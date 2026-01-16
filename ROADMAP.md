@@ -41,16 +41,17 @@
 - [x] Audit log file writer (JSON Lines)
 - [x] Alerting webhooks (PagerDuty, Slack)
 
-## v0.4 - Operational Tooling
+## v0.4 - Operational Tooling (Done)
 
-- [ ] CLI subcommands
-  - [ ] `prefixd status` - show active mitigations
-  - [ ] `prefixd withdraw <id>` - manual withdrawal
-  - [ ] `prefixd safelist add/remove`
-  - [ ] `prefixd peers` - BGP session status
-- [ ] Read-only web dashboard
-- [ ] Configuration hot-reload (inventory, playbooks)
-- [ ] Graceful shutdown with announcement preservation
+- [x] CLI subcommands (prefixdctl binary)
+  - [x] `prefixdctl status` - show active mitigations
+  - [x] `prefixdctl mitigations withdraw <id>` - manual withdrawal
+  - [x] `prefixdctl safelist add/remove`
+  - [x] `prefixdctl peers` - BGP session status
+  - [x] `prefixdctl reload` - hot-reload config
+- [ ] Read-only web dashboard (frontend scaffolding in progress)
+- [x] Configuration hot-reload (inventory, playbooks)
+- [x] Graceful shutdown with announcement preservation
 
 ## v1.0 - Production Ready
 

@@ -16,6 +16,9 @@ pub enum PrefixdError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    #[error("service shutting down")]
+    ShuttingDown,
+
     // Domain errors
     #[error("duplicate event from {detector_source}: {external_id}")]
     DuplicateEvent { detector_source: String, external_id: String },
@@ -113,6 +116,7 @@ impl PrefixdError {
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::NotFound(_) | Self::MitigationNotFound(_) => StatusCode::NOT_FOUND,
+            Self::ShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
             Self::DuplicateEvent { .. } => StatusCode::CONFLICT,
             Self::GuardrailViolation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::IpNotOwned(_) | Self::InvalidIpAddress(_) | Self::InvalidPrefix(_) => {

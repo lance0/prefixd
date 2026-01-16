@@ -145,10 +145,16 @@ pub async fn ingest_event(
     // Store event
     state.repo.insert_event(&event).await.map_err(AppError)?;
 
-    // Lookup IP context
-    let context = state.inventory.lookup_ip(&event.victim_ip);
+    // Check if shutting down
+    if state.is_shutting_down() {
+        return Err(AppError(PrefixdError::ShuttingDown));
+    }
 
-    if context.is_none() && !state.inventory.is_owned(&event.victim_ip) {
+    // Lookup IP context
+    let inventory = state.inventory.read().await;
+    let context = inventory.lookup_ip(&event.victim_ip);
+
+    if context.is_none() && !inventory.is_owned(&event.victim_ip) {
         tracing::warn!(victim_ip = %event.victim_ip, "event for unowned IP, skipping mitigation");
         return Ok((
             StatusCode::ACCEPTED,
@@ -161,9 +167,12 @@ pub async fn ingest_event(
         ));
     }
 
+    drop(inventory); // Release read lock before policy evaluation
+
     // Build policy engine and evaluate
+    let playbooks = state.playbooks.read().await.clone();
     let policy = PolicyEngine::new(
-        state.playbooks.clone(),
+        playbooks,
         state.settings.pop.clone(),
         state.settings.timers.default_ttl_seconds,
     );
@@ -323,9 +332,13 @@ pub async fn create_mitigation(
         _ => return Err(AppError(PrefixdError::InvalidRequest("invalid action".to_string()))),
     };
 
+    let inventory = state.inventory.read().await;
+    let customer_id = inventory.lookup_ip(&req.victim_ip).map(|c| c.customer_id);
+    drop(inventory);
+
     let intent = MitigationIntent {
         event_id: Uuid::new_v4(),
-        customer_id: state.inventory.lookup_ip(&req.victim_ip).map(|c| c.customer_id),
+        customer_id,
         service_id: None,
         pop: state.settings.pop.clone(),
         match_criteria: MatchCriteria {
@@ -454,6 +467,21 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 pub async fn metrics() -> impl IntoResponse {
     crate::observability::gather_metrics()
+}
+
+#[derive(Serialize)]
+pub struct ReloadResponse {
+    reloaded: Vec<String>,
+    timestamp: String,
+}
+
+pub async fn reload_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let reloaded = state.reload_config().await.map_err(AppError)?;
+
+    Ok::<_, AppError>(Json(ReloadResponse {
+        reloaded,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    }))
 }
 
 // Error handling

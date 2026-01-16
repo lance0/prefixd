@@ -17,6 +17,8 @@ pub struct Settings {
     pub observability: ObservabilityConfig,
     #[serde(default)]
     pub safelist: SafelistConfig,
+    #[serde(default)]
+    pub shutdown: ShutdownConfig,
 }
 
 fn default_mode() -> OperationMode {
@@ -227,6 +229,25 @@ pub struct SafelistConfig {
     #[serde(default)]
     pub prefixes: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShutdownConfig {
+    #[serde(default = "default_drain_timeout")]
+    pub drain_timeout_seconds: u32,
+    #[serde(default = "default_true")]
+    pub preserve_announcements: bool,
+}
+
+impl Default for ShutdownConfig {
+    fn default() -> Self {
+        Self {
+            drain_timeout_seconds: default_drain_timeout(),
+            preserve_announcements: true,
+        }
+    }
+}
+
+fn default_drain_timeout() -> u32 { 30 }
 
 impl Settings {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {

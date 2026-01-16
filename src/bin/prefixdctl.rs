@@ -43,6 +43,9 @@ enum Commands {
 
     /// Show BGP peer status
     Peers,
+
+    /// Reload configuration (inventory, playbooks)
+    Reload,
 }
 
 #[derive(Subcommand)]
@@ -277,6 +280,7 @@ async fn main() -> ExitCode {
         Commands::Mitigations(cmd) => cmd_mitigations(&client, cmd, cli.format).await,
         Commands::Safelist(cmd) => cmd_safelist(&client, cmd, cli.format).await,
         Commands::Peers => cmd_peers(&client, cli.format).await,
+        Commands::Reload => cmd_reload(&client, cli.format).await,
     };
 
     match result {
@@ -480,6 +484,28 @@ async fn cmd_peers(client: &Client, format: OutputFormat) -> Result<(), String> 
             for (peer, state) in &health.bgp_sessions {
                 println!("{:<30}  {:<15}", peer, state);
             }
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ReloadResponse {
+    reloaded: Vec<String>,
+    timestamp: String,
+}
+
+async fn cmd_reload(client: &Client, format: OutputFormat) -> Result<(), String> {
+    let resp: ReloadResponse = client.post("/v1/config/reload", &serde_json::json!({})).await?;
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+        }
+        OutputFormat::Table => {
+            println!("Reloaded: {}", resp.reloaded.join(", "));
+            println!("Timestamp: {}", resp.timestamp);
         }
     }
 

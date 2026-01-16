@@ -9,7 +9,7 @@ use prefixd::config::{
     AllowedPorts, Asset, AuthConfig, AuthMode, BgpConfig, BgpMode, Customer, EscalationConfig,
     GuardrailsConfig, HttpConfig, Inventory, ObservabilityConfig, Playbook, PlaybookAction,
     PlaybookMatch, PlaybookStep, Playbooks, QuotasConfig, RateLimitConfig, SafelistConfig,
-    Service, Settings, StorageConfig, StorageDriver, TimersConfig,
+    Service, Settings, ShutdownConfig, StorageConfig, StorageDriver, TimersConfig,
 };
 use prefixd::db;
 use prefixd::domain::AttackVector;
@@ -76,6 +76,7 @@ fn test_settings() -> Settings {
             metrics_listen: "127.0.0.1:0".to_string(),
         },
         safelist: SafelistConfig { prefixes: vec![] },
+        shutdown: ShutdownConfig::default(),
     }
 }
 
@@ -130,6 +131,7 @@ async fn setup_app() -> axum::Router {
         test_playbooks(),
         repo,
         announcer,
+        std::path::PathBuf::from("."),
     );
 
     create_router(state)

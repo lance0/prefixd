@@ -28,6 +28,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/v1/safelist", get(handlers::list_safelist))
         .route("/v1/safelist", post(handlers::add_safelist))
         .route("/v1/safelist/{prefix}", axum::routing::delete(handlers::remove_safelist))
+        .route("/v1/config/reload", post(handlers::reload_config))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

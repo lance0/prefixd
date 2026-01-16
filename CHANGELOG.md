@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-01-16
+
+### Added
+
+- `prefixdctl` CLI binary for controlling the daemon
+  - `prefixdctl status` - show daemon health and BGP sessions
+  - `prefixdctl mitigations list/get/withdraw` - manage mitigations
+  - `prefixdctl safelist list/add/remove` - manage safelist
+  - `prefixdctl peers` - show BGP peer status
+  - `prefixdctl reload` - hot-reload configuration
+  - Table and JSON output formats
+  - Environment variable support (PREFIXD_API, PREFIXD_API_TOKEN)
+- Configuration hot-reload via `POST /v1/config/reload`
+  - Reloads inventory.yaml and playbooks.yaml without restart
+  - Validates config before applying (fail-safe)
+- Graceful shutdown improvements
+  - Configurable drain timeout (default 30s)
+  - Announcement preservation option (mitigations not withdrawn on shutdown)
+  - Shutdown state tracking (new events return 503)
+  - Enhanced shutdown logging with mitigation counts
+
+### Changed
+
+- AppState now uses RwLock for inventory and playbooks (hot-reload support)
+- Event ingestion checks shutdown state before processing
+
 ## [0.3.0] - 2026-01-16
 
 ### Added

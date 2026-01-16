@@ -156,6 +156,9 @@ prefixdctl safelist remove 10.0.0.1/32
 prefixdctl -a http://localhost:8080  # API endpoint
 prefixdctl -t <token>                 # Bearer token
 prefixdctl -f json                    # JSON output
+
+# Configuration
+prefixdctl reload                     # Hot-reload inventory & playbooks
 ```
 
 ## Environment Variables

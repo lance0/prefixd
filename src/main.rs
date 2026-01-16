@@ -77,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
         config.playbooks,
         repo.clone(),
         announcer.clone(),
+        cli.config.clone(),
     );
 
     // Start reconciliation loop
@@ -132,6 +133,28 @@ async fn shutdown_signal(state: Arc<AppState>) {
         _ = terminate => {},
     }
 
-    tracing::info!("shutdown signal received");
+    let drain_timeout = state.settings.shutdown.drain_timeout_seconds;
+    let active = state.repo.count_active_global().await.unwrap_or(0);
+
+    tracing::info!(
+        drain_timeout_seconds = drain_timeout,
+        active_mitigations = active,
+        preserve_announcements = state.settings.shutdown.preserve_announcements,
+        "shutdown signal received, beginning graceful shutdown"
+    );
+
+    // Mark as shutting down (new events will get 503)
     state.trigger_shutdown();
+
+    // Give in-flight requests time to complete
+    if drain_timeout > 0 {
+        tracing::info!(seconds = drain_timeout, "waiting for drain period");
+        tokio::time::sleep(std::time::Duration::from_secs(drain_timeout as u64)).await;
+    }
+
+    let final_active = state.repo.count_active_global().await.unwrap_or(0);
+    tracing::info!(
+        active_mitigations = final_active,
+        "graceful shutdown complete"
+    );
 }
