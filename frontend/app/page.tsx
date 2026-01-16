@@ -4,7 +4,7 @@ import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
 import { StatCard } from "@/components/dashboard/stat-card"
 import { BgpSessionStatus } from "@/components/dashboard/bgp-session-status"
 import { QuotaGauge } from "@/components/dashboard/quota-gauge"
-import { ActivityFeed } from "@/components/dashboard/activity-feed"
+import { ActivityFeedLive } from "@/components/dashboard/activity-feed-live"
 import { useStats, useMitigations } from "@/hooks/use-api"
 
 export default function OverviewPage() {
@@ -39,7 +39,7 @@ export default function OverviewPage() {
             }}
           />
           <div className="lg:col-span-2">
-            <ActivityFeed />
+            <ActivityFeedLive />
           </div>
         </div>
       </div>
