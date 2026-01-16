@@ -1,3 +1,7 @@
+mod metrics;
+
+pub use metrics::*;
+
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::config::LogFormat;

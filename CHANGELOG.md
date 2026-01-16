@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-01-16
+
+### Added
+
+- GoBGP gRPC client implementation
+  - Full FlowSpec NLRI construction (destination prefix, protocol, ports)
+  - Traffic-rate extended community for police/discard actions
+  - AddPath/DeletePath for announce/withdraw
+  - ListPath for active routes
+  - ListPeer for session status
+- Bearer token authentication middleware
+  - Configurable via `PREFIXD_API_TOKEN` environment variable
+  - Constant-time token comparison
+- Token bucket rate limiter for API endpoints
+- Prometheus metrics endpoint (`/metrics`)
+  - `prefixd_events_ingested_total`
+  - `prefixd_events_rejected_total`
+  - `prefixd_mitigations_active`
+  - `prefixd_mitigations_created_total`
+  - `prefixd_mitigations_expired_total`
+  - `prefixd_mitigations_withdrawn_total`
+  - `prefixd_announcements_total`
+  - `prefixd_announcements_latency_seconds`
+  - `prefixd_bgp_session_up`
+  - `prefixd_guardrail_rejections_total`
+  - `prefixd_reconciliation_runs_total`
+
+### Changed
+
+- Health and metrics endpoints now public (no auth required)
+- Protected routes require authentication when bearer mode enabled
+
 ## [0.1.0] - 2026-01-16
 
 ### Added

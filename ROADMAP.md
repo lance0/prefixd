@@ -11,23 +11,23 @@
 - [x] Dry-run mode
 - [x] Structured logging
 
-## v0.2 - Production BGP
+## v0.2 - Production BGP (Done)
 
-- [ ] GoBGP gRPC client implementation
-  - [ ] Generate protos from gobgp/api
-  - [ ] Implement `announce()` with FlowSpec NLRI construction
-  - [ ] Implement `withdraw()` with exact NLRI matching
-  - [ ] Implement `list_active()` for RIB queries
-  - [ ] Session status monitoring
-- [ ] Bearer token authentication middleware
+- [x] GoBGP gRPC client implementation
+  - [x] Generate protos from gobgp/api
+  - [x] Implement `announce()` with FlowSpec NLRI construction
+  - [x] Implement `withdraw()` with exact NLRI matching
+  - [x] Implement `list_active()` for RIB queries
+  - [x] Session status monitoring
+- [x] Bearer token authentication middleware
 - [ ] mTLS authentication option
-- [ ] API rate limiting (tower middleware)
-- [ ] Prometheus metrics endpoint
-  - [ ] `prefixd_events_ingested_total`
-  - [ ] `prefixd_mitigations_active`
-  - [ ] `prefixd_announcements_total`
-  - [ ] `prefixd_bgp_session_up`
-  - [ ] `prefixd_guardrail_rejections_total`
+- [x] API rate limiting (token bucket)
+- [x] Prometheus metrics endpoint
+  - [x] `prefixd_events_ingested_total`
+  - [x] `prefixd_mitigations_active`
+  - [x] `prefixd_announcements_total`
+  - [x] `prefixd_bgp_session_up`
+  - [x] `prefixd_guardrail_rejections_total`
 
 ## v0.3 - Escalation & Correlation
 

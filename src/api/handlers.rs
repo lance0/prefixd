@@ -453,8 +453,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 pub async fn metrics() -> impl IntoResponse {
-    // TODO: Prometheus metrics
-    "# prefixd metrics\n"
+    crate::observability::gather_metrics()
 }
 
 // Error handling
