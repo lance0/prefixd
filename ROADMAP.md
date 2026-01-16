@@ -66,20 +66,57 @@
 
 ## v1.0 - Production Ready
 
+**Goal:** Enterprise-ready foundation with comprehensive testing, documentation, and security.
+
+### Features (Done)
 - [x] IPv6 FlowSpec support
   - [x] IpVersion detection for IPv4/IPv6 prefixes
   - [x] IPv6 FlowSpec NLRI construction (AFI=2, SAFI=133)
   - [x] IPv6-aware guardrails (configurable prefix lengths)
   - [x] IPv6 customer prefix/asset support in inventory
-- [x] Multi-POP coordination (v1.0 approach: shared PostgreSQL)
+- [x] Multi-POP coordination (shared PostgreSQL approach)
   - [x] `GET /v1/stats` - aggregate stats across all POPs
   - [x] `GET /v1/pops` - list known POPs from database
   - [x] `GET /v1/mitigations?pop=all` - cross-POP visibility
   - See "Multi-POP Architecture" section below for evolution path
-- [ ] API versioning and stability guarantees
-- [ ] Comprehensive documentation
-- [ ] Performance benchmarks
+- [x] OpenAPI spec generation (`/openapi.json`)
+
+### Testing (In Progress)
+- [ ] Unit tests for BGP logic (`gobgp.rs`)
+  - [ ] NLRI construction (IPv4/IPv6)
+  - [ ] Path attribute building
+  - [ ] Withdraw logic
+- [ ] Unit tests for guardrails (`guardrails/mod.rs`)
+  - [ ] Prefix validation
+  - [ ] Quota enforcement
+  - [ ] Safelist checking
+- [ ] Unit tests for repository (`repository.rs`)
+  - [ ] CRUD operations
+  - [ ] Query filtering
+  - [ ] Multi-POP queries
+- [ ] Unit tests for policy engine
+  - [ ] Playbook evaluation
+  - [ ] Escalation logic
+
+### Security & Auth
+- [ ] mTLS authentication option (deferred from v0.2)
 - [ ] Security audit
+  - [ ] Input validation review
+  - [ ] SQL injection prevention verification
+  - [ ] Auth bypass testing
+  - [ ] Rate limiting effectiveness
+
+### Documentation
+- [ ] Configuration guide (all YAML options)
+- [ ] Deployment guide (Docker, bare metal)
+- [ ] Troubleshooting runbook
+- [ ] API stability guarantees
+
+### Performance
+- [ ] Benchmark suite (criterion)
+  - [ ] Event ingestion throughput
+  - [ ] BGP announcement latency
+  - [ ] Database query performance
 
 ## v1.5 - Multi-Vendor Support
 
@@ -110,8 +147,6 @@
 - [ ] NetBox integration for inventory
 - [ ] Advanced correlation with ML-assisted confidence
 - [ ] Per-peer vendor profiles in config
-
----
 
 ---
 
