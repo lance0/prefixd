@@ -478,3 +478,281 @@ impl GoBgpAnnouncer {
         Err(PrefixdError::Internal("FlowSpec path parsing not fully implemented".to_string()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_announcer() -> GoBgpAnnouncer {
+        GoBgpAnnouncer::new("127.0.0.1:50051".to_string())
+    }
+
+    // ==========================================================================
+    // IPv4 Prefix Parsing Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_prefix_v4_with_cidr() {
+        let announcer = make_announcer();
+
+        let (ip, len) = announcer.parse_prefix_v4("192.168.1.1/32").unwrap();
+        assert_eq!(ip, 0xC0A80101); // 192.168.1.1
+        assert_eq!(len, 32);
+
+        let (ip, len) = announcer.parse_prefix_v4("10.0.0.0/8").unwrap();
+        assert_eq!(ip, 0x0A000000); // 10.0.0.0
+        assert_eq!(len, 8);
+
+        let (ip, len) = announcer.parse_prefix_v4("203.0.113.0/24").unwrap();
+        assert_eq!(ip, 0xCB007100); // 203.0.113.0
+        assert_eq!(len, 24);
+    }
+
+    #[test]
+    fn test_parse_prefix_v4_without_cidr() {
+        let announcer = make_announcer();
+
+        // Should default to /32
+        let (ip, len) = announcer.parse_prefix_v4("192.168.1.1").unwrap();
+        assert_eq!(ip, 0xC0A80101);
+        assert_eq!(len, 32);
+    }
+
+    #[test]
+    fn test_parse_prefix_v4_invalid() {
+        let announcer = make_announcer();
+
+        assert!(announcer.parse_prefix_v4("not-an-ip/32").is_err());
+        assert!(announcer.parse_prefix_v4("300.0.0.1/32").is_err());
+        assert!(announcer.parse_prefix_v4("192.168.1.1/abc").is_err());
+    }
+
+    // ==========================================================================
+    // IPv6 Prefix Parsing Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_prefix_v6_with_cidr() {
+        let announcer = make_announcer();
+
+        let (ip, len) = announcer.parse_prefix_v6("2001:db8::1/128").unwrap();
+        assert_eq!(ip, Ipv6Addr::from_str("2001:db8::1").unwrap());
+        assert_eq!(len, 128);
+
+        let (ip, len) = announcer.parse_prefix_v6("2001:db8::/64").unwrap();
+        assert_eq!(ip, Ipv6Addr::from_str("2001:db8::").unwrap());
+        assert_eq!(len, 64);
+
+        let (ip, len) = announcer.parse_prefix_v6("::1/128").unwrap();
+        assert_eq!(ip, Ipv6Addr::LOCALHOST);
+        assert_eq!(len, 128);
+    }
+
+    #[test]
+    fn test_parse_prefix_v6_without_cidr() {
+        let announcer = make_announcer();
+
+        // Should default to /128
+        let (ip, len) = announcer.parse_prefix_v6("2001:db8::1").unwrap();
+        assert_eq!(ip, Ipv6Addr::from_str("2001:db8::1").unwrap());
+        assert_eq!(len, 128);
+    }
+
+    #[test]
+    fn test_parse_prefix_v6_invalid() {
+        let announcer = make_announcer();
+
+        assert!(announcer.parse_prefix_v6("not-an-ip/128").is_err());
+        assert!(announcer.parse_prefix_v6("2001:db8::1/abc").is_err());
+        // Too many segments
+        assert!(announcer.parse_prefix_v6("2001:db8:1:2:3:4:5:6:7/64").is_err());
+    }
+
+    // ==========================================================================
+    // NLRI Construction Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_build_flowspec_nlri_v4() {
+        let announcer = make_announcer();
+
+        let nlri = FlowSpecNlri {
+            dst_prefix: "192.168.1.1/32".to_string(),
+            protocol: Some(17), // UDP
+            dst_ports: vec![53],
+        };
+
+        let result = announcer.build_flowspec_nlri_v4(&nlri);
+        assert!(result.is_ok());
+
+        let any = result.unwrap();
+        assert!(any.type_url.contains("FlowSpecNLRI"));
+        assert!(!any.value.is_empty());
+    }
+
+    #[test]
+    fn test_build_flowspec_nlri_v4_multiple_ports() {
+        let announcer = make_announcer();
+
+        let nlri = FlowSpecNlri {
+            dst_prefix: "10.0.0.1/32".to_string(),
+            protocol: Some(6), // TCP
+            dst_ports: vec![80, 443, 8080, 8443],
+        };
+
+        let result = announcer.build_flowspec_nlri_v4(&nlri);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_build_flowspec_nlri_v4_no_ports() {
+        let announcer = make_announcer();
+
+        let nlri = FlowSpecNlri {
+            dst_prefix: "192.168.1.1/32".to_string(),
+            protocol: Some(1), // ICMP
+            dst_ports: vec![],
+        };
+
+        let result = announcer.build_flowspec_nlri_v4(&nlri);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_build_flowspec_nlri_v6() {
+        let announcer = make_announcer();
+
+        let nlri = FlowSpecNlri {
+            dst_prefix: "2001:db8::1/128".to_string(),
+            protocol: Some(17),
+            dst_ports: vec![53],
+        };
+
+        let result = announcer.build_flowspec_nlri_v6(&nlri);
+        assert!(result.is_ok());
+
+        let any = result.unwrap();
+        assert!(any.type_url.contains("FlowSpecNLRI"));
+        assert!(!any.value.is_empty());
+    }
+
+    // ==========================================================================
+    // Path Attribute Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_build_path_attributes_discard() {
+        let announcer = make_announcer();
+
+        let actions = vec![FlowSpecAction {
+            action_type: ActionType::Discard,
+            rate_bps: None,
+        }];
+
+        let result = announcer.build_path_attributes(&actions);
+        assert!(result.is_ok());
+
+        let pattrs = result.unwrap();
+        // Should have origin + extended communities
+        assert!(pattrs.len() >= 1);
+    }
+
+    #[test]
+    fn test_build_path_attributes_police() {
+        let announcer = make_announcer();
+
+        let actions = vec![FlowSpecAction {
+            action_type: ActionType::Police,
+            rate_bps: Some(1_000_000_000), // 1 Gbps
+        }];
+
+        let result = announcer.build_path_attributes(&actions);
+        assert!(result.is_ok());
+
+        let pattrs = result.unwrap();
+        assert!(pattrs.len() >= 1);
+    }
+
+    #[test]
+    fn test_build_path_attributes_empty() {
+        let announcer = make_announcer();
+
+        let actions: Vec<FlowSpecAction> = vec![];
+        let result = announcer.build_path_attributes(&actions);
+        assert!(result.is_ok());
+
+        // Should still have origin attribute
+        let pattrs = result.unwrap();
+        assert!(!pattrs.is_empty());
+    }
+
+    // ==========================================================================
+    // FlowSpec Path Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_build_flowspec_path_v4() {
+        let announcer = make_announcer();
+
+        let rule = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "192.168.1.1/32".to_string(),
+                protocol: Some(17),
+                dst_ports: vec![53],
+            },
+            FlowSpecAction {
+                action_type: ActionType::Discard,
+                rate_bps: None,
+            },
+        );
+
+        let result = announcer.build_flowspec_path(&rule);
+        assert!(result.is_ok());
+
+        let path = result.unwrap();
+        assert!(path.nlri.is_some());
+        assert!(path.family.is_some());
+
+        let family = path.family.unwrap();
+        assert_eq!(family.afi, AFI_IP);
+        assert_eq!(family.safi, SAFI_FLOWSPEC);
+    }
+
+    #[test]
+    fn test_build_flowspec_path_v6() {
+        let announcer = make_announcer();
+
+        let rule = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "2001:db8::1/128".to_string(),
+                protocol: Some(17),
+                dst_ports: vec![53],
+            },
+            FlowSpecAction {
+                action_type: ActionType::Police,
+                rate_bps: Some(500_000_000),
+            },
+        );
+
+        let result = announcer.build_flowspec_path(&rule);
+        assert!(result.is_ok());
+
+        let path = result.unwrap();
+        let family = path.family.unwrap();
+        assert_eq!(family.afi, AFI_IP6);
+        assert_eq!(family.safi, SAFI_FLOWSPEC);
+    }
+
+    // ==========================================================================
+    // AFI/SAFI Constants Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_afi_safi_constants() {
+        // RFC 4760 values
+        assert_eq!(AFI_IP, 1);
+        assert_eq!(AFI_IP6, 2);
+        // RFC 5575 FlowSpec SAFI
+        assert_eq!(SAFI_FLOWSPEC, 133);
+    }
+}
