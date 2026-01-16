@@ -14,12 +14,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - BGP/GoBGP tests: NLRI construction, path attributes, RFC constants (16 tests)
   - Repository tests: CRUD, queries, pagination, safelist, multi-POP (18 tests)
   - Policy engine tests: evaluation, port intersection, protocols, TTL (13 tests)
-- Next.js frontend scaffolding (`frontend/`)
-  - Dashboard layout with sidebar navigation
-  - Mitigations page (mock data)
-  - Events page (mock data)
-  - Audit log page (mock data)
-  - Dark mode support
+- Next.js frontend dashboard (`frontend/`)
+  - Dashboard overview with live stats, BGP status, quota gauges
+  - Mitigations list with filtering, sorting, pagination (live API)
+  - Events list with filtering, sorting, pagination (live API)
+  - Audit log viewer with filtering (live API)
+  - Dark mode support, keyboard shortcuts, command palette
+  - SWR for data fetching with 5s refresh interval
+  - Follows Vercel React best practices (deferred analytics, parallel fetching)
+- New API endpoints
+  - `GET /v1/events` - list events with pagination
+  - `GET /v1/audit` - list audit log entries with pagination
+- Audit log database storage (in addition to file-based logging)
+- Docker support for frontend
+  - `frontend/Dockerfile` using oven/bun image
+  - Dashboard service in docker-compose.yml (port 3000)
+- Bun package manager for frontend (faster installs)
 
 ### Fixed
 

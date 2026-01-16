@@ -123,16 +123,18 @@
   - [ ] BGP announcement latency
   - [ ] Database query performance
 
-### Web Dashboard (In Progress)
-- [ ] Next.js frontend (`frontend/`)
-  - [ ] Dashboard overview (stats, activity feed)
-  - [ ] Mitigations list with filtering
-  - [ ] Events list
-  - [ ] Audit log viewer
-  - [ ] Real-time updates (polling or WebSocket)
-- [ ] API integration
-  - [ ] Connect to prefixd REST API
-  - [ ] Authentication support
+### Web Dashboard (Done)
+- [x] Next.js frontend (`frontend/`)
+  - [x] Dashboard overview (stats, BGP status, quota gauges)
+  - [x] Mitigations list with filtering, sorting, pagination
+  - [x] Events list with filtering, sorting, pagination
+  - [x] Audit log viewer with filtering
+  - [x] Real-time updates (SWR with 5s polling)
+  - [x] Docker deployment support
+- [x] API integration
+  - [x] Connect to prefixd REST API
+  - [x] `GET /v1/events` endpoint
+  - [x] `GET /v1/audit` endpoint
 
 ## v1.5 - Multi-Vendor Support
 
