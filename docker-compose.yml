@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  prefixd:
+    build: .
+    container_name: prefixd
+    ports:
+      - "8080:8080"   # HTTP API
+      - "9090:9090"   # Prometheus metrics
+    volumes:
+      - ./configs:/etc/prefixd:ro
+      - prefixd-data:/data
+    environment:
+      - RUST_LOG=info
+      - PREFIXD_API_TOKEN=${PREFIXD_API_TOKEN:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gobgp:
+        condition: service_started
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: prefixd-postgres
+    environment:
+      POSTGRES_USER: prefixd
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prefixd_secret}
+      POSTGRES_DB: prefixd
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefixd"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  gobgp:
+    image: osrg/gobgp:latest
+    container_name: prefixd-gobgp
+    ports:
+      - "50051:50051"  # gRPC API
+      - "179:179"      # BGP
+    volumes:
+      - ./configs/gobgp.conf:/etc/gobgp/gobgp.conf:ro
+    command: gobgpd -f /etc/gobgp/gobgp.conf
+    restart: unless-stopped
+
+volumes:
+  prefixd-data:
+  postgres-data:

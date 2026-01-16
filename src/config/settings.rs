@@ -193,6 +193,8 @@ fn default_max_escalated_duration() -> u32 { 1800 }
 pub struct StorageConfig {
     #[serde(default = "default_driver")]
     pub driver: StorageDriver,
+    /// For SQLite: file path (e.g., "./data/prefixd.db")
+    /// For Postgres: connection string (e.g., "postgres://user:pass@localhost/prefixd")
     pub path: String,
 }
 
@@ -202,6 +204,7 @@ fn default_driver() -> StorageDriver { StorageDriver::Sqlite }
 #[serde(rename_all = "lowercase")]
 pub enum StorageDriver {
     Sqlite,
+    Postgres,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

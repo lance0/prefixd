@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 
 use prefixd::api::create_router;
 use prefixd::bgp::{GoBgpAnnouncer, MockAnnouncer};
-use prefixd::config::{AppConfig, BgpMode};
+use prefixd::config::{AppConfig, BgpMode, StorageDriver};
 use prefixd::db;
 use prefixd::observability::init_tracing;
 use prefixd::scheduler::ReconciliationLoop;
@@ -44,11 +44,17 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Init database
-    let db_path = PathBuf::from(&config.settings.storage.path);
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let storage = &config.settings.storage;
+    tracing::info!(driver = ?storage.driver, "initializing database");
+
+    if storage.driver == StorageDriver::Sqlite {
+        let db_path = PathBuf::from(&storage.path);
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
     }
-    let pool = db::init_pool(&db_path).await?;
+
+    let pool = db::init_pool_from_config(storage.driver, &storage.path).await?;
     let repo = db::Repository::new(pool);
 
     // Init safelist from config

@@ -122,7 +122,7 @@ fn test_playbooks() -> Playbooks {
 
 async fn setup_app() -> axum::Router {
     let pool = db::init_memory_pool().await.unwrap();
-    let repo = db::Repository::new(pool);
+    let repo = db::Repository::from_sqlite(pool);
     let announcer = Arc::new(MockAnnouncer::new());
 
     let state = AppState::new(

@@ -1,0 +1,63 @@
+# prefixd configuration for Docker/Postgres deployment
+
+pop: docker1
+mode: dry-run
+
+http:
+  listen: "0.0.0.0:8080"
+  auth:
+    mode: none
+  rate_limit:
+    events_per_second: 100
+    burst: 500
+
+bgp:
+  mode: sidecar
+  gobgp_grpc: "gobgp:50051"
+  local_asn: 65010
+  router_id: "10.10.0.10"
+  neighbors: []
+
+guardrails:
+  require_ttl: true
+  dst_prefix_minlen: 32
+  dst_prefix_maxlen: 32
+  max_ports: 8
+  allow_src_prefix_match: false
+
+quotas:
+  max_active_per_customer: 5
+  max_active_per_pop: 200
+  max_active_global: 500
+  max_new_per_minute: 30
+
+timers:
+  default_ttl_seconds: 120
+  min_ttl_seconds: 30
+  max_ttl_seconds: 1800
+  correlation_window_seconds: 300
+  reconciliation_interval_seconds: 30
+
+escalation:
+  enabled: true
+  min_persistence_seconds: 120
+  min_confidence: 0.7
+
+storage:
+  driver: postgres
+  path: "postgres://prefixd:prefixd_secret@postgres:5432/prefixd"
+
+observability:
+  log_format: json
+  log_level: info
+  audit_log_path: "/data/audit.jsonl"
+  metrics_listen: "0.0.0.0:9090"
+
+safelist:
+  prefixes:
+    - "10.0.0.0/8"
+    - "192.168.0.0/16"
+
+shutdown:
+  drain_timeout_seconds: 30
+  preserve_announcements: true

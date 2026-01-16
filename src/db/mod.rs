@@ -2,14 +2,36 @@ mod repository;
 
 pub use repository::*;
 
+use crate::config::StorageDriver;
+use crate::error::Result;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::SqlitePool;
+use sqlx::{PgPool, SqlitePool};
 use std::path::Path;
 use std::str::FromStr;
 
-use crate::error::Result;
+/// Database pool that supports both SQLite and PostgreSQL
+#[derive(Clone)]
+pub enum DbPool {
+    Sqlite(SqlitePool),
+    Postgres(PgPool),
+}
 
-pub async fn init_pool(path: &Path) -> Result<SqlitePool> {
+/// Initialize database pool based on driver configuration
+pub async fn init_pool_from_config(driver: StorageDriver, path: &str) -> Result<DbPool> {
+    match driver {
+        StorageDriver::Sqlite => {
+            let pool = init_sqlite_pool(Path::new(path)).await?;
+            Ok(DbPool::Sqlite(pool))
+        }
+        StorageDriver::Postgres => {
+            let pool = init_postgres_pool(path).await?;
+            Ok(DbPool::Postgres(pool))
+        }
+    }
+}
+
+pub async fn init_sqlite_pool(path: &Path) -> Result<SqlitePool> {
     let db_url = format!("sqlite:{}", path.display());
 
     let options = SqliteConnectOptions::from_str(&db_url)?
@@ -26,6 +48,31 @@ pub async fn init_pool(path: &Path) -> Result<SqlitePool> {
     sqlx::migrate!("./migrations").run(&pool).await?;
 
     Ok(pool)
+}
+
+pub async fn init_postgres_pool(connection_string: &str) -> Result<PgPool> {
+    let options = PgConnectOptions::from_str(connection_string)?;
+
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .connect_with(options)
+        .await?;
+
+    // Run postgres migrations manually (sqlx::migrate! uses sqlite folder by default)
+    run_postgres_migrations(&pool).await?;
+
+    Ok(pool)
+}
+
+async fn run_postgres_migrations(pool: &PgPool) -> Result<()> {
+    let migration_sql = include_str!("../../migrations/postgres/001_initial.sql");
+    sqlx::raw_sql(migration_sql).execute(pool).await?;
+    Ok(())
+}
+
+// Legacy function for backward compatibility
+pub async fn init_pool(path: &Path) -> Result<SqlitePool> {
+    init_sqlite_pool(path).await
 }
 
 pub async fn init_memory_pool() -> Result<SqlitePool> {
