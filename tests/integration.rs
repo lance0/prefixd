@@ -26,6 +26,7 @@ fn test_settings() -> Settings {
                 bearer_token_env: None,
             },
             rate_limit: RateLimitConfig::default(),
+            tls: None,
         },
         bgp: BgpConfig {
             mode: BgpMode::Mock,
@@ -196,4 +197,140 @@ async fn test_ingest_event() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::ACCEPTED);
+}
+
+// Auth tests with bearer token
+fn test_settings_with_bearer() -> Settings {
+    let mut settings = test_settings();
+    settings.http.auth.mode = AuthMode::Bearer;
+    settings.http.auth.bearer_token_env = Some("TEST_PREFIXD_TOKEN".to_string());
+    settings
+}
+
+async fn setup_app_with_bearer() -> axum::Router {
+    // Set the test token in environment
+    // SAFETY: Tests run serially, no other threads reading this env var
+    unsafe {
+        std::env::set_var("TEST_PREFIXD_TOKEN", "test-secret-token-123");
+    }
+
+    let pool = db::init_memory_pool().await.unwrap();
+    let repo = db::Repository::from_sqlite(pool);
+    let announcer = Arc::new(MockAnnouncer::new());
+
+    let state = AppState::new(
+        test_settings_with_bearer(),
+        test_inventory(),
+        test_playbooks(),
+        repo,
+        announcer,
+        std::path::PathBuf::from("."),
+    );
+
+    create_router(state)
+}
+
+#[tokio::test]
+async fn test_bearer_auth_missing_token_returns_401() {
+    let app = setup_app_with_bearer().await;
+
+    // Request without Authorization header
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/mitigations")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_bearer_auth_invalid_token_returns_401() {
+    let app = setup_app_with_bearer().await;
+
+    // Request with wrong token
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/mitigations")
+                .header("Authorization", "Bearer wrong-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_bearer_auth_valid_token_returns_200() {
+    let app = setup_app_with_bearer().await;
+
+    // Request with correct token
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/mitigations")
+                .header("Authorization", "Bearer test-secret-token-123")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_public_endpoint_no_auth_required() {
+    let app = setup_app_with_bearer().await;
+
+    // Health endpoint should work without auth even when bearer is configured
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_security_headers_present() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Check security headers
+    assert_eq!(
+        response.headers().get("x-content-type-options").map(|v| v.to_str().unwrap()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        response.headers().get("x-frame-options").map(|v| v.to_str().unwrap()),
+        Some("DENY")
+    );
+    assert_eq!(
+        response.headers().get("cache-control").map(|v| v.to_str().unwrap()),
+        Some("no-store")
+    );
 }

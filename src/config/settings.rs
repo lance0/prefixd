@@ -38,6 +38,16 @@ pub struct HttpConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    pub cert_path: String,
+    pub key_path: String,
+    /// CA certificate for client verification (required for mTLS)
+    pub ca_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

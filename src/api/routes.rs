@@ -1,10 +1,12 @@
 use axum::{
+    http::{header, HeaderValue},
     middleware,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
 use std::sync::Arc;
+use tower_http::set_header::SetResponseHeaderLayer;
 use utoipa::OpenApi;
 
 use super::{auth::auth_middleware, handlers, openapi::ApiDoc};
@@ -45,6 +47,19 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     public_routes
         .merge(protected_routes)
         .with_state(state)
+        // Security headers
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
 }
 
 async fn openapi_json() -> impl IntoResponse {

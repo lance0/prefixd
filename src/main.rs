@@ -2,11 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use tokio::net::TcpListener;
 
 use prefixd::api::create_router;
 use prefixd::bgp::{GoBgpAnnouncer, MockAnnouncer};
-use prefixd::config::{AppConfig, BgpMode, StorageDriver};
+use prefixd::config::{AppConfig, AuthMode, BgpMode, StorageDriver};
 use prefixd::db;
 use prefixd::observability::init_tracing;
 use prefixd::scheduler::ReconciliationLoop;
@@ -105,12 +104,119 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| config.settings.http.listen.clone());
 
     let router = create_router(state.clone());
-    let listener = TcpListener::bind(&listen).await?;
 
-    tracing::info!(listen = %listen, "HTTP server starting");
+    // Check if TLS is configured
+    if let Some(tls_config) = &config.settings.http.tls {
+        start_tls_server(
+            &listen,
+            router,
+            tls_config,
+            config.settings.http.auth.mode == AuthMode::Mtls,
+            state,
+        )
+        .await?;
+    } else {
+        start_plain_server(&listen, router, state).await?;
+    }
+
+    Ok(())
+}
+
+async fn start_plain_server(
+    listen: &str,
+    router: axum::Router,
+    state: Arc<AppState>,
+) -> anyhow::Result<()> {
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind(listen).await?;
+    tracing::info!(listen = %listen, tls = false, "HTTP server starting");
 
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal(state))
+        .await?;
+
+    Ok(())
+}
+
+async fn start_tls_server(
+    listen: &str,
+    router: axum::Router,
+    tls_config: &prefixd::config::TlsConfig,
+    require_client_cert: bool,
+    state: Arc<AppState>,
+) -> anyhow::Result<()> {
+    use axum_server::tls_rustls::RustlsConfig;
+    use rustls::server::WebPkiClientVerifier;
+    use rustls::RootCertStore;
+    use std::fs::File;
+    use std::io::BufReader;
+
+    // For mTLS, we need to build a custom rustls config
+    // For simple TLS, use the built-in method
+    let rustls_config = if require_client_cert {
+        let ca_path = tls_config
+            .ca_path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("mTLS requires ca_path to be set"))?;
+
+        // Load CA certificates for client verification
+        let ca_file = File::open(ca_path)?;
+        let mut ca_reader = BufReader::new(ca_file);
+        let ca_certs: Vec<_> = rustls_pemfile::certs(&mut ca_reader)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut root_store = RootCertStore::empty();
+        for cert in ca_certs {
+            root_store.add(cert)?;
+        }
+
+        let client_verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
+            .build()
+            .map_err(|e| anyhow::anyhow!("failed to build client verifier: {}", e))?;
+
+        // Load server certificate and key
+        let cert_file = File::open(&tls_config.cert_path)?;
+        let mut cert_reader = BufReader::new(cert_file);
+        let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let key_file = File::open(&tls_config.key_path)?;
+        let mut key_reader = BufReader::new(key_file);
+        let key = rustls_pemfile::private_key(&mut key_reader)?
+            .ok_or_else(|| anyhow::anyhow!("no private key found in {}", tls_config.key_path))?;
+
+        let config = rustls::ServerConfig::builder()
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(certs, key)?;
+
+        RustlsConfig::from_config(Arc::new(config))
+    } else {
+        // TLS without client certificate requirement
+        RustlsConfig::from_pem_file(&tls_config.cert_path, &tls_config.key_path).await?
+    };
+
+    tracing::info!(
+        listen = %listen,
+        tls = true,
+        mtls = require_client_cert,
+        "HTTPS server starting"
+    );
+
+    let addr: std::net::SocketAddr = listen.parse()?;
+
+    // axum-server uses Handle for graceful shutdown
+    let handle = axum_server::Handle::new();
+    let shutdown_handle = handle.clone();
+
+    tokio::spawn(async move {
+        shutdown_signal(state).await;
+        shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+    });
+
+    axum_server::bind_rustls(addr, rustls_config)
+        .handle(handle)
+        .serve(router.into_make_service())
         .await?;
 
     Ok(())
