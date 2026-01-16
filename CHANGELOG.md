@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-01-16
+
+### Added
+
+- PostgreSQL backend support
+  - Runtime-configurable storage driver (`storage.driver: postgres`)
+  - PostgreSQL-specific migrations
+  - Connection string support (`storage.path: "postgres://..."`)
+- Docker deployment
+  - Multi-stage Dockerfile for optimized builds
+  - docker-compose.yml with prefixd, postgres, gobgp services
+  - `configs/prefixd-postgres.yaml` example config
+  - `configs/gobgp.conf` for FlowSpec BGP sidecar
+  - `.dockerignore` for efficient builds
+
+### Changed
+
+- Repository refactored to support both SQLite and PostgreSQL
+- `db::init_pool_from_config()` for runtime driver selection
+
 ## [0.4.0] - 2026-01-16
 
 ### Added

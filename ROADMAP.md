@@ -53,9 +53,19 @@
 - [x] Configuration hot-reload (inventory, playbooks)
 - [x] Graceful shutdown with announcement preservation
 
+## v0.5 - Docker & PostgreSQL (Done)
+
+- [x] PostgreSQL backend option
+  - [x] Runtime-configurable storage driver (sqlite/postgres)
+  - [x] Postgres migrations
+  - [x] Connection pooling
+- [x] Docker deployment
+  - [x] Multi-stage Dockerfile
+  - [x] docker-compose.yml (prefixd, postgres, gobgp)
+  - [x] Example postgres config
+
 ## v1.0 - Production Ready
 
-- [ ] PostgreSQL backend option
 - [ ] Multi-POP coordination
 - [ ] IPv6 FlowSpec support
 - [ ] API versioning and stability guarantees
