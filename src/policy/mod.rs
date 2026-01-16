@@ -4,7 +4,8 @@ mod escalation;
 pub use correlation::*;
 pub use escalation::*;
 
-use crate::config::{AllowedPorts, IpContext, Playbook, PlaybookAction, PlaybookMatch, PlaybookStep, Playbooks};
+use crate::config::{AllowedPorts, IpContext, PlaybookAction, Playbooks};
+
 use crate::domain::{
     ActionParams, ActionType, AttackEvent, AttackVector, MatchCriteria, MitigationIntent,
 };
@@ -128,6 +129,8 @@ impl PolicyEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Playbook, PlaybookMatch, PlaybookStep};
+    use crate::domain::AttackVector;
     use uuid::Uuid;
 
     fn test_playbooks() -> Playbooks {

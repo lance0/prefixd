@@ -1,4 +1,4 @@
-use crate::domain::{AttackEvent, AttackVector, Mitigation};
+use crate::domain::{AttackEvent, Mitigation};
 
 /// Result of correlating an event with existing mitigations
 #[derive(Debug, Clone)]
@@ -44,6 +44,7 @@ pub enum CorrelationAction {
 
 /// Correlates incoming events with existing mitigations
 pub struct EventCorrelator {
+    #[allow(dead_code)]
     correlation_window_seconds: u32,
 }
 
@@ -149,7 +150,7 @@ impl EventCorrelator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ActionParams, ActionType, MatchCriteria, MitigationStatus};
+    use crate::domain::{ActionParams, ActionType, AttackVector, MatchCriteria, MitigationStatus};
     use chrono::Utc;
     use uuid::Uuid;
 

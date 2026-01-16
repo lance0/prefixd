@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 
 use crate::config::{EscalationConfig, PolicyProfile};
 use crate::domain::{ActionType, Mitigation, MitigationStatus};

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(name = "prefixdctl", about = "Control CLI for prefixd")]
+#[command(name = "prefixdctl", about = "Control CLI for prefixd", version)]
 struct Cli {
     /// prefixd API endpoint
     #[arg(short, long, default_value = "http://127.0.0.1:8080", env = "PREFIXD_API")]
