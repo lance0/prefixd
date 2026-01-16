@@ -1,0 +1,58 @@
+[package]
+name = "prefixd"
+version = "0.1.0"
+edition = "2024"
+description = "BGP FlowSpec routing policy daemon for DDoS mitigation"
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full", "sync"] }
+
+# HTTP server
+axum = { version = "0.7", features = ["macros"] }
+tower = { version = "0.4", features = ["util", "limit"] }
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Database (compile-time checked queries)
+sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
+
+# gRPC for GoBGP
+tonic = "0.11"
+prost = "0.12"
+
+# Logging & Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Metrics
+prometheus = "0.13"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+ipnet = { version = "2", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+async-trait = "0.1"
+
+[build-dependencies]
+tonic-build = "0.11"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
+
+[[bin]]
+name = "prefixd"
+path = "src/main.rs"

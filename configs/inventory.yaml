@@ -1,0 +1,24 @@
+customers:
+  - customer_id: cust_example
+    name: "Example Customer"
+    prefixes:
+      - "203.0.113.0/24"
+    policy_profile: normal
+    services:
+      - service_id: svc_dns
+        name: "DNS Service"
+        assets:
+          - ip: "203.0.113.10"
+            role: dns
+          - ip: "203.0.113.11"
+            role: dns
+        allowed_ports:
+          udp: [53]
+          tcp: [53]
+      - service_id: svc_web
+        name: "Web Service"
+        assets:
+          - ip: "203.0.113.20"
+            role: web
+        allowed_ports:
+          tcp: [80, 443]

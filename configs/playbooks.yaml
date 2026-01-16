@@ -1,0 +1,40 @@
+playbooks:
+  - name: udp_flood_police_first
+    match:
+      vector: udp_flood
+      require_top_ports: false
+    steps:
+      - action: police
+        rate_bps: 5000000
+        ttl_seconds: 120
+      - action: discard
+        ttl_seconds: 300
+        require_confidence_at_least: 0.7
+        require_persistence_seconds: 120
+
+  - name: syn_flood_police
+    match:
+      vector: syn_flood
+    steps:
+      - action: police
+        rate_bps: 10000000
+        ttl_seconds: 120
+      - action: discard
+        ttl_seconds: 300
+        require_confidence_at_least: 0.8
+        require_persistence_seconds: 180
+
+  - name: icmp_flood_discard
+    match:
+      vector: icmp_flood
+    steps:
+      - action: discard
+        ttl_seconds: 300
+
+  - name: unknown_conservative
+    match:
+      vector: unknown
+    steps:
+      - action: police
+        rate_bps: 1000000
+        ttl_seconds: 60
