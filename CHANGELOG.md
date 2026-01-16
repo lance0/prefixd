@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Comprehensive unit test suite (84 tests total)
+  - Guardrails tests: prefix validation, TTL, port count, IPv6 detection (18 tests)
+  - BGP/GoBGP tests: NLRI construction, path attributes, RFC constants (16 tests)
+  - Repository tests: CRUD, queries, pagination, safelist, multi-POP (18 tests)
+  - Policy engine tests: evaluation, port intersection, protocols, TTL (13 tests)
+- Next.js frontend scaffolding (`frontend/`)
+  - Dashboard layout with sidebar navigation
+  - Mitigations page (mock data)
+  - Events page (mock data)
+  - Audit log page (mock data)
+  - Dark mode support
+
+### Fixed
+
+- `list_mitigations_all_pops_sqlite` query using wrong column names
+
 ## [0.5.0] - 2026-01-16
 
 ### Added

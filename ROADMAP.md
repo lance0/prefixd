@@ -49,7 +49,6 @@
   - [x] `prefixdctl safelist add/remove`
   - [x] `prefixdctl peers` - BGP session status
   - [x] `prefixdctl reload` - hot-reload config
-- [ ] Read-only web dashboard (frontend scaffolding in progress)
 - [x] Configuration hot-reload (inventory, playbooks)
 - [x] Graceful shutdown with announcement preservation
 
@@ -81,22 +80,28 @@
   - See "Multi-POP Architecture" section below for evolution path
 - [x] OpenAPI spec generation (`/openapi.json`)
 
-### Testing (In Progress)
-- [ ] Unit tests for BGP logic (`gobgp.rs`)
-  - [ ] NLRI construction (IPv4/IPv6)
-  - [ ] Path attribute building
-  - [ ] Withdraw logic
-- [ ] Unit tests for guardrails (`guardrails/mod.rs`)
-  - [ ] Prefix validation
-  - [ ] Quota enforcement
-  - [ ] Safelist checking
-- [ ] Unit tests for repository (`repository.rs`)
-  - [ ] CRUD operations
-  - [ ] Query filtering
-  - [ ] Multi-POP queries
-- [ ] Unit tests for policy engine
-  - [ ] Playbook evaluation
-  - [ ] Escalation logic
+### Testing (Done)
+- [x] Unit tests for BGP logic (`gobgp.rs`) - 16 tests
+  - [x] NLRI construction (IPv4/IPv6)
+  - [x] Path attribute building
+  - [x] RFC constant validation
+- [x] Unit tests for guardrails (`guardrails/mod.rs`) - 18 tests
+  - [x] Prefix validation
+  - [x] TTL validation
+  - [x] Port count limits
+  - [x] IPv6 detection
+- [x] Unit tests for repository (`repository.rs`) - 18 tests
+  - [x] CRUD operations
+  - [x] Query filtering
+  - [x] Multi-POP queries
+  - [x] Safelist operations
+- [x] Unit tests for policy engine - 13 tests
+  - [x] Playbook evaluation
+  - [x] Port intersection logic
+  - [x] Protocol detection
+  - [x] TTL handling
+
+**Total: 84 unit tests**
 
 ### Security & Auth
 - [ ] mTLS authentication option (deferred from v0.2)
@@ -117,6 +122,17 @@
   - [ ] Event ingestion throughput
   - [ ] BGP announcement latency
   - [ ] Database query performance
+
+### Web Dashboard (In Progress)
+- [ ] Next.js frontend (`frontend/`)
+  - [ ] Dashboard overview (stats, activity feed)
+  - [ ] Mitigations list with filtering
+  - [ ] Events list
+  - [ ] Audit log viewer
+  - [ ] Real-time updates (polling or WebSocket)
+- [ ] API integration
+  - [ ] Connect to prefixd REST API
+  - [ ] Authentication support
 
 ## v1.5 - Multi-Vendor Support
 
