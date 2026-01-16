@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.83 AS builder
+FROM rust:latest AS builder
 
 WORKDIR /app
 
@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/ap
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
 COPY proto ./proto
+COPY benches ./benches
 
 # Create dummy src to cache dependencies
 RUN mkdir -p src/bin && \
@@ -17,8 +18,8 @@ RUN mkdir -p src/bin && \
     echo "fn main() {}" > src/bin/prefixdctl.rs && \
     echo "" > src/lib.rs
 
-# Build dependencies only
-RUN cargo build --release && rm -rf src
+# Build dependencies only (skip benchmarks for faster builds)
+RUN cargo build --release --bins && rm -rf src
 
 # Copy actual source code
 COPY src ./src
@@ -26,10 +27,10 @@ COPY migrations ./migrations
 
 # Build the application
 RUN touch src/lib.rs src/main.rs src/bin/prefixdctl.rs && \
-    cargo build --release
+    cargo build --release --bins
 
-# Runtime stage
-FROM debian:bookworm-slim
+# Runtime stage - use same base as rust image for glibc compatibility
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \

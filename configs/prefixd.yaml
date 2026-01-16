@@ -2,7 +2,7 @@ pop: iad1
 mode: dry-run
 
 http:
-  listen: "127.0.0.1:8080"
+  listen: "0.0.0.0:8080"
   auth:
     mode: none
   rate_limit:
@@ -52,7 +52,7 @@ observability:
   log_format: pretty
   log_level: info
   audit_log_path: "./data/audit.jsonl"
-  metrics_listen: "127.0.0.1:9090"
+  metrics_listen: "0.0.0.0:9090"
 
 safelist:
   prefixes:

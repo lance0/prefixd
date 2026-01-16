@@ -24,9 +24,9 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
-# Create non-root user
-RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 nextjs
+# Create non-root user (bun image is distroless-like, use numeric IDs)
+RUN echo "nextjs:x:1001:1001::/app:/sbin/nologin" >> /etc/passwd && \
+    echo "nodejs:x:1001:" >> /etc/group || true
 
 # Copy built assets
 COPY --from=builder /app/public ./public
