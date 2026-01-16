@@ -58,7 +58,8 @@ services:
       - "179:179"      # BGP
     volumes:
       - ./configs/gobgp.conf:/etc/gobgp/gobgp.conf:ro
-    command: gobgpd -f /etc/gobgp/gobgp.conf
+    entrypoint: ["/go/bin/gobgpd"]
+    command: ["-f", "/etc/gobgp/gobgp.conf", "-p", "--api-hosts=0.0.0.0:50051"]
     restart: unless-stopped
 
 volumes:
