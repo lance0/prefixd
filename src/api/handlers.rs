@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::domain::{
@@ -19,25 +20,39 @@ use crate::AppState;
 
 // Response types
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct EventResponse {
+    /// Unique identifier for this event
     event_id: Uuid,
+    /// External event ID from the detector
     external_event_id: Option<String>,
+    /// Processing status
     status: String,
+    /// ID of the created mitigation, if any
     mitigation_id: Option<Uuid>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MitigationResponse {
+    /// Unique mitigation identifier
     mitigation_id: Uuid,
+    /// Current status (pending, active, withdrawn, expired)
     status: String,
+    /// Customer ID from inventory
     customer_id: Option<String>,
+    /// Victim IP address being protected
     victim_ip: String,
+    /// Attack vector type
     vector: String,
+    /// Action type (discard, police)
     action_type: String,
+    /// Rate limit in bps (for police action)
     rate_bps: Option<u64>,
+    /// When the mitigation was created
     created_at: String,
+    /// When the mitigation expires
     expires_at: String,
+    /// Scope hash for deduplication
     scope_hash: String,
 }
 
@@ -58,22 +73,29 @@ impl From<&Mitigation> for MitigationResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MitigationsListResponse {
+    /// List of mitigations
     mitigations: Vec<MitigationResponse>,
+    /// Total count
     total: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct HealthResponse {
+    /// Health status
     status: String,
+    /// BGP session states by peer name
     bgp_sessions: std::collections::HashMap<String, String>,
+    /// Number of active mitigations
     active_mitigations: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ErrorResponse {
+    /// Error message
     error: String,
+    /// Retry after seconds (for rate limiting)
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_seconds: Option<u32>,
 }
@@ -127,6 +149,18 @@ pub struct AddSafelistRequest {
 
 // Handlers
 
+/// Ingest an attack event from a detector
+#[utoipa::path(
+    post,
+    path = "/v1/events",
+    tag = "events",
+    request_body = AttackEventInput,
+    responses(
+        (status = 202, description = "Event accepted", body = EventResponse),
+        (status = 409, description = "Duplicate event"),
+        (status = 422, description = "Guardrail rejection"),
+    )
+)]
 pub async fn ingest_event(
     State(state): State<Arc<AppState>>,
     Json(input): Json<AttackEventInput>,
@@ -273,6 +307,22 @@ pub async fn ingest_event(
     ))
 }
 
+/// List mitigations with optional filters
+#[utoipa::path(
+    get,
+    path = "/v1/mitigations",
+    tag = "mitigations",
+    params(
+        ("status" = Option<String>, Query, description = "Filter by status (comma-separated)"),
+        ("customer_id" = Option<String>, Query, description = "Filter by customer ID"),
+        ("pop" = Option<String>, Query, description = "Filter by POP, use 'all' for cross-POP"),
+        ("limit" = Option<u32>, Query, description = "Max results (default 100)"),
+        ("offset" = Option<u32>, Query, description = "Offset for pagination"),
+    ),
+    responses(
+        (status = 200, description = "List of mitigations", body = MitigationsListResponse)
+    )
+)]
 pub async fn list_mitigations(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListMitigationsQuery>,
@@ -317,6 +367,19 @@ pub async fn list_mitigations(
     }))
 }
 
+/// Get a specific mitigation by ID
+#[utoipa::path(
+    get,
+    path = "/v1/mitigations/{id}",
+    tag = "mitigations",
+    params(
+        ("id" = Uuid, Path, description = "Mitigation ID")
+    ),
+    responses(
+        (status = 200, description = "Mitigation details", body = MitigationResponse),
+        (status = 404, description = "Mitigation not found"),
+    )
+)]
 pub async fn get_mitigation(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
@@ -465,6 +528,15 @@ pub async fn remove_safelist(
     }
 }
 
+/// Health check endpoint
+#[utoipa::path(
+    get,
+    path = "/v1/health",
+    tag = "health",
+    responses(
+        (status = 200, description = "Service is healthy", body = HealthResponse)
+    )
+)]
 pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let sessions = state.announcer.session_status().await.unwrap_or_default();
     let active = state.repo.count_active_global().await.unwrap_or(0);
@@ -485,9 +557,11 @@ pub async fn metrics() -> impl IntoResponse {
     crate::observability::gather_metrics()
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ReloadResponse {
+    /// List of reloaded config files
     reloaded: Vec<String>,
+    /// Reload timestamp
     timestamp: String,
 }
 
@@ -502,11 +576,29 @@ pub async fn reload_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
 
 // Multi-POP coordination
 
+/// Get aggregate stats across all POPs
+#[utoipa::path(
+    get,
+    path = "/v1/stats",
+    tag = "multi-pop",
+    responses(
+        (status = 200, description = "Global statistics", body = crate::db::repository::GlobalStats)
+    )
+)]
 pub async fn get_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let stats = state.repo.get_stats().await.map_err(AppError)?;
     Ok::<_, AppError>(Json(stats))
 }
 
+/// List all known POPs
+#[utoipa::path(
+    get,
+    path = "/v1/pops",
+    tag = "multi-pop",
+    responses(
+        (status = 200, description = "List of POPs", body = Vec<crate::db::repository::PopInfo>)
+    )
+)]
 pub async fn list_pops(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let pops = state.repo.list_pops().await.map_err(AppError)?;
     Ok::<_, AppError>(Json(pops))

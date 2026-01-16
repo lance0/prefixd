@@ -1,18 +1,21 @@
 use axum::{
     middleware,
+    response::IntoResponse,
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use std::sync::Arc;
+use utoipa::OpenApi;
 
-use super::{auth::auth_middleware, handlers};
+use super::{auth::auth_middleware, handlers, openapi::ApiDoc};
 use crate::AppState;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     // Public routes (no auth required)
     let public_routes = Router::new()
         .route("/v1/health", get(handlers::health))
-        .route("/metrics", get(handlers::metrics));
+        .route("/metrics", get(handlers::metrics))
+        .route("/openapi.json", get(openapi_json));
 
     // Protected routes (auth required)
     // Rate limiting is handled at the handler level via AppState
@@ -40,4 +43,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     public_routes
         .merge(protected_routes)
         .with_state(state)
+}
+
+async fn openapi_json() -> impl IntoResponse {
+    Json(ApiDoc::openapi())
 }

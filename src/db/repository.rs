@@ -210,25 +210,35 @@ impl Repository {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct PopInfo {
+    /// POP identifier
     pub pop: String,
+    /// Number of active mitigations in this POP
     pub active_mitigations: u32,
+    /// Total mitigations (all statuses) in this POP
     pub total_mitigations: u32,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct GlobalStats {
+    /// Total active mitigations across all POPs
     pub total_active: u32,
+    /// Total mitigations across all POPs
     pub total_mitigations: u32,
+    /// Total events ingested
     pub total_events: u32,
+    /// Per-POP breakdown
     pub pops: Vec<PopStats>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct PopStats {
+    /// POP identifier
     pub pop: String,
+    /// Active mitigations
     pub active: u32,
+    /// Total mitigations
     pub total: u32,
 }
 
@@ -1031,11 +1041,16 @@ async fn list_mitigations_all_pops_postgres(
 
 use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct SafelistEntry {
+    /// IP prefix in CIDR notation
     pub prefix: String,
+    /// When the entry was added
     pub added_at: chrono::DateTime<Utc>,
+    /// Who added the entry
     pub added_by: String,
+    /// Reason for safelisting
     pub reason: Option<String>,
+    /// Optional expiration time
     pub expires_at: Option<chrono::DateTime<Utc>>,
 }
