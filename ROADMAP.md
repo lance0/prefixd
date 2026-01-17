@@ -242,15 +242,44 @@
   - [ ] `POST /v1/mitigations/bulk-withdraw`
   - [ ] `POST /v1/safelist/bulk-add`
 - [ ] API validation improvements
-  - [ ] Tighten `create_mitigation` validation (protocol/action/rate)
-  - [ ] Clarify `total` semantics (page size vs total count)
+  - [x] Tighten `create_mitigation` validation (protocol/action/rate)
+  - [x] Clarify `total` semantics (page size vs total count) - renamed to `count`
   - [ ] Add max TTL enforcement in guardrails (config-driven)
+- [ ] Pagination hardening
+  - [ ] Add hard upper bound on `limit` param (e.g., 1000)
+  - [ ] Wrap `list_events` in response struct with `count` (consistency with mitigations)
+  - [ ] Document max limits in OpenAPI
+- [ ] Status code consistency
+  - [ ] Decide sync vs async semantics for `create_mitigation` (201 vs 202)
 
 ### BGP Improvements
 - [ ] Implement `parse_flowspec_path()` for reconciliation
   - [ ] Decode FlowSpec NLRI from GoBGP RIB
   - [ ] Enable desired vs actual state comparison
   - [ ] Document limitation if not implemented
+
+### Domain Model Hardening
+- [ ] `Mitigation::from_row` - fail instead of defaulting on parse errors
+  - [ ] Return Result instead of silently defaulting to Police/Pending
+  - [ ] Log/alert on data corruption
+- [ ] `MatchCriteria::compute_scope_hash` - dedup ports before sorting
+- [ ] `validate_prefix_length` - use `IpAddr` parsing instead of contains(':') heuristic
+  - [ ] Handle IPv4-mapped IPv6 correctly
+
+### Policy & Guardrails Consistency
+- [ ] `compute_port_intersection` - apply port guardrail to non-UDP/TCP or document exception
+- [ ] Reconciliation: decide if `Pending` status should be announced (Active/Escalated only currently)
+- [ ] Reconciliation: handle >1000 active mitigations (current limit=1000 causes partial state)
+  - [ ] Add dedicated `list_all_active_mitigations()` method or pagination
+
+### Auth & Performance
+- [ ] Cache bearer token at startup instead of `getenv` per request
+- [ ] Emit startup error on auth misconfiguration instead of per-request log
+- [ ] Document rate limiter scope (global vs per-client) and keying strategy
+
+### Observability Improvements
+- [ ] `AuditLogWriter` - buffer writes instead of flush per entry (throughput)
+- [ ] `AlertingClient::new` - surface HTTP client creation errors explicitly
 
 ### Documentation
 - [ ] Inline code documentation
