@@ -1,5 +1,6 @@
 mod auth;
 mod handlers;
+mod metrics;
 mod openapi;
 pub mod ratelimit;
 mod routes;

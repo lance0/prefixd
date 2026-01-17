@@ -139,6 +139,35 @@ pub static ROW_PARSE_ERRORS: Lazy<CounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+// HTTP metrics
+pub static HTTP_REQUESTS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "prefixd_http_requests_total",
+        "Total HTTP requests",
+        &["method", "route", "status_class"]
+    )
+    .unwrap()
+});
+
+pub static HTTP_REQUEST_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "prefixd_http_request_duration_seconds",
+        "HTTP request duration in seconds",
+        &["method", "route", "status_class"],
+        vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+    )
+    .unwrap()
+});
+
+pub static HTTP_IN_FLIGHT: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_http_in_flight_requests",
+        "In-flight HTTP requests",
+        &["method", "route"]
+    )
+    .unwrap()
+});
+
 /// Generate Prometheus metrics output
 pub fn gather_metrics() -> String {
     let encoder = TextEncoder::new();
@@ -165,4 +194,7 @@ pub fn init_metrics() {
     Lazy::force(&CONFIG_RELOADS);
     Lazy::force(&ESCALATIONS_TOTAL);
     Lazy::force(&ROW_PARSE_ERRORS);
+    Lazy::force(&HTTP_REQUESTS_TOTAL);
+    Lazy::force(&HTTP_REQUEST_DURATION);
+    Lazy::force(&HTTP_IN_FLIGHT);
 }

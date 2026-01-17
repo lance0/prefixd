@@ -43,6 +43,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     public_routes
         .merge(protected_routes)
         .with_state(state)
+        // HTTP metrics (outermost layer to capture all requests)
+        .layer(middleware::from_fn(super::metrics::http_metrics))
         // Security headers
         .layer(SetResponseHeaderLayer::overriding(
             header::X_CONTENT_TYPE_OPTIONS,

@@ -191,9 +191,10 @@
 **Goal:** Production-grade observability and CI/CD infrastructure.
 
 ### Observability
-- [ ] HTTP metrics
-  - [ ] `prefixd_http_request_duration_seconds` histogram
-  - [ ] `prefixd_http_requests_total` counter (by endpoint, status)
+- [x] HTTP metrics
+  - [x] `prefixd_http_request_duration_seconds` histogram
+  - [x] `prefixd_http_requests_total` counter (by endpoint, status)
+  - [x] `prefixd_http_in_flight_requests` gauge
 - [ ] Database metrics
   - [ ] `prefixd_db_query_duration_seconds` histogram
   - [ ] `prefixd_db_connections_active` gauge

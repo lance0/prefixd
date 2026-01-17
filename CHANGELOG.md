@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `prefixd_config_reload_total` counter metric (success/error)
   - `prefixd_escalations_total` counter metric
   - `prefixd_db_row_parse_errors_total` counter metric (tracks corrupted DB rows)
+  - HTTP metrics via middleware:
+    - `prefixd_http_requests_total{method,route,status_class}` counter
+    - `prefixd_http_request_duration_seconds{method,route,status_class}` histogram
+    - `prefixd_http_in_flight_requests{method,route}` gauge
   - Database connectivity status in `/v1/health` endpoint
   - GoBGP connectivity status in `/v1/health` endpoint (now structured: `{status, error}`)
   - Health endpoint now returns `"degraded"` status on DB or GoBGP failure
