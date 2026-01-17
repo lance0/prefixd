@@ -29,6 +29,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Require `rate_bps` for `police` action type
   - Improved error messages with valid options listed
 
+- **CI/CD**
+  - GitHub Actions workflow (`.github/workflows/ci.yml`)
+    - Test job (unit + integration with testcontainers)
+    - Lint job (cargo fmt, clippy)
+    - Build job (release binary artifact)
+    - Docker job (build and push to ghcr.io)
+    - Security audit job (cargo-audit)
+
+- **Testing**
+  - Integration tests with testcontainers (6 tests)
+    - Full event → mitigation flow
+    - Mitigation withdrawal via API
+    - Duplicate event TTL extension
+    - Pagination queries
+    - Safelist blocking
+    - Migration verification
+
 ### Fixed
 
 - IPv6 support in `is_safelisted()` - now handles both IPv4 and IPv6 prefixes

@@ -160,13 +160,15 @@
 
 **Goal:** Comprehensive integration test coverage and critical bug fixes.
 
-### Integration Tests (using testcontainers)
-- [ ] Full event ingestion flow (event → policy → mitigation → BGP)
-- [ ] Mitigation withdrawal via API
+### Integration Tests (using testcontainers) - Done
+- [x] Full event ingestion flow (event → policy → mitigation → BGP)
+- [x] Mitigation withdrawal via API
+- [x] Duplicate event extends TTL
 - [ ] TTL expiry via reconciliation loop
 - [ ] Configuration hot-reload
-- [ ] Pagination and filtering queries
-- [ ] Migration verification (clean Postgres → migrations)
+- [x] Pagination and filtering queries
+- [x] Safelist blocks mitigation
+- [x] Migration verification (clean Postgres → migrations)
 
 ### Bug Fixes (Done)
 - [x] Fix `is_safelisted()` performance
@@ -207,11 +209,11 @@
   - [x] Detailed `/v1/health` response (status: healthy/degraded)
 
 ### DevOps
-- [ ] GitHub Actions CI
-  - [ ] Test (unit + integration with testcontainers)
-  - [ ] Lint (clippy, rustfmt)
-  - [ ] Build (release binary, Docker image)
-  - [ ] Security audit (cargo-audit)
+- [x] GitHub Actions CI
+  - [x] Test (unit + integration with testcontainers)
+  - [x] Lint (clippy, rustfmt)
+  - [x] Build (release binary, Docker image)
+  - [x] Security audit (cargo-audit)
 - [ ] Kubernetes manifests
   - [ ] Deployment, Service, ConfigMap, Secret
   - [ ] PodDisruptionBudget
