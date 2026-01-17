@@ -3,6 +3,9 @@
 import { useEffect, useState } from "react"
 import { Menu, Search } from "lucide-react"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { ConnectionStatus } from "@/components/connection-status"
+import { UserMenu } from "@/components/user-menu"
+import { useWebSocket } from "@/hooks/use-websocket"
 
 const pops = ["IAD1", "IAD2", "SFO1", "LAX1", "ORD1", "AMS1", "FRA1", "NRT1"]
 
@@ -13,6 +16,7 @@ interface TopBarProps {
 
 export function TopBar({ onMenuClick, onSearchClick }: TopBarProps) {
   const [time, setTime] = useState<string>("")
+  const { connectionState } = useWebSocket()
 
   useEffect(() => {
     const updateTime = () => {
@@ -71,11 +75,9 @@ export function TopBar({ onMenuClick, onSearchClick }: TopBarProps) {
         </button>
       </div>
       <div className="flex items-center gap-3">
-        <div className="flex items-center gap-2">
-          <span className="h-1.5 w-1.5 bg-primary" />
-          <span className="hidden sm:inline text-xs font-mono text-primary">CONNECTED</span>
-        </div>
+        <ConnectionStatus state={connectionState} />
         <div className="text-[10px] font-mono text-muted-foreground tabular-nums">{time}</div>
+        <UserMenu />
       </div>
     </header>
   )

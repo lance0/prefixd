@@ -10,10 +10,20 @@ license = "MIT"
 tokio = { version = "1", features = ["full", "sync"] }
 
 # HTTP server
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 tower = { version = "0.5", features = ["util", "limit"] }
 tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "limit"] }
+
+# Authentication
+axum-login = "0.18"
+tower-sessions = "0.14"
+tower-sessions-sqlx-store = { version = "0.15", features = ["postgres"] }
+argon2 = "0.5"
+password-hash = "0.5"
+
+# WebSocket
+futures-util = "0.3"
 rustls = "0.23"
 rustls-pemfile = "2"
 
@@ -72,6 +82,10 @@ testcontainers-modules = { version = "0.11", features = ["postgres"] }
 [[bench]]
 name = "benchmarks"
 harness = false
+
+[features]
+default = []
+test-utils = []
 
 [[bin]]
 name = "prefixd"

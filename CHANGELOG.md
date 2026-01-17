@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **WebSocket Real-Time Updates**
+  - WebSocket endpoint at `/v1/ws/feed` for live mitigation/event updates
+  - Message types: MitigationCreated, MitigationUpdated, MitigationExpired, MitigationWithdrawn, EventIngested, ResyncRequired
+  - Broadcast channel integration in handlers and reconciliation loop
+  - Lag detection with ResyncRequired message for client cache invalidation
+
+- **Session-Based Authentication**
+  - Operators table with argon2 password hashing
+  - PostgreSQL session store via tower-sessions-sqlx-store
+  - Login/logout/me endpoints (`/v1/auth/login`, `/v1/auth/logout`, `/v1/auth/me`)
+  - Hybrid auth model: session cookies for browser, bearer tokens for API/CLI
+  - `prefixdctl operators create` command for seeding operators
+
+- **Frontend Authentication & Real-Time**
+  - Login page with form validation and error handling
+  - `useAuth` hook with AuthProvider context (memoized per React best practices)
+  - `useWebSocket` hook with reconnection, SWR cache invalidation
+  - `RequireAuth` component for protected routes
+  - `ConnectionStatus` indicator in top bar
+  - `UserMenu` dropdown with logout
+
 - **Observability**
   - `prefixd_config_reload_total` counter metric (success/error)
   - `prefixd_escalations_total` counter metric

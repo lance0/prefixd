@@ -3,7 +3,7 @@ use axum::http::{Request, StatusCode};
 use std::sync::Arc;
 use tower::ServiceExt;
 
-use prefixd::api::create_router;
+use prefixd::api::create_test_router;
 use prefixd::bgp::MockAnnouncer;
 use prefixd::config::{
     AllowedPorts, Asset, AuthConfig, AuthMode, BgpConfig, BgpMode, Customer, EscalationConfig,
@@ -138,7 +138,7 @@ async fn setup_app() -> axum::Router {
     )
     .expect("failed to create app state");
 
-    create_router(state)
+    create_test_router(state)
 }
 
 #[tokio::test]
@@ -237,7 +237,7 @@ async fn setup_app_with_bearer() -> axum::Router {
     )
     .expect("failed to create app state");
 
-    create_router(state)
+    create_test_router(state)
 }
 
 #[tokio::test]

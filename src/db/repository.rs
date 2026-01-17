@@ -5,7 +5,7 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use super::RepositoryTrait;
-use crate::domain::{AttackEvent, Mitigation, MitigationRow, MitigationStatus};
+use crate::domain::{AttackEvent, Mitigation, MitigationRow, MitigationStatus, Operator, OperatorRole};
 use crate::error::Result;
 use crate::observability::{metrics::ROW_PARSE_ERRORS, ActorType, AuditEntry};
 
@@ -553,6 +553,76 @@ impl RepositoryTrait for Repository {
             })
             .collect())
     }
+
+    // Operator methods
+    async fn get_operator_by_username(&self, username: &str) -> Result<Option<Operator>> {
+        let row = sqlx::query_as::<_, OperatorRow>(
+            r#"
+            SELECT operator_id, username, password_hash, role, created_at, created_by, last_login_at
+            FROM operators WHERE username = $1
+            "#,
+        )
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Into::into))
+    }
+
+    async fn get_operator_by_id(&self, id: Uuid) -> Result<Option<Operator>> {
+        let row = sqlx::query_as::<_, OperatorRow>(
+            r#"
+            SELECT operator_id, username, password_hash, role, created_at, created_by, last_login_at
+            FROM operators WHERE operator_id = $1
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Into::into))
+    }
+
+    async fn create_operator(
+        &self,
+        username: &str,
+        password_hash: &str,
+        role: OperatorRole,
+        created_by: Option<&str>,
+    ) -> Result<Operator> {
+        let row = sqlx::query_as::<_, OperatorRow>(
+            r#"
+            INSERT INTO operators (username, password_hash, role, created_by)
+            VALUES ($1, $2, $3, $4)
+            RETURNING operator_id, username, password_hash, role, created_at, created_by, last_login_at
+            "#,
+        )
+        .bind(username)
+        .bind(password_hash)
+        .bind(role.to_string())
+        .bind(created_by)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.into())
+    }
+
+    async fn update_operator_last_login(&self, id: Uuid) -> Result<()> {
+        sqlx::query("UPDATE operators SET last_login_at = NOW() WHERE operator_id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn list_operators(&self) -> Result<Vec<Operator>> {
+        let rows = sqlx::query_as::<_, OperatorRow>(
+            r#"
+            SELECT operator_id, username, password_hash, role, created_at, created_by, last_login_at
+            FROM operators ORDER BY created_at ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow, utoipa::ToSchema)]
@@ -584,4 +654,30 @@ pub struct PopStats {
     pub pop: String,
     pub active: u32,
     pub total: u32,
+}
+
+#[derive(Debug, FromRow)]
+struct OperatorRow {
+    operator_id: Uuid,
+    username: String,
+    password_hash: String,
+    role: String,
+    created_at: DateTime<Utc>,
+    created_by: Option<String>,
+    last_login_at: Option<DateTime<Utc>>,
+}
+
+impl From<OperatorRow> for Operator {
+    fn from(row: OperatorRow) -> Self {
+        let role = row.role.parse().unwrap_or(OperatorRole::Operator);
+        Self {
+            operator_id: row.operator_id,
+            username: row.username,
+            password_hash: row.password_hash,
+            role,
+            created_at: row.created_at,
+            created_by: row.created_by,
+            last_login_at: row.last_login_at,
+        }
+    }
 }

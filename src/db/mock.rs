@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 use super::{GlobalStats, PopInfo, PopStats, RepositoryTrait, SafelistEntry};
-use crate::domain::{AttackEvent, Mitigation, MitigationStatus};
+use crate::domain::{AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole};
 use crate::error::Result;
 use crate::observability::AuditEntry;
 
@@ -13,6 +13,7 @@ pub struct MockRepository {
     mitigations: Mutex<Vec<Mitigation>>,
     safelist: Mutex<Vec<SafelistEntry>>,
     audit: Mutex<Vec<AuditEntry>>,
+    operators: Mutex<Vec<Operator>>,
 }
 
 impl MockRepository {
@@ -22,6 +23,7 @@ impl MockRepository {
             mitigations: Mutex::new(Vec::new()),
             safelist: Mutex::new(Vec::new()),
             audit: Mutex::new(Vec::new()),
+            operators: Mutex::new(Vec::new()),
         }
     }
 }
@@ -324,5 +326,48 @@ impl RepositoryTrait for MockRepository {
         offset: u32,
     ) -> Result<Vec<Mitigation>> {
         self.list_mitigations(status_filter, customer_id, limit, offset).await
+    }
+
+    // Operator methods
+    async fn get_operator_by_username(&self, username: &str) -> Result<Option<Operator>> {
+        let operators = self.operators.lock().unwrap();
+        Ok(operators.iter().find(|o| o.username == username).cloned())
+    }
+
+    async fn get_operator_by_id(&self, id: Uuid) -> Result<Option<Operator>> {
+        let operators = self.operators.lock().unwrap();
+        Ok(operators.iter().find(|o| o.operator_id == id).cloned())
+    }
+
+    async fn create_operator(
+        &self,
+        username: &str,
+        password_hash: &str,
+        role: OperatorRole,
+        created_by: Option<&str>,
+    ) -> Result<Operator> {
+        let op = Operator {
+            operator_id: Uuid::new_v4(),
+            username: username.to_string(),
+            password_hash: password_hash.to_string(),
+            role,
+            created_at: Utc::now(),
+            created_by: created_by.map(String::from),
+            last_login_at: None,
+        };
+        self.operators.lock().unwrap().push(op.clone());
+        Ok(op)
+    }
+
+    async fn update_operator_last_login(&self, id: Uuid) -> Result<()> {
+        let mut operators = self.operators.lock().unwrap();
+        if let Some(op) = operators.iter_mut().find(|o| o.operator_id == id) {
+            op.last_login_at = Some(Utc::now());
+        }
+        Ok(())
+    }
+
+    async fn list_operators(&self) -> Result<Vec<Operator>> {
+        Ok(self.operators.lock().unwrap().clone())
     }
 }

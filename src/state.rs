@@ -7,6 +7,7 @@ use crate::bgp::FlowSpecAnnouncer;
 use crate::config::{AuthMode, Inventory, Playbooks, Settings};
 use crate::db::RepositoryTrait;
 use crate::error::{PrefixdError, Result};
+use crate::ws::WsMessage;
 
 /// Shared application state
 pub struct AppState {
@@ -16,6 +17,8 @@ pub struct AppState {
     pub repo: Arc<dyn RepositoryTrait>,
     pub announcer: Arc<dyn FlowSpecAnnouncer>,
     pub shutdown_tx: broadcast::Sender<()>,
+    /// WebSocket broadcast channel for real-time updates
+    pub ws_broadcast: broadcast::Sender<WsMessage>,
     /// Cached bearer token (loaded at startup to avoid per-request env lookups)
     pub bearer_token: Option<String>,
     config_dir: PathBuf,
@@ -32,6 +35,7 @@ impl AppState {
         config_dir: PathBuf,
     ) -> Result<Arc<Self>> {
         let (shutdown_tx, _) = broadcast::channel(1);
+        let ws_broadcast = crate::ws::create_broadcast();
 
         // Load bearer token at startup (avoids per-request env lookups)
         let bearer_token = if matches!(settings.http.auth.mode, AuthMode::Bearer) {
@@ -65,6 +69,7 @@ impl AppState {
             repo,
             announcer,
             shutdown_tx,
+            ws_broadcast,
             bearer_token,
             config_dir,
             shutting_down: AtomicBool::new(false),

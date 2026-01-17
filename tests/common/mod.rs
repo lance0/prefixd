@@ -3,6 +3,7 @@ use std::sync::Arc;
 use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
 use testcontainers_modules::postgres::Postgres;
 
+use prefixd::auth::create_auth_layer;
 use prefixd::bgp::MockAnnouncer;
 use prefixd::config::{
     AllowedPorts, Asset, AuthConfig, AuthMode, BgpConfig, BgpMode, Customer, EscalationConfig,
@@ -13,10 +14,12 @@ use prefixd::config::{
 use prefixd::db::{init_postgres_pool, Repository, RepositoryTrait};
 use prefixd::domain::AttackVector;
 use prefixd::AppState;
+use sqlx::PgPool;
 
 pub struct TestContext {
     pub state: Arc<AppState>,
     pub repo: Arc<dyn RepositoryTrait>,
+    pub pool: PgPool,
     _container: ContainerAsync<Postgres>,
 }
 
@@ -43,7 +46,7 @@ impl TestContext {
             .await
             .expect("Failed to init pool");
 
-        let repo: Arc<dyn RepositoryTrait> = Arc::new(Repository::new(pool));
+        let repo: Arc<dyn RepositoryTrait> = Arc::new(Repository::new(pool.clone()));
         let announcer = Arc::new(MockAnnouncer::new());
 
         let mut settings = test_settings();
@@ -62,12 +65,14 @@ impl TestContext {
         Self {
             state,
             repo,
+            pool,
             _container: container,
         }
     }
 
-    pub fn router(&self) -> axum::Router {
-        prefixd::api::create_router(self.state.clone())
+    pub async fn router(&self) -> axum::Router {
+        let auth_layer = create_auth_layer(self.pool.clone(), self.repo.clone()).await;
+        prefixd::api::create_router(self.state.clone(), auth_layer)
     }
 
     /// Create a test context with a custom config directory for hot-reload testing
@@ -93,7 +98,7 @@ impl TestContext {
             .await
             .expect("Failed to init pool");
 
-        let repo: Arc<dyn RepositoryTrait> = Arc::new(Repository::new(pool));
+        let repo: Arc<dyn RepositoryTrait> = Arc::new(Repository::new(pool.clone()));
         let announcer = Arc::new(MockAnnouncer::new());
 
         let mut settings = test_settings();
@@ -127,6 +132,7 @@ impl TestContext {
         Self {
             state,
             repo,
+            pool,
             _container: container,
         }
     }

@@ -10,7 +10,7 @@ use prefixd::domain::MitigationStatus;
 #[tokio::test]
 async fn test_full_event_to_mitigation_flow() {
     let ctx = TestContext::new().await;
-    let app = ctx.router();
+    let app = ctx.router().await;
 
     // Ingest an event for a known IP
     let event_json = r#"{
@@ -53,7 +53,7 @@ async fn test_full_event_to_mitigation_flow() {
 #[tokio::test]
 async fn test_mitigation_withdrawal() {
     let ctx = TestContext::new().await;
-    let app = ctx.router();
+    let app = ctx.router().await;
 
     // First, create a mitigation via event
     let event_json = r#"{
@@ -125,7 +125,7 @@ async fn test_mitigation_withdrawal() {
 #[tokio::test]
 async fn test_pagination() {
     let ctx = TestContext::new().await;
-    let app = ctx.router();
+    let app = ctx.router().await;
 
     // Create multiple mitigations by sending events for different IPs
     for i in 10..20 {
@@ -200,7 +200,7 @@ async fn test_pagination() {
 #[tokio::test]
 async fn test_safelist_blocks_mitigation() {
     let ctx = TestContext::new().await;
-    let app = ctx.router();
+    let app = ctx.router().await;
 
     // Add an IP to safelist
     ctx.repo
@@ -247,7 +247,7 @@ async fn test_safelist_blocks_mitigation() {
 #[tokio::test]
 async fn test_duplicate_event_extends_ttl() {
     let ctx = TestContext::new().await;
-    let app = ctx.router();
+    let app = ctx.router().await;
 
     let event_json = r#"{
         "timestamp": "2026-01-17T10:00:00Z",
@@ -530,7 +530,7 @@ playbooks:
     write_yaml(temp_dir.path(), "playbooks.yaml", updated_playbooks);
 
     // Call reload endpoint
-    let app = ctx.router();
+    let app = ctx.router().await;
     let response = app
         .oneshot(
             Request::builder()

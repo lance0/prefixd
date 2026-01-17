@@ -9,7 +9,34 @@ use std::sync::Arc;
 use crate::config::AuthMode;
 use crate::AppState;
 
-/// Bearer token authentication middleware
+/// Check if request is authenticated via bearer token
+/// Returns Ok(()) if authenticated, Err(StatusCode) if not
+/// When auth mode is None, always returns Ok
+pub fn require_bearer_auth(
+    state: &AppState,
+    auth_header: Option<&str>,
+) -> Result<(), StatusCode> {
+    // If auth is disabled, allow all
+    if matches!(state.settings.http.auth.mode, AuthMode::None) {
+        return Ok(());
+    }
+
+    // Check bearer token
+    if let Some(header_str) = auth_header {
+        if header_str.starts_with("Bearer ") {
+            let provided_token = &header_str[7..];
+            if let Some(ref expected_token) = state.bearer_token {
+                if constant_time_eq(provided_token.as_bytes(), expected_token.as_bytes()) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+/// Bearer token authentication middleware (legacy, for CLI/detectors only)
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     request: Request,
@@ -24,6 +51,31 @@ pub async fn auth_middleware(
             Ok(next.run(request).await)
         }
     }
+}
+
+/// Bearer token authentication middleware for API routes
+/// Session-based auth is used only for WebSocket and /v1/auth/* endpoints
+pub async fn hybrid_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    // If auth is disabled, allow all
+    if matches!(state.settings.http.auth.mode, AuthMode::None) {
+        return Ok(next.run(request).await);
+    }
+
+    // Check bearer token (CLI/detectors)
+    if let Some(auth_header) = request.headers().get(header::AUTHORIZATION) {
+        if let Ok(header_str) = auth_header.to_str() {
+            if header_str.starts_with("Bearer ") {
+                return validate_bearer_token(&state, request, next).await;
+            }
+        }
+    }
+    
+    tracing::debug!("no valid session or bearer token");
+    Err(StatusCode::UNAUTHORIZED)
 }
 
 async fn validate_bearer_token(

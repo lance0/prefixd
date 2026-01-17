@@ -232,9 +232,16 @@
 - [ ] API client tests
 - [ ] React hooks tests
 - [ ] Error boundaries throughout
-- [ ] WebSocket support (replace 5s polling)
-  - [ ] Real-time mitigation updates
-  - [ ] Live event stream
+- [x] WebSocket support (replace 5s polling)
+  - [x] Real-time mitigation updates
+  - [x] Live event stream
+  - [x] useWebSocket hook with reconnection
+  - [x] SWR cache invalidation on messages
+- [x] Authentication
+  - [x] Login page
+  - [x] useAuth hook with AuthProvider
+  - [x] RequireAuth protected routes
+  - [x] UserMenu with logout
 
 ### API Polish
 - [ ] OpenAPI enhancements
@@ -466,7 +473,7 @@ prefixd implements a **signal-driven** architecture where detection is decoupled
 
 ### Tier 1: Ship Blockers (Can't Call It Credible Without These)
 1. [ ] **Implement `parse_flowspec_path()`** - Without this, reconciliation is theater
-2. [ ] **WebSocket for dashboard** - 5s polling during an attack is genuinely bad UX
+2. [x] **WebSocket for dashboard** - Real-time updates via /v1/ws/feed
 3. [ ] **One real router test** - Even just Juniper vMX in a lab; document quirks
 
 ### Tier 1.5: Nice-to-Have Before Launch

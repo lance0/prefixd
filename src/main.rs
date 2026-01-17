@@ -4,6 +4,7 @@ use std::sync::Arc;
 use clap::Parser;
 
 use prefixd::api::create_router;
+use prefixd::auth::create_auth_layer;
 use prefixd::bgp::{GoBgpAnnouncer, MockAnnouncer};
 use prefixd::config::{AppConfig, AuthMode, BgpMode};
 use prefixd::db;
@@ -47,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("initializing PostgreSQL database");
 
     let pool = db::init_postgres_pool(&storage.connection_string).await?;
-    let repo: Arc<dyn db::RepositoryTrait> = Arc::new(db::Repository::new(pool));
+    let repo: Arc<dyn db::RepositoryTrait> = Arc::new(db::Repository::new(pool.clone()));
 
     // Init safelist from config
     for prefix in &config.settings.safelist.prefixes {
@@ -78,13 +79,17 @@ async fn main() -> anyhow::Result<()> {
         cli.config.clone(),
     )?;
 
+    // Create auth layer for session-based auth
+    let auth_layer = create_auth_layer(pool, repo.clone()).await;
+
     // Start reconciliation loop
     let reconciler = ReconciliationLoop::new(
         repo,
         announcer,
         config.settings.timers.reconciliation_interval_seconds,
         state.is_dry_run(),
-    );
+    )
+    .with_ws_broadcast(state.ws_broadcast.clone());
 
     let shutdown_rx = state.subscribe_shutdown();
     tokio::spawn(async move {
@@ -96,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
         .listen
         .unwrap_or_else(|| config.settings.http.listen.clone());
 
-    let router = create_router(state.clone());
+    let router = create_router(state.clone(), auth_layer);
 
     // Check if TLS is configured
     if let Some(tls_config) = &config.settings.http.tls {

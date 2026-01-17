@@ -3,6 +3,7 @@ import type { Metadata, Viewport } from "next"
 import { Geist, Geist_Mono } from "next/font/google"
 import "./globals.css"
 import { SWRProvider } from "@/components/swr-provider"
+import { AuthProvider } from "@/hooks/use-auth"
 import { Analytics } from "@/components/analytics"
 
 const geist = Geist({ 
@@ -51,9 +52,11 @@ export default function RootLayout({
   return (
     <html lang="en" className={`dark bg-background ${geist.variable} ${geistMono.variable}`}>
       <body className="font-sans antialiased">
-        <SWRProvider>
-          {children}
-        </SWRProvider>
+        <AuthProvider>
+          <SWRProvider>
+            {children}
+          </SWRProvider>
+        </AuthProvider>
         <Analytics />
       </body>
     </html>

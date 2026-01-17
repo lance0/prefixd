@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -18,42 +18,44 @@ use crate::guardrails::Guardrails;
 use crate::policy::PolicyEngine;
 use crate::AppState;
 
+use super::auth::require_bearer_auth;
+
 // Response types
 
-#[derive(Serialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct EventResponse {
     /// Unique identifier for this event
-    event_id: Uuid,
+    pub event_id: Uuid,
     /// External event ID from the detector
-    external_event_id: Option<String>,
+    pub external_event_id: Option<String>,
     /// Processing status
-    status: String,
+    pub status: String,
     /// ID of the created mitigation, if any
-    mitigation_id: Option<Uuid>,
+    pub mitigation_id: Option<Uuid>,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct MitigationResponse {
     /// Unique mitigation identifier
-    mitigation_id: Uuid,
+    pub mitigation_id: Uuid,
     /// Current status (pending, active, withdrawn, expired)
-    status: String,
+    pub status: String,
     /// Customer ID from inventory
-    customer_id: Option<String>,
+    pub customer_id: Option<String>,
     /// Victim IP address being protected
-    victim_ip: String,
+    pub victim_ip: String,
     /// Attack vector type
-    vector: String,
+    pub vector: String,
     /// Action type (discard, police)
-    action_type: String,
+    pub action_type: String,
     /// Rate limit in bps (for police action)
-    rate_bps: Option<u64>,
+    pub rate_bps: Option<u64>,
     /// When the mitigation was created
-    created_at: String,
+    pub created_at: String,
     /// When the mitigation expires
-    expires_at: String,
+    pub expires_at: String,
     /// Scope hash for deduplication
-    scope_hash: String,
+    pub scope_hash: String,
 }
 
 impl From<&Mitigation> for MitigationResponse {
@@ -274,6 +276,11 @@ pub async fn ingest_event(
         existing.extend_ttl(intent.ttl_seconds, event.event_id);
         state.repo.update_mitigation(&existing).await.map_err(AppError)?;
 
+        // Broadcast mitigation update via WebSocket
+        let _ = state.ws_broadcast.send(crate::ws::WsMessage::MitigationUpdated {
+            mitigation: MitigationResponse::from(&existing),
+        });
+
         tracing::info!(
             mitigation_id = %existing.mitigation_id,
             "extended existing mitigation TTL"
@@ -323,6 +330,11 @@ pub async fn ingest_event(
 
     mitigation.activate();
     state.repo.insert_mitigation(&mitigation).await.map_err(AppError)?;
+
+    // Broadcast new mitigation via WebSocket
+    let _ = state.ws_broadcast.send(crate::ws::WsMessage::MitigationCreated {
+        mitigation: MitigationResponse::from(&mitigation),
+    });
 
     tracing::info!(
         mitigation_id = %mitigation.mitigation_id,
@@ -419,8 +431,13 @@ pub async fn list_audit(
 )]
 pub async fn list_mitigations(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<ListMitigationsQuery>,
-) -> impl IntoResponse {
+) -> Result<Json<MitigationsListResponse>, StatusCode> {
+    // Check auth (bearer token)
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    require_bearer_auth(&state, auth_header)?;
+
     let status_filter: Option<Vec<MitigationStatus>> = query.status.as_ref().map(|s| {
         s.split(',')
             .filter_map(|st| st.parse().ok())
@@ -440,7 +457,7 @@ pub async fn list_mitigations(
                 query.offset,
             )
             .await
-            .map_err(AppError)?
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
         state
             .repo
@@ -451,13 +468,13 @@ pub async fn list_mitigations(
                 query.offset,
             )
             .await
-            .map_err(AppError)?
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
     let count = mitigations.len();
     let responses: Vec<_> = mitigations.iter().map(MitigationResponse::from).collect();
 
-    Ok::<_, AppError>(Json(MitigationsListResponse {
+    Ok(Json(MitigationsListResponse {
         mitigations: responses,
         count,
     }))
@@ -599,6 +616,11 @@ pub async fn withdraw_mitigation(
 
     mitigation.withdraw(Some(format!("{}: {}", req.operator_id, req.reason)));
     state.repo.update_mitigation(&mitigation).await.map_err(AppError)?;
+
+    // Broadcast withdrawal via WebSocket
+    let _ = state.ws_broadcast.send(crate::ws::WsMessage::MitigationWithdrawn {
+        mitigation_id: mitigation.mitigation_id.to_string(),
+    });
 
     tracing::info!(
         mitigation_id = %mitigation.mitigation_id,
@@ -764,4 +786,94 @@ impl IntoResponse for AppError {
         });
         (status, body).into_response()
     }
+}
+
+// Authentication handlers
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LoginResponse {
+    pub operator_id: Uuid,
+    pub username: String,
+    pub role: String,
+}
+
+/// Login with username and password
+#[utoipa::path(
+    post,
+    path = "/v1/auth/login",
+    tag = "auth",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Login successful", body = LoginResponse),
+        (status = 401, description = "Invalid credentials")
+    )
+)]
+pub async fn login(
+    mut auth_session: crate::auth::AuthSession,
+    Json(req): Json<LoginRequest>,
+) -> Result<Json<LoginResponse>, StatusCode> {
+    use crate::auth::Credentials;
+
+    let creds = Credentials {
+        username: req.username,
+        password: req.password,
+    };
+    
+    let operator = auth_session
+        .authenticate(creds)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    
+    auth_session
+        .login(&operator)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    Ok(Json(LoginResponse {
+        operator_id: operator.operator_id,
+        username: operator.username,
+        role: operator.role.to_string(),
+    }))
+}
+
+/// Logout current session
+#[utoipa::path(
+    post,
+    path = "/v1/auth/logout",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Logout successful")
+    )
+)]
+pub async fn logout(mut auth_session: crate::auth::AuthSession) -> StatusCode {
+    if let Err(e) = auth_session.logout().await {
+        tracing::warn!(error = %e, "logout failed");
+    }
+    StatusCode::OK
+}
+
+/// Get current authenticated operator
+#[utoipa::path(
+    get,
+    path = "/v1/auth/me",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Current operator", body = LoginResponse),
+        (status = 401, description = "Not authenticated")
+    )
+)]
+pub async fn get_me(auth_session: crate::auth::AuthSession) -> Result<Json<LoginResponse>, StatusCode> {
+    let operator = auth_session.user.ok_or(StatusCode::UNAUTHORIZED)?;
+    Ok(Json(LoginResponse {
+        operator_id: operator.operator_id,
+        username: operator.username,
+        role: operator.role.to_string(),
+    }))
 }

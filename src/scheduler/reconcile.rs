@@ -5,12 +5,14 @@ use tokio::sync::broadcast;
 use crate::bgp::FlowSpecAnnouncer;
 use crate::db::RepositoryTrait;
 use crate::domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule, MitigationStatus};
+use crate::ws::WsMessage;
 
 pub struct ReconciliationLoop {
     repo: Arc<dyn RepositoryTrait>,
     announcer: Arc<dyn FlowSpecAnnouncer>,
     interval: Duration,
     dry_run: bool,
+    ws_broadcast: Option<broadcast::Sender<WsMessage>>,
 }
 
 impl ReconciliationLoop {
@@ -25,7 +27,14 @@ impl ReconciliationLoop {
             announcer,
             interval: Duration::from_secs(interval_seconds as u64),
             dry_run,
+            ws_broadcast: None,
         }
+    }
+
+    /// Set the WebSocket broadcast sender for real-time notifications
+    pub fn with_ws_broadcast(mut self, sender: broadcast::Sender<WsMessage>) -> Self {
+        self.ws_broadcast = Some(sender);
+        self
     }
 
     pub async fn run(&self, mut shutdown: broadcast::Receiver<()>) {
@@ -94,6 +103,13 @@ impl ReconciliationLoop {
             // Update status
             mitigation.expire();
             self.repo.update_mitigation(&mitigation).await?;
+
+            // Broadcast expiry via WebSocket
+            if let Some(ref tx) = self.ws_broadcast {
+                let _ = tx.send(WsMessage::MitigationExpired {
+                    mitigation_id: mitigation.mitigation_id.to_string(),
+                });
+            }
         }
 
         Ok(())

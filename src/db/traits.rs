@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::domain::{AttackEvent, Mitigation, MitigationStatus};
+use crate::domain::{AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole};
 use crate::error::Result;
 use crate::observability::AuditEntry;
 
@@ -56,4 +56,17 @@ pub trait RepositoryTrait: Send + Sync {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Mitigation>>;
+
+    // Operators
+    async fn get_operator_by_username(&self, username: &str) -> Result<Option<Operator>>;
+    async fn get_operator_by_id(&self, id: Uuid) -> Result<Option<Operator>>;
+    async fn create_operator(
+        &self,
+        username: &str,
+        password_hash: &str,
+        role: OperatorRole,
+        created_by: Option<&str>,
+    ) -> Result<Operator>;
+    async fn update_operator_last_login(&self, id: Uuid) -> Result<()>;
+    async fn list_operators(&self) -> Result<Vec<Operator>>;
 }

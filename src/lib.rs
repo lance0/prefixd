@@ -1,4 +1,5 @@
 pub mod api;
+pub mod auth;
 pub mod bgp;
 pub mod config;
 pub mod db;
@@ -8,6 +9,7 @@ pub mod guardrails;
 pub mod observability;
 pub mod policy;
 pub mod scheduler;
+pub mod ws;
 
 mod state;
 

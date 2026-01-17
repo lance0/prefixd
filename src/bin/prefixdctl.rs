@@ -1,3 +1,7 @@
+use argon2::{
+    password_hash::{rand_core::OsRng, SaltString},
+    Argon2, PasswordHasher,
+};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::process::ExitCode;
@@ -41,11 +45,36 @@ enum Commands {
     #[command(subcommand)]
     Safelist(SafelistCommands),
 
+    /// Manage operators (direct DB access, for initial setup)
+    #[command(subcommand)]
+    Operators(OperatorCommands),
+
     /// Show BGP peer status
     Peers,
 
     /// Reload configuration (inventory, playbooks)
     Reload,
+}
+
+#[derive(Subcommand)]
+enum OperatorCommands {
+    /// Create a new operator (requires DATABASE_URL env var)
+    Create {
+        /// Username
+        #[arg(short, long)]
+        username: String,
+
+        /// Password (will prompt if not provided)
+        #[arg(short, long)]
+        password: Option<String>,
+
+        /// Role (admin or viewer)
+        #[arg(short, long, default_value = "admin")]
+        role: String,
+    },
+
+    /// List operators (requires DATABASE_URL env var)
+    List,
 }
 
 #[derive(Subcommand)]
@@ -274,6 +303,7 @@ async fn main() -> ExitCode {
         Commands::Status => cmd_status(&client, cli.format).await,
         Commands::Mitigations(cmd) => cmd_mitigations(&client, cmd, cli.format).await,
         Commands::Safelist(cmd) => cmd_safelist(&client, cmd, cli.format).await,
+        Commands::Operators(cmd) => cmd_operators(cmd, cli.format).await,
         Commands::Peers => cmd_peers(&client, cli.format).await,
         Commands::Reload => cmd_reload(&client, cli.format).await,
     };
@@ -511,6 +541,141 @@ async fn cmd_reload(client: &Client, format: OutputFormat) -> Result<(), String>
         OutputFormat::Table => {
             println!("Reloaded: {}", resp.reloaded.join(", "));
             println!("Timestamp: {}", resp.timestamp);
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<(), String> {
+    let database_url = std::env::var("DATABASE_URL")
+        .map_err(|_| "DATABASE_URL environment variable not set")?;
+
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .map_err(|e| format!("failed to connect to database: {}", e))?;
+
+    match cmd {
+        OperatorCommands::Create { username, password, role } => {
+            // Validate role
+            let role_lower = role.to_lowercase();
+            if role_lower != "admin" && role_lower != "viewer" {
+                return Err("role must be 'admin' or 'viewer'".to_string());
+            }
+
+            // Get password (prompt if not provided)
+            let password = match password {
+                Some(p) => p,
+                None => {
+                    eprint!("Password: ");
+                    let mut input = String::new();
+                    std::io::stdin()
+                        .read_line(&mut input)
+                        .map_err(|e| format!("failed to read password: {}", e))?;
+                    input.trim().to_string()
+                }
+            };
+
+            if password.is_empty() {
+                return Err("password cannot be empty".to_string());
+            }
+
+            // Hash password with argon2
+            let salt = SaltString::generate(&mut OsRng);
+            let argon2 = Argon2::default();
+            let password_hash = argon2
+                .hash_password(password.as_bytes(), &salt)
+                .map_err(|e| format!("failed to hash password: {}", e))?
+                .to_string();
+
+            // Check if username exists
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM operators WHERE username = $1)"
+            )
+            .bind(&username)
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| format!("database error: {}", e))?;
+
+            if exists {
+                return Err(format!("operator '{}' already exists", username));
+            }
+
+            // Insert operator
+            let id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                INSERT INTO operators (username, password_hash, role)
+                VALUES ($1, $2, $3)
+                RETURNING id
+                "#
+            )
+            .bind(&username)
+            .bind(&password_hash)
+            .bind(&role_lower)
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| format!("failed to create operator: {}", e))?;
+
+            match format {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::json!({
+                        "id": id.to_string(),
+                        "username": username,
+                        "role": role_lower
+                    }));
+                }
+                OutputFormat::Table => {
+                    println!("Created operator '{}' (id: {}, role: {})", username, id, role_lower);
+                }
+            }
+        }
+
+        OperatorCommands::List => {
+            #[derive(sqlx::FromRow, Serialize)]
+            struct OperatorRow {
+                id: uuid::Uuid,
+                username: String,
+                role: String,
+                created_at: chrono::DateTime<chrono::Utc>,
+                last_login: Option<chrono::DateTime<chrono::Utc>>,
+            }
+
+            let operators: Vec<OperatorRow> = sqlx::query_as(
+                "SELECT id, username, role, created_at, last_login FROM operators ORDER BY created_at"
+            )
+            .fetch_all(&pool)
+            .await
+            .map_err(|e| format!("database error: {}", e))?;
+
+            match format {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&operators).unwrap());
+                }
+                OutputFormat::Table => {
+                    if operators.is_empty() {
+                        println!("No operators found.");
+                        return Ok(());
+                    }
+
+                    println!(
+                        "{:<36}  {:<20}  {:<8}  {:<20}  {}",
+                        "ID", "USERNAME", "ROLE", "CREATED", "LAST LOGIN"
+                    );
+                    println!("{}", "-".repeat(110));
+
+                    for op in &operators {
+                        let created = op.created_at.format("%Y-%m-%d %H:%M:%S").to_string();
+                        let last_login = op
+                            .last_login
+                            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                            .unwrap_or_else(|| "never".to_string());
+                        println!(
+                            "{:<36}  {:<20}  {:<8}  {:<20}  {}",
+                            op.id, op.username, op.role, created, last_login
+                        );
+                    }
+                }
+            }
         }
     }
 
