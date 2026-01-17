@@ -14,14 +14,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `prefixd_escalations_total` counter metric
   - Database connectivity status in `/v1/health` endpoint
   - Health endpoint now returns `"degraded"` status on DB failure
+  - Warning logs for FlowSpec path parse failures in reconciliation
 
 - **Security**
   - Request body size limit (1MB) via tower-http
+  - Fix SQL injection in `list_mitigations` queries (now uses parameterized queries)
 
-- **Bug Fixes**
-  - IPv6 support in `is_safelisted()` - now handles both IPv4 and IPv6 prefixes
+- **Reliability**
+  - GoBGP gRPC timeout handling (10s connect, 30s request)
+  - GoBGP retry with exponential backoff (3 retries, 100ms-400ms)
+
+- **API Validation**
+  - Reject unknown protocol values (was silently converting to None)
+  - Require `rate_bps` for `police` action type
+  - Improved error messages with valid options listed
+
+### Fixed
+
+- IPv6 support in `is_safelisted()` - now handles both IPv4 and IPv6 prefixes
+- `is_safelisted()` performance - uses PostgreSQL inet operators instead of loading all entries
 
 ### Changed
+
+- **API Response** (breaking for clients parsing `total`)
+  - Renamed `total` to `count` in `MitigationsListResponse`
+  - Clarifies this is page size, not total count
+
+- **Code Quality**
+  - Consolidated duplicate route registrations in `routes.rs`
 
 - **PostgreSQL-only storage** (breaking change)
   - Removed SQLite support entirely (~800 lines removed)
