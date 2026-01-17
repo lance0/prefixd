@@ -34,8 +34,8 @@ pub fn create_router(
         .route("/v1/auth/me", get(handlers::get_me))
         .route("/v1/ws/feed", any(ws::ws_handler));
 
-    // API routes - bearer token auth enforced in handlers via require_bearer_auth()
-    // Browser clients should use session-based /v1/ws/feed for real-time updates
+    // API routes - hybrid auth (session OR bearer) enforced via require_auth()
+    // Browser dashboard uses session cookies, CLI/detectors use bearer tokens
     let api_routes = Router::new()
         .route("/v1/events", get(handlers::list_events).post(handlers::ingest_event))
         .route("/v1/mitigations", get(handlers::list_mitigations).post(handlers::create_mitigation))

@@ -18,7 +18,8 @@ use crate::guardrails::Guardrails;
 use crate::policy::PolicyEngine;
 use crate::AppState;
 
-use super::auth::require_bearer_auth;
+use super::auth::require_auth;
+use crate::auth::AuthSession;
 
 // Response types
 
@@ -369,11 +370,12 @@ pub async fn ingest_event(
 )]
 pub async fn list_events(
     State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
     headers: HeaderMap,
     Query(query): Query<ListEventsQuery>,
 ) -> Result<Json<EventsListResponse>, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_bearer_auth(&state, auth_header)?;
+    require_auth(&state, &auth_session, auth_header)?;
 
     let limit = clamp_limit(query.limit.unwrap_or(100));
     let offset = query.offset.unwrap_or(0);
@@ -403,11 +405,12 @@ pub async fn list_events(
 )]
 pub async fn list_audit(
     State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
     headers: HeaderMap,
     Query(query): Query<ListEventsQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_bearer_auth(&state, auth_header)?;
+    require_auth(&state, &auth_session, auth_header)?;
 
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
@@ -439,12 +442,13 @@ pub async fn list_audit(
 )]
 pub async fn list_mitigations(
     State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
     headers: HeaderMap,
     Query(query): Query<ListMitigationsQuery>,
 ) -> Result<Json<MitigationsListResponse>, StatusCode> {
     // Check auth (bearer token)
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_bearer_auth(&state, auth_header)?;
+    require_auth(&state, &auth_session, auth_header)?;
 
     let status_filter: Option<Vec<MitigationStatus>> = query.status.as_ref().map(|s| {
         s.split(',')
@@ -503,11 +507,12 @@ pub async fn list_mitigations(
 )]
 pub async fn get_mitigation(
     State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<MitigationResponse>, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_bearer_auth(&state, auth_header)?;
+    require_auth(&state, &auth_session, auth_header)?;
 
     let mitigation = state
         .repo
@@ -521,12 +526,13 @@ pub async fn get_mitigation(
 
 pub async fn create_mitigation(
     State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
     headers: HeaderMap,
     Json(req): Json<CreateMitigationRequest>,
 ) -> impl IntoResponse {
     // Check auth first
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    if let Err(status) = require_bearer_auth(&state, auth_header) {
+    if let Err(status) = require_auth(&state, &auth_session, auth_header) {
         return Err(status);
     }
 
@@ -615,13 +621,14 @@ pub async fn create_mitigation(
 
 pub async fn withdraw_mitigation(
     State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(req): Json<WithdrawRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Check auth
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_bearer_auth(&state, auth_header)?;
+    require_auth(&state, &auth_session, auth_header)?;
 
     let mut mitigation = state
         .repo
@@ -661,10 +668,11 @@ pub async fn withdraw_mitigation(
 
 pub async fn list_safelist(
     State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_bearer_auth(&state, auth_header)?;
+    require_auth(&state, &auth_session, auth_header)?;
 
     let entries = state.repo.list_safelist().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(entries))
@@ -672,11 +680,12 @@ pub async fn list_safelist(
 
 pub async fn add_safelist(
     State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
     headers: HeaderMap,
     Json(req): Json<AddSafelistRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_bearer_auth(&state, auth_header)?;
+    require_auth(&state, &auth_session, auth_header)?;
 
     state
         .repo
@@ -690,11 +699,12 @@ pub async fn add_safelist(
 
 pub async fn remove_safelist(
     State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
     headers: HeaderMap,
     Path(prefix): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_bearer_auth(&state, auth_header)?;
+    require_auth(&state, &auth_session, auth_header)?;
 
     let removed = state.repo.remove_safelist(&prefix).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if removed {
@@ -764,10 +774,11 @@ pub struct ReloadResponse {
 
 pub async fn reload_config(
     State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_bearer_auth(&state, auth_header)?;
+    require_auth(&state, &auth_session, auth_header)?;
 
     match state.reload_config().await {
         Ok(reloaded) => {
@@ -801,10 +812,11 @@ pub async fn reload_config(
 )]
 pub async fn get_stats(
     State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_bearer_auth(&state, auth_header)?;
+    require_auth(&state, &auth_session, auth_header)?;
 
     let stats = state.repo.get_stats().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(stats))
@@ -821,10 +833,11 @@ pub async fn get_stats(
 )]
 pub async fn list_pops(
     State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_bearer_auth(&state, auth_header)?;
+    require_auth(&state, &auth_session, auth_header)?;
 
     let pops = state.repo.list_pops().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(pops))

@@ -9,11 +9,14 @@ use std::sync::Arc;
 use crate::config::AuthMode;
 use crate::AppState;
 
-/// Check if request is authenticated via bearer token
+use crate::auth::AuthSession;
+
+/// Check if request is authenticated via session cookie or bearer token (hybrid auth)
 /// Returns Ok(()) if authenticated, Err(StatusCode) if not
 /// When auth mode is None, always returns Ok
-pub fn require_bearer_auth(
+pub fn require_auth(
     state: &AppState,
+    auth_session: &AuthSession,
     auth_header: Option<&str>,
 ) -> Result<(), StatusCode> {
     // If auth is disabled, allow all
@@ -21,7 +24,12 @@ pub fn require_bearer_auth(
         return Ok(());
     }
 
-    // Check bearer token
+    // Check session cookie first (browser/dashboard)
+    if auth_session.user.is_some() {
+        return Ok(());
+    }
+
+    // Fall back to bearer token (CLI/detectors)
     if let Some(header_str) = auth_header {
         if header_str.starts_with("Bearer ") {
             let provided_token = &header_str[7..];
