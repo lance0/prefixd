@@ -339,12 +339,31 @@ async fn test_migration_applies_cleanly() {
 #[tokio::test]
 async fn test_ttl_expiry() {
     use chrono::{Duration, Utc};
+    use prefixd::bgp::{FlowSpecAnnouncer, MockAnnouncer};
     use prefixd::domain::{
-        ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationStatus,
+        ActionParams, ActionType, AttackVector, FlowSpecAction, FlowSpecNlri, FlowSpecRule,
+        MatchCriteria, Mitigation, MitigationStatus,
     };
+    use prefixd::scheduler::ReconciliationLoop;
+    use std::sync::Arc;
     use uuid::Uuid;
 
     let ctx = TestContext::new().await;
+
+    // Create a shared MockAnnouncer so we can check withdrawals
+    let announcer = Arc::new(MockAnnouncer::new());
+
+    // Pre-announce a rule so we can verify it gets withdrawn
+    let rule = FlowSpecRule::new(
+        FlowSpecNlri {
+            dst_prefix: "203.0.113.99/32".to_string(),
+            protocol: Some(17),
+            dst_ports: vec![53],
+        },
+        FlowSpecAction::police(10_000_000),
+    );
+    announcer.announce(&rule).await.expect("Failed to announce");
+    assert_eq!(announcer.announced_count().await, 1, "Should have 1 announced rule");
 
     // Create a mitigation with expires_at in the past (already expired)
     let now = Utc::now();
@@ -385,23 +404,16 @@ async fn test_ttl_expiry() {
         .await
         .expect("Failed to insert mitigation");
 
-    // Verify it shows up in find_expired_mitigations
-    let expired = ctx
-        .repo
-        .find_expired_mitigations()
-        .await
-        .expect("Failed to find expired mitigations");
+    // Create reconciliation loop and run it (dry_run=false to test withdrawals)
+    let reconciler = ReconciliationLoop::new(
+        ctx.repo.clone(),
+        announcer.clone(),
+        30, // interval doesn't matter, we call reconcile() directly
+        false, // NOT dry-run, so withdrawals happen
+    );
 
-    assert_eq!(expired.len(), 1, "Should find 1 expired mitigation");
-    assert_eq!(expired[0].mitigation_id, mitigation.mitigation_id);
-
-    // Simulate what reconciliation does: expire the mitigation
-    let mut to_expire = expired[0].clone();
-    to_expire.expire();
-    ctx.repo
-        .update_mitigation(&to_expire)
-        .await
-        .expect("Failed to update mitigation");
+    // Run reconciliation
+    reconciler.reconcile().await.expect("Reconciliation failed");
 
     // Verify status changed
     let updated = ctx
@@ -413,6 +425,13 @@ async fn test_ttl_expiry() {
 
     assert_eq!(updated.status, MitigationStatus::Expired);
     assert!(updated.withdrawn_at.is_some());
+
+    // Verify BGP withdrawal happened
+    assert_eq!(
+        announcer.announced_count().await,
+        0,
+        "Rule should be withdrawn from announcer"
+    );
 
     // Verify it no longer shows in find_expired (since it's now Expired, not Active)
     let expired_after = ctx

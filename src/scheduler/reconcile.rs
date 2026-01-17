@@ -58,7 +58,8 @@ impl ReconciliationLoop {
         }
     }
 
-    async fn reconcile(&self) -> anyhow::Result<()> {
+    /// Run one reconciliation cycle (for testing)
+    pub async fn reconcile(&self) -> anyhow::Result<()> {
         // 1. Expire mitigations past TTL
         self.expire_mitigations().await?;
 
