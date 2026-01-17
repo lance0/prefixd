@@ -3,6 +3,7 @@ use prost::Message;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
@@ -20,6 +21,12 @@ use crate::error::{PrefixdError, Result};
 const AFI_IP: i32 = 1;
 const AFI_IP6: i32 = 2;
 const SAFI_FLOWSPEC: i32 = 133;
+
+// Timeout and retry configuration
+const GRPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const GRPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_RETRIES: u32 = 3;
+const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 
 /// GoBGP gRPC client for FlowSpec announcements
 pub struct GoBgpAnnouncer {
@@ -49,6 +56,8 @@ impl GoBgpAnnouncer {
                 peer: "gobgp".to_string(),
                 error: e.to_string(),
             })?
+            .connect_timeout(GRPC_CONNECT_TIMEOUT)
+            .timeout(GRPC_REQUEST_TIMEOUT)
             .connect()
             .await
             .map_err(|e| PrefixdError::BgpSessionError {
@@ -61,6 +70,40 @@ impl GoBgpAnnouncer {
 
         tracing::info!("connected to GoBGP");
         Ok(())
+    }
+
+    /// Execute a gRPC call with retry logic and exponential backoff
+    async fn with_retry<F, Fut, T>(&self, operation: &str, mut f: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let mut last_error = None;
+        let mut backoff = INITIAL_BACKOFF;
+
+        for attempt in 1..=MAX_RETRIES {
+            match f().await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < MAX_RETRIES {
+                        tracing::warn!(
+                            operation = %operation,
+                            attempt = attempt,
+                            max_retries = MAX_RETRIES,
+                            backoff_ms = backoff.as_millis(),
+                            "gRPC call failed, retrying"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff *= 2; // Exponential backoff
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            PrefixdError::Internal(format!("{} failed after {} retries", operation, MAX_RETRIES))
+        }))
     }
 
     async fn get_client(&self) -> Result<GobgpApiClient<Channel>> {
@@ -333,27 +376,34 @@ impl GoBgpAnnouncer {
 #[async_trait]
 impl FlowSpecAnnouncer for GoBgpAnnouncer {
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
-        let mut client = self.get_client().await?;
         let path = self.build_flowspec_path(rule)?;
+        let nlri_hash = rule.nlri_hash();
+        let dst_prefix = rule.nlri.dst_prefix.clone();
 
         tracing::info!(
-            nlri_hash = %rule.nlri_hash(),
-            dst_prefix = %rule.nlri.dst_prefix,
+            nlri_hash = %nlri_hash,
+            dst_prefix = %dst_prefix,
             "announcing flowspec rule via GoBGP"
         );
 
-        let request = AddPathRequest {
-            table_type: TableType::Global as i32,
-            path: Some(path),
-            vrf_id: String::new(),
-        };
+        self.with_retry("AddPath", || async {
+            let mut client = self.get_client().await?;
+            let request = AddPathRequest {
+                table_type: TableType::Global as i32,
+                path: Some(path.clone()),
+                vrf_id: String::new(),
+            };
 
-        client.add_path(request).await.map_err(|e| {
-            PrefixdError::BgpAnnouncementFailed(format!("GoBGP AddPath failed: {}", e))
-        })?;
+            client.add_path(request).await.map_err(|e| {
+                PrefixdError::BgpAnnouncementFailed(format!("GoBGP AddPath failed: {}", e))
+            })?;
+
+            Ok(())
+        })
+        .await?;
 
         tracing::info!(
-            nlri_hash = %rule.nlri_hash(),
+            nlri_hash = %nlri_hash,
             "flowspec rule announced"
         );
 
@@ -361,35 +411,42 @@ impl FlowSpecAnnouncer for GoBgpAnnouncer {
     }
 
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
-        let mut client = self.get_client().await?;
         let path = self.build_flowspec_path(rule)?;
         let is_v6 = rule.nlri.ip_version() == IpVersion::V6;
         let afi = if is_v6 { AFI_IP6 } else { AFI_IP };
+        let nlri_hash = rule.nlri_hash();
+        let dst_prefix = rule.nlri.dst_prefix.clone();
 
         tracing::info!(
-            nlri_hash = %rule.nlri_hash(),
-            dst_prefix = %rule.nlri.dst_prefix,
+            nlri_hash = %nlri_hash,
+            dst_prefix = %dst_prefix,
             ipv6 = is_v6,
             "withdrawing flowspec rule via GoBGP"
         );
 
-        let request = DeletePathRequest {
-            table_type: TableType::Global as i32,
-            path: Some(path),
-            vrf_id: String::new(),
-            family: Some(Family {
-                afi,
-                safi: SAFI_FLOWSPEC,
-            }),
-            uuid: Vec::new(),
-        };
+        self.with_retry("DeletePath", || async {
+            let mut client = self.get_client().await?;
+            let request = DeletePathRequest {
+                table_type: TableType::Global as i32,
+                path: Some(path.clone()),
+                vrf_id: String::new(),
+                family: Some(Family {
+                    afi,
+                    safi: SAFI_FLOWSPEC,
+                }),
+                uuid: Vec::new(),
+            };
 
-        client.delete_path(request).await.map_err(|e| {
-            PrefixdError::BgpWithdrawalFailed(format!("GoBGP DeletePath failed: {}", e))
-        })?;
+            client.delete_path(request).await.map_err(|e| {
+                PrefixdError::BgpWithdrawalFailed(format!("GoBGP DeletePath failed: {}", e))
+            })?;
+
+            Ok(())
+        })
+        .await?;
 
         tracing::info!(
-            nlri_hash = %rule.nlri_hash(),
+            nlri_hash = %nlri_hash,
             "flowspec rule withdrawn"
         );
 

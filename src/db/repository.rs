@@ -390,39 +390,20 @@ impl RepositoryTrait for Repository {
     }
 
     async fn is_safelisted(&self, ip: &str) -> Result<bool> {
-        use ipnet::{Ipv4Net, Ipv6Net};
-        use std::net::IpAddr;
-        use std::str::FromStr;
+        // Use PostgreSQL inet operators for efficient CIDR matching
+        // This avoids loading all entries and leverages database indexes
+        let row: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*) FROM safelist
+            WHERE $1::inet <<= prefix::inet
+               OR prefix = $1
+            "#,
+        )
+        .bind(ip)
+        .fetch_one(&self.pool)
+        .await?;
 
-        let entries = self.list_safelist().await?;
-        let ip_addr: IpAddr = match IpAddr::from_str(ip) {
-            Ok(addr) => addr,
-            Err(_) => return Ok(false),
-        };
-
-        for entry in entries {
-            match ip_addr {
-                IpAddr::V4(v4) => {
-                    if let Ok(prefix) = Ipv4Net::from_str(&entry.prefix) {
-                        if prefix.contains(&v4) {
-                            return Ok(true);
-                        }
-                    }
-                }
-                IpAddr::V6(v6) => {
-                    if let Ok(prefix) = Ipv6Net::from_str(&entry.prefix) {
-                        if prefix.contains(&v6) {
-                            return Ok(true);
-                        }
-                    }
-                }
-            }
-            if entry.prefix == ip {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
+        Ok(row.0 > 0)
     }
 
     async fn list_pops(&self) -> Result<Vec<PopInfo>> {
