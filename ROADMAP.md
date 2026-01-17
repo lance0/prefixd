@@ -290,9 +290,13 @@
   - [ ] PostgreSQL performance tuning
 - [ ] Architecture Decision Records (ADRs)
 
-## v1.5 - Multi-Signal Correlation
+## v1.5 - Multi-Signal Correlation (Killer Feature)
 
 **Goal:** Combine weak signals from multiple sources into high-confidence mitigation decisions.
+
+**This is what differentiates prefixd from "just let FastNetMon announce directly."**
+
+Example: FastNetMon says UDP flood at 0.6 confidence + router CPU spiking + host conntrack exhaustion = **high-confidence mitigation**. No single detector should have that power, but correlated signals can.
 
 ### Signal Source Adapters
 - [ ] FastNetMon adapter (current HTTP webhook, enhanced)

@@ -9,7 +9,10 @@ A **BGP FlowSpec** routing policy daemon for automated L3/L4 DDoS mitigation. Re
 
 ## Why prefixd?
 
-- **Detector-agnostic** - Works with FastNetMon, custom telemetry, NOC tooling, or any system that can POST JSON
+**The killer feature (v1.5):** Multi-signal correlation. FastNetMon says UDP flood at 0.6 confidence + router CPU spiking + host conntrack exhaustion = **high-confidence mitigation**. No single detector should have that power, but correlated signals can. This is what differentiates prefixd from "just let FastNetMon announce directly."
+
+- **Signal-driven** - Detectors signal intent, prefixd decides policy. Multiple weak signals combine into high-confidence actions
+- **Detector-agnostic** - Works with FastNetMon, Prometheus alerts, router telemetry, or any system that can POST JSON
 - **Policy-driven** - YAML playbooks define responses per attack vector (rate-limit first, then drop)
 - **Guardrail-heavy** - Quotas, safelists, /32-only rules, mandatory TTLs prevent accidental broad impact
 - **Fail-open** - If prefixd dies, mitigations auto-expire via TTL (no permanent rules)
