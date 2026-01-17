@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
 use testcontainers_modules::postgres::Postgres;
@@ -68,6 +69,72 @@ impl TestContext {
     pub fn router(&self) -> axum::Router {
         prefixd::api::create_router(self.state.clone())
     }
+
+    /// Create a test context with a custom config directory for hot-reload testing
+    pub async fn with_config_dir(config_dir: &Path) -> Self {
+        let container = Postgres::default()
+            .with_tag("16-alpine")
+            .start()
+            .await
+            .expect("Failed to start Postgres container");
+
+        let host = container.get_host().await.expect("Failed to get host");
+        let port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("Failed to get port");
+
+        let connection_string = format!(
+            "postgres://postgres:postgres@{}:{}/postgres",
+            host, port
+        );
+
+        let pool = init_postgres_pool(&connection_string)
+            .await
+            .expect("Failed to init pool");
+
+        let repo: Arc<dyn RepositoryTrait> = Arc::new(Repository::new(pool));
+        let announcer = Arc::new(MockAnnouncer::new());
+
+        let mut settings = test_settings();
+        settings.storage.connection_string = connection_string;
+
+        // Load inventory/playbooks from config_dir if they exist
+        let inventory = config_dir
+            .join("inventory.yaml")
+            .exists()
+            .then(|| Inventory::load(config_dir.join("inventory.yaml")).ok())
+            .flatten()
+            .unwrap_or_else(test_inventory);
+
+        let playbooks = config_dir
+            .join("playbooks.yaml")
+            .exists()
+            .then(|| Playbooks::load(config_dir.join("playbooks.yaml")).ok())
+            .flatten()
+            .unwrap_or_else(test_playbooks);
+
+        let state = AppState::new(
+            settings,
+            inventory,
+            playbooks,
+            repo.clone(),
+            announcer,
+            config_dir.to_path_buf(),
+        )
+        .expect("failed to create app state");
+
+        Self {
+            state,
+            repo,
+            _container: container,
+        }
+    }
+}
+
+/// Write a YAML string to a file in the given directory
+pub fn write_yaml(dir: &Path, filename: &str, content: &str) {
+    std::fs::write(dir.join(filename), content).expect("Failed to write YAML file");
 }
 
 pub fn test_settings() -> Settings {

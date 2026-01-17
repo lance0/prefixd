@@ -335,3 +335,214 @@ async fn test_migration_applies_cleanly() {
     // Additional verification: ensure all expected tables exist
     // (implicit - we can query mitigations, safelist, etc.)
 }
+
+#[tokio::test]
+async fn test_ttl_expiry() {
+    use chrono::{Duration, Utc};
+    use prefixd::domain::{
+        ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationStatus,
+    };
+    use uuid::Uuid;
+
+    let ctx = TestContext::new().await;
+
+    // Create a mitigation with expires_at in the past (already expired)
+    let now = Utc::now();
+    let expired_at = now - Duration::seconds(60); // 1 minute ago
+
+    let mitigation = Mitigation {
+        mitigation_id: Uuid::new_v4(),
+        scope_hash: "test_expiry_hash".to_string(),
+        pop: "test-pop".to_string(),
+        customer_id: Some("cust_test".to_string()),
+        service_id: None,
+        victim_ip: "203.0.113.99".to_string(),
+        vector: AttackVector::UdpFlood,
+        match_criteria: MatchCriteria {
+            dst_prefix: "203.0.113.99/32".to_string(),
+            protocol: Some(17),
+            dst_ports: vec![53],
+        },
+        action_type: ActionType::Police,
+        action_params: ActionParams {
+            rate_bps: Some(10_000_000),
+        },
+        status: MitigationStatus::Active, // Active but expired
+        created_at: now - Duration::seconds(120),
+        updated_at: now - Duration::seconds(60),
+        expires_at: expired_at, // Already expired
+        withdrawn_at: None,
+        triggering_event_id: Uuid::new_v4(),
+        last_event_id: Uuid::new_v4(),
+        escalated_from_id: None,
+        reason: "TTL expiry test".to_string(),
+        rejection_reason: None,
+    };
+
+    // Insert the expired mitigation
+    ctx.repo
+        .insert_mitigation(&mitigation)
+        .await
+        .expect("Failed to insert mitigation");
+
+    // Verify it shows up in find_expired_mitigations
+    let expired = ctx
+        .repo
+        .find_expired_mitigations()
+        .await
+        .expect("Failed to find expired mitigations");
+
+    assert_eq!(expired.len(), 1, "Should find 1 expired mitigation");
+    assert_eq!(expired[0].mitigation_id, mitigation.mitigation_id);
+
+    // Simulate what reconciliation does: expire the mitigation
+    let mut to_expire = expired[0].clone();
+    to_expire.expire();
+    ctx.repo
+        .update_mitigation(&to_expire)
+        .await
+        .expect("Failed to update mitigation");
+
+    // Verify status changed
+    let updated = ctx
+        .repo
+        .get_mitigation(mitigation.mitigation_id)
+        .await
+        .expect("Failed to get mitigation")
+        .expect("Mitigation should exist");
+
+    assert_eq!(updated.status, MitigationStatus::Expired);
+    assert!(updated.withdrawn_at.is_some());
+
+    // Verify it no longer shows in find_expired (since it's now Expired, not Active)
+    let expired_after = ctx
+        .repo
+        .find_expired_mitigations()
+        .await
+        .expect("Failed to find expired mitigations");
+
+    assert_eq!(expired_after.len(), 0, "Should find 0 expired mitigations after expiry");
+}
+
+#[tokio::test]
+async fn test_config_hot_reload() {
+    use common::write_yaml;
+
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+
+    // Write initial inventory with 1 customer
+    let initial_inventory = r#"
+customers:
+  - customer_id: cust_initial
+    name: Initial Customer
+    prefixes:
+      - 10.0.0.0/24
+    policy_profile: normal
+    services: []
+"#;
+    write_yaml(temp_dir.path(), "inventory.yaml", initial_inventory);
+
+    // Write initial playbooks with 1 playbook
+    let initial_playbooks = r#"
+playbooks:
+  - name: udp_flood
+    match:
+      vector: udp_flood
+      require_top_ports: false
+    steps:
+      - action: police
+        rate_bps: 10000000
+        ttl_seconds: 60
+"#;
+    write_yaml(temp_dir.path(), "playbooks.yaml", initial_playbooks);
+
+    // Create context with our config dir
+    let ctx = TestContext::with_config_dir(temp_dir.path()).await;
+
+    // Verify initial state
+    {
+        let inv = ctx.state.inventory.read().await;
+        assert_eq!(inv.customers.len(), 1);
+        assert_eq!(inv.customers[0].customer_id, "cust_initial");
+    }
+    {
+        let pb = ctx.state.playbooks.read().await;
+        assert_eq!(pb.playbooks.len(), 1);
+        assert_eq!(pb.playbooks[0].name, "udp_flood");
+    }
+
+    // Update inventory with 2 customers
+    let updated_inventory = r#"
+customers:
+  - customer_id: cust_initial
+    name: Initial Customer
+    prefixes:
+      - 10.0.0.0/24
+    policy_profile: normal
+    services: []
+  - customer_id: cust_added
+    name: Added Customer
+    prefixes:
+      - 10.1.0.0/24
+    policy_profile: strict
+    services: []
+"#;
+    write_yaml(temp_dir.path(), "inventory.yaml", updated_inventory);
+
+    // Update playbooks with 2 playbooks
+    let updated_playbooks = r#"
+playbooks:
+  - name: udp_flood
+    match:
+      vector: udp_flood
+      require_top_ports: false
+    steps:
+      - action: police
+        rate_bps: 10000000
+        ttl_seconds: 60
+  - name: syn_flood
+    match:
+      vector: syn_flood
+      require_top_ports: false
+    steps:
+      - action: discard
+        ttl_seconds: 120
+"#;
+    write_yaml(temp_dir.path(), "playbooks.yaml", updated_playbooks);
+
+    // Call reload endpoint
+    let app = ctx.router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/config/reload")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Parse response to verify what was reloaded
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let reload_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let reloaded = reload_resp["reloaded"].as_array().unwrap();
+    assert!(reloaded.iter().any(|v| v == "inventory"));
+    assert!(reloaded.iter().any(|v| v == "playbooks"));
+
+    // Verify new config is loaded
+    {
+        let inv = ctx.state.inventory.read().await;
+        assert_eq!(inv.customers.len(), 2, "Should have 2 customers after reload");
+        assert!(inv.customers.iter().any(|c| c.customer_id == "cust_added"));
+    }
+    {
+        let pb = ctx.state.playbooks.read().await;
+        assert_eq!(pb.playbooks.len(), 2, "Should have 2 playbooks after reload");
+        assert!(pb.playbooks.iter().any(|p| p.name == "syn_flood"));
+    }
+}

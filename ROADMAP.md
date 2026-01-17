@@ -164,8 +164,8 @@
 - [x] Full event ingestion flow (event → policy → mitigation → BGP)
 - [x] Mitigation withdrawal via API
 - [x] Duplicate event extends TTL
-- [ ] TTL expiry via reconciliation loop
-- [ ] Configuration hot-reload
+- [x] TTL expiry via reconciliation loop
+- [x] Configuration hot-reload
 - [x] Pagination and filtering queries
 - [x] Safelist blocks mitigation
 - [x] Migration verification (clean Postgres → migrations)

@@ -40,13 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Security audit job (cargo-audit)
 
 - **Testing**
-  - Integration tests with testcontainers (6 tests)
+  - Integration tests with testcontainers (8 tests)
     - Full event → mitigation flow
     - Mitigation withdrawal via API
     - Duplicate event TTL extension
     - Pagination queries
     - Safelist blocking
     - Migration verification
+    - TTL expiry via reconciliation
+    - Configuration hot-reload (inventory + playbooks)
 
 - **DevOps**
   - Dependabot configuration for Cargo, GitHub Actions, and npm
