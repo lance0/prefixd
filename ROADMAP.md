@@ -168,20 +168,21 @@
 - [ ] Pagination and filtering queries
 - [ ] Migration verification (clean Postgres → migrations)
 
-### Bug Fixes
-- [ ] Fix `is_safelisted()` performance
-  - [ ] Replace load-all with indexed query
-  - [ ] Add prefix tree for efficient CIDR matching
-- [ ] Add IPv6 support in `is_safelisted()`
-- [ ] Add timeout handling for GoBGP gRPC calls
-- [ ] Add retry logic for transient BGP failures
-  - [ ] Exponential backoff
-  - [ ] Circuit breaker pattern
+### Bug Fixes (Done)
+- [x] Fix `is_safelisted()` performance
+  - [x] Replace load-all with PostgreSQL inet operators (`<<=`)
+- [x] Add IPv6 support in `is_safelisted()`
+- [x] Add timeout handling for GoBGP gRPC calls (10s connect, 30s request)
+- [x] Add retry logic for transient BGP failures
+  - [x] Exponential backoff (3 retries, 100ms-400ms)
+- [x] Fix SQL injection in list_mitigations queries
+  - [x] Use parameterized queries for status/customer filters
 
 ### Security Hardening
+- [x] Request body size limit (1MB via tower-http)
+- [ ] Request header count limits
 - [ ] API key rotation support (multiple valid tokens)
 - [ ] Audit log for authentication failures
-- [ ] Request size limits (body size, header count)
 
 ## v1.2 - Observability & DevOps
 
@@ -194,16 +195,16 @@
 - [ ] Database metrics
   - [ ] `prefixd_db_query_duration_seconds` histogram
   - [ ] `prefixd_db_connections_active` gauge
-- [ ] Operational metrics
-  - [ ] `prefixd_config_reload_total` counter
-  - [ ] `prefixd_escalations_total` counter
+- [x] Operational metrics
+  - [x] `prefixd_config_reload_total` counter
+  - [x] `prefixd_escalations_total` counter
 - [ ] Tracing
   - [ ] Request correlation with trace IDs
   - [ ] Span instrumentation for key operations
-- [ ] Health checks
-  - [ ] Database connectivity check
+- [x] Health checks
+  - [x] Database connectivity check in `/v1/health`
   - [ ] GoBGP connectivity check
-  - [ ] Detailed `/v1/health` response
+  - [x] Detailed `/v1/health` response (status: healthy/degraded)
 
 ### DevOps
 - [ ] GitHub Actions CI
@@ -240,6 +241,16 @@
 - [ ] Bulk operations
   - [ ] `POST /v1/mitigations/bulk-withdraw`
   - [ ] `POST /v1/safelist/bulk-add`
+- [ ] API validation improvements
+  - [ ] Tighten `create_mitigation` validation (protocol/action/rate)
+  - [ ] Clarify `total` semantics (page size vs total count)
+  - [ ] Add max TTL enforcement in guardrails (config-driven)
+
+### BGP Improvements
+- [ ] Implement `parse_flowspec_path()` for reconciliation
+  - [ ] Decode FlowSpec NLRI from GoBGP RIB
+  - [ ] Enable desired vs actual state comparison
+  - [ ] Document limitation if not implemented
 
 ### Documentation
 - [ ] Inline code documentation

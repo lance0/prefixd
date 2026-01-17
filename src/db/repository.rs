@@ -280,30 +280,29 @@ impl RepositoryTrait for Repository {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Mitigation>> {
-        let mut query = String::from(
+        // Convert status filter to string array for parameterized query
+        let status_strings: Option<Vec<String>> = status_filter
+            .map(|statuses| statuses.iter().map(|s| s.as_str().to_string()).collect());
+
+        let rows = sqlx::query_as::<_, MitigationRow>(
             r#"
             SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
                    triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason
-            FROM mitigations WHERE 1=1
+            FROM mitigations
+            WHERE ($1::text[] IS NULL OR status = ANY($1))
+              AND ($2::text IS NULL OR customer_id = $2)
+            ORDER BY created_at DESC
+            LIMIT $3 OFFSET $4
             "#,
-        );
-
-        if let Some(statuses) = status_filter {
-            let placeholders: Vec<_> = statuses.iter().map(|s| format!("'{}'", s.as_str())).collect();
-            query.push_str(&format!(" AND status IN ({})", placeholders.join(",")));
-        }
-
-        if let Some(cid) = customer_id {
-            query.push_str(&format!(" AND customer_id = '{}'", cid));
-        }
-
-        query.push_str(&format!(" ORDER BY created_at DESC LIMIT {} OFFSET {}", limit, offset));
-
-        let rows = sqlx::query_as::<_, MitigationRow>(&query)
-            .fetch_all(&self.pool)
-            .await?;
+        )
+        .bind(status_strings.as_deref())
+        .bind(customer_id)
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(rows.into_iter().map(Mitigation::from_row).collect())
     }
@@ -482,30 +481,29 @@ impl RepositoryTrait for Repository {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Mitigation>> {
-        let mut query = String::from(
+        // Convert status filter to string array for parameterized query
+        let status_strings: Option<Vec<String>> = status_filter
+            .map(|statuses| statuses.iter().map(|s| s.as_str().to_string()).collect());
+
+        let rows = sqlx::query_as::<_, MitigationRow>(
             r#"
             SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
                    triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason
-            FROM mitigations WHERE 1=1
+            FROM mitigations
+            WHERE ($1::text[] IS NULL OR status = ANY($1))
+              AND ($2::text IS NULL OR customer_id = $2)
+            ORDER BY created_at DESC
+            LIMIT $3 OFFSET $4
             "#,
-        );
-
-        if let Some(statuses) = status_filter {
-            let placeholders: Vec<_> = statuses.iter().map(|s| format!("'{}'", s.as_str())).collect();
-            query.push_str(&format!(" AND status IN ({})", placeholders.join(",")));
-        }
-
-        if let Some(cid) = customer_id {
-            query.push_str(&format!(" AND customer_id = '{}'", cid));
-        }
-
-        query.push_str(&format!(" ORDER BY created_at DESC LIMIT {} OFFSET {}", limit, offset));
-
-        let rows = sqlx::query_as::<_, MitigationRow>(&query)
-            .fetch_all(&self.pool)
-            .await?;
+        )
+        .bind(status_strings.as_deref())
+        .bind(customer_id)
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(rows.into_iter().map(Mitigation::from_row).collect())
     }
