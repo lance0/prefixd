@@ -455,15 +455,21 @@ prefixd implements a **signal-driven** architecture where detection is decoupled
 - [ ] Record demo video: attack → detection → mitigation → recovery
 
 ### Tier 2: Remove Weaknesses
-- [ ] Native BGP speaker option (remove GoBGP dependency)
-  - [ ] Evaluate zettabgp or bgp-rs crate
-  - [ ] Feature flag to choose GoBGP vs native
+- [ ] GoBGP hardening (priority)
+  - [x] Connection timeout (10s) and request timeout (30s)
+  - [x] Retry with exponential backoff (3 retries)
+  - [ ] Automatic reconnection on disconnect
+  - [ ] Health check endpoint (`/v1/health` includes GoBGP status)
+  - [ ] Circuit breaker pattern for sustained failures
+  - [ ] Metrics: `prefixd_gobgp_reconnects_total`, `prefixd_gobgp_latency_seconds`
 - [ ] WebSocket for real-time dashboard updates (replace 5s polling)
-- [ ] GoBGP health monitoring with automatic alerting
 - [ ] Chaos testing suite
-  - [ ] Kill GoBGP mid-mitigation
-  - [ ] Kill Postgres during event ingestion
-  - [ ] Flood events beyond rate limits
+  - [ ] Kill GoBGP mid-mitigation → verify reconnect + re-announce
+  - [ ] Kill Postgres during event ingestion → verify graceful degradation
+  - [ ] Flood events beyond rate limits → verify backpressure
+- [ ] Native BGP speaker (future/optional)
+  - [ ] Evaluate zettabgp or bgp-rs if GoBGP proves inadequate
+  - [ ] Feature flag to choose GoBGP vs native
 
 ### Tier 3: Differentiation
 - [ ] Multi-signal correlation (see v1.5 roadmap) - killer feature
