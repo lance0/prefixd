@@ -536,13 +536,18 @@ mod tests {
 
     #[test]
     fn test_ipv6_detection() {
-        // These should be detected as IPv6
-        assert!("2001:db8::1/128".contains(':'));
-        assert!("::1".contains(':'));
-        assert!("fe80::1%eth0".contains(':'));
+        // Test IpAddr parsing for IPv6 detection (used in validate_prefix_length)
+        // These should parse as IPv6
+        assert!("2001:db8::1".parse::<IpAddr>().unwrap().is_ipv6());
+        assert!("::1".parse::<IpAddr>().unwrap().is_ipv6());
 
-        // These should not be detected as IPv6
-        assert!(!"192.168.1.1/32".contains(':'));
-        assert!(!"10.0.0.1".contains(':'));
+        // These should parse as IPv4
+        assert!("192.168.1.1".parse::<IpAddr>().unwrap().is_ipv4());
+        assert!("10.0.0.1".parse::<IpAddr>().unwrap().is_ipv4());
+
+        // IPv4-mapped IPv6 parses as IPv6 but represents IPv4
+        // Our code handles this by checking .is_ipv6() on the parsed address
+        let mapped = "::ffff:192.168.1.1".parse::<IpAddr>().unwrap();
+        assert!(mapped.is_ipv6()); // It's technically IPv6
     }
 }

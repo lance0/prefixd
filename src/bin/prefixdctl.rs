@@ -113,25 +113,20 @@ enum SafelistCommands {
 }
 
 // API Response types
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct HealthResponse {
     status: String,
     bgp_sessions: std::collections::HashMap<String, String>,
     active_mitigations: u32,
+    database: String,
+    gobgp: ComponentHealth,
 }
 
-impl Serialize for HealthResponse {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("HealthResponse", 3)?;
-        s.serialize_field("status", &self.status)?;
-        s.serialize_field("bgp_sessions", &self.bgp_sessions)?;
-        s.serialize_field("active_mitigations", &self.active_mitigations)?;
-        s.end()
-    }
+#[derive(Debug, Deserialize, Serialize)]
+struct ComponentHealth {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -151,7 +146,7 @@ struct MitigationResponse {
 #[derive(Debug, Deserialize)]
 struct MitigationsListResponse {
     mitigations: Vec<MitigationResponse>,
-    total: usize,
+    count: usize,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -303,6 +298,16 @@ async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String>
             println!("Status: {}", health.status);
             println!("Active Mitigations: {}", health.active_mitigations);
             println!();
+            println!("Components:");
+            let db_indicator = if health.database == "connected" { "●" } else { "○" };
+            println!("  {} Database: {}", db_indicator, health.database);
+            let gobgp_indicator = if health.gobgp.status == "connected" { "●" } else { "○" };
+            if let Some(ref err) = health.gobgp.error {
+                println!("  {} GoBGP: {} ({})", gobgp_indicator, health.gobgp.status, err);
+            } else {
+                println!("  {} GoBGP: {}", gobgp_indicator, health.gobgp.status);
+            }
+            println!();
             println!("BGP Sessions:");
             if health.bgp_sessions.is_empty() {
                 println!("  (none configured)");
@@ -360,7 +365,7 @@ async fn cmd_mitigations(
                     }
 
                     println!();
-                    println!("Total: {}", resp.total);
+                    println!("Count: {}", resp.count);
                 }
             }
         }
