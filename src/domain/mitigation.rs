@@ -106,6 +106,7 @@ impl MatchCriteria {
         }
         let mut sorted_ports = self.dst_ports.clone();
         sorted_ports.sort();
+        sorted_ports.dedup(); // Remove duplicates for consistent hashing
         for port in &sorted_ports {
             hasher.update(port.to_be_bytes());
         }

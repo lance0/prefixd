@@ -220,7 +220,7 @@
   - [ ] HorizontalPodAutoscaler
 - [ ] Helm chart
 - [ ] Pre-commit hooks configuration
-- [ ] Dependabot configuration
+- [x] Dependabot configuration
 
 ## v1.3 - Frontend Maturity & API Polish
 
@@ -247,10 +247,10 @@
   - [x] Tighten `create_mitigation` validation (protocol/action/rate)
   - [x] Clarify `total` semantics (page size vs total count) - renamed to `count`
   - [ ] Add max TTL enforcement in guardrails (config-driven)
-- [ ] Pagination hardening
-  - [ ] Add hard upper bound on `limit` param (e.g., 1000)
-  - [ ] Wrap `list_events` in response struct with `count` (consistency with mitigations)
-  - [ ] Document max limits in OpenAPI
+- [x] Pagination hardening
+  - [x] Add hard upper bound on `limit` param (1000)
+  - [x] Wrap `list_events` in `EventsListResponse` with `count`
+  - [x] Clamp limits in all list endpoints
 - [ ] Status code consistency
   - [ ] Decide sync vs async semantics for `create_mitigation` (201 vs 202)
 
@@ -264,9 +264,9 @@
 - [ ] `Mitigation::from_row` - fail instead of defaulting on parse errors
   - [ ] Return Result instead of silently defaulting to Police/Pending
   - [ ] Log/alert on data corruption
-- [ ] `MatchCriteria::compute_scope_hash` - dedup ports before sorting
-- [ ] `validate_prefix_length` - use `IpAddr` parsing instead of contains(':') heuristic
-  - [ ] Handle IPv4-mapped IPv6 correctly
+- [x] `MatchCriteria::compute_scope_hash` - dedup ports before sorting
+- [x] `validate_prefix_length` - use `IpAddr` parsing instead of contains(':') heuristic
+  - [x] Handle IPv4-mapped IPv6 correctly
 
 ### Policy & Guardrails Consistency
 - [ ] `compute_port_intersection` - apply port guardrail to non-UDP/TCP or document exception
@@ -275,8 +275,8 @@
   - [ ] Add dedicated `list_all_active_mitigations()` method or pagination
 
 ### Auth & Performance
-- [ ] Cache bearer token at startup instead of `getenv` per request
-- [ ] Emit startup error on auth misconfiguration instead of per-request log
+- [x] Cache bearer token at startup instead of `getenv` per request
+- [x] Emit startup error on auth misconfiguration instead of per-request log
 - [ ] Document rate limiter scope (global vs per-client) and keying strategy
 
 ### Observability Improvements

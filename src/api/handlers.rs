@@ -73,11 +73,22 @@ impl From<&Mitigation> for MitigationResponse {
     }
 }
 
+/// Maximum page size for list endpoints
+const MAX_PAGE_LIMIT: u32 = 1000;
+
 #[derive(Serialize, ToSchema)]
 pub struct MitigationsListResponse {
     /// List of mitigations in this page
     mitigations: Vec<MitigationResponse>,
     /// Number of mitigations returned in this page
+    count: usize,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct EventsListResponse {
+    /// List of events in this page
+    events: Vec<AttackEvent>,
+    /// Number of events returned in this page
     count: usize,
 }
 
@@ -124,6 +135,10 @@ pub struct ListMitigationsQuery {
 
 fn default_limit() -> u32 {
     100
+}
+
+fn clamp_limit(limit: u32) -> u32 {
+    limit.min(MAX_PAGE_LIMIT)
 }
 
 #[derive(Deserialize)]
@@ -321,18 +336,18 @@ pub async fn ingest_event(
     path = "/v1/events",
     tag = "events",
     params(
-        ("limit" = Option<u32>, Query, description = "Max results (default 100)"),
+        ("limit" = Option<u32>, Query, description = "Max results (default 100, max 1000)"),
         ("offset" = Option<u32>, Query, description = "Offset for pagination"),
     ),
     responses(
-        (status = 200, description = "List of events", body = Vec<AttackEvent>)
+        (status = 200, description = "List of events", body = EventsListResponse)
     )
 )]
 pub async fn list_events(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListEventsQuery>,
 ) -> impl IntoResponse {
-    let limit = query.limit.unwrap_or(100);
+    let limit = clamp_limit(query.limit.unwrap_or(100));
     let offset = query.offset.unwrap_or(0);
 
     let events = state
@@ -341,7 +356,8 @@ pub async fn list_events(
         .await
         .map_err(AppError)?;
 
-    Ok::<_, AppError>(Json(events))
+    let count = events.len();
+    Ok::<_, AppError>(Json(EventsListResponse { events, count }))
 }
 
 /// List audit log entries
@@ -399,6 +415,8 @@ pub async fn list_mitigations(
             .collect()
     });
 
+    let limit = clamp_limit(query.limit);
+
     // If pop=all, list mitigations from all POPs
     let mitigations = if query.pop.as_deref() == Some("all") {
         state
@@ -406,7 +424,7 @@ pub async fn list_mitigations(
             .list_mitigations_all_pops(
                 status_filter.as_deref(),
                 query.customer_id.as_deref(),
-                query.limit,
+                limit,
                 query.offset,
             )
             .await
@@ -417,7 +435,7 @@ pub async fn list_mitigations(
             .list_mitigations(
                 status_filter.as_deref(),
                 query.customer_id.as_deref(),
-                query.limit,
+                limit,
                 query.offset,
             )
             .await

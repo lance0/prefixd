@@ -46,12 +46,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Safelist blocking
     - Migration verification
 
+- **DevOps**
+  - Dependabot configuration for Cargo, GitHub Actions, and npm
+
 ### Fixed
+
+- IPv6 prefix validation uses proper `IpAddr` parsing (was using contains(':') heuristic)
+- `compute_scope_hash()` now deduplicates ports before hashing for consistency
+- Bearer token cached at startup (was reading env var on every request)
 
 - IPv6 support in `is_safelisted()` - now handles both IPv4 and IPv6 prefixes
 - `is_safelisted()` performance - uses PostgreSQL inet operators instead of loading all entries
 
 ### Changed
+
+- **Pagination**
+  - Added `MAX_PAGE_LIMIT` (1000) - requests for larger pages are clamped
+  - `list_events` now returns `EventsListResponse` with `count` (consistency with mitigations)
 
 - **API Response** (breaking for clients parsing `total`)
   - Renamed `total` to `count` in `MitigationsListResponse`

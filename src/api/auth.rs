@@ -31,22 +31,12 @@ async fn validate_bearer_token(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // Get expected token from environment variable
-    let token_env_var = state
-        .settings
-        .http
-        .auth
-        .bearer_token_env
-        .as_deref()
-        .unwrap_or("PREFIXD_API_TOKEN");
-
-    let expected_token = match std::env::var(token_env_var) {
-        Ok(token) if !token.is_empty() => token,
-        _ => {
-            tracing::error!(
-                env_var = token_env_var,
-                "bearer auth enabled but token env var not set"
-            );
+    // Use cached token from startup (avoids per-request env lookups)
+    let expected_token = match &state.bearer_token {
+        Some(token) => token.as_str(),
+        None => {
+            // Token was not loaded at startup - this is a configuration error
+            tracing::error!("bearer auth enabled but no token was loaded at startup");
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };

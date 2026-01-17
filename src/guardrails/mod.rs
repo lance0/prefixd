@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use crate::config::{GuardrailsConfig, QuotasConfig};
 use crate::db::RepositoryTrait;
 use crate::domain::{MatchCriteria, MitigationIntent};
@@ -51,7 +53,15 @@ impl Guardrails {
     }
 
     fn validate_prefix_length(&self, criteria: &MatchCriteria) -> Result<()> {
-        let is_v6 = criteria.dst_prefix.contains(':');
+        // Use proper IP address parsing instead of contains(':') heuristic
+        // This correctly handles IPv4-mapped IPv6 and invalid strings
+        let is_v6 = criteria
+            .dst_prefix
+            .split('/')
+            .next()
+            .and_then(|ip| ip.parse::<IpAddr>().ok())
+            .map(|addr| addr.is_ipv6())
+            .unwrap_or(false);
         let prefix_len = extract_prefix_length(&criteria.dst_prefix, is_v6);
 
         // Use IPv6-specific limits if configured, otherwise default to /128
