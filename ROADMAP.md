@@ -461,12 +461,15 @@ prefixd implements a **signal-driven** architecture where detection is decoupled
 5. **5s polling during attacks** - Operators will be frustrated; WebSocket is more important than ranked
 6. **No Tbps scale** - Requires scrubber integration for serious volumetric attacks
 
-### Tier 1: Credibility (Do These First)
-- [ ] **Implement `parse_flowspec_path()`** - CRITICAL: reconciliation is blind without it
-- [ ] **Test with real routers** - Juniper MX, Arista 7xxx, Cisco; document quirks and import policy gotchas
-- [ ] **WebSocket for dashboard** - 5s polling is unacceptable during active attacks (moved up from Tier 2)
+### Tier 1: Ship Blockers (Can't Call It Credible Without These)
+1. [ ] **Implement `parse_flowspec_path()`** - Without this, reconciliation is theater
+2. [ ] **WebSocket for dashboard** - 5s polling during an attack is genuinely bad UX
+3. [ ] **One real router test** - Even just Juniper vMX in a lab; document quirks
+
+### Tier 1.5: Nice-to-Have Before Launch
 - [ ] Ship Grafana dashboards (prefixd metrics + BGP session health)
 - [ ] Record demo video: attack → detection → mitigation → recovery
+- [ ] Test additional routers (Arista 7xxx, Cisco XR)
 
 ### Tier 2: Remove Weaknesses
 - [ ] GoBGP hardening (reduce SPOF risk)
