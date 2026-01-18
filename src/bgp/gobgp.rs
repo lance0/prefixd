@@ -444,38 +444,21 @@ impl FlowSpecAnnouncer for GoBgpAnnouncer {
     }
 
     async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
-        let mut client = self.get_client().await?;
-
-        let request = ListPathRequest {
-            table_type: TableType::Global as i32,
-            family: Some(Family {
-                afi: AFI_IP,
-                safi: SAFI_FLOWSPEC,
-            }),
-            ..Default::default()
-        };
-
-        let mut stream = client.list_path(request).await.map_err(|e| {
-            PrefixdError::Internal(format!("GoBGP ListPath failed: {}", e))
-        })?.into_inner();
-
         let mut rules = Vec::new();
 
-        while let Some(resp) = stream.message().await.map_err(|e| {
-            PrefixdError::Internal(format!("GoBGP stream error: {}", e))
-        })? {
-            if let Some(dest) = resp.destination {
-                for path in dest.paths {
-                    match self.parse_flowspec_path(&path) {
-                        Ok(rule) => rules.push(rule),
-                        Err(e) => {
-                            // Log warning for parse failures to aid debugging reconciliation gaps
-                            tracing::warn!(
-                                error = %e,
-                                "failed to parse FlowSpec path from GoBGP RIB, rule will be ignored in reconciliation"
-                            );
-                        }
-                    }
+        // Query both IPv4 and IPv6 FlowSpec tables
+        // Continue if one address family isn't configured
+        for afi in [AFI_IP, AFI_IP6] {
+            match self.list_active_for_afi(afi).await {
+                Ok(afi_rules) => rules.extend(afi_rules),
+                Err(e) => {
+                    // IPv6 FlowSpec may not be configured - log and continue
+                    let afi_name = if afi == AFI_IP6 { "ipv6" } else { "ipv4" };
+                    tracing::debug!(
+                        afi = afi_name,
+                        error = %e,
+                        "failed to query FlowSpec RIB for address family"
+                    );
                 }
             }
         }
@@ -527,6 +510,46 @@ impl FlowSpecAnnouncer for GoBgpAnnouncer {
 }
 
 impl GoBgpAnnouncer {
+    /// Query FlowSpec RIB for a specific address family
+    async fn list_active_for_afi(&self, afi: i32) -> Result<Vec<FlowSpecRule>> {
+        let mut client = self.get_client().await?;
+        let mut rules = Vec::new();
+
+        let request = ListPathRequest {
+            table_type: TableType::Global as i32,
+            family: Some(Family {
+                afi,
+                safi: SAFI_FLOWSPEC,
+            }),
+            ..Default::default()
+        };
+
+        let mut stream = client.list_path(request).await.map_err(|e| {
+            PrefixdError::Internal(format!("GoBGP ListPath failed: {}", e))
+        })?.into_inner();
+
+        while let Some(resp) = stream.message().await.map_err(|e| {
+            PrefixdError::Internal(format!("GoBGP stream error: {}", e))
+        })? {
+            if let Some(dest) = resp.destination {
+                for path in dest.paths {
+                    match self.parse_flowspec_path(&path) {
+                        Ok(rule) => rules.push(rule),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                afi = afi,
+                                "failed to parse FlowSpec path from GoBGP RIB"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(rules)
+    }
+
     /// Parse a FlowSpec path from GoBGP's RIB into our domain FlowSpecRule.
     /// This is the inverse of build_flowspec_path - used by reconciliation to compare
     /// desired state (DB) vs actual state (BGP RIB).
