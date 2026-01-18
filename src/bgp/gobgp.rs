@@ -537,9 +537,152 @@ impl FlowSpecAnnouncer for GoBgpAnnouncer {
 }
 
 impl GoBgpAnnouncer {
-    fn parse_flowspec_path(&self, _path: &Path) -> Result<FlowSpecRule> {
-        // Simplified parsing - full implementation would decode NLRI and attributes
-        Err(PrefixdError::Internal("FlowSpec path parsing not fully implemented".to_string()))
+    /// Parse a FlowSpec path from GoBGP's RIB into our domain FlowSpecRule.
+    /// This is the inverse of build_flowspec_path - used by reconciliation to compare
+    /// desired state (DB) vs actual state (BGP RIB).
+    fn parse_flowspec_path(&self, path: &Path) -> Result<FlowSpecRule> {
+        // 1. Parse NLRI
+        let nlri_any = path.nlri.as_ref().ok_or_else(|| {
+            PrefixdError::Internal("Path has no NLRI".to_string())
+        })?;
+
+        let flowspec_nlri = self.decode_flowspec_nlri(nlri_any)?;
+
+        // 2. Parse path attributes for action (traffic-rate extended community)
+        let action = self.parse_flowspec_action(&path.pattrs)?;
+
+        Ok(FlowSpecRule::new(flowspec_nlri, action))
+    }
+
+    /// Decode FlowSpecNLRI from Any and extract match criteria
+    fn decode_flowspec_nlri(&self, nlri_any: &prost_types::Any) -> Result<FlowSpecNlri> {
+        // Verify it's a FlowSpecNLRI
+        if !nlri_any.type_url.ends_with("FlowSpecNLRI") {
+            return Err(PrefixdError::Internal(format!(
+                "Unexpected NLRI type: {}",
+                nlri_any.type_url
+            )));
+        }
+
+        // Decode the FlowSpecNLRI
+        let proto_nlri = ProtoFlowSpecNlri::decode(nlri_any.value.as_slice()).map_err(|e| {
+            PrefixdError::Internal(format!("Failed to decode FlowSpecNLRI: {}", e))
+        })?;
+
+        let mut dst_prefix = String::new();
+        let mut protocol: Option<u8> = None;
+        let mut dst_ports: Vec<u16> = Vec::new();
+
+        // Parse each rule (component) in the NLRI
+        for rule_any in &proto_nlri.rules {
+            if rule_any.type_url.ends_with("FlowSpecIPPrefix") {
+                // IPv6 style prefix
+                let ip_prefix = FlowSpecIpPrefix::decode(rule_any.value.as_slice()).map_err(|e| {
+                    PrefixdError::Internal(format!("Failed to decode FlowSpecIPPrefix: {}", e))
+                })?;
+                if ip_prefix.r#type == 1 {
+                    // Destination prefix
+                    dst_prefix = format!("{}/{}", ip_prefix.prefix, ip_prefix.prefix_len);
+                }
+            } else if rule_any.type_url.ends_with("FlowSpecComponent") {
+                let component = FlowSpecComponent::decode(rule_any.value.as_slice()).map_err(|e| {
+                    PrefixdError::Internal(format!("Failed to decode FlowSpecComponent: {}", e))
+                })?;
+
+                match component.r#type {
+                    1 => {
+                        // Destination prefix (IPv4 encoding)
+                        // Items contain: op=prefix_len, value=prefix as u64
+                        if let Some(item) = component.items.first() {
+                            let prefix_len = item.op as u8;
+                            let prefix_bytes = (item.value as u32).to_be_bytes();
+                            let addr = Ipv4Addr::new(
+                                prefix_bytes[0],
+                                prefix_bytes[1],
+                                prefix_bytes[2],
+                                prefix_bytes[3],
+                            );
+                            dst_prefix = format!("{}/{}", addr, prefix_len);
+                        }
+                    }
+                    3 => {
+                        // IP Protocol
+                        if let Some(item) = component.items.first() {
+                            protocol = Some(item.value as u8);
+                        }
+                    }
+                    5 => {
+                        // Destination ports
+                        for item in &component.items {
+                            dst_ports.push(item.value as u16);
+                        }
+                    }
+                    _ => {
+                        // Ignore other component types (src prefix, src port, etc.)
+                    }
+                }
+            }
+        }
+
+        if dst_prefix.is_empty() {
+            return Err(PrefixdError::Internal(
+                "FlowSpec NLRI missing destination prefix".to_string(),
+            ));
+        }
+
+        Ok(FlowSpecNlri {
+            dst_prefix,
+            protocol,
+            dst_ports,
+        })
+    }
+
+    /// Parse extended communities to extract the FlowSpec action (traffic-rate)
+    fn parse_flowspec_action(&self, pattrs: &[prost_types::Any]) -> Result<FlowSpecAction> {
+        for attr_any in pattrs {
+            if attr_any.type_url.ends_with("ExtendedCommunitiesAttribute") {
+                let ext_comm = ExtendedCommunitiesAttribute::decode(attr_any.value.as_slice())
+                    .map_err(|e| {
+                        PrefixdError::Internal(format!(
+                            "Failed to decode ExtendedCommunitiesAttribute: {}",
+                            e
+                        ))
+                    })?;
+
+                for comm_any in &ext_comm.communities {
+                    if comm_any.type_url.ends_with("TrafficRateExtended") {
+                        let traffic_rate =
+                            TrafficRateExtended::decode(comm_any.value.as_slice()).map_err(|e| {
+                                PrefixdError::Internal(format!(
+                                    "Failed to decode TrafficRateExtended: {}",
+                                    e
+                                ))
+                            })?;
+
+                        // rate == 0 means discard, otherwise it's police with rate
+                        if traffic_rate.rate == 0.0 {
+                            return Ok(FlowSpecAction {
+                                action_type: ActionType::Discard,
+                                rate_bps: None,
+                            });
+                        } else {
+                            // Convert bytes/sec back to bps
+                            let rate_bps = (traffic_rate.rate as u64) * 8;
+                            return Ok(FlowSpecAction {
+                                action_type: ActionType::Police,
+                                rate_bps: Some(rate_bps),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // No traffic-rate found - default to discard (conservative)
+        Ok(FlowSpecAction {
+            action_type: ActionType::Discard,
+            rate_bps: None,
+        })
     }
 }
 
@@ -818,5 +961,157 @@ mod tests {
         assert_eq!(AFI_IP6, 2);
         // RFC 5575 FlowSpec SAFI
         assert_eq!(SAFI_FLOWSPEC, 133);
+    }
+
+    // ==========================================================================
+    // FlowSpec Path Parsing Tests (roundtrip)
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_flowspec_path_roundtrip_ipv4_discard() {
+        let announcer = make_announcer();
+
+        // Build a path
+        let original_rule = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "192.168.1.100/32".to_string(),
+                protocol: Some(17), // UDP
+                dst_ports: vec![53, 5353],
+            },
+            FlowSpecAction {
+                action_type: ActionType::Discard,
+                rate_bps: None,
+            },
+        );
+
+        let path = announcer.build_flowspec_path(&original_rule).unwrap();
+
+        // Parse it back
+        let parsed_rule = announcer.parse_flowspec_path(&path).unwrap();
+
+        // Verify NLRI matches
+        assert_eq!(parsed_rule.nlri.dst_prefix, original_rule.nlri.dst_prefix);
+        assert_eq!(parsed_rule.nlri.protocol, original_rule.nlri.protocol);
+        assert_eq!(parsed_rule.nlri.dst_ports, original_rule.nlri.dst_ports);
+
+        // Verify action matches
+        assert_eq!(parsed_rule.actions.len(), 1);
+        assert_eq!(parsed_rule.actions[0].action_type, ActionType::Discard);
+        assert_eq!(parsed_rule.actions[0].rate_bps, None);
+
+        // Verify NLRI hash matches (critical for reconciliation)
+        assert_eq!(parsed_rule.nlri_hash(), original_rule.nlri_hash());
+    }
+
+    #[test]
+    fn test_parse_flowspec_path_roundtrip_ipv4_police() {
+        let announcer = make_announcer();
+
+        let original_rule = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "10.0.0.50/32".to_string(),
+                protocol: Some(6), // TCP
+                dst_ports: vec![80, 443, 8080],
+            },
+            FlowSpecAction {
+                action_type: ActionType::Police,
+                rate_bps: Some(100_000_000), // 100 Mbps
+            },
+        );
+
+        let path = announcer.build_flowspec_path(&original_rule).unwrap();
+        let parsed_rule = announcer.parse_flowspec_path(&path).unwrap();
+
+        assert_eq!(parsed_rule.nlri.dst_prefix, original_rule.nlri.dst_prefix);
+        assert_eq!(parsed_rule.nlri.protocol, original_rule.nlri.protocol);
+        assert_eq!(parsed_rule.nlri.dst_ports, original_rule.nlri.dst_ports);
+        assert_eq!(parsed_rule.actions.len(), 1);
+        assert_eq!(parsed_rule.actions[0].action_type, ActionType::Police);
+        // Rate may have small rounding due to float conversion
+        assert!(parsed_rule.actions[0].rate_bps.is_some());
+        assert_eq!(parsed_rule.nlri_hash(), original_rule.nlri_hash());
+    }
+
+    #[test]
+    fn test_parse_flowspec_path_roundtrip_ipv6() {
+        let announcer = make_announcer();
+
+        let original_rule = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "2001:db8::1/128".to_string(),
+                protocol: Some(17),
+                dst_ports: vec![53],
+            },
+            FlowSpecAction {
+                action_type: ActionType::Police,
+                rate_bps: Some(500_000_000),
+            },
+        );
+
+        let path = announcer.build_flowspec_path(&original_rule).unwrap();
+        let parsed_rule = announcer.parse_flowspec_path(&path).unwrap();
+
+        assert_eq!(parsed_rule.nlri.dst_prefix, original_rule.nlri.dst_prefix);
+        assert_eq!(parsed_rule.nlri.protocol, original_rule.nlri.protocol);
+        assert_eq!(parsed_rule.nlri.dst_ports, original_rule.nlri.dst_ports);
+        assert_eq!(parsed_rule.nlri_hash(), original_rule.nlri_hash());
+    }
+
+    #[test]
+    fn test_parse_flowspec_path_no_protocol_no_ports() {
+        let announcer = make_announcer();
+
+        // Minimal rule: just destination prefix
+        let original_rule = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "203.0.113.50/32".to_string(),
+                protocol: None,
+                dst_ports: vec![],
+            },
+            FlowSpecAction {
+                action_type: ActionType::Discard,
+                rate_bps: None,
+            },
+        );
+
+        let path = announcer.build_flowspec_path(&original_rule).unwrap();
+        let parsed_rule = announcer.parse_flowspec_path(&path).unwrap();
+
+        assert_eq!(parsed_rule.nlri.dst_prefix, original_rule.nlri.dst_prefix);
+        assert_eq!(parsed_rule.nlri.protocol, None);
+        assert_eq!(parsed_rule.nlri.dst_ports, Vec::<u16>::new());
+        assert_eq!(parsed_rule.nlri_hash(), original_rule.nlri_hash());
+    }
+
+    #[test]
+    fn test_parse_flowspec_path_invalid_nlri_type() {
+        let announcer = make_announcer();
+
+        // Create a path with wrong NLRI type
+        let path = Path {
+            nlri: Some(prost_types::Any {
+                type_url: "type.googleapis.com/apipb.IPAddressPrefix".to_string(),
+                value: vec![],
+            }),
+            ..Default::default()
+        };
+
+        let result = announcer.parse_flowspec_path(&path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unexpected NLRI type"));
+    }
+
+    #[test]
+    fn test_parse_flowspec_path_missing_nlri() {
+        let announcer = make_announcer();
+
+        let path = Path {
+            nlri: None,
+            ..Default::default()
+        };
+
+        let result = announcer.parse_flowspec_path(&path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no NLRI"));
     }
 }
