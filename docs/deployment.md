@@ -3,10 +3,11 @@
 ## Overview
 
 prefixd requires:
-- **prefixd** daemon (this software)
-- **GoBGP** sidecar for BGP FlowSpec announcements
+
+- **prefixd** daemon
+- **GoBGP v4.x** sidecar for BGP FlowSpec
 - **PostgreSQL 14+**
-- **Edge routers** configured to receive and apply FlowSpec
+- **Routers** with FlowSpec support
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
@@ -16,83 +17,287 @@ prefixd requires:
                            │                   │
                            ▼                   ▼
                     ┌─────────────┐     ┌─────────────┐
-                    │  Database   │     │   Routers   │
-                    │ (PostgreSQL)│     │  (Juniper)  │
+                    │  PostgreSQL │     │   Routers   │
                     └─────────────┘     └─────────────┘
 ```
 
-## Docker Compose (Recommended)
+---
 
-The easiest deployment method using the included `docker-compose.yml`.
+## Quick Start
 
-### Prerequisites
-
-- Docker Engine 20.10+
-- Docker Compose v2
-
-### Quick Start
+### Docker Compose (Recommended)
 
 ```bash
-# Clone and enter directory
-git clone https://github.com/yourorg/prefixd.git
+# Clone
+git clone https://github.com/lance0/prefixd.git
 cd prefixd
 
-# Create data directory
-mkdir -p data
-
-# Copy and edit configs
-cp configs/prefixd-postgres.yaml configs/prefixd.yaml
+# Configure
+cp configs/prefixd.yaml.example configs/prefixd.yaml
 # Edit configs/prefixd.yaml, inventory.yaml, playbooks.yaml
 
-# Set API token
+# Generate API token
 export PREFIXD_API_TOKEN=$(openssl rand -hex 32)
-echo "PREFIXD_API_TOKEN=$PREFIXD_API_TOKEN" > .env
+echo "PREFIXD_API_TOKEN=$PREFIXD_API_TOKEN" >> .env
 
-# Start stack
+# Start
 docker compose up -d
 
-# Check status
-docker compose ps
-docker compose logs -f prefixd
+# Create admin operator (for dashboard login)
+docker compose exec prefixd prefixdctl operators create \
+  --username admin --role admin --password
+
+# Verify
+curl http://localhost:8080/v1/health
+open http://localhost:3000
 ```
 
-### docker-compose.yml Services
+### Services
 
 | Service | Port | Description |
 |---------|------|-------------|
-| `prefixd` | 8080 | HTTP API |
-| `prefixd` | 9090 | Prometheus metrics |
-| `gobgp` | 50051 | gRPC (internal) |
-| `gobgp` | 179 | BGP (to routers) |
-| `postgres` | 5432 | Database |
-| `dashboard` | 3000 | Web UI |
+| prefixd | 8080 | HTTP API |
+| prefixd | 9090 | Prometheus metrics |
+| gobgp | 50051 | gRPC (internal) |
+| gobgp | 179 | BGP (to routers) |
+| postgres | 5432 | Database |
+| dashboard | 3000 | Web UI |
 
-### Production Considerations
+---
+
+## Authentication Setup
+
+### Create Operators
+
+Operators are users who can log into the dashboard:
+
+```bash
+# Create admin (full access)
+prefixdctl operators create --username admin --role admin --password
+
+# Create operator (read + withdraw)
+prefixdctl operators create --username oncall --role operator --password
+
+# Create viewer (read-only)
+prefixdctl operators create --username readonly --role viewer --password
+
+# List operators
+prefixdctl operators list
+```
+
+### Auth Modes
+
+Configure in `prefixd.yaml`:
 
 ```yaml
-# docker-compose.override.yml for production
-services:
-  prefixd:
-    restart: always
-    environment:
-      - RUST_LOG=info
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-  
-  postgres:
-    restart: always
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-
-volumes:
-  postgres_data:
+http:
+  auth:
+    mode: bearer           # API/CLI: bearer token required
+    token: "${PREFIXD_API_TOKEN}"
+    secure_cookies: auto   # auto, true, false
 ```
+
+| Mode | Dashboard | API/CLI |
+|------|-----------|---------|
+| `none` | No login | No auth |
+| `bearer` | Session login | Bearer token |
+| `hybrid` | Session login | Session or bearer |
+
+### Secure Cookies
+
+- `auto` - Secure cookies if TLS detected (recommended)
+- `true` - Always secure (requires HTTPS)
+- `false` - Never secure (development only)
+
+---
+
+## GoBGP v4.x Setup
+
+prefixd requires GoBGP v4.0.0 or later.
+
+### Docker (Included)
+
+The `docker-compose.yml` includes GoBGP v4.x:
+
+```yaml
+gobgp:
+  image: jauderho/gobgp:latest  # v4.2.0+
+  volumes:
+    - ./configs/gobgp.conf:/etc/gobgp/gobgp.conf
+  ports:
+    - "179:179"
+    - "50051:50051"
+```
+
+### GoBGP Configuration
+
+`configs/gobgp.conf`:
+
+```toml
+[global.config]
+  as = 65010
+  router-id = "10.10.0.10"
+  port = 179
+
+# Peer with edge router
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "10.0.0.1"
+    peer-as = 65000
+  
+  # IPv4 FlowSpec
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-flowspec"
+  
+  # IPv6 FlowSpec (optional)
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv6-flowspec"
+```
+
+### Verify GoBGP
+
+```bash
+# Check peer status
+docker compose exec gobgp gobgp neighbor
+
+# Check FlowSpec RIB
+docker compose exec gobgp gobgp global rib -a ipv4-flowspec
+docker compose exec gobgp gobgp global rib -a ipv6-flowspec
+```
+
+### Bare Metal GoBGP
+
+```bash
+# Download GoBGP v4.x
+wget https://github.com/osrg/gobgp/releases/download/v4.2.0/gobgp_4.2.0_linux_amd64.tar.gz
+tar xzf gobgp_4.2.0_linux_amd64.tar.gz
+sudo mv gobgp gobgpd /usr/local/bin/
+
+# Verify version
+gobgpd --version  # Should show v4.x
+
+# Start
+sudo gobgpd -f /etc/gobgp/gobgp.conf
+```
+
+---
+
+## Router Configuration
+
+### Juniper Junos (MX/PTX)
+
+```junos
+# BGP group for FlowSpec
+set protocols bgp group FLOWSPEC type internal
+set protocols bgp group FLOWSPEC local-address 10.0.0.1
+set protocols bgp group FLOWSPEC neighbor 10.10.0.10
+
+# Enable IPv4 FlowSpec
+set protocols bgp group FLOWSPEC family inet flow no-validate FLOWSPEC-IMPORT
+
+# Enable IPv6 FlowSpec (optional)
+set protocols bgp group FLOWSPEC family inet6 flow no-validate FLOWSPEC-IMPORT
+
+# Import policy
+set policy-options policy-statement FLOWSPEC-IMPORT term accept from family inet-flow
+set policy-options policy-statement FLOWSPEC-IMPORT term accept then accept
+set policy-options policy-statement FLOWSPEC-IMPORT term accept6 from family inet6-flow
+set policy-options policy-statement FLOWSPEC-IMPORT term accept6 then accept
+
+# Enable FlowSpec forwarding
+set routing-options flow term-order standard
+```
+
+### Verify on Juniper
+
+```junos
+# BGP session
+show bgp neighbor 10.10.0.10
+
+# FlowSpec routes
+show route table inetflow.0
+show route table inet6flow.0
+
+# Detailed FlowSpec
+show route table inetflow.0 extensive
+```
+
+### Arista EOS (7xxx)
+
+```eos
+! BGP configuration
+router bgp 65000
+  neighbor 10.10.0.10 remote-as 65010
+  !
+  address-family flow-spec ipv4
+    neighbor 10.10.0.10 activate
+  !
+  address-family flow-spec ipv6
+    neighbor 10.10.0.10 activate
+```
+
+### Cisco IOS-XR (ASR 9000, NCS)
+
+```cisco
+router bgp 65000
+  neighbor 10.10.0.10
+    remote-as 65010
+    address-family ipv4 flowspec
+    address-family ipv6 flowspec
+  !
+  flowspec
+    address-family ipv4
+      service-policy type pbr FLOWSPEC-POLICY
+```
+
+---
+
+## PostgreSQL Setup
+
+### Docker (Included)
+
+The `docker-compose.yml` includes PostgreSQL:
+
+```yaml
+postgres:
+  image: postgres:16
+  environment:
+    POSTGRES_DB: prefixd
+    POSTGRES_USER: prefixd
+    POSTGRES_PASSWORD: prefixd
+  volumes:
+    - postgres_data:/var/lib/postgresql/data
+```
+
+### External PostgreSQL
+
+```sql
+-- Create database
+CREATE DATABASE prefixd;
+CREATE USER prefixd WITH PASSWORD 'secure-password';
+GRANT ALL PRIVILEGES ON DATABASE prefixd TO prefixd;
+```
+
+Configure in `prefixd.yaml`:
+
+```yaml
+storage:
+  connection_string: "postgres://prefixd:secure-password@postgres.internal:5432/prefixd"
+  max_connections: 10
+```
+
+### High Availability
+
+For production:
+
+1. Use PostgreSQL with streaming replication
+2. Configure connection pooling (PgBouncer)
+3. Regular backups
+4. Monitor replication lag
+
+---
 
 ## Bare Metal Deployment
 
@@ -101,12 +306,11 @@ volumes:
 ```bash
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
 
-# Build release binary
+# Build
 cargo build --release
 
-# Install binaries
+# Install
 sudo cp target/release/prefixd /usr/local/bin/
 sudo cp target/release/prefixdctl /usr/local/bin/
 ```
@@ -114,25 +318,20 @@ sudo cp target/release/prefixdctl /usr/local/bin/
 ### Directory Structure
 
 ```bash
-sudo mkdir -p /etc/prefixd
-sudo mkdir -p /var/lib/prefixd
-sudo mkdir -p /var/log/prefixd
-
-# Copy configs
+sudo mkdir -p /etc/prefixd /var/lib/prefixd /var/log/prefixd
 sudo cp configs/*.yaml /etc/prefixd/
-
-# Set permissions
+sudo useradd -r -s /bin/false prefixd
 sudo chown -R prefixd:prefixd /etc/prefixd /var/lib/prefixd /var/log/prefixd
 ```
 
 ### Systemd Service
 
-Create `/etc/systemd/system/prefixd.service`:
+`/etc/systemd/system/prefixd.service`:
 
 ```ini
 [Unit]
-Description=prefixd BGP FlowSpec routing policy daemon
-After=network.target gobgpd.service
+Description=prefixd BGP FlowSpec policy daemon
+After=network.target postgresql.service gobgpd.service
 Wants=gobgpd.service
 
 [Service]
@@ -143,7 +342,7 @@ ExecStart=/usr/local/bin/prefixd --config /etc/prefixd
 Restart=on-failure
 RestartSec=5
 
-# Security hardening
+# Security
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -158,208 +357,112 @@ EnvironmentFile=-/etc/prefixd/env
 WantedBy=multi-user.target
 ```
 
-Create `/etc/prefixd/env`:
+`/etc/prefixd/env`:
 
 ```bash
-PREFIXD_API_TOKEN=your-secret-token-here
+PREFIXD_API_TOKEN=your-secret-token
 ```
-
-Enable and start:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable prefixd
 sudo systemctl start prefixd
-sudo systemctl status prefixd
 ```
 
-## GoBGP Configuration
+---
 
-### Install GoBGP
+## TLS Configuration
+
+### Self-Signed Certificates
 
 ```bash
-# Download latest release
-wget https://github.com/osrg/gobgp/releases/download/v3.25.0/gobgp_3.25.0_linux_amd64.tar.gz
-tar xzf gobgp_3.25.0_linux_amd64.tar.gz
-sudo mv gobgp gobgpd /usr/local/bin/
-```
-
-### GoBGP Config (`/etc/gobgp/gobgp.conf`)
-
-```toml
-[global.config]
-  as = 65010
-  router-id = "10.10.0.10"
-  port = 179
-
-# Peer with edge router
-[[neighbors]]
-  [neighbors.config]
-    neighbor-address = "10.0.0.1"
-    peer-as = 65000
-  
-  # Enable IPv4 FlowSpec
-  [[neighbors.afi-safis]]
-    [neighbors.afi-safis.config]
-      afi-safi-name = "ipv4-flowspec"
-  
-  # Enable IPv6 FlowSpec (optional)
-  [[neighbors.afi-safis]]
-    [neighbors.afi-safis.config]
-      afi-safi-name = "ipv6-flowspec"
-
-# Second peer (if applicable)
-[[neighbors]]
-  [neighbors.config]
-    neighbor-address = "10.0.0.2"
-    peer-as = 65000
-  [[neighbors.afi-safis]]
-    [neighbors.afi-safis.config]
-      afi-safi-name = "ipv4-flowspec"
-```
-
-### GoBGP Systemd Service
-
-Create `/etc/systemd/system/gobgpd.service`:
-
-```ini
-[Unit]
-Description=GoBGP Routing Daemon
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/gobgpd -f /etc/gobgp/gobgp.conf
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-## Router Configuration
-
-### Juniper Junos
-
-```junos
-# Enable FlowSpec
-set protocols bgp group FLOWSPEC type internal
-set protocols bgp group FLOWSPEC local-address 10.0.0.1
-set protocols bgp group FLOWSPEC neighbor 10.10.0.10 family inet flow no-validate FLOWSPEC-IMPORT
-
-# Import policy to accept FlowSpec routes
-set policy-options policy-statement FLOWSPEC-IMPORT term accept-flowspec from family inet-flow
-set policy-options policy-statement FLOWSPEC-IMPORT term accept-flowspec then accept
-
-# Apply to forwarding table
-set routing-options flow term-order standard
-set routing-options forwarding-table export FLOWSPEC-EXPORT
-```
-
-### Juniper FlowSpec Validation (Important)
-
-```junos
-# Disable validation for lab/testing
-set protocols bgp group FLOWSPEC neighbor 10.10.0.10 family inet flow no-validate FLOWSPEC-IMPORT
-
-# For production, consider:
-# - Prefix filters on what destinations can be mitigated
-# - Rate limiting on FlowSpec updates
-# - Monitoring for unexpected rules
-```
-
-### Verify FlowSpec on Router
-
-```junos
-# Show received FlowSpec routes
-show route table inetflow.0
-
-# Show FlowSpec details
-show route table inetflow.0 extensive
-
-# Monitor FlowSpec updates
-monitor traffic interface xe-0/0/0 matching "port 179"
-```
-
-## PostgreSQL Setup (Multi-POP)
-
-### Create Database
-
-```sql
-CREATE DATABASE prefixd;
-CREATE USER prefixd WITH PASSWORD 'secure-password';
-GRANT ALL PRIVILEGES ON DATABASE prefixd TO prefixd;
-```
-
-### Configure prefixd
-
-```yaml
-# prefixd.yaml
-storage:
-  driver: postgres
-  path: "postgres://prefixd:secure-password@postgres.internal:5432/prefixd"
-```
-
-### High Availability
-
-For production multi-POP deployments:
-
-1. Use PostgreSQL with streaming replication
-2. Consider PgBouncer for connection pooling
-3. Each POP runs its own prefixd instance
-4. All instances share the same PostgreSQL cluster
-
-## TLS/mTLS Setup
-
-### Generate Certificates
-
-```bash
-# Create CA
+# Generate CA
 openssl genrsa -out ca.key 4096
 openssl req -x509 -new -nodes -key ca.key -sha256 -days 3650 \
   -out ca.crt -subj "/CN=prefixd-ca"
 
-# Create server certificate
+# Generate server cert
 openssl genrsa -out server.key 2048
-openssl req -new -key server.key -out server.csr \
-  -subj "/CN=prefixd.internal"
+openssl req -new -key server.key -out server.csr -subj "/CN=prefixd"
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key \
   -CAcreateserial -out server.crt -days 365 -sha256
-
-# Create client certificate (for mTLS)
-openssl genrsa -out client.key 2048
-openssl req -new -key client.key -out client.csr \
-  -subj "/CN=detector-1"
-openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key \
-  -CAcreateserial -out client.crt -days 365 -sha256
 ```
 
-### Configure mTLS
+### Configure TLS
 
 ```yaml
-# prefixd.yaml
 http:
   listen: "0.0.0.0:8443"
+  tls:
+    cert_path: "/etc/prefixd/server.crt"
+    key_path: "/etc/prefixd/server.key"
+  auth:
+    secure_cookies: true  # Required for HTTPS
+```
+
+### mTLS (Mutual TLS)
+
+For zero-trust environments:
+
+```yaml
+http:
   auth:
     mode: mtls
   tls:
     cert_path: "/etc/prefixd/server.crt"
     key_path: "/etc/prefixd/server.key"
-    ca_path: "/etc/prefixd/ca.crt"
+    ca_path: "/etc/prefixd/ca.crt"  # Client CA
 ```
 
-### Test mTLS Connection
+---
+
+## Multi-POP Deployment
+
+Multiple prefixd instances share one PostgreSQL:
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  prefixd    │     │  prefixd    │     │  prefixd    │
+│  (iad1)     │     │  (fra1)     │     │  (sin1)     │
+└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+       │                   │                   │
+       └───────────────────┼───────────────────┘
+                           │
+                    ┌──────┴──────┐
+                    │  PostgreSQL │
+                    └─────────────┘
+```
+
+### Configure POP Identity
+
+Each instance uses a unique `pop` value:
+
+```yaml
+# iad1
+pop: iad1
+
+# fra1
+pop: fra1
+```
+
+### Cross-POP Visibility
 
 ```bash
-curl --cert client.crt --key client.key --cacert ca.crt \
-  https://prefixd.internal:8443/v1/health
+# List all mitigations across POPs
+curl "http://localhost:8080/v1/mitigations?pop=all"
+
+# Get stats per POP
+curl "http://localhost:8080/v1/stats"
+curl "http://localhost:8080/v1/pops"
 ```
+
+---
 
 ## Monitoring
 
-### Prometheus Metrics
+### Prometheus
 
-Add to your Prometheus config:
+Scrape config:
 
 ```yaml
 scrape_configs:
@@ -372,13 +475,14 @@ scrape_configs:
 
 | Metric | Description |
 |--------|-------------|
-| `prefixd_events_ingested_total` | Total events received |
-| `prefixd_mitigations_active` | Current active mitigations |
-| `prefixd_announcements_total` | FlowSpec announcements made |
-| `prefixd_bgp_session_up` | BGP session status (1=up) |
-| `prefixd_guardrail_rejections_total` | Rejected by guardrails |
+| `prefixd_mitigations_active` | Active mitigations |
+| `prefixd_events_ingested_total` | Events received |
+| `prefixd_announcements_total` | FlowSpec announcements |
+| `prefixd_bgp_session_up` | BGP session status |
+| `prefixd_guardrail_rejections_total` | Rejected events |
+| `prefixd_http_requests_total` | HTTP requests |
 
-### Alerting Rules
+### Alerting
 
 ```yaml
 groups:
@@ -389,30 +493,64 @@ groups:
         for: 1m
         labels:
           severity: critical
-        annotations:
-          summary: "prefixd BGP session down"
       
-      - alert: PrefixdHighRejectionRate
+      - alert: PrefixdHighRejections
         expr: rate(prefixd_guardrail_rejections_total[5m]) > 10
         for: 5m
         labels:
           severity: warning
-        annotations:
-          summary: "High guardrail rejection rate"
 ```
 
-## Health Checks
+### Health Checks
 
 ```bash
 # API health
 curl http://localhost:8080/v1/health
 
-# BGP session status
+# CLI status
+prefixdctl status
+prefixdctl health
 prefixdctl peers
-
-# Active mitigations
-prefixdctl mitigations list --status active
-
-# Metrics endpoint
-curl http://localhost:9090/metrics
 ```
+
+---
+
+## Production Checklist
+
+### Security
+
+- [ ] Generate strong API token
+- [ ] Create operators with appropriate roles
+- [ ] Enable TLS (or use reverse proxy)
+- [ ] Configure secure_cookies for HTTPS
+- [ ] Network isolation (prefixd ↔ GoBGP on private network)
+- [ ] Firewall rules (only allow trusted detectors)
+
+### Reliability
+
+- [ ] PostgreSQL high availability
+- [ ] Systemd restart policies
+- [ ] Log rotation
+- [ ] Backup strategy for database
+
+### Monitoring
+
+- [ ] Prometheus scraping metrics
+- [ ] Alerting rules configured
+- [ ] Dashboard for visibility
+- [ ] BGP session monitoring
+
+### Configuration
+
+- [ ] Inventory reflects actual network
+- [ ] Playbooks match security policy
+- [ ] Quotas set appropriately
+- [ ] Safelist populated with infrastructure IPs
+
+### Testing
+
+- [ ] Test event ingestion
+- [ ] Verify FlowSpec reaches routers
+- [ ] Test mitigation withdrawal
+- [ ] Verify TTL expiry works
+- [ ] Test dashboard login
