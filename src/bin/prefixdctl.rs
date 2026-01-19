@@ -1,6 +1,6 @@
 use argon2::{
-    password_hash::{rand_core::OsRng, SaltString},
     Argon2, PasswordHasher,
+    password_hash::{SaltString, rand_core::OsRng},
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,12 @@ use std::process::ExitCode;
 #[command(name = "prefixdctl", about = "Control CLI for prefixd", version)]
 struct Cli {
     /// prefixd API endpoint
-    #[arg(short, long, default_value = "http://127.0.0.1:8080", env = "PREFIXD_API")]
+    #[arg(
+        short,
+        long,
+        default_value = "http://127.0.0.1:8080",
+        env = "PREFIXD_API"
+    )]
     api: String,
 
     /// Bearer token for authentication
@@ -329,11 +334,22 @@ async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String>
             println!("Active Mitigations: {}", health.active_mitigations);
             println!();
             println!("Components:");
-            let db_indicator = if health.database == "connected" { "●" } else { "○" };
+            let db_indicator = if health.database == "connected" {
+                "●"
+            } else {
+                "○"
+            };
             println!("  {} Database: {}", db_indicator, health.database);
-            let gobgp_indicator = if health.gobgp.status == "connected" { "●" } else { "○" };
+            let gobgp_indicator = if health.gobgp.status == "connected" {
+                "●"
+            } else {
+                "○"
+            };
             if let Some(ref err) = health.gobgp.error {
-                println!("  {} GoBGP: {} ({})", gobgp_indicator, health.gobgp.status, err);
+                println!(
+                    "  {} GoBGP: {} ({})",
+                    gobgp_indicator, health.gobgp.status, err
+                );
             } else {
                 println!("  {} GoBGP: {}", gobgp_indicator, health.gobgp.status);
             }
@@ -359,7 +375,11 @@ async fn cmd_mitigations(
     format: OutputFormat,
 ) -> Result<(), String> {
     match cmd {
-        MitigationCommands::List { status, customer, limit } => {
+        MitigationCommands::List {
+            status,
+            customer,
+            limit,
+        } => {
             let mut path = format!("/v1/mitigations?limit={}", limit);
             if let Some(s) = status {
                 path.push_str(&format!("&status={}", s));
@@ -372,7 +392,10 @@ async fn cmd_mitigations(
 
             match format {
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&resp.mitigations).unwrap());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&resp.mitigations).unwrap()
+                    );
                 }
                 OutputFormat::Table => {
                     if resp.mitigations.is_empty() {
@@ -390,7 +413,12 @@ async fn cmd_mitigations(
                         let expires = &m.expires_at[..19]; // Trim to datetime
                         println!(
                             "{:<36}  {:<10}  {:<15}  {:<10}  {:<8}  {}",
-                            m.mitigation_id, m.status, m.victim_ip, m.vector, m.action_type, expires
+                            m.mitigation_id,
+                            m.status,
+                            m.victim_ip,
+                            m.vector,
+                            m.action_type,
+                            expires
                         );
                     }
 
@@ -417,7 +445,10 @@ async fn cmd_mitigations(
                     if let Some(rate) = m.rate_bps {
                         println!("Rate (bps):     {}", rate);
                     }
-                    println!("Customer:       {}", m.customer_id.as_deref().unwrap_or("N/A"));
+                    println!(
+                        "Customer:       {}",
+                        m.customer_id.as_deref().unwrap_or("N/A")
+                    );
                     println!("Created:        {}", m.created_at);
                     println!("Expires:        {}", m.expires_at);
                     println!("Scope Hash:     {}", m.scope_hash);
@@ -425,7 +456,11 @@ async fn cmd_mitigations(
             }
         }
 
-        MitigationCommands::Withdraw { id, reason, operator } => {
+        MitigationCommands::Withdraw {
+            id,
+            reason,
+            operator,
+        } => {
             let path = format!("/v1/mitigations/{}/withdraw", id);
             let body = serde_json::json!({
                 "operator_id": operator,
@@ -479,7 +514,11 @@ async fn cmd_safelist(
             }
         }
 
-        SafelistCommands::Add { prefix, reason, operator } => {
+        SafelistCommands::Add {
+            prefix,
+            reason,
+            operator,
+        } => {
             let body = serde_json::json!({
                 "operator_id": operator,
                 "prefix": prefix,
@@ -505,7 +544,10 @@ async fn cmd_peers(client: &Client, format: OutputFormat) -> Result<(), String> 
 
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&health.bgp_sessions).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&health.bgp_sessions).unwrap()
+            );
         }
         OutputFormat::Table => {
             if health.bgp_sessions.is_empty() {
@@ -532,7 +574,9 @@ struct ReloadResponse {
 }
 
 async fn cmd_reload(client: &Client, format: OutputFormat) -> Result<(), String> {
-    let resp: ReloadResponse = client.post("/v1/config/reload", &serde_json::json!({})).await?;
+    let resp: ReloadResponse = client
+        .post("/v1/config/reload", &serde_json::json!({}))
+        .await?;
 
     match format {
         OutputFormat::Json => {
@@ -548,15 +592,19 @@ async fn cmd_reload(client: &Client, format: OutputFormat) -> Result<(), String>
 }
 
 async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<(), String> {
-    let database_url = std::env::var("DATABASE_URL")
-        .map_err(|_| "DATABASE_URL environment variable not set")?;
+    let database_url =
+        std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL environment variable not set")?;
 
     let pool = sqlx::PgPool::connect(&database_url)
         .await
         .map_err(|e| format!("failed to connect to database: {}", e))?;
 
     match cmd {
-        OperatorCommands::Create { username, password, role } => {
+        OperatorCommands::Create {
+            username,
+            password,
+            role,
+        } => {
             // Validate role
             let role_lower = role.to_lowercase();
             if role_lower != "admin" && role_lower != "viewer" {
@@ -589,13 +637,12 @@ async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<()
                 .to_string();
 
             // Check if username exists
-            let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM operators WHERE username = $1)"
-            )
-            .bind(&username)
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| format!("database error: {}", e))?;
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM operators WHERE username = $1)")
+                    .bind(&username)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|e| format!("database error: {}", e))?;
 
             if exists {
                 return Err(format!("operator '{}' already exists", username));
@@ -607,7 +654,7 @@ async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<()
                 INSERT INTO operators (username, password_hash, role)
                 VALUES ($1, $2, $3)
                 RETURNING operator_id
-                "#
+                "#,
             )
             .bind(&username)
             .bind(&password_hash)
@@ -618,14 +665,20 @@ async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<()
 
             match format {
                 OutputFormat::Json => {
-                    println!("{}", serde_json::json!({
-                        "id": id.to_string(),
-                        "username": username,
-                        "role": role_lower
-                    }));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "id": id.to_string(),
+                            "username": username,
+                            "role": role_lower
+                        })
+                    );
                 }
                 OutputFormat::Table => {
-                    println!("Created operator '{}' (id: {}, role: {})", username, id, role_lower);
+                    println!(
+                        "Created operator '{}' (id: {}, role: {})",
+                        username, id, role_lower
+                    );
                 }
             }
         }

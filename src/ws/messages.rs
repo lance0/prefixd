@@ -8,19 +8,19 @@ use crate::api::handlers::{EventResponse, MitigationResponse};
 pub enum WsMessage {
     /// A new mitigation was created
     MitigationCreated { mitigation: MitigationResponse },
-    
+
     /// An existing mitigation was updated
     MitigationUpdated { mitigation: MitigationResponse },
-    
+
     /// A mitigation expired due to TTL
     MitigationExpired { mitigation_id: String },
-    
+
     /// A mitigation was manually withdrawn
     MitigationWithdrawn { mitigation_id: String },
-    
+
     /// A new event was ingested
     EventIngested { event: EventResponse },
-    
+
     /// Client fell behind, needs to resync
     ResyncRequired {},
 }

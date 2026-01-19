@@ -3,7 +3,7 @@
 use axum::{body::Body, extract::MatchedPath, http::Request, middleware::Next, response::Response};
 use std::time::Instant;
 
-use crate::observability::metrics::{HTTP_IN_FLIGHT, HTTP_REQUESTS_TOTAL, HTTP_REQUEST_DURATION};
+use crate::observability::metrics::{HTTP_IN_FLIGHT, HTTP_REQUEST_DURATION, HTTP_REQUESTS_TOTAL};
 
 /// Middleware to collect HTTP metrics (requests, duration, in-flight)
 pub async fn http_metrics(req: Request<Body>, next: Next) -> Response {

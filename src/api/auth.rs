@@ -1,13 +1,13 @@
 use axum::{
     extract::{Request, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     middleware::Next,
     response::Response,
 };
 use std::sync::Arc;
 
-use crate::config::AuthMode;
 use crate::AppState;
+use crate::config::AuthMode;
 
 use crate::auth::AuthSession;
 
@@ -81,7 +81,7 @@ pub async fn hybrid_auth_middleware(
             }
         }
     }
-    
+
     tracing::debug!("no valid session or bearer token");
     Err(StatusCode::UNAUTHORIZED)
 }

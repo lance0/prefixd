@@ -13,7 +13,7 @@ use crate::db::RepositoryTrait;
 pub type AuthSession = axum_login::AuthSession<AuthBackend>;
 
 /// Create the auth manager layer for the router
-/// 
+///
 /// # Arguments
 /// * `pool` - PostgreSQL connection pool for session storage
 /// * `repo` - Repository for operator lookups
@@ -25,7 +25,7 @@ pub async fn create_auth_layer(
 ) -> axum_login::AuthManagerLayer<AuthBackend, PostgresStore> {
     // Session store using PostgreSQL
     let session_store = PostgresStore::new(pool.clone());
-    
+
     // Spawn task to clean up expired sessions (fire and forget)
     tokio::task::spawn(async move {
         if let Err(e) = session_store

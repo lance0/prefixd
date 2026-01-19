@@ -1,12 +1,13 @@
 use std::path::Path;
 use std::sync::Arc;
 use testcontainers::{
+    ContainerAsync, GenericImage, ImageExt,
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,
-    ContainerAsync, GenericImage, ImageExt,
 };
 use testcontainers_modules::postgres::Postgres;
 
+use prefixd::AppState;
 use prefixd::auth::create_auth_layer;
 use prefixd::bgp::{FlowSpecAnnouncer, GoBgpAnnouncer, MockAnnouncer};
 use prefixd::config::{
@@ -15,9 +16,8 @@ use prefixd::config::{
     PlaybookAction, PlaybookMatch, PlaybookStep, Playbooks, QuotasConfig, RateLimitConfig,
     SafelistConfig, Service, Settings, ShutdownConfig, StorageConfig, TimersConfig,
 };
-use prefixd::db::{init_postgres_pool, Repository, RepositoryTrait};
+use prefixd::db::{Repository, RepositoryTrait, init_postgres_pool};
 use prefixd::domain::AttackVector;
-use prefixd::AppState;
 use sqlx::PgPool;
 
 pub struct TestContext {
@@ -41,10 +41,7 @@ impl TestContext {
             .await
             .expect("Failed to get port");
 
-        let connection_string = format!(
-            "postgres://postgres:postgres@{}:{}/postgres",
-            host, port
-        );
+        let connection_string = format!("postgres://postgres:postgres@{}:{}/postgres", host, port);
 
         let pool = init_postgres_pool(&connection_string)
             .await
@@ -93,10 +90,7 @@ impl TestContext {
             .await
             .expect("Failed to get port");
 
-        let connection_string = format!(
-            "postgres://postgres:postgres@{}:{}/postgres",
-            host, port
-        );
+        let connection_string = format!("postgres://postgres:postgres@{}:{}/postgres", host, port);
 
         let pool = init_postgres_pool(&connection_string)
             .await
@@ -304,7 +298,10 @@ impl E2ETestContext {
             .await
             .expect("Failed to start Postgres container");
 
-        let pg_host = postgres.get_host().await.expect("Failed to get Postgres host");
+        let pg_host = postgres
+            .get_host()
+            .await
+            .expect("Failed to get Postgres host");
         let pg_port = postgres
             .get_host_port_ipv4(5432)
             .await
@@ -321,11 +318,7 @@ impl E2ETestContext {
             .with_exposed_port(50051.tcp())
             .with_exposed_port(179.tcp())
             .with_wait_for(WaitFor::seconds(3))
-            .with_cmd([
-                "/usr/local/bin/gobgpd",
-                "-p",
-                "--api-hosts=0.0.0.0:50051",
-            ])
+            .with_cmd(["/usr/local/bin/gobgpd", "-p", "--api-hosts=0.0.0.0:50051"])
             .start()
             .await
             .expect("Failed to start GoBGP container");
@@ -353,7 +346,10 @@ impl E2ETestContext {
 
         // Create REAL GoBGP announcer
         let mut announcer = GoBgpAnnouncer::new(gobgp_endpoint.clone());
-        announcer.connect().await.expect("Failed to connect to GoBGP");
+        announcer
+            .connect()
+            .await
+            .expect("Failed to connect to GoBGP");
         let announcer = Arc::new(announcer);
 
         // Settings configured for ENFORCED mode (not dry-run)
@@ -392,9 +388,7 @@ impl E2ETestContext {
 
 /// Configure GoBGP via gRPC StartBgp call
 async fn configure_gobgp(endpoint: &str) {
-    use prefixd::bgp::apipb::{
-        go_bgp_service_client::GoBgpServiceClient, Global, StartBgpRequest,
-    };
+    use prefixd::bgp::apipb::{Global, StartBgpRequest, go_bgp_service_client::GoBgpServiceClient};
     use tonic::transport::Channel;
 
     let channel = Channel::from_shared(format!("http://{}", endpoint))

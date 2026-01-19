@@ -5,9 +5,11 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use super::RepositoryTrait;
-use crate::domain::{AttackEvent, Mitigation, MitigationRow, MitigationStatus, Operator, OperatorRole};
+use crate::domain::{
+    AttackEvent, Mitigation, MitigationRow, MitigationStatus, Operator, OperatorRole,
+};
 use crate::error::Result;
-use crate::observability::{metrics::ROW_PARSE_ERRORS, ActorType, AuditEntry};
+use crate::observability::{ActorType, AuditEntry, metrics::ROW_PARSE_ERRORS};
 
 #[derive(Debug, FromRow)]
 struct AuditRow {
@@ -241,7 +243,11 @@ impl RepositoryTrait for Repository {
         }
     }
 
-    async fn find_active_by_scope(&self, scope_hash: &str, pop: &str) -> Result<Option<Mitigation>> {
+    async fn find_active_by_scope(
+        &self,
+        scope_hash: &str,
+        pop: &str,
+    ) -> Result<Option<Mitigation>> {
         let row = sqlx::query_as::<_, MitigationRow>(
             r#"
             SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
@@ -297,8 +303,8 @@ impl RepositoryTrait for Repository {
         offset: u32,
     ) -> Result<Vec<Mitigation>> {
         // Convert status filter to string array for parameterized query
-        let status_strings: Option<Vec<String>> = status_filter
-            .map(|statuses| statuses.iter().map(|s| s.as_str().to_string()).collect());
+        let status_strings: Option<Vec<String>> =
+            status_filter.map(|statuses| statuses.iter().map(|s| s.as_str().to_string()).collect());
 
         let rows = sqlx::query_as::<_, MitigationRow>(
             r#"
@@ -390,7 +396,12 @@ impl RepositoryTrait for Repository {
             .collect())
     }
 
-    async fn insert_safelist(&self, prefix: &str, added_by: &str, reason: Option<&str>) -> Result<()> {
+    async fn insert_safelist(
+        &self,
+        prefix: &str,
+        added_by: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             INSERT INTO safelist (prefix, added_at, added_by, reason)
@@ -518,8 +529,8 @@ impl RepositoryTrait for Repository {
         offset: u32,
     ) -> Result<Vec<Mitigation>> {
         // Convert status filter to string array for parameterized query
-        let status_strings: Option<Vec<String>> = status_filter
-            .map(|statuses| statuses.iter().map(|s| s.as_str().to_string()).collect());
+        let status_strings: Option<Vec<String>> =
+            status_filter.map(|statuses| statuses.iter().map(|s| s.as_str().to_string()).collect());
 
         let rows = sqlx::query_as::<_, MitigationRow>(
             r#"

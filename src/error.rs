@@ -21,7 +21,10 @@ pub enum PrefixdError {
 
     // Domain errors
     #[error("duplicate event from {detector_source}: {external_id}")]
-    DuplicateEvent { detector_source: String, external_id: String },
+    DuplicateEvent {
+        detector_source: String,
+        external_id: String,
+    },
 
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),

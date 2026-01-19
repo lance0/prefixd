@@ -7,10 +7,11 @@ use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
 use super::apipb::{
-    go_bgp_service_client::GoBgpServiceClient, AddPathRequest, Attribute, DeletePathRequest,
-    ExtendedCommunitiesAttribute, ExtendedCommunity, Family, FlowSpecComponent,
-    FlowSpecComponentItem, FlowSpecIpPrefix, FlowSpecNlri as ProtoFlowSpecNlri, FlowSpecRule as ProtoFlowSpecRule,
-    ListPathRequest, ListPeerRequest, MpReachNlriAttribute, Nlri, OriginAttribute, Path, TableType, TrafficRateExtended,
+    AddPathRequest, Attribute, DeletePathRequest, ExtendedCommunitiesAttribute, ExtendedCommunity,
+    Family, FlowSpecComponent, FlowSpecComponentItem, FlowSpecIpPrefix,
+    FlowSpecNlri as ProtoFlowSpecNlri, FlowSpecRule as ProtoFlowSpecRule, ListPathRequest,
+    ListPeerRequest, MpReachNlriAttribute, Nlri, OriginAttribute, Path, TableType,
+    TrafficRateExtended, go_bgp_service_client::GoBgpServiceClient,
 };
 use super::apipb::{attribute, extended_community, flow_spec_rule, nlri};
 use super::{FlowSpecAnnouncer, PeerStatus, SessionState};
@@ -101,7 +102,10 @@ impl GoBgpAnnouncer {
         }
 
         Err(last_error.unwrap_or_else(|| {
-            PrefixdError::Internal(format!("{} failed after {} retries", operation, MAX_RETRIES))
+            PrefixdError::Internal(format!(
+                "{} failed after {} retries",
+                operation, MAX_RETRIES
+            ))
         }))
     }
 
@@ -143,7 +147,11 @@ impl GoBgpAnnouncer {
         // For FlowSpec, the nexthop is typically 0.0.0.0 (IPv4) or :: (IPv6)
         let mp_reach = MpReachNlriAttribute {
             family: Some(family.clone()),
-            next_hops: vec![if is_v6 { "::".to_string() } else { "0.0.0.0".to_string() }],
+            next_hops: vec![if is_v6 {
+                "::".to_string()
+            } else {
+                "0.0.0.0".to_string()
+            }],
             nlris: vec![Nlri {
                 nlri: Some(nlri::Nlri::FlowSpec(flowspec_nlri)),
             }],
@@ -168,7 +176,12 @@ impl GoBgpAnnouncer {
 
         // Type 1: Destination Prefix - use FlowSpecIPPrefix for proper encoding
         let prefix_bytes = prefix_u32.to_be_bytes();
-        let addr = Ipv4Addr::new(prefix_bytes[0], prefix_bytes[1], prefix_bytes[2], prefix_bytes[3]);
+        let addr = Ipv4Addr::new(
+            prefix_bytes[0],
+            prefix_bytes[1],
+            prefix_bytes[2],
+            prefix_bytes[3],
+        );
         let dst_prefix = FlowSpecIpPrefix {
             r#type: 1, // FLOWSPEC_TYPE_DST_PREFIX
             prefix_len: prefix_len as u32,
@@ -274,10 +287,7 @@ impl GoBgpAnnouncer {
                 })
                 .collect();
 
-            let port_component = FlowSpecComponent {
-                r#type: 5,
-                items,
-            };
+            let port_component = FlowSpecComponent { r#type: 5, items };
             rules.push(ProtoFlowSpecRule {
                 rule: Some(flow_spec_rule::Rule::Component(port_component)),
             });
@@ -302,10 +312,7 @@ impl GoBgpAnnouncer {
             match action.action_type {
                 ActionType::Discard => {
                     // Traffic-rate 0 = discard
-                    let traffic_rate = TrafficRateExtended {
-                        asn: 0,
-                        rate: 0.0,
-                    };
+                    let traffic_rate = TrafficRateExtended { asn: 0, rate: 0.0 };
                     communities.push(ExtendedCommunity {
                         extcom: Some(extended_community::Extcom::TrafficRate(traffic_rate)),
                     });
@@ -341,11 +348,9 @@ impl GoBgpAnnouncer {
         let ip = Ipv4Addr::from_str(parts[0]).map_err(|_| {
             PrefixdError::InvalidPrefix(format!("invalid IPv4 in prefix: {}", prefix))
         })?;
-        let len: u8 = parts
-            .get(1)
-            .unwrap_or(&"32")
-            .parse()
-            .map_err(|_| PrefixdError::InvalidPrefix(format!("invalid prefix length: {}", prefix)))?;
+        let len: u8 = parts.get(1).unwrap_or(&"32").parse().map_err(|_| {
+            PrefixdError::InvalidPrefix(format!("invalid prefix length: {}", prefix))
+        })?;
         Ok((u32::from(ip), len))
     }
 
@@ -354,11 +359,9 @@ impl GoBgpAnnouncer {
         let ip = Ipv6Addr::from_str(parts[0]).map_err(|_| {
             PrefixdError::InvalidPrefix(format!("invalid IPv6 in prefix: {}", prefix))
         })?;
-        let len: u8 = parts
-            .get(1)
-            .unwrap_or(&"128")
-            .parse()
-            .map_err(|_| PrefixdError::InvalidPrefix(format!("invalid prefix length: {}", prefix)))?;
+        let len: u8 = parts.get(1).unwrap_or(&"128").parse().map_err(|_| {
+            PrefixdError::InvalidPrefix(format!("invalid prefix length: {}", prefix))
+        })?;
         Ok((ip, len))
     }
 }
@@ -473,27 +476,36 @@ impl FlowSpecAnnouncer for GoBgpAnnouncer {
             ..Default::default()
         };
 
-        let mut stream = client.list_peer(request).await.map_err(|e| {
-            PrefixdError::Internal(format!("GoBGP ListPeer failed: {}", e))
-        })?.into_inner();
+        let mut stream = client
+            .list_peer(request)
+            .await
+            .map_err(|e| PrefixdError::Internal(format!("GoBGP ListPeer failed: {}", e)))?
+            .into_inner();
 
         let mut peers = Vec::new();
 
-        while let Some(resp) = stream.message().await.map_err(|e| {
-            PrefixdError::Internal(format!("GoBGP stream error: {}", e))
-        })? {
+        while let Some(resp) = stream
+            .message()
+            .await
+            .map_err(|e| PrefixdError::Internal(format!("GoBGP stream error: {}", e)))?
+        {
             if let Some(peer) = resp.peer {
-                let state = peer.state.map(|s| match s.session_state {
-                    1 => SessionState::Idle,
-                    2 => SessionState::Connect,
-                    3 => SessionState::Active,
-                    4 => SessionState::OpenSent,
-                    5 => SessionState::OpenConfirm,
-                    6 => SessionState::Established,
-                    _ => SessionState::Idle,
-                }).unwrap_or(SessionState::Idle);
+                let state = peer
+                    .state
+                    .map(|s| match s.session_state {
+                        1 => SessionState::Idle,
+                        2 => SessionState::Connect,
+                        3 => SessionState::Active,
+                        4 => SessionState::OpenSent,
+                        5 => SessionState::OpenConfirm,
+                        6 => SessionState::Established,
+                        _ => SessionState::Idle,
+                    })
+                    .unwrap_or(SessionState::Idle);
 
-                let name = peer.conf.as_ref()
+                let name = peer
+                    .conf
+                    .as_ref()
                     .map(|c| c.neighbor_address.clone())
                     .unwrap_or_default();
 
@@ -524,13 +536,17 @@ impl GoBgpAnnouncer {
             ..Default::default()
         };
 
-        let mut stream = client.list_path(request).await.map_err(|e| {
-            PrefixdError::Internal(format!("GoBGP ListPath failed: {}", e))
-        })?.into_inner();
+        let mut stream = client
+            .list_path(request)
+            .await
+            .map_err(|e| PrefixdError::Internal(format!("GoBGP ListPath failed: {}", e)))?
+            .into_inner();
 
-        while let Some(resp) = stream.message().await.map_err(|e| {
-            PrefixdError::Internal(format!("GoBGP stream error: {}", e))
-        })? {
+        while let Some(resp) = stream
+            .message()
+            .await
+            .map_err(|e| PrefixdError::Internal(format!("GoBGP stream error: {}", e)))?
+        {
             if let Some(dest) = resp.destination {
                 for path in dest.paths {
                     match self.parse_flowspec_path(&path) {
@@ -556,9 +572,10 @@ impl GoBgpAnnouncer {
     /// Updated for GoBGP v4 API which uses typed oneof instead of Any.
     fn parse_flowspec_path(&self, path: &Path) -> Result<FlowSpecRule> {
         // 1. Parse NLRI (now a typed Nlri message with oneof)
-        let nlri_wrapper = path.nlri.as_ref().ok_or_else(|| {
-            PrefixdError::Internal("Path has no NLRI".to_string())
-        })?;
+        let nlri_wrapper = path
+            .nlri
+            .as_ref()
+            .ok_or_else(|| PrefixdError::Internal("Path has no NLRI".to_string()))?;
 
         let flowspec_nlri = self.decode_flowspec_nlri(nlri_wrapper)?;
 
@@ -581,9 +598,7 @@ impl GoBgpAnnouncer {
                 )));
             }
             None => {
-                return Err(PrefixdError::Internal(
-                    "NLRI has no inner type".to_string()
-                ));
+                return Err(PrefixdError::Internal("NLRI has no inner type".to_string()));
             }
         };
 
@@ -647,7 +662,9 @@ impl GoBgpAnnouncer {
         for attr in pattrs {
             if let Some(attribute::Attr::ExtendedCommunities(ext_comm)) = &attr.attr {
                 for community in &ext_comm.communities {
-                    if let Some(extended_community::Extcom::TrafficRate(traffic_rate)) = &community.extcom {
+                    if let Some(extended_community::Extcom::TrafficRate(traffic_rate)) =
+                        &community.extcom
+                    {
                         // rate == 0 means discard, otherwise it's police with rate
                         if traffic_rate.rate == 0.0 {
                             return Ok(FlowSpecAction {
@@ -761,7 +778,11 @@ mod tests {
         assert!(announcer.parse_prefix_v6("not-an-ip/128").is_err());
         assert!(announcer.parse_prefix_v6("2001:db8::1/abc").is_err());
         // Too many segments
-        assert!(announcer.parse_prefix_v6("2001:db8:1:2:3:4:5:6:7/64").is_err());
+        assert!(
+            announcer
+                .parse_prefix_v6("2001:db8:1:2:3:4:5:6:7/64")
+                .is_err()
+        );
     }
 
     // ==========================================================================
@@ -1093,7 +1114,12 @@ mod tests {
 
         let result = announcer.parse_flowspec_path(&path);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unexpected NLRI type"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unexpected NLRI type")
+        );
     }
 
     #[test]

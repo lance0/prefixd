@@ -111,9 +111,7 @@ impl Alert {
             "Mitigation Created",
             &format!(
                 "{} mitigation for {} ({})",
-                mitigation.action_type,
-                mitigation.victim_ip,
-                mitigation.vector
+                mitigation.action_type, mitigation.victim_ip, mitigation.vector
             ),
         )
     }
@@ -145,7 +143,10 @@ impl AlertingClient {
             .build()
             .unwrap_or_default();
 
-        Self { config, http_client }
+        Self {
+            config,
+            http_client,
+        }
     }
 
     pub async fn send(&self, alert: &Alert) -> Result<()> {

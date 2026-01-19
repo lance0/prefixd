@@ -1,7 +1,7 @@
 use axum::{
     extract::{
-        ws::{Message, WebSocket},
         State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
     },
     http::StatusCode,
     response::IntoResponse,
@@ -11,8 +11,8 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use super::WsMessage;
-use crate::auth::AuthSession;
 use crate::AppState;
+use crate::auth::AuthSession;
 
 /// WebSocket endpoint handler
 /// Requires authenticated session (cookie-based)

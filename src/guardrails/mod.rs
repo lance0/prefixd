@@ -16,17 +16,31 @@ pub struct Guardrails {
 
 impl Guardrails {
     /// Create guardrails with explicit TTL bounds (for production use with timers fallback)
-    pub fn with_timers(config: GuardrailsConfig, quotas: QuotasConfig, timers: &TimersConfig) -> Self {
+    pub fn with_timers(
+        config: GuardrailsConfig,
+        quotas: QuotasConfig,
+        timers: &TimersConfig,
+    ) -> Self {
         let min_ttl = config.min_ttl_seconds.unwrap_or(timers.min_ttl_seconds);
         let max_ttl = config.max_ttl_seconds.unwrap_or(timers.max_ttl_seconds);
-        Self { config, quotas, min_ttl, max_ttl }
+        Self {
+            config,
+            quotas,
+            min_ttl,
+            max_ttl,
+        }
     }
 
     /// Create guardrails with config-only TTL bounds (for tests)
     pub fn new(config: GuardrailsConfig, quotas: QuotasConfig) -> Self {
         let min_ttl = config.min_ttl_seconds.unwrap_or(0);
         let max_ttl = config.max_ttl_seconds.unwrap_or(u32::MAX);
-        Self { config, quotas, min_ttl, max_ttl }
+        Self {
+            config,
+            quotas,
+            min_ttl,
+            max_ttl,
+        }
     }
 
     pub async fn validate(
@@ -38,9 +52,9 @@ impl Guardrails {
         // Check safelist
         if is_safelisted {
             let ip = &intent.match_criteria.dst_prefix;
-            return Err(PrefixdError::GuardrailViolation(GuardrailError::Safelisted {
-                ip: ip.clone(),
-            }));
+            return Err(PrefixdError::GuardrailViolation(
+                GuardrailError::Safelisted { ip: ip.clone() },
+            ));
         }
 
         // Check TTL
@@ -60,16 +74,20 @@ impl Guardrails {
 
     fn validate_ttl(&self, ttl: u32) -> Result<()> {
         if self.config.require_ttl && ttl == 0 {
-            return Err(PrefixdError::GuardrailViolation(GuardrailError::TtlRequired));
+            return Err(PrefixdError::GuardrailViolation(
+                GuardrailError::TtlRequired,
+            ));
         }
 
         // Use resolved TTL bounds (from guardrails config or timers fallback)
         if ttl > 0 && (ttl < self.min_ttl || ttl > self.max_ttl) {
-            return Err(PrefixdError::GuardrailViolation(GuardrailError::TtlOutOfBounds {
-                ttl,
-                min: self.min_ttl,
-                max: self.max_ttl,
-            }));
+            return Err(PrefixdError::GuardrailViolation(
+                GuardrailError::TtlOutOfBounds {
+                    ttl,
+                    min: self.min_ttl,
+                    max: self.max_ttl,
+                },
+            ));
         }
 
         Ok(())
@@ -112,45 +130,57 @@ impl Guardrails {
 
     fn validate_port_count(&self, criteria: &MatchCriteria) -> Result<()> {
         if criteria.dst_ports.len() > self.config.max_ports {
-            return Err(PrefixdError::GuardrailViolation(GuardrailError::TooManyPorts {
-                count: criteria.dst_ports.len(),
-                max: self.config.max_ports,
-            }));
+            return Err(PrefixdError::GuardrailViolation(
+                GuardrailError::TooManyPorts {
+                    count: criteria.dst_ports.len(),
+                    max: self.config.max_ports,
+                },
+            ));
         }
         Ok(())
     }
 
-    async fn validate_quotas(&self, intent: &MitigationIntent, repo: &dyn RepositoryTrait) -> Result<()> {
+    async fn validate_quotas(
+        &self,
+        intent: &MitigationIntent,
+        repo: &dyn RepositoryTrait,
+    ) -> Result<()> {
         // Customer quota
         if let Some(ref cid) = intent.customer_id {
             let count = repo.count_active_by_customer(cid).await?;
             if count >= self.quotas.max_active_per_customer {
-                return Err(PrefixdError::GuardrailViolation(GuardrailError::QuotaExceeded {
-                    quota_type: "customer".to_string(),
-                    current: count,
-                    max: self.quotas.max_active_per_customer,
-                }));
+                return Err(PrefixdError::GuardrailViolation(
+                    GuardrailError::QuotaExceeded {
+                        quota_type: "customer".to_string(),
+                        current: count,
+                        max: self.quotas.max_active_per_customer,
+                    },
+                ));
             }
         }
 
         // POP quota
         let pop_count = repo.count_active_by_pop(&intent.pop).await?;
         if pop_count >= self.quotas.max_active_per_pop {
-            return Err(PrefixdError::GuardrailViolation(GuardrailError::QuotaExceeded {
-                quota_type: "pop".to_string(),
-                current: pop_count,
-                max: self.quotas.max_active_per_pop,
-            }));
+            return Err(PrefixdError::GuardrailViolation(
+                GuardrailError::QuotaExceeded {
+                    quota_type: "pop".to_string(),
+                    current: pop_count,
+                    max: self.quotas.max_active_per_pop,
+                },
+            ));
         }
 
         // Global quota
         let global_count = repo.count_active_global().await?;
         if global_count >= self.quotas.max_active_global {
-            return Err(PrefixdError::GuardrailViolation(GuardrailError::QuotaExceeded {
-                quota_type: "global".to_string(),
-                current: global_count,
-                max: self.quotas.max_active_global,
-            }));
+            return Err(PrefixdError::GuardrailViolation(
+                GuardrailError::QuotaExceeded {
+                    quota_type: "global".to_string(),
+                    current: global_count,
+                    max: self.quotas.max_active_global,
+                },
+            ));
         }
 
         Ok(())
@@ -280,7 +310,7 @@ mod tests {
 
         // Valid TTLs within bounds (30-1800)
         assert!(guardrails.validate_ttl(60).is_ok());
-        assert!(guardrails.validate_ttl(30).is_ok());  // min
+        assert!(guardrails.validate_ttl(30).is_ok()); // min
         assert!(guardrails.validate_ttl(1800).is_ok()); // max
     }
 
@@ -356,7 +386,11 @@ mod tests {
         let result = guardrails.validate_prefix_length(&invalid);
         assert!(result.is_err());
         match result.unwrap_err() {
-            PrefixdError::GuardrailViolation(GuardrailError::PrefixLengthViolation { len, min, max }) => {
+            PrefixdError::GuardrailViolation(GuardrailError::PrefixLengthViolation {
+                len,
+                min,
+                max,
+            }) => {
                 assert_eq!(len, 24);
                 assert_eq!(min, 32);
                 assert_eq!(max, 32);

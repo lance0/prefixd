@@ -1,10 +1,10 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
-use prefixd::config::{
-    AllowedPorts, Asset, Customer, Inventory, Service,
-};
+use prefixd::config::{AllowedPorts, Asset, Customer, Inventory, Service};
 use prefixd::db::{MockRepository, RepositoryTrait};
-use prefixd::domain::{ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationStatus};
+use prefixd::domain::{
+    ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationStatus,
+};
 
 fn test_inventory() -> Inventory {
     let mut customers = Vec::new();
@@ -236,9 +236,7 @@ fn bench_uuid(c: &mut Criterion) {
     });
 
     let id = uuid::Uuid::new_v4();
-    c.bench_function("uuid_to_string", |b| {
-        b.iter(|| black_box(id.to_string()))
-    });
+    c.bench_function("uuid_to_string", |b| b.iter(|| black_box(id.to_string())));
 }
 
 // Group benchmarks with different sample sizes for DB operations
@@ -291,9 +289,7 @@ fn bench_inventory_scaling(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("lookup", num_customers),
             num_customers,
-            |b, _| {
-                b.iter(|| black_box(inventory.lookup_ip("203.50.1.1")))
-            },
+            |b, _| b.iter(|| black_box(inventory.lookup_ip("203.50.1.1"))),
         );
     }
     group.finish();

@@ -222,7 +222,10 @@ impl Mitigation {
                 error = %e,
                 "failed to parse match_json - possible data corruption"
             );
-            PrefixdError::Internal(format!("invalid match_json for mitigation {}: {}", row.mitigation_id, e))
+            PrefixdError::Internal(format!(
+                "invalid match_json for mitigation {}: {}",
+                row.mitigation_id, e
+            ))
         })?;
 
         let action_params: ActionParams = match &row.action_params_json {
@@ -232,7 +235,10 @@ impl Mitigation {
                     error = %e,
                     "failed to parse action_params_json - possible data corruption"
                 );
-                PrefixdError::Internal(format!("invalid action_params_json for mitigation {}: {}", row.mitigation_id, e))
+                PrefixdError::Internal(format!(
+                    "invalid action_params_json for mitigation {}: {}",
+                    row.mitigation_id, e
+                ))
             })?,
             None => ActionParams { rate_bps: None },
         };
@@ -243,7 +249,10 @@ impl Mitigation {
                 vector = %row.vector,
                 "failed to parse vector - possible data corruption"
             );
-            PrefixdError::Internal(format!("invalid vector '{}' for mitigation {}", row.vector, row.mitigation_id))
+            PrefixdError::Internal(format!(
+                "invalid vector '{}' for mitigation {}",
+                row.vector, row.mitigation_id
+            ))
         })?;
 
         let action_type = row.action_type.parse().map_err(|_| {
@@ -252,7 +261,10 @@ impl Mitigation {
                 action_type = %row.action_type,
                 "failed to parse action_type - possible data corruption"
             );
-            PrefixdError::Internal(format!("invalid action_type '{}' for mitigation {}", row.action_type, row.mitigation_id))
+            PrefixdError::Internal(format!(
+                "invalid action_type '{}' for mitigation {}",
+                row.action_type, row.mitigation_id
+            ))
         })?;
 
         let status = row.status.parse().map_err(|_| {
@@ -261,7 +273,10 @@ impl Mitigation {
                 status = %row.status,
                 "failed to parse status - possible data corruption"
             );
-            PrefixdError::Internal(format!("invalid status '{}' for mitigation {}", row.status, row.mitigation_id))
+            PrefixdError::Internal(format!(
+                "invalid status '{}' for mitigation {}",
+                row.status, row.mitigation_id
+            ))
         })?;
 
         Ok(Self {

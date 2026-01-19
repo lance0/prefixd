@@ -1,7 +1,7 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::{RwLock, broadcast};
 
 use crate::bgp::FlowSpecAnnouncer;
 use crate::config::{AuthMode, Inventory, Playbooks, Settings};

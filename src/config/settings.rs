@@ -82,8 +82,12 @@ impl Default for RateLimitConfig {
     }
 }
 
-fn default_events_per_second() -> u32 { 100 }
-fn default_burst() -> u32 { 500 }
+fn default_events_per_second() -> u32 {
+    100
+}
+fn default_burst() -> u32 {
+    500
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BgpConfig {
@@ -96,7 +100,9 @@ pub struct BgpConfig {
     pub neighbors: Vec<BgpNeighbor>,
 }
 
-fn default_bgp_mode() -> BgpMode { BgpMode::Sidecar }
+fn default_bgp_mode() -> BgpMode {
+    BgpMode::Sidecar
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -148,9 +154,15 @@ pub struct GuardrailsConfig {
     pub allow_packet_length_match: bool,
 }
 
-fn default_true() -> bool { true }
-fn default_32() -> u8 { 32 }
-fn default_max_ports() -> usize { 8 }
+fn default_true() -> bool {
+    true
+}
+fn default_32() -> u8 {
+    32
+}
+fn default_max_ports() -> usize {
+    8
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotasConfig {
@@ -166,11 +178,21 @@ pub struct QuotasConfig {
     pub max_announcements_per_peer: u32,
 }
 
-fn default_max_per_customer() -> u32 { 5 }
-fn default_max_per_pop() -> u32 { 200 }
-fn default_max_global() -> u32 { 500 }
-fn default_max_new_per_minute() -> u32 { 30 }
-fn default_max_per_peer() -> u32 { 100 }
+fn default_max_per_customer() -> u32 {
+    5
+}
+fn default_max_per_pop() -> u32 {
+    200
+}
+fn default_max_global() -> u32 {
+    500
+}
+fn default_max_new_per_minute() -> u32 {
+    30
+}
+fn default_max_per_peer() -> u32 {
+    100
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimersConfig {
@@ -188,12 +210,24 @@ pub struct TimersConfig {
     pub quiet_period_after_withdraw_seconds: u32,
 }
 
-fn default_ttl() -> u32 { 120 }
-fn default_min_ttl() -> u32 { 30 }
-fn default_max_ttl() -> u32 { 1800 }
-fn default_correlation_window() -> u32 { 300 }
-fn default_reconciliation_interval() -> u32 { 30 }
-fn default_quiet_period() -> u32 { 120 }
+fn default_ttl() -> u32 {
+    120
+}
+fn default_min_ttl() -> u32 {
+    30
+}
+fn default_max_ttl() -> u32 {
+    1800
+}
+fn default_correlation_window() -> u32 {
+    300
+}
+fn default_reconciliation_interval() -> u32 {
+    30
+}
+fn default_quiet_period() -> u32 {
+    120
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EscalationConfig {
@@ -207,9 +241,15 @@ pub struct EscalationConfig {
     pub max_escalated_duration_seconds: u32,
 }
 
-fn default_min_persistence() -> u32 { 120 }
-fn default_min_confidence() -> f64 { 0.7 }
-fn default_max_escalated_duration() -> u32 { 1800 }
+fn default_min_persistence() -> u32 {
+    120
+}
+fn default_min_confidence() -> f64 {
+    0.7
+}
+fn default_max_escalated_duration() -> u32 {
+    1800
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
@@ -227,8 +267,12 @@ pub struct ObservabilityConfig {
     pub metrics_listen: String,
 }
 
-fn default_log_format() -> LogFormat { LogFormat::Json }
-fn default_log_level() -> String { "info".to_string() }
+fn default_log_format() -> LogFormat {
+    LogFormat::Json
+}
+fn default_log_level() -> String {
+    "info".to_string()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -260,7 +304,9 @@ impl Default for ShutdownConfig {
     }
 }
 
-fn default_drain_timeout() -> u32 { 30 }
+fn default_drain_timeout() -> u32 {
+    30
+}
 
 impl Settings {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {

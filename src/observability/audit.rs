@@ -164,10 +164,7 @@ pub struct AuditLogWriter {
 
 impl AuditLogWriter {
     pub fn new<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
 
         Ok(Self {
             writer: Mutex::new(BufWriter::new(file)),
@@ -200,12 +197,8 @@ mod tests {
 
     #[test]
     fn test_audit_entry_serialization() {
-        let entry = AuditEntry::event_ingested(
-            "fastnetmon",
-            Uuid::new_v4(),
-            "203.0.113.10",
-            "udp_flood",
-        );
+        let entry =
+            AuditEntry::event_ingested("fastnetmon", Uuid::new_v4(), "203.0.113.10", "udp_flood");
 
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("\"action\":\"ingest\""));
@@ -217,12 +210,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let writer = AuditLogWriter::new(temp_file.path()).unwrap();
 
-        let entry = AuditEntry::event_ingested(
-            "test",
-            Uuid::new_v4(),
-            "203.0.113.10",
-            "udp_flood",
-        );
+        let entry = AuditEntry::event_ingested("test", Uuid::new_v4(), "203.0.113.10", "udp_flood");
 
         writer.write(&entry).unwrap();
 

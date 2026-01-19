@@ -6,16 +6,19 @@
 //!   docker compose up -d gobgp
 //!   cargo test --test integration_gobgp -- --ignored
 
-use std::time::Duration;
 use prefixd::bgp::{FlowSpecAnnouncer, GoBgpAnnouncer};
 use prefixd::domain::{ActionType, FlowSpecAction, FlowSpecNlri, FlowSpecRule};
+use std::time::Duration;
 
 const GOBGP_ENDPOINT: &str = "127.0.0.1:50051";
 
 /// Helper to create and connect a GoBGP announcer
 async fn connect_gobgp() -> GoBgpAnnouncer {
     let mut announcer = GoBgpAnnouncer::new(GOBGP_ENDPOINT.to_string());
-    announcer.connect().await.expect("Failed to connect to GoBGP");
+    announcer
+        .connect()
+        .await
+        .expect("Failed to connect to GoBGP");
     announcer
 }
 
@@ -44,7 +47,10 @@ async fn test_announce_and_list_active() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // List active rules
-    let active = announcer.list_active().await.expect("Failed to list active");
+    let active = announcer
+        .list_active()
+        .await
+        .expect("Failed to list active");
 
     // Find our rule by NLRI hash
     let found = active.iter().find(|r| r.nlri_hash() == rule.nlri_hash());
@@ -83,7 +89,10 @@ async fn test_announce_withdraw_cycle() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Verify present
-    let active = announcer.list_active().await.expect("Failed to list active");
+    let active = announcer
+        .list_active()
+        .await
+        .expect("Failed to list active");
     assert!(
         active.iter().any(|r| r.nlri_hash() == rule.nlri_hash()),
         "Rule should be in RIB after announce"
@@ -94,7 +103,10 @@ async fn test_announce_withdraw_cycle() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Verify gone
-    let active = announcer.list_active().await.expect("Failed to list active");
+    let active = announcer
+        .list_active()
+        .await
+        .expect("Failed to list active");
     assert!(
         !active.iter().any(|r| r.nlri_hash() == rule.nlri_hash()),
         "Rule should NOT be in RIB after withdraw"
@@ -165,8 +177,11 @@ async fn test_multiple_rules_roundtrip() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // List and verify all present
-    let active = announcer.list_active().await.expect("Failed to list active");
-    
+    let active = announcer
+        .list_active()
+        .await
+        .expect("Failed to list active");
+
     for rule in &rules {
         let found = active.iter().find(|r| r.nlri_hash() == rule.nlri_hash());
         assert!(
@@ -174,7 +189,7 @@ async fn test_multiple_rules_roundtrip() {
             "Rule {} not found in RIB",
             rule.nlri.dst_prefix
         );
-        
+
         let parsed = found.unwrap();
         assert_eq!(parsed.nlri.dst_prefix, rule.nlri.dst_prefix);
         assert_eq!(parsed.nlri.protocol, rule.nlri.protocol);
@@ -219,12 +234,18 @@ async fn test_reconciliation_detects_missing_rule() {
     );
 
     // Announce only rule1 (simulating partial state)
-    announcer.announce(&rule1).await.expect("Failed to announce");
+    announcer
+        .announce(&rule1)
+        .await
+        .expect("Failed to announce");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // List active (simulating reconciliation check)
-    let active = announcer.list_active().await.expect("Failed to list active");
-    let active_hashes: std::collections::HashSet<_> = 
+    let active = announcer
+        .list_active()
+        .await
+        .expect("Failed to list active");
+    let active_hashes: std::collections::HashSet<_> =
         active.iter().map(|r| r.nlri_hash()).collect();
 
     // Check which "desired" rules are missing
@@ -238,11 +259,17 @@ async fn test_reconciliation_detects_missing_rule() {
     assert_eq!(missing[0].nlri.dst_prefix, "198.51.100.21/32");
 
     // Reconciliation would re-announce missing rule
-    announcer.announce(&rule2).await.expect("Failed to re-announce");
+    announcer
+        .announce(&rule2)
+        .await
+        .expect("Failed to re-announce");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Verify both now present
-    let active = announcer.list_active().await.expect("Failed to list active");
+    let active = announcer
+        .list_active()
+        .await
+        .expect("Failed to list active");
     assert!(active.iter().any(|r| r.nlri_hash() == rule1.nlri_hash()));
     assert!(active.iter().any(|r| r.nlri_hash() == rule2.nlri_hash()));
 
@@ -283,16 +310,25 @@ async fn test_reconciliation_detects_orphan_rule() {
         },
     );
 
-    announcer.announce(&orphan_rule).await.expect("Failed to announce orphan");
-    announcer.announce(&desired_rule).await.expect("Failed to announce desired");
+    announcer
+        .announce(&orphan_rule)
+        .await
+        .expect("Failed to announce orphan");
+    announcer
+        .announce(&desired_rule)
+        .await
+        .expect("Failed to announce desired");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Simulate desired state (only desired_rule)
-    let desired_hashes: std::collections::HashSet<_> = 
+    let desired_hashes: std::collections::HashSet<_> =
         vec![desired_rule.nlri_hash()].into_iter().collect();
 
     // List active and find orphans
-    let active = announcer.list_active().await.expect("Failed to list active");
+    let active = announcer
+        .list_active()
+        .await
+        .expect("Failed to list active");
     let orphans: Vec<_> = active
         .iter()
         .filter(|r| !desired_hashes.contains(&r.nlri_hash()))
@@ -327,7 +363,10 @@ async fn test_ipv6_flowspec_roundtrip() {
     );
 
     // Announce
-    announcer.announce(&rule).await.expect("Failed to announce IPv6 rule");
+    announcer
+        .announce(&rule)
+        .await
+        .expect("Failed to announce IPv6 rule");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Note: list_active() currently only queries IPv4 FlowSpec (AFI=1)
@@ -335,7 +374,10 @@ async fn test_ipv6_flowspec_roundtrip() {
     // This test verifies announce/withdraw work for IPv6
 
     // Cleanup
-    announcer.withdraw(&rule).await.expect("Failed to withdraw IPv6 rule");
+    announcer
+        .withdraw(&rule)
+        .await
+        .expect("Failed to withdraw IPv6 rule");
 }
 
 /// Test: Session status check
@@ -344,15 +386,18 @@ async fn test_ipv6_flowspec_roundtrip() {
 async fn test_session_status() {
     let announcer = connect_gobgp().await;
 
-    let peers = announcer.session_status().await.expect("Failed to get session status");
-    
+    let peers = announcer
+        .session_status()
+        .await
+        .expect("Failed to get session status");
+
     // In docker-compose setup, GoBGP may have no configured peers
     // Just verify the call succeeds and returns a list
     println!("GoBGP peers: {:?}", peers);
 }
 
 /// Test: End-to-end reconciliation - manually delete from GoBGP, verify re-announcement
-/// 
+///
 /// This simulates what happens when GoBGP loses state (restart, etc.) and the
 /// reconciliation loop detects drift and re-announces missing rules.
 #[tokio::test]
@@ -377,7 +422,10 @@ async fn test_reconciliation_reannounces_after_manual_delete() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // 2. Verify it's in the RIB
-    let active = announcer.list_active().await.expect("Failed to list active");
+    let active = announcer
+        .list_active()
+        .await
+        .expect("Failed to list active");
     assert!(
         active.iter().any(|r| r.nlri_hash() == rule.nlri_hash()),
         "Rule should be in RIB after initial announce"
@@ -388,7 +436,10 @@ async fn test_reconciliation_reannounces_after_manual_delete() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // 4. Verify it's gone
-    let active = announcer.list_active().await.expect("Failed to list active");
+    let active = announcer
+        .list_active()
+        .await
+        .expect("Failed to list active");
     assert!(
         !active.iter().any(|r| r.nlri_hash() == rule.nlri_hash()),
         "Rule should NOT be in RIB after manual delete"
@@ -397,28 +448,35 @@ async fn test_reconciliation_reannounces_after_manual_delete() {
     // 5. Simulate reconciliation: detect missing and re-announce
     // In real prefixd, this would be sync_announcements() comparing DB vs RIB
     let desired_hashes: std::collections::HashSet<_> = vec![rule.nlri_hash()].into_iter().collect();
-    let active_hashes: std::collections::HashSet<_> = 
+    let active_hashes: std::collections::HashSet<_> =
         active.iter().map(|r| r.nlri_hash()).collect();
-    
-    let missing: Vec<_> = desired_hashes
-        .difference(&active_hashes)
-        .collect();
-    
+
+    let missing: Vec<_> = desired_hashes.difference(&active_hashes).collect();
+
     assert_eq!(missing.len(), 1, "Should detect one missing rule");
 
     // Re-announce the missing rule
-    announcer.announce(&rule).await.expect("Failed to re-announce");
+    announcer
+        .announce(&rule)
+        .await
+        .expect("Failed to re-announce");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // 6. Verify it's back
-    let active = announcer.list_active().await.expect("Failed to list active");
+    let active = announcer
+        .list_active()
+        .await
+        .expect("Failed to list active");
     assert!(
         active.iter().any(|r| r.nlri_hash() == rule.nlri_hash()),
         "Rule should be back in RIB after reconciliation re-announce"
     );
 
     // 7. Verify the parsed rule matches original
-    let parsed = active.iter().find(|r| r.nlri_hash() == rule.nlri_hash()).unwrap();
+    let parsed = active
+        .iter()
+        .find(|r| r.nlri_hash() == rule.nlri_hash())
+        .unwrap();
     assert_eq!(parsed.nlri.dst_prefix, rule.nlri.dst_prefix);
     assert_eq!(parsed.nlri.protocol, rule.nlri.protocol);
     assert_eq!(parsed.nlri.dst_ports, rule.nlri.dst_ports);

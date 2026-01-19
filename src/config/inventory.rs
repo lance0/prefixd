@@ -26,7 +26,9 @@ pub struct Customer {
     pub services: Vec<Service>,
 }
 
-fn default_policy_profile() -> PolicyProfile { PolicyProfile::Normal }
+fn default_policy_profile() -> PolicyProfile {
+    PolicyProfile::Normal
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -98,12 +100,18 @@ impl Inventory {
                     if let Ok(ip) = Ipv4Addr::from_str(&asset.ip) {
                         self.ip_index_v4.insert(
                             ip,
-                            (customer.customer_id.clone(), Some(service.service_id.clone())),
+                            (
+                                customer.customer_id.clone(),
+                                Some(service.service_id.clone()),
+                            ),
                         );
                     } else if let Ok(ip) = Ipv6Addr::from_str(&asset.ip) {
                         self.ip_index_v6.insert(
                             ip,
-                            (customer.customer_id.clone(), Some(service.service_id.clone())),
+                            (
+                                customer.customer_id.clone(),
+                                Some(service.service_id.clone()),
+                            ),
                         );
                     }
                 }
@@ -162,12 +170,19 @@ impl Inventory {
     }
 
     fn build_context(&self, customer_id: &str, service_id: Option<&str>) -> Option<IpContext> {
-        let customer = self.customers.iter().find(|c| c.customer_id == customer_id)?;
+        let customer = self
+            .customers
+            .iter()
+            .find(|c| c.customer_id == customer_id)?;
 
         let (svc_id, svc_name, allowed_ports) = if let Some(sid) = service_id {
             let service = customer.services.iter().find(|s| s.service_id == sid);
             if let Some(svc) = service {
-                (Some(svc.service_id.clone()), Some(svc.name.clone()), svc.allowed_ports.clone())
+                (
+                    Some(svc.service_id.clone()),
+                    Some(svc.name.clone()),
+                    svc.allowed_ports.clone(),
+                )
             } else {
                 (None, None, AllowedPorts::default())
             }

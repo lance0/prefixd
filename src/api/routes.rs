@@ -1,8 +1,8 @@
 use axum::{
-    http::{header, HeaderValue, Method},
+    Json, Router,
+    http::{HeaderValue, Method, header},
     response::IntoResponse,
     routing::{any, get, post},
-    Json, Router,
 };
 use axum_login::AuthManagerLayer;
 use std::sync::Arc;
@@ -13,9 +13,9 @@ use tower_sessions_sqlx_store::PostgresStore;
 use utoipa::OpenApi;
 
 use super::{handlers, openapi::ApiDoc};
+use crate::AppState;
 use crate::auth::AuthBackend;
 use crate::ws;
-use crate::AppState;
 
 /// Create the router with auth layer
 pub fn create_router(
@@ -38,12 +38,27 @@ pub fn create_router(
     // API routes - hybrid auth (session OR bearer) enforced via require_auth()
     // Browser dashboard uses session cookies, CLI/detectors use bearer tokens
     let api_routes = Router::new()
-        .route("/v1/events", get(handlers::list_events).post(handlers::ingest_event))
-        .route("/v1/mitigations", get(handlers::list_mitigations).post(handlers::create_mitigation))
+        .route(
+            "/v1/events",
+            get(handlers::list_events).post(handlers::ingest_event),
+        )
+        .route(
+            "/v1/mitigations",
+            get(handlers::list_mitigations).post(handlers::create_mitigation),
+        )
         .route("/v1/mitigations/{id}", get(handlers::get_mitigation))
-        .route("/v1/mitigations/{id}/withdraw", post(handlers::withdraw_mitigation))
-        .route("/v1/safelist", get(handlers::list_safelist).post(handlers::add_safelist))
-        .route("/v1/safelist/{prefix}", axum::routing::delete(handlers::remove_safelist))
+        .route(
+            "/v1/mitigations/{id}/withdraw",
+            post(handlers::withdraw_mitigation),
+        )
+        .route(
+            "/v1/safelist",
+            get(handlers::list_safelist).post(handlers::add_safelist),
+        )
+        .route(
+            "/v1/safelist/{prefix}",
+            axum::routing::delete(handlers::remove_safelist),
+        )
         .route("/v1/config/reload", post(handlers::reload_config))
         .route("/v1/stats", get(handlers::get_stats))
         .route("/v1/pops", get(handlers::list_pops))
@@ -94,8 +109,7 @@ pub fn create_test_router(state: Arc<AppState>) -> Router {
     use tower_sessions::MemoryStore;
 
     let session_store = MemoryStore::default();
-    let session_layer = tower_sessions::SessionManagerLayer::new(session_store)
-        .with_secure(false);
+    let session_layer = tower_sessions::SessionManagerLayer::new(session_store).with_secure(false);
     let backend = crate::auth::AuthBackend::new(state.repo.clone());
     let auth_layer = axum_login::AuthManagerLayerBuilder::new(backend, session_layer).build();
 
@@ -112,12 +126,27 @@ pub fn create_test_router(state: Arc<AppState>) -> Router {
         .route("/v1/ws/feed", any(ws::ws_handler));
 
     let api_routes = Router::new()
-        .route("/v1/events", get(handlers::list_events).post(handlers::ingest_event))
-        .route("/v1/mitigations", get(handlers::list_mitigations).post(handlers::create_mitigation))
+        .route(
+            "/v1/events",
+            get(handlers::list_events).post(handlers::ingest_event),
+        )
+        .route(
+            "/v1/mitigations",
+            get(handlers::list_mitigations).post(handlers::create_mitigation),
+        )
         .route("/v1/mitigations/{id}", get(handlers::get_mitigation))
-        .route("/v1/mitigations/{id}/withdraw", post(handlers::withdraw_mitigation))
-        .route("/v1/safelist", get(handlers::list_safelist).post(handlers::add_safelist))
-        .route("/v1/safelist/{prefix}", axum::routing::delete(handlers::remove_safelist))
+        .route(
+            "/v1/mitigations/{id}/withdraw",
+            post(handlers::withdraw_mitigation),
+        )
+        .route(
+            "/v1/safelist",
+            get(handlers::list_safelist).post(handlers::add_safelist),
+        )
+        .route(
+            "/v1/safelist/{prefix}",
+            axum::routing::delete(handlers::remove_safelist),
+        )
         .route("/v1/config/reload", post(handlers::reload_config))
         .route("/v1/stats", get(handlers::get_stats))
         .route("/v1/pops", get(handlers::list_pops))

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 
+use prefixd::AppState;
 use prefixd::api::create_router;
 use prefixd::auth::create_auth_layer;
 use prefixd::bgp::{GoBgpAnnouncer, MockAnnouncer};
@@ -10,7 +11,6 @@ use prefixd::config::{AppConfig, AuthMode, BgpMode};
 use prefixd::db;
 use prefixd::observability::init_tracing;
 use prefixd::scheduler::ReconciliationLoop;
-use prefixd::AppState;
 
 #[derive(Parser)]
 #[command(name = "prefixd", about = "BGP FlowSpec routing policy daemon")]
@@ -147,8 +147,8 @@ async fn start_tls_server(
     state: Arc<AppState>,
 ) -> anyhow::Result<()> {
     use axum_server::tls_rustls::RustlsConfig;
-    use rustls::server::WebPkiClientVerifier;
     use rustls::RootCertStore;
+    use rustls::server::WebPkiClientVerifier;
     use std::fs::File;
     use std::io::BufReader;
 
@@ -160,8 +160,8 @@ async fn start_tls_server(
 
         let ca_file = File::open(ca_path)?;
         let mut ca_reader = BufReader::new(ca_file);
-        let ca_certs: Vec<_> = rustls_pemfile::certs(&mut ca_reader)
-            .collect::<Result<Vec<_>, _>>()?;
+        let ca_certs: Vec<_> =
+            rustls_pemfile::certs(&mut ca_reader).collect::<Result<Vec<_>, _>>()?;
 
         let mut root_store = RootCertStore::empty();
         for cert in ca_certs {
@@ -174,8 +174,8 @@ async fn start_tls_server(
 
         let cert_file = File::open(&tls_config.cert_path)?;
         let mut cert_reader = BufReader::new(cert_file);
-        let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
-            .collect::<Result<Vec<_>, _>>()?;
+        let certs: Vec<_> =
+            rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
 
         let key_file = File::open(&tls_config.key_path)?;
         let mut key_reader = BufReader::new(key_file);

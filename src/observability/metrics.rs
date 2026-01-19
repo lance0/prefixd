@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use prometheus::{
-    register_counter_vec, register_gauge_vec, register_histogram_vec,
-    CounterVec, GaugeVec, HistogramVec, Encoder, TextEncoder,
+    CounterVec, Encoder, GaugeVec, HistogramVec, TextEncoder, register_counter_vec,
+    register_gauge_vec, register_histogram_vec,
 };
 
 // Event metrics
@@ -154,7 +154,9 @@ pub static HTTP_REQUEST_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
         "prefixd_http_request_duration_seconds",
         "HTTP request duration in seconds",
         &["method", "route", "status_class"],
-        vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+        vec![
+            0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0
+        ]
     )
     .unwrap()
 });

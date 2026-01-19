@@ -95,7 +95,10 @@ async fn test_e2e_event_creates_flowspec_in_rib() {
     assert!(
         found.is_some(),
         "FlowSpec rule should be in GoBGP RIB. Found rules: {:?}",
-        active_rules.iter().map(|r| &r.nlri.dst_prefix).collect::<Vec<_>>()
+        active_rules
+            .iter()
+            .map(|r| &r.nlri.dst_prefix)
+            .collect::<Vec<_>>()
     );
 
     let rule = found.unwrap();
@@ -148,7 +151,9 @@ async fn test_e2e_withdrawal_removes_from_rib() {
     // Verify rule is in RIB
     let active_before = ctx.announcer.list_active().await.unwrap();
     assert!(
-        active_before.iter().any(|r| r.nlri.dst_prefix == "203.0.113.11/32"),
+        active_before
+            .iter()
+            .any(|r| r.nlri.dst_prefix == "203.0.113.11/32"),
         "Rule should be in RIB before withdrawal"
     );
 
@@ -177,7 +182,9 @@ async fn test_e2e_withdrawal_removes_from_rib() {
     // Step 4: Verify rule is GONE from RIB
     let active_after = ctx.announcer.list_active().await.unwrap();
     assert!(
-        !active_after.iter().any(|r| r.nlri.dst_prefix == "203.0.113.11/32"),
+        !active_after
+            .iter()
+            .any(|r| r.nlri.dst_prefix == "203.0.113.11/32"),
         "Rule should be removed from RIB after withdrawal"
     );
 
@@ -200,10 +207,7 @@ async fn test_e2e_multiple_mitigations() {
     let app = ctx.router().await;
 
     // Create two mitigations for different IPs
-    for (ip, vector) in [
-        ("203.0.113.10", "udp_flood"),
-        ("203.0.113.11", "syn_flood"),
-    ] {
+    for (ip, vector) in [("203.0.113.10", "udp_flood"), ("203.0.113.11", "syn_flood")] {
         let event_json = format!(
             r#"{{
                 "timestamp": "2026-01-18T10:00:00Z",
@@ -238,11 +242,15 @@ async fn test_e2e_multiple_mitigations() {
     let active_rules = ctx.announcer.list_active().await.unwrap();
 
     assert!(
-        active_rules.iter().any(|r| r.nlri.dst_prefix == "203.0.113.10/32"),
+        active_rules
+            .iter()
+            .any(|r| r.nlri.dst_prefix == "203.0.113.10/32"),
         "First rule should be in RIB"
     );
     assert!(
-        active_rules.iter().any(|r| r.nlri.dst_prefix == "203.0.113.11/32"),
+        active_rules
+            .iter()
+            .any(|r| r.nlri.dst_prefix == "203.0.113.11/32"),
         "Second rule should be in RIB"
     );
 
@@ -373,7 +381,9 @@ async fn test_e2e_safelist_blocks_mitigation() {
     // Verify no rule in RIB
     let active_rules = ctx.announcer.list_active().await.unwrap();
     assert!(
-        !active_rules.iter().any(|r| r.nlri.dst_prefix == "203.0.113.10/32"),
+        !active_rules
+            .iter()
+            .any(|r| r.nlri.dst_prefix == "203.0.113.10/32"),
         "No rule should be in RIB for safelisted IP"
     );
 }
@@ -415,6 +425,12 @@ async fn test_e2e_api_response_format() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("Response should be JSON");
 
     // Verify response fields
-    assert!(json.get("event_id").is_some(), "Response should have event_id");
-    assert!(json.get("mitigation_id").is_some(), "Response should have mitigation_id");
+    assert!(
+        json.get("event_id").is_some(),
+        "Response should have event_id"
+    );
+    assert!(
+        json.get("mitigation_id").is_some(),
+        "Response should have mitigation_id"
+    );
 }

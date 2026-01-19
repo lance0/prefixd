@@ -26,7 +26,8 @@ pub trait RepositoryTrait: Send + Sync {
     async fn insert_mitigation(&self, m: &Mitigation) -> Result<()>;
     async fn update_mitigation(&self, m: &Mitigation) -> Result<()>;
     async fn get_mitigation(&self, id: Uuid) -> Result<Option<Mitigation>>;
-    async fn find_active_by_scope(&self, scope_hash: &str, pop: &str) -> Result<Option<Mitigation>>;
+    async fn find_active_by_scope(&self, scope_hash: &str, pop: &str)
+    -> Result<Option<Mitigation>>;
     async fn find_active_by_victim(&self, victim_ip: &str) -> Result<Vec<Mitigation>>;
     async fn list_mitigations(
         &self,
@@ -41,7 +42,12 @@ pub trait RepositoryTrait: Send + Sync {
     async fn find_expired_mitigations(&self) -> Result<Vec<Mitigation>>;
 
     // Safelist
-    async fn insert_safelist(&self, prefix: &str, added_by: &str, reason: Option<&str>) -> Result<()>;
+    async fn insert_safelist(
+        &self,
+        prefix: &str,
+        added_by: &str,
+        reason: Option<&str>,
+    ) -> Result<()>;
     async fn remove_safelist(&self, prefix: &str) -> Result<bool>;
     async fn list_safelist(&self) -> Result<Vec<SafelistEntry>>;
     async fn is_safelisted(&self, ip: &str) -> Result<bool>;

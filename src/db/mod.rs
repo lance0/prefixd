@@ -7,8 +7,8 @@ pub use repository::*;
 pub use traits::*;
 
 use crate::error::Result;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::PgPool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::str::FromStr;
 
 pub async fn init_postgres_pool(connection_string: &str) -> Result<PgPool> {

@@ -331,7 +331,7 @@ async fn test_migration_applies_cleanly() {
     // This test verifies that migrations apply cleanly to a fresh database
     // The TestContext::new() already runs migrations, so if we get here without panic, it worked
     let _ctx = TestContext::new().await;
-    
+
     // Additional verification: ensure all expected tables exist
     // (implicit - we can query mitigations, safelist, etc.)
 }
@@ -363,7 +363,11 @@ async fn test_ttl_expiry() {
         FlowSpecAction::police(10_000_000),
     );
     announcer.announce(&rule).await.expect("Failed to announce");
-    assert_eq!(announcer.announced_count().await, 1, "Should have 1 announced rule");
+    assert_eq!(
+        announcer.announced_count().await,
+        1,
+        "Should have 1 announced rule"
+    );
 
     // Create a mitigation with expires_at in the past (already expired)
     let now = Utc::now();
@@ -408,7 +412,7 @@ async fn test_ttl_expiry() {
     let reconciler = ReconciliationLoop::new(
         ctx.repo.clone(),
         announcer.clone(),
-        30, // interval doesn't matter, we call reconcile() directly
+        30,    // interval doesn't matter, we call reconcile() directly
         false, // NOT dry-run, so withdrawals happen
     );
 
@@ -440,7 +444,11 @@ async fn test_ttl_expiry() {
         .await
         .expect("Failed to find expired mitigations");
 
-    assert_eq!(expired_after.len(), 0, "Should find 0 expired mitigations after expiry");
+    assert_eq!(
+        expired_after.len(),
+        0,
+        "Should find 0 expired mitigations after expiry"
+    );
 }
 
 #[tokio::test]
@@ -556,12 +564,20 @@ playbooks:
     // Verify new config is loaded
     {
         let inv = ctx.state.inventory.read().await;
-        assert_eq!(inv.customers.len(), 2, "Should have 2 customers after reload");
+        assert_eq!(
+            inv.customers.len(),
+            2,
+            "Should have 2 customers after reload"
+        );
         assert!(inv.customers.iter().any(|c| c.customer_id == "cust_added"));
     }
     {
         let pb = ctx.state.playbooks.read().await;
-        assert_eq!(pb.playbooks.len(), 2, "Should have 2 playbooks after reload");
+        assert_eq!(
+            pb.playbooks.len(),
+            2,
+            "Should have 2 playbooks after reload"
+        );
         assert!(pb.playbooks.iter().any(|p| p.name == "syn_flood"));
     }
 }

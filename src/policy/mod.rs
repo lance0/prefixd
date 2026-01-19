@@ -26,7 +26,11 @@ impl PolicyEngine {
         }
     }
 
-    pub fn evaluate(&self, event: &AttackEvent, context: Option<&IpContext>) -> Result<MitigationIntent> {
+    pub fn evaluate(
+        &self,
+        event: &AttackEvent,
+        context: Option<&IpContext>,
+    ) -> Result<MitigationIntent> {
         let vector = event.attack_vector();
         let ports = event.top_dst_ports();
         let has_ports = !ports.is_empty();
@@ -266,7 +270,8 @@ mod tests {
         let event_ports = vec![53, 80, 443];
         let context = make_context("cust", vec![53, 123], vec![]);
 
-        let result = engine.compute_port_intersection(&event_ports, Some(&context), AttackVector::UdpFlood);
+        let result =
+            engine.compute_port_intersection(&event_ports, Some(&context), AttackVector::UdpFlood);
         assert_eq!(result, vec![53]);
     }
 
@@ -278,7 +283,8 @@ mod tests {
         let event_ports = vec![80, 443];
         let context = make_context("cust", vec![53, 123], vec![]);
 
-        let result = engine.compute_port_intersection(&event_ports, Some(&context), AttackVector::UdpFlood);
+        let result =
+            engine.compute_port_intersection(&event_ports, Some(&context), AttackVector::UdpFlood);
         assert!(result.is_empty());
     }
 
@@ -290,7 +296,8 @@ mod tests {
         let event_ports = vec![53, 80, 443];
         let context = make_context("cust", vec![], vec![]);
 
-        let result = engine.compute_port_intersection(&event_ports, Some(&context), AttackVector::UdpFlood);
+        let result =
+            engine.compute_port_intersection(&event_ports, Some(&context), AttackVector::UdpFlood);
         assert_eq!(result, event_ports);
     }
 
@@ -302,7 +309,8 @@ mod tests {
         let event_ports: Vec<u16> = vec![];
         let context = make_context("cust", vec![53, 123], vec![]);
 
-        let result = engine.compute_port_intersection(&event_ports, Some(&context), AttackVector::UdpFlood);
+        let result =
+            engine.compute_port_intersection(&event_ports, Some(&context), AttackVector::UdpFlood);
         assert_eq!(result, vec![53, 123]);
     }
 
@@ -314,7 +322,8 @@ mod tests {
         let event_ports = vec![80, 443, 8080];
         let context = make_context("cust", vec![53], vec![80, 443]);
 
-        let result = engine.compute_port_intersection(&event_ports, Some(&context), AttackVector::SynFlood);
+        let result =
+            engine.compute_port_intersection(&event_ports, Some(&context), AttackVector::SynFlood);
         assert_eq!(result, vec![80, 443]);
     }
 

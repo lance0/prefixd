@@ -187,7 +187,9 @@ mod tests {
                 dst_ports: ports,
             },
             action_type: ActionType::Police,
-            action_params: ActionParams { rate_bps: Some(5_000_000) },
+            action_params: ActionParams {
+                rate_bps: Some(5_000_000),
+            },
             status: MitigationStatus::Active,
             created_at: now,
             updated_at: now,
@@ -208,7 +210,13 @@ mod tests {
         let mitigation = test_mitigation("203.0.113.10", vec![53, 123]);
 
         let result = correlator.correlate(&event, &[mitigation]);
-        assert!(matches!(result, CorrelationResult::ExactMatch { action: CorrelationAction::ExtendTtl, .. }));
+        assert!(matches!(
+            result,
+            CorrelationResult::ExactMatch {
+                action: CorrelationAction::ExtendTtl,
+                ..
+            }
+        ));
     }
 
     #[test]

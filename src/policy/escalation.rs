@@ -98,7 +98,7 @@ impl EscalationEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ActionParams, MatchCriteria, AttackVector};
+    use crate::domain::{ActionParams, AttackVector, MatchCriteria};
     use uuid::Uuid;
 
     fn test_config() -> EscalationConfig {
@@ -126,7 +126,9 @@ mod tests {
                 dst_ports: vec![53],
             },
             action_type: action,
-            action_params: ActionParams { rate_bps: Some(5_000_000) },
+            action_params: ActionParams {
+                rate_bps: Some(5_000_000),
+            },
             status: MitigationStatus::Active,
             created_at: now - Duration::seconds(created_seconds_ago),
             updated_at: now,

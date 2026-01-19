@@ -80,10 +80,14 @@ impl AuthnBackend for AuthBackend {
             .is_ok()
         {
             // Update last login time
-            if let Err(e) = self.repo.update_operator_last_login(operator.operator_id).await {
+            if let Err(e) = self
+                .repo
+                .update_operator_last_login(operator.operator_id)
+                .await
+            {
                 tracing::warn!(error = %e, "failed to update last login time");
             }
-            
+
             tracing::info!(username = %operator.username, "login successful");
             Ok(Some(operator))
         } else {
@@ -92,10 +96,7 @@ impl AuthnBackend for AuthBackend {
         }
     }
 
-    async fn get_user(
-        &self,
-        user_id: &UserId<Self>,
-    ) -> Result<Option<Self::User>, Self::Error> {
+    async fn get_user(&self, user_id: &UserId<Self>) -> Result<Option<Self::User>, Self::Error> {
         match self.repo.get_operator_by_id(*user_id).await {
             Ok(op) => Ok(op),
             Err(e) => {

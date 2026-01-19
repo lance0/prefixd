@@ -1,9 +1,9 @@
 use axum::{
+    Json,
     extract::Request,
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -49,7 +49,7 @@ impl RateLimiter {
         } else {
             // Calculate how long until a token is available
             let wait_time = Duration::from_secs_f64(
-                (1.0 - state.tokens) / self.config.events_per_second as f64
+                (1.0 - state.tokens) / self.config.events_per_second as f64,
             );
             Err(wait_time)
         }
@@ -67,7 +67,7 @@ pub async fn rate_limit_middleware(
         Err(wait_time) => {
             let retry_after = wait_time.as_secs().max(1) as u32;
             tracing::warn!(retry_after_seconds = retry_after, "rate limit exceeded");
-            
+
             (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(serde_json::json!({

@@ -1,10 +1,10 @@
-mod settings;
 mod inventory;
 mod playbooks;
+mod settings;
 
-pub use settings::*;
 pub use inventory::*;
 pub use playbooks::*;
+pub use settings::*;
 
 use anyhow::Result;
 use std::path::Path;

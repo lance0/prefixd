@@ -6,7 +6,7 @@ pub use alerting::*;
 pub use audit::*;
 pub use metrics::*;
 
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::LogFormat;
 

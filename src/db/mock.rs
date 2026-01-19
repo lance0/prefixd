@@ -85,7 +85,10 @@ impl RepositoryTrait for MockRepository {
 
     async fn update_mitigation(&self, m: &Mitigation) -> Result<()> {
         let mut mitigations = self.mitigations.lock().unwrap();
-        if let Some(existing) = mitigations.iter_mut().find(|x| x.mitigation_id == m.mitigation_id) {
+        if let Some(existing) = mitigations
+            .iter_mut()
+            .find(|x| x.mitigation_id == m.mitigation_id)
+        {
             *existing = m.clone();
         }
         Ok(())
@@ -96,7 +99,11 @@ impl RepositoryTrait for MockRepository {
         Ok(mitigations.iter().find(|m| m.mitigation_id == id).cloned())
     }
 
-    async fn find_active_by_scope(&self, scope_hash: &str, pop: &str) -> Result<Option<Mitigation>> {
+    async fn find_active_by_scope(
+        &self,
+        scope_hash: &str,
+        pop: &str,
+    ) -> Result<Option<Mitigation>> {
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
             .iter()
@@ -105,7 +112,9 @@ impl RepositoryTrait for MockRepository {
                     && m.pop == pop
                     && matches!(
                         m.status,
-                        MitigationStatus::Pending | MitigationStatus::Active | MitigationStatus::Escalated
+                        MitigationStatus::Pending
+                            | MitigationStatus::Active
+                            | MitigationStatus::Escalated
                     )
             })
             .cloned())
@@ -119,7 +128,9 @@ impl RepositoryTrait for MockRepository {
                 m.victim_ip == victim_ip
                     && matches!(
                         m.status,
-                        MitigationStatus::Pending | MitigationStatus::Active | MitigationStatus::Escalated
+                        MitigationStatus::Pending
+                            | MitigationStatus::Active
+                            | MitigationStatus::Escalated
                     )
             })
             .cloned()
@@ -159,7 +170,9 @@ impl RepositoryTrait for MockRepository {
                 m.customer_id.as_deref() == Some(customer_id)
                     && matches!(
                         m.status,
-                        MitigationStatus::Pending | MitigationStatus::Active | MitigationStatus::Escalated
+                        MitigationStatus::Pending
+                            | MitigationStatus::Active
+                            | MitigationStatus::Escalated
                     )
             })
             .count() as u32)
@@ -173,7 +186,9 @@ impl RepositoryTrait for MockRepository {
                 m.pop == pop
                     && matches!(
                         m.status,
-                        MitigationStatus::Pending | MitigationStatus::Active | MitigationStatus::Escalated
+                        MitigationStatus::Pending
+                            | MitigationStatus::Active
+                            | MitigationStatus::Escalated
                     )
             })
             .count() as u32)
@@ -186,7 +201,9 @@ impl RepositoryTrait for MockRepository {
             .filter(|m| {
                 matches!(
                     m.status,
-                    MitigationStatus::Pending | MitigationStatus::Active | MitigationStatus::Escalated
+                    MitigationStatus::Pending
+                        | MitigationStatus::Active
+                        | MitigationStatus::Escalated
                 )
             })
             .count() as u32)
@@ -198,14 +215,21 @@ impl RepositoryTrait for MockRepository {
         Ok(mitigations
             .iter()
             .filter(|m| {
-                matches!(m.status, MitigationStatus::Active | MitigationStatus::Escalated)
-                    && m.expires_at < now
+                matches!(
+                    m.status,
+                    MitigationStatus::Active | MitigationStatus::Escalated
+                ) && m.expires_at < now
             })
             .cloned()
             .collect())
     }
 
-    async fn insert_safelist(&self, prefix: &str, added_by: &str, reason: Option<&str>) -> Result<()> {
+    async fn insert_safelist(
+        &self,
+        prefix: &str,
+        added_by: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
         let mut safelist = self.safelist.lock().unwrap();
         safelist.retain(|e| e.prefix != prefix);
         safelist.push(SafelistEntry {
@@ -325,7 +349,8 @@ impl RepositoryTrait for MockRepository {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Mitigation>> {
-        self.list_mitigations(status_filter, customer_id, limit, offset).await
+        self.list_mitigations(status_filter, customer_id, limit, offset)
+            .await
     }
 
     // Operator methods

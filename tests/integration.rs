@@ -3,17 +3,17 @@ use axum::http::{Request, StatusCode};
 use std::sync::Arc;
 use tower::ServiceExt;
 
+use prefixd::AppState;
 use prefixd::api::create_test_router;
 use prefixd::bgp::MockAnnouncer;
 use prefixd::config::{
     AllowedPorts, Asset, AuthConfig, AuthMode, BgpConfig, BgpMode, Customer, EscalationConfig,
     GuardrailsConfig, HttpConfig, Inventory, ObservabilityConfig, Playbook, PlaybookAction,
-    PlaybookMatch, PlaybookStep, Playbooks, QuotasConfig, RateLimitConfig, SafelistConfig,
-    Service, Settings, ShutdownConfig, StorageConfig, TimersConfig,
+    PlaybookMatch, PlaybookStep, Playbooks, QuotasConfig, RateLimitConfig, SafelistConfig, Service,
+    Settings, ShutdownConfig, StorageConfig, TimersConfig,
 };
 use prefixd::db::{MockRepository, RepositoryTrait};
 use prefixd::domain::AttackVector;
-use prefixd::AppState;
 
 fn test_settings() -> Settings {
     Settings {
@@ -146,18 +146,28 @@ async fn test_health_endpoint() {
     let app = setup_app().await;
 
     let response = app
-        .oneshot(Request::builder().uri("/v1/health").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
     // Verify gobgp is now a structured object
     assert!(json["gobgp"].is_object(), "gobgp should be an object");
-    assert!(json["gobgp"]["status"].is_string(), "gobgp.status should be a string");
+    assert!(
+        json["gobgp"]["status"].is_string(),
+        "gobgp.status should be a string"
+    );
     // database remains a string for backward compat
     assert!(json["database"].is_string(), "database should be a string");
 }
@@ -327,15 +337,24 @@ async fn test_security_headers_present() {
     assert_eq!(response.status(), StatusCode::OK);
 
     assert_eq!(
-        response.headers().get("x-content-type-options").map(|v| v.to_str().unwrap()),
+        response
+            .headers()
+            .get("x-content-type-options")
+            .map(|v| v.to_str().unwrap()),
         Some("nosniff")
     );
     assert_eq!(
-        response.headers().get("x-frame-options").map(|v| v.to_str().unwrap()),
+        response
+            .headers()
+            .get("x-frame-options")
+            .map(|v| v.to_str().unwrap()),
         Some("DENY")
     );
     assert_eq!(
-        response.headers().get("cache-control").map(|v| v.to_str().unwrap()),
+        response
+            .headers()
+            .get("cache-control")
+            .map(|v| v.to_str().unwrap()),
         Some("no-store")
     );
 }
