@@ -30,8 +30,8 @@ export function Sidebar({ isOpen, onClose, isCollapsed = false, onToggleCollapse
 
       <aside
         className={cn(
-          "fixed left-0 top-0 z-50 h-screen border-r border-border bg-sidebar",
-          "transition-all duration-150 ease-in-out",
+          "fixed left-0 top-0 z-50 h-dvh border-r border-border bg-sidebar",
+          "transition-[transform,width] duration-150 ease-out",
           isCollapsed ? "lg:w-14" : "lg:w-48",
           "w-56 lg:translate-x-0",
           isOpen ? "translate-x-0" : "-translate-x-full",

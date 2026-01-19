@@ -164,6 +164,7 @@ export function MitigationsContentLive() {
             className="h-10 w-10 shrink-0"
             onClick={() => mutate()}
             disabled={isLoading}
+            aria-label="Refresh mitigations"
           >
             <RefreshCw className={cn("h-4 w-4", isLoading && "animate-spin")} />
           </Button>
@@ -172,6 +173,7 @@ export function MitigationsContentLive() {
             size="icon"
             className="h-10 w-10 lg:hidden shrink-0"
             onClick={() => setShowFilters(!showFilters)}
+            aria-label="Toggle filters"
           >
             <Filter className="h-4 w-4" />
           </Button>
@@ -325,6 +327,7 @@ export function MitigationsContentLive() {
                               e.stopPropagation()
                               setSelectedId(mitigation.mitigation_id)
                             }}
+                            aria-label="View mitigation details"
                           >
                             <Eye className="h-4 w-4" />
                           </Button>

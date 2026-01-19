@@ -30,7 +30,7 @@ export function MitigationDetailPanel({ mitigation, onClose }: MitigationDetailP
             {mitigation.vector.replace(/_/g, " ")}
           </span>
         </div>
-        <Button variant="ghost" size="icon" onClick={onClose}>
+        <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close panel">
           <X className="h-4 w-4" />
         </Button>
       </div>

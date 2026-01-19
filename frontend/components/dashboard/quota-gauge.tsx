@@ -24,7 +24,7 @@ export function QuotaGauge({ title, current, max, secondary }: QuotaGaugeProps) 
             </span>
           </div>
           <div className="h-1.5 bg-secondary overflow-hidden">
-            <div className="h-full bg-primary transition-all duration-500" style={{ width: `${percentage}%` }} />
+            <div className="h-full bg-primary transition-transform duration-500 origin-left" style={{ transform: `scaleX(${percentage / 100})` }} />
           </div>
         </div>
         {secondary && (
@@ -37,8 +37,8 @@ export function QuotaGauge({ title, current, max, secondary }: QuotaGaugeProps) 
             </div>
             <div className="h-1 bg-secondary overflow-hidden">
               <div
-                className="h-full bg-muted-foreground transition-all duration-500"
-                style={{ width: `${secondaryPercentage}%` }}
+                className="h-full bg-muted-foreground transition-transform duration-500 origin-left"
+                style={{ transform: `scaleX(${secondaryPercentage / 100})` }}
               />
             </div>
           </div>

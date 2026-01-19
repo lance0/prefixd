@@ -39,14 +39,14 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
   })
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-dvh bg-background">
       <Sidebar
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         isCollapsed={sidebarCollapsed}
         onToggleCollapse={handleToggleCollapse}
       />
-      <div className={cn("transition-all duration-200 ease-in-out", sidebarCollapsed ? "lg:pl-16" : "lg:pl-56")}>
+      <div className={cn("transition-[padding] duration-200 ease-out", sidebarCollapsed ? "lg:pl-16" : "lg:pl-56")}>
         <TopBar onMenuClick={() => setSidebarOpen(true)} onSearchClick={() => setCommandPaletteOpen(true)} />
         <main className="p-3 sm:p-4 lg:p-6">{children}</main>
       </div>

@@ -132,6 +132,7 @@ export function AuditLogContentLive() {
             className="h-10 w-10 shrink-0"
             onClick={() => mutate()}
             disabled={isLoading}
+            aria-label="Refresh audit log"
           >
             <RefreshCw className={cn("h-4 w-4", isLoading && "animate-spin")} />
           </Button>
