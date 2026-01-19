@@ -64,7 +64,8 @@ async fn main() -> anyhow::Result<()> {
         }
         BgpMode::Sidecar => {
             tracing::info!(endpoint = %config.settings.bgp.gobgp_grpc, "using GoBGP sidecar");
-            let gobgp = GoBgpAnnouncer::new(config.settings.bgp.gobgp_grpc.clone());
+            let mut gobgp = GoBgpAnnouncer::new(config.settings.bgp.gobgp_grpc.clone());
+            gobgp.connect().await?;
             Arc::new(gobgp)
         }
     };

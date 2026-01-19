@@ -10,8 +10,8 @@ http:
     burst: 500
 
 bgp:
-  mode: mock
-  gobgp_grpc: "127.0.0.1:50051"
+  mode: sidecar
+  gobgp_grpc: "gobgp:50051"
   local_asn: 65010
   router_id: "10.10.0.10"
   neighbors: []
@@ -45,7 +45,8 @@ escalation:
   min_confidence: 0.7
 
 storage:
-  connection_string: "postgres://prefixd:prefixd@localhost:5432/prefixd"
+  # Use 'postgres' service name for docker-compose, or 'localhost' when running locally
+  connection_string: "postgres://prefixd:prefixd_secret@postgres:5432/prefixd"
 
 observability:
   log_format: pretty
