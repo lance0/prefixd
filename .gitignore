@@ -2,4 +2,3 @@
 /data
 *.db
 *.db-*
-Cargo.lock
