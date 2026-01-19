@@ -58,9 +58,6 @@ export function useMitigations(params?: Parameters<typeof api.getMitigations>[0]
         if (params?.customer_id) {
           result = result.filter(m => m.customer_id === params.customer_id)
         }
-        if (params?.pop) {
-          result = result.filter(m => m.pop === params.pop)
-        }
         if (params?.limit) {
           result = result.slice(0, params.limit)
         }
