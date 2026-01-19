@@ -146,7 +146,7 @@ impl GoBgpAnnouncer {
         // GoBGP v4 requires MpReachNLRI with nexthop for FlowSpec
         // For FlowSpec, the nexthop is typically 0.0.0.0 (IPv4) or :: (IPv6)
         let mp_reach = MpReachNlriAttribute {
-            family: Some(family.clone()),
+            family: Some(family),
             next_hops: vec![if is_v6 {
                 "::".to_string()
             } else {

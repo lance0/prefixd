@@ -556,12 +556,10 @@ pub async fn create_mitigation(
     auth_session: AuthSession,
     headers: HeaderMap,
     Json(req): Json<CreateMitigationRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, StatusCode> {
     // Check auth first
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    if let Err(status) = require_auth(&state, &auth_session, auth_header) {
-        return Err(status);
-    }
+    require_auth(&state, &auth_session, auth_header)?;
 
     // Validate protocol - reject unknown values instead of silently converting to None
     let protocol = match req.protocol.as_str() {

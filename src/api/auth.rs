@@ -31,8 +31,7 @@ pub fn require_auth(
 
     // Fall back to bearer token (CLI/detectors)
     if let Some(header_str) = auth_header {
-        if header_str.starts_with("Bearer ") {
-            let provided_token = &header_str[7..];
+        if let Some(provided_token) = header_str.strip_prefix("Bearer ") {
             if let Some(ref expected_token) = state.bearer_token {
                 if constant_time_eq(provided_token.as_bytes(), expected_token.as_bytes()) {
                     return Ok(());

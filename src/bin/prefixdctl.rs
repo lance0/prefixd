@@ -404,8 +404,8 @@ async fn cmd_mitigations(
                     }
 
                     println!(
-                        "{:<36}  {:<10}  {:<15}  {:<10}  {:<8}  {}",
-                        "ID", "STATUS", "VICTIM_IP", "VECTOR", "ACTION", "EXPIRES"
+                        "{:<36}  {:<10}  {:<15}  {:<10}  {:<8}  EXPIRES",
+                        "ID", "STATUS", "VICTIM_IP", "VECTOR", "ACTION"
                     );
                     println!("{}", "-".repeat(100));
 
@@ -495,8 +495,8 @@ async fn cmd_safelist(
                     }
 
                     println!(
-                        "{:<20}  {:<15}  {:<20}  {}",
-                        "PREFIX", "ADDED_BY", "ADDED_AT", "REASON"
+                        "{:<20}  {:<15}  {:<20}  REASON",
+                        "PREFIX", "ADDED_BY", "ADDED_AT"
                     );
                     println!("{}", "-".repeat(80));
 
@@ -711,8 +711,8 @@ async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<()
                     }
 
                     println!(
-                        "{:<36}  {:<20}  {:<8}  {:<20}  {}",
-                        "ID", "USERNAME", "ROLE", "CREATED", "LAST LOGIN"
+                        "{:<36}  {:<20}  {:<8}  {:<20}  LAST LOGIN",
+                        "ID", "USERNAME", "ROLE", "CREATED"
                     );
                     println!("{}", "-".repeat(110));
 
