@@ -5,15 +5,6 @@ import { useHealth, usePops } from "@/hooks/use-api"
 import { cn } from "@/lib/utils"
 import { useReducedMotion } from "@/hooks/use-reduced-motion"
 
-function formatUptime(seconds: number): string {
-  const days = Math.floor(seconds / 86400)
-  const hours = Math.floor((seconds % 86400) / 3600)
-  const mins = Math.floor((seconds % 3600) / 60)
-  if (days > 0) return `${days}d ${hours}h ${mins}m`
-  if (hours > 0) return `${hours}h ${mins}m`
-  return `${mins}m`
-}
-
 export function BgpSessionStatus() {
   const { data: health, error } = useHealth()
   const { data: pops } = usePops()
@@ -45,9 +36,17 @@ export function BgpSessionStatus() {
         {health && (
           <div className="group relative flex items-center gap-2 bg-secondary px-3 py-2 border border-border">
             <span className="size-1.5 bg-primary" />
-            <span className="font-mono text-xs text-foreground">{health.pop}</span>
-            <span className="text-[10px] font-mono text-muted-foreground">
-              {formatUptime(health.uptime_seconds)}
+            <span className="font-mono text-xs text-foreground">DB</span>
+            <span className="text-[10px] font-mono uppercase text-primary">
+              {health.database === "connected" ? "OK" : "ERR"}
+            </span>
+          </div>
+        )}
+
+        {health && (
+          <div className="group relative flex items-center gap-2 bg-secondary px-3 py-2 border border-border">
+            <span className="font-mono text-xs text-muted-foreground tabular-nums">
+              {health.active_mitigations} active
             </span>
           </div>
         )}
