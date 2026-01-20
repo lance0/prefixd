@@ -9,15 +9,17 @@ Comprehensive list of prefixd capabilities.
 ### HTTP Event API
 
 - `POST /v1/events` accepts attack signals from any detector
+- Unified ban/unban: `action` field supports `"ban"` (default) or `"unban"`
 - Schema: victim IP, attack vector, confidence score, optional ports/protocol
 - Idempotent: duplicate events extend TTL instead of creating new mitigations
 - Rate-limited: configurable token bucket (default 100 req/s burst, 10 req/s sustained)
+- `raw_details`: JSONB field for storing forensic data from detectors
 
 ### Supported Detectors
 
 Any system that can POST JSON works. Tested with:
 
-- **FastNetMon** - Native webhook integration
+- **FastNetMon Community** - Notify script integration ([setup guide](docs/detectors/fastnetmon.md))
 - **Prometheus/Alertmanager** - Via webhook receiver
 - **Custom scripts** - Simple curl calls
 
@@ -25,16 +27,26 @@ Any system that can POST JSON works. Tested with:
 
 ```json
 {
+  "event_id": "stable-hash-for-idempotency",
   "source": "fastnetmon",
   "victim_ip": "203.0.113.10",
   "vector": "udp_flood",
   "bps": 1200000000,
   "pps": 800000,
   "confidence": 0.95,
-  "dst_ports": [53, 123],
-  "protocol": "udp"
+  "top_dst_ports": [53, 123],
+  "action": "ban",
+  "raw_details": {"direction": "incoming"}
 }
 ```
+
+### Unban Flow
+
+When detector sends `action: "unban"` with the same `event_id`:
+1. prefixd finds the original ban event by `source` + `event_id`
+2. Looks up the active mitigation created from that event
+3. Withdraws the FlowSpec rule from GoBGP
+4. Updates mitigation status to "withdrawn"
 
 ---
 

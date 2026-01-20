@@ -13,8 +13,10 @@ Detector ──► prefixd ──► GoBGP ──► Routers
    │            ├── Guardrails (quotas, safelist, /32-only)
    │            └── Reconciliation (auto-expire, drift repair)
    │
-   └── FastNetMon, Prometheus alerts, custom scripts
+   └── FastNetMon, Kentik, Prometheus alerts, custom scripts
 ```
+
+**Detector integrations:** [FastNetMon](docs/detectors/fastnetmon.md) | More coming soon
 
 **Key idea:** Detectors signal intent, prefixd decides policy. No detector ever speaks BGP directly.
 

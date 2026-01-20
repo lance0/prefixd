@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Unified Detector Events API**
+  - `POST /v1/events` now accepts `action` field: `"ban"` (default) or `"unban"`
+  - Unban events find original event by `external_event_id` and withdraw mitigation
+  - `raw_details` JSONB field for storing forensic data from detectors
+  - Deterministic withdrawal via event correlation (no guessing by IP)
+
+- **FastNetMon Integration**
+  - `scripts/prefixd-fastnetmon.sh` notify script for FastNetMon Community
+  - Computes stable `event_id` for idempotency and ban/unban matching
+  - Auto-detects vector from attack details (UDP/SYN/ACK/ICMP)
+  - `docs/detectors/fastnetmon.md` setup guide
+
+- **API/Frontend Contract Fixes**
+  - Health endpoint now returns `version`, `pop`, `uptime_seconds`
+  - mTLS auth mode now works correctly (was returning 401)
+  - Fixed `operator_id` payload names in withdraw/safelist API calls
+
+- **Frontend Animations**
+  - Detail panels slide in from right (150ms, ease-out)
+  - Activity feed items with staggered entrance
+  - Status badge pulse animation on active items
+  - BGP status breathing animation when session UP
+  - All animations respect `prefers-reduced-motion`
+  - Custom webkit scrollbars matching theme
+
 - **FRR FlowSpec Lab**
   - Containerlab topology with FRR 10.3.1 as FlowSpec receiver
   - Works on any Linux host (no nested virtualization required)
