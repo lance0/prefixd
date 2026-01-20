@@ -11,7 +11,12 @@ use super::{GlobalStats, PopInfo, SafelistEntry};
 pub trait RepositoryTrait: Send + Sync {
     // Events
     async fn insert_event(&self, event: &AttackEvent) -> Result<()>;
-    async fn find_event_by_external_id(
+    /// Find the most recent ban event by external_event_id.
+    /// Used for duplicate detection (ban) and correlation (unban).
+    /// Note: Event IDs are hashed from IP|direction, so the same IP can have
+    /// multiple ban/unban cycles over time. This returns only ban events,
+    /// ordered by most recent first.
+    async fn find_ban_event_by_external_id(
         &self,
         source: &str,
         external_id: &str,

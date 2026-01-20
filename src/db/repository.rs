@@ -87,7 +87,7 @@ impl RepositoryTrait for Repository {
         Ok(())
     }
 
-    async fn find_event_by_external_id(
+    async fn find_ban_event_by_external_id(
         &self,
         source: &str,
         external_id: &str,
@@ -97,7 +97,10 @@ impl RepositoryTrait for Repository {
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, confidence,
                    action, raw_details
-            FROM events WHERE source = $1 AND external_event_id = $2
+            FROM events 
+            WHERE source = $1 AND external_event_id = $2 AND action = 'ban'
+            ORDER BY ingested_at DESC
+            LIMIT 1
             "#,
         )
         .bind(source)

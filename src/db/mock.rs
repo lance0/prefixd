@@ -41,15 +41,21 @@ impl RepositoryTrait for MockRepository {
         Ok(())
     }
 
-    async fn find_event_by_external_id(
+    async fn find_ban_event_by_external_id(
         &self,
         source: &str,
         external_id: &str,
     ) -> Result<Option<AttackEvent>> {
         let events = self.events.lock().unwrap();
+        // Find the most recent ban event with matching source and external_id
         Ok(events
             .iter()
-            .find(|e| e.source == source && e.external_event_id.as_deref() == Some(external_id))
+            .rev() // Most recent first
+            .find(|e| {
+                e.source == source
+                    && e.external_event_id.as_deref() == Some(external_id)
+                    && e.action == "ban"
+            })
             .cloned())
     }
 

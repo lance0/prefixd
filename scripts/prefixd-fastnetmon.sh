@@ -45,6 +45,11 @@ API_ACTION="ban"
 
 # Compute stable event ID for idempotency and unban matching
 # Hash: victim_ip|direction - same hash for ban and unban so we can match them
+#
+# Note: This assumes FastNetMon has one active ban per IP/direction at a time.
+# If the same IP is banned again after an unban, we get the same event_id,
+# which is correct - prefixd only checks for duplicate *ban* events, so
+# ban→unban→ban cycles work correctly.
 EVENT_ID=$(echo -n "${IP}|${DIRECTION}" | sha256sum | cut -d' ' -f1)
 
 # Infer attack vector from raw details

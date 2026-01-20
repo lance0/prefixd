@@ -25,7 +25,16 @@ pub async fn init_postgres_pool(connection_string: &str) -> Result<PgPool> {
 }
 
 async fn run_migrations(pool: &PgPool) -> Result<()> {
-    let migration_sql = include_str!("../../migrations/001_initial.sql");
-    sqlx::raw_sql(migration_sql).execute(pool).await?;
+    // Run all migrations in order
+    let migrations = [
+        include_str!("../../migrations/001_initial.sql"),
+        include_str!("../../migrations/002_operators_sessions.sql"),
+        include_str!("../../migrations/003_raw_details.sql"),
+    ];
+
+    for migration_sql in migrations {
+        sqlx::raw_sql(migration_sql).execute(pool).await?;
+    }
+
     Ok(())
 }

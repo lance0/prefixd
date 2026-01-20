@@ -238,7 +238,14 @@ pub async fn ingest_event(
     // Branch on action type
     match input.action.as_str() {
         "unban" => handle_unban(state, input).await,
-        "ban" | _ => handle_ban(state, input).await,
+        "ban" => handle_ban(state, input).await,
+        unknown => {
+            tracing::warn!(action = %unknown, "unknown action type");
+            Err(AppError(PrefixdError::InvalidRequest(format!(
+                "unknown action: '{}', expected 'ban' or 'unban'",
+                unknown
+            ))))
+        }
     }
 }
 
@@ -267,7 +274,7 @@ async fn handle_unban(
     // Find original ban event
     let original_event = match state
         .repo
-        .find_event_by_external_id(&input.source, &ext_id)
+        .find_ban_event_by_external_id(&input.source, &ext_id)
         .await
     {
         Ok(Some(e)) => e,
@@ -362,11 +369,11 @@ async fn handle_ban(
     state: Arc<AppState>,
     input: AttackEventInput,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
-    // Check for duplicate
+    // Check for duplicate ban event (only bans are checked, not unbans)
     if let Some(ref ext_id) = input.event_id {
         if let Ok(Some(_)) = state
             .repo
-            .find_event_by_external_id(&input.source, ext_id)
+            .find_ban_event_by_external_id(&input.source, ext_id)
             .await
         {
             return Err(AppError(PrefixdError::DuplicateEvent {
