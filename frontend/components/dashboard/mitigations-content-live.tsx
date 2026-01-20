@@ -299,8 +299,8 @@ export function MitigationsContentLive() {
                         </td>
                         <td className="px-4 py-3">
                           <ActionBadge
-                            type={mitigation.action_type}
-                            rate={mitigation.rate_bps || undefined}
+                            actionType={mitigation.action_type}
+                            rateBps={mitigation.rate_bps}
                           />
                         </td>
                         <td className="px-4 py-3 font-mono text-muted-foreground">

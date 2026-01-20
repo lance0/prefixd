@@ -205,7 +205,7 @@ export function MitigationDetailPanel({ mitigation, onClose, onWithdraw }: Mitig
             <CardContent className="space-y-2">
               <div className="flex justify-between items-center">
                 <span className="text-sm text-muted-foreground">Type</span>
-                <ActionBadge type={mitigation.action_type} rate={mitigation.rate_bps || undefined} />
+                <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} />
               </div>
               {mitigation.rate_bps && (
                 <>

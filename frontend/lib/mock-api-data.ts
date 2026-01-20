@@ -8,6 +8,9 @@ const inFuture = (minutes: number) => new Date(now.getTime() + minutes * 60 * 10
 
 export const mockHealth: HealthResponse = {
   status: "healthy",
+  version: "0.8.0",
+  pop: "iad1",
+  uptime_seconds: 86400,
   bgp_sessions: { "172.30.30.3": "established" },
   active_mitigations: 6,
   database: "connected",
@@ -16,11 +19,14 @@ export const mockHealth: HealthResponse = {
 }
 
 export const mockStats: Stats = {
+  total_active: 6,
   total_mitigations: 847,
-  active_mitigations: 6,
-  events_24h: 142,
   total_events: 12847,
-  pops: ["iad1", "ord1", "lax1"],
+  pops: [
+    { pop: "iad1", active: 4, total: 523 },
+    { pop: "ord1", active: 1, total: 198 },
+    { pop: "lax1", active: 1, total: 126 },
+  ],
 }
 
 export const mockMitigations: Mitigation[] = [
@@ -389,8 +395,8 @@ export const mockSafelist: SafelistEntry[] = [
   },
 ]
 
-export const mockPops = [
-  { pop: "iad1", active_mitigations: 4 },
-  { pop: "ord1", active_mitigations: 1 },
-  { pop: "lax1", active_mitigations: 1 },
+export const mockPops: import("./api").PopInfo[] = [
+  { pop: "iad1", active_mitigations: 4, total_mitigations: 523 },
+  { pop: "ord1", active_mitigations: 1, total_mitigations: 198 },
+  { pop: "lax1", active_mitigations: 1, total_mitigations: 126 },
 ]

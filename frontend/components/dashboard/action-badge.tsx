@@ -1,8 +1,9 @@
 import { cn } from "@/lib/utils"
 
 interface ActionBadgeProps {
-  type: "police" | "discard"
-  rate?: number
+  actionType: "police" | "discard" | string
+  rateBps?: number | null
+  size?: "sm" | "default"
 }
 
 function formatBps(bps: number): string {
@@ -12,17 +13,20 @@ function formatBps(bps: number): string {
   return `${bps} bps`
 }
 
-export function ActionBadge({ type, rate }: ActionBadgeProps) {
+export function ActionBadge({ actionType, rateBps, size = "default" }: ActionBadgeProps) {
+  const isPolice = actionType === "police"
+  
   return (
     <span
       className={cn(
-        "inline-flex items-center px-2 py-0.5 text-[10px] font-mono uppercase tracking-wide border",
-        type === "police"
+        "inline-flex items-center font-mono uppercase tracking-wide border",
+        size === "sm" ? "px-1.5 py-0.5 text-[9px]" : "px-2 py-0.5 text-[10px]",
+        isPolice
           ? "bg-primary/5 text-primary border-primary/30"
           : "bg-destructive/5 text-destructive border-destructive/30",
       )}
     >
-      {type === "police" && rate ? `police ${formatBps(rate)}` : type}
+      {isPolice && rateBps ? `police ${formatBps(rateBps)}` : actionType}
     </span>
   )
 }
