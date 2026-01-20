@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use tokio::sync::{RwLock, broadcast};
 
 use crate::bgp::FlowSpecAnnouncer;
@@ -21,6 +22,8 @@ pub struct AppState {
     pub ws_broadcast: broadcast::Sender<WsMessage>,
     /// Cached bearer token (loaded at startup to avoid per-request env lookups)
     pub bearer_token: Option<String>,
+    /// Server start time for uptime calculation
+    pub start_time: Instant,
     config_dir: PathBuf,
     shutting_down: AtomicBool,
 }
@@ -71,6 +74,7 @@ impl AppState {
             shutdown_tx,
             ws_broadcast,
             bearer_token,
+            start_time: Instant::now(),
             config_dir,
             shutting_down: AtomicBool::new(false),
         }))

@@ -138,15 +138,15 @@ export default function ConfigPage() {
                 <CardContent className="space-y-3">
                   <div className="flex justify-between items-center">
                     <span className="text-muted-foreground text-sm">Active Mitigations</span>
-                    <span className="font-mono text-sm">{stats.active_mitigations}</span>
+                    <span className="font-mono text-sm">{stats.total_active}</span>
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="text-muted-foreground text-sm">Total Mitigations</span>
                     <span className="font-mono text-sm">{stats.total_mitigations}</span>
                   </div>
                   <div className="flex justify-between items-center">
-                    <span className="text-muted-foreground text-sm">Events (24h)</span>
-                    <span className="font-mono text-sm">{stats.events_24h}</span>
+                    <span className="text-muted-foreground text-sm">Total Events</span>
+                    <span className="font-mono text-sm">{stats.total_events}</span>
                   </div>
                 </CardContent>
               </Card>

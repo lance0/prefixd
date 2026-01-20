@@ -126,6 +126,12 @@ pub struct EventsListResponse {
 pub struct HealthResponse {
     /// Health status (healthy, degraded)
     status: String,
+    /// Daemon version
+    version: String,
+    /// POP identifier
+    pop: String,
+    /// Seconds since daemon started
+    uptime_seconds: u64,
     /// BGP session states by peer name
     bgp_sessions: std::collections::HashMap<String, String>,
     /// Number of active mitigations
@@ -854,6 +860,9 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     Json(HealthResponse {
         status: status.to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        pop: state.settings.pop.clone(),
+        uptime_seconds: state.start_time.elapsed().as_secs(),
         bgp_sessions: bgp_map,
         active_mitigations: active,
         database: db_status,

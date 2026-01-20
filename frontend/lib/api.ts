@@ -44,17 +44,26 @@ export interface Stats {
   total_active: number
   total_mitigations: number
   total_events: number
-  pops: PopInfo[]
+  pops: PopStats[]
+}
+
+export interface PopStats {
+  pop: string
+  active: number
+  total: number
 }
 
 export interface PopInfo {
   pop: string
   active_mitigations: number
-  last_seen: string
+  total_mitigations: number
 }
 
 export interface HealthResponse {
   status: string
+  version: string
+  pop: string
+  uptime_seconds: number
   bgp_sessions: Record<string, string>
   active_mitigations: number
   database: string
@@ -164,7 +173,7 @@ export async function withdrawMitigation(
 ): Promise<void> {
   await fetchApi(`/v1/mitigations/${id}/withdraw`, {
     method: "POST",
-    body: JSON.stringify({ reason, operator }),
+    body: JSON.stringify({ reason, operator_id: operator }),
   })
 }
 
@@ -216,7 +225,7 @@ export async function addSafelist(
 ): Promise<void> {
   await fetchApi("/v1/safelist", {
     method: "POST",
-    body: JSON.stringify({ prefix, reason, operator }),
+    body: JSON.stringify({ prefix, reason, operator_id: operator }),
   })
 }
 

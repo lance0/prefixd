@@ -24,6 +24,11 @@ pub fn require_auth(
         return Ok(());
     }
 
+    // mTLS is validated at transport layer - if request reached here, client is authenticated
+    if matches!(state.settings.http.auth.mode, AuthMode::Mtls) {
+        return Ok(());
+    }
+
     // Check session cookie first (browser/dashboard)
     if auth_session.user.is_some() {
         return Ok(());
