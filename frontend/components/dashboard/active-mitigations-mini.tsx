@@ -4,6 +4,7 @@ import Link from "next/link"
 import { ArrowRight } from "lucide-react"
 import { StatusBadge } from "./status-badge"
 import { ActionBadge } from "./action-badge"
+import { cn } from "@/lib/utils"
 import type { Mitigation } from "@/lib/api"
 
 interface ActiveMitigationsMiniProps {
@@ -36,7 +37,7 @@ export function ActiveMitigationsMini({ mitigations, limit = 5 }: ActiveMitigati
   return (
     <div className="border border-border bg-card p-4 h-full flex flex-col">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-xs font-mono uppercase tracking-wide text-muted-foreground">
+        <h3 className="text-xs font-mono uppercase text-muted-foreground text-balance">
           Active Mitigations
         </h3>
         <Link
@@ -44,7 +45,7 @@ export function ActiveMitigationsMini({ mitigations, limit = 5 }: ActiveMitigati
           className="text-xs text-primary hover:underline flex items-center gap-1"
         >
           View all
-          <ArrowRight className="h-3 w-3" />
+          <ArrowRight className="size-3" />
         </Link>
       </div>
       
@@ -57,9 +58,10 @@ export function ActiveMitigationsMini({ mitigations, limit = 5 }: ActiveMitigati
           {active.map((m, index) => (
             <div
               key={m.mitigation_id}
-              className={`flex items-center justify-between py-2 ${
-                index !== active.length - 1 ? "border-b border-border/50" : ""
-              }`}
+              className={cn(
+                "flex items-center justify-between py-2",
+                index !== active.length - 1 && "border-b border-border/50"
+              )}
             >
               <div className="flex items-center gap-3 min-w-0">
                 <StatusBadge status={m.status} size="sm" />

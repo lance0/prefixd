@@ -11,7 +11,7 @@ const navItems = [
   { href: "/mitigations", label: "Mitigations", icon: Shield },
   { href: "/events", label: "Events", icon: Activity },
   { href: "/audit-log", label: "Audit Log", icon: FileText },
-  { href: "/config", label: "Config", icon: Settings },
+  { href: "/admin", label: "Admin", icon: Settings },
 ]
 
 interface SidebarProps {
