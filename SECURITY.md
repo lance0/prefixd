@@ -11,13 +11,10 @@
 
 **Please do NOT report security vulnerabilities through public GitHub issues.**
 
-Instead, please report them via GitHub's private vulnerability reporting:
+Instead, please report them via one of these methods:
 
-1. Go to the [Security tab](https://github.com/lance0/prefixd/security)
-2. Click "Report a vulnerability"
-3. Fill out the form with details
-
-Alternatively, email security concerns to the maintainers directly.
+1. **Email:** [lance@lance0.com](mailto:lance@lance0.com)
+2. **GitHub:** Use [private vulnerability reporting](https://github.com/lance0/prefixd/security/advisories/new)
 
 ### What to Include
 
