@@ -45,8 +45,9 @@ escalation:
   min_confidence: 0.7
 
 storage:
-  # Use 'postgres' service name for docker-compose, or 'localhost' when running locally
-  connection_string: "postgres://prefixd:prefixd_secret@postgres:5432/prefixd"
+  # Use environment variable or fallback to docker-compose default
+  # For production, set DATABASE_URL environment variable
+  connection_string: "${DATABASE_URL:-postgres://prefixd:prefixd@postgres:5432/prefixd}"
 
 observability:
   log_format: pretty
