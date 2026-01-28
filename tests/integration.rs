@@ -24,6 +24,8 @@ fn test_settings() -> Settings {
             auth: AuthConfig {
                 mode: AuthMode::None,
                 bearer_token_env: None,
+                ldap: None,
+                radius: None,
             },
             rate_limit: RateLimitConfig::default(),
             tls: None,

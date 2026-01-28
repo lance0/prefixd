@@ -1256,9 +1256,7 @@ pub async fn list_operators(
     use super::auth::require_role;
     use crate::domain::OperatorRole;
 
-    let auth_header = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
 
     require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
 
@@ -1307,20 +1305,18 @@ pub async fn create_operator(
     Json(req): Json<CreateOperatorRequest>,
 ) -> Result<(StatusCode, Json<OperatorInfo>), StatusCode> {
     use super::auth::require_role;
-    use argon2::{Argon2, PasswordHasher, password_hash::{SaltString, rand_core::OsRng}};
     use crate::domain::OperatorRole;
+    use argon2::{
+        Argon2, PasswordHasher,
+        password_hash::{SaltString, rand_core::OsRng},
+    };
 
-    let auth_header = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
 
     let admin = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
 
     // Validate role
-    let role: OperatorRole = req
-        .role
-        .parse()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let role: OperatorRole = req.role.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // Validate password length
     if req.password.len() < 8 {
@@ -1395,9 +1391,7 @@ pub async fn delete_operator(
     use super::auth::require_role;
     use crate::domain::OperatorRole;
 
-    let auth_header = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
 
     let admin = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
 
@@ -1446,19 +1440,20 @@ pub async fn change_password(
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, StatusCode> {
     use super::auth::require_role;
-    use argon2::{Argon2, PasswordHasher, password_hash::{SaltString, rand_core::OsRng}};
     use crate::domain::OperatorRole;
+    use argon2::{
+        Argon2, PasswordHasher,
+        password_hash::{SaltString, rand_core::OsRng},
+    };
 
-    let auth_header = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
 
     // Allow self or admin to change password
     let caller = require_role(&state, &auth_session, auth_header, OperatorRole::Viewer)?;
-    
+
     let is_self = caller.operator_id == id;
     let is_admin = caller.role == OperatorRole::Admin;
-    
+
     if !is_self && !is_admin {
         return Err(StatusCode::FORBIDDEN);
     }
