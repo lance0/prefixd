@@ -9,7 +9,7 @@ use testcontainers_modules::postgres::Postgres;
 
 use prefixd::AppState;
 use prefixd::auth::create_auth_layer;
-use prefixd::bgp::{FlowSpecAnnouncer, GoBgpAnnouncer, MockAnnouncer};
+use prefixd::bgp::{GoBgpAnnouncer, MockAnnouncer};
 use prefixd::config::{
     AllowedPorts, Asset, AuthConfig, AuthMode, BgpConfig, BgpMode, Customer, EscalationConfig,
     GuardrailsConfig, HttpConfig, Inventory, ObservabilityConfig, OperationMode, Playbook,
