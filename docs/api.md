@@ -354,6 +354,121 @@ GET /v1/auth/me
 
 ---
 
+## Operators (Admin Only)
+
+### List Operators
+
+```http
+GET /v1/operators
+```
+
+**Response:**
+
+```json
+{
+  "operators": [
+    {
+      "operator_id": "uuid",
+      "username": "admin",
+      "role": "admin",
+      "created_at": "2026-01-15T08:00:00Z",
+      "created_by": null,
+      "last_login_at": "2026-01-18T10:30:00Z"
+    }
+  ],
+  "count": 1
+}
+```
+
+### Create Operator
+
+```http
+POST /v1/operators
+Content-Type: application/json
+```
+
+**Request:**
+
+```json
+{
+  "username": "jsmith",
+  "password": "securepassword123",
+  "role": "operator"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `username` | string | yes | Unique username |
+| `password` | string | yes | Minimum 8 characters |
+| `role` | string | yes | `admin`, `operator`, or `viewer` |
+
+**Response (201 Created):**
+
+```json
+{
+  "operator_id": "uuid",
+  "username": "jsmith",
+  "role": "operator",
+  "created_at": "2026-01-18T10:30:00Z",
+  "created_by": "admin",
+  "last_login_at": null
+}
+```
+
+**Error Responses:**
+
+| Status | Reason |
+|--------|--------|
+| 400 | Invalid role or password too short |
+| 403 | Caller is not admin |
+| 409 | Username already exists |
+
+### Delete Operator
+
+```http
+DELETE /v1/operators/{id}
+```
+
+**Response (204 No Content)**
+
+**Error Responses:**
+
+| Status | Reason |
+|--------|--------|
+| 400 | Cannot delete self |
+| 403 | Caller is not admin |
+| 404 | Operator not found |
+
+### Change Password
+
+```http
+PUT /v1/operators/{id}/password
+Content-Type: application/json
+```
+
+**Request:**
+
+```json
+{
+  "new_password": "newsecurepassword123"
+}
+```
+
+Admins can change any password. Non-admins can only change their own.
+
+**Response (204 No Content)**
+
+**Error Responses:**
+
+| Status | Reason |
+|--------|--------|
+| 400 | Password too short (min 8 chars) |
+| 403 | Insufficient permissions |
+| 404 | Operator not found |
+
+---
+
 ## Operational Endpoints
 
 ### Health Check
