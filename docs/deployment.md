@@ -554,3 +554,28 @@ prefixdctl peers
 - [ ] Test mitigation withdrawal
 - [ ] Verify TTL expiry works
 - [ ] Test dashboard login
+
+---
+
+## Lab Environment
+
+For testing FlowSpec without production routers, see the [lab/](../lab/) directory which includes:
+
+| Lab | Router | Requirements |
+|-----|--------|--------------|
+| `frr-flowspec.clab.yml` | FRR | Any Linux (recommended) |
+| `vjunos-flowspec.clab.yml` | vJunos | Intel CPU with nested KVM |
+| `cjunos-flowspec.clab.yml` | cJunosEvolved | Intel CPU with nested KVM |
+
+Quick start with FRR (no special hardware needed):
+
+```bash
+cd lab
+sudo containerlab deploy -t frr-flowspec.clab.yml
+docker network connect clab-mgmt prefixd-gobgp
+
+# Verify BGP session
+docker exec prefixd-gobgp gobgp neighbor
+```
+
+See [lab/README.md](../lab/README.md) for full instructions.
