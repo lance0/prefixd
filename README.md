@@ -6,6 +6,8 @@
 
 prefixd is a BGP FlowSpec policy daemon for automated DDoS mitigation. It receives attack signals from detectors, applies policy-driven playbooks, and announces FlowSpec rules to routers via GoBGP.
 
+![Dashboard Overview](docs/images/dashboard-overview.png)
+
 ```
 Detector ──► prefixd ──► GoBGP ──► Routers
    │            │

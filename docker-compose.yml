@@ -13,6 +13,7 @@ services:
     environment:
       - RUST_LOG=info
       - PREFIXD_API_TOKEN=${PREFIXD_API_TOKEN:-}
+      - DATABASE_URL=postgres://prefixd:${POSTGRES_PASSWORD:-prefixd_secret}@postgres:5432/prefixd
     depends_on:
       postgres:
         condition: service_healthy
@@ -28,6 +29,7 @@ services:
     environment:
       - NEXT_PUBLIC_PREFIXD_API=http://localhost:8080
       - NEXT_PUBLIC_PREFIXD_TOKEN=${PREFIXD_API_TOKEN:-}
+      - NEXT_PUBLIC_MOCK_MODE=${MOCK_MODE:-false}
     depends_on:
       - prefixd
     restart: unless-stopped

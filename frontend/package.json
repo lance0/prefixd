@@ -49,6 +49,7 @@
     "motion": "^12.27.1",
     "next": "^16.0.11",
     "next-themes": "^0.4.6",
+    "playwright": "^1.58.0",
     "react": "^19.2.4",
     "react-day-picker": "9.13.0",
     "react-dom": "^19.2.4",

@@ -44,10 +44,12 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Init database
-    let storage = &config.settings.storage;
+    // DATABASE_URL env var takes precedence over config file
+    let connection_string = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| config.settings.storage.connection_string.clone());
     tracing::info!("initializing PostgreSQL database");
 
-    let pool = db::init_postgres_pool(&storage.connection_string).await?;
+    let pool = db::init_postgres_pool(&connection_string).await?;
     let repo: Arc<dyn db::RepositoryTrait> = Arc::new(db::Repository::new(pool.clone()));
 
     // Init safelist from config

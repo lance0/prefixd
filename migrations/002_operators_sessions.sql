@@ -1,5 +1,5 @@
 -- Operators table for dashboard authentication
-CREATE TABLE operators (
+CREATE TABLE IF NOT EXISTS operators (
     operator_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
@@ -9,13 +9,13 @@ CREATE TABLE operators (
     last_login_at TIMESTAMPTZ
 );
 
-CREATE INDEX idx_operators_username ON operators(username);
+CREATE INDEX IF NOT EXISTS idx_operators_username ON operators(username);
 
 -- Sessions table for tower-sessions-sqlx-store
-CREATE TABLE sessions (
+CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     data BYTEA NOT NULL,
     expiry_date TIMESTAMPTZ NOT NULL
 );
 
-CREATE INDEX idx_sessions_expiry ON sessions(expiry_date);
+CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expiry_date);
