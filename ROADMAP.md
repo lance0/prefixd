@@ -72,6 +72,7 @@ Target: Stable API, comprehensive testing, production-proven.
 - [ ] Chaos testing (kill GoBGP mid-mitigation, kill Postgres during ingestion)
 - [ ] Load testing (sustained event volume)
 - [ ] Security audit (dependencies, input validation)
+- [ ] Reconciliation loop pagination (currently limited to 1000 mitigations)
 
 ### Observability
 
