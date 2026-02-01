@@ -12,10 +12,13 @@ CREATE TABLE IF NOT EXISTS operators (
 CREATE INDEX IF NOT EXISTS idx_operators_username ON operators(username);
 
 -- Sessions table for tower-sessions-sqlx-store
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
+-- Uses tower_sessions schema as expected by the library
+CREATE SCHEMA IF NOT EXISTS tower_sessions;
+
+CREATE TABLE IF NOT EXISTS tower_sessions.session (
+    id TEXT PRIMARY KEY NOT NULL,
     data BYTEA NOT NULL,
     expiry_date TIMESTAMPTZ NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expiry_date);
+CREATE INDEX IF NOT EXISTS idx_tower_sessions_expiry ON tower_sessions.session(expiry_date);
