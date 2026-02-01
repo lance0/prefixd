@@ -27,9 +27,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_PREFIXD_API=http://localhost:8080
-      - NEXT_PUBLIC_PREFIXD_TOKEN=${PREFIXD_API_TOKEN:-}
-      - NEXT_PUBLIC_MOCK_MODE=${MOCK_MODE:-false}
+      # Server-side only - proxied through Next.js API route
+      - PREFIXD_API=http://prefixd:8080
     depends_on:
       - prefixd
     restart: unless-stopped

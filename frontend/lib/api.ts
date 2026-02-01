@@ -1,4 +1,6 @@
-const API_BASE = process.env.NEXT_PUBLIC_PREFIXD_API || "http://localhost:8080"
+// Use relative URL to proxy through Next.js API route
+// This allows the dashboard to work on any host without hardcoded URLs
+const API_BASE = "/api/prefixd"
 
 // Cache for deduplicating in-flight requests (client-swr-dedup pattern)
 const requestCache = new Map<string, Promise<unknown>>()

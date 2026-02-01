@@ -1,4 +1,5 @@
-const API_BASE = process.env.NEXT_PUBLIC_PREFIXD_API || "http://localhost:8080"
+// Use relative URL to proxy through Next.js API route
+const API_BASE = "/api/prefixd"
 
 export type OperatorRole = "admin" | "operator" | "viewer"
 
