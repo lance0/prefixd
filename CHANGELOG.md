@@ -5,6 +5,23 @@ All notable changes to prefixd will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Frontend API Proxy** - Dashboard now works on remote servers without hardcoded URLs
+  - Added `/api/prefixd/[...path]` Next.js API route to proxy requests to backend
+  - Removed `NEXT_PUBLIC_PREFIXD_API` build-time env var (was baked into bundle)
+  - Added `PREFIXD_API` server-side env var for backend URL
+  - Browser only talks to dashboard on port 3000, never directly to API
+
+- **Session Table Schema** - Fixed `tower_sessions.session` table creation
+  - Migration now creates correct schema/table name for `tower-sessions-sqlx-store`
+  - Users no longer need to manually create the session table
+
+- **Bun Lockfile** - Removed `--frozen-lockfile` from frontend Dockerfile
+  - Fixes build failures on systems with different bun versions
+
 ## [0.8.0] - 2026-01-28
 
 ### Added

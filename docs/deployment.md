@@ -111,6 +111,48 @@ http:
 
 ---
 
+## Dashboard Setup
+
+The Next.js dashboard communicates with the prefixd API through a server-side proxy. This allows the dashboard to work on any host without hardcoded URLs.
+
+### Docker Compose
+
+The dashboard container uses the `PREFIXD_API` environment variable to locate the backend:
+
+```yaml
+dashboard:
+  build: ./frontend
+  ports:
+    - "3000:3000"
+  environment:
+    - PREFIXD_API=http://prefixd:8080  # Docker service name
+```
+
+### Remote Deployment
+
+When deploying to a remote server, ensure:
+
+1. The dashboard container can reach the prefixd container (same Docker network)
+2. Users access the dashboard via the server's IP/hostname on port 3000
+3. The browser never connects directly to port 8080 - all API calls are proxied
+
+```bash
+# Access dashboard from your workstation
+open http://your-server:3000
+```
+
+### Local Development (Outside Docker)
+
+For frontend development without Docker:
+
+```bash
+cd frontend
+export PREFIXD_API=http://localhost:8080
+npm run dev
+```
+
+---
+
 ## GoBGP v4.x Setup
 
 prefixd requires GoBGP v4.0.0 or later.
