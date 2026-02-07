@@ -18,7 +18,7 @@ tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "limi
 
 # Authentication
 axum-login = "0.18"
-tower-sessions = "0.14"
+tower-sessions = "0.15"
 tower-sessions-sqlx-store = { version = "0.15", features = ["postgres"] }
 argon2 = "0.5"
 password-hash = "0.5"
