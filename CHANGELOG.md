@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dashboard POP Selector** - POP dropdown in TopBar now loads dynamically from the backend API
+  - Replaced hardcoded POP list with `usePops()` and `useHealth()` hooks
+  - Current POP from health endpoint used as default selection
+- **`GET /v1/pops` Endpoint** - Current instance POP now always included in response
+  - Newly deployed POPs with no mitigations are no longer invisible to the API
+
 ### Added
 
 - **Juniper cJunosEvolved FlowSpec Lab** - End-to-end verified with real Junos router

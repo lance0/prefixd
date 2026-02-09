@@ -1087,11 +1087,22 @@ pub async fn list_pops(
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
-    let pops = state
+    let mut pops = state
         .repo
         .list_pops()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let current_pop = &state.settings.pop;
+    if !pops.iter().any(|p| p.pop == *current_pop) {
+        pops.push(crate::db::PopInfo {
+            pop: current_pop.clone(),
+            active_mitigations: 0,
+            total_mitigations: 0,
+        });
+        pops.sort_by(|a, b| a.pop.cmp(&b.pop));
+    }
+
     Ok(Json(pops))
 }
 
@@ -1492,4 +1503,91 @@ pub async fn change_password(
     );
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::PopInfo;
+
+    #[test]
+    fn test_list_pops_includes_current_pop_when_missing() {
+        let mut pops = vec![
+            PopInfo {
+                pop: "fra1".to_string(),
+                active_mitigations: 2,
+                total_mitigations: 50,
+            },
+            PopInfo {
+                pop: "ord1".to_string(),
+                active_mitigations: 1,
+                total_mitigations: 30,
+            },
+        ];
+        let current_pop = "iad1";
+
+        if !pops.iter().any(|p| p.pop == *current_pop) {
+            pops.push(PopInfo {
+                pop: current_pop.to_string(),
+                active_mitigations: 0,
+                total_mitigations: 0,
+            });
+            pops.sort_by(|a, b| a.pop.cmp(&b.pop));
+        }
+
+        assert_eq!(pops.len(), 3);
+        assert_eq!(pops[0].pop, "fra1");
+        assert_eq!(pops[1].pop, "iad1");
+        assert_eq!(pops[2].pop, "ord1");
+        assert_eq!(pops[1].active_mitigations, 0);
+        assert_eq!(pops[1].total_mitigations, 0);
+    }
+
+    #[test]
+    fn test_list_pops_does_not_duplicate_existing_pop() {
+        let mut pops = vec![
+            PopInfo {
+                pop: "iad1".to_string(),
+                active_mitigations: 5,
+                total_mitigations: 100,
+            },
+            PopInfo {
+                pop: "ord1".to_string(),
+                active_mitigations: 1,
+                total_mitigations: 30,
+            },
+        ];
+        let current_pop = "iad1";
+
+        if !pops.iter().any(|p| p.pop == *current_pop) {
+            pops.push(PopInfo {
+                pop: current_pop.to_string(),
+                active_mitigations: 0,
+                total_mitigations: 0,
+            });
+            pops.sort_by(|a, b| a.pop.cmp(&b.pop));
+        }
+
+        assert_eq!(pops.len(), 2);
+        assert_eq!(pops[0].pop, "iad1");
+        assert_eq!(pops[0].active_mitigations, 5);
+    }
+
+    #[test]
+    fn test_list_pops_inserts_into_empty_list() {
+        let mut pops: Vec<PopInfo> = vec![];
+        let current_pop = "iad1";
+
+        if !pops.iter().any(|p| p.pop == *current_pop) {
+            pops.push(PopInfo {
+                pop: current_pop.to_string(),
+                active_mitigations: 0,
+                total_mitigations: 0,
+            });
+            pops.sort_by(|a, b| a.pop.cmp(&b.pop));
+        }
+
+        assert_eq!(pops.len(), 1);
+        assert_eq!(pops[0].pop, "iad1");
+    }
 }

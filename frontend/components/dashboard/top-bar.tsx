@@ -6,8 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ConnectionStatus } from "@/components/connection-status"
 import { UserMenu } from "@/components/user-menu"
 import { useWebSocket } from "@/hooks/use-websocket"
-
-const pops = ["IAD1", "IAD2", "SFO1", "LAX1", "ORD1", "AMS1", "FRA1", "NRT1"]
+import { usePops, useHealth } from "@/hooks/use-api"
 
 interface TopBarProps {
   onMenuClick?: () => void
@@ -17,6 +16,11 @@ interface TopBarProps {
 export function TopBar({ onMenuClick, onSearchClick }: TopBarProps) {
   const [time, setTime] = useState<string>("")
   const { connectionState } = useWebSocket()
+  const { data: popsData } = usePops()
+  const { data: health } = useHealth()
+
+  const currentPop = health?.pop?.toUpperCase()
+  const pops = popsData?.map((p) => p.pop.toUpperCase()) ?? (currentPop ? [currentPop] : [])
 
   useEffect(() => {
     const updateTime = () => {
@@ -52,9 +56,9 @@ export function TopBar({ onMenuClick, onSearchClick }: TopBarProps) {
           </div>
         </div>
 
-        <Select defaultValue="IAD1">
+        <Select defaultValue={currentPop}>
           <SelectTrigger className="w-20 h-7 bg-secondary border-border text-xs font-mono">
-            <SelectValue />
+            <SelectValue placeholder={currentPop ?? "..."} />
           </SelectTrigger>
           <SelectContent>
             {pops.map((pop) => (
