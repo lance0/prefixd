@@ -132,9 +132,10 @@ async function doFetch<T>(url: string, options: RequestInit): Promise<T> {
 
 export async function getHealth(): Promise<HealthResponse> {
   const data = await fetchApi<Omit<HealthResponse, 'bgp_session_up'>>("/v1/health")
+  const sessions = Object.values(data.bgp_sessions ?? {})
   return {
     ...data,
-    bgp_session_up: data.gobgp?.status === "connected",
+    bgp_session_up: sessions.length > 0 && sessions.every((s) => s === "established"),
   }
 }
 
