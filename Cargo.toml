@@ -1,6 +1,6 @@
 [package]
 name = "prefixd"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2024"
 rust-version = "1.85"
 description = "BGP FlowSpec routing policy daemon for DDoS mitigation"
