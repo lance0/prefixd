@@ -3,7 +3,11 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { useSWRConfig } from "swr"
 
-const WS_BASE = process.env.NEXT_PUBLIC_PREFIXD_WS || "ws://localhost:8080"
+function getWsBase(): string {
+  if (typeof window === "undefined") return "ws://localhost:8080"
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
+  return `${proto}//${window.location.host}`
+}
 
 export type WsMessageType =
   | "MitigationCreated"
@@ -80,7 +84,7 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     setConnectionState("connecting")
 
     try {
-      const ws = new WebSocket(`${WS_BASE}/v1/ws/feed`)
+      const ws = new WebSocket(`${getWsBase()}/v1/ws/feed`)
       wsRef.current = ws
 
       ws.onopen = () => {

@@ -41,7 +41,7 @@ See [CHANGELOG](CHANGELOG.md) for version history.
 
 ### Frontend
 
-- [ ] Derive WebSocket URL from `window.location` at runtime (remove `NEXT_PUBLIC_PREFIXD_WS` build-time env var, same pattern as the HTTP API proxy)
+- [x] Derive WebSocket URL from `window.location` at runtime (removed `NEXT_PUBLIC_PREFIXD_WS` build-time env var)
 - [ ] Vitest setup
 - [ ] Component tests
 - [ ] Hook tests

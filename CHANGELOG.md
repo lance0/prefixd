@@ -35,7 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Lab Test Script** - `lab/test-flowspec.sh` for automated end-to-end FlowSpec verification
   - Checks prefixd health, GoBGP, BGP neighbors, sends test event, verifies RIB
   - Optional `--withdraw` flag to test full announce/withdraw lifecycle
-- **WebSocket Build Arg** - `NEXT_PUBLIC_PREFIXD_WS` can be set at Docker build time for remote deployments (contributed by @bswinnerton)
+- **WebSocket Runtime URL** - WS connection now derived from `window.location` at runtime
+  - No build-time env var needed; works behind any reverse proxy (nginx, caddy, etc.)
+  - Removed `NEXT_PUBLIC_PREFIXD_WS` build arg from Dockerfile
 - **Favicon** - Replaced Vercel placeholder with prefixd shield icon (dark/light mode PNGs + SVG)
 
 ### Changed

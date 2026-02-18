@@ -12,10 +12,6 @@ RUN bun install
 # Copy source
 COPY . .
 
-# Build arguments
-ARG NEXT_PUBLIC_PREFIXD_WS
-ENV NEXT_PUBLIC_PREFIXD_WS=$NEXT_PUBLIC_PREFIXD_WS
-
 # Build
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN bun run build
