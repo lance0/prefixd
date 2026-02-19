@@ -58,30 +58,37 @@ src/
 
 frontend/
 ├── app/
-│   ├── (dashboard)/           # Route group with RequireAuth layout wrapper
-│   │   ├── layout.tsx         # Auth guard for all dashboard pages
+│   ├── (dashboard)/           # Route group with RequireAuth + ErrorBoundary layout wrapper
+│   │   ├── layout.tsx         # Auth guard + WebSocket + ErrorBoundary for all dashboard pages
 │   │   ├── page.tsx           # Overview
 │   │   ├── mitigations/       # Mitigations list with inline withdraw
+│   │   ├── mitigations/[id]/  # Mitigation detail (full-page, timeline, customer context)
+│   │   ├── mitigations/create/# Manual "Mitigate Now" form
 │   │   ├── events/            # Event log
 │   │   ├── inventory/         # Searchable customer/service/IP browser
 │   │   ├── audit-log/         # Audit trail
 │   │   ├── config/            # Settings (JSON) + Playbooks (cards) + hot-reload
-│   │   └── admin/             # System status, safelist CRUD, user management
+│   │   └── admin/             # Tabbed: System Status, Safelist CRUD, User management
 │   ├── login/                 # Login page (outside auth guard)
 │   ├── globals.css            # Light + dark theme variables
-│   └── layout.tsx             # Root layout with ThemeProvider
+│   └── layout.tsx             # Root layout with ThemeProvider + Toaster
 ├── components/
 │   ├── dashboard/             # Sidebar, top-bar, BGP status, command palette, detail panels
 │   ├── ui/                    # shadcn/ui components (button, card, dialog, alert-dialog, etc.)
+│   ├── error-boundary.tsx     # React class ErrorBoundary with retry button
+│   ├── websocket-provider.tsx # Centralized WebSocket context (SWR invalidation + toasts)
 │   ├── require-auth.tsx       # Auth-mode-aware guard with deny-by-default
 │   └── swr-provider.tsx       # SWR config with 401 retry suppression
 ├── hooks/
 │   ├── use-api.ts             # SWR hooks for all endpoints
 │   ├── use-auth.tsx           # AuthProvider with session expiry listener
 │   └── use-permissions.ts     # Role-based permissions (deny-by-default, settled flag)
-└── lib/
-    ├── api.ts                 # Fetch wrapper, all API functions, 401 debounce dispatch
-    └── mock-api-data.ts       # Mock data for development
+├── lib/
+│   ├── api.ts                 # Fetch wrapper, all API functions, 401 debounce dispatch
+│   └── mock-api-data.ts       # Mock data for development
+├── __tests__/                 # Vitest tests
+├── vitest.config.ts           # Vitest config (jsdom, react plugin, @ alias)
+└── vitest.setup.ts            # jest-dom matchers
 
 configs/                       # prefixd.yaml, inventory.yaml, playbooks.yaml, nginx.conf, gobgp.conf
 docs/
@@ -162,10 +169,10 @@ See `docs/adr/` for all 15 Architecture Decision Records.
 ## Testing
 
 ```bash
-# Unit tests (73 tests)
+# Backend unit tests (73 tests)
 cargo test
 
-# All tests including integration (93 total: 73 unit, 12 integration, 8 ignored)
+# All backend tests including integration (85 runnable: 73 unit + 12 integration; 14 ignored requiring GoBGP/Docker)
 cargo test --features test-utils
 
 # Lint
@@ -174,6 +181,10 @@ cargo clippy -- -D warnings
 
 # Frontend build
 cd frontend && bun run build
+
+# Frontend tests (Vitest + Testing Library)
+cd frontend && bun run test          # single run
+cd frontend && bun run test:watch    # watch mode
 
 # Run locally
 cargo run -- --config ./configs
@@ -198,7 +209,7 @@ docker compose logs prefixd   # View daemon logs
 
 Services: nginx (80), prefixd (8080), dashboard (3000), postgres (5432), gobgp (50051/179), prometheus (9091), grafana (3001)
 
-## Current State (v0.8.3)
+## Current State (v0.8.3+)
 
 Completed:
 - HTTP API with hybrid auth (session + bearer) and rate limiting
@@ -207,16 +218,20 @@ Completed:
 - Guardrails, quotas, and safelist protection
 - PostgreSQL state store with reconciliation loop
 - Prometheus metrics + Grafana dashboards
-- Next.js dashboard with real-time WebSocket updates
+- Next.js dashboard with real-time WebSocket updates and toast notifications
 - Config/inventory read-only pages with allowlist redaction
-- Safelist management and user management on admin page
+- Safelist management and user management on admin page (tabbed layout)
+- Mitigation detail full-page view with timeline and customer context
+- Manual "Mitigate Now" form (POST /v1/events from dashboard)
 - Inline withdraw button on mitigations table
 - Light/dark mode with next-themes
 - Nginx reverse proxy (single-origin deployment)
+- ErrorBoundary wrapping all dashboard pages
 - 15 Architecture Decision Records
 - CLI tool (prefixdctl) for all API operations
 - OpenAPI spec with utoipa annotations
-- 12 integration tests + 73 unit tests
+- 73 backend unit tests + 12 integration tests (+ 14 ignored requiring GoBGP/Docker)
+- Vitest + Testing Library frontend test infrastructure (10 tests)
 
 ## Code Conventions
 
@@ -244,6 +259,11 @@ Completed:
 3. Add API function in `frontend/lib/api.ts`
 4. Add to sidebar nav in `frontend/components/dashboard/sidebar.tsx`
 5. Add to command palette in `frontend/components/dashboard/command-palette.tsx`
+
+### Adding a frontend test
+1. Create `frontend/__tests__/your-test.test.ts` (pure logic) or `.test.tsx` (component)
+2. Use `vitest` globals (`describe`, `it`, `expect`) and `@testing-library/react` for components
+3. Run with `cd frontend && bun run test`
 
 ### Adding a new metric
 1. Define in `src/observability/metrics.rs` using `Lazy<CounterVec>` etc.

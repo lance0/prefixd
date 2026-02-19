@@ -1,5 +1,6 @@
 import { RequireAuth } from "@/components/require-auth"
 import { WebSocketProvider } from "@/components/websocket-provider"
+import { ErrorBoundary } from "@/components/error-boundary"
 
 export default function DashboardGroupLayout({
   children,
@@ -9,7 +10,9 @@ export default function DashboardGroupLayout({
   return (
     <RequireAuth>
       <WebSocketProvider>
-        {children}
+        <ErrorBoundary>
+          {children}
+        </ErrorBoundary>
       </WebSocketProvider>
     </RequireAuth>
   )

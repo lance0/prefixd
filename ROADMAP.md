@@ -93,10 +93,10 @@ See [CHANGELOG](CHANGELOG.md) for version history.
 - [ ] Config page (Phase 2)
   - Playbook editor (form-based, with validation)
   - Requires `PUT /v1/config/playbooks` endpoint, file persistence, rollback
-- [ ] Vitest setup
-- [ ] Component tests
-- [ ] Hook tests
-- [ ] Error boundaries
+- [x] Vitest setup (vitest.config.ts, jsdom, @testing-library/react, bun run test)
+- [x] Component tests (ErrorBoundary test with 3 cases)
+- [ ] Hook tests (usePermissions, useAuth, use-api)
+- [x] Error boundaries (ErrorBoundary component wrapping dashboard layout)
 - [ ] Upgrade lucide-react (0.454 -> latest, verify all ~30 icon imports)
 - [ ] Upgrade react-resizable-panels (2.x -> 4.x, major version)
 - [ ] Upgrade tower-sessions (0.14 -> 0.15, blocked on axum-login 0.18 compatibility)

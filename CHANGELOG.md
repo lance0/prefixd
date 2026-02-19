@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Optional reason field, permission-gated (operator + admin only)
   - Tooltips on view and withdraw action buttons
 - **Per-peer BGP session detail on admin page** - Shows each peer name and session state (established/down) instead of a single boolean
+- **ErrorBoundary for dashboard pages** - React class ErrorBoundary wraps all `(dashboard)/` routes; displays error message and "Try Again" button instead of blank screen
+- **Admin page tabbed layout** - Refactored from long scroll to Tabs (Status, Safelist, Users); Users tab conditionally rendered for admins
+- **Vitest + Testing Library** - Frontend test infrastructure with 10 tests (ErrorBoundary component tests, create mitigation validation tests)
+- **"Mitigate Now" in command palette** - Quick action entry to jump to manual mitigation form
 
 ### Fixed
 
@@ -603,5 +607,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/lance0/prefixd/compare/v0.8.2...v0.8.3
+[0.8.2]: https://github.com/lance0/prefixd/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/lance0/prefixd/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/lance0/prefixd/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/lance0/prefixd/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/lance0/prefixd/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/lance0/prefixd/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/lance0/prefixd/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/lance0/prefixd/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/lance0/prefixd/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/lance0/prefixd/releases/tag/v0.1.0

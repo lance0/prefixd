@@ -148,7 +148,7 @@ For frontend development without Docker:
 ```bash
 cd frontend
 export PREFIXD_API=http://localhost:8080
-npm run dev
+bun run dev
 ```
 
 ---
@@ -306,11 +306,11 @@ The `docker-compose.yml` includes PostgreSQL:
 
 ```yaml
 postgres:
-  image: postgres:16
+  image: postgres:16-alpine
   environment:
     POSTGRES_DB: prefixd
     POSTGRES_USER: prefixd
-    POSTGRES_PASSWORD: prefixd
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prefixd_secret}
   volumes:
     - postgres_data:/var/lib/postgresql/data
 ```
@@ -511,8 +511,9 @@ Scrape config:
 ```yaml
 scrape_configs:
   - job_name: 'prefixd'
+    metrics_path: /metrics
     static_configs:
-      - targets: ['prefixd:9090']
+      - targets: ['prefixd:8080']
 ```
 
 ### Key Metrics
@@ -550,7 +551,7 @@ groups:
 ```bash
 # Liveness check (public, lightweight - no DB/GoBGP calls)
 curl http://localhost/v1/health
-# Returns: {"status":"ok","version":"0.8.2","auth_mode":"none"}
+# Returns: {"status":"ok","version":"0.8.3","auth_mode":"none"}
 
 # Full operational health (authenticated)
 curl -H "Authorization: Bearer $TOKEN" http://localhost/v1/health/detail

@@ -62,14 +62,15 @@ Content-Type: application/json
 
 ```json
 {
+  "timestamp": "2026-02-18T10:30:00Z",
   "source": "fastnetmon",
   "victim_ip": "203.0.113.10",
   "vector": "udp_flood",
   "bps": 1200000000,
   "pps": 800000,
   "confidence": 0.95,
-  "dst_ports": [53, 123],
-  "protocol": "udp"
+  "top_dst_ports": [53, 123],
+  "action": "ban"
 }
 ```
 
@@ -77,36 +78,29 @@ Content-Type: application/json
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `source` | string | yes | Detector identifier |
-| `victim_ip` | string | yes | IPv4 or IPv6 address under attack |
-| `vector` | string | yes | Attack type (udp_flood, syn_flood, etc.) |
+| `timestamp` | datetime | yes | Event timestamp (ISO 8601) |
+| `source` | string | yes | Detector identifier (e.g. "fastnetmon", "dashboard") |
+| `victim_ip` | string | yes | IPv4 address under attack |
+| `vector` | string | yes | Attack type: `udp_flood`, `syn_flood`, `ack_flood`, `icmp_flood`, `unknown` |
 | `bps` | integer | no | Bits per second |
 | `pps` | integer | no | Packets per second |
 | `confidence` | float | no | 0.0-1.0, detection confidence |
-| `dst_ports` | array | no | Destination ports involved |
-| `protocol` | string | no | tcp, udp, icmp |
+| `top_dst_ports` | array | no | Destination ports involved (max 8) |
+| `action` | string | no | `"ban"` (default) or `"unban"` |
+| `event_id` | string | no | External event ID (for dedup / unban correlation) |
+| `raw_details` | object | no | Raw detector payload for forensics |
 
-**Response (201 Created):**
+**Response (202 Accepted):**
 
 ```json
 {
   "event_id": "evt_abc123",
   "mitigation_id": "mit_def456",
-  "action_taken": "created",
-  "message": "Mitigation created: police 10 Mbps for 120s"
+  "status": "created"
 }
 ```
 
-**Response (200 OK - Extended):**
-
-```json
-{
-  "event_id": "evt_abc124",
-  "mitigation_id": "mit_def456",
-  "action_taken": "extended",
-  "message": "TTL extended by 120s"
-}
-```
+Status values: `"created"`, `"extended"`, `"escalated"`, `"duplicate"`, `"unban_processed"`, `"unban_not_found"`.
 
 **Error Responses:**
 
@@ -484,7 +478,7 @@ Lightweight liveness check. No authentication required. Does not query database 
 ```json
 {
   "status": "ok",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "auth_mode": "none"
 }
 ```
@@ -508,8 +502,8 @@ Full operational health. Requires authentication.
 
 ```json
 {
-  "status": "healthy",
-  "version": "0.8.2",
+  "status": "ok",
+  "version": "0.8.3",
   "pop": "iad1",
   "uptime_seconds": 86400,
   "bgp_sessions": {
@@ -676,30 +670,10 @@ GET /v1/pops
 }
 ```
 
-### BGP Peers
-
-```http
-GET /v1/peers
-```
-
-**Response:**
-
-```json
-{
-  "peers": [
-    {
-      "name": "10.0.0.1",
-      "address": "10.0.0.1",
-      "state": "established"
-    }
-  ]
-}
-```
-
 ### Reload Configuration
 
 ```http
-POST /v1/admin/reload
+POST /v1/config/reload
 ```
 
 **Response (200 OK):**
