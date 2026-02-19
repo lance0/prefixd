@@ -55,14 +55,17 @@ cp .env.example .env
 docker compose up -d
 ```
 
-This starts 4 services:
+This starts 7 services:
 
 | Service | Purpose | Ports |
 |---------|---------|-------|
-| **prefixd** | Policy daemon | 8080 (API), 9090 (metrics) |
-| **dashboard** | Web UI | 3000 |
-| **gobgp** | BGP route server | 179 (BGP), 50051 (gRPC) |
+| **nginx** | Reverse proxy (single entrypoint) | 80 |
+| **prefixd** | Policy daemon | internal |
+| **dashboard** | Web UI | internal |
+| **gobgp** | BGP route server | 179 (BGP) |
 | **postgres** | State storage | 5432 |
+| **prometheus** | Metrics storage | 9091 |
+| **grafana** | Monitoring dashboards | 3001 |
 
 ### 3. Verify it's running
 
@@ -71,8 +74,8 @@ This starts 4 services:
 docker compose ps
 
 # Test the API
-curl http://localhost:8080/v1/health
-# {"status":"healthy","version":"0.8.0",...}
+curl http://localhost/v1/health
+# {"status":"ok","version":"0.8.3","auth_mode":"none"}
 ```
 
 ### 4. Create an admin account
@@ -86,7 +89,7 @@ docker compose exec prefixd prefixdctl operators create \
 ### 5. Open the dashboard
 
 ```bash
-open http://localhost:3000
+open http://localhost
 ```
 
 Login with the admin credentials you just created.
@@ -105,6 +108,7 @@ docker compose restart
 ```
 
 **Common issues:**
+- Port 80 in use → Stop local web server or change nginx port in docker-compose.yml
 - Port 5432 in use → Stop local PostgreSQL or change port in docker-compose.yml
 - Port 179 in use → Another BGP daemon is running
 - "connection refused" → Wait a few seconds for services to start
@@ -155,9 +159,11 @@ playbooks:
 Point your detector at prefixd's API:
 
 ```bash
-curl -X POST http://localhost:8080/v1/events \
+curl -X POST http://localhost/v1/events \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
   -d '{
+    "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",
     "source": "fastnetmon",
     "victim_ip": "203.0.113.10",
     "vector": "udp_flood",
@@ -178,13 +184,15 @@ Configure GoBGP neighbors in `configs/gobgp.conf` and set up FlowSpec import pol
 | Category | What it does |
 |----------|--------------|
 | **Signal Ingestion** | HTTP API accepts attack events from any detector |
-| **Policy Engine** | YAML playbooks define per-vector responses |
+| **Policy Engine** | YAML playbooks define per-vector responses with escalation |
 | **Guardrails** | Quotas, safelist, /32-only enforcement, mandatory TTLs |
 | **BGP FlowSpec** | Announces via GoBGP (traffic-rate, discard actions) |
-| **Reconciliation** | Auto-expires mitigations, repairs RIB drift |
-| **Dashboard** | Real-time web UI with WebSocket updates |
-| **Authentication** | Three roles: admin, operator, viewer |
-| **Observability** | Prometheus metrics, structured logs, audit trail |
+| **Reconciliation** | Auto-expires mitigations, repairs RIB drift every 30s |
+| **Dashboard** | Real-time web UI with WebSocket updates and toast notifications |
+| **Manual Mitigation** | "Mitigate Now" form for operator-initiated events |
+| **Authentication** | Three roles (admin, operator, viewer) with session + bearer hybrid auth |
+| **Observability** | Prometheus metrics, Grafana dashboards, structured logs, audit trail |
+| **CLI** | `prefixdctl` for status, mitigations, safelist, config reload |
 
 ---
 
@@ -239,9 +247,11 @@ FlowSpec (RFC 5575, RFC 8955) is supported by:
 
 ## Project Status
 
-Current version: **v0.8.0**
+Current version: **v0.8.3**
 
 - Core functionality stable and tested
+- Real-time dashboard with WebSocket updates, toast notifications, and mitigation detail views
+- Full operator workflow: manual mitigation, withdraw, safelist management, config browsing
 - API may change before v1.0
 - See [ROADMAP.md](ROADMAP.md) for planned features
 
