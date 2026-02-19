@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest"
 
-const IP_REGEX = /^(\d{1,3}\.){3}\d{1,3}$/
+function isValidIPv4(ip: string): boolean {
+  const parts = ip.split(".")
+  if (parts.length !== 4) return false
+  return parts.every((p) => {
+    const n = Number(p)
+    return /^\d{1,3}$/.test(p) && n >= 0 && n <= 255
+  })
+}
 
 function parsePorts(input: string): number[] | null {
   if (!input.trim()) return []
@@ -14,17 +21,24 @@ function parsePorts(input: string): number[] | null {
 describe("Create Mitigation validation", () => {
   describe("IP validation", () => {
     it("accepts valid IPv4", () => {
-      expect(IP_REGEX.test("192.0.2.1")).toBe(true)
-      expect(IP_REGEX.test("10.0.0.1")).toBe(true)
-      expect(IP_REGEX.test("255.255.255.255")).toBe(true)
+      expect(isValidIPv4("192.0.2.1")).toBe(true)
+      expect(isValidIPv4("10.0.0.1")).toBe(true)
+      expect(isValidIPv4("255.255.255.255")).toBe(true)
+      expect(isValidIPv4("0.0.0.0")).toBe(true)
     })
 
     it("rejects invalid IPs", () => {
-      expect(IP_REGEX.test("")).toBe(false)
-      expect(IP_REGEX.test("192.0.2")).toBe(false)
-      expect(IP_REGEX.test("192.0.2.1/32")).toBe(false)
-      expect(IP_REGEX.test("not-an-ip")).toBe(false)
-      expect(IP_REGEX.test("2001:db8::1")).toBe(false)
+      expect(isValidIPv4("")).toBe(false)
+      expect(isValidIPv4("192.0.2")).toBe(false)
+      expect(isValidIPv4("192.0.2.1/32")).toBe(false)
+      expect(isValidIPv4("not-an-ip")).toBe(false)
+      expect(isValidIPv4("2001:db8::1")).toBe(false)
+    })
+
+    it("rejects out-of-range octets", () => {
+      expect(isValidIPv4("999.1.1.1")).toBe(false)
+      expect(isValidIPv4("256.0.0.1")).toBe(false)
+      expect(isValidIPv4("1.2.3.999")).toBe(false)
     })
   })
 

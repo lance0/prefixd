@@ -502,7 +502,7 @@ Full operational health. Requires authentication.
 
 ```json
 {
-  "status": "ok",
+  "status": "healthy",
   "version": "0.8.3",
   "pop": "iad1",
   "uptime_seconds": 86400,

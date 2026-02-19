@@ -245,8 +245,15 @@ pub struct AddSafelistRequest {
 )]
 pub async fn ingest_event(
     State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
     Json(input): Json<AttackEventInput>,
 ) -> impl IntoResponse {
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    if let Err(_status) = require_auth(&state, &auth_session, auth_header) {
+        return Err(AppError(PrefixdError::Unauthorized("authentication required".into())));
+    }
+
     // Branch on action type
     match input.action.as_str() {
         "unban" => handle_unban(state, input).await,

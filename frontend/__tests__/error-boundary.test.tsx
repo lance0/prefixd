@@ -27,7 +27,7 @@ describe("ErrorBoundary", () => {
     )
 
     expect(screen.getByText("Something went wrong")).toBeInTheDocument()
-    expect(screen.getByText("Test explosion")).toBeInTheDocument()
+    expect(screen.queryByText("Test explosion")).not.toBeInTheDocument()
     expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument()
 
     vi.restoreAllMocks()

@@ -38,12 +38,8 @@ export class ErrorBoundary extends Component<Props, State> {
           <h2 className="text-lg font-semibold">Something went wrong</h2>
           <p className="text-sm text-muted-foreground text-center max-w-md">
             This section encountered an error. The rest of the dashboard is still functional.
+            Check the browser console for details.
           </p>
-          {this.state.error && (
-            <pre className="text-xs font-mono text-muted-foreground bg-secondary p-3 rounded-md max-w-lg overflow-x-auto">
-              {this.state.error.message}
-            </pre>
-          )}
           <Button
             variant="outline"
             onClick={() => this.setState({ hasError: false, error: null })}

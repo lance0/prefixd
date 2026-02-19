@@ -27,7 +27,14 @@ const VECTORS = [
   { value: "unknown", label: "Unknown" },
 ] as const
 
-const IP_REGEX = /^(\d{1,3}\.){3}\d{1,3}$/
+function isValidIPv4(ip: string): boolean {
+  const parts = ip.split(".")
+  if (parts.length !== 4) return false
+  return parts.every((p) => {
+    const n = Number(p)
+    return /^\d{1,3}$/.test(p) && n >= 0 && n <= 255
+  })
+}
 
 export default function CreateMitigationPage() {
   const router = useRouter()
@@ -52,7 +59,7 @@ export default function CreateMitigationPage() {
   }
 
   const isValid =
-    IP_REGEX.test(victimIp) &&
+    isValidIPv4(victimIp) &&
     vector !== "" &&
     parsePorts(ports) !== null &&
     (!bps || !isNaN(Number(bps))) &&
@@ -162,7 +169,7 @@ export default function CreateMitigationPage() {
               <p className="text-xs text-muted-foreground">
                 Must be a single host IP. A /32 prefix will be applied automatically.
               </p>
-              {victimIp && !IP_REGEX.test(victimIp) && (
+              {victimIp && !isValidIPv4(victimIp) && (
                 <p className="text-xs text-destructive">Invalid IPv4 address</p>
               )}
             </div>
