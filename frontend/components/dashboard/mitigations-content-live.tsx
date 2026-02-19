@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useMemo } from "react"
+import { useRouter } from "next/navigation"
 import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, AlertCircle, XCircle } from "lucide-react"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 import { ActionBadge } from "@/components/dashboard/action-badge"
@@ -68,8 +69,6 @@ function formatBps(bps: number | null): string {
   if (bps >= 1_000) return `${(bps / 1_000).toFixed(1)} Kbps`
   return `${bps} bps`
 }
-
-import { useRouter } from "next/navigation"
 
 export function MitigationsContentLive() {
   const router = useRouter()

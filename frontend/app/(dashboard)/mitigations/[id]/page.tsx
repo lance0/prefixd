@@ -9,7 +9,7 @@ import { ActionBadge } from "@/components/dashboard/action-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { ArrowLeft, Clock, Copy, ShieldAlert, Activity, GitBranch, RefreshCw, AlertTriangle, User, Server } from "lucide-react"
+import { ArrowLeft, Check, Clock, Copy, ShieldAlert, Activity, GitBranch, RefreshCw, AlertTriangle, User } from "lucide-react"
 import { withdrawMitigation } from "@/lib/api"
 import { useState } from "react"
 import {
@@ -62,7 +62,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
   const { id } = use(params)
   const router = useRouter()
   const permissions = usePermissions()
-  
+
   const { data: mitigation, isLoading, mutate } = useMitigation(id)
   const { data: inventory } = useConfigInventory()
 
@@ -121,7 +121,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
   const canWithdraw = mitigation.status === "active" || mitigation.status === "escalated"
 
   // Find customer context
-  const customer = inventory?.inventory.find(c => c.customer_id === mitigation.customer_id)
+  const customer = inventory?.customers.find(c => c.customer_id === mitigation.customer_id)
   const service = customer?.services.find(s => s.service_id === mitigation.service_id)
 
   return (
@@ -166,7 +166,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Main Info Column */}
           <div className="lg:col-span-2 space-y-6">
-            
+
             {/* FlowSpec Rule Preview */}
             <Card className="border-border shadow-sm">
               <CardHeader className="bg-secondary/30 pb-4 border-b border-border">
@@ -220,7 +220,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
               </CardHeader>
               <CardContent>
                 <div className="space-y-6 pl-4 border-l-2 border-muted relative">
-                  
+
                   {/* Created */}
                   <div className="relative">
                     <div className="absolute -left-[21px] top-1 h-3 w-3 rounded-full bg-primary" />
