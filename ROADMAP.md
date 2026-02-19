@@ -135,6 +135,7 @@ Target: Stable API, comprehensive testing, production-proven.
 - [x] Route definition deduplication (shared helpers for production + test routers)
 - [x] OpenAPI spec covers all endpoints (health split, config read-only)
 - [x] Integration tests for config/health endpoints (12 tests, up from 8)
+- [x] Event ingestion endpoint auth enforcement (require_auth on POST /v1/events)
 - [ ] Chaos testing (kill GoBGP mid-mitigation, kill Postgres during ingestion)
 - [ ] Load testing (sustained event volume)
 - [ ] Security audit (dependencies, input validation)

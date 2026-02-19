@@ -29,13 +29,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Per-peer BGP session detail on admin page** - Shows each peer name and session state (established/down) instead of a single boolean
 - **ErrorBoundary for dashboard pages** - React class ErrorBoundary wraps all `(dashboard)/` routes; displays error message and "Try Again" button instead of blank screen
 - **Admin page tabbed layout** - Refactored from long scroll to Tabs (Status, Safelist, Users); Users tab conditionally rendered for admins
-- **Vitest + Testing Library** - Frontend test infrastructure with 10 tests (ErrorBoundary component tests, create mitigation validation tests)
+- **Vitest + Testing Library** - Frontend test infrastructure with 11 tests (ErrorBoundary component, IP/port validation)
 - **"Mitigate Now" in command palette** - Quick action entry to jump to manual mitigation form
+
+### Security
+
+- **`POST /v1/events` now requires authentication** - `ingest_event` handler was missing `require_auth()` call; direct API calls could bypass auth when enabled
 
 ### Fixed
 
+- **Mitigation detail customer context crash** - Was accessing `inventory.inventory` instead of `inventory.customers` (correct API shape)
+- **Missing `Check` icon import** on mitigation detail page caused runtime error on "Copy JSON"
+- **IP validation on Mitigate Now form** - Replaced permissive regex with octet-validating function (rejects `999.1.1.1`, `256.0.0.1`)
+- **ErrorBoundary no longer leaks internal error messages** - Raw `error.message` removed from UI, errors logged to console only
 - **Admin health status badge** - Was checking for `"healthy"` but API returns `"ok"`, so the badge always showed destructive red
 - **Dark mode hover on admin reload button** - Added explicit dark mode hover classes for proper contrast
+- **Documentation sweep** - Fixed stale version strings, incorrect API field names, wrong endpoint paths, and missing changelog comparison links across api.md, deployment.md, AGENTS.md
 
 ## [0.8.3] - 2026-02-18
 
