@@ -84,6 +84,10 @@ See [CHANGELOG](CHANGELOG.md) for version history.
 - [ ] **Dark mode refinement** (P1 — audit all components for theme consistency)
   - Verify all cards, badges, tables, dialogs render correctly in both themes
   - Fix any hardcoded colors (e.g., hover states, status indicators)
+- [ ] **Page layout cleanup** (P1 — reduce complexity, improve navigation)
+  - Admin page: split into tabs or sub-pages (system status, safelist, user management, config reload)
+  - Evaluate other long pages for tabbed/modular layout
+  - Extract reusable table/card patterns into shared components
 - [ ] Config page (Phase 2)
   - Playbook editor (form-based, with validation)
   - Requires `PUT /v1/config/playbooks` endpoint, file persistence, rollback
