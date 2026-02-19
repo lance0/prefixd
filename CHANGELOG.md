@@ -5,6 +5,20 @@ All notable changes to prefixd will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Inline withdraw button on mitigations table** - XCircle button on active/escalated rows with confirmation dialog
+  - Optional reason field, permission-gated (operator + admin only)
+  - Tooltips on view and withdraw action buttons
+- **Per-peer BGP session detail on admin page** - Shows each peer name and session state (established/down) instead of a single boolean
+
+### Fixed
+
+- **Admin health status badge** - Was checking for `"healthy"` but API returns `"ok"`, so the badge always showed destructive red
+- **Dark mode hover on admin reload button** - Added explicit dark mode hover classes for proper contrast
+
 ## [0.8.3] - 2026-02-18
 
 ### Added
