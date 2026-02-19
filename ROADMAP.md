@@ -69,6 +69,21 @@ See [CHANGELOG](CHANGELOG.md) for version history.
 - [ ] **Embedded time-series charts** (P2 — reduces context-switching to Grafana)
   - Mitigation count over time, events/sec on overview page
   - Query Prometheus or use internal metrics endpoint
+- [ ] **Filtering and pagination on list pages** (P1)
+  - Mitigations: filter by status, customer, destination IP, vector; paginate beyond 100
+  - Events: filter by vector, source, time range
+  - Audit log: filter by operator, action type, time range
+  - API already supports query params (`?status=active&customer=cust_123`)
+- [ ] **Mitigation history per IP** (P2 — "what happened to this IP in the last 24h")
+  - Timeline view: event → mitigation → escalation → expiry/withdraw
+  - Searchable by destination IP, links to detail view
+- [ ] **Alerting/webhook config UI** (P2 — backend webhook support planned)
+  - Configure alert destinations (Slack, PagerDuty, generic webhook)
+  - Test notification button
+  - Requires backend `POST /v1/config/webhooks` endpoint
+- [ ] **Dark mode refinement** (P1 — audit all components for theme consistency)
+  - Verify all cards, badges, tables, dialogs render correctly in both themes
+  - Fix any hardcoded colors (e.g., hover states, status indicators)
 - [ ] Config page (Phase 2)
   - Playbook editor (form-based, with validation)
   - Requires `PUT /v1/config/playbooks` endpoint, file persistence, rollback
