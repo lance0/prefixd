@@ -90,6 +90,9 @@ Target: Stable API, comprehensive testing, production-proven.
 - [x] Frontend deny-by-default permissions with auth-mode awareness
 - [x] Session expiry handling (401 interceptor, debounced redirect)
 - [x] Route-group auth guard (structural, not opt-in per page)
+- [x] Route definition deduplication (shared helpers for production + test routers)
+- [x] OpenAPI spec covers all endpoints (health split, config read-only)
+- [x] Integration tests for config/health endpoints (12 tests, up from 8)
 - [ ] Chaos testing (kill GoBGP mid-mitigation, kill Postgres during ingestion)
 - [ ] Load testing (sustained event volume)
 - [ ] Security audit (dependencies, input validation)

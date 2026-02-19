@@ -46,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Login page redirects** - Already-authenticated users and auth:none users redirected to `/` instead of showing login form
 - **prefixdctl** - `status` and `peers` commands now use `/v1/health/detail`
 - **RwLock guards dropped early** - Inventory and playbooks handlers clone data and release locks before building JSON response
+- **Route definitions deduplicated** - `create_router()` and `create_test_router()` now share `public_routes()`, `session_routes()`, `api_routes()`, and `common_layers()` helpers (eliminates ~80 lines of duplication)
+- **OpenAPI spec updated** - All new endpoints (`health_detail`, `config/settings`, `config/inventory`, `config/playbooks`) registered with utoipa annotations and `PublicHealthResponse` schema
+- **API documentation** - `docs/api.md` updated with config endpoint documentation, example payloads, and health endpoint migration note
+- **Integration test coverage** - 4 new tests: `health_detail` (validates full operational response), `config_settings` (verifies allowlist redaction of sensitive fields), `config_inventory`, `config_playbooks` (12 integration tests total, up from 8)
 
 ### Security
 
