@@ -258,8 +258,9 @@ export default function AdminPage() {
                   onClick={handleReloadConfig}
                   disabled={isReloading}
                   className={cn(
-                    reloadStatus === "success" && "border-green-500 text-green-500",
-                    reloadStatus === "error" && "border-destructive text-destructive"
+                    "hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/20 dark:hover:text-accent-foreground",
+                    reloadStatus === "success" && "border-green-500 text-green-500 hover:text-green-500 dark:hover:text-green-400",
+                    reloadStatus === "error" && "border-destructive text-destructive hover:text-destructive dark:hover:text-red-400"
                   )}
                 >
                   {isReloading ? (
