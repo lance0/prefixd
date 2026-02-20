@@ -45,7 +45,7 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onTogg
       // n for Mitigate Now
       if (e.key === "n" && !e.metaKey && !e.ctrlKey) {
         e.preventDefault()
-        router.push("/mitigations/create")
+        router.push("/mitigations?mitigate=true")
         return
       }
 

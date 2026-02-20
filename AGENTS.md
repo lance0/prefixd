@@ -232,7 +232,7 @@ Completed:
 - CLI tool (prefixdctl) for all API operations
 - OpenAPI spec with utoipa annotations
 - 73 backend unit tests + 12 integration tests (+ 14 ignored requiring GoBGP/Docker)
-- Vitest + Testing Library frontend test infrastructure (21 tests)
+- Vitest + Testing Library frontend test infrastructure (25 tests)
 
 ## Code Conventions
 

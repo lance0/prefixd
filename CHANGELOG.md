@@ -5,6 +5,22 @@ All notable changes to prefixd will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Mitigate Now is now a modal dialog** - Opens over the mitigations list instead of navigating to a separate page; command palette and `n` shortcut open the modal directly
+- **Removed `/mitigations/create` route** - Replaced by modal, no redirect needed
+
+### Fixed
+
+- **CSV export crash on events page** - Was referencing `e.timestamp` which doesn't exist (correct field is `event_timestamp`); added null guard in CSV helper
+- **CSV export adds `ingested_at` column** to events export
+
+### Added
+
+- **CSV helper tests** (4 tests: headers/rows, comma escaping, quote escaping, null handling)
+
 ## [0.8.5] - 2026-02-19
 
 ### Added

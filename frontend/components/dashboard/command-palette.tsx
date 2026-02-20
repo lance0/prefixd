@@ -163,7 +163,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
           <CommandSeparator />
           <CommandGroup heading="Quick Actions">
             <CommandItem
-              onSelect={() => runCommand(() => router.push("/mitigations/create"))}
+              onSelect={() => runCommand(() => router.push("/mitigations?mitigate=true"))}
               className="font-mono text-xs"
             >
               <ShieldAlert className="mr-2 h-3 w-3 text-primary" />
