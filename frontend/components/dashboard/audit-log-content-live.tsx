@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from "react"
 import Link from "next/link"
-import { Search, ChevronDown, ChevronUp, RefreshCw, AlertCircle } from "lucide-react"
+import { Search, ChevronDown, ChevronUp, RefreshCw, AlertCircle, Download } from "lucide-react"
 import { ActionTypeBadge } from "@/components/dashboard/action-type-badge"
 import { ActorBadge } from "@/components/dashboard/actor-badge"
 import { Button } from "@/components/ui/button"
@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useAuditLog } from "@/hooks/use-api"
 import type { AuditEntry } from "@/lib/api"
 import { cn } from "@/lib/utils"
+import { downloadCsv } from "@/lib/csv"
 
 type SortField = "timestamp" | "actor" | "action" | "target"
 type SortDirection = "asc" | "desc"
@@ -127,6 +128,23 @@ export function AuditLogContentLive() {
               className="pl-9 h-10 bg-secondary border-border text-base"
             />
           </div>
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-10 w-10 shrink-0"
+            onClick={() => {
+              const headers = ["timestamp", "actor_type", "actor_id", "action", "target_type", "target_id"]
+              const rows = filteredLogs.map((e) => [
+                e.timestamp, e.actor_type ?? "", e.actor_id ?? "", e.action,
+                e.target_type ?? "", e.target_id ?? "",
+              ])
+              downloadCsv(`audit-log-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
+            }}
+            disabled={filteredLogs.length === 0}
+            aria-label="Export CSV"
+          >
+            <Download className="h-4 w-4" />
+          </Button>
           <Button
             variant="outline"
             size="icon"

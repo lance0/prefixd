@@ -14,6 +14,7 @@ const shortcuts = [
       { keys: ["g", "o"], description: "Go to Overview" },
       { keys: ["g", "m"], description: "Go to Mitigations" },
       { keys: ["g", "e"], description: "Go to Events" },
+      { keys: ["g", "i"], description: "Go to Inventory" },
       { keys: ["g", "a"], description: "Go to Audit Log" },
       { keys: ["g", "c"], description: "Go to Config" },
     ],
@@ -21,18 +22,11 @@ const shortcuts = [
   {
     category: "Actions",
     items: [
+      { keys: ["n"], description: "Mitigate Now" },
       { keys: ["⌘", "K"], description: "Open command palette" },
       { keys: ["⌘", "B"], description: "Toggle sidebar" },
-      { keys: ["?"], description: "Show keyboard shortcuts" },
+      { keys: ["?"], description: "Toggle keyboard shortcuts" },
       { keys: ["Esc"], description: "Close modal / panel" },
-    ],
-  },
-  {
-    category: "Tables",
-    items: [
-      { keys: ["j"], description: "Next row" },
-      { keys: ["k"], description: "Previous row" },
-      { keys: ["Enter"], description: "Open selected row" },
     ],
   },
 ]

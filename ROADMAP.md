@@ -103,14 +103,14 @@ See [CHANGELOG](CHANGELOG.md) for version history.
   - Command palette search links directly to `/mitigations/{id}`
   - Overview stat cards link to mitigations/events pages
   - Events "View Mitigations for IP" pre-fills search via `?ip=` param
-- [ ] **CSV export for list pages** (P1 — operators need data for reports/tooling)
-  - Download button on mitigations and events tables
+- [x] **CSV export for list pages** (P1 — operators need data for reports/tooling)
+  - Download button on mitigations, events, and audit log tables
   - Exports current filtered view as CSV (client-side generation, no backend)
-  - Include all visible columns plus IDs
-- [ ] **Keyboard shortcuts** (P1 — DX, command palette already exists)
-  - Wire up `g m` (mitigations), `g e` (events), `g a` (audit), `g c` (config), `g o` (overview)
-  - `n` for "Mitigate Now" from mitigations page
-  - Hint shortcuts in command palette and sidebar tooltips
+  - Includes all visible columns plus IDs, date-stamped filename
+- [x] **Keyboard shortcuts** (P1 — DX, command palette already exists)
+  - `g o/m/e/i/a/c` navigation, `n` for Mitigate Now, `?` toggles help modal
+  - `Cmd+K` command palette, `Cmd+B` sidebar toggle
+  - Hints shown in command palette and keyboard shortcuts modal
 - [ ] Upgrade lucide-react (0.454 -> latest, verify all ~30 icon imports)
 - [ ] Upgrade react-resizable-panels (2.x -> 4.x, major version)
 - [ ] Upgrade tower-sessions (0.14 -> 0.15, blocked on axum-login 0.18 compatibility)

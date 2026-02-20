@@ -35,7 +35,7 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
   useKeyboardShortcuts({
     onCommandPalette: () => setCommandPaletteOpen(true),
     onToggleSidebar: handleToggleCollapse,
-    onShowHelp: () => setShortcutsModalOpen(true),
+    onToggleHelp: () => setShortcutsModalOpen((prev) => !prev),
   })
 
   return (

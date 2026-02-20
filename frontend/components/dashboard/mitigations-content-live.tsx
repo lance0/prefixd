@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from "react"
 import { useRouter } from "next/navigation"
-import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, AlertCircle, XCircle, Plus } from "lucide-react"
+import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, AlertCircle, XCircle, Plus, Download } from "lucide-react"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 import { ActionBadge } from "@/components/dashboard/action-badge"
 import { Button } from "@/components/ui/button"
@@ -28,6 +28,7 @@ import { useMitigations } from "@/hooks/use-api"
 import { usePermissions } from "@/hooks/use-permissions"
 import { withdrawMitigation, type Mitigation } from "@/lib/api"
 import { cn } from "@/lib/utils"
+import { downloadCsv } from "@/lib/csv"
 
 type SortField = "status" | "victim_ip" | "vector" | "customer_id" | "created_at" | "expires_at"
 type SortDirection = "asc" | "desc"
@@ -212,6 +213,23 @@ export function MitigationsContentLive({ initialSearch }: MitigationsContentLive
               <span className="hidden sm:inline">Mitigate Now</span>
             </Button>
           )}
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-10 w-10 shrink-0"
+            onClick={() => {
+              const headers = ["mitigation_id", "status", "victim_ip", "vector", "action_type", "customer_id", "created_at", "expires_at"]
+              const rows = filteredMitigations.map((m) => [
+                m.mitigation_id, m.status, m.victim_ip, m.vector, m.action_type,
+                m.customer_id ?? "", m.created_at, m.expires_at,
+              ])
+              downloadCsv(`mitigations-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
+            }}
+            disabled={filteredMitigations.length === 0}
+            aria-label="Export CSV"
+          >
+            <Download className="h-4 w-4" />
+          </Button>
           <Button
             variant="outline"
             size="icon"

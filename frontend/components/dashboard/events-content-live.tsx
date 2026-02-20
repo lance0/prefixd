@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useMemo } from "react"
-import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, AlertCircle } from "lucide-react"
+import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, AlertCircle, Download } from "lucide-react"
 import { SourceBadge } from "@/components/dashboard/source-badge"
 import { ConfidenceBar } from "@/components/dashboard/confidence-bar"
 import { EventDetailPanel } from "@/components/dashboard/event-detail-panel"
@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useEvents } from "@/hooks/use-api"
 import type { Event } from "@/lib/api"
 import { cn } from "@/lib/utils"
+import { downloadCsv } from "@/lib/csv"
 
 type SortField = "timestamp" | "source" | "victim_ip" | "vector" | "bps" | "confidence"
 type SortDirection = "asc" | "desc"
@@ -156,6 +157,23 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
               className="pl-9 h-10 bg-secondary border-border text-base font-mono"
             />
           </div>
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-10 w-10 shrink-0"
+            onClick={() => {
+              const headers = ["event_id", "timestamp", "source", "victim_ip", "vector", "bps", "pps", "confidence"]
+              const rows = filteredEvents.map((e) => [
+                e.event_id, e.timestamp, e.source, e.victim_ip, e.vector,
+                String(e.bps ?? ""), String(e.pps ?? ""), String(e.confidence ?? ""),
+              ])
+              downloadCsv(`events-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
+            }}
+            disabled={filteredEvents.length === 0}
+            aria-label="Export CSV"
+          >
+            <Download className="h-4 w-4" />
+          </Button>
           <Button
             variant="outline"
             size="icon"

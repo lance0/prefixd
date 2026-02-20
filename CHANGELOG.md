@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Admin page tabbed layout** - Refactored from long scroll to Tabs (Status, Safelist, Users); Users tab conditionally rendered for admins
 - **Vitest + Testing Library** - Frontend test infrastructure with 11 tests (ErrorBoundary component, IP/port validation)
 - **"Mitigate Now" in command palette** - Quick action entry to jump to manual mitigation form
+- **CSV export** - Download button on mitigations, events, and audit log tables
+  - Exports current filtered view as CSV (client-side, no backend)
+  - Filename includes current date (e.g., `mitigations-2026-02-19.csv`)
+- **Keyboard shortcuts** - `g i` (inventory), `n` (Mitigate Now), `?` toggles help modal
+  - Removed phantom table navigation shortcuts (j/k/Enter) from help modal
 - **Cross-entity navigation** - Wired up dead-end UI elements across dashboard:
   - Command palette mitigation search links directly to `/mitigations/{id}` (was broken `?id=` param)
   - Mitigation detail `triggering_event_id` links to events page with event auto-selected

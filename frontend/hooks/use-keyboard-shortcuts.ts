@@ -6,10 +6,10 @@ import { useRouter } from "next/navigation"
 interface KeyboardShortcutsOptions {
   onCommandPalette?: () => void
   onToggleSidebar?: () => void
-  onShowHelp?: () => void // Added help callback
+  onToggleHelp?: () => void
 }
 
-export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onShowHelp }: KeyboardShortcutsOptions = {}) {
+export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onToggleHelp }: KeyboardShortcutsOptions = {}) {
   const router = useRouter()
   const gPressedRef = useRef(false)
   const gTimeoutRef = useRef<NodeJS.Timeout>()
@@ -38,7 +38,14 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onShow
 
       if (e.key === "?" && !e.metaKey && !e.ctrlKey) {
         e.preventDefault()
-        onShowHelp?.()
+        onToggleHelp?.()
+        return
+      }
+
+      // n for Mitigate Now
+      if (e.key === "n" && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault()
+        router.push("/mitigations/create")
         return
       }
 
@@ -73,6 +80,10 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onShow
             e.preventDefault()
             router.push("/audit-log")
             break
+          case "i":
+            e.preventDefault()
+            router.push("/inventory")
+            break
           case "c":
             e.preventDefault()
             router.push("/config")
@@ -80,7 +91,7 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onShow
         }
       }
     },
-    [router, onCommandPalette, onToggleSidebar, onShowHelp],
+    [router, onCommandPalette, onToggleSidebar, onToggleHelp],
   )
 
   useEffect(() => {
