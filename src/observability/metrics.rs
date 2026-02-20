@@ -139,6 +139,16 @@ pub static ROW_PARSE_ERRORS: Lazy<CounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+// Database pool metrics
+pub static DB_POOL_SIZE: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_db_pool_connections",
+        "Database connection pool size",
+        &["state"]
+    )
+    .unwrap()
+});
+
 // HTTP metrics
 pub static HTTP_REQUESTS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
@@ -196,7 +206,18 @@ pub fn init_metrics() {
     Lazy::force(&CONFIG_RELOADS);
     Lazy::force(&ESCALATIONS_TOTAL);
     Lazy::force(&ROW_PARSE_ERRORS);
+    Lazy::force(&DB_POOL_SIZE);
     Lazy::force(&HTTP_REQUESTS_TOTAL);
     Lazy::force(&HTTP_REQUEST_DURATION);
     Lazy::force(&HTTP_IN_FLIGHT);
+}
+
+/// Update database pool metrics from sqlx pool stats
+pub fn update_db_pool_metrics(pool: &sqlx::PgPool) {
+    let size = pool.size() as f64;
+    let idle = pool.num_idle() as f64;
+    let active = size - idle;
+    DB_POOL_SIZE.with_label_values(&["active"]).set(active);
+    DB_POOL_SIZE.with_label_values(&["idle"]).set(idle);
+    DB_POOL_SIZE.with_label_values(&["total"]).set(size);
 }

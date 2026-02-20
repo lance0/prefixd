@@ -73,13 +73,14 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Build app state
-    let state = AppState::new(
+    let state = AppState::with_pool(
         config.settings.clone(),
         config.inventory,
         config.playbooks,
         repo.clone(),
         announcer.clone(),
         cli.config.clone(),
+        Some(pool.clone()),
     )?;
 
     // Create auth layer for session-based auth

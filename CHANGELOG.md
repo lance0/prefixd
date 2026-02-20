@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Clickable IPs everywhere** — All victim_ip cells in mitigations table, events table, active mitigations mini, mitigation detail, and event detail panel link to IP history
 - **IP History in navigation** — Added to sidebar, command palette (`g h`), keyboard shortcuts
 - **2 new integration tests** — timeseries endpoint returns buckets, IP history returns structure
+- **Database pool metrics** — `prefixd_db_pool_connections{state=active|idle|total}` gauge exposed to Prometheus on each `/metrics` scrape
+- **Request correlation IDs** — Every request gets an `x-request-id` (UUID), preserved if client-provided, echoed in response, added to tracing span. nginx config forwards it.
+- **HTTPS via nginx production example** — Full TLS termination config with HSTS, HTTP→HTTPS redirect, Let's Encrypt note
 
 ### Changed
 

@@ -444,6 +444,75 @@ http:
     secure_cookies: true  # Required for HTTPS
 ```
 
+### HTTPS via nginx (Recommended for Production)
+
+The most common production setup terminates TLS at nginx. This keeps certificate management in one place and the internal Docker network unencrypted:
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name prefixd.example.com;
+
+    ssl_certificate     /etc/nginx/ssl/server.crt;
+    ssl_certificate_key /etc/nginx/ssl/server.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
+    # HSTS - enforce HTTPS for browsers
+    add_header Strict-Transport-Security "max-age=63072000" always;
+
+    resolver 127.0.0.11 valid=10s;
+    set $dashboard dashboard:3000;
+    set $api prefixd:8080;
+
+    location /v1/ {
+        proxy_pass http://$api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 86400s;
+    }
+
+    location / {
+        proxy_pass http://$dashboard;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}
+
+# Redirect HTTP to HTTPS
+server {
+    listen 80;
+    server_name prefixd.example.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+Mount your certificates into the nginx container:
+
+```yaml
+# docker-compose.yml override
+nginx:
+  volumes:
+    - ./configs/nginx.conf:/etc/nginx/conf.d/default.conf
+    - ./certs/server.crt:/etc/nginx/ssl/server.crt:ro
+    - ./certs/server.key:/etc/nginx/ssl/server.key:ro
+  ports:
+    - "443:443"
+    - "80:80"
+```
+
+> **Let's Encrypt**: For automated certificate renewal, use certbot with the nginx plugin or mount certificates from an external certbot container.
+
 ### mTLS (Mutual TLS)
 
 For zero-trust environments:
@@ -526,6 +595,9 @@ scrape_configs:
 | `prefixd_bgp_session_up` | BGP session status |
 | `prefixd_guardrail_rejections_total` | Rejected events |
 | `prefixd_http_requests_total` | HTTP requests |
+| `prefixd_http_request_duration_seconds` | Request latency histogram |
+| `prefixd_db_pool_connections` | DB pool stats (active, idle, total) |
+| `prefixd_db_row_parse_errors_total` | Corrupted row parse errors |
 
 ### Alerting
 
@@ -561,6 +633,25 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost/v1/health/detail
 prefixdctl status
 prefixdctl health
 prefixdctl peers
+```
+
+### Request Tracing
+
+Every request is assigned an `x-request-id` header (UUID). If the client sends one, it is preserved; otherwise prefixd generates it. The ID is:
+
+- Added to the tracing span (visible in structured logs)
+- Echoed back in the response `x-request-id` header
+- Forwarded by nginx when using the included config
+
+Use it to correlate a user's action through nginx → prefixd → database:
+
+```bash
+# Send a request with a custom ID
+curl -H "x-request-id: debug-123" http://localhost/v1/health
+
+# Check the response header
+curl -v http://localhost/v1/health 2>&1 | grep x-request-id
+# < x-request-id: 550e8400-e29b-41d4-a716-446655440000
 ```
 
 ---

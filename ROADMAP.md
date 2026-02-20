@@ -160,8 +160,8 @@ Target: Stable API, comprehensive testing, production-proven.
 
 ### Observability
 
-- [ ] Database metrics (query latency, connection pool)
-- [ ] Request tracing with correlation IDs
+- [x] Database metrics (connection pool: active, idle, total via `prefixd_db_pool_connections`)
+- [x] Request tracing with correlation IDs (`x-request-id` header, tracing span, nginx forwarding)
 - [x] Grafana dashboard templates
 
 ---

@@ -85,6 +85,7 @@ fn api_routes() -> Router<Arc<AppState>> {
 /// Common layers applied to both production and test routers
 fn common_layers(router: Router) -> Router {
     router
+        .layer(axum::middleware::from_fn(super::request_id::request_id))
         .layer(axum::middleware::from_fn(super::metrics::http_metrics))
         .layer(SetResponseHeaderLayer::overriding(
             header::X_CONTENT_TYPE_OPTIONS,

@@ -1071,7 +1071,12 @@ pub async fn health_detail(
     }))
 }
 
-pub async fn metrics() -> impl IntoResponse {
+pub async fn metrics(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Some(pool) = &state.db_pool {
+        crate::observability::metrics::update_db_pool_metrics(pool);
+    }
     crate::observability::gather_metrics()
 }
 

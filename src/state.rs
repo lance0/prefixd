@@ -10,6 +10,7 @@ use crate::config::{AuthMode, Inventory, Playbooks, Settings};
 use crate::db::RepositoryTrait;
 use crate::error::{PrefixdError, Result};
 use crate::ws::WsMessage;
+use sqlx::PgPool;
 
 /// Shared application state
 pub struct AppState {
@@ -29,6 +30,8 @@ pub struct AppState {
     pub inventory_loaded_at: RwLock<DateTime<Utc>>,
     /// Timestamp when playbooks were last loaded/reloaded
     pub playbooks_loaded_at: RwLock<DateTime<Utc>>,
+    /// PostgreSQL pool for metrics (None in tests with MockRepository)
+    pub db_pool: Option<PgPool>,
     config_dir: PathBuf,
     shutting_down: AtomicBool,
 }
@@ -41,6 +44,18 @@ impl AppState {
         repo: Arc<dyn RepositoryTrait>,
         announcer: Arc<dyn FlowSpecAnnouncer>,
         config_dir: PathBuf,
+    ) -> Result<Arc<Self>> {
+        Self::with_pool(settings, inventory, playbooks, repo, announcer, config_dir, None)
+    }
+
+    pub fn with_pool(
+        settings: Settings,
+        inventory: Inventory,
+        playbooks: Playbooks,
+        repo: Arc<dyn RepositoryTrait>,
+        announcer: Arc<dyn FlowSpecAnnouncer>,
+        config_dir: PathBuf,
+        db_pool: Option<PgPool>,
     ) -> Result<Arc<Self>> {
         let (shutdown_tx, _) = broadcast::channel(1);
         let ws_broadcast = crate::ws::create_broadcast();
@@ -82,6 +97,7 @@ impl AppState {
             start_time: Instant::now(),
             inventory_loaded_at: RwLock::new(Utc::now()),
             playbooks_loaded_at: RwLock::new(Utc::now()),
+            db_pool,
             config_dir,
             shutting_down: AtomicBool::new(false),
         }))
