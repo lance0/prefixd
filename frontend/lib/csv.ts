@@ -1,4 +1,5 @@
 function escapeCsvField(field: string): string {
+  if (!field) return ""
   if (field.includes(",") || field.includes('"') || field.includes("\n")) {
     return `"${field.replace(/"/g, '""')}"`
   }

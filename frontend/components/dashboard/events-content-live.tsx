@@ -162,9 +162,9 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
             size="icon"
             className="h-10 w-10 shrink-0"
             onClick={() => {
-              const headers = ["event_id", "timestamp", "source", "victim_ip", "vector", "bps", "pps", "confidence"]
+              const headers = ["event_id", "event_timestamp", "ingested_at", "source", "victim_ip", "vector", "bps", "pps", "confidence"]
               const rows = filteredEvents.map((e) => [
-                e.event_id, e.timestamp, e.source, e.victim_ip, e.vector,
+                e.event_id, e.event_timestamp, e.ingested_at, e.source, e.victim_ip, e.vector,
                 String(e.bps ?? ""), String(e.pps ?? ""), String(e.confidence ?? ""),
               ])
               downloadCsv(`events-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
