@@ -18,11 +18,12 @@ function LoadingState() {
 export default function MitigationsPage() {
   const searchParams = useSearchParams()
   const ipSearch = searchParams.get("ip")
+  const openMitigate = searchParams.get("mitigate") === "true"
 
   return (
     <DashboardLayout>
       <Suspense fallback={<LoadingState />}>
-        <MitigationsContentLive initialSearch={ipSearch} />
+        <MitigationsContentLive initialSearch={ipSearch} initialMitigateOpen={openMitigate} />
       </Suspense>
     </DashboardLayout>
   )

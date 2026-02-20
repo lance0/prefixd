@@ -29,6 +29,7 @@ import { usePermissions } from "@/hooks/use-permissions"
 import { withdrawMitigation, type Mitigation } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { downloadCsv } from "@/lib/csv"
+import { MitigateNowDialog } from "@/components/dashboard/mitigate-now-dialog"
 
 type SortField = "status" | "victim_ip" | "vector" | "customer_id" | "created_at" | "expires_at"
 type SortDirection = "asc" | "desc"
@@ -73,9 +74,10 @@ function formatBps(bps: number | null): string {
 
 interface MitigationsContentLiveProps {
   initialSearch?: string | null
+  initialMitigateOpen?: boolean
 }
 
-export function MitigationsContentLive({ initialSearch }: MitigationsContentLiveProps = {}) {
+export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: MitigationsContentLiveProps = {}) {
   const router = useRouter()
   const [statusFilters, setStatusFilters] = useState<string[]>(initialSearch ? [] : ["active", "escalated"])
   const [searchQuery, setSearchQuery] = useState(initialSearch ?? "")
@@ -87,6 +89,7 @@ export function MitigationsContentLive({ initialSearch }: MitigationsContentLive
   const [withdrawReason, setWithdrawReason] = useState("")
   const [isWithdrawing, setIsWithdrawing] = useState(false)
   const [withdrawError, setWithdrawError] = useState<string | null>(null)
+  const [mitigateNowOpen, setMitigateNowOpen] = useState(initialMitigateOpen ?? false)
   const permissions = usePermissions()
   const itemsPerPage = 20
 
@@ -214,7 +217,7 @@ export function MitigationsContentLive({ initialSearch }: MitigationsContentLive
               variant="default"
               size="sm"
               className="h-10 shrink-0"
-              onClick={() => router.push("/mitigations/create")}
+              onClick={() => setMitigateNowOpen(true)}
             >
               <Plus className="h-4 w-4 mr-1.5" />
               <span className="hidden sm:inline">Mitigate Now</span>
@@ -512,6 +515,8 @@ export function MitigationsContentLive({ initialSearch }: MitigationsContentLive
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <MitigateNowDialog open={mitigateNowOpen} onOpenChange={setMitigateNowOpen} />
     </div>
   )
 }
