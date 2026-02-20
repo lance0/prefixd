@@ -97,6 +97,18 @@ See [CHANGELOG](CHANGELOG.md) for version history.
 - [x] Component tests (ErrorBoundary test with 3 cases)
 - [ ] Hook tests (usePermissions, useAuth, use-api)
 - [x] Error boundaries (ErrorBoundary component wrapping dashboard layout)
+- [ ] **Event → mitigation linking** (P1 — connects the operator workflow)
+  - Events page rows link to the mitigation they triggered (via `triggering_event_id`)
+  - Mitigation detail page links back to triggering event
+  - Clicking an event shows outcome: mitigation created, extended, or rejected
+- [ ] **CSV export for list pages** (P1 — operators need data for reports/tooling)
+  - Download button on mitigations and events tables
+  - Exports current filtered view as CSV (client-side generation, no backend)
+  - Include all visible columns plus IDs
+- [ ] **Keyboard shortcuts** (P1 — DX, command palette already exists)
+  - Wire up `g m` (mitigations), `g e` (events), `g a` (audit), `g c` (config), `g o` (overview)
+  - `n` for "Mitigate Now" from mitigations page
+  - Hint shortcuts in command palette and sidebar tooltips
 - [ ] Upgrade lucide-react (0.454 -> latest, verify all ~30 icon imports)
 - [ ] Upgrade react-resizable-panels (2.x -> 4.x, major version)
 - [ ] Upgrade tower-sessions (0.14 -> 0.15, blocked on axum-login 0.18 compatibility)
