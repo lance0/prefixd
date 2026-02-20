@@ -5,6 +5,13 @@ All notable changes to prefixd will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Hook tests** - usePermissions (5 tests: auth disabled, admin, operator, viewer, deny-by-default) and useAuth (5 tests: provider guard, loading, login, logout, auth-expired event)
+- **Activity feed clickable items** - Event entries link to `/events?id={id}`, mitigation-related audit entries link to `/mitigations/{id}`
+
 ## [0.8.4] - 2026-02-19
 
 ### Added

@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { motion } from "motion/react"
 import { Shield, AlertTriangle, User, FileText, RefreshCw, AlertCircle } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -12,6 +13,7 @@ interface ActivityItem {
   timestamp: string
   description: string
   ip?: string
+  href?: string
 }
 
 function formatTimestamp(dateStr: string): string {
@@ -64,6 +66,7 @@ export function ActivityFeedLive() {
         timestamp: event.ingested_at,
         description: `${event.vector.replace("_", " ")} detected from ${event.source}`,
         ip: event.victim_ip,
+        href: `/events?id=${event.event_id}`,
       })
     }
   }
@@ -79,12 +82,17 @@ export function ActivityFeedLive() {
         description = `${description} (${shortId}...)`
       }
 
+      const href = entry.target_type === "mitigation" && entry.target_id
+        ? `/mitigations/${entry.target_id}`
+        : undefined
+
       activities.push({
         id: `audit-${entry.audit_id}`,
         type: actorType,
         timestamp: entry.timestamp,
         description,
         ip: entry.details?.victim_ip as string | undefined,
+        href,
       })
     }
   }
@@ -132,29 +140,40 @@ export function ActivityFeedLive() {
     <div className="border border-border bg-card p-4 h-full">
       <h3 className="text-xs font-mono uppercase tracking-wide text-muted-foreground mb-3">Recent Activity</h3>
       <div className="space-y-0">
-        {displayActivities.map((activity, index) => (
-          <motion.div
-            key={activity.id}
-            initial={reducedMotion ? false : { opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.15, ease: "easeOut", delay: reducedMotion ? 0 : index * 0.03 }}
-            className={cn(
-              "flex items-start gap-3 py-2 hover:bg-secondary/50",
-              index !== displayActivities.length - 1 && "border-b border-border/50"
-            )}
-          >
-            <div className="mt-0.5 opacity-60">{getActivityIcon(activity.type)}</div>
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 text-xs">
-                <span className="font-mono text-[10px] text-muted-foreground whitespace-nowrap tabular-nums">
-                  {formatTimestamp(activity.timestamp)}
-                </span>
-                <span className="text-foreground truncate">{activity.description}</span>
+        {displayActivities.map((activity, index) => {
+          const content = (
+            <motion.div
+              key={activity.id}
+              initial={reducedMotion ? false : { opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.15, ease: "easeOut", delay: reducedMotion ? 0 : index * 0.03 }}
+              className={cn(
+                "flex items-start gap-3 py-2 hover:bg-secondary/50",
+                index !== displayActivities.length - 1 && "border-b border-border/50",
+                activity.href && "cursor-pointer"
+              )}
+            >
+              <div className="mt-0.5 opacity-60">{getActivityIcon(activity.type)}</div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="font-mono text-[10px] text-muted-foreground whitespace-nowrap tabular-nums">
+                    {formatTimestamp(activity.timestamp)}
+                  </span>
+                  <span className="text-foreground truncate">{activity.description}</span>
+                </div>
+                {activity.ip && <span className="font-mono text-[10px] text-primary">{activity.ip}</span>}
               </div>
-              {activity.ip && <span className="font-mono text-[10px] text-primary">{activity.ip}</span>}
-            </div>
-          </motion.div>
-        ))}
+            </motion.div>
+          )
+
+          return activity.href ? (
+            <Link key={activity.id} href={activity.href} className="block">
+              {content}
+            </Link>
+          ) : (
+            <div key={activity.id}>{content}</div>
+          )
+        })}
       </div>
     </div>
   )

@@ -95,7 +95,7 @@ See [CHANGELOG](CHANGELOG.md) for version history.
   - Requires `PUT /v1/config/playbooks` endpoint, file persistence, rollback
 - [x] Vitest setup (vitest.config.ts, jsdom, @testing-library/react, bun run test)
 - [x] Component tests (ErrorBoundary test with 3 cases)
-- [ ] Hook tests (usePermissions, useAuth, use-api)
+- [x] Hook tests (usePermissions 5 tests, useAuth 5 tests)
 - [x] Error boundaries (ErrorBoundary component wrapping dashboard layout)
 - [x] **Event → mitigation linking** (P1 — connects the operator workflow)
   - Mitigation detail page links back to triggering event via `?id=` param
