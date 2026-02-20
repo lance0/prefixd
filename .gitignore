@@ -4,3 +4,4 @@
 *.db-*
 lab/clab-*/
 .claude/
+.factory/
