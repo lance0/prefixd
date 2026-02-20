@@ -131,7 +131,14 @@ export function MitigationsContentLive({ initialSearch }: MitigationsContentLive
     if (!mitigations) return []
     return mitigations
       .filter((m) => {
-        if (searchQuery && !m.victim_ip.includes(searchQuery)) return false
+        if (searchQuery) {
+          const q = searchQuery.toLowerCase()
+          const matches = m.victim_ip.includes(q) ||
+            m.vector.toLowerCase().includes(q) ||
+            (m.customer_id && m.customer_id.toLowerCase().includes(q)) ||
+            m.mitigation_id.toLowerCase().includes(q)
+          if (!matches) return false
+        }
         return true
       })
       .sort((a, b) => {

@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useMemo } from "react"
+import Link from "next/link"
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -38,7 +39,7 @@ function CustomerCard({ customer, defaultOpen }: { customer: ConfigCustomer; def
           </div>
         </div>
         <div className="flex items-center gap-1.5 ml-5 mt-1">
-          <span className="text-[10px] font-mono text-muted-foreground">{customer.customer_id}</span>
+          <Link href={`/mitigations?ip=${customer.customer_id}`} className="text-[10px] font-mono text-primary hover:underline">{customer.customer_id}</Link>
           <span className="text-[10px] text-muted-foreground">·</span>
           {customer.prefixes.map((p) => (
             <Badge key={p} variant="outline" className="text-[10px] font-mono px-1 py-0">
@@ -71,7 +72,7 @@ function CustomerCard({ customer, defaultOpen }: { customer: ConfigCustomer; def
                 <div className="divide-y divide-border">
                   {service.assets.map((asset) => (
                     <div key={asset.ip} className="flex items-center justify-between px-3 py-1.5 text-xs font-mono">
-                      <span>{asset.ip}</span>
+                      <Link href={`/mitigations?ip=${asset.ip}`} className="text-primary hover:underline">{asset.ip}</Link>
                       {asset.role && (
                         <Badge variant="outline" className="text-[10px] font-mono px-1 py-0">
                           {asset.role}

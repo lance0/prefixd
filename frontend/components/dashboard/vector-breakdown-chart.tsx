@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useMemo } from "react"
 import { PieChart, Pie, Cell } from "recharts"
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart"
@@ -97,7 +98,11 @@ export function VectorBreakdownChart({ mitigations }: VectorBreakdownChartProps)
         </div>
         <div className="flex-1 space-y-1.5">
           {data.map((item) => (
-            <div key={item.vector} className="flex items-center justify-between text-xs">
+            <Link
+              key={item.vector}
+              href={`/mitigations?ip=${item.vector}`}
+              className="flex items-center justify-between text-xs hover:bg-secondary/50 rounded px-1 -mx-1 py-0.5 transition-colors"
+            >
               <div className="flex items-center gap-2">
                 <span
                   className="size-2"
@@ -106,7 +111,7 @@ export function VectorBreakdownChart({ mitigations }: VectorBreakdownChartProps)
                 <span className="text-muted-foreground">{item.label}</span>
               </div>
               <span className="font-mono tabular-nums text-foreground">{item.count}</span>
-            </div>
+            </Link>
           ))}
         </div>
       </div>

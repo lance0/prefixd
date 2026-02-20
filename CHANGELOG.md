@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Hook tests** - usePermissions (5 tests: auth disabled, admin, operator, viewer, deny-by-default) and useAuth (5 tests: provider guard, loading, login, logout, auth-expired event)
 - **Activity feed clickable items** - Event entries link to `/events?id={id}`, mitigation-related audit entries link to `/mitigations/{id}`
+- **Vector breakdown chart clickable** - Legend items link to mitigations filtered by vector
+- **Inventory cross-links** - Customer IDs and asset IPs link to `/mitigations?ip={value}`
+- **Mitigations search** - Now matches on vector, customer_id, and mitigation_id (was IP-only)
+- **Dependency upgrades** - react-resizable-panels 2.1 → 4.6
 
 ## [0.8.4] - 2026-02-19
 
