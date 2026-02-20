@@ -343,6 +343,53 @@ For production:
 
 ---
 
+## Database Migrations
+
+### How Migrations Work
+
+prefixd runs database migrations automatically on startup. Each migration file in `migrations/` uses `IF NOT EXISTS` guards so they are idempotent and safe to re-run.
+
+Applied migrations are tracked in the `schema_migrations` table:
+
+```sql
+SELECT * FROM schema_migrations ORDER BY version;
+-- version | name                | applied_at
+-- --------+---------------------+---------------------
+--       1 | initial             | 2026-01-15 10:00:00
+--       2 | operators_sessions  | 2026-01-15 10:00:00
+--       3 | raw_details         | 2026-01-28 12:00:00
+--       4 | schema_migrations   | 2026-02-20 10:00:00
+```
+
+### Check Migration Status
+
+```bash
+# Via CLI
+DATABASE_URL=postgres://prefixd:pass@localhost:5432/prefixd prefixdctl migrations
+
+# Via SQL
+docker compose exec postgres psql -U prefixd -c \
+  "SELECT version, name, applied_at FROM schema_migrations ORDER BY version"
+```
+
+### Adding New Migrations
+
+1. Create `migrations/NNN_description.sql` with `IF NOT EXISTS` guards
+2. Add it to the migrations list in `src/db/mod.rs`
+3. The next prefixd startup will apply and record it
+
+### Rollback
+
+Migrations are forward-only. To roll back:
+
+1. Stop prefixd
+2. Restore from a database backup taken before the upgrade
+3. Start the previous prefixd version
+
+Always take a database backup before upgrading. See [Upgrade Guide](upgrading.md).
+
+---
+
 ## Bare Metal Deployment
 
 ### Build from Source
@@ -672,7 +719,7 @@ curl -v http://localhost/v1/health 2>&1 | grep x-request-id
 - [ ] PostgreSQL high availability
 - [ ] Systemd restart policies
 - [ ] Log rotation
-- [ ] Backup strategy for database
+- [ ] Backup strategy for database (required for rollback, see [Upgrade Guide](upgrading.md))
 
 ### Monitoring
 

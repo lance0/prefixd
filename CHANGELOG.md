@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Database pool metrics** — `prefixd_db_pool_connections{state=active|idle|total}` gauge exposed to Prometheus on each `/metrics` scrape
 - **Request correlation IDs** — Every request gets an `x-request-id` (UUID), preserved if client-provided, echoed in response, added to tracing span. nginx config forwards it.
 - **HTTPS via nginx production example** — Full TLS termination config with HSTS, HTTP→HTTPS redirect, Let's Encrypt note
+- **Reconciliation loop pagination** — Pages through all active mitigations instead of capping at 1000; adds `prefixd_reconciliation_active_count` gauge metric
+- **Database migration tracking** — `schema_migrations` table records applied migrations with version, name, and timestamp; `prefixdctl migrations` command to check status
+- **API versioning policy** — `docs/api-versioning.md` documents backward compatibility guarantees, deprecation process, and `Sunset` header convention
+- **Upgrade guide** — `docs/upgrading.md` covers Docker Compose and bare metal upgrade procedures, rollback guidance, and migration verification
 
 ### Changed
 

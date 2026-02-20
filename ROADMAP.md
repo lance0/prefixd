@@ -138,9 +138,9 @@ Target: Stable API, comprehensive testing, production-proven.
 
 ### Stability
 
-- [ ] API versioning and deprecation policy
-- [ ] Database migration tooling
-- [ ] Upgrade path documentation
+- [x] API versioning and deprecation policy (`docs/api-versioning.md`)
+- [x] Database migration tooling (`schema_migrations` table, `prefixdctl migrations`)
+- [x] Upgrade path documentation (`docs/upgrading.md`)
 
 ### Hardening
 
@@ -156,7 +156,7 @@ Target: Stable API, comprehensive testing, production-proven.
 - [ ] Chaos testing (kill GoBGP mid-mitigation, kill Postgres during ingestion)
 - [ ] Load testing (sustained event volume)
 - [ ] Security audit (dependencies, input validation)
-- [ ] Reconciliation loop pagination (currently limited to 1000 mitigations)
+- [x] Reconciliation loop pagination (pages through all active mitigations, no cap)
 
 ### Observability
 

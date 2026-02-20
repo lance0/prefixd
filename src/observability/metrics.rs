@@ -109,6 +109,15 @@ pub static RECONCILIATION_RUNS: Lazy<CounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static RECONCILIATION_ACTIVE_COUNT: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_reconciliation_active_count",
+        "Number of active mitigations seen during last reconciliation",
+        &["pop"]
+    )
+    .unwrap()
+});
+
 // Config reload metrics
 pub static CONFIG_RELOADS: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
@@ -203,6 +212,7 @@ pub fn init_metrics() {
     Lazy::force(&BGP_SESSION_UP);
     Lazy::force(&GUARDRAIL_REJECTIONS);
     Lazy::force(&RECONCILIATION_RUNS);
+    Lazy::force(&RECONCILIATION_ACTIVE_COUNT);
     Lazy::force(&CONFIG_RELOADS);
     Lazy::force(&ESCALATIONS_TOTAL);
     Lazy::force(&ROW_PARSE_ERRORS);

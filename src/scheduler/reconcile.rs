@@ -116,16 +116,31 @@ impl ReconciliationLoop {
     }
 
     async fn sync_announcements(&self) -> anyhow::Result<()> {
-        // Get desired state: active mitigations
-        let active = self
-            .repo
-            .list_mitigations(
-                Some(&[MitigationStatus::Active, MitigationStatus::Escalated]),
-                None,
-                1000,
-                0,
-            )
-            .await?;
+        // Page through all active mitigations (no cap)
+        let mut active = Vec::new();
+        let page_size: u32 = 500;
+        let mut offset: u32 = 0;
+        loop {
+            let page = self
+                .repo
+                .list_mitigations(
+                    Some(&[MitigationStatus::Active, MitigationStatus::Escalated]),
+                    None,
+                    page_size,
+                    offset,
+                )
+                .await?;
+            let done = (page.len() as u32) < page_size;
+            active.extend(page);
+            if done {
+                break;
+            }
+            offset += page_size;
+        }
+
+        crate::observability::metrics::RECONCILIATION_ACTIVE_COUNT
+            .with_label_values(&["local"])
+            .set(active.len() as f64);
 
         // Get actual state from BGP
         let announced = self.announcer.list_active().await?;

@@ -4,6 +4,8 @@ prefixd exposes a REST API for event ingestion, mitigation management, and opera
 
 **Base URL:** `http://localhost:8080/v1`
 
+> **Versioning:** All endpoints are under `/v1/`. See [API Versioning Policy](api-versioning.md) for backward compatibility guarantees and deprecation process.
+
 ## Authentication
 
 ### Bearer Token

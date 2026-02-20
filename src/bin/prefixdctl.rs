@@ -59,6 +59,9 @@ enum Commands {
 
     /// Reload configuration (inventory, playbooks)
     Reload,
+
+    /// Show applied database migrations (requires DATABASE_URL)
+    Migrations,
 }
 
 #[derive(Subcommand)]
@@ -311,6 +314,7 @@ async fn main() -> ExitCode {
         Commands::Operators(cmd) => cmd_operators(cmd, cli.format).await,
         Commands::Peers => cmd_peers(&client, cli.format).await,
         Commands::Reload => cmd_reload(&client, cli.format).await,
+        Commands::Migrations => cmd_migrations(cli.format).await,
     };
 
     match result {
@@ -729,6 +733,66 @@ async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<()
                     }
                 }
             }
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_migrations(format: OutputFormat) -> Result<(), String> {
+    let database_url =
+        std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL environment variable not set")?;
+
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .map_err(|e| format!("failed to connect to database: {}", e))?;
+
+    #[derive(sqlx::FromRow, Serialize)]
+    struct MigrationRow {
+        version: i32,
+        name: String,
+        applied_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let has_table: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'schema_migrations')",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| format!("database error: {}", e))?;
+
+    if !has_table {
+        println!("No schema_migrations table found. Run prefixd to initialize.");
+        return Ok(());
+    }
+
+    let rows: Vec<MigrationRow> = sqlx::query_as(
+        "SELECT version, name, applied_at FROM schema_migrations ORDER BY version",
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| format!("database error: {}", e))?;
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&rows).unwrap());
+        }
+        OutputFormat::Table => {
+            if rows.is_empty() {
+                println!("No migrations applied.");
+                return Ok(());
+            }
+
+            println!("{:<8}  {:<30}  APPLIED AT", "VERSION", "NAME");
+            println!("{}", "-".repeat(65));
+
+            for m in &rows {
+                let applied = m.applied_at.format("%Y-%m-%d %H:%M:%S").to_string();
+                println!("{:<8}  {:<30}  {}", m.version, m.name, applied);
+            }
+
+            println!();
+            println!("{} migration(s) applied", rows.len());
         }
     }
 
