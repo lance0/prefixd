@@ -550,6 +550,53 @@ GET /v1/stats
 }
 ```
 
+### Stats Timeseries
+
+```http
+GET /v1/stats/timeseries?metric=mitigations&range=24h&bucket=1h
+Authorization: Bearer <token>
+```
+
+Returns gap-filled time buckets for charting. Supported metrics: `mitigations`, `events`. Range up to 7d, bucket minimum 5m.
+
+**Response:**
+
+```json
+{
+  "metric": "mitigations",
+  "buckets": [
+    { "bucket": "2026-02-20T00:00:00Z", "count": 0 },
+    { "bucket": "2026-02-20T01:00:00Z", "count": 3 },
+    { "bucket": "2026-02-20T02:00:00Z", "count": 1 }
+  ]
+}
+```
+
+### IP History
+
+```http
+GET /v1/ip/192.0.2.1/history?limit=100
+Authorization: Bearer <token>
+```
+
+Returns all events and mitigations for a given IP, plus customer/service context from inventory.
+
+**Response:**
+
+```json
+{
+  "ip": "192.0.2.1",
+  "customer": { "customer_id": "acme", "name": "ACME Corp", "policy_profile": "normal" },
+  "service": { "service_id": "web", "name": "Web Frontend" },
+  "events": [
+    { "event_id": "...", "source": "fastnetmon", "event_timestamp": "...", "vector": "udp_flood", "bps": 5000000000, "pps": 1200000, "confidence": 0.95 }
+  ],
+  "mitigations": [
+    { "mitigation_id": "...", "status": "active", "action_type": "police", "vector": "udp_flood", "created_at": "...", "expires_at": "..." }
+  ]
+}
+```
+
 ### Config Settings
 
 ```http

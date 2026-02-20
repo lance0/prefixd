@@ -1,8 +1,8 @@
 use utoipa::OpenApi;
 
 use super::handlers::{
-    ErrorResponse, EventResponse, HealthResponse, MitigationResponse, MitigationsListResponse,
-    PublicHealthResponse, ReloadResponse,
+    ErrorResponse, EventResponse, HealthResponse, IpHistoryResponse, MitigationResponse,
+    MitigationsListResponse, PublicHealthResponse, ReloadResponse, TimeseriesResponse,
 };
 use crate::db::{GlobalStats, PopInfo, PopStats, SafelistEntry};
 
@@ -29,6 +29,8 @@ use crate::db::{GlobalStats, PopInfo, PopStats, SafelistEntry};
         super::handlers::get_config_settings,
         super::handlers::get_config_inventory,
         super::handlers::get_config_playbooks,
+        super::handlers::get_timeseries,
+        super::handlers::get_ip_history,
     ),
     components(
         schemas(
@@ -43,6 +45,9 @@ use crate::db::{GlobalStats, PopInfo, PopStats, SafelistEntry};
             PopStats,
             PopInfo,
             SafelistEntry,
+            TimeseriesResponse,
+            IpHistoryResponse,
+            crate::db::TimeseriesBucket,
         )
     ),
     tags(
@@ -52,6 +57,8 @@ use crate::db::{GlobalStats, PopInfo, PopStats, SafelistEntry};
         (name = "safelist", description = "Safelist management"),
         (name = "config", description = "Configuration management"),
         (name = "multi-pop", description = "Multi-POP coordination"),
+        (name = "stats", description = "Statistics and timeseries"),
+        (name = "ip-history", description = "IP history and context"),
     )
 )]
 pub struct ApiDoc;

@@ -3,7 +3,7 @@ use chrono::Utc;
 use std::sync::Mutex;
 use uuid::Uuid;
 
-use super::{GlobalStats, PopInfo, PopStats, RepositoryTrait, SafelistEntry};
+use super::{GlobalStats, PopInfo, PopStats, RepositoryTrait, SafelistEntry, TimeseriesBucket};
 use crate::domain::{AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole};
 use crate::error::Result;
 use crate::observability::AuditEntry;
@@ -373,6 +373,36 @@ impl RepositoryTrait for MockRepository {
     ) -> Result<Vec<Mitigation>> {
         self.list_mitigations(status_filter, customer_id, limit, offset)
             .await
+    }
+
+    // Timeseries (mock returns empty)
+    async fn timeseries_mitigations(&self, _range_hours: u32, _bucket_minutes: u32) -> Result<Vec<TimeseriesBucket>> {
+        Ok(vec![])
+    }
+
+    async fn timeseries_events(&self, _range_hours: u32, _bucket_minutes: u32) -> Result<Vec<TimeseriesBucket>> {
+        Ok(vec![])
+    }
+
+    // IP history
+    async fn list_events_by_ip(&self, ip: &str, limit: u32) -> Result<Vec<AttackEvent>> {
+        let events = self.events.lock().unwrap();
+        Ok(events
+            .iter()
+            .filter(|e| e.victim_ip == ip)
+            .take(limit as usize)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_mitigations_by_ip(&self, ip: &str, limit: u32) -> Result<Vec<Mitigation>> {
+        let mitigations = self.mitigations.lock().unwrap();
+        Ok(mitigations
+            .iter()
+            .filter(|m| m.victim_ip == ip)
+            .take(limit as usize)
+            .cloned()
+            .collect())
     }
 
     // Operator methods

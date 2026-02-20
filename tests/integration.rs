@@ -518,3 +518,51 @@ async fn test_security_headers_present() {
         Some("no-store")
     );
 }
+
+#[tokio::test]
+async fn test_timeseries_returns_buckets() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/stats/timeseries?metric=mitigations&range=24h&bucket=1h")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["metric"], "mitigations");
+    // MockRepository returns empty buckets
+    assert!(json["buckets"].is_array());
+}
+
+#[tokio::test]
+async fn test_ip_history_returns_structure() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/ip/192.0.2.1/history")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ip"], "192.0.2.1");
+    assert!(json["events"].is_array());
+    assert!(json["mitigations"].is_array());
+}

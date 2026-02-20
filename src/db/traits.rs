@@ -5,7 +5,7 @@ use crate::domain::{AttackEvent, Mitigation, MitigationStatus, Operator, Operato
 use crate::error::Result;
 use crate::observability::AuditEntry;
 
-use super::{GlobalStats, PopInfo, SafelistEntry};
+use super::{GlobalStats, PopInfo, SafelistEntry, TimeseriesBucket};
 
 #[async_trait]
 pub trait RepositoryTrait: Send + Sync {
@@ -68,6 +68,14 @@ pub trait RepositoryTrait: Send + Sync {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Mitigation>>;
+
+    // Timeseries
+    async fn timeseries_mitigations(&self, range_hours: u32, bucket_minutes: u32) -> Result<Vec<TimeseriesBucket>>;
+    async fn timeseries_events(&self, range_hours: u32, bucket_minutes: u32) -> Result<Vec<TimeseriesBucket>>;
+
+    // IP history
+    async fn list_events_by_ip(&self, ip: &str, limit: u32) -> Result<Vec<AttackEvent>>;
+    async fn list_mitigations_by_ip(&self, ip: &str, limit: u32) -> Result<Vec<Mitigation>>;
 
     // Operators
     async fn get_operator_by_username(&self, username: &str) -> Result<Option<Operator>>;

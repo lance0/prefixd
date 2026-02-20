@@ -3,7 +3,7 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { cn } from "@/lib/utils"
-import { LayoutDashboard, Shield, Activity, FileText, Settings, X, ChevronsLeft, ChevronsRight, FileCode, Database } from "lucide-react"
+import { LayoutDashboard, Shield, Activity, FileText, Settings, X, ChevronsLeft, ChevronsRight, FileCode, Database, History } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { usePermissions } from "@/hooks/use-permissions"
 
@@ -12,6 +12,7 @@ const navItems = [
   { href: "/mitigations", label: "Mitigations", icon: Shield, adminOnly: false },
   { href: "/events", label: "Events", icon: Activity, adminOnly: false },
   { href: "/inventory", label: "Inventory", icon: Database, adminOnly: false },
+  { href: "/ip-history", label: "IP History", icon: History, adminOnly: false },
   { href: "/audit-log", label: "Audit Log", icon: FileText, adminOnly: false },
   { href: "/config", label: "Config", icon: FileCode, adminOnly: false },
   { href: "/admin", label: "Admin", icon: Settings, adminOnly: true },

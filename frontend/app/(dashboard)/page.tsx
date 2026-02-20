@@ -7,6 +7,7 @@ import { QuotaGauge } from "@/components/dashboard/quota-gauge"
 import { ActivityFeedLive } from "@/components/dashboard/activity-feed-live"
 import { VectorBreakdownChart } from "@/components/dashboard/vector-breakdown-chart"
 import { ActiveMitigationsMini } from "@/components/dashboard/active-mitigations-mini"
+import { MitigationActivityChart } from "@/components/dashboard/mitigation-activity-chart"
 import { useStats, useMitigations } from "@/hooks/use-api"
 
 export default function OverviewPage() {
@@ -35,6 +36,8 @@ export default function OverviewPage() {
               <ActiveMitigationsMini mitigations={activeMitigations} />
             </div>
           </div>
+
+          <MitigationActivityChart />
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
             <QuotaGauge

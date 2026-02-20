@@ -374,7 +374,15 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                         <td className="px-4 py-3">
                           <StatusBadge status={mitigation.status} />
                         </td>
-                        <td className="px-4 py-3 font-mono text-foreground">{mitigation.victim_ip}</td>
+                        <td className="px-4 py-3 font-mono text-foreground">
+                          <a
+                            href={`/ip-history?ip=${encodeURIComponent(mitigation.victim_ip)}`}
+                            onClick={(e) => { e.stopPropagation(); }}
+                            className="hover:underline text-primary"
+                          >
+                            {mitigation.victim_ip}
+                          </a>
+                        </td>
                         <td className="px-4 py-3 text-muted-foreground">
                           {mitigation.vector.replace(/_/g, " ")}
                         </td>

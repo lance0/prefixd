@@ -13,7 +13,7 @@ import {
   CommandSeparator,
   CommandShortcut,
 } from "@/components/ui/command"
-import { LayoutDashboard, Shield, ShieldAlert, Activity, FileText, Settings, Zap, Clock, XCircle, Database, FileCode } from "lucide-react"
+import { LayoutDashboard, Shield, ShieldAlert, Activity, FileText, Settings, Zap, Clock, XCircle, Database, FileCode, History } from "lucide-react"
 import { useMitigations, useEvents } from "@/hooks/use-api"
 import type { Mitigation } from "@/lib/api"
 
@@ -105,6 +105,11 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
               <Database className="mr-2 h-3 w-3 opacity-60" />
               <span>Inventory</span>
               <CommandShortcut className="font-mono">g i</CommandShortcut>
+            </CommandItem>
+            <CommandItem onSelect={() => runCommand(() => router.push("/ip-history"))} className="font-mono text-xs">
+              <History className="mr-2 h-3 w-3 opacity-60" />
+              <span>IP History</span>
+              <CommandShortcut className="font-mono">g h</CommandShortcut>
             </CommandItem>
             <CommandItem onSelect={() => runCommand(() => router.push("/audit-log"))} className="font-mono text-xs">
               <FileText className="mr-2 h-3 w-3 opacity-60" />

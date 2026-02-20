@@ -67,9 +67,13 @@ export function ActiveMitigationsMini({ mitigations, limit = 5 }: ActiveMitigati
               <div className="flex items-center gap-3 min-w-0">
                 <StatusBadge status={m.status} size="sm" />
                 <div className="min-w-0">
-                  <div className="font-mono text-xs text-foreground truncate">
+                  <a
+                    href={`/ip-history?ip=${encodeURIComponent(m.victim_ip)}`}
+                    onClick={(e) => { e.stopPropagation(); }}
+                    className="font-mono text-xs text-primary hover:underline truncate block"
+                  >
                     {m.victim_ip}
-                  </div>
+                  </a>
                   <div className="text-[10px] text-muted-foreground">
                     {m.vector.replace(/_/g, " ")}
                   </div>

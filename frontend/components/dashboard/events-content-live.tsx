@@ -321,7 +321,15 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
                       <td className="px-4 py-3">
                         <SourceBadge source={event.source} />
                       </td>
-                      <td className="px-4 py-3 font-mono text-foreground">{event.victim_ip}</td>
+                      <td className="px-4 py-3 font-mono text-foreground">
+                        <a
+                          href={`/ip-history?ip=${encodeURIComponent(event.victim_ip)}`}
+                          onClick={(e) => { e.stopPropagation(); }}
+                          className="hover:underline text-primary"
+                        >
+                          {event.victim_ip}
+                        </a>
+                      </td>
                       <td className="px-4 py-3 text-muted-foreground">
                         {event.vector.replace(/_/g, " ")}
                       </td>

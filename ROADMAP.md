@@ -69,17 +69,20 @@ See [CHANGELOG](CHANGELOG.md) for version history.
   - Surface WS events as toast notifications (new mitigation, escalation, expiry)
   - Refactored `use-websocket` into a `WebSocketProvider` Context to prevent duplicate connections
   - Centralized connection management and SWR cache invalidation
-- [ ] **Embedded time-series charts** (P2 — reduces context-switching to Grafana)
-  - Mitigation count over time, events/sec on overview page
-  - Query Prometheus or use internal metrics endpoint
+- [x] **Embedded time-series charts** (P2 — reduces context-switching to Grafana)
+  - 24h area chart on overview: mitigations + events per hour
+  - PostgreSQL-backed via `GET /v1/stats/timeseries` with gap-filled `generate_series` buckets
+  - recharts AreaChart with gradient fill, 30s auto-refresh
 - [x] **Filtering and pagination on list pages** (P1 — client-side)
   - Mitigations: status toggle pills, IP search, column sorting, 20/page pagination
   - Events: source filter, vector filter, IP search, column sorting, 20/page pagination
   - Audit log: action filter, actor filter, text search, column sorting, 20/page pagination
   - Server-side cursor pagination tracked as future item
-- [ ] **Mitigation history per IP** (P2 — "what happened to this IP in the last 24h")
-  - Timeline view: event → mitigation → escalation → expiry/withdraw
-  - Searchable by destination IP, links to detail view
+- [x] **Mitigation history per IP** (P2 — "what happened to this IP")
+  - Dedicated `/ip-history?ip=X` page with search bar and vertical timeline
+  - Events + mitigations interleaved chronologically, customer/service context
+  - All victim_ip cells across UI link to IP history page
+  - `GET /v1/ip/{ip}/history` backend endpoint with inventory lookup
 - [ ] **Alerting/webhook config UI** (P2 — backend webhook support planned)
   - Configure alert destinations (Slack, PagerDuty, generic webhook)
   - Test notification button

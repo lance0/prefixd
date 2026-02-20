@@ -593,6 +593,105 @@ impl RepositoryTrait for Repository {
             .collect())
     }
 
+    // Timeseries
+    async fn timeseries_mitigations(&self, range_hours: u32, bucket_minutes: u32) -> Result<Vec<TimeseriesBucket>> {
+        let range_interval = format!("{} hours", range_hours);
+        let bucket_interval = format!("{} minutes", bucket_minutes);
+        let rows = sqlx::query_as::<_, TimeseriesBucket>(
+            r#"
+            SELECT gs AS bucket, COALESCE(c.count, 0) AS count
+            FROM generate_series(
+                date_trunc('hour', NOW() - $1::interval),
+                NOW(),
+                $2::interval
+            ) gs
+            LEFT JOIN (
+                SELECT date_trunc('hour', created_at) AS bucket, COUNT(*)::bigint AS count
+                FROM mitigations
+                WHERE created_at >= NOW() - $1::interval
+                GROUP BY 1
+            ) c ON c.bucket = gs
+            ORDER BY gs
+            "#,
+        )
+        .bind(&range_interval)
+        .bind(&bucket_interval)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn timeseries_events(&self, range_hours: u32, bucket_minutes: u32) -> Result<Vec<TimeseriesBucket>> {
+        let range_interval = format!("{} hours", range_hours);
+        let bucket_interval = format!("{} minutes", bucket_minutes);
+        let rows = sqlx::query_as::<_, TimeseriesBucket>(
+            r#"
+            SELECT gs AS bucket, COALESCE(c.count, 0) AS count
+            FROM generate_series(
+                date_trunc('hour', NOW() - $1::interval),
+                NOW(),
+                $2::interval
+            ) gs
+            LEFT JOIN (
+                SELECT date_trunc('hour', ingested_at) AS bucket, COUNT(*)::bigint AS count
+                FROM events
+                WHERE ingested_at >= NOW() - $1::interval
+                GROUP BY 1
+            ) c ON c.bucket = gs
+            ORDER BY gs
+            "#,
+        )
+        .bind(&range_interval)
+        .bind(&bucket_interval)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    // IP history
+    async fn list_events_by_ip(&self, ip: &str, limit: u32) -> Result<Vec<AttackEvent>> {
+        let events = sqlx::query_as::<_, AttackEvent>(
+            r#"
+            SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
+                   victim_ip, vector, protocol, bps, pps, top_dst_ports_json, confidence,
+                   action, raw_details
+            FROM events WHERE victim_ip = $1 ORDER BY ingested_at DESC LIMIT $2
+            "#,
+        )
+        .bind(ip)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(events)
+    }
+
+    async fn list_mitigations_by_ip(&self, ip: &str, limit: u32) -> Result<Vec<Mitigation>> {
+        let rows = sqlx::query_as::<_, MitigationRow>(
+            r#"
+            SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
+                   match_json, action_type, action_params_json, status,
+                   created_at, updated_at, expires_at, withdrawn_at,
+                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason
+            FROM mitigations WHERE victim_ip = $1 ORDER BY created_at DESC LIMIT $2
+            "#,
+        )
+        .bind(ip)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| match Mitigation::from_row(row) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    ROW_PARSE_ERRORS.with_label_values(&["mitigations"]).inc();
+                    tracing::error!(error = %e, "skipping corrupted mitigation row");
+                    None
+                }
+            })
+            .collect())
+    }
+
     // Operator methods
     async fn get_operator_by_username(&self, username: &str) -> Result<Option<Operator>> {
         let row = sqlx::query_as::<_, OperatorRow>(
@@ -710,6 +809,12 @@ pub struct PopStats {
     pub pop: String,
     pub active: u32,
     pub total: u32,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, utoipa::ToSchema)]
+pub struct TimeseriesBucket {
+    pub bucket: DateTime<Utc>,
+    pub count: i64,
 }
 
 #[derive(Debug, FromRow)]

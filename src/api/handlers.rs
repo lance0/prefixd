@@ -1812,3 +1812,180 @@ pub async fn get_config_playbooks(
         loaded_at,
     }))
 }
+
+// === Timeseries ===
+
+#[derive(Deserialize)]
+pub struct TimeseriesQuery {
+    metric: Option<String>,
+    range: Option<String>,
+    bucket: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct TimeseriesResponse {
+    pub metric: String,
+    pub buckets: Vec<crate::db::TimeseriesBucket>,
+}
+
+fn parse_duration_hours(s: &str) -> Option<u32> {
+    let s = s.trim();
+    if let Some(h) = s.strip_suffix('h') {
+        h.parse().ok()
+    } else if let Some(d) = s.strip_suffix('d') {
+        d.parse::<u32>().ok().map(|d| d * 24)
+    } else {
+        s.parse().ok()
+    }
+}
+
+fn parse_duration_minutes(s: &str) -> Option<u32> {
+    let s = s.trim();
+    if let Some(m) = s.strip_suffix('m') {
+        m.parse().ok()
+    } else if let Some(h) = s.strip_suffix('h') {
+        h.parse::<u32>().ok().map(|h| h * 60)
+    } else {
+        s.parse().ok()
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/stats/timeseries",
+    tag = "stats",
+    params(
+        ("metric" = Option<String>, Query, description = "Metric: mitigations or events (default: mitigations)"),
+        ("range" = Option<String>, Query, description = "Time range, e.g. 24h, 7d (default: 24h)"),
+        ("bucket" = Option<String>, Query, description = "Bucket size, e.g. 1h, 30m (default: 1h)"),
+    ),
+    responses(
+        (status = 200, description = "Timeseries data", body = TimeseriesResponse)
+    )
+)]
+pub async fn get_timeseries(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
+    Query(query): Query<TimeseriesQuery>,
+) -> Result<Json<TimeseriesResponse>, StatusCode> {
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    require_auth(&state, &auth_session, auth_header)?;
+
+    let metric = query.metric.as_deref().unwrap_or("mitigations");
+    let range_hours = query
+        .range
+        .as_deref()
+        .and_then(parse_duration_hours)
+        .unwrap_or(24)
+        .min(168); // cap at 7 days
+    let bucket_minutes = query
+        .bucket
+        .as_deref()
+        .and_then(parse_duration_minutes)
+        .unwrap_or(60)
+        .max(5); // minimum 5 minute buckets
+
+    let buckets = match metric {
+        "events" => state.repo.timeseries_events(range_hours, bucket_minutes).await,
+        _ => state.repo.timeseries_mitigations(range_hours, bucket_minutes).await,
+    }
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(TimeseriesResponse {
+        metric: metric.to_string(),
+        buckets,
+    }))
+}
+
+// === IP History ===
+
+#[derive(Serialize, ToSchema)]
+pub struct IpHistoryResponse {
+    pub ip: String,
+    pub customer: Option<serde_json::Value>,
+    pub service: Option<serde_json::Value>,
+    pub events: Vec<serde_json::Value>,
+    pub mitigations: Vec<MitigationResponse>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/ip/{ip}/history",
+    tag = "ip-history",
+    params(
+        ("ip" = String, Path, description = "IP address to look up"),
+        ("limit" = Option<u32>, Query, description = "Max results per type (default 100)"),
+    ),
+    responses(
+        (status = 200, description = "IP history", body = IpHistoryResponse)
+    )
+)]
+pub async fn get_ip_history(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
+    Path(ip): Path<String>,
+    Query(query): Query<ListEventsQuery>,
+) -> Result<Json<IpHistoryResponse>, StatusCode> {
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    require_auth(&state, &auth_session, auth_header)?;
+
+    let limit = query.limit.unwrap_or(100).min(1000);
+
+    let (events, mitigations) = tokio::try_join!(
+        state.repo.list_events_by_ip(&ip, limit),
+        state.repo.list_mitigations_by_ip(&ip, limit),
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Inventory lookup for customer/service context
+    let inventory = state.inventory.read().await;
+    let mut customer_json = None;
+    let mut service_json = None;
+    for customer in &inventory.customers {
+        for service in &customer.services {
+            for asset in &service.assets {
+                if asset.ip == ip {
+                    customer_json = Some(serde_json::json!({
+                        "customer_id": customer.customer_id,
+                        "name": customer.name,
+                        "policy_profile": format!("{:?}", customer.policy_profile).to_lowercase(),
+                    }));
+                    service_json = Some(serde_json::json!({
+                        "service_id": service.service_id,
+                        "name": service.name,
+                    }));
+                }
+            }
+        }
+    }
+    drop(inventory);
+
+    let events_json: Vec<serde_json::Value> = events
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "event_id": e.event_id,
+                "source": e.source,
+                "event_timestamp": e.event_timestamp,
+                "ingested_at": e.ingested_at,
+                "vector": e.vector,
+                "bps": e.bps,
+                "pps": e.pps,
+                "confidence": e.confidence,
+            })
+        })
+        .collect();
+
+    let mitigation_responses: Vec<MitigationResponse> =
+        mitigations.iter().map(MitigationResponse::from).collect();
+
+    Ok(Json(IpHistoryResponse {
+        ip,
+        customer: customer_json,
+        service: service_json,
+        events: events_json,
+        mitigations: mitigation_responses,
+    }))
+}

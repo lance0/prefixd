@@ -88,6 +88,10 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onTogg
             e.preventDefault()
             router.push("/config")
             break
+          case "h":
+            e.preventDefault()
+            router.push("/ip-history")
+            break
         }
       }
     },

@@ -423,3 +423,56 @@ export async function getConfigInventory(): Promise<ConfigInventoryResponse> {
 export async function getConfigPlaybooks(): Promise<ConfigPlaybooksResponse> {
   return fetchApi<ConfigPlaybooksResponse>("/v1/config/playbooks")
 }
+
+// Timeseries
+
+export interface TimeseriesBucket {
+  bucket: string
+  count: number
+}
+
+export interface TimeseriesResponse {
+  metric: string
+  buckets: TimeseriesBucket[]
+}
+
+export async function getTimeseries(params?: {
+  metric?: string
+  range?: string
+  bucket?: string
+}): Promise<TimeseriesResponse> {
+  const searchParams = new URLSearchParams()
+  if (params?.metric) searchParams.set("metric", params.metric)
+  if (params?.range) searchParams.set("range", params.range)
+  if (params?.bucket) searchParams.set("bucket", params.bucket)
+  const query = searchParams.toString()
+  return fetchApi<TimeseriesResponse>(`/v1/stats/timeseries${query ? `?${query}` : ""}`)
+}
+
+// IP History
+
+export interface IpHistoryResponse {
+  ip: string
+  customer: { customer_id: string; name: string; policy_profile: string } | null
+  service: { service_id: string; name: string } | null
+  events: IpHistoryEvent[]
+  mitigations: Mitigation[]
+}
+
+export interface IpHistoryEvent {
+  event_id: string
+  source: string
+  event_timestamp: string
+  ingested_at: string
+  vector: string
+  bps: number | null
+  pps: number | null
+  confidence: number | null
+}
+
+export async function getIpHistory(ip: string, limit?: number): Promise<IpHistoryResponse> {
+  const searchParams = new URLSearchParams()
+  if (limit) searchParams.set("limit", limit.toString())
+  const query = searchParams.toString()
+  return fetchApi<IpHistoryResponse>(`/v1/ip/${encodeURIComponent(ip)}/history${query ? `?${query}` : ""}`)
+}

@@ -7,10 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Embedded time-series charts on overview** — 24h area chart showing mitigations and events per hour, PostgreSQL-backed with gap-filled buckets via `GET /v1/stats/timeseries`
+- **IP history page** (`/ip-history?ip=X`) — Unified timeline of all events and mitigations for an IP, with customer/service context from inventory, via `GET /v1/ip/{ip}/history`
+- **Clickable IPs everywhere** — All victim_ip cells in mitigations table, events table, active mitigations mini, mitigation detail, and event detail panel link to IP history
+- **IP History in navigation** — Added to sidebar, command palette (`g h`), keyboard shortcuts
+- **2 new integration tests** — timeseries endpoint returns buckets, IP history returns structure
+
 ### Changed
 
 - **Mitigate Now is now a modal dialog** - Opens over the mitigations list instead of navigating to a separate page; command palette and `n` shortcut open the modal directly
 - **Removed `/mitigations/create` route** - Replaced by modal, no redirect needed
+- **Upgraded recharts** 3.6.0 → 3.7.0
 
 ### Fixed
 

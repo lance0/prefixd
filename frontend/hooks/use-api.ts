@@ -203,3 +203,30 @@ export function useConfigPlaybooks() {
     { refreshInterval: 0, revalidateOnFocus: !MOCK_MODE }
   )
 }
+
+export function useTimeseries(metric?: string, range?: string, bucket?: string) {
+  const key = ["timeseries", metric || "mitigations", range || "24h", bucket || "1h"]
+  return useSWR(
+    key,
+    MOCK_MODE
+      ? async () => ({ metric: metric || "mitigations", buckets: [] })
+      : () => api.getTimeseries({ metric, range, bucket }),
+    {
+      refreshInterval: MOCK_MODE ? 0 : 30000,
+      revalidateOnFocus: !MOCK_MODE,
+    }
+  )
+}
+
+export function useIpHistory(ip: string | null) {
+  return useSWR(
+    ip ? ["ip-history", ip] : null,
+    MOCK_MODE
+      ? async () => ({ ip: ip!, customer: null, service: null, events: [], mitigations: [] })
+      : () => api.getIpHistory(ip!),
+    {
+      refreshInterval: 0,
+      revalidateOnFocus: !MOCK_MODE,
+    }
+  )
+}

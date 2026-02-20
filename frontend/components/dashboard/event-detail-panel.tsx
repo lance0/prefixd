@@ -103,7 +103,12 @@ export function EventDetailPanel({ event, onClose }: EventDetailPanelProps) {
       <div className="sticky top-0 bg-background border-b border-border px-6 py-4 flex items-center justify-between z-10">
         <div className="flex items-center gap-3">
           <SourceBadge source={event.source} />
-          <span className="font-mono text-lg font-semibold text-foreground">{event.victim_ip}</span>
+          <a
+            href={`/ip-history?ip=${encodeURIComponent(event.victim_ip)}`}
+            className="font-mono text-lg font-semibold text-primary hover:underline"
+          >
+            {event.victim_ip}
+          </a>
           <span className="rounded-md bg-secondary px-2 py-0.5 text-xs text-muted-foreground">
             {event.vector.replace(/_/g, " ")}
           </span>
