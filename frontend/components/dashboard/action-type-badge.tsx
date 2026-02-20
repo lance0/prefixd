@@ -1,12 +1,18 @@
 import { cn } from "@/lib/utils"
 
 interface ActionTypeBadgeProps {
-  action: "announce" | "withdraw" | "reject" | "escalate" | "extend" | "create"
+  action: string
 }
 
 export function ActionTypeBadge({ action }: ActionTypeBadgeProps) {
-  const isPositive = action === "announce" || action === "create" || action === "extend"
-  const isNegative = action === "reject" || action === "escalate"
+  const normalized = action.toLowerCase()
+  const isPositive =
+    normalized === "announce" ||
+    normalized === "create" ||
+    normalized === "extend" ||
+    normalized === "ingest" ||
+    normalized === "safelist_add"
+  const isNegative = normalized === "reject" || normalized === "escalate"
 
   return (
     <span

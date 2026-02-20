@@ -14,20 +14,17 @@ pub async fn request_id(mut req: Request<Body>, next: Next) -> Response {
         .map(|s| s.to_string())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    req.headers_mut().insert(
-        REQUEST_ID_HEADER,
-        id.parse().expect("valid header value"),
-    );
+    req.headers_mut()
+        .insert(REQUEST_ID_HEADER, id.parse().expect("valid header value"));
 
     let span = tracing::info_span!("request", request_id = %id);
     let _guard = span.enter();
 
     let mut response = next.run(req).await;
 
-    response.headers_mut().insert(
-        REQUEST_ID_HEADER,
-        id.parse().expect("valid header value"),
-    );
+    response
+        .headers_mut()
+        .insert(REQUEST_ID_HEADER, id.parse().expect("valid header value"));
 
     response
 }

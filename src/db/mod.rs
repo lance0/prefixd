@@ -26,10 +26,26 @@ pub async fn init_postgres_pool(connection_string: &str) -> Result<PgPool> {
 
 async fn run_migrations(pool: &PgPool) -> Result<()> {
     let migrations: &[(i32, &str, &str)] = &[
-        (1, "initial", include_str!("../../migrations/001_initial.sql")),
-        (2, "operators_sessions", include_str!("../../migrations/002_operators_sessions.sql")),
-        (3, "raw_details", include_str!("../../migrations/003_raw_details.sql")),
-        (4, "schema_migrations", include_str!("../../migrations/004_schema_migrations.sql")),
+        (
+            1,
+            "initial",
+            include_str!("../../migrations/001_initial.sql"),
+        ),
+        (
+            2,
+            "operators_sessions",
+            include_str!("../../migrations/002_operators_sessions.sql"),
+        ),
+        (
+            3,
+            "raw_details",
+            include_str!("../../migrations/003_raw_details.sql"),
+        ),
+        (
+            4,
+            "schema_migrations",
+            include_str!("../../migrations/004_schema_migrations.sql"),
+        ),
     ];
 
     // Bootstrap: run all migrations first (they use IF NOT EXISTS)
@@ -48,11 +64,10 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
         .await?;
     }
 
-    let applied: Vec<(i32,)> = sqlx::query_as(
-        "SELECT version FROM schema_migrations ORDER BY version"
-    )
-    .fetch_all(pool)
-    .await?;
+    let applied: Vec<(i32,)> =
+        sqlx::query_as("SELECT version FROM schema_migrations ORDER BY version")
+            .fetch_all(pool)
+            .await?;
 
     tracing::info!(
         versions = ?applied.iter().map(|r| r.0).collect::<Vec<_>>(),

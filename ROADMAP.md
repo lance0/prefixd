@@ -111,7 +111,7 @@ See [CHANGELOG](CHANGELOG.md) for version history.
   - Exports current filtered view as CSV (client-side generation, no backend)
   - Includes all visible columns plus IDs, date-stamped filename
 - [x] **Keyboard shortcuts** (P1 — DX, command palette already exists)
-  - `g o/m/e/i/a/c` navigation, `n` for Mitigate Now, `?` toggles help modal
+  - `g o/m/e/i/h/a/c` navigation, `n` for Mitigate Now, `?` toggles help modal
   - `Cmd+K` command palette, `Cmd+B` sidebar toggle
   - Hints shown in command palette and keyboard shortcuts modal
 - [x] Upgrade lucide-react (0.454 → 0.575, all ~40 icon imports verified)

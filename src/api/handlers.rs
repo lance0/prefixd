@@ -5,6 +5,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -1071,9 +1072,7 @@ pub async fn health_detail(
     }))
 }
 
-pub async fn metrics(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if let Some(pool) = &state.db_pool {
         crate::observability::metrics::update_db_pool_metrics(pool);
     }
@@ -1892,8 +1891,18 @@ pub async fn get_timeseries(
         .max(5); // minimum 5 minute buckets
 
     let buckets = match metric {
-        "events" => state.repo.timeseries_events(range_hours, bucket_minutes).await,
-        _ => state.repo.timeseries_mitigations(range_hours, bucket_minutes).await,
+        "events" => {
+            state
+                .repo
+                .timeseries_events(range_hours, bucket_minutes)
+                .await
+        }
+        _ => {
+            state
+                .repo
+                .timeseries_mitigations(range_hours, bucket_minutes)
+                .await
+        }
     }
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -1936,6 +1945,10 @@ pub async fn get_ip_history(
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
+    if ip.parse::<IpAddr>().is_err() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let limit = query.limit.unwrap_or(100).min(1000);
 
     let (events, mitigations) = tokio::try_join!(
@@ -1948,20 +1961,23 @@ pub async fn get_ip_history(
     let inventory = state.inventory.read().await;
     let mut customer_json = None;
     let mut service_json = None;
-    for customer in &inventory.customers {
+    'customer_search: for customer in &inventory.customers {
         for service in &customer.services {
-            for asset in &service.assets {
-                if asset.ip == ip {
-                    customer_json = Some(serde_json::json!({
-                        "customer_id": customer.customer_id,
-                        "name": customer.name,
-                        "policy_profile": format!("{:?}", customer.policy_profile).to_lowercase(),
-                    }));
-                    service_json = Some(serde_json::json!({
-                        "service_id": service.service_id,
-                        "name": service.name,
-                    }));
-                }
+            if service
+                .assets
+                .iter()
+                .any(|asset| asset.ip.as_str() == ip.as_str())
+            {
+                customer_json = Some(serde_json::json!({
+                    "customer_id": customer.customer_id,
+                    "name": customer.name,
+                    "policy_profile": format!("{:?}", customer.policy_profile).to_lowercase(),
+                }));
+                service_json = Some(serde_json::json!({
+                    "service_id": service.service_id,
+                    "name": service.name,
+                }));
+                break 'customer_search;
             }
         }
     }

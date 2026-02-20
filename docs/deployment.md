@@ -678,7 +678,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost/v1/health/detail
 
 # CLI status (uses /v1/health/detail)
 prefixdctl status
-prefixdctl health
+prefixdctl status
 prefixdctl peers
 ```
 

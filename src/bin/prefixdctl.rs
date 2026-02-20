@@ -10,12 +10,7 @@ use std::process::ExitCode;
 #[command(name = "prefixdctl", about = "Control CLI for prefixd", version)]
 struct Cli {
     /// prefixd API endpoint
-    #[arg(
-        short,
-        long,
-        default_value = "http://127.0.0.1:8080",
-        env = "PREFIXD_API"
-    )]
+    #[arg(short, long, default_value = "http://127.0.0.1", env = "PREFIXD_API")]
     api: String,
 
     /// Bearer token for authentication
@@ -76,7 +71,7 @@ enum OperatorCommands {
         #[arg(short, long)]
         password: Option<String>,
 
-        /// Role (admin or viewer)
+        /// Role (admin, operator, or viewer)
         #[arg(short, long, default_value = "admin")]
         role: String,
     },
@@ -611,8 +606,8 @@ async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<()
         } => {
             // Validate role
             let role_lower = role.to_lowercase();
-            if role_lower != "admin" && role_lower != "viewer" {
-                return Err("role must be 'admin' or 'viewer'".to_string());
+            if role_lower != "admin" && role_lower != "operator" && role_lower != "viewer" {
+                return Err("role must be 'admin', 'operator', or 'viewer'".to_string());
             }
 
             // Get password (prompt if not provided)
@@ -766,12 +761,11 @@ async fn cmd_migrations(format: OutputFormat) -> Result<(), String> {
         return Ok(());
     }
 
-    let rows: Vec<MigrationRow> = sqlx::query_as(
-        "SELECT version, name, applied_at FROM schema_migrations ORDER BY version",
-    )
-    .fetch_all(&pool)
-    .await
-    .map_err(|e| format!("database error: {}", e))?;
+    let rows: Vec<MigrationRow> =
+        sqlx::query_as("SELECT version, name, applied_at FROM schema_migrations ORDER BY version")
+            .fetch_all(&pool)
+            .await
+            .map_err(|e| format!("database error: {}", e))?;
 
     match format {
         OutputFormat::Json => {

@@ -22,21 +22,66 @@ function formatHour(bucket: string) {
 }
 
 export function MitigationActivityChart() {
-  const { data: mitigationData } = useTimeseries("mitigations", "24h", "1h")
-  const { data: eventData } = useTimeseries("events", "24h", "1h")
+  const { data: mitigationData, error: mitigationError } = useTimeseries("mitigations", "24h", "1h")
+  const { data: eventData, error: eventError } = useTimeseries("events", "24h", "1h")
 
   const chartData = useMemo(() => {
-    if (!mitigationData?.buckets) return []
-    const eventMap = new Map<string, number>()
-    for (const b of eventData?.buckets ?? []) {
-      eventMap.set(b.bucket, b.count)
+    const bucketMap = new Map<string, { bucket: string; mitigations: number; events: number }>()
+
+    for (const b of mitigationData?.buckets ?? []) {
+      bucketMap.set(b.bucket, {
+        bucket: b.bucket,
+        mitigations: b.count,
+        events: bucketMap.get(b.bucket)?.events ?? 0,
+      })
     }
-    return mitigationData.buckets.map((b) => ({
-      time: formatHour(b.bucket),
-      mitigations: b.count,
-      events: eventMap.get(b.bucket) ?? 0,
-    }))
+
+    for (const b of eventData?.buckets ?? []) {
+      const existing = bucketMap.get(b.bucket)
+      bucketMap.set(b.bucket, {
+        bucket: b.bucket,
+        mitigations: existing?.mitigations ?? 0,
+        events: b.count,
+      })
+    }
+
+    return Array.from(bucketMap.values())
+      .sort((a, b) => new Date(a.bucket).getTime() - new Date(b.bucket).getTime())
+      .map((b) => ({
+        time: formatHour(b.bucket),
+        mitigations: b.mitigations,
+        events: b.events,
+      }))
   }, [mitigationData, eventData])
+
+  const isLoading = !mitigationData || !eventData
+  const hasError = Boolean(mitigationError || eventError)
+
+  if (isLoading) {
+    return (
+      <div className="border border-border bg-card p-4">
+        <h3 className="text-xs font-mono uppercase text-muted-foreground mb-3">
+          Activity (24h)
+        </h3>
+        <div className="flex items-center justify-center h-32 text-muted-foreground text-xs">
+          Loading...
+        </div>
+      </div>
+    )
+  }
+
+  if (hasError) {
+    return (
+      <div className="border border-border bg-card p-4">
+        <h3 className="text-xs font-mono uppercase text-muted-foreground mb-3">
+          Activity (24h)
+        </h3>
+        <div className="flex items-center justify-center h-32 text-xs text-destructive">
+          Unable to load activity chart
+        </div>
+      </div>
+    )
+  }
 
   if (chartData.length === 0) {
     return (
@@ -45,7 +90,7 @@ export function MitigationActivityChart() {
           Activity (24h)
         </h3>
         <div className="flex items-center justify-center h-32 text-muted-foreground text-xs">
-          Loading...
+          No activity in the last 24 hours
         </div>
       </div>
     )

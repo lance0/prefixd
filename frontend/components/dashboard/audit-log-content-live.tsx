@@ -255,7 +255,7 @@ export function AuditLogContentLive() {
                         {formatTimestamp(entry.timestamp)}
                       </td>
                       <td className="px-4 py-3">
-                        <ActorBadge actor={{ type: entry.actor_type, name: entry.actor_id || "system" }} />
+                        <ActorBadge type={entry.actor_type} name={entry.actor_id || "system"} />
                       </td>
                       <td className="px-4 py-3">
                         <ActionTypeBadge action={entry.action} />

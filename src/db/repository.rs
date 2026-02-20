@@ -594,19 +594,23 @@ impl RepositoryTrait for Repository {
     }
 
     // Timeseries
-    async fn timeseries_mitigations(&self, range_hours: u32, bucket_minutes: u32) -> Result<Vec<TimeseriesBucket>> {
+    async fn timeseries_mitigations(
+        &self,
+        range_hours: u32,
+        bucket_minutes: u32,
+    ) -> Result<Vec<TimeseriesBucket>> {
         let range_interval = format!("{} hours", range_hours);
         let bucket_interval = format!("{} minutes", bucket_minutes);
         let rows = sqlx::query_as::<_, TimeseriesBucket>(
             r#"
             SELECT gs AS bucket, COALESCE(c.count, 0) AS count
             FROM generate_series(
-                date_trunc('hour', NOW() - $1::interval),
-                NOW(),
+                date_bin($2::interval, NOW() - $1::interval, '1970-01-01 00:00:00+00'::timestamptz),
+                date_bin($2::interval, NOW(), '1970-01-01 00:00:00+00'::timestamptz),
                 $2::interval
             ) gs
             LEFT JOIN (
-                SELECT date_trunc('hour', created_at) AS bucket, COUNT(*)::bigint AS count
+                SELECT date_bin($2::interval, created_at, '1970-01-01 00:00:00+00'::timestamptz) AS bucket, COUNT(*)::bigint AS count
                 FROM mitigations
                 WHERE created_at >= NOW() - $1::interval
                 GROUP BY 1
@@ -621,19 +625,23 @@ impl RepositoryTrait for Repository {
         Ok(rows)
     }
 
-    async fn timeseries_events(&self, range_hours: u32, bucket_minutes: u32) -> Result<Vec<TimeseriesBucket>> {
+    async fn timeseries_events(
+        &self,
+        range_hours: u32,
+        bucket_minutes: u32,
+    ) -> Result<Vec<TimeseriesBucket>> {
         let range_interval = format!("{} hours", range_hours);
         let bucket_interval = format!("{} minutes", bucket_minutes);
         let rows = sqlx::query_as::<_, TimeseriesBucket>(
             r#"
             SELECT gs AS bucket, COALESCE(c.count, 0) AS count
             FROM generate_series(
-                date_trunc('hour', NOW() - $1::interval),
-                NOW(),
+                date_bin($2::interval, NOW() - $1::interval, '1970-01-01 00:00:00+00'::timestamptz),
+                date_bin($2::interval, NOW(), '1970-01-01 00:00:00+00'::timestamptz),
                 $2::interval
             ) gs
             LEFT JOIN (
-                SELECT date_trunc('hour', ingested_at) AS bucket, COUNT(*)::bigint AS count
+                SELECT date_bin($2::interval, ingested_at, '1970-01-01 00:00:00+00'::timestamptz) AS bucket, COUNT(*)::bigint AS count
                 FROM events
                 WHERE ingested_at >= NOW() - $1::interval
                 GROUP BY 1

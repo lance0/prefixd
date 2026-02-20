@@ -12,13 +12,18 @@ interface KeyboardShortcutsOptions {
 export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onToggleHelp }: KeyboardShortcutsOptions = {}) {
   const router = useRouter()
   const gPressedRef = useRef(false)
-  const gTimeoutRef = useRef<NodeJS.Timeout>()
+  const gTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       // Ignore if typing in input/textarea
       const target = e.target as HTMLElement
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) {
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
+        target.isContentEditable
+      ) {
         return
       }
 
@@ -52,16 +57,22 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onTogg
       // Two-key navigation: g + letter
       if (e.key === "g" && !e.metaKey && !e.ctrlKey) {
         gPressedRef.current = true
-        clearTimeout(gTimeoutRef.current)
+        if (gTimeoutRef.current) {
+          clearTimeout(gTimeoutRef.current)
+        }
         gTimeoutRef.current = setTimeout(() => {
           gPressedRef.current = false
+          gTimeoutRef.current = null
         }, 1000)
         return
       }
 
       if (gPressedRef.current) {
         gPressedRef.current = false
-        clearTimeout(gTimeoutRef.current)
+        if (gTimeoutRef.current) {
+          clearTimeout(gTimeoutRef.current)
+          gTimeoutRef.current = null
+        }
 
         switch (e.key) {
           case "o":
@@ -102,7 +113,9 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onTogg
     window.addEventListener("keydown", handleKeyDown)
     return () => {
       window.removeEventListener("keydown", handleKeyDown)
-      clearTimeout(gTimeoutRef.current)
+      if (gTimeoutRef.current) {
+        clearTimeout(gTimeoutRef.current)
+      }
     }
   }, [handleKeyDown])
 }

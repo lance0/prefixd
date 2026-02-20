@@ -6,7 +6,7 @@ import { toast } from "sonner"
 import { WsMessage, WsMessageType, ConnectionState } from "@/hooks/use-websocket-types"
 
 function getWsBase(): string {
-  if (typeof window === "undefined") return "ws://localhost:8080"
+  if (typeof window === "undefined") return "ws://127.0.0.1"
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
   return `${proto}//${window.location.host}`
 }

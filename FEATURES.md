@@ -273,7 +273,7 @@ customers:
 
 ### Hot Reload
 
-- `prefixdctl reload` or `POST /v1/admin/reload`
+- `prefixdctl reload` or `POST /v1/config/reload`
 - Inventory and playbooks reload without restart
 - Active mitigations preserved
 
@@ -318,7 +318,7 @@ prefixdctl operators list
 # Status
 prefixdctl status              # Overview
 prefixdctl peers               # BGP session status
-prefixdctl health              # Detailed health check
+prefixdctl status              # Detailed health check
 
 # Mitigations
 prefixdctl mitigations list
@@ -345,7 +345,7 @@ prefixdctl -f table mitigations list # Table output (default)
 ### Configuration
 
 ```bash
-export PREFIXD_API=http://localhost:8080
+export PREFIXD_API=http://localhost
 export PREFIXD_API_TOKEN=your-token-here
 ```
 

@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useMemo } from "react"
+import Link from "next/link"
 import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, AlertCircle, Download } from "lucide-react"
 import { SourceBadge } from "@/components/dashboard/source-badge"
 import { ConfidenceBar } from "@/components/dashboard/confidence-bar"
@@ -322,13 +323,15 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
                         <SourceBadge source={event.source} />
                       </td>
                       <td className="px-4 py-3 font-mono text-foreground">
-                        <a
+                        <Link
                           href={`/ip-history?ip=${encodeURIComponent(event.victim_ip)}`}
-                          onClick={(e) => { e.stopPropagation(); }}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                          }}
                           className="hover:underline text-primary"
                         >
                           {event.victim_ip}
-                        </a>
+                        </Link>
                       </td>
                       <td className="px-4 py-3 text-muted-foreground">
                         {event.vector.replace(/_/g, " ")}

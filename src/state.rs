@@ -45,7 +45,9 @@ impl AppState {
         announcer: Arc<dyn FlowSpecAnnouncer>,
         config_dir: PathBuf,
     ) -> Result<Arc<Self>> {
-        Self::with_pool(settings, inventory, playbooks, repo, announcer, config_dir, None)
+        Self::with_pool(
+            settings, inventory, playbooks, repo, announcer, config_dir, None,
+        )
     }
 
     pub fn with_pool(

@@ -376,11 +376,19 @@ impl RepositoryTrait for MockRepository {
     }
 
     // Timeseries (mock returns empty)
-    async fn timeseries_mitigations(&self, _range_hours: u32, _bucket_minutes: u32) -> Result<Vec<TimeseriesBucket>> {
+    async fn timeseries_mitigations(
+        &self,
+        _range_hours: u32,
+        _bucket_minutes: u32,
+    ) -> Result<Vec<TimeseriesBucket>> {
         Ok(vec![])
     }
 
-    async fn timeseries_events(&self, _range_hours: u32, _bucket_minutes: u32) -> Result<Vec<TimeseriesBucket>> {
+    async fn timeseries_events(
+        &self,
+        _range_hours: u32,
+        _bucket_minutes: u32,
+    ) -> Result<Vec<TimeseriesBucket>> {
         Ok(vec![])
     }
 

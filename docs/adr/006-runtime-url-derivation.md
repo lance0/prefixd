@@ -27,7 +27,7 @@ Derive all URLs from `window.location` at runtime:
 
 ```typescript
 function getWsBase(): string {
-  if (typeof window === "undefined") return "ws://localhost:8080"
+  if (typeof window === "undefined") return "ws://127.0.0.1"
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
   return `${proto}//${window.location.host}`
 }
@@ -43,4 +43,4 @@ function getWsBase(): string {
 
 **Negative:**
 - Server-side rendering can't access the API via `window.location` (uses `PREFIXD_API` env var server-side instead, which is a runtime env var set in docker-compose)
-- The SSR fallback (`ws://localhost:8080`) is only used during server rendering and is never sent to the browser
+- The SSR fallback (`ws://127.0.0.1`) is only used during server rendering and is never sent to the browser

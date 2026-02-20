@@ -4,11 +4,10 @@
 
 ```bash
 # Check health
-curl http://localhost:8080/v1/health | jq
+curl http://localhost/v1/health | jq
 
 # Check status
 prefixdctl status
-prefixdctl health
 prefixdctl peers
 
 # Check logs
@@ -29,7 +28,7 @@ curl -s localhost:9090/metrics | grep prefixd_
 
 **Check the response:**
 ```bash
-curl -v -X POST http://localhost:8080/v1/events \
+curl -v -X POST http://localhost/v1/events \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
   -d '{"source":"test","victim_ip":"203.0.113.10","vector":"udp_flood"}'
@@ -366,7 +365,7 @@ echo $PREFIXD_API_TOKEN
 **Test authentication:**
 ```bash
 curl -v -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
-  http://localhost:8080/v1/health
+  http://localhost/v1/health
 ```
 
 **Check config:**
@@ -410,7 +409,7 @@ curl -s localhost:9090/metrics | grep prefixd_http_request_duration
 
 **Check active mitigations:**
 ```bash
-curl -s localhost:8080/v1/stats | jq '.total_active'
+curl -s http://localhost/v1/stats | jq '.total_active'
 ```
 
 **Reduce memory:**
@@ -495,7 +494,7 @@ docker compose exec gobgp gobgp global rib -a ipv4-flowspec del all
 **Test WebSocket manually:**
 ```bash
 # Requires wscat (npm install -g wscat)
-wscat -c ws://localhost:8080/v1/ws/feed -H "Cookie: session=..."
+wscat -c ws://localhost/v1/ws/feed -H "Cookie: session=..."
 ```
 
 ---

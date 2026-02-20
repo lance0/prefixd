@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useMemo } from "react"
+import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, AlertCircle, XCircle, Plus, Download } from "lucide-react"
 import { StatusBadge } from "@/components/dashboard/status-badge"
@@ -375,13 +376,15 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                           <StatusBadge status={mitigation.status} />
                         </td>
                         <td className="px-4 py-3 font-mono text-foreground">
-                          <a
+                          <Link
                             href={`/ip-history?ip=${encodeURIComponent(mitigation.victim_ip)}`}
-                            onClick={(e) => { e.stopPropagation(); }}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                            }}
                             className="hover:underline text-primary"
                           >
                             {mitigation.victim_ip}
-                          </a>
+                          </Link>
                         </td>
                         <td className="px-4 py-3 text-muted-foreground">
                           {mitigation.vector.replace(/_/g, " ")}

@@ -5,14 +5,14 @@ import { cn } from "@/lib/utils"
 import { useReducedMotion } from "@/hooks/use-reduced-motion"
 
 interface StatusBadgeProps {
-  status: "active" | "escalated" | "expired" | "withdrawn" | "announced" | "pending" | "failed"
+  status: "pending" | "active" | "escalated" | "expired" | "withdrawn" | "rejected"
   size?: "sm" | "default"
 }
 
 export function StatusBadge({ status, size = "default" }: StatusBadgeProps) {
   const reducedMotion = useReducedMotion()
-  const isPositive = status === "active" || status === "announced"
-  const isNegative = status === "escalated" || status === "failed"
+  const isPositive = status === "active"
+  const isNegative = status === "escalated" || status === "rejected"
   const isPending = status === "pending"
   const isInactive = status === "expired" || status === "withdrawn"
 

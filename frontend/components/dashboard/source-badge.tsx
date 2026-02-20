@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils"
 
 interface SourceBadgeProps {
-  source: "fastnetmon" | "noc" | "custom"
+  source: string
 }
 
 export function SourceBadge({ source }: SourceBadgeProps) {

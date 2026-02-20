@@ -136,12 +136,12 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
             </Button>
             <div className="flex items-center gap-3 mt-1">
               <StatusBadge status={mitigation.status} />
-              <a
+              <Link
                 href={`/ip-history?ip=${encodeURIComponent(mitigation.victim_ip)}`}
                 className="text-2xl font-bold font-mono tracking-tight text-primary hover:underline"
               >
                 {mitigation.victim_ip}
-              </a>
+              </Link>
             </div>
             <div className="flex items-center gap-2 mt-2">
               <Badge variant="outline" className="font-mono text-muted-foreground">

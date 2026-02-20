@@ -1,6 +1,7 @@
 "use client"
 
 import Link from "next/link"
+import { useRouter } from "next/navigation"
 import { ArrowRight } from "lucide-react"
 import { StatusBadge } from "./status-badge"
 import { ActionBadge } from "./action-badge"
@@ -30,6 +31,7 @@ function formatTimeRemaining(expiresAt: string): string {
 }
 
 export function ActiveMitigationsMini({ mitigations, limit = 5 }: ActiveMitigationsMiniProps) {
+  const router = useRouter()
   const active = mitigations
     .filter((m) => m.status === "active" || m.status === "escalated")
     .slice(0, limit)
@@ -56,9 +58,17 @@ export function ActiveMitigationsMini({ mitigations, limit = 5 }: ActiveMitigati
       ) : (
         <div className="space-y-0 flex-1">
           {active.map((m, index) => (
-            <Link
+            <div
               key={m.mitigation_id}
-              href={`/mitigations/${m.mitigation_id}`}
+              role="button"
+              tabIndex={0}
+              onClick={() => router.push(`/mitigations/${m.mitigation_id}`)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault()
+                  router.push(`/mitigations/${m.mitigation_id}`)
+                }
+              }}
               className={cn(
                 "flex items-center justify-between py-2 hover:bg-secondary/50 px-2 -mx-2 rounded-sm transition-colors",
                 index !== active.length - 1 && "border-b border-border/50"
@@ -67,13 +77,15 @@ export function ActiveMitigationsMini({ mitigations, limit = 5 }: ActiveMitigati
               <div className="flex items-center gap-3 min-w-0">
                 <StatusBadge status={m.status} size="sm" />
                 <div className="min-w-0">
-                  <a
+                  <Link
                     href={`/ip-history?ip=${encodeURIComponent(m.victim_ip)}`}
-                    onClick={(e) => { e.stopPropagation(); }}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                    }}
                     className="font-mono text-xs text-primary hover:underline truncate block"
                   >
                     {m.victim_ip}
-                  </a>
+                  </Link>
                   <div className="text-[10px] text-muted-foreground">
                     {m.vector.replace(/_/g, " ")}
                   </div>
@@ -85,7 +97,7 @@ export function ActiveMitigationsMini({ mitigations, limit = 5 }: ActiveMitigati
                   {formatTimeRemaining(m.expires_at)}
                 </span>
               </div>
-            </Link>
+            </div>
           ))}
         </div>
       )}

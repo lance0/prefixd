@@ -70,8 +70,16 @@ pub trait RepositoryTrait: Send + Sync {
     ) -> Result<Vec<Mitigation>>;
 
     // Timeseries
-    async fn timeseries_mitigations(&self, range_hours: u32, bucket_minutes: u32) -> Result<Vec<TimeseriesBucket>>;
-    async fn timeseries_events(&self, range_hours: u32, bucket_minutes: u32) -> Result<Vec<TimeseriesBucket>>;
+    async fn timeseries_mitigations(
+        &self,
+        range_hours: u32,
+        bucket_minutes: u32,
+    ) -> Result<Vec<TimeseriesBucket>>;
+    async fn timeseries_events(
+        &self,
+        range_hours: u32,
+        bucket_minutes: u32,
+    ) -> Result<Vec<TimeseriesBucket>>;
 
     // IP history
     async fn list_events_by_ip(&self, ip: &str, limit: u32) -> Result<Vec<AttackEvent>>;

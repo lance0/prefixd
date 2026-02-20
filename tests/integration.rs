@@ -566,3 +566,20 @@ async fn test_ip_history_returns_structure() {
     assert!(json["events"].is_array());
     assert!(json["mitigations"].is_array());
 }
+
+#[tokio::test]
+async fn test_ip_history_rejects_invalid_ip() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/ip/not-an-ip/history")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}

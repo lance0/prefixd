@@ -306,7 +306,7 @@ prefixdctl safelist add 10.0.0.1/32 --reason "router loopback" --operator jsmith
 prefixdctl safelist remove 10.0.0.1/32
 
 # Options
-prefixdctl -a http://localhost:8080  # API endpoint
+prefixdctl -a http://localhost       # API endpoint
 prefixdctl -t <token>                 # Bearer token
 prefixdctl -f json                    # JSON output
 
@@ -316,7 +316,7 @@ prefixdctl reload                     # Hot-reload inventory & playbooks
 
 ## Environment Variables
 
-- `PREFIXD_API` - API endpoint for prefixdctl (default: http://127.0.0.1:8080)
+- `PREFIXD_API` - API endpoint for prefixdctl (default: http://127.0.0.1)
 - `PREFIXD_API_TOKEN` - Bearer token for API auth (when mode=bearer)
 - `RUST_LOG` - Log level override (e.g., `RUST_LOG=debug`)
 - `USER` - Default operator ID for CLI commands

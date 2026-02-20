@@ -32,7 +32,7 @@ export default function IpHistoryPage() {
   const [searchInput, setSearchInput] = useState(initialIp)
   const [activeIp, setActiveIp] = useState(initialIp)
 
-  const { data, isLoading } = useIpHistory(activeIp || null)
+  const { data, isLoading, error } = useIpHistory(activeIp || null)
 
   function handleSearch(e: React.FormEvent) {
     e.preventDefault()
@@ -118,6 +118,17 @@ export default function IpHistoryPage() {
         {activeIp && isLoading && (
           <div className="border border-border bg-card rounded-lg p-8 text-center text-muted-foreground text-sm">
             Loading history for {activeIp}...
+          </div>
+        )}
+
+        {activeIp && error && !isLoading && (
+          <div className="border border-border bg-card rounded-lg p-8 text-center text-sm">
+            <p className="text-destructive font-medium mb-1">Unable to load history for {activeIp}</p>
+            <p className="text-muted-foreground">
+              {error instanceof Error && error.message.includes("400")
+                ? "Enter a valid IP address and try again."
+                : "Please retry or check API connectivity."}
+            </p>
           </div>
         )}
 

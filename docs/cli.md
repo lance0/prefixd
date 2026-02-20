@@ -22,14 +22,17 @@ docker run --rm ghcr.io/lance0/prefixd:latest prefixdctl --help
 ### Environment Variables
 
 ```bash
-export PREFIXD_API=http://localhost:8080    # API endpoint
+export PREFIXD_API=http://localhost         # API endpoint (nginx entrypoint)
 export PREFIXD_API_TOKEN=your-token-here    # Bearer token
 ```
 
 ### Command-Line Options
 
 ```bash
-prefixdctl -a http://localhost:8080 -t $TOKEN <command>
+prefixdctl -a http://localhost -t $TOKEN <command>
+
+# Direct daemon access (without nginx)
+prefixdctl -a http://127.0.0.1:8080 -t $TOKEN <command>
 ```
 
 | Option | Env Var | Description |
@@ -54,18 +57,6 @@ prefixdctl status
 # Uptime: 2d 4h 30m
 # Active mitigations: 12
 # BGP sessions: 2/2 established
-```
-
-### Health
-
-```bash
-# Detailed health check
-prefixdctl health
-
-# Example output:
-# Database: connected (2ms)
-# GoBGP: connected (peers: 2 established)
-# Status: healthy
 ```
 
 ### Peers
@@ -100,8 +91,8 @@ prefixdctl mitigations list --customer acme
 # Combine filters
 prefixdctl mitigations list --status active --customer acme
 
-# Pagination
-prefixdctl mitigations list --limit 50 --offset 100
+# Limit results
+prefixdctl mitigations list --limit 50
 
 # JSON output
 prefixdctl -f json mitigations list
@@ -207,18 +198,11 @@ prefixdctl reload
 # Playbooks: 12 policies
 ```
 
-### Events
+### Show Applied Migrations
 
 ```bash
-# List recent events
-prefixdctl events list
-
-# Filter by source
-prefixdctl events list --source fastnetmon
-
-# Filter by time range
-prefixdctl events list --since 1h
-prefixdctl events list --since 2026-01-18T00:00:00Z
+# Requires DATABASE_URL to be set
+prefixdctl migrations
 ```
 
 ---
@@ -297,7 +281,7 @@ watch -n 5 'prefixdctl mitigations list --status active'
 prefixdctl peers
 
 # Get detailed status
-prefixdctl health
+prefixdctl status
 ```
 
 ### Automation

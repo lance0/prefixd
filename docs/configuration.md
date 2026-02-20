@@ -457,7 +457,7 @@ playbooks:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PREFIXD_API_TOKEN` | Bearer token for auth | Required if mode=bearer |
-| `PREFIXD_API` | API URL for prefixdctl | `http://127.0.0.1:8080` |
+| `PREFIXD_API` | API URL for prefixdctl | `http://127.0.0.1` |
 | `RUST_LOG` | Log level override | Config value |
 | `DATABASE_URL` | PostgreSQL connection | Config value |
 
@@ -483,7 +483,7 @@ Inventory and playbooks can be reloaded without restart:
 prefixdctl reload
 
 # API
-curl -X POST http://localhost:8080/v1/admin/reload
+curl -X POST http://localhost/v1/config/reload
 ```
 
 Note: `prefixd.yaml` changes require restart.

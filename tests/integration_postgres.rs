@@ -337,6 +337,133 @@ async fn test_migration_applies_cleanly() {
 }
 
 #[tokio::test]
+async fn test_timeseries_non_hour_bucket_alignment() {
+    use chrono::{Duration, Timelike, Utc};
+    use prefixd::domain::{
+        ActionParams, ActionType, AttackEvent, AttackVector, MatchCriteria, Mitigation,
+        MitigationStatus,
+    };
+    use uuid::Uuid;
+
+    let ctx = TestContext::new().await;
+
+    let now = Utc::now();
+    let base = (now - Duration::minutes(30))
+        .with_minute(17)
+        .and_then(|dt| dt.with_second(0))
+        .and_then(|dt| dt.with_nanosecond(0))
+        .unwrap_or(now - Duration::minutes(30));
+
+    let event_one = AttackEvent {
+        event_id: Uuid::new_v4(),
+        external_event_id: Some("evt-timeseries-1".to_string()),
+        source: "integration_test".to_string(),
+        event_timestamp: base,
+        ingested_at: base,
+        victim_ip: "203.0.113.200".to_string(),
+        vector: "udp_flood".to_string(),
+        protocol: Some(17),
+        bps: Some(100_000_000),
+        pps: Some(50_000),
+        top_dst_ports_json: "[53]".to_string(),
+        confidence: Some(0.9),
+        action: "ban".to_string(),
+        raw_details: None,
+    };
+
+    let event_two = AttackEvent {
+        event_id: Uuid::new_v4(),
+        external_event_id: Some("evt-timeseries-2".to_string()),
+        source: "integration_test".to_string(),
+        event_timestamp: base + Duration::minutes(6),
+        ingested_at: base + Duration::minutes(6),
+        victim_ip: "203.0.113.200".to_string(),
+        vector: "udp_flood".to_string(),
+        protocol: Some(17),
+        bps: Some(120_000_000),
+        pps: Some(60_000),
+        top_dst_ports_json: "[53]".to_string(),
+        confidence: Some(0.92),
+        action: "ban".to_string(),
+        raw_details: None,
+    };
+
+    ctx.repo
+        .insert_event(&event_one)
+        .await
+        .expect("failed to insert first event");
+    ctx.repo
+        .insert_event(&event_two)
+        .await
+        .expect("failed to insert second event");
+
+    let match_criteria = MatchCriteria {
+        dst_prefix: "203.0.113.200/32".to_string(),
+        protocol: Some(17),
+        dst_ports: vec![53],
+    };
+
+    let mitigation = Mitigation {
+        mitigation_id: Uuid::new_v4(),
+        scope_hash: match_criteria.compute_scope_hash(),
+        pop: "test-pop".to_string(),
+        customer_id: Some("cust_integration".to_string()),
+        service_id: Some("svc_web".to_string()),
+        victim_ip: "203.0.113.200".to_string(),
+        vector: AttackVector::UdpFlood,
+        match_criteria,
+        action_type: ActionType::Police,
+        action_params: ActionParams {
+            rate_bps: Some(10_000_000),
+        },
+        status: MitigationStatus::Active,
+        created_at: base + Duration::minutes(4),
+        updated_at: base + Duration::minutes(4),
+        expires_at: base + Duration::minutes(64),
+        withdrawn_at: None,
+        triggering_event_id: event_one.event_id,
+        last_event_id: event_two.event_id,
+        escalated_from_id: None,
+        reason: "timeseries alignment test".to_string(),
+        rejection_reason: None,
+    };
+
+    ctx.repo
+        .insert_mitigation(&mitigation)
+        .await
+        .expect("failed to insert mitigation");
+
+    let event_buckets = ctx
+        .repo
+        .timeseries_events(2, 5)
+        .await
+        .expect("failed to query event timeseries");
+    let mitigation_buckets = ctx
+        .repo
+        .timeseries_mitigations(2, 5)
+        .await
+        .expect("failed to query mitigation timeseries");
+
+    let event_total: i64 = event_buckets.iter().map(|b| b.count).sum();
+    let mitigation_total: i64 = mitigation_buckets.iter().map(|b| b.count).sum();
+    assert_eq!(event_total, 2);
+    assert_eq!(mitigation_total, 1);
+
+    assert!(
+        event_buckets
+            .iter()
+            .any(|b| b.count > 0 && b.bucket.minute() != 0),
+        "expected event counts in non-hour buckets"
+    );
+    assert!(
+        mitigation_buckets
+            .iter()
+            .any(|b| b.count > 0 && b.bucket.minute() != 0),
+        "expected mitigation counts in non-hour buckets"
+    );
+}
+
+#[tokio::test]
 async fn test_ttl_expiry() {
     use chrono::{Duration, Utc};
     use prefixd::bgp::{FlowSpecAnnouncer, MockAnnouncer};

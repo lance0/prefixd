@@ -2,7 +2,9 @@
 
 prefixd exposes a REST API for event ingestion, mitigation management, and operational tasks.
 
-**Base URL:** `http://localhost:8080/v1`
+**Base URL:** `http://localhost/v1`
+
+> In the default Docker Compose deployment, nginx is the only published entrypoint (`http://localhost`). Port `8080` is internal to the Docker network.
 
 > **Versioning:** All endpoints are under `/v1/`. See [API Versioning Policy](api-versioning.md) for backward compatibility guarantees and deprecation process.
 
@@ -14,7 +16,7 @@ For API and CLI access:
 
 ```bash
 curl -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
-  http://localhost:8080/v1/mitigations
+  http://localhost/v1/mitigations
 ```
 
 ### Session Cookie
@@ -23,13 +25,13 @@ For dashboard access, authenticate via login:
 
 ```bash
 # Login
-curl -X POST http://localhost:8080/v1/auth/login \
+curl -X POST http://localhost/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username": "admin", "password": "secret"}' \
   -c cookies.txt
 
 # Use session
-curl -b cookies.txt http://localhost:8080/v1/mitigations
+curl -b cookies.txt http://localhost/v1/mitigations
 ```
 
 ### Auth Modes
@@ -539,16 +541,12 @@ GET /v1/stats
 ```json
 {
   "total_active": 12,
-  "total_expired": 1543,
-  "total_withdrawn": 89,
-  "by_customer": {
-    "acme": 5,
-    "contoso": 7
-  },
-  "by_pop": {
-    "iad1": 8,
-    "fra1": 4
-  }
+  "total_mitigations": 1543,
+  "total_events": 9821,
+  "pops": [
+    { "pop": "iad1", "active": 8, "total": 900 },
+    { "pop": "fra1", "active": 4, "total": 643 }
+  ]
 }
 ```
 
@@ -745,7 +743,7 @@ POST /v1/config/reload
 ### Real-Time Feed
 
 ```
-WebSocket: ws://localhost:8080/v1/ws/feed
+WebSocket: ws://localhost/v1/ws/feed
 ```
 
 Requires session authentication (send session cookie).
