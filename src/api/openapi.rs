@@ -29,6 +29,7 @@ use crate::db::{GlobalStats, PopInfo, PopStats, SafelistEntry};
         super::handlers::get_config_settings,
         super::handlers::get_config_inventory,
         super::handlers::get_config_playbooks,
+        super::handlers::update_playbooks,
         super::handlers::get_alerting_config,
         super::handlers::test_alerting,
         super::handlers::get_timeseries,

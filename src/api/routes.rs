@@ -62,7 +62,10 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/v1/config/reload", post(handlers::reload_config))
         .route("/v1/config/settings", get(handlers::get_config_settings))
         .route("/v1/config/inventory", get(handlers::get_config_inventory))
-        .route("/v1/config/playbooks", get(handlers::get_config_playbooks))
+        .route(
+            "/v1/config/playbooks",
+            get(handlers::get_config_playbooks).put(handlers::update_playbooks),
+        )
         .route("/v1/stats", get(handlers::get_stats))
         .route("/v1/stats/timeseries", get(handlers::get_timeseries))
         .route("/v1/ip/{ip}/history", get(handlers::get_ip_history))

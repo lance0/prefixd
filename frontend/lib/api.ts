@@ -423,6 +423,13 @@ export async function getConfigPlaybooks(): Promise<ConfigPlaybooksResponse> {
   return fetchApi<ConfigPlaybooksResponse>("/v1/config/playbooks")
 }
 
+export async function updatePlaybooks(playbooks: ConfigPlaybook[]): Promise<ConfigPlaybooksResponse> {
+  return fetchApi<ConfigPlaybooksResponse>("/v1/config/playbooks", {
+    method: "PUT",
+    body: JSON.stringify({ playbooks }),
+  })
+}
+
 // Timeseries
 
 export interface TimeseriesBucket {

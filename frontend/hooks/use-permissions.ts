@@ -33,6 +33,7 @@ export function usePermissions() {
     canManageSafelist: authDisabled || role === "admin",
     canManageUsers: authDisabled || role === "admin",
     canReloadConfig: authDisabled || role === "admin",
+    canEditPlaybooks: authDisabled || role === "admin",
 
     // Current role (for display)
     role: authDisabled ? "admin" : role,

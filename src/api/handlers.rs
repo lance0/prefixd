@@ -2015,6 +2015,93 @@ pub async fn get_config_playbooks(
     }))
 }
 
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct UpdatePlaybooksRequest {
+    playbooks: Vec<crate::config::Playbook>,
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/config/playbooks",
+    tag = "config",
+    request_body = UpdatePlaybooksRequest,
+    responses(
+        (status = 200, description = "Updated playbook definitions"),
+        (status = 400, description = "Validation failed"),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "Insufficient permissions")
+    )
+)]
+pub async fn update_playbooks(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
+    Json(body): Json<UpdatePlaybooksRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    use super::auth::require_role;
+    use crate::config::Playbooks;
+    use crate::domain::OperatorRole;
+    use crate::observability::{ActorType, AuditEntry};
+
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+
+    let new_playbooks = Playbooks {
+        playbooks: body.playbooks,
+    };
+
+    // Validate
+    let errors = new_playbooks.validate();
+    if !errors.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "errors": errors })),
+        )
+            .into_response());
+    }
+
+    // Save to disk (with .bak backup) and reload
+    let playbooks_path = state.config_dir.join("playbooks.yaml");
+    new_playbooks.save(&playbooks_path).map_err(|e| {
+        tracing::error!(error = %e, "failed to save playbooks");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let old_count = state.playbooks.read().await.playbooks.len();
+    *state.playbooks.write().await = new_playbooks.clone();
+    *state.playbooks_loaded_at.write().await = chrono::Utc::now();
+
+    // Audit log
+    let audit = AuditEntry::new(
+        ActorType::Operator,
+        Some(operator.username.clone()),
+        "update_playbooks",
+        Some("config"),
+        None,
+        serde_json::json!({
+            "previous_count": old_count,
+            "new_count": new_playbooks.playbooks.len(),
+        }),
+    );
+    if let Err(e) = state.repo.insert_audit(&audit).await {
+        tracing::warn!(error = %e, "failed to insert audit entry for playbook update");
+    }
+
+    tracing::info!(
+        operator = %operator.username,
+        count = new_playbooks.playbooks.len(),
+        "playbooks updated via API"
+    );
+
+    let loaded_at = state.playbooks_loaded_at.read().await.to_rfc3339();
+    Ok(Json(ConfigPlaybooksResponse {
+        total_playbooks: new_playbooks.playbooks.len(),
+        playbooks: new_playbooks.playbooks,
+        loaded_at,
+    })
+    .into_response())
+}
+
 // === Timeseries ===
 
 #[derive(Deserialize)]

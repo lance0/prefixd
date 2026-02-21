@@ -1,39 +1,31 @@
 "use client"
 
-import { useState } from "react"
+import { useCallback, useState } from "react"
 import { useSWRConfig } from "swr"
+import { toast } from "sonner"
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useConfigSettings, useConfigPlaybooks } from "@/hooks/use-api"
-import { reloadConfig } from "@/lib/api"
+import { reloadConfig, updatePlaybooks, type ConfigPlaybook } from "@/lib/api"
 import { usePermissions } from "@/hooks/use-permissions"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { RefreshCw, Loader2, FileCode, Zap, Bell } from "lucide-react"
+import { RefreshCw, Loader2, FileCode, Zap, Bell, Code } from "lucide-react"
 import { AlertingConfigPanel } from "@/components/dashboard/alerting-config-panel"
-
-function formatRate(bps: number): string {
-  if (bps >= 1_000_000_000) return `${(bps / 1_000_000_000).toFixed(1)} Gbps`
-  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(0)} Mbps`
-  if (bps >= 1_000) return `${(bps / 1_000).toFixed(0)} Kbps`
-  return `${bps} bps`
-}
-
-function formatTtl(seconds: number): string {
-  if (seconds >= 3600) return `${(seconds / 3600).toFixed(1)}h`
-  if (seconds >= 60) return `${(seconds / 60).toFixed(0)}m`
-  return `${seconds}s`
-}
+import { PlaybookEditor, ReadOnlyPlaybookCard } from "@/components/dashboard/playbook-editor"
+import { PlaybookYamlEditor } from "@/components/dashboard/playbook-yaml-editor"
 
 export default function ConfigPage() {
   const { data: settingsData, error: settingsError } = useConfigSettings()
-  const { data: playbooksData, error: playbooksError } = useConfigPlaybooks()
+  const { data: playbooksData, error: playbooksError, mutate: mutatePlaybooks } = useConfigPlaybooks()
   const { mutate } = useSWRConfig()
-  const { canReloadConfig } = usePermissions()
+  const { canReloadConfig, canEditPlaybooks } = usePermissions()
   const [reloading, setReloading] = useState(false)
   const [reloadResult, setReloadResult] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [playbookView, setPlaybookView] = useState<"form" | "yaml">("form")
 
   const handleReload = async () => {
     setReloading(true)
@@ -50,6 +42,21 @@ export default function ConfigPage() {
     }
   }
 
+  const handleSavePlaybooks = useCallback(async (playbooks: ConfigPlaybook[]) => {
+    setSaving(true)
+    try {
+      await updatePlaybooks(playbooks)
+      await mutatePlaybooks()
+      toast.success("Playbooks saved and reloaded")
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to save playbooks"
+      toast.error(msg)
+      throw e
+    } finally {
+      setSaving(false)
+    }
+  }, [mutatePlaybooks])
+
   return (
     <DashboardLayout>
       <div className="flex-1 overflow-auto">
@@ -58,7 +65,7 @@ export default function ConfigPage() {
             <div>
               <h1 className="text-lg font-mono font-medium">Configuration</h1>
               <p className="text-xs text-muted-foreground font-mono mt-0.5">
-                Running daemon configuration (read-only)
+                {canEditPlaybooks ? "Manage daemon configuration" : "Running daemon configuration (read-only)"}
               </p>
             </div>
             <div className="flex items-center gap-3">
@@ -104,11 +111,11 @@ export default function ConfigPage() {
               <TabsTrigger value="playbooks" className="text-xs">
                 <Zap className="h-3 w-3 mr-1.5" />
                 Playbooks
-                {playbooksData && (
+                {playbooksData ? (
                   <Badge variant="secondary" className="ml-1.5 text-[10px] px-1 py-0">
                     {playbooksData.total_playbooks}
                   </Badge>
-                )}
+                ) : null}
               </TabsTrigger>
               <TabsTrigger value="alerting" className="text-xs">
                 <Bell className="h-3 w-3 mr-1.5" />
@@ -163,66 +170,57 @@ export default function ConfigPage() {
                     <span className="text-sm font-mono">Loading playbooks...</span>
                   </CardContent>
                 </Card>
-              ) : playbooksData.playbooks.length === 0 ? (
-                <Card>
-                  <CardContent className="p-4 text-sm text-muted-foreground font-mono">
-                    No playbooks configured
-                  </CardContent>
-                </Card>
+              ) : canEditPlaybooks ? (
+                <>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-mono text-muted-foreground">
+                      Loaded: {new Date(playbooksData.loaded_at).toLocaleString()}
+                    </span>
+                    <div className="flex items-center gap-1 border border-border rounded-md p-0.5">
+                      <button
+                        onClick={() => setPlaybookView("form")}
+                        className={`px-2 py-1 text-[10px] font-mono rounded-sm transition-colors ${playbookView === "form" ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                      >
+                        <Zap className="h-3 w-3 inline mr-1" />
+                        Form
+                      </button>
+                      <button
+                        onClick={() => setPlaybookView("yaml")}
+                        className={`px-2 py-1 text-[10px] font-mono rounded-sm transition-colors ${playbookView === "yaml" ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                      >
+                        <Code className="h-3 w-3 inline mr-1" />
+                        YAML
+                      </button>
+                    </div>
+                  </div>
+                  {playbookView === "form" ? (
+                    <PlaybookEditor
+                      key={playbooksData.loaded_at}
+                      playbooks={playbooksData.playbooks}
+                      onSave={handleSavePlaybooks}
+                      saving={saving}
+                    />
+                  ) : (
+                    <PlaybookYamlEditor
+                      key={playbooksData.loaded_at}
+                      playbooks={playbooksData.playbooks}
+                      onSave={handleSavePlaybooks}
+                      saving={saving}
+                    />
+                  )}
+                </>
               ) : (
-                playbooksData.playbooks.map((playbook) => (
-                  <Card key={playbook.name}>
-                    <CardHeader className="pb-2">
-                      <div className="flex items-center gap-2">
-                        <CardTitle className="text-sm font-mono">{playbook.name}</CardTitle>
-                        <Badge variant="outline" className="text-[10px] font-mono">
-                          {playbook.match.vector}
-                        </Badge>
-                        {playbook.match.require_top_ports && (
-                          <Badge variant="secondary" className="text-[10px] font-mono">
-                            top ports required
-                          </Badge>
-                        )}
-                      </div>
-                    </CardHeader>
-                    <CardContent>
-                      <div className="space-y-1.5">
-                        {playbook.steps.map((step, i) => (
-                          <div
-                            key={i}
-                            className="flex items-center gap-3 text-xs font-mono bg-secondary/50 px-3 py-2"
-                          >
-                            <span className="text-muted-foreground w-4">{i + 1}.</span>
-                            <Badge
-                              variant={step.action === "discard" ? "destructive" : "default"}
-                              className="text-[10px] font-mono"
-                            >
-                              {step.action}
-                            </Badge>
-                            {step.rate_bps && (
-                              <span className="text-muted-foreground">
-                                {formatRate(step.rate_bps)}
-                              </span>
-                            )}
-                            <span className="text-muted-foreground">
-                              TTL {formatTtl(step.ttl_seconds)}
-                            </span>
-                            {step.require_confidence_at_least && (
-                              <span className="text-muted-foreground">
-                                confidence ≥ {step.require_confidence_at_least}
-                              </span>
-                            )}
-                            {step.require_persistence_seconds && (
-                              <span className="text-muted-foreground">
-                                persist {formatTtl(step.require_persistence_seconds)}
-                              </span>
-                            )}
-                          </div>
-                        ))}
-                      </div>
+                playbooksData.playbooks.length === 0 ? (
+                  <Card>
+                    <CardContent className="p-4 text-sm text-muted-foreground font-mono">
+                      No playbooks configured
                     </CardContent>
                   </Card>
-                ))
+                ) : (
+                  playbooksData.playbooks.map((playbook) => (
+                    <ReadOnlyPlaybookCard key={playbook.name} playbook={playbook} />
+                  ))
+                )
               )}
             </TabsContent>
 

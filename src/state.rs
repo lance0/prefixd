@@ -35,7 +35,7 @@ pub struct AppState {
     pub alerting: Arc<AlertingService>,
     /// PostgreSQL pool for metrics (None in tests with MockRepository)
     pub db_pool: Option<PgPool>,
-    config_dir: PathBuf,
+    pub config_dir: PathBuf,
     shutting_down: AtomicBool,
 }
 
