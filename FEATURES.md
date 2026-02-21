@@ -512,7 +512,6 @@ prefixd_reconciliation_active_count{pop}
 
 # Database
 prefixd_db_row_parse_errors_total{table}
-prefixd_db_pool_connections{state}
 prefixd_db_pool_connections{state=active|idle|total}
 
 # Alerting

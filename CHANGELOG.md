@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Request ID hardened** — `x-request-id` header capped at 128 characters with character validation, removed `.expect()` panics
 - **CSV formula injection fix** — CSV export now prefixes cells starting with `=`, `+`, `-`, `@`, `\t`, `\r` with a single quote to prevent spreadsheet formula injection
 - **Client token exposure removed** — Removed `NEXT_PUBLIC_PREFIXD_TOKEN` from frontend bundle (session cookies are sufficient for browser auth)
+- **Login throttle race condition fixed** — Merged separate check/record into atomic `check_and_record_login_attempt` (single lock scope), added TTL pruning and 10K tracked-user cap to prevent unbounded memory growth
+- **Generic webhook header redaction** — `GET /v1/config/alerting` now masks all custom header values with `***` (previously leaked raw values)
+- **CIDR validation hardened** — Safelist prefix validation now uses `ipnet::IpNet` parser, rejecting invalid masks like `/999`
+- **Alerting test endpoint admin-only** — `POST /v1/config/alerting/test` now requires admin role; frontend button gated behind permissions
+- **CSV formula regex hardened** — Catches leading whitespace/newline before formula characters (`=`, `+`, `-`, `@`)
+- **Alert queue bounded** — Semaphore caps in-flight alert tasks at 64; excess alerts logged and dropped
 
 ### Frontend
 
@@ -35,8 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Backend unit tests increased from 73 to 88 (15 new alerting formatter/config/HMAC tests)
+- Backend unit tests increased from 73 to 93 (alerting formatters, HMAC, CIDR validation, login throttle, header redaction)
 - Frontend tests increased from 25 to 26 (added CSV injection regression test)
+- OpenAPI spec now includes alerting endpoints
+- Load/chaos test scripts support optional `PREFIXD_API_TOKEN` for authenticated environments
 
 ## [0.9.0] - 2026-02-20
 

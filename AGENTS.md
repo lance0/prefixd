@@ -174,10 +174,10 @@ See `docs/adr/` for all 15 Architecture Decision Records.
 ## Testing
 
 ```bash
-# Backend unit tests (88 tests)
+# Backend unit tests (93 tests)
 cargo test
 
-# All backend tests including integration (100 runnable: 88 unit + 12 integration; 14 ignored requiring GoBGP/Docker)
+# All backend tests including integration (105 runnable: 93 unit + 12 integration; 14 ignored requiring GoBGP/Docker)
 cargo test --features test-utils
 
 # Lint
@@ -236,7 +236,7 @@ Completed:
 - 15 Architecture Decision Records
 - CLI tool (prefixdctl) for all API operations
 - OpenAPI spec with utoipa annotations
-- 88 backend unit tests + 12 integration tests (+ 14 ignored requiring GoBGP/Docker)
+- 93 backend unit tests + 12 integration tests (+ 14 ignored requiring GoBGP/Docker)
 - Vitest + Testing Library frontend test infrastructure (25 tests)
 
 ## Code Conventions

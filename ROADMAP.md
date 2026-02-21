@@ -83,19 +83,18 @@ See [CHANGELOG](CHANGELOG.md) for version history.
   - Events + mitigations interleaved chronologically, customer/service context
   - All victim_ip cells across UI link to IP history page
   - `GET /v1/ip/{ip}/history` backend endpoint with inventory lookup
-- [ ] **Alerting/webhook config UI** (P1 — backend done, frontend remaining)
-  - Backend: 7 destinations (Slack, Discord, Teams, Telegram, PagerDuty, OpsGenie, generic), `GET /v1/config/alerting`, `POST /v1/config/alerting/test`
-  - Frontend: read-only destination list with redacted secrets, "Send Test Alert" button, status display
-- [ ] **Audit log detail expansion** (P1 — details truncated at 50 chars)
-  - Click-to-expand or slide-over panel showing full JSON details per audit entry
-- [ ] **Customer/POP filter on mitigations** (P1 — backend supports, no UI)
-  - Add customer and POP dropdown filters; backend `?customer_id=` and `?pop=` already supported
-- [ ] **Timeseries range selector** (P1 — hardcoded 24h view)
-  - Add 1h/6h/24h/7d toggle buttons above activity chart; backend supports arbitrary range/bucket
-- [ ] **Active count badge on sidebar** (P1 — instant awareness)
-  - Show active mitigation count badge on sidebar nav; `useStats()` hook already exists
-- [ ] **Severity badges on mitigations** (P1 — every competitor has this)
-  - Color-coded severity indicators on mitigation rows (critical/high/medium/low)
+- [x] **Alerting/webhook config UI** (P1 — read-only + test alert)
+  - "Alerting" tab on Config page: destination list (secrets redacted), "Send Test Alert" button (admin-only), per-destination pass/fail results
+- [x] **Audit log detail expansion** (P1 — click-to-expand)
+  - Click truncated details to expand full JSON inline; extracted AuditRow sub-component
+- [x] **Customer/POP filter on mitigations** (P1 — dropdown filters)
+  - Customer and POP dropdown filters using existing backend `?customer_id=` and `?pop=` params
+- [x] **Timeseries range selector** (P1 — 4 range options)
+  - 1h/6h/24h/7d toggle buttons above activity chart with appropriate bucket sizes (5m/30m/1h/6h)
+- [x] **Active count badge on sidebar** (P1 — live count)
+  - Active mitigation count badge on Mitigations nav item via `useStats()` hook
+- [x] **Severity badges on mitigations** (P1 — color-coded)
+  - Severity column derived from status + action_type (critical/high/medium/low)
 - [x] **Dark mode refinement** (P1 — audited, no issues)
   - All hardcoded colors are semantic accents (status green/red/yellow) with good contrast in both themes
   - Admin reload button already has explicit `dark:` hover variants
