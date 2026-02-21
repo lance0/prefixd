@@ -69,6 +69,38 @@ describe("CSV export", () => {
     })
   })
 
+  it("sanitizes formula injection characters", () => {
+    let capturedContent = ""
+    const originalBlob = globalThis.Blob
+    globalThis.Blob = class MockBlob {
+      constructor(parts: BlobPart[]) {
+        capturedContent = parts[0] as string
+      }
+    } as any
+
+    globalThis.URL.createObjectURL = vi.fn(() => "blob:mock")
+    globalThis.URL.revokeObjectURL = vi.fn()
+
+    return import("@/lib/csv").then(({ downloadCsv }) => {
+      downloadCsv("test.csv", ["data"], [
+        ['=CMD("calc")'],
+        ["+1234"],
+        ["-5678"],
+        ["@SUM(A1)"],
+        ["normal"],
+      ])
+
+      const lines = capturedContent.split("\n")
+      expect(lines[0]).toBe("data")
+      expect(lines[1]).toBe("\"'=CMD(\"\"calc\"\")\"") // prefixed + quoted
+      expect(lines[2]).toBe("'+1234")
+      expect(lines[3]).toBe("'-5678")
+      expect(lines[4]).toBe("'@SUM(A1)")
+      expect(lines[5]).toBe("normal")
+      globalThis.Blob = originalBlob
+    })
+  })
+
   it("handles null/undefined fields gracefully", () => {
     let capturedContent = ""
     const originalBlob = globalThis.Blob

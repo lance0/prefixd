@@ -5,8 +5,11 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::Mutex;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -201,6 +204,74 @@ fn clamp_limit(limit: u32) -> u32 {
     limit.min(MAX_PAGE_LIMIT)
 }
 
+const LOGIN_MAX_ATTEMPTS: u32 = 5;
+const LOGIN_WINDOW_SECS: u64 = 60;
+
+static LOGIN_ATTEMPTS: std::sync::LazyLock<Mutex<HashMap<String, (u32, Instant)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+async fn check_login_throttle(key: &str) -> Result<(), StatusCode> {
+    let attempts = LOGIN_ATTEMPTS.lock().await;
+    if let Some((count, started)) = attempts.get(key) {
+        if started.elapsed().as_secs() < LOGIN_WINDOW_SECS && *count >= LOGIN_MAX_ATTEMPTS {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
+    Ok(())
+}
+
+async fn record_login_attempt(key: &str) {
+    let mut attempts = LOGIN_ATTEMPTS.lock().await;
+    let entry = attempts.entry(key.to_string()).or_insert((0, Instant::now()));
+    if entry.1.elapsed().as_secs() >= LOGIN_WINDOW_SECS {
+        *entry = (1, Instant::now());
+    } else {
+        entry.0 += 1;
+    }
+}
+
+async fn clear_login_attempts(key: &str) {
+    let mut attempts = LOGIN_ATTEMPTS.lock().await;
+    attempts.remove(key);
+}
+
+const MAX_STRING_LEN: usize = 1024;
+const MAX_USERNAME_LEN: usize = 64;
+const MAX_PASSWORD_LEN: usize = 256;
+
+fn validate_string_len(value: &str, field: &str, max: usize) -> Result<(), PrefixdError> {
+    if value.len() > max {
+        Err(PrefixdError::InvalidRequest(format!(
+            "{} exceeds maximum length of {} characters",
+            field, max
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_ip(ip: &str) -> Result<IpAddr, PrefixdError> {
+    ip.parse::<IpAddr>().map_err(|_| {
+        PrefixdError::InvalidRequest(format!("invalid IP address: '{}'", ip))
+    })
+}
+
+fn validate_cidr(prefix: &str) -> Result<(), PrefixdError> {
+    if let Some((ip_part, mask_part)) = prefix.split_once('/') {
+        ip_part.parse::<IpAddr>().map_err(|_| {
+            PrefixdError::InvalidRequest(format!("invalid prefix: '{}'", prefix))
+        })?;
+        mask_part.parse::<u8>().map_err(|_| {
+            PrefixdError::InvalidRequest(format!("invalid prefix mask: '{}'", prefix))
+        })?;
+    } else {
+        prefix.parse::<IpAddr>().map_err(|_| {
+            PrefixdError::InvalidRequest(format!("invalid prefix: '{}'", prefix))
+        })?;
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 pub struct CreateMitigationRequest {
     #[allow(dead_code)]
@@ -255,6 +326,14 @@ pub async fn ingest_event(
         return Err(AppError(PrefixdError::Unauthorized(
             "authentication required".into(),
         )));
+    }
+
+    // Validate input
+    validate_ip(&input.victim_ip).map_err(AppError)?;
+    validate_string_len(&input.source, "source", MAX_STRING_LEN).map_err(AppError)?;
+    validate_string_len(&input.victim_ip, "victim_ip", 45).map_err(AppError)?;
+    if let Some(ref eid) = input.event_id {
+        validate_string_len(eid, "event_id", MAX_STRING_LEN).map_err(AppError)?;
     }
 
     // Branch on action type
@@ -629,7 +708,7 @@ pub async fn list_audit(
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
-    let limit = query.limit.unwrap_or(100);
+    let limit = clamp_limit(query.limit.unwrap_or(100));
     let offset = query.offset.unwrap_or(0);
 
     let entries = state
@@ -749,6 +828,14 @@ pub async fn create_mitigation(
     // Check auth first
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
+
+    // Validate input
+    if let Err(e) = validate_ip(&req.victim_ip) {
+        return Ok(AppError(e).into_response());
+    }
+    if let Err(e) = validate_string_len(&req.reason, "reason", MAX_STRING_LEN) {
+        return Ok(AppError(e).into_response());
+    }
 
     // Validate protocol - reject unknown values instead of silently converting to None
     let protocol = match req.protocol.as_str() {
@@ -933,6 +1020,14 @@ pub async fn add_safelist(
 ) -> Result<impl IntoResponse, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
+
+    validate_cidr(&req.prefix).map_err(|_| StatusCode::BAD_REQUEST)?;
+    validate_string_len(&req.operator_id, "operator_id", MAX_USERNAME_LEN)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if let Some(ref reason) = req.reason {
+        validate_string_len(reason, "reason", MAX_STRING_LEN)
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+    }
 
     state
         .repo
@@ -1229,21 +1324,36 @@ pub async fn login(
 ) -> Result<Json<LoginResponse>, StatusCode> {
     use crate::auth::Credentials;
 
+    // Validate input lengths
+    if req.username.len() > MAX_USERNAME_LEN || req.password.len() > MAX_PASSWORD_LEN {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Per-username brute-force throttle
+    check_login_throttle(&req.username).await?;
+
+    let username = req.username.clone();
+
     let creds = Credentials {
         username: req.username,
         password: req.password,
     };
 
-    let operator = auth_session
-        .authenticate(creds)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let operator = match auth_session.authenticate(creds).await {
+        Ok(Some(op)) => op,
+        Ok(None) => {
+            record_login_attempt(&username).await;
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
 
     auth_session
         .login(&operator)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    clear_login_attempts(&username).await;
 
     Ok(Json(LoginResponse {
         operator_id: operator.operator_id,
@@ -1400,8 +1510,16 @@ pub async fn create_operator(
     // Validate role
     let role: OperatorRole = req.role.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
 
+    // Validate username
+    if req.username.is_empty() || req.username.len() > MAX_USERNAME_LEN {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if !req.username.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     // Validate password length
-    if req.password.len() < 8 {
+    if req.password.len() < 8 || req.password.len() > MAX_PASSWORD_LEN {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -1541,7 +1659,7 @@ pub async fn change_password(
     }
 
     // Validate password length
-    if req.new_password.len() < 8 {
+    if req.new_password.len() < 8 || req.new_password.len() > MAX_PASSWORD_LEN {
         return Err(StatusCode::BAD_REQUEST);
     }
 

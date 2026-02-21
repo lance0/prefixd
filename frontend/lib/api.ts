@@ -101,10 +101,8 @@ export interface SafelistEntry {
 }
 
 async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> {
-  const token = process.env.NEXT_PUBLIC_PREFIXD_TOKEN
   const headers: HeadersInit = {
     "Content-Type": "application/json",
-    ...(token && { Authorization: `Bearer ${token}` }),
     ...options?.headers,
   }
 

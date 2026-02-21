@@ -1,9 +1,15 @@
+const CSV_FORMULA_CHARS = ["=", "+", "-", "@", "\t", "\r"]
+
 function escapeCsvField(field: string): string {
   if (!field) return ""
-  if (field.includes(",") || field.includes('"') || field.includes("\n")) {
-    return `"${field.replace(/"/g, '""')}"`
+  let safe = field
+  if (CSV_FORMULA_CHARS.some((c) => safe.startsWith(c))) {
+    safe = "'" + safe
   }
-  return field
+  if (safe.includes(",") || safe.includes('"') || safe.includes("\n")) {
+    return `"${safe.replace(/"/g, '""')}"`
+  }
+  return safe
 }
 
 export function downloadCsv(filename: string, headers: string[], rows: string[][]) {
