@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Webhook alerting backend** — 7 destination types: Slack (Block Kit), Discord (embeds), Microsoft Teams (Adaptive Card), Telegram (Bot API), PagerDuty (Events API v2 with auto-resolve on withdraw/expire), OpsGenie (Alert API v2), Generic webhook (HMAC-SHA256 signed). Fire-and-forget via tokio::spawn with 3 retries and exponential backoff. Configurable event type filtering. `prefixd_alerts_sent_total{destination,status}` Prometheus counter.
+- **Alerting API endpoints** — `GET /v1/config/alerting` (secrets redacted) and `POST /v1/config/alerting/test` (sends test alert, returns per-destination pass/fail)
 - **Chaos test suite** — `scripts/chaos-test.sh` with 17 resilience tests across 4 categories: Postgres chaos (kill during ingestion, restart recovery, state preservation), GoBGP chaos (kill during mitigations, reconciliation re-announce), prefixd chaos (restart, rapid restart, SIGKILL recovery), network chaos (nginx outage and recovery)
 - **HTTP load test suite** — `scripts/load-test.sh` with 7 tests across 5 profiles (quick/default/sustained/burst/all), using `hey` for HTTP benchmarking. Baseline results: ~8,000 health req/s, ~4,700 ingestion req/s, P99 1.6ms
 - **Benchmarks documentation rewrite** — `docs/benchmarks.md` updated with fresh criterion micro-benchmark numbers, HTTP load test baselines, chaos test summary, bottleneck analysis, and instructions for running all three test suites
@@ -24,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Backend unit tests increased from 73 to 88 (15 new alerting formatter/config/HMAC tests)
 - Frontend tests increased from 25 to 26 (added CSV injection regression test)
 
 ## [0.9.0] - 2026-02-20

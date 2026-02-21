@@ -279,17 +279,79 @@ customers:
 
 ---
 
+## Alerting / Webhooks
+
+Push notifications to external systems on mitigation lifecycle events.
+
+### Supported Destinations
+
+| Destination | Format | Notes |
+|---|---|---|
+| **Slack** | Block Kit (header + sections + fields) | Incoming webhook URL |
+| **Discord** | Rich embeds (title, color, fields, footer) | Webhook URL |
+| **Microsoft Teams** | Adaptive Card via Power Automate webhook | Post-connector-deprecation format |
+| **Telegram** | Bot API `sendMessage` with HTML formatting | Bot token + chat_id |
+| **PagerDuty** | Events API v2 | Auto-resolve on withdraw/expire via dedup_key |
+| **OpsGenie** | Alert API v2 | US and EU region support |
+| **Generic Webhook** | Raw JSON payload | Optional HMAC-SHA256 signing (`X-Prefixd-Signature`) |
+
+### Alert Events
+
+| Event Type | Severity | Trigger |
+|---|---|---|
+| `mitigation.created` | Warning | New mitigation announced |
+| `mitigation.escalated` | Critical | Mitigation escalated (police → discard) |
+| `mitigation.withdrawn` | Info | Manual or detector-driven withdrawal |
+| `mitigation.expired` | Info | TTL reached, rule removed |
+
+### Configuration
+
+```yaml
+alerting:
+  destinations:
+    - type: slack
+      webhook_url: "https://hooks.slack.com/services/..."
+      channel: "#ddos-alerts"
+    - type: pagerduty
+      routing_key: "${PAGERDUTY_ROUTING_KEY}"
+    - type: generic
+      url: "https://example.com/webhook"
+      secret: "${WEBHOOK_SECRET}"
+  events:
+    - mitigation.created
+    - mitigation.escalated
+```
+
+### Design
+
+- **Fire-and-forget** — Alerts spawned as background tasks, never block event processing
+- **Retry with backoff** — 3 retries per destination (1s, 2s, 4s exponential)
+- **Multiple destinations** — Multiple instances of same type supported (e.g., two Slack channels)
+- **Event filtering** — Only send alerts for configured event types (default: all)
+- **Secret redaction** — `GET /v1/config/alerting` never exposes webhook URLs or tokens
+- **Test endpoint** — `POST /v1/config/alerting/test` sends a test alert to all destinations
+
+---
+
 ## Dashboard
 
 ### Next.js Web UI
 
 Real-time visibility into mitigation state:
 
-- **Overview** - Active mitigations, BGP session status, quota usage
-- **Mitigations** - List with filtering, sorting, pagination
-- **Events** - Attack event history
-- **Audit Log** - All actions with operator attribution
-- **Config** - System status, safelist viewer
+- **Overview** - Active mitigations, BGP session status, quota usage, 24h activity chart
+- **Mitigations** - List with filtering, sorting, pagination, inline withdraw, CSV export
+- **Events** - Attack event history with CSV export
+- **IP History** - Unified timeline per IP (events + mitigations + customer context)
+- **Audit Log** - All actions with operator attribution, CSV export
+- **Config** - System status, safelist viewer, hot-reload button
+- **Inventory** - Searchable customer/service/IP browser
+- **Admin** - User management, safelist CRUD, system health (tabbed layout)
+- **Embedded Charts** - 24h area chart on overview (PostgreSQL-backed timeseries with gap-filling)
+- **Clickable IPs** - All victim_ip cells link to IP history page
+- **Light/dark mode** - Theme toggle with system preference detection
+- **Keyboard shortcuts** - `g o/m/e/i/h/a/c` navigation, `n` mitigate, `Cmd+K` palette, `?` help
+- **Command palette** - Quick navigation and search (`Cmd+K`)
 
 ### Authentication
 
@@ -447,7 +509,21 @@ prefixd_http_in_flight_requests{method,route}
 prefixd_config_reload_total{result}
 prefixd_escalations_total{from_action,to_action}
 prefixd_reconciliation_runs_total{result}
+prefixd_reconciliation_active_count{pop}
+
+# Database
+prefixd_db_pool_connections{state=active|idle|total}
+
+# Alerting
+prefixd_alerts_sent_total{destination,status}
 ```
+
+### Request Correlation IDs
+
+Every request gets an `x-request-id` header (UUID). If the client provides one, it's preserved; otherwise a new one is generated. The ID is:
+- Echoed in the response header
+- Added to the tracing span for log correlation
+- Forwarded through nginx
 
 ### Structured Logging
 
@@ -482,24 +558,30 @@ All state-changing operations logged:
 }
 ```
 
-### Health Endpoint
+### Health Endpoints
 
-`GET /v1/health` returns:
+`GET /v1/health` (public, lightweight liveness check):
 
 ```json
 {
-  "status": "healthy",
-  "version": "0.8.0",
+  "status": "ok",
+  "version": "0.9.0",
+  "auth_mode": "none"
+}
+```
+
+`GET /v1/health/detail` (authenticated, full operational status):
+
+```json
+{
+  "status": "ok",
+  "version": "0.9.0",
   "pop": "iad1",
   "uptime_seconds": 86400,
-  "database": {
-    "status": "connected",
-    "latency_ms": 2
-  },
-  "gobgp": {
-    "status": "connected",
-    "peers_established": 2
-  }
+  "active_mitigations": 3,
+  "database": "ok",
+  "gobgp": { "status": "ok" },
+  "bgp_sessions": [{ "name": "edge1", "state": "established" }]
 }
 ```
 
@@ -542,14 +624,31 @@ Each POP:
 
 ## Performance
 
-Benchmarked on commodity hardware (see [benchmarks.md](docs/benchmarks.md)):
+Benchmarked on Docker Compose stack (see [benchmarks.md](docs/benchmarks.md)):
 
-| Operation | Throughput | Latency |
-|-----------|------------|---------|
-| Event ingestion | ~6,000/sec | <1ms p99 |
-| Inventory lookup | ~5.6M/sec | <1μs |
-| Database queries | ~6,000/sec | <1ms p99 |
-| FlowSpec announcement | ~100/sec | ~10ms |
+### HTTP Load Tests (end-to-end through nginx)
+
+| Endpoint | Req/sec | Avg Latency | P99 Latency |
+|----------|---------|-------------|-------------|
+| `GET /v1/health` | ~8,000 | 1.3 ms | 2.6 ms |
+| `GET /v1/mitigations` | ~4,800 | 2.1 ms | 3.1 ms |
+| `POST /v1/events` (ingestion) | ~4,700 | 1.1 ms | 1.6 ms |
+| Burst (50 concurrent) | ~4,930 | 8.1 ms | 53 ms |
+
+### Micro-Benchmarks (criterion)
+
+| Operation | Time | Throughput |
+|-----------|------|------------|
+| Inventory IP lookup | 156 ns | ~6.4M ops/sec |
+| Scope hash (SHA-256) | 119 ns | ~8.4M ops/sec |
+| JSON serialize mitigation | 880 ns | ~1.1M ops/sec |
+| Mock DB insert | 1.36 µs | ~735K ops/sec |
+
+### Resilience
+
+- **Chaos tests:** 17/17 passing (Postgres kill, GoBGP kill, prefixd restart, nginx outage)
+- **Load tests:** 7/7 passing across 5 profiles
+- **Headroom:** ~100x over realistic DDoS detector event volume
 
 ### Resource Usage
 

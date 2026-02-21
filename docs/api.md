@@ -694,6 +694,53 @@ Returns playbook definitions from `playbooks.yaml`.
 }
 ```
 
+### Alerting Config
+
+```http
+GET /v1/config/alerting
+```
+
+Returns configured alert destinations with secrets redacted.
+
+**Response:**
+
+```json
+{
+  "destinations": [
+    {
+      "type": "slack",
+      "webhook_url": "***",
+      "channel": "#ddos-alerts"
+    },
+    {
+      "type": "pagerduty",
+      "routing_key": "***",
+      "events_url": "https://events.pagerduty.com/v2/enqueue"
+    }
+  ],
+  "events": ["mitigation.created", "mitigation.escalated"]
+}
+```
+
+### Test Alerting
+
+```http
+POST /v1/config/alerting/test
+```
+
+Sends a test alert to all configured destinations. Returns per-destination results.
+
+**Response:**
+
+```json
+{
+  "results": [
+    {"destination": "slack", "status": "ok", "error": null},
+    {"destination": "pagerduty", "status": "error", "error": "pagerduty returned 403"}
+  ]
+}
+```
+
 ### List POPs
 
 ```http

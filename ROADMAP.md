@@ -83,10 +83,9 @@ See [CHANGELOG](CHANGELOG.md) for version history.
   - Events + mitigations interleaved chronologically, customer/service context
   - All victim_ip cells across UI link to IP history page
   - `GET /v1/ip/{ip}/history` backend endpoint with inventory lookup
-- [ ] **Alerting/webhook config UI** (P2 — backend webhook support planned)
-  - Configure alert destinations (Slack, PagerDuty, generic webhook)
-  - Test notification button
-  - Requires backend `POST /v1/config/webhooks` endpoint
+- [ ] **Alerting/webhook config UI** (P2 — backend done, frontend remaining)
+  - Backend: 7 destinations (Slack, Discord, Teams, Telegram, PagerDuty, OpsGenie, generic), `GET /v1/config/alerting`, `POST /v1/config/alerting/test`
+  - Frontend: configure destinations from dashboard, test notification button
 - [x] **Dark mode refinement** (P1 — audited, no issues)
   - All hardcoded colors are semantic accents (status green/red/yellow) with good contrast in both themes
   - Admin reload button already has explicit `dark:` hover variants
@@ -221,7 +220,7 @@ Not committed, but on the radar.
 - **Embedded traffic charts** — Real-time bps/pps sparklines on the overview page (query Prometheus or internal metrics endpoint, reduce context-switching to Grafana)
 - **Attack timeline / history per IP** — Unified "what happened to this IP" view combining events, mitigations, and escalations
 - **Incident reports** — Formatted PDF/Excel post-attack reports (building on existing CSV export)
-- **Webhook/alerting config UI** — Configure Slack, PagerDuty, and generic webhook destinations from the dashboard
+- **Webhook/alerting config UI** — Configure alert destinations from dashboard (backend supports Slack, Discord, Teams, Telegram, PagerDuty, OpsGenie, generic webhook; frontend UI not yet built)
 - **GeoIP / ASN / IX enrichment** — Enrich attack events at ingest with source country, ASN, and IX presence. Same pattern as our `ttl` project: `maxminddb` crate with local GeoLite2-City.mmdb, Team Cymru DNS for ASN, PeeringDB REST API for IX detection. In-memory caches with 1h TTL, PeeringDB disk-cached at 24h. Fields added to AttackEvent before policy evaluation.
 
 ### Advanced FlowSpec

@@ -36,8 +36,9 @@ Detector → HTTP API → Policy Engine → Guardrails → FlowSpec Manager → 
 
 ```
 src/
+├── alerting/          # Webhook alerting: Slack, Discord, Teams, Telegram, PagerDuty, OpsGenie, generic
 ├── api/
-│   ├── handlers.rs    # All HTTP handlers (health, events, mitigations, config, safelist, operators)
+│   ├── handlers.rs    # All HTTP handlers (health, events, mitigations, config, safelist, operators, alerting)
 │   ├── routes.rs      # Route definitions: public_routes(), session_routes(), api_routes(), common_layers()
 │   ├── openapi.rs     # utoipa OpenAPI spec registration
 │   └── metrics.rs     # HTTP request metrics middleware
@@ -136,7 +137,11 @@ See `docs/adr/` for all 15 Architecture Decision Records.
 - `GET /v1/config/inventory` - Customer/service/IP data
 - `GET /v1/config/playbooks` - Playbook definitions
 - `POST /v1/config/reload` - Hot-reload inventory + playbooks
+- `GET /v1/config/alerting` - Alerting config (secrets redacted)
+- `POST /v1/config/alerting/test` - Send test alert to all destinations
 - `GET /v1/stats` - Global statistics
+- `GET /v1/stats/timeseries` - Time-series data for charts
+- `GET /v1/ip/{ip}/history` - IP history (events + mitigations + context)
 - `GET /v1/pops` - Points of presence
 - `GET /v1/audit` - Audit log
 - `GET/POST /v1/operators` - User management (admin only)
