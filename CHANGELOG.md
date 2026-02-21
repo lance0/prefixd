@@ -24,6 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CSV formula injection fix** — CSV export now prefixes cells starting with `=`, `+`, `-`, `@`, `\t`, `\r` with a single quote to prevent spreadsheet formula injection
 - **Client token exposure removed** — Removed `NEXT_PUBLIC_PREFIXD_TOKEN` from frontend bundle (session cookies are sufficient for browser auth)
 
+### Frontend
+
+- **Alerting config UI** — New "Alerting" tab on Config page showing configured destinations (read-only, secrets redacted) with "Send Test Alert" button reporting per-destination pass/fail
+- **Audit log detail expansion** — Click truncated details cells to expand full JSON inline; extracted AuditRow sub-component
+- **Customer/POP filter on mitigations** — Dropdown filters using existing backend `?customer_id=` and `?pop=` query params
+- **Timeseries range selector** — 1h/6h/24h/7d toggle buttons on activity chart with appropriate bucket sizes (5m/30m/1h/6h)
+- **Active count badge on sidebar** — Live mitigation count badge on Mitigations nav item (collapsed and expanded modes)
+- **Severity badges on mitigations** — Color-coded severity column (critical/high/medium/low) derived from status + action_type
+
 ### Changed
 
 - Backend unit tests increased from 73 to 88 (15 new alerting formatter/config/HMAC tests)
