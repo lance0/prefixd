@@ -68,7 +68,7 @@ urlencoding = "2"
 
 # OpenAPI
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
-rand = "0.9.2"
+rand = "0.10.0"
 
 [build-dependencies]
 tonic-build = "0.14"
