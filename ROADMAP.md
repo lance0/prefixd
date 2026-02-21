@@ -153,9 +153,9 @@ Target: Stable API, comprehensive testing, production-proven.
 - [x] OpenAPI spec covers all endpoints (health split, config read-only)
 - [x] Integration tests for config/health endpoints (12 tests, up from 8)
 - [x] Event ingestion endpoint auth enforcement (require_auth on POST /v1/events)
-- [ ] Chaos testing (kill GoBGP mid-mitigation, kill Postgres during ingestion)
-- [ ] Load testing (sustained event volume)
-- [ ] Security audit (dependencies, input validation)
+- [x] Chaos testing — 17 tests across 4 categories (Postgres, GoBGP, prefixd, network), all passing
+- [x] Load testing — 7 HTTP load tests with hey (~4,700 events/sec, ~8,000 health req/s)
+- [x] Security audit — 20 backend + 9 frontend findings, actionable items fixed (login throttle, input validation, CSV injection, client token removal)
 - [x] Reconciliation loop pagination (pages through all active mitigations, no cap)
 
 ### Observability

@@ -222,7 +222,9 @@ async fn check_login_throttle(key: &str) -> Result<(), StatusCode> {
 
 async fn record_login_attempt(key: &str) {
     let mut attempts = LOGIN_ATTEMPTS.lock().await;
-    let entry = attempts.entry(key.to_string()).or_insert((0, Instant::now()));
+    let entry = attempts
+        .entry(key.to_string())
+        .or_insert((0, Instant::now()));
     if entry.1.elapsed().as_secs() >= LOGIN_WINDOW_SECS {
         *entry = (1, Instant::now());
     } else {
@@ -251,23 +253,22 @@ fn validate_string_len(value: &str, field: &str, max: usize) -> Result<(), Prefi
 }
 
 fn validate_ip(ip: &str) -> Result<IpAddr, PrefixdError> {
-    ip.parse::<IpAddr>().map_err(|_| {
-        PrefixdError::InvalidRequest(format!("invalid IP address: '{}'", ip))
-    })
+    ip.parse::<IpAddr>()
+        .map_err(|_| PrefixdError::InvalidRequest(format!("invalid IP address: '{}'", ip)))
 }
 
 fn validate_cidr(prefix: &str) -> Result<(), PrefixdError> {
     if let Some((ip_part, mask_part)) = prefix.split_once('/') {
-        ip_part.parse::<IpAddr>().map_err(|_| {
-            PrefixdError::InvalidRequest(format!("invalid prefix: '{}'", prefix))
-        })?;
+        ip_part
+            .parse::<IpAddr>()
+            .map_err(|_| PrefixdError::InvalidRequest(format!("invalid prefix: '{}'", prefix)))?;
         mask_part.parse::<u8>().map_err(|_| {
             PrefixdError::InvalidRequest(format!("invalid prefix mask: '{}'", prefix))
         })?;
     } else {
-        prefix.parse::<IpAddr>().map_err(|_| {
-            PrefixdError::InvalidRequest(format!("invalid prefix: '{}'", prefix))
-        })?;
+        prefix
+            .parse::<IpAddr>()
+            .map_err(|_| PrefixdError::InvalidRequest(format!("invalid prefix: '{}'", prefix)))?;
     }
     Ok(())
 }
@@ -1514,7 +1515,11 @@ pub async fn create_operator(
     if req.username.is_empty() || req.username.len() > MAX_USERNAME_LEN {
         return Err(StatusCode::BAD_REQUEST);
     }
-    if !req.username.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+    if !req
+        .username
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
 

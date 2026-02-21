@@ -13,7 +13,11 @@ pub async fn request_id(mut req: Request<Body>, next: Next) -> Response {
         .headers()
         .get(REQUEST_ID_HEADER)
         .and_then(|v| v.to_str().ok())
-        .filter(|s| s.len() <= MAX_REQUEST_ID_LEN && s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.'))
+        .filter(|s| {
+            s.len() <= MAX_REQUEST_ID_LEN
+                && s.chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+        })
         .map(|s| s.to_string())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 

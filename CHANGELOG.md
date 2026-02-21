@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Chaos test suite** — `scripts/chaos-test.sh` with 17 resilience tests across 4 categories: Postgres chaos (kill during ingestion, restart recovery, state preservation), GoBGP chaos (kill during mitigations, reconciliation re-announce), prefixd chaos (restart, rapid restart, SIGKILL recovery), network chaos (nginx outage and recovery)
+- **HTTP load test suite** — `scripts/load-test.sh` with 7 tests across 5 profiles (quick/default/sustained/burst/all), using `hey` for HTTP benchmarking. Baseline results: ~8,000 health req/s, ~4,700 ingestion req/s, P99 1.6ms
+- **Benchmarks documentation rewrite** — `docs/benchmarks.md` updated with fresh criterion micro-benchmark numbers, HTTP load test baselines, chaos test summary, bottleneck analysis, and instructions for running all three test suites
+
+### Security
+
+- **Login brute-force protection** — Per-username rate limiting (5 attempts per 60-second window) on `POST /v1/auth/login`, returns 429 when exceeded
+- **Input validation sweep** — victim_ip validated as real IP address in `ingest_event` and `create_mitigation`; safelist prefix validated as CIDR/IP; string length limits on all user input fields (1024 general, 64 username, 256 password); username format validation (alphanumeric, dash, underscore); max password length to prevent argon2 DoS
+- **Audit pagination bounded** — `list_audit` endpoint now applies `clamp_limit()` (was unbounded)
+- **Request ID hardened** — `x-request-id` header capped at 128 characters with character validation, removed `.expect()` panics
+- **CSV formula injection fix** — CSV export now prefixes cells starting with `=`, `+`, `-`, `@`, `\t`, `\r` with a single quote to prevent spreadsheet formula injection
+- **Client token exposure removed** — Removed `NEXT_PUBLIC_PREFIXD_TOKEN` from frontend bundle (session cookies are sufficient for browser auth)
+
+### Changed
+
+- Frontend tests increased from 25 to 26 (added CSV injection regression test)
+
 ## [0.9.0] - 2026-02-20
 
 ### Added
