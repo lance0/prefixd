@@ -1,5 +1,6 @@
 #![allow(clippy::collapsible_if)]
 
+pub mod alerting;
 pub mod api;
 pub mod auth;
 pub mod bgp;

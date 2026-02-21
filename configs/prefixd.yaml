@@ -64,3 +64,31 @@ safelist:
 shutdown:
   drain_timeout_seconds: 30
   preserve_announcements: true
+
+# alerting:
+#   destinations:
+#     - type: slack
+#       webhook_url: "https://hooks.slack.com/services/T.../B.../xxx"
+#       channel: "#ddos-alerts"
+#     - type: discord
+#       webhook_url: "https://discord.com/api/webhooks/123/abc"
+#     - type: teams
+#       webhook_url: "https://prod-XX.westus.logic.azure.com/..."
+#     - type: telegram
+#       bot_token: "${TELEGRAM_BOT_TOKEN}"
+#       chat_id: "-100123456789"
+#     - type: pagerduty
+#       routing_key: "${PAGERDUTY_ROUTING_KEY}"
+#     - type: opsgenie
+#       api_key: "${OPSGENIE_API_KEY}"
+#       region: "us"
+#     - type: generic
+#       url: "https://example.com/webhook"
+#       secret: "${WEBHOOK_SECRET}"
+#       headers:
+#         X-Custom: "value"
+#   events:
+#     - mitigation.created
+#     - mitigation.escalated
+#     - mitigation.withdrawn
+#     - mitigation.expired

@@ -95,7 +95,8 @@ async fn main() -> anyhow::Result<()> {
         config.settings.timers.reconciliation_interval_seconds,
         state.is_dry_run(),
     )
-    .with_ws_broadcast(state.ws_broadcast.clone());
+    .with_ws_broadcast(state.ws_broadcast.clone())
+    .with_alerting(state.alerting.clone());
 
     let shutdown_rx = state.subscribe_shutdown();
     tokio::spawn(async move {

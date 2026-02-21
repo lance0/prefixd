@@ -58,6 +58,7 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
 ipnet = { version = "2", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }

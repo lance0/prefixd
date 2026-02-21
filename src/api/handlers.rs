@@ -449,6 +449,10 @@ async fn handle_unban(
             mitigation_id: mitigation.mitigation_id.to_string(),
         });
 
+    state
+        .alerting
+        .notify(crate::alerting::Alert::mitigation_withdrawn(&mitigation));
+
     tracing::info!(
         mitigation_id = %mitigation.mitigation_id,
         victim_ip = %mitigation.victim_ip,
@@ -633,6 +637,10 @@ async fn handle_ban(
         .send(crate::ws::WsMessage::MitigationCreated {
             mitigation: MitigationResponse::from(&mitigation),
         });
+
+    state
+        .alerting
+        .notify(crate::alerting::Alert::mitigation_created(&mitigation));
 
     tracing::info!(
         mitigation_id = %mitigation.mitigation_id,
@@ -987,6 +995,10 @@ pub async fn withdraw_mitigation(
         .send(crate::ws::WsMessage::MitigationWithdrawn {
             mitigation_id: mitigation.mitigation_id.to_string(),
         });
+
+    state
+        .alerting
+        .notify(crate::alerting::Alert::mitigation_withdrawn(&mitigation));
 
     tracing::info!(
         mitigation_id = %mitigation.mitigation_id,
@@ -2132,4 +2144,49 @@ pub async fn get_ip_history(
         events: events_json,
         mitigations: mitigation_responses,
     }))
+}
+
+/// Get alerting configuration (redacted secrets)
+pub async fn get_alerting_config(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, StatusCode> {
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    require_auth(&state, &auth_session, auth_header)?;
+
+    let config = state.alerting.config();
+    let destinations: Vec<serde_json::Value> =
+        config.destinations.iter().map(|d| d.redacted()).collect();
+
+    Ok(Json(serde_json::json!({
+        "destinations": destinations,
+        "events": config.events,
+    })))
+}
+
+/// Send a test alert to all configured destinations
+pub async fn test_alerting(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, StatusCode> {
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    require_auth(&state, &auth_session, auth_header)?;
+
+    let alert = crate::alerting::Alert::test_alert();
+    let results = state.alerting.dispatch(&alert).await;
+
+    let outcomes: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|(dest, result)| {
+            serde_json::json!({
+                "destination": dest,
+                "status": if result.is_ok() { "ok" } else { "error" },
+                "error": result.err(),
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({ "results": outcomes })))
 }

@@ -19,6 +19,8 @@ pub struct Settings {
     pub safelist: SafelistConfig,
     #[serde(default)]
     pub shutdown: ShutdownConfig,
+    #[serde(default)]
+    pub alerting: crate::alerting::AlertingConfig,
 }
 
 fn default_mode() -> OperationMode {

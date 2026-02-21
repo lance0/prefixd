@@ -1,8 +1,6 @@
-mod alerting;
 mod audit;
 pub mod metrics;
 
-pub use alerting::*;
 pub use audit::*;
 pub use metrics::*;
 

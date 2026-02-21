@@ -2184,6 +2184,7 @@ dependencies = [
  "criterion",
  "futures-util",
  "hex",
+ "hmac",
  "ipnet",
  "once_cell",
  "password-hash",

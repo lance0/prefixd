@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::sync::{RwLock, broadcast};
 
+use crate::alerting::AlertingService;
 use crate::bgp::FlowSpecAnnouncer;
 use crate::config::{AuthMode, Inventory, Playbooks, Settings};
 use crate::db::RepositoryTrait;
@@ -30,6 +31,8 @@ pub struct AppState {
     pub inventory_loaded_at: RwLock<DateTime<Utc>>,
     /// Timestamp when playbooks were last loaded/reloaded
     pub playbooks_loaded_at: RwLock<DateTime<Utc>>,
+    /// Alerting service for webhook notifications
+    pub alerting: Arc<AlertingService>,
     /// PostgreSQL pool for metrics (None in tests with MockRepository)
     pub db_pool: Option<PgPool>,
     config_dir: PathBuf,
@@ -61,6 +64,7 @@ impl AppState {
     ) -> Result<Arc<Self>> {
         let (shutdown_tx, _) = broadcast::channel(1);
         let ws_broadcast = crate::ws::create_broadcast();
+        let alerting = AlertingService::new(settings.alerting.clone());
 
         // Load bearer token at startup (avoids per-request env lookups)
         let bearer_token = if matches!(settings.http.auth.mode, AuthMode::Bearer) {
@@ -96,6 +100,7 @@ impl AppState {
             shutdown_tx,
             ws_broadcast,
             bearer_token,
+            alerting,
             start_time: Instant::now(),
             inventory_loaded_at: RwLock::new(Utc::now()),
             playbooks_loaded_at: RwLock::new(Utc::now()),

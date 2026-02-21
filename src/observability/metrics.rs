@@ -201,6 +201,7 @@ pub fn gather_metrics() -> String {
 /// Initialize all metrics (forces lazy statics to be created)
 pub fn init_metrics() {
     // Touch all lazy statics to initialize them
+    Lazy::force(&crate::alerting::ALERTS_SENT);
     Lazy::force(&EVENTS_INGESTED);
     Lazy::force(&EVENTS_REJECTED);
     Lazy::force(&MITIGATIONS_ACTIVE);

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
+use crate::alerting::AlertingService;
 use crate::bgp::FlowSpecAnnouncer;
 use crate::db::RepositoryTrait;
 use crate::domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule, MitigationStatus};
@@ -13,6 +14,7 @@ pub struct ReconciliationLoop {
     interval: Duration,
     dry_run: bool,
     ws_broadcast: Option<broadcast::Sender<WsMessage>>,
+    alerting: Option<Arc<AlertingService>>,
 }
 
 impl ReconciliationLoop {
@@ -28,12 +30,18 @@ impl ReconciliationLoop {
             interval: Duration::from_secs(interval_seconds as u64),
             dry_run,
             ws_broadcast: None,
+            alerting: None,
         }
     }
 
     /// Set the WebSocket broadcast sender for real-time notifications
     pub fn with_ws_broadcast(mut self, sender: broadcast::Sender<WsMessage>) -> Self {
         self.ws_broadcast = Some(sender);
+        self
+    }
+
+    pub fn with_alerting(mut self, alerting: Arc<AlertingService>) -> Self {
+        self.alerting = Some(alerting);
         self
     }
 
@@ -109,6 +117,10 @@ impl ReconciliationLoop {
                 let _ = tx.send(WsMessage::MitigationExpired {
                     mitigation_id: mitigation.mitigation_id.to_string(),
                 });
+            }
+
+            if let Some(ref alerting) = self.alerting {
+                alerting.notify(crate::alerting::Alert::mitigation_expired(&mitigation));
             }
         }
 
