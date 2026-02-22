@@ -75,7 +75,7 @@ docker compose ps
 
 # Test the API
 curl http://localhost/v1/health
-# {"status":"ok","version":"0.10.0","auth_mode":"none"}
+# {"status":"ok","version":"0.10.1","auth_mode":"none"}
 ```
 
 ### 4. Create an admin account
@@ -247,7 +247,7 @@ FlowSpec (RFC 5575, RFC 8955) is supported by:
 
 ## Project Status
 
-Current version: **v0.10.0**
+Current version: **v0.10.1**
 
 - Core functionality stable and tested
 - Real-time dashboard with WebSocket updates, toast notifications, and mitigation detail views

@@ -172,7 +172,7 @@ gobgp:
 ```toml
 [global.config]
   as = 65010
-  router-id = "10.10.0.10"
+  router-id = "10.10.1.10"
   port = 179
 
 # Peer with edge router
@@ -238,7 +238,7 @@ set routing-options flow term-order standard
 set protocols bgp group FLOWSPEC type external
 set protocols bgp group FLOWSPEC import FLOWSPEC-IMPORT
 set protocols bgp group FLOWSPEC peer-as 65010
-set protocols bgp group FLOWSPEC neighbor 10.10.0.10 family inet flow no-validate FLOWSPEC-IMPORT
+set protocols bgp group FLOWSPEC neighbor 10.10.1.10 family inet flow no-validate FLOWSPEC-IMPORT
 ```
 
 > **Important**: The GoBGP neighbor config must advertise **only** `ipv4-flowspec` AFI-SAFI.
@@ -250,7 +250,7 @@ set protocols bgp group FLOWSPEC neighbor 10.10.0.10 family inet flow no-validat
 
 ```junos
 # BGP session
-show bgp neighbor 10.10.0.10
+show bgp neighbor 10.10.1.10
 
 # FlowSpec routes (this is where prefixd rules appear)
 show route table inetflow.0
@@ -267,20 +267,20 @@ show bgp summary
 ```eos
 ! BGP configuration
 router bgp 65000
-  neighbor 10.10.0.10 remote-as 65010
+  neighbor 10.10.1.10 remote-as 65010
   !
   address-family flow-spec ipv4
-    neighbor 10.10.0.10 activate
+    neighbor 10.10.1.10 activate
   !
   address-family flow-spec ipv6
-    neighbor 10.10.0.10 activate
+    neighbor 10.10.1.10 activate
 ```
 
 ### Cisco IOS-XR (ASR 9000, NCS)
 
 ```cisco
 router bgp 65000
-  neighbor 10.10.0.10
+  neighbor 10.10.1.10
     remote-as 65010
     address-family ipv4 flowspec
     address-family ipv6 flowspec
@@ -664,7 +664,7 @@ groups:
 ```bash
 # Liveness check (public, lightweight - no DB/GoBGP calls)
 curl http://localhost/v1/health
-# Returns: {"status":"ok","version":"0.10.0","auth_mode":"none"}
+# Returns: {"status":"ok","version":"0.10.1","auth_mode":"none"}
 
 # Full operational health (authenticated)
 curl -H "Authorization: Bearer $TOKEN" http://localhost/v1/health/detail

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-02-22
+
+### Added
+
+- **`victim_ip` filter on mitigations API** — `GET /v1/mitigations?victim_ip=X` filters by exact victim IP address. Supported in both single-POP and all-POPs queries. (#65)
+- **FastNetMon integration guide** — New `docs/detectors/fastnetmon.md` with full setup, env vars, testing, and troubleshooting
+- **Integration test** — `test_list_mitigations_filters_by_victim_ip` validates API filtering end-to-end
+
+### Fixed
+
+- **FastNetMon re-ban collision** — Deterministic `sha256(IP|direction)` event IDs caused permanent 409 duplicates after withdrawal. Script now uses UUID event IDs per ban occurrence, enabling re-ban and proper TTL extension. (#65)
+- **FastNetMon unban flow** — Unban now queries active mitigations by `victim_ip` and withdraws directly, instead of relying on a shared event ID. Includes configurable retry window for ban/unban race timing. (#65)
+- **FastNetMon withdraw missing `operator_id`** — Withdraw payload now includes `PREFIXD_OPERATOR` (default: `fastnetmon`) to satisfy API validation
+
 ## [0.10.0] - 2026-02-22
 
 ### Added
@@ -746,7 +760,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/lance0/prefixd/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/lance0/prefixd/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/lance0/prefixd/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/lance0/prefixd/compare/v0.8.5...v0.9.0
