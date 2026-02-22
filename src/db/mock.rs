@@ -163,6 +163,7 @@ impl RepositoryTrait for MockRepository {
         &self,
         status_filter: Option<&[MitigationStatus]>,
         customer_id: Option<&str>,
+        victim_ip: Option<&str>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Mitigation>> {
@@ -176,7 +177,8 @@ impl RepositoryTrait for MockRepository {
                 let customer_ok = customer_id
                     .map(|cid| m.customer_id.as_deref() == Some(cid))
                     .unwrap_or(true);
-                status_ok && customer_ok
+                let ip_ok = victim_ip.map(|ip| m.victim_ip == ip).unwrap_or(true);
+                status_ok && customer_ok && ip_ok
             })
             .skip(offset as usize)
             .take(limit as usize)
@@ -368,10 +370,11 @@ impl RepositoryTrait for MockRepository {
         &self,
         status_filter: Option<&[MitigationStatus]>,
         customer_id: Option<&str>,
+        victim_ip: Option<&str>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Mitigation>> {
-        self.list_mitigations(status_filter, customer_id, limit, offset)
+        self.list_mitigations(status_filter, customer_id, victim_ip, limit, offset)
             .await
     }
 

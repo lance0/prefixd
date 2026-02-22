@@ -191,6 +191,8 @@ pub struct ListEventsQuery {
 pub struct ListMitigationsQuery {
     status: Option<String>,
     customer_id: Option<String>,
+    /// Filter by victim IP address
+    victim_ip: Option<String>,
     /// Filter by POP. Use "all" to see mitigations from all POPs.
     pop: Option<String>,
     #[serde(default = "default_limit")]
@@ -763,6 +765,7 @@ pub async fn list_audit(
     params(
         ("status" = Option<String>, Query, description = "Filter by status (comma-separated)"),
         ("customer_id" = Option<String>, Query, description = "Filter by customer ID"),
+        ("victim_ip" = Option<String>, Query, description = "Filter by victim IP address"),
         ("pop" = Option<String>, Query, description = "Filter by POP, use 'all' for cross-POP"),
         ("limit" = Option<u32>, Query, description = "Max results (default 100)"),
         ("offset" = Option<u32>, Query, description = "Offset for pagination"),
@@ -795,6 +798,7 @@ pub async fn list_mitigations(
             .list_mitigations_all_pops(
                 status_filter.as_deref(),
                 query.customer_id.as_deref(),
+                query.victim_ip.as_deref(),
                 limit,
                 query.offset,
             )
@@ -806,6 +810,7 @@ pub async fn list_mitigations(
             .list_mitigations(
                 status_filter.as_deref(),
                 query.customer_id.as_deref(),
+                query.victim_ip.as_deref(),
                 limit,
                 query.offset,
             )

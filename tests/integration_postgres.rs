@@ -41,7 +41,7 @@ async fn test_full_event_to_mitigation_flow() {
     // Verify mitigation was created in the database
     let mitigations = ctx
         .repo
-        .list_mitigations(None, None, 100, 0)
+        .list_mitigations(None, None, None, 100, 0)
         .await
         .expect("Failed to list mitigations");
 
@@ -84,7 +84,7 @@ async fn test_mitigation_withdrawal() {
     // Get the mitigation ID from the database
     let mitigations = ctx
         .repo
-        .list_mitigations(None, None, 100, 0)
+        .list_mitigations(None, None, None, 100, 0)
         .await
         .expect("Failed to list mitigations");
 
@@ -237,7 +237,7 @@ async fn test_safelist_blocks_mitigation() {
     // Verify no mitigation was created
     let mitigations = ctx
         .repo
-        .list_mitigations(None, None, 100, 0)
+        .list_mitigations(None, None, None, 100, 0)
         .await
         .expect("Failed to list mitigations");
 
@@ -284,7 +284,7 @@ async fn test_duplicate_event_extends_ttl() {
     // Get original expiry time
     let mitigations = ctx
         .repo
-        .list_mitigations(None, None, 100, 0)
+        .list_mitigations(None, None, None, 100, 0)
         .await
         .expect("Failed to list mitigations");
     let original_expires_at = mitigations[0].expires_at;
@@ -318,7 +318,7 @@ async fn test_duplicate_event_extends_ttl() {
     // Verify TTL was extended
     let mitigations = ctx
         .repo
-        .list_mitigations(None, None, 100, 0)
+        .list_mitigations(None, None, None, 100, 0)
         .await
         .expect("Failed to list mitigations");
 

@@ -327,6 +327,7 @@ impl RepositoryTrait for Repository {
         &self,
         status_filter: Option<&[MitigationStatus]>,
         customer_id: Option<&str>,
+        victim_ip: Option<&str>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Mitigation>> {
@@ -343,6 +344,7 @@ impl RepositoryTrait for Repository {
             FROM mitigations
             WHERE ($1::text[] IS NULL OR status = ANY($1))
               AND ($2::text IS NULL OR customer_id = $2)
+              AND ($5::text IS NULL OR victim_ip = $5)
             ORDER BY created_at DESC
             LIMIT $3 OFFSET $4
             "#,
@@ -351,6 +353,7 @@ impl RepositoryTrait for Repository {
         .bind(customer_id)
         .bind(limit as i64)
         .bind(offset as i64)
+        .bind(victim_ip)
         .fetch_all(&self.pool)
         .await?;
 
@@ -553,6 +556,7 @@ impl RepositoryTrait for Repository {
         &self,
         status_filter: Option<&[MitigationStatus]>,
         customer_id: Option<&str>,
+        victim_ip: Option<&str>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Mitigation>> {
@@ -569,6 +573,7 @@ impl RepositoryTrait for Repository {
             FROM mitigations
             WHERE ($1::text[] IS NULL OR status = ANY($1))
               AND ($2::text IS NULL OR customer_id = $2)
+              AND ($5::text IS NULL OR victim_ip = $5)
             ORDER BY created_at DESC
             LIMIT $3 OFFSET $4
             "#,
@@ -577,6 +582,7 @@ impl RepositoryTrait for Repository {
         .bind(customer_id)
         .bind(limit as i64)
         .bind(offset as i64)
+        .bind(victim_ip)
         .fetch_all(&self.pool)
         .await?;
 

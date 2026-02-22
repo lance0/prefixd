@@ -4,7 +4,7 @@ This guide covers integrating FastNetMon Community Edition with prefixd for auto
 
 ## Overview
 
-FastNetMon detects DDoS attacks via NetFlow/sFlow analysis and calls a notify script when attacks are detected. The `prefixd-fastnetmon.sh` script bridges FastNetMon to prefixd's event API.
+FastNetMon detects DDoS attacks via NetFlow/sFlow analysis and calls a notify script when attacks are detected. The `prefixd-fastnetmon.sh` script bridges FastNetMon to prefixd's HTTP APIs (event ingest + mitigation withdraw).
 
 ```
 FastNetMon → notify_script → prefixd → GoBGP → Routers (FlowSpec)
@@ -14,7 +14,7 @@ FastNetMon → notify_script → prefixd → GoBGP → Routers (FlowSpec)
 
 - FastNetMon Community Edition installed and configured
 - prefixd running with API accessible
-- `curl` and optionally `jq` installed on the FastNetMon host
+- `curl` installed (`jq` and/or `python3` are recommended for richer JSON handling)
 - Network connectivity from FastNetMon to prefixd API
 
 ## Installation
@@ -35,8 +35,15 @@ PREFIXD_API="http://prefixd-host:8080"
 # Bearer token for authentication (if auth.mode=bearer)
 PREFIXD_TOKEN="your-api-token"
 
+# Operator ID written to withdrawal audit trail (optional)
+PREFIXD_OPERATOR="fastnetmon"
+
 # Log file location (optional)
 PREFIXD_LOG="/var/log/prefixd-fastnetmon.log"
+
+# Unban lookup retries to handle ban/unban race windows (optional)
+UNBAN_QUERY_RETRIES="5"
+UNBAN_QUERY_DELAY_SECONDS="1"
 ```
 
 3. Configure FastNetMon to use the script. Edit `/etc/fastnetmon.conf`:
@@ -58,7 +65,7 @@ sudo systemctl restart fastnetmon
 
 1. FastNetMon detects attack on victim IP
 2. Calls script with args: `$1=IP $2=direction $3=pps $4=ban`
-3. Script computes stable `event_id` from `IP|direction`
+3. Script generates a unique UUID `event_id` for each ban occurrence
 4. Sends `POST /v1/events` with `action: "ban"`
 5. prefixd evaluates playbook, creates mitigation, announces FlowSpec
 
@@ -66,15 +73,15 @@ sudo systemctl restart fastnetmon
 
 1. FastNetMon attack subsides
 2. Calls script with args: `$1=IP $2=direction $3=pps $4=unban`
-3. Script sends same `event_id` with `action: "unban"`
-4. prefixd finds original event, withdraws mitigation
+3. Script queries `GET /v1/mitigations?status=pending,active,escalated&victim_ip=<ip>`
+4. Script withdraws each matching mitigation via `POST /v1/mitigations/{id}/withdraw`
+5. Script retries lookup briefly to handle ban/unban races
 
 ### Idempotency
 
-The `event_id` is computed as `sha256(IP|direction)`, ensuring:
-- Duplicate bans are rejected (409 Conflict)
-- Unbans match their corresponding bans
-- Safe retries if network issues occur
+Each ban uses a unique `event_id`, which prevents permanent duplicate collisions after a ban→withdraw→re-ban cycle and allows ongoing attacks to extend TTL through scope matching.
+
+Unban correlation is done by querying active mitigations for the victim IP and withdrawing them directly.
 
 ## Vector Detection
 
@@ -117,6 +124,7 @@ tail -f /var/log/prefixd-fastnetmon.log
 2. **401 Unauthorized**: Check `PREFIXD_TOKEN` matches prefixd config
 3. **422 Unprocessable**: Victim IP not in prefixd inventory
 4. **No mitigation created**: Check playbooks match the vector
+5. **400 on withdraw**: Ensure script sends `operator_id` (set `PREFIXD_OPERATOR`, default: `fastnetmon`)
 
 ### Debug mode
 

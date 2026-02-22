@@ -140,6 +140,7 @@ impl ReconciliationLoop {
                 .list_mitigations(
                     Some(&[MitigationStatus::Active, MitigationStatus::Escalated]),
                     None,
+                    None,
                     page_size,
                     offset,
                 )

@@ -179,6 +179,7 @@ Authorization: Bearer <token>
 |-------|------|-------------|
 | `status` | string | Filter by one or more statuses (comma-separated): `pending`, `active`, `escalated`, `withdrawn`, `expired`, `rejected` |
 | `customer_id` | string | Filter by customer |
+| `victim_ip` | string | Filter by exact victim IP |
 | `pop` | string | Filter by POP (or "all") |
 | `limit` | integer | Max results (default 100, max 1000) |
 | `offset` | integer | Pagination offset |

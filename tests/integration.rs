@@ -405,6 +405,61 @@ async fn test_ingest_event() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 }
 
+#[tokio::test]
+async fn test_list_mitigations_filters_by_victim_ip() {
+    let app = setup_app().await;
+
+    let event_a = r#"{
+        "timestamp": "2026-01-16T14:00:00Z",
+        "source": "test",
+        "victim_ip": "203.0.113.10",
+        "vector": "udp_flood",
+        "pps": 50000
+    }"#;
+    let event_b = r#"{
+        "timestamp": "2026-01-16T14:00:01Z",
+        "source": "test",
+        "victim_ip": "203.0.113.11",
+        "vector": "syn_flood",
+        "pps": 25000
+    }"#;
+
+    for body in [event_a, event_b] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/mitigations?victim_ip=203.0.113.10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["count"], 1);
+    assert_eq!(json["mitigations"][0]["victim_ip"], "203.0.113.10");
+}
+
 // Auth tests with bearer token
 fn test_settings_with_bearer() -> Settings {
     let mut settings = test_settings();
