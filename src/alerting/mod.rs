@@ -7,10 +7,13 @@ mod teams;
 mod telegram;
 
 use crate::domain::Mitigation;
+use anyhow::Result;
 use once_cell::sync::Lazy;
 use prometheus::CounterVec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -27,7 +30,7 @@ pub static ALERTS_SENT: Lazy<CounterVec> = Lazy::new(|| {
 const MAX_IN_FLIGHT_ALERT_TASKS: usize = 64;
 
 /// Alert event types
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AlertEventType {
     #[serde(rename = "mitigation.created")]
@@ -226,7 +229,7 @@ impl Alert {
 }
 
 /// Configuration for a single alert destination
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum DestinationConfig {
     Slack {
@@ -332,13 +335,268 @@ impl DestinationConfig {
     }
 }
 
-/// Top-level alerting config in prefixd.yaml
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+const REDACTED: &str = "***";
+
+/// Top-level alerting config
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AlertingConfig {
     #[serde(default)]
     pub destinations: Vec<DestinationConfig>,
     #[serde(default)]
     pub events: Vec<AlertEventType>,
+}
+
+impl AlertingConfig {
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let config: AlertingConfig = serde_yaml::from_str(&content)?;
+        Ok(config)
+    }
+
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let path = path.as_ref();
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("invalid alerting config path"))?;
+        let tmp_path = parent.join(format!(
+            ".{}.tmp-{}",
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("alerting.yaml"),
+            uuid::Uuid::new_v4()
+        ));
+
+        if std::fs::symlink_metadata(path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(anyhow::anyhow!(
+                "refusing to write alerting config through symlink"
+            ));
+        }
+
+        if path.exists() {
+            let bak = path.with_extension("yaml.bak");
+            if std::fs::symlink_metadata(&bak)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                return Err(anyhow::anyhow!(
+                    "refusing to write alerting backup through symlink"
+                ));
+            }
+            std::fs::copy(path, &bak)?;
+        }
+
+        let yaml = serde_yaml::to_string(self)?;
+        let mut tmp_file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)?;
+
+        tmp_file.write_all(yaml.as_bytes())?;
+        tmp_file.sync_all()?;
+        drop(tmp_file);
+
+        std::fs::rename(&tmp_path, path).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp_path);
+        })?;
+
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        for (i, dest) in self.destinations.iter().enumerate() {
+            let ctx = format!("destination[{}] ({})", i, dest.destination_type());
+            match dest {
+                DestinationConfig::Slack { webhook_url, .. } => {
+                    if webhook_url.is_empty() || webhook_url == REDACTED {
+                        errors.push(format!("{}: webhook_url is required", ctx));
+                    } else if webhook_url.len() > 1024 {
+                        errors.push(format!("{}: webhook_url exceeds 1024 chars", ctx));
+                    }
+                }
+                DestinationConfig::Discord { webhook_url } => {
+                    if webhook_url.is_empty() || webhook_url == REDACTED {
+                        errors.push(format!("{}: webhook_url is required", ctx));
+                    } else if webhook_url.len() > 1024 {
+                        errors.push(format!("{}: webhook_url exceeds 1024 chars", ctx));
+                    }
+                }
+                DestinationConfig::Teams { webhook_url } => {
+                    if webhook_url.is_empty() || webhook_url == REDACTED {
+                        errors.push(format!("{}: webhook_url is required", ctx));
+                    } else if webhook_url.len() > 1024 {
+                        errors.push(format!("{}: webhook_url exceeds 1024 chars", ctx));
+                    }
+                }
+                DestinationConfig::Telegram { bot_token, chat_id } => {
+                    if bot_token.is_empty() || bot_token == REDACTED {
+                        errors.push(format!("{}: bot_token is required", ctx));
+                    }
+                    if chat_id.is_empty() {
+                        errors.push(format!("{}: chat_id is required", ctx));
+                    } else if chat_id.len() > 64 {
+                        errors.push(format!("{}: chat_id exceeds 64 chars", ctx));
+                    }
+                }
+                DestinationConfig::Pagerduty {
+                    routing_key,
+                    events_url,
+                } => {
+                    if routing_key.is_empty() || routing_key == REDACTED {
+                        errors.push(format!("{}: routing_key is required", ctx));
+                    }
+                    if events_url.is_empty() {
+                        errors.push(format!("{}: events_url is required", ctx));
+                    } else if events_url.len() > 1024 {
+                        errors.push(format!("{}: events_url exceeds 1024 chars", ctx));
+                    }
+                }
+                DestinationConfig::Opsgenie { api_key, region } => {
+                    if api_key.is_empty() || api_key == REDACTED {
+                        errors.push(format!("{}: api_key is required", ctx));
+                    }
+                    if region != "us" && region != "eu" {
+                        errors.push(format!("{}: region must be 'us' or 'eu'", ctx));
+                    }
+                }
+                DestinationConfig::Generic { url, .. } => {
+                    if url.is_empty() {
+                        errors.push(format!("{}: url is required", ctx));
+                    } else if url.len() > 1024 {
+                        errors.push(format!("{}: url exceeds 1024 chars", ctx));
+                    }
+                }
+            }
+        }
+
+        errors
+    }
+
+    /// Merge redacted secret sentinel values with real secrets from the current config.
+    /// Returns errors if a "***" value has no matching existing destination to inherit from.
+    pub fn merge_secrets(&mut self, current: &AlertingConfig) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        for (i, dest) in self.destinations.iter_mut().enumerate() {
+            let ctx = format!("destination[{}] ({})", i, dest.destination_type());
+            match dest {
+                DestinationConfig::Slack { webhook_url, .. } => {
+                    if webhook_url.as_str() == REDACTED {
+                        let found = current.destinations.iter().find_map(|d| match d {
+                            DestinationConfig::Slack { webhook_url: u, .. } => Some(u.clone()),
+                            _ => None,
+                        });
+                        match found {
+                            Some(u) => *webhook_url = u,
+                            None => errors.push(format!("{}: cannot resolve redacted webhook_url — no existing Slack destination", ctx)),
+                        }
+                    }
+                }
+                DestinationConfig::Discord { webhook_url } => {
+                    if webhook_url.as_str() == REDACTED {
+                        let found = current.destinations.iter().find_map(|d| match d {
+                            DestinationConfig::Discord { webhook_url: u } => Some(u.clone()),
+                            _ => None,
+                        });
+                        match found {
+                            Some(u) => *webhook_url = u,
+                            None => errors.push(format!("{}: cannot resolve redacted webhook_url — no existing Discord destination", ctx)),
+                        }
+                    }
+                }
+                DestinationConfig::Teams { webhook_url } => {
+                    if webhook_url.as_str() == REDACTED {
+                        let found = current.destinations.iter().find_map(|d| match d {
+                            DestinationConfig::Teams { webhook_url: u } => Some(u.clone()),
+                            _ => None,
+                        });
+                        match found {
+                            Some(u) => *webhook_url = u,
+                            None => errors.push(format!("{}: cannot resolve redacted webhook_url — no existing Teams destination", ctx)),
+                        }
+                    }
+                }
+                DestinationConfig::Telegram { bot_token, chat_id } => {
+                    if bot_token.as_str() == REDACTED {
+                        let cid = chat_id.clone();
+                        let found = current.destinations.iter().find_map(|d| match d {
+                            DestinationConfig::Telegram {
+                                bot_token: t,
+                                chat_id: c,
+                            } if c == &cid => Some(t.clone()),
+                            _ => None,
+                        });
+                        match found {
+                            Some(t) => *bot_token = t,
+                            None => errors.push(format!("{}: cannot resolve redacted bot_token — no existing Telegram destination with chat_id={}", ctx, chat_id)),
+                        }
+                    }
+                }
+                DestinationConfig::Pagerduty {
+                    routing_key,
+                    events_url,
+                } => {
+                    if routing_key.as_str() == REDACTED {
+                        let eu = events_url.clone();
+                        let found = current.destinations.iter().find_map(|d| match d {
+                            DestinationConfig::Pagerduty {
+                                routing_key: k,
+                                events_url: e,
+                            } if e == &eu => Some(k.clone()),
+                            _ => None,
+                        });
+                        match found {
+                            Some(k) => *routing_key = k,
+                            None => errors.push(format!("{}: cannot resolve redacted routing_key — no existing PagerDuty destination", ctx)),
+                        }
+                    }
+                }
+                DestinationConfig::Opsgenie { api_key, region } => {
+                    if api_key.as_str() == REDACTED {
+                        let r = region.clone();
+                        let found = current.destinations.iter().find_map(|d| match d {
+                            DestinationConfig::Opsgenie {
+                                api_key: k,
+                                region: reg,
+                            } if reg == &r => Some(k.clone()),
+                            _ => None,
+                        });
+                        match found {
+                            Some(k) => *api_key = k,
+                            None => errors.push(format!("{}: cannot resolve redacted api_key — no existing OpsGenie destination for region={}", ctx, region)),
+                        }
+                    }
+                }
+                DestinationConfig::Generic { secret, url, .. } => {
+                    if secret.as_deref() == Some(REDACTED) {
+                        let u = url.clone();
+                        let found = current.destinations.iter().find_map(|d| match d {
+                            DestinationConfig::Generic {
+                                secret: s,
+                                url: existing_url,
+                                ..
+                            } if existing_url == &u => s.clone(),
+                            _ => None,
+                        });
+                        match found {
+                            Some(s) => *secret = Some(s),
+                            None => errors.push(format!("{}: cannot resolve redacted secret — no existing Generic destination for url={}", ctx, url)),
+                        }
+                    }
+                }
+            }
+        }
+
+        errors
+    }
 }
 
 /// The alerting service that dispatches to all configured destinations
@@ -527,6 +785,157 @@ mod tests {
         let json = serde_json::to_string(&alert).unwrap();
         assert!(json.contains("mitigation.created"));
         assert!(json.contains("203.0.113.1"));
+    }
+
+    #[test]
+    fn test_validate_empty_config_ok() {
+        let config = AlertingConfig::default();
+        assert!(config.validate().is_empty());
+    }
+
+    #[test]
+    fn test_validate_missing_webhook_url() {
+        let config = AlertingConfig {
+            destinations: vec![DestinationConfig::Slack {
+                webhook_url: "".into(),
+                channel: None,
+            }],
+            events: vec![],
+        };
+        let errors = config.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("webhook_url is required"));
+    }
+
+    #[test]
+    fn test_validate_redacted_sentinel_rejected() {
+        let config = AlertingConfig {
+            destinations: vec![DestinationConfig::Discord {
+                webhook_url: "***".into(),
+            }],
+            events: vec![],
+        };
+        let errors = config.validate();
+        assert!(errors[0].contains("webhook_url is required"));
+    }
+
+    #[test]
+    fn test_validate_telegram_missing_fields() {
+        let config = AlertingConfig {
+            destinations: vec![DestinationConfig::Telegram {
+                bot_token: "".into(),
+                chat_id: "".into(),
+            }],
+            events: vec![],
+        };
+        let errors = config.validate();
+        assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn test_validate_opsgenie_bad_region() {
+        let config = AlertingConfig {
+            destinations: vec![DestinationConfig::Opsgenie {
+                api_key: "key123".into(),
+                region: "ap".into(),
+            }],
+            events: vec![],
+        };
+        let errors = config.validate();
+        assert!(errors[0].contains("region must be"));
+    }
+
+    #[test]
+    fn test_merge_secrets_preserves_existing() {
+        let current = AlertingConfig {
+            destinations: vec![DestinationConfig::Slack {
+                webhook_url: "https://hooks.slack.com/real-secret".into(),
+                channel: Some("#alerts".into()),
+            }],
+            events: vec![],
+        };
+        let mut incoming = AlertingConfig {
+            destinations: vec![DestinationConfig::Slack {
+                webhook_url: "***".into(),
+                channel: Some("#new-channel".into()),
+            }],
+            events: vec![],
+        };
+        let errors = incoming.merge_secrets(&current);
+        assert!(errors.is_empty());
+        if let DestinationConfig::Slack {
+            webhook_url,
+            channel,
+        } = &incoming.destinations[0]
+        {
+            assert_eq!(webhook_url, "https://hooks.slack.com/real-secret");
+            assert_eq!(channel.as_deref(), Some("#new-channel"));
+        } else {
+            panic!("expected Slack");
+        }
+    }
+
+    #[test]
+    fn test_merge_secrets_new_dest_with_redacted_fails() {
+        let current = AlertingConfig::default();
+        let mut incoming = AlertingConfig {
+            destinations: vec![DestinationConfig::Discord {
+                webhook_url: "***".into(),
+            }],
+            events: vec![],
+        };
+        let errors = incoming.merge_secrets(&current);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("cannot resolve"));
+    }
+
+    #[test]
+    fn test_merge_secrets_generic_by_url() {
+        let current = AlertingConfig {
+            destinations: vec![DestinationConfig::Generic {
+                url: "https://example.com/hook".into(),
+                secret: Some("real-secret".into()),
+                headers: HashMap::new(),
+            }],
+            events: vec![],
+        };
+        let mut incoming = AlertingConfig {
+            destinations: vec![DestinationConfig::Generic {
+                url: "https://example.com/hook".into(),
+                secret: Some("***".into()),
+                headers: HashMap::new(),
+            }],
+            events: vec![],
+        };
+        let errors = incoming.merge_secrets(&current);
+        assert!(errors.is_empty());
+        if let DestinationConfig::Generic { secret, .. } = &incoming.destinations[0] {
+            assert_eq!(secret.as_deref(), Some("real-secret"));
+        }
+    }
+
+    #[test]
+    fn test_save_and_load_roundtrip() {
+        let config = AlertingConfig {
+            destinations: vec![
+                DestinationConfig::Slack {
+                    webhook_url: "https://hooks.slack.com/test".into(),
+                    channel: Some("#test".into()),
+                },
+                DestinationConfig::Generic {
+                    url: "https://example.com".into(),
+                    secret: None,
+                    headers: HashMap::new(),
+                },
+            ],
+            events: vec![AlertEventType::MitigationCreated],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alerting.yaml");
+        config.save(&path).unwrap();
+        let loaded = AlertingConfig::load(&path).unwrap();
+        assert_eq!(loaded.destinations.len(), 2);
+        assert_eq!(loaded.events.len(), 1);
     }
 
     #[test]

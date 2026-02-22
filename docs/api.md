@@ -762,6 +762,44 @@ Returns configured alert destinations with secrets redacted.
 }
 ```
 
+### Update Alerting Config
+
+```http
+PUT /v1/config/alerting
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "destinations": [
+    {
+      "type": "slack",
+      "webhook_url": "https://hooks.slack.com/services/T.../B.../xxx",
+      "channel": "#ddos-alerts"
+    }
+  ],
+  "events": ["mitigation.created", "mitigation.withdrawn"]
+}
+```
+
+**Admin only.** Validates, merges redacted secrets (`***`) with existing values, writes to `alerting.yaml` (with `.bak` backup), and hot-reloads the alerting service. Returns the updated config with secrets redacted.
+
+**Secret merge:** If a secret field (e.g. `webhook_url`, `bot_token`, `routing_key`, `api_key`, `secret`) equals `"***"`, the server carries forward the real secret from the matching existing destination. New destinations must provide actual secrets.
+
+**Validation rules:**
+- Slack/Discord/Teams: `webhook_url` required, max 1024 chars
+- Telegram: `bot_token` and `chat_id` required
+- PagerDuty: `routing_key` required, `events_url` max 1024 chars
+- OpsGenie: `api_key` required, `region` must be `us` or `eu`
+- Generic: `url` required, max 1024 chars
+
+**Error response (400):**
+
+```json
+{
+  "errors": ["destination[0] (slack): webhook_url is required"]
+}
+```
+
 ### Test Alerting
 
 ```http

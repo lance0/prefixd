@@ -139,6 +139,7 @@ See `docs/adr/` for all 15 Architecture Decision Records.
 - `PUT /v1/config/playbooks` - Update playbooks (admin only, writes YAML + hot-reload)
 - `POST /v1/config/reload` - Hot-reload inventory + playbooks
 - `GET /v1/config/alerting` - Alerting config (secrets redacted)
+- `PUT /v1/config/alerting` - Update alerting config (admin only, writes YAML + hot-reload)
 - `POST /v1/config/alerting/test` - Send test alert to all destinations (admin only)
 - `GET /v1/stats` - Global statistics
 - `GET /v1/stats/timeseries` - Time-series data for charts

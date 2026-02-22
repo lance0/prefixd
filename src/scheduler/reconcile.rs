@@ -7,6 +7,7 @@ use crate::bgp::FlowSpecAnnouncer;
 use crate::db::RepositoryTrait;
 use crate::domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule, MitigationStatus};
 use crate::ws::WsMessage;
+use tokio::sync::RwLock;
 
 pub struct ReconciliationLoop {
     repo: Arc<dyn RepositoryTrait>,
@@ -14,7 +15,7 @@ pub struct ReconciliationLoop {
     interval: Duration,
     dry_run: bool,
     ws_broadcast: Option<broadcast::Sender<WsMessage>>,
-    alerting: Option<Arc<AlertingService>>,
+    alerting: Option<Arc<RwLock<Arc<AlertingService>>>>,
 }
 
 impl ReconciliationLoop {
@@ -40,7 +41,7 @@ impl ReconciliationLoop {
         self
     }
 
-    pub fn with_alerting(mut self, alerting: Arc<AlertingService>) -> Self {
+    pub fn with_alerting(mut self, alerting: Arc<RwLock<Arc<AlertingService>>>) -> Self {
         self.alerting = Some(alerting);
         self
     }
@@ -119,7 +120,8 @@ impl ReconciliationLoop {
                 });
             }
 
-            if let Some(ref alerting) = self.alerting {
+            if let Some(ref alerting_lock) = self.alerting {
+                let alerting = alerting_lock.read().await.clone();
                 alerting.notify(crate::alerting::Alert::mitigation_expired(&mitigation));
             }
         }

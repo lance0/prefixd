@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Load config
-    let config = AppConfig::load(&cli.config)?;
+    let mut config = AppConfig::load(&cli.config)?;
 
     // Init logging
     init_tracing(
@@ -71,6 +71,14 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(gobgp)
         }
     };
+
+    // Load alerting config from alerting.yaml if present, falling back to prefixd.yaml
+    let alerting_path = cli.config.join("alerting.yaml");
+    if alerting_path.exists() {
+        let alerting_config = prefixd::alerting::AlertingConfig::load(&alerting_path)?;
+        config.settings.alerting = alerting_config;
+        tracing::info!("loaded alerting.yaml");
+    }
 
     // Build app state
     let state = AppState::with_pool(

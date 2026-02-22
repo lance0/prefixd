@@ -83,7 +83,10 @@ fn api_routes() -> Router<Arc<AppState>> {
             "/v1/operators/{id}/password",
             axum::routing::put(handlers::change_password),
         )
-        .route("/v1/config/alerting", get(handlers::get_alerting_config))
+        .route(
+            "/v1/config/alerting",
+            get(handlers::get_alerting_config).put(handlers::update_alerting_config),
+        )
         .route("/v1/config/alerting/test", post(handlers::test_alerting))
 }
 

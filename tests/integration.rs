@@ -149,6 +149,27 @@ async fn setup_app() -> axum::Router {
     setup_app_with_config_dir(std::path::PathBuf::from(".")).await
 }
 
+async fn setup_app_bearer_with_config_dir(config_dir: std::path::PathBuf) -> axum::Router {
+    unsafe {
+        std::env::set_var("TEST_PREFIXD_TOKEN", "test-secret-token-123");
+    }
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+
+    let state = AppState::new(
+        test_settings_with_bearer(),
+        test_inventory(),
+        test_playbooks(),
+        repo,
+        announcer,
+        config_dir,
+    )
+    .expect("failed to create app state");
+
+    create_test_router(state)
+}
+
 #[tokio::test]
 async fn test_health_endpoint() {
     let app = setup_app().await;
@@ -683,6 +704,128 @@ async fn test_update_playbooks_bearer_operator_forbidden() {
                 .header("Authorization", "Bearer test-secret-token-123")
                 .header("content-type", "application/json")
                 .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// ─── Alerting PUT tests ───
+
+#[tokio::test]
+async fn test_update_alerting_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = setup_app_with_config_dir(dir.path().to_path_buf()).await;
+
+    let body = serde_json::json!({
+        "destinations": [
+            {
+                "type": "slack",
+                "webhook_url": "https://hooks.slack.com/services/T/B/xxx",
+                "channel": "#alerts"
+            }
+        ],
+        "events": ["mitigation.created", "mitigation.withdrawn"]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/config/alerting")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["destinations"][0]["type"], "slack");
+    assert_eq!(json["destinations"][0]["webhook_url"], "***");
+    assert_eq!(json["events"].as_array().unwrap().len(), 2);
+
+    // Verify file was written
+    let alerting_path = dir.path().join("alerting.yaml");
+    assert!(alerting_path.exists());
+}
+
+#[tokio::test]
+async fn test_update_alerting_validation_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = setup_app_with_config_dir(dir.path().to_path_buf()).await;
+
+    let body = serde_json::json!({
+        "destinations": [
+            {
+                "type": "slack",
+                "webhook_url": "",
+                "channel": "#alerts"
+            }
+        ],
+        "events": []
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/config/alerting")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_update_alerting_invalid_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = setup_app_with_config_dir(dir.path().to_path_buf()).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/config/alerting")
+                .header("content-type", "application/json")
+                .body(Body::from("not json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_update_alerting_operator_forbidden() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = setup_app_bearer_with_config_dir(dir.path().to_path_buf()).await;
+
+    let body = serde_json::json!({
+        "destinations": [],
+        "events": []
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/config/alerting")
+                .header("Authorization", "Bearer test-secret-token-123")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
                 .unwrap(),
         )
         .await

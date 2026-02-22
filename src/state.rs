@@ -31,8 +31,10 @@ pub struct AppState {
     pub inventory_loaded_at: RwLock<DateTime<Utc>>,
     /// Timestamp when playbooks were last loaded/reloaded
     pub playbooks_loaded_at: RwLock<DateTime<Utc>>,
-    /// Alerting service for webhook notifications
-    pub alerting: Arc<AlertingService>,
+    /// Alerting service for webhook notifications (RwLock for hot-swap on config update)
+    pub alerting: Arc<RwLock<Arc<AlertingService>>>,
+    /// Timestamp when alerting config was last loaded
+    pub alerting_loaded_at: RwLock<DateTime<Utc>>,
     /// PostgreSQL pool for metrics (None in tests with MockRepository)
     pub db_pool: Option<PgPool>,
     config_dir: PathBuf,
@@ -100,7 +102,8 @@ impl AppState {
             shutdown_tx,
             ws_broadcast,
             bearer_token,
-            alerting,
+            alerting: Arc::new(RwLock::new(alerting)),
+            alerting_loaded_at: RwLock::new(Utc::now()),
             start_time: Instant::now(),
             inventory_loaded_at: RwLock::new(Utc::now()),
             playbooks_loaded_at: RwLock::new(Utc::now()),
@@ -131,6 +134,10 @@ impl AppState {
         self.config_dir.join("playbooks.yaml")
     }
 
+    pub fn alerting_path(&self) -> PathBuf {
+        self.config_dir.join("alerting.yaml")
+    }
+
     /// Reload inventory and playbooks from config files
     pub async fn reload_config(&self) -> Result<Vec<String>> {
         let mut reloaded = Vec::new();
@@ -155,6 +162,18 @@ impl AppState {
             *self.playbooks_loaded_at.write().await = Utc::now();
             reloaded.push("playbooks".to_string());
             tracing::info!("reloaded playbooks.yaml");
+        }
+
+        // Reload alerting (from alerting.yaml if present)
+        let alerting_path = self.alerting_path();
+        if alerting_path.exists() {
+            let new_config = crate::alerting::AlertingConfig::load(&alerting_path)
+                .map_err(|e| PrefixdError::Config(format!("alerting: {}", e)))?;
+            let new_service = AlertingService::new(new_config);
+            *self.alerting.write().await = new_service;
+            *self.alerting_loaded_at.write().await = Utc::now();
+            reloaded.push("alerting".to_string());
+            tracing::info!("reloaded alerting.yaml");
         }
 
         Ok(reloaded)

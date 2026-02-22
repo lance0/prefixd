@@ -473,6 +473,8 @@ async fn handle_unban(
 
     state
         .alerting
+        .read()
+        .await
         .notify(crate::alerting::Alert::mitigation_withdrawn(&mitigation));
 
     tracing::info!(
@@ -662,6 +664,8 @@ async fn handle_ban(
 
     state
         .alerting
+        .read()
+        .await
         .notify(crate::alerting::Alert::mitigation_created(&mitigation));
 
     tracing::info!(
@@ -1032,6 +1036,8 @@ pub async fn withdraw_mitigation(
 
     state
         .alerting
+        .read()
+        .await
         .notify(crate::alerting::Alert::mitigation_withdrawn(&mitigation));
 
     tracing::info!(
@@ -2327,7 +2333,8 @@ pub async fn get_alerting_config(
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
-    let config = state.alerting.config();
+    let alerting = state.alerting.read().await;
+    let config = alerting.config();
     let destinations: Vec<serde_json::Value> =
         config.destinations.iter().map(|d| d.redacted()).collect();
 
@@ -2335,6 +2342,103 @@ pub async fn get_alerting_config(
         "destinations": destinations,
         "events": config.events,
     })))
+}
+
+/// Update alerting configuration
+#[utoipa::path(
+    put,
+    path = "/v1/config/alerting",
+    tag = "config",
+    responses(
+        (status = 200, description = "Updated alerting configuration"),
+        (status = 400, description = "Validation error"),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "Insufficient permissions")
+    )
+)]
+pub async fn update_alerting_config(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
+    body: Result<Json<crate::alerting::AlertingConfig>, axum::extract::rejection::JsonRejection>,
+) -> Result<impl IntoResponse, StatusCode> {
+    use super::auth::require_role;
+    use crate::domain::OperatorRole;
+    use crate::observability::{ActorType, AuditEntry};
+
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+
+    let Json(mut new_config) = match body {
+        Ok(payload) => payload,
+        Err(rejection) => {
+            tracing::warn!(error = %rejection, "invalid alerting config payload");
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
+
+    // Merge redacted secrets with current config
+    let current_config = state.alerting.read().await.config().clone();
+    let merge_errors = new_config.merge_secrets(&current_config);
+    if !merge_errors.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "errors": merge_errors })),
+        )
+            .into_response());
+    }
+
+    // Validate after secret merge
+    let errors = new_config.validate();
+    if !errors.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "errors": errors })),
+        )
+            .into_response());
+    }
+
+    // Atomic save to alerting.yaml
+    let alerting_path = state.alerting_path();
+    new_config.save(&alerting_path).map_err(|e| {
+        tracing::error!(error = %e, "failed to save alerting config");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Rebuild service and hot-swap
+    let old_count = current_config.destinations.len();
+    let new_service = crate::alerting::AlertingService::new(new_config.clone());
+    *state.alerting.write().await = new_service;
+    *state.alerting_loaded_at.write().await = chrono::Utc::now();
+
+    // Audit log
+    let audit = AuditEntry::new(
+        ActorType::Operator,
+        Some(operator.username.clone()),
+        "update_alerting",
+        Some("config"),
+        None,
+        serde_json::json!({
+            "previous_destinations": old_count,
+            "new_destinations": new_config.destinations.len(),
+        }),
+    );
+    if let Err(e) = state.repo.insert_audit(&audit).await {
+        tracing::warn!(error = %e, "failed to insert audit entry for alerting update");
+    }
+
+    // Return redacted config
+    let destinations: Vec<serde_json::Value> = new_config
+        .destinations
+        .iter()
+        .map(|d| d.redacted())
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "destinations": destinations,
+        "events": new_config.events,
+    }))
+    .into_response())
 }
 
 /// Send a test alert to all configured destinations
@@ -2360,7 +2464,8 @@ pub async fn test_alerting(
     require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
 
     let alert = crate::alerting::Alert::test_alert();
-    let results = state.alerting.dispatch(&alert).await;
+    let alerting = state.alerting.read().await.clone();
+    let results = alerting.dispatch(&alert).await;
 
     let outcomes: Vec<serde_json::Value> = results
         .into_iter()

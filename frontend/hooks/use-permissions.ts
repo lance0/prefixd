@@ -34,6 +34,7 @@ export function usePermissions() {
     canManageUsers: authDisabled || role === "admin",
     canReloadConfig: authDisabled || role === "admin",
     canEditPlaybooks: authDisabled || role === "admin",
+    canEditAlerting: authDisabled || role === "admin",
 
     // Current role (for display)
     role: authDisabled ? "admin" : role,

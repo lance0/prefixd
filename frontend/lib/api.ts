@@ -516,6 +516,18 @@ export async function testAlerting(): Promise<AlertingTestResponse> {
   return fetchApi<AlertingTestResponse>("/v1/config/alerting/test", { method: "POST" })
 }
 
+export interface UpdateAlertingRequest {
+  destinations: AlertingDestination[]
+  events: string[]
+}
+
+export async function updateAlertingConfig(config: UpdateAlertingRequest): Promise<AlertingConfigResponse> {
+  return fetchApi<AlertingConfigResponse>("/v1/config/alerting", {
+    method: "PUT",
+    body: JSON.stringify(config),
+  })
+}
+
 export async function getIpHistory(ip: string, limit?: number): Promise<IpHistoryResponse> {
   const searchParams = new URLSearchParams()
   if (limit) searchParams.set("limit", limit.toString())
