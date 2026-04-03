@@ -55,8 +55,18 @@ impl ReconciliationLoop {
         );
 
         // Initial reconciliation
-        if let Err(e) = self.reconcile().await {
-            tracing::error!(error = %e, "initial reconciliation failed");
+        match self.reconcile().await {
+            Ok(()) => {
+                crate::observability::metrics::RECONCILIATION_RUNS
+                    .with_label_values(&["success"])
+                    .inc();
+            }
+            Err(e) => {
+                crate::observability::metrics::RECONCILIATION_RUNS
+                    .with_label_values(&["error"])
+                    .inc();
+                tracing::error!(error = %e, "initial reconciliation failed");
+            }
         }
 
         let mut interval = tokio::time::interval(self.interval);
@@ -65,8 +75,18 @@ impl ReconciliationLoop {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    if let Err(e) = self.reconcile().await {
-                        tracing::error!(error = %e, "reconciliation failed");
+                    match self.reconcile().await {
+                        Ok(()) => {
+                            crate::observability::metrics::RECONCILIATION_RUNS
+                                .with_label_values(&["success"])
+                                .inc();
+                        }
+                        Err(e) => {
+                            crate::observability::metrics::RECONCILIATION_RUNS
+                                .with_label_values(&["error"])
+                                .inc();
+                            tracing::error!(error = %e, "reconciliation failed");
+                        }
                     }
                 }
                 _ = shutdown.recv() => {
