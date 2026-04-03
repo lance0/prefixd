@@ -533,9 +533,20 @@ async fn handle_unban(
         let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
         let rule = FlowSpecRule::new(nlri, action);
 
+        let start = std::time::Instant::now();
         if let Err(e) = state.announcer.withdraw(&rule).await {
+            crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                .with_label_values(&["unknown", "error"])
+                .inc();
             tracing::error!(error = %e, "BGP withdrawal failed");
             // Continue anyway - mark as withdrawn in DB
+        } else {
+            crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                .with_label_values(&["unknown", "withdrawn"])
+                .inc();
+            crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+                .with_label_values(&["unknown"])
+                .observe(start.elapsed().as_secs_f64());
         }
     }
 
@@ -903,7 +914,11 @@ async fn handle_ban(
         let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
         let rule = FlowSpecRule::new(nlri, action);
 
+        let start = std::time::Instant::now();
         if let Err(e) = state.announcer.announce(&rule).await {
+            crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                .with_label_values(&["unknown", "error"])
+                .inc();
             tracing::error!(error = %e, "BGP announcement failed");
             mitigation.reject(e.to_string());
             state
@@ -913,6 +928,12 @@ async fn handle_ban(
                 .map_err(AppError)?;
             return Err(AppError(e));
         }
+        crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+            .with_label_values(&["unknown", "announced"])
+            .inc();
+        crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+            .with_label_values(&["unknown"])
+            .observe(start.elapsed().as_secs_f64());
     }
 
     mitigation.activate();
@@ -1400,9 +1421,19 @@ pub async fn create_mitigation(
         let nlri = FlowSpecNlri::from(&mitigation.match_criteria);
         let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
         let rule = FlowSpecRule::new(nlri, action);
+        let start = std::time::Instant::now();
         if let Err(e) = state.announcer.announce(&rule).await {
+            crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                .with_label_values(&["unknown", "error"])
+                .inc();
             return Ok(AppError(e).into_response());
         }
+        crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+            .with_label_values(&["unknown", "announced"])
+            .inc();
+        crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+            .with_label_values(&["unknown"])
+            .observe(start.elapsed().as_secs_f64());
     }
 
     mitigation.activate();
@@ -1457,11 +1488,24 @@ pub async fn withdraw_mitigation(
         let nlri = FlowSpecNlri::from(&mitigation.match_criteria);
         let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
         let rule = FlowSpecRule::new(nlri, action);
+        let start = std::time::Instant::now();
         state
             .announcer
             .withdraw(&rule)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| {
+                crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                    .with_label_values(&["unknown", "error"])
+                    .inc();
+                let _ = e;
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+            .with_label_values(&["unknown", "withdrawn"])
+            .inc();
+        crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+            .with_label_values(&["unknown"])
+            .observe(start.elapsed().as_secs_f64());
     }
 
     let action_type_str = mitigation.action_type.to_string();
@@ -1593,8 +1637,19 @@ pub async fn bulk_withdraw_mitigations(
             let nlri = FlowSpecNlri::from(&mitigation.match_criteria);
             let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
             let rule = FlowSpecRule::new(nlri, action);
+            let start = std::time::Instant::now();
             if let Err(e) = state.announcer.withdraw(&rule).await {
+                crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                    .with_label_values(&["unknown", "error"])
+                    .inc();
                 tracing::error!(error = %e, mitigation_id = %id, "BGP withdrawal failed in bulk withdraw");
+            } else {
+                crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                    .with_label_values(&["unknown", "withdrawn"])
+                    .inc();
+                crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+                    .with_label_values(&["unknown"])
+                    .observe(start.elapsed().as_secs_f64());
             }
         }
 

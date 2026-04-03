@@ -107,12 +107,23 @@ impl ReconciliationLoop {
             // Withdraw BGP announcement
             if !self.dry_run {
                 let rule = self.build_flowspec_rule(&mitigation);
+                let start = std::time::Instant::now();
                 if let Err(e) = self.announcer.withdraw(&rule).await {
+                    crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                        .with_label_values(&["unknown", "error"])
+                        .inc();
                     tracing::warn!(
                         mitigation_id = %mitigation.mitigation_id,
                         error = %e,
                         "failed to withdraw expired mitigation"
                     );
+                } else {
+                    crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                        .with_label_values(&["unknown", "withdrawn"])
+                        .inc();
+                    crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+                        .with_label_values(&["unknown"])
+                        .observe(start.elapsed().as_secs_f64());
                 }
             }
 
@@ -243,12 +254,23 @@ impl ReconciliationLoop {
                 );
 
                 if !self.dry_run {
+                    let start = std::time::Instant::now();
                     if let Err(e) = self.announcer.announce(&rule).await {
+                        crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                            .with_label_values(&["unknown", "error"])
+                            .inc();
                         tracing::error!(
                             mitigation_id = %mitigation.mitigation_id,
                             error = %e,
                             "failed to re-announce"
                         );
+                    } else {
+                        crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                            .with_label_values(&["unknown", "announced"])
+                            .inc();
+                        crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+                            .with_label_values(&["unknown"])
+                            .observe(start.elapsed().as_secs_f64());
                     }
                 }
             }
