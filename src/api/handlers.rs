@@ -899,6 +899,15 @@ async fn handle_ban(
         crate::observability::metrics::EVENTS_REJECTED
             .with_label_values(&[&event.source, "guardrail"])
             .inc();
+        let reason = match &e {
+            PrefixdError::GuardrailViolation(g) => {
+                format!("{:?}", g).split_whitespace().next().unwrap_or("unknown").to_string()
+            }
+            _ => "unknown".to_string(),
+        };
+        crate::observability::metrics::GUARDRAIL_REJECTIONS
+            .with_label_values(&[&reason])
+            .inc();
         tracing::warn!(error = %e, "guardrail rejected mitigation");
         return Err(AppError(e));
     }
@@ -1410,6 +1419,15 @@ pub async fn create_mitigation(
         .validate(&intent, state.repo.as_ref(), is_safelisted)
         .await
     {
+        let reason = match &e {
+            PrefixdError::GuardrailViolation(g) => {
+                format!("{:?}", g).split_whitespace().next().unwrap_or("unknown").to_string()
+            }
+            _ => "unknown".to_string(),
+        };
+        crate::observability::metrics::GUARDRAIL_REJECTIONS
+            .with_label_values(&[&reason])
+            .inc();
         return Ok(AppError(e).into_response());
     }
 
