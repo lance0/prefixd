@@ -88,6 +88,9 @@ impl ReconciliationLoop {
         // 3. Sync desired vs actual state
         self.sync_announcements().await?;
 
+        // 4. Update BGP session metrics
+        self.update_bgp_session_metrics().await;
+
         Ok(())
     }
 
@@ -114,8 +117,14 @@ impl ReconciliationLoop {
             }
 
             // Update status
+            let action_type_str = mitigation.action_type.to_string();
+            let pop = mitigation.pop.clone();
             mitigation.expire();
             self.repo.update_mitigation(&mitigation).await?;
+
+            crate::observability::metrics::MITIGATIONS_EXPIRED
+                .with_label_values(&[&action_type_str, &pop])
+                .inc();
 
             // Broadcast expiry via WebSocket
             if let Some(ref tx) = self.ws_broadcast {
@@ -197,6 +206,25 @@ impl ReconciliationLoop {
             .with_label_values(&["local"])
             .set(active.len() as f64);
 
+        // Update MITIGATIONS_ACTIVE gauge by action_type and pop
+        {
+            use std::collections::HashMap;
+            let mut counts: HashMap<(String, String), f64> = HashMap::new();
+            for m in &active {
+                *counts
+                    .entry((m.action_type.to_string(), m.pop.clone()))
+                    .or_default() += 1.0;
+            }
+            // Reset all label combinations to zero first, then set observed values.
+            // This handles the case where a combination drops to zero.
+            crate::observability::metrics::MITIGATIONS_ACTIVE.reset();
+            for ((action_type, pop), count) in &counts {
+                crate::observability::metrics::MITIGATIONS_ACTIVE
+                    .with_label_values(&[action_type, pop])
+                    .set(*count);
+            }
+        }
+
         // Get actual state from BGP
         let announced = self.announcer.list_active().await?;
         let announced_hashes: std::collections::HashSet<_> =
@@ -243,6 +271,26 @@ impl ReconciliationLoop {
         }
 
         Ok(())
+    }
+
+    async fn update_bgp_session_metrics(&self) {
+        match self.announcer.session_status().await {
+            Ok(peers) => {
+                for peer in &peers {
+                    let value = if peer.state.is_established() {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    crate::observability::metrics::BGP_SESSION_UP
+                        .with_label_values(&[&peer.name])
+                        .set(value);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to fetch BGP session status for metrics");
+            }
+        }
     }
 
     fn build_flowspec_rule(&self, m: &crate::domain::Mitigation) -> FlowSpecRule {

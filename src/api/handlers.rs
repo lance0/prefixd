@@ -540,12 +540,17 @@ async fn handle_unban(
     }
 
     // Update mitigation status
+    let action_type_str = mitigation.action_type.to_string();
     mitigation.withdraw(Some(format!("Detector unban: {}", source)));
     state
         .repo
         .update_mitigation(&mitigation)
         .await
         .map_err(AppError)?;
+
+    crate::observability::metrics::MITIGATIONS_WITHDRAWN
+        .with_label_values(&[&action_type_str, &mitigation.pop, "detector_unban"])
+        .inc();
 
     // Broadcast withdrawal via WebSocket
     let _ = state
@@ -916,6 +921,10 @@ async fn handle_ban(
         .insert_mitigation(&mitigation)
         .await
         .map_err(AppError)?;
+
+    crate::observability::metrics::MITIGATIONS_CREATED
+        .with_label_values(&[&mitigation.action_type.to_string(), &state.settings.pop])
+        .inc();
 
     // Resolve signal group to 'resolved' now that mitigation is confirmed
     if let Some(group_id) = signal_group_id {
@@ -1401,6 +1410,10 @@ pub async fn create_mitigation(
         return Ok(AppError(e).into_response());
     }
 
+    crate::observability::metrics::MITIGATIONS_CREATED
+        .with_label_values(&[&mitigation.action_type.to_string(), &state.settings.pop])
+        .inc();
+
     Ok((
         StatusCode::CREATED,
         Json(MitigationResponse::from(&mitigation)),
@@ -1451,12 +1464,17 @@ pub async fn withdraw_mitigation(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
+    let action_type_str = mitigation.action_type.to_string();
     mitigation.withdraw(Some(format!("{}: {}", req.operator_id, req.reason)));
     state
         .repo
         .update_mitigation(&mitigation)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    crate::observability::metrics::MITIGATIONS_WITHDRAWN
+        .with_label_values(&[&action_type_str, &mitigation.pop, "operator"])
+        .inc();
 
     // Broadcast withdrawal via WebSocket
     let _ = state
