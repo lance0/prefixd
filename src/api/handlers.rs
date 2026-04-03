@@ -560,7 +560,11 @@ async fn handle_unban(
         .map_err(AppError)?;
 
     crate::observability::metrics::MITIGATIONS_WITHDRAWN
-        .with_label_values(&[action_type_str.as_str(), mitigation.pop.as_str(), "detector_unban"])
+        .with_label_values(&[
+            action_type_str.as_str(),
+            mitigation.pop.as_str(),
+            "detector_unban",
+        ])
         .inc();
 
     // Broadcast withdrawal via WebSocket
@@ -900,9 +904,11 @@ async fn handle_ban(
             .with_label_values(&[event.source.as_str(), "guardrail"])
             .inc();
         let reason = match &e {
-            PrefixdError::GuardrailViolation(g) => {
-                format!("{:?}", g).split_whitespace().next().unwrap_or("unknown").to_string()
-            }
+            PrefixdError::GuardrailViolation(g) => format!("{:?}", g)
+                .split_whitespace()
+                .next()
+                .unwrap_or("unknown")
+                .to_string(),
             _ => "unknown".to_string(),
         };
         crate::observability::metrics::GUARDRAIL_REJECTIONS
@@ -1420,9 +1426,11 @@ pub async fn create_mitigation(
         .await
     {
         let reason = match &e {
-            PrefixdError::GuardrailViolation(g) => {
-                format!("{:?}", g).split_whitespace().next().unwrap_or("unknown").to_string()
-            }
+            PrefixdError::GuardrailViolation(g) => format!("{:?}", g)
+                .split_whitespace()
+                .next()
+                .unwrap_or("unknown")
+                .to_string(),
             _ => "unknown".to_string(),
         };
         crate::observability::metrics::GUARDRAIL_REJECTIONS
@@ -1507,17 +1515,13 @@ pub async fn withdraw_mitigation(
         let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
         let rule = FlowSpecRule::new(nlri, action);
         let start = std::time::Instant::now();
-        state
-            .announcer
-            .withdraw(&rule)
-            .await
-            .map_err(|e| {
-                crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                    .with_label_values(&["unknown", "error"])
-                    .inc();
-                let _ = e;
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+        state.announcer.withdraw(&rule).await.map_err(|e| {
+            crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                .with_label_values(&["unknown", "error"])
+                .inc();
+            let _ = e;
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
         crate::observability::metrics::ANNOUNCEMENTS_TOTAL
             .with_label_values(&["unknown", "withdrawn"])
             .inc();
@@ -1535,7 +1539,11 @@ pub async fn withdraw_mitigation(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     crate::observability::metrics::MITIGATIONS_WITHDRAWN
-        .with_label_values(&[action_type_str.as_str(), mitigation.pop.as_str(), "operator"])
+        .with_label_values(&[
+            action_type_str.as_str(),
+            mitigation.pop.as_str(),
+            "operator",
+        ])
         .inc();
 
     // Broadcast withdrawal via WebSocket
