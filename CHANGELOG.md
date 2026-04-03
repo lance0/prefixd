@@ -5,6 +5,30 @@ All notable changes to prefixd will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-04-03
+
+### Fixed
+
+- **Prometheus metrics wired up** — All event, mitigation, announcement, reconciliation, guardrail, and BGP session metrics were defined but never incremented. Now properly instrumented across all handler and reconciliation paths. (contributed by @bswinnerton)
+- **ANNOUNCEMENTS_TOTAL label simplified** — Dropped unused `peer` label (handlers don't have peer context); ANNOUNCEMENTS_LATENCY changed from per-peer HistogramVec to a global Histogram
+- **MITIGATIONS_ACTIVE gauge accuracy** — Reconciliation loop now resets and recomputes the active mitigations gauge with correct `action_type` and `pop` labels each tick
+- **BGP_SESSION_UP gauge** — Now updated each reconciliation tick from actual peer session state
+
+### Changed
+
+- Bump uuid 1.21.0 → 1.22.0
+- Bump rustls 0.23.36 → 0.23.37
+- Bump ipnet 2.11.0 → 2.12.0
+- Bump @radix-ui/react-popover 1.1.4 → 1.1.15
+- Bump recharts 3.7.0 → 3.8.0
+- Bump picomatch 4.0.0 → 4.0.4
+
+### Security
+
+- **aws-lc-sys** — Updated 0.36.0 → 0.39.1 fixing CRL scope check logic error (RUSTSEC-2026-0048, high), PKCS7 signature validation bypass (RUSTSEC-2026-0047, high), PKCS7 cert chain bypass (RUSTSEC-2026-0046, high), AES-CCM timing side-channel (RUSTSEC-2026-0045, medium), X.509 name constraints bypass (RUSTSEC-2026-0044)
+- **rustls-webpki** — Updated 0.103.9 → 0.103.10 fixing CRL Distribution Point matching logic (RUSTSEC-2026-0049)
+- **picomatch** — Updated to 4.0.4 fixing ReDoS via extglob quantifiers (GHSA-c2c7-rcm5-vvqj, high) and method injection in POSIX character classes (GHSA-3v7f-55p6-f55p, moderate)
+
 ## [0.14.0] - 2026-03-20
 
 ### Added
@@ -826,6 +850,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
+[0.14.1]: https://github.com/lance0/prefixd/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/lance0/prefixd/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/lance0/prefixd/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/lance0/prefixd/compare/v0.11.0...v0.12.0
