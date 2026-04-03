@@ -129,9 +129,6 @@ impl ReconciliationLoop {
                 let rule = self.build_flowspec_rule(&mitigation);
                 let start = std::time::Instant::now();
                 if let Err(e) = self.announcer.withdraw(&rule).await {
-                    crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                        .with_label_values(&["error"])
-                        .inc();
                     tracing::warn!(
                         mitigation_id = %mitigation.mitigation_id,
                         error = %e,
@@ -276,9 +273,6 @@ impl ReconciliationLoop {
                 if !self.dry_run {
                     let start = std::time::Instant::now();
                     if let Err(e) = self.announcer.announce(&rule).await {
-                        crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                            .with_label_values(&["error"])
-                            .inc();
                         tracing::error!(
                             mitigation_id = %mitigation.mitigation_id,
                             error = %e,
