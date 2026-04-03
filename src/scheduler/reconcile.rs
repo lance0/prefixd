@@ -55,8 +55,18 @@ impl ReconciliationLoop {
         );
 
         // Initial reconciliation
-        if let Err(e) = self.reconcile().await {
-            tracing::error!(error = %e, "initial reconciliation failed");
+        match self.reconcile().await {
+            Ok(()) => {
+                crate::observability::metrics::RECONCILIATION_RUNS
+                    .with_label_values(&["success"])
+                    .inc();
+            }
+            Err(e) => {
+                crate::observability::metrics::RECONCILIATION_RUNS
+                    .with_label_values(&["error"])
+                    .inc();
+                tracing::error!(error = %e, "initial reconciliation failed");
+            }
         }
 
         let mut interval = tokio::time::interval(self.interval);
@@ -65,8 +75,18 @@ impl ReconciliationLoop {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    if let Err(e) = self.reconcile().await {
-                        tracing::error!(error = %e, "reconciliation failed");
+                    match self.reconcile().await {
+                        Ok(()) => {
+                            crate::observability::metrics::RECONCILIATION_RUNS
+                                .with_label_values(&["success"])
+                                .inc();
+                        }
+                        Err(e) => {
+                            crate::observability::metrics::RECONCILIATION_RUNS
+                                .with_label_values(&["error"])
+                                .inc();
+                            tracing::error!(error = %e, "reconciliation failed");
+                        }
                     }
                 }
                 _ = shutdown.recv() => {
@@ -88,6 +108,9 @@ impl ReconciliationLoop {
         // 3. Sync desired vs actual state
         self.sync_announcements().await?;
 
+        // 4. Update BGP session metrics
+        self.update_bgp_session_metrics().await;
+
         Ok(())
     }
 
@@ -104,18 +127,31 @@ impl ReconciliationLoop {
             // Withdraw BGP announcement
             if !self.dry_run {
                 let rule = self.build_flowspec_rule(&mitigation);
+                let start = std::time::Instant::now();
                 if let Err(e) = self.announcer.withdraw(&rule).await {
                     tracing::warn!(
                         mitigation_id = %mitigation.mitigation_id,
                         error = %e,
                         "failed to withdraw expired mitigation"
                     );
+                } else {
+                    crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                        .with_label_values(&["withdrawn"])
+                        .inc();
+                    crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+                        .observe(start.elapsed().as_secs_f64());
                 }
             }
 
             // Update status
+            let action_type_str = mitigation.action_type.to_string();
+            let pop = mitigation.pop.clone();
             mitigation.expire();
             self.repo.update_mitigation(&mitigation).await?;
+
+            crate::observability::metrics::MITIGATIONS_EXPIRED
+                .with_label_values(&[&action_type_str, &pop])
+                .inc();
 
             // Broadcast expiry via WebSocket
             if let Some(ref tx) = self.ws_broadcast {
@@ -197,6 +233,22 @@ impl ReconciliationLoop {
             .with_label_values(&["local"])
             .set(active.len() as f64);
 
+        {
+            use std::collections::HashMap;
+            let mut counts: HashMap<(String, String), f64> = HashMap::new();
+            for m in &active {
+                *counts
+                    .entry((m.action_type.to_string(), m.pop.clone()))
+                    .or_default() += 1.0;
+            }
+            crate::observability::metrics::MITIGATIONS_ACTIVE.reset();
+            for ((action_type, pop), count) in &counts {
+                crate::observability::metrics::MITIGATIONS_ACTIVE
+                    .with_label_values(&[action_type, pop])
+                    .set(*count);
+            }
+        }
+
         // Get actual state from BGP
         let announced = self.announcer.list_active().await?;
         let announced_hashes: std::collections::HashSet<_> =
@@ -215,12 +267,19 @@ impl ReconciliationLoop {
                 );
 
                 if !self.dry_run {
+                    let start = std::time::Instant::now();
                     if let Err(e) = self.announcer.announce(&rule).await {
                         tracing::error!(
                             mitigation_id = %mitigation.mitigation_id,
                             error = %e,
                             "failed to re-announce"
                         );
+                    } else {
+                        crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                            .with_label_values(&["announced"])
+                            .inc();
+                        crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+                            .observe(start.elapsed().as_secs_f64());
                     }
                 }
             }
@@ -243,6 +302,26 @@ impl ReconciliationLoop {
         }
 
         Ok(())
+    }
+
+    async fn update_bgp_session_metrics(&self) {
+        match self.announcer.session_status().await {
+            Ok(peers) => {
+                for peer in &peers {
+                    let value = if peer.state.is_established() {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    crate::observability::metrics::BGP_SESSION_UP
+                        .with_label_values(&[&peer.name])
+                        .set(value);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to fetch BGP session status for metrics");
+            }
+        }
     }
 
     fn build_flowspec_rule(&self, m: &crate::domain::Mitigation) -> FlowSpecRule {

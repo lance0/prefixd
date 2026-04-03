@@ -533,19 +533,35 @@ async fn handle_unban(
         let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
         let rule = FlowSpecRule::new(nlri, action);
 
+        let start = std::time::Instant::now();
         if let Err(e) = state.announcer.withdraw(&rule).await {
             tracing::error!(error = %e, "BGP withdrawal failed");
             // Continue anyway - mark as withdrawn in DB
+        } else {
+            crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                .with_label_values(&["withdrawn"])
+                .inc();
+            crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+                .observe(start.elapsed().as_secs_f64());
         }
     }
 
     // Update mitigation status
+    let action_type_str = mitigation.action_type.to_string();
     mitigation.withdraw(Some(format!("Detector unban: {}", source)));
     state
         .repo
         .update_mitigation(&mitigation)
         .await
         .map_err(AppError)?;
+
+    crate::observability::metrics::MITIGATIONS_WITHDRAWN
+        .with_label_values(&[
+            action_type_str.as_str(),
+            mitigation.pop.as_str(),
+            "detector_unban",
+        ])
+        .inc();
 
     // Broadcast withdrawal via WebSocket
     let _ = state
@@ -589,6 +605,9 @@ async fn handle_ban(
             .find_ban_event_by_external_id(&input.source, ext_id)
             .await
         {
+            crate::observability::metrics::EVENTS_REJECTED
+                .with_label_values(&[input.source.as_str(), "duplicate"])
+                .inc();
             return Err(AppError(PrefixdError::DuplicateEvent {
                 detector_source: input.source.clone(),
                 external_id: ext_id.clone(),
@@ -601,6 +620,10 @@ async fn handle_ban(
 
     // Store event
     state.repo.insert_event(&event).await.map_err(AppError)?;
+
+    crate::observability::metrics::EVENTS_INGESTED
+        .with_label_values(&[&event.source, &event.attack_vector().to_string()])
+        .inc();
 
     // Check if shutting down
     if state.is_shutting_down() {
@@ -873,6 +896,20 @@ async fn handle_ban(
         .validate(&intent, state.repo.as_ref(), is_safelisted)
         .await
     {
+        crate::observability::metrics::EVENTS_REJECTED
+            .with_label_values(&[event.source.as_str(), "guardrail"])
+            .inc();
+        let reason = match &e {
+            PrefixdError::GuardrailViolation(g) => format!("{:?}", g)
+                .split_whitespace()
+                .next()
+                .unwrap_or("unknown")
+                .to_string(),
+            _ => "unknown".to_string(),
+        };
+        crate::observability::metrics::GUARDRAIL_REJECTIONS
+            .with_label_values(&[&reason])
+            .inc();
         tracing::warn!(error = %e, "guardrail rejected mitigation");
         return Err(AppError(e));
     }
@@ -888,6 +925,7 @@ async fn handle_ban(
         let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
         let rule = FlowSpecRule::new(nlri, action);
 
+        let start = std::time::Instant::now();
         if let Err(e) = state.announcer.announce(&rule).await {
             tracing::error!(error = %e, "BGP announcement failed");
             mitigation.reject(e.to_string());
@@ -898,6 +936,10 @@ async fn handle_ban(
                 .map_err(AppError)?;
             return Err(AppError(e));
         }
+        crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+            .with_label_values(&["announced"])
+            .inc();
+        crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(start.elapsed().as_secs_f64());
     }
 
     mitigation.activate();
@@ -906,6 +948,10 @@ async fn handle_ban(
         .insert_mitigation(&mitigation)
         .await
         .map_err(AppError)?;
+
+    crate::observability::metrics::MITIGATIONS_CREATED
+        .with_label_values(&[&mitigation.action_type.to_string(), &state.settings.pop])
+        .inc();
 
     // Resolve signal group to 'resolved' now that mitigation is confirmed
     if let Some(group_id) = signal_group_id {
@@ -1370,6 +1416,17 @@ pub async fn create_mitigation(
         .validate(&intent, state.repo.as_ref(), is_safelisted)
         .await
     {
+        let reason = match &e {
+            PrefixdError::GuardrailViolation(g) => format!("{:?}", g)
+                .split_whitespace()
+                .next()
+                .unwrap_or("unknown")
+                .to_string(),
+            _ => "unknown".to_string(),
+        };
+        crate::observability::metrics::GUARDRAIL_REJECTIONS
+            .with_label_values(&[&reason])
+            .inc();
         return Ok(AppError(e).into_response());
     }
 
@@ -1381,15 +1438,24 @@ pub async fn create_mitigation(
         let nlri = FlowSpecNlri::from(&mitigation.match_criteria);
         let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
         let rule = FlowSpecRule::new(nlri, action);
+        let start = std::time::Instant::now();
         if let Err(e) = state.announcer.announce(&rule).await {
             return Ok(AppError(e).into_response());
         }
+        crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+            .with_label_values(&["announced"])
+            .inc();
+        crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(start.elapsed().as_secs_f64());
     }
 
     mitigation.activate();
     if let Err(e) = state.repo.insert_mitigation(&mitigation).await {
         return Ok(AppError(e).into_response());
     }
+
+    crate::observability::metrics::MITIGATIONS_CREATED
+        .with_label_values(&[&mitigation.action_type.to_string(), &state.settings.pop])
+        .inc();
 
     Ok((
         StatusCode::CREATED,
@@ -1434,19 +1500,33 @@ pub async fn withdraw_mitigation(
         let nlri = FlowSpecNlri::from(&mitigation.match_criteria);
         let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
         let rule = FlowSpecRule::new(nlri, action);
+        let start = std::time::Instant::now();
         state
             .announcer
             .withdraw(&rule)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+            .with_label_values(&["withdrawn"])
+            .inc();
+        crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(start.elapsed().as_secs_f64());
     }
 
+    let action_type_str = mitigation.action_type.to_string();
     mitigation.withdraw(Some(format!("{}: {}", req.operator_id, req.reason)));
     state
         .repo
         .update_mitigation(&mitigation)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    crate::observability::metrics::MITIGATIONS_WITHDRAWN
+        .with_label_values(&[
+            action_type_str.as_str(),
+            mitigation.pop.as_str(),
+            "operator",
+        ])
+        .inc();
 
     // Broadcast withdrawal via WebSocket
     let _ = state
@@ -1565,8 +1645,15 @@ pub async fn bulk_withdraw_mitigations(
             let nlri = FlowSpecNlri::from(&mitigation.match_criteria);
             let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
             let rule = FlowSpecRule::new(nlri, action);
+            let start = std::time::Instant::now();
             if let Err(e) = state.announcer.withdraw(&rule).await {
                 tracing::error!(error = %e, mitigation_id = %id, "BGP withdrawal failed in bulk withdraw");
+            } else {
+                crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                    .with_label_values(&["withdrawn"])
+                    .inc();
+                crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+                    .observe(start.elapsed().as_secs_f64());
             }
         }
 
