@@ -589,6 +589,9 @@ async fn handle_ban(
             .find_ban_event_by_external_id(&input.source, ext_id)
             .await
         {
+            crate::observability::metrics::EVENTS_REJECTED
+                .with_label_values(&[&input.source, "duplicate"])
+                .inc();
             return Err(AppError(PrefixdError::DuplicateEvent {
                 detector_source: input.source.clone(),
                 external_id: ext_id.clone(),
@@ -601,6 +604,10 @@ async fn handle_ban(
 
     // Store event
     state.repo.insert_event(&event).await.map_err(AppError)?;
+
+    crate::observability::metrics::EVENTS_INGESTED
+        .with_label_values(&[&event.source, &event.attack_vector().to_string()])
+        .inc();
 
     // Check if shutting down
     if state.is_shutting_down() {
@@ -873,6 +880,9 @@ async fn handle_ban(
         .validate(&intent, state.repo.as_ref(), is_safelisted)
         .await
     {
+        crate::observability::metrics::EVENTS_REJECTED
+            .with_label_values(&[&event.source, "guardrail"])
+            .inc();
         tracing::warn!(error = %e, "guardrail rejected mitigation");
         return Err(AppError(e));
     }
