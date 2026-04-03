@@ -560,7 +560,7 @@ async fn handle_unban(
         .map_err(AppError)?;
 
     crate::observability::metrics::MITIGATIONS_WITHDRAWN
-        .with_label_values(&[&action_type_str, &mitigation.pop, "detector_unban"])
+        .with_label_values(&[action_type_str.as_str(), mitigation.pop.as_str(), "detector_unban"])
         .inc();
 
     // Broadcast withdrawal via WebSocket
@@ -606,7 +606,7 @@ async fn handle_ban(
             .await
         {
             crate::observability::metrics::EVENTS_REJECTED
-                .with_label_values(&[&input.source, "duplicate"])
+                .with_label_values(&[input.source.as_str(), "duplicate"])
                 .inc();
             return Err(AppError(PrefixdError::DuplicateEvent {
                 detector_source: input.source.clone(),
@@ -897,7 +897,7 @@ async fn handle_ban(
         .await
     {
         crate::observability::metrics::EVENTS_REJECTED
-            .with_label_values(&[&event.source, "guardrail"])
+            .with_label_values(&[event.source.as_str(), "guardrail"])
             .inc();
         let reason = match &e {
             PrefixdError::GuardrailViolation(g) => {
@@ -1535,7 +1535,7 @@ pub async fn withdraw_mitigation(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     crate::observability::metrics::MITIGATIONS_WITHDRAWN
-        .with_label_values(&[&action_type_str, &mitigation.pop, "operator"])
+        .with_label_values(&[action_type_str.as_str(), mitigation.pop.as_str(), "operator"])
         .inc();
 
     // Broadcast withdrawal via WebSocket
