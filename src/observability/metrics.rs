@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use prometheus::{
-    CounterVec, Encoder, GaugeVec, HistogramVec, TextEncoder, register_counter_vec,
-    register_gauge_vec, register_histogram_vec,
+    CounterVec, Encoder, GaugeVec, Histogram, HistogramVec, TextEncoder, register_counter_vec,
+    register_gauge_vec, register_histogram, register_histogram_vec,
 };
 
 // Event metrics
@@ -70,11 +70,10 @@ pub static ANNOUNCEMENTS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub static ANNOUNCEMENTS_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
+pub static ANNOUNCEMENTS_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
         "prefixd_announcements_latency_seconds",
         "BGP announcement latency in seconds",
-        &[],
         vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
     )
     .unwrap()

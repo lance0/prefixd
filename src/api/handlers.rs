@@ -542,7 +542,6 @@ async fn handle_unban(
                 .with_label_values(&["withdrawn"])
                 .inc();
             crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-                .with_label_values(&[] as &[&str])
                 .observe(start.elapsed().as_secs_f64());
         }
     }
@@ -940,9 +939,7 @@ async fn handle_ban(
         crate::observability::metrics::ANNOUNCEMENTS_TOTAL
             .with_label_values(&["announced"])
             .inc();
-        crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-            .with_label_values(&[] as &[&str])
-            .observe(start.elapsed().as_secs_f64());
+        crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(start.elapsed().as_secs_f64());
     }
 
     mitigation.activate();
@@ -1448,9 +1445,7 @@ pub async fn create_mitigation(
         crate::observability::metrics::ANNOUNCEMENTS_TOTAL
             .with_label_values(&["announced"])
             .inc();
-        crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-            .with_label_values(&[] as &[&str])
-            .observe(start.elapsed().as_secs_f64());
+        crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(start.elapsed().as_secs_f64());
     }
 
     mitigation.activate();
@@ -1514,9 +1509,7 @@ pub async fn withdraw_mitigation(
         crate::observability::metrics::ANNOUNCEMENTS_TOTAL
             .with_label_values(&["withdrawn"])
             .inc();
-        crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-            .with_label_values(&[] as &[&str])
-            .observe(start.elapsed().as_secs_f64());
+        crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(start.elapsed().as_secs_f64());
     }
 
     let action_type_str = mitigation.action_type.to_string();
@@ -1660,7 +1653,6 @@ pub async fn bulk_withdraw_mitigations(
                     .with_label_values(&["withdrawn"])
                     .inc();
                 crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-                    .with_label_values(&[] as &[&str])
                     .observe(start.elapsed().as_secs_f64());
             }
         }

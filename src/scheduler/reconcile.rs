@@ -139,7 +139,6 @@ impl ReconciliationLoop {
                         .with_label_values(&["withdrawn"])
                         .inc();
                     crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-                        .with_label_values(&[] as &[&str])
                         .observe(start.elapsed().as_secs_f64());
                 }
             }
@@ -234,7 +233,6 @@ impl ReconciliationLoop {
             .with_label_values(&["local"])
             .set(active.len() as f64);
 
-        // Update MITIGATIONS_ACTIVE gauge by action_type and pop
         {
             use std::collections::HashMap;
             let mut counts: HashMap<(String, String), f64> = HashMap::new();
@@ -243,8 +241,6 @@ impl ReconciliationLoop {
                     .entry((m.action_type.to_string(), m.pop.clone()))
                     .or_default() += 1.0;
             }
-            // Reset all label combinations to zero first, then set observed values.
-            // This handles the case where a combination drops to zero.
             crate::observability::metrics::MITIGATIONS_ACTIVE.reset();
             for ((action_type, pop), count) in &counts {
                 crate::observability::metrics::MITIGATIONS_ACTIVE
@@ -283,7 +279,6 @@ impl ReconciliationLoop {
                             .with_label_values(&["announced"])
                             .inc();
                         crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-                            .with_label_values(&[] as &[&str])
                             .observe(start.elapsed().as_secs_f64());
                     }
                 }
