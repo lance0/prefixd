@@ -536,16 +536,16 @@ async fn handle_unban(
         let start = std::time::Instant::now();
         if let Err(e) = state.announcer.withdraw(&rule).await {
             crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                .with_label_values(&["unknown", "error"])
+                .with_label_values(&["error"])
                 .inc();
             tracing::error!(error = %e, "BGP withdrawal failed");
             // Continue anyway - mark as withdrawn in DB
         } else {
             crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                .with_label_values(&["unknown", "withdrawn"])
+                .with_label_values(&["withdrawn"])
                 .inc();
             crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-                .with_label_values(&["unknown"])
+                .with_label_values(&[] as &[&str])
                 .observe(start.elapsed().as_secs_f64());
         }
     }
@@ -932,7 +932,7 @@ async fn handle_ban(
         let start = std::time::Instant::now();
         if let Err(e) = state.announcer.announce(&rule).await {
             crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                .with_label_values(&["unknown", "error"])
+                .with_label_values(&["error"])
                 .inc();
             tracing::error!(error = %e, "BGP announcement failed");
             mitigation.reject(e.to_string());
@@ -944,10 +944,10 @@ async fn handle_ban(
             return Err(AppError(e));
         }
         crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-            .with_label_values(&["unknown", "announced"])
+            .with_label_values(&["announced"])
             .inc();
         crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-            .with_label_values(&["unknown"])
+            .with_label_values(&[] as &[&str])
             .observe(start.elapsed().as_secs_f64());
     }
 
@@ -1450,15 +1450,15 @@ pub async fn create_mitigation(
         let start = std::time::Instant::now();
         if let Err(e) = state.announcer.announce(&rule).await {
             crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                .with_label_values(&["unknown", "error"])
+                .with_label_values(&["error"])
                 .inc();
             return Ok(AppError(e).into_response());
         }
         crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-            .with_label_values(&["unknown", "announced"])
+            .with_label_values(&["announced"])
             .inc();
         crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-            .with_label_values(&["unknown"])
+            .with_label_values(&[] as &[&str])
             .observe(start.elapsed().as_secs_f64());
     }
 
@@ -1517,16 +1517,16 @@ pub async fn withdraw_mitigation(
         let start = std::time::Instant::now();
         state.announcer.withdraw(&rule).await.map_err(|e| {
             crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                .with_label_values(&["unknown", "error"])
+                .with_label_values(&["error"])
                 .inc();
             let _ = e;
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
         crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-            .with_label_values(&["unknown", "withdrawn"])
+            .with_label_values(&["withdrawn"])
             .inc();
         crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-            .with_label_values(&["unknown"])
+            .with_label_values(&[] as &[&str])
             .observe(start.elapsed().as_secs_f64());
     }
 
@@ -1666,15 +1666,15 @@ pub async fn bulk_withdraw_mitigations(
             let start = std::time::Instant::now();
             if let Err(e) = state.announcer.withdraw(&rule).await {
                 crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                    .with_label_values(&["unknown", "error"])
+                    .with_label_values(&["error"])
                     .inc();
                 tracing::error!(error = %e, mitigation_id = %id, "BGP withdrawal failed in bulk withdraw");
             } else {
                 crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                    .with_label_values(&["unknown", "withdrawn"])
+                    .with_label_values(&["withdrawn"])
                     .inc();
                 crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-                    .with_label_values(&["unknown"])
+                    .with_label_values(&[] as &[&str])
                     .observe(start.elapsed().as_secs_f64());
             }
         }

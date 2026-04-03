@@ -130,7 +130,7 @@ impl ReconciliationLoop {
                 let start = std::time::Instant::now();
                 if let Err(e) = self.announcer.withdraw(&rule).await {
                     crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                        .with_label_values(&["unknown", "error"])
+                        .with_label_values(&["error"])
                         .inc();
                     tracing::warn!(
                         mitigation_id = %mitigation.mitigation_id,
@@ -139,10 +139,10 @@ impl ReconciliationLoop {
                     );
                 } else {
                     crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                        .with_label_values(&["unknown", "withdrawn"])
+                        .with_label_values(&["withdrawn"])
                         .inc();
                     crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-                        .with_label_values(&["unknown"])
+                        .with_label_values(&[] as &[&str])
                         .observe(start.elapsed().as_secs_f64());
                 }
             }
@@ -277,7 +277,7 @@ impl ReconciliationLoop {
                     let start = std::time::Instant::now();
                     if let Err(e) = self.announcer.announce(&rule).await {
                         crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                            .with_label_values(&["unknown", "error"])
+                            .with_label_values(&["error"])
                             .inc();
                         tracing::error!(
                             mitigation_id = %mitigation.mitigation_id,
@@ -286,10 +286,10 @@ impl ReconciliationLoop {
                         );
                     } else {
                         crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                            .with_label_values(&["unknown", "announced"])
+                            .with_label_values(&["announced"])
                             .inc();
                         crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-                            .with_label_values(&["unknown"])
+                            .with_label_values(&[] as &[&str])
                             .observe(start.elapsed().as_secs_f64());
                     }
                 }
