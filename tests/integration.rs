@@ -1,3 +1,5 @@
+#![allow(clippy::field_reassign_with_default)]
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use std::sync::Arc;
@@ -1139,7 +1141,7 @@ async fn test_cursor_pagination_mitigations() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/mitigations?limit=2&cursor={}", cursor))
+                .uri(format!("/v1/mitigations?limit=2&cursor={}", cursor))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1206,7 +1208,7 @@ async fn test_cursor_pagination_events() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/events?limit=2&cursor={}", cursor))
+                .uri(format!("/v1/events?limit=2&cursor={}", cursor))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1619,7 +1621,7 @@ async fn test_incident_report_by_mitigation_id() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/reports/incident?mitigation_id={}",
                     mitigation_id
                 ))
@@ -2179,7 +2181,7 @@ async fn test_correlation_mitigation_detail_includes_correlation() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/mitigations/{}", mitigation_id))
+                .uri(format!("/v1/mitigations/{}", mitigation_id))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2221,7 +2223,7 @@ async fn test_correlation_disabled_mitigation_no_correlation_field() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/mitigations/{}", mitigation_id))
+                .uri(format!("/v1/mitigations/{}", mitigation_id))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2352,7 +2354,7 @@ async fn test_correlation_detail_has_full_context_list_has_summary() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/mitigations/{}", mitigation_id))
+                .uri(format!("/v1/mitigations/{}", mitigation_id))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2625,7 +2627,7 @@ async fn test_signal_groups_list_pagination() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/signal-groups?limit=2&cursor={}", cursor))
+                .uri(format!("/v1/signal-groups?limit=2&cursor={}", cursor))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2724,7 +2726,7 @@ async fn test_signal_groups_list_vector_filter() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["groups"].as_array().unwrap().len() >= 1);
+    assert!(!json["groups"].as_array().unwrap().is_empty());
 
     // Filter for syn_flood (should not match)
     let response = app
@@ -2790,7 +2792,7 @@ async fn test_signal_groups_list_date_range_filter() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["groups"].as_array().unwrap().len() >= 1);
+    assert!(!json["groups"].as_array().unwrap().is_empty());
 
     // Use a past end date — should return 0 groups
     let response = app
@@ -2845,7 +2847,7 @@ async fn test_signal_group_detail_with_events() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/signal-groups/{}", group_id))
+                .uri(format!("/v1/signal-groups/{}", group_id))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2916,7 +2918,7 @@ async fn test_signal_group_detail_no_mitigation_id() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/signal-groups/{}", group_id))
+                .uri(format!("/v1/signal-groups/{}", group_id))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2946,7 +2948,7 @@ async fn test_signal_group_detail_not_found() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/signal-groups/{}", fake_id))
+                .uri(format!("/v1/signal-groups/{}", fake_id))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3004,7 +3006,7 @@ async fn test_signal_groups_auth_required() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/signal-groups/{}", fake_id))
+                .uri(format!("/v1/signal-groups/{}", fake_id))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3131,7 +3133,7 @@ async fn test_signal_group_detail_multiple_events() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/signal-groups/{}", group_id))
+                .uri(format!("/v1/signal-groups/{}", group_id))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3618,7 +3620,7 @@ async fn test_alertmanager_fingerprint_dedup() {
         "critical",
         "dedup_fp",
     );
-    let payload = make_alertmanager_payload(&[alert.clone()]);
+    let payload = make_alertmanager_payload(std::slice::from_ref(&alert));
 
     // First request
     let (status1, json1) = post_alertmanager(&app, &payload).await;

@@ -63,6 +63,7 @@ fn make_mitigation(i: usize) -> Mitigation {
         rejection_reason: None,
         acknowledged_at: None,
         acknowledged_by: None,
+        signal_group_id: None,
     }
 }
 

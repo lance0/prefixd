@@ -609,12 +609,11 @@ impl GoBgpAnnouncer {
         // Parse each rule in the NLRI - now typed with oneof
         for rule in &proto_nlri.rules {
             match &rule.rule {
-                Some(flow_spec_rule::Rule::IpPrefix(ip_prefix)) => {
-                    // FlowSpecIPPrefix for destination/source prefix
-                    if ip_prefix.r#type == 1 {
-                        // Destination prefix (type 1)
-                        dst_prefix = format!("{}/{}", ip_prefix.prefix, ip_prefix.prefix_len);
-                    }
+                Some(flow_spec_rule::Rule::IpPrefix(ip_prefix)) if ip_prefix.r#type == 1 => {
+                    // FlowSpecIPPrefix destination prefix (type 1)
+                    dst_prefix = format!("{}/{}", ip_prefix.prefix, ip_prefix.prefix_len);
+                }
+                Some(flow_spec_rule::Rule::IpPrefix(_)) => {
                     // type 2 would be source prefix, which we don't support
                 }
                 Some(flow_spec_rule::Rule::Component(component)) => {
@@ -1291,7 +1290,7 @@ mod proptests {
         #[test]
         fn action_roundtrip_preserves_type(action in flowspec_action()) {
             let announcer = make_announcer();
-            let pattrs = announcer.build_path_attributes(&[action.clone()]).unwrap();
+            let pattrs = announcer.build_path_attributes(std::slice::from_ref(&action)).unwrap();
             let parsed = announcer.parse_flowspec_action(&pattrs).unwrap();
 
             prop_assert_eq!(parsed.action_type, action.action_type);

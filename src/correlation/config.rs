@@ -379,8 +379,10 @@ sources:
 
     #[test]
     fn test_source_weight_unknown_uses_custom_default() {
-        let mut config = CorrelationConfig::default();
-        config.default_weight = 0.5;
+        let config = CorrelationConfig {
+            default_weight: 0.5,
+            ..Default::default()
+        };
         assert_eq!(config.source_weight("unknown"), 0.5);
     }
 
@@ -670,8 +672,10 @@ sources:
 
     #[test]
     fn test_redacted_includes_safe_fields() {
-        let mut config = CorrelationConfig::default();
-        config.enabled = true;
+        let mut config = CorrelationConfig {
+            enabled: true,
+            ..Default::default()
+        };
         config.sources.insert(
             "fastnetmon".to_string(),
             SourceConfig {
@@ -695,9 +699,11 @@ sources:
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("correlation.yaml");
 
-        let mut config = CorrelationConfig::default();
-        config.enabled = true;
-        config.min_sources = 3;
+        let mut config = CorrelationConfig {
+            enabled: true,
+            min_sources: 3,
+            ..Default::default()
+        };
         config.sources.insert(
             "test".to_string(),
             SourceConfig {
