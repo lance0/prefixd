@@ -484,6 +484,7 @@ impl E2ETestContext {
             confidence_threshold,
             sources,
             default_weight: 1.0,
+            webhook_adapters: Vec::new(),
         };
 
         let state = AppState::new(

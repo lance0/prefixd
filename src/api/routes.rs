@@ -117,6 +117,7 @@ fn api_routes() -> Router<Arc<AppState>> {
             post(handlers::ingest_alertmanager),
         )
         .route("/v1/signals/fastnetmon", post(handlers::ingest_fastnetmon))
+        .route("/v1/signals/webhook/{name}", post(handlers::ingest_webhook))
 }
 
 /// Common layers applied to both production and test routers

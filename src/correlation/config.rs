@@ -38,6 +38,11 @@ pub struct CorrelationConfig {
     /// Default weight assigned to events from sources not listed in `sources`.
     #[serde(default = "default_weight")]
     pub default_weight: f32,
+
+    /// Generic webhook adapters, each exposed at `POST /v1/signals/webhook/{name}`.
+    /// See `docs/configuration.md` for the schema.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhook_adapters: Vec<super::webhook::WebhookAdapter>,
 }
 
 /// Configuration for a single detection/signal source.
@@ -82,6 +87,7 @@ impl Default for CorrelationConfig {
             confidence_threshold: default_confidence_threshold(),
             sources: HashMap::new(),
             default_weight: default_weight(),
+            webhook_adapters: Vec::new(),
         }
     }
 }
@@ -244,6 +250,28 @@ impl CorrelationConfig {
             }
         }
 
+        let mut seen_names = std::collections::HashSet::new();
+        for adapter in &self.webhook_adapters {
+            if !super::webhook::is_valid_name(&adapter.name) {
+                errors.push(format!(
+                    "webhook_adapter '{}': name must match [a-z0-9-]{{1,64}}",
+                    adapter.name
+                ));
+            }
+            if !seen_names.insert(adapter.name.clone()) {
+                errors.push(format!(
+                    "webhook_adapter '{}': duplicate name",
+                    adapter.name
+                ));
+            }
+            if let Err(e) = super::webhook::CompiledAdapter::compile(adapter) {
+                errors.push(format!(
+                    "webhook_adapter '{}': invalid JSONPath: {}",
+                    adapter.name, e
+                ));
+            }
+        }
+
         errors
     }
 
@@ -265,6 +293,39 @@ impl CorrelationConfig {
             })
             .collect();
 
+        let webhook_adapters: Vec<serde_json::Value> = self
+            .webhook_adapters
+            .iter()
+            .map(|a| {
+                let auth_json = match &a.auth {
+                    super::webhook::WebhookAuth::Hmac {
+                        secret_env,
+                        header,
+                        algorithm,
+                    } => serde_json::json!({
+                        "type": "hmac",
+                        "secret_env": secret_env,
+                        "header": header,
+                        "algorithm": algorithm,
+                    }),
+                    super::webhook::WebhookAuth::Bearer => serde_json::json!({ "type": "bearer" }),
+                    super::webhook::WebhookAuth::None => serde_json::json!({ "type": "none" }),
+                };
+                serde_json::json!({
+                    "name": a.name,
+                    "description": a.description,
+                    "enabled": a.enabled,
+                    "auth": auth_json,
+                    "root_path": a.root_path,
+                    "fields": a.fields,
+                    "vector_map": a.vector_map,
+                    "default_vector": a.default_vector,
+                    "confidence_scale": a.confidence_scale,
+                    "source_id_prefix": a.source_id_prefix,
+                })
+            })
+            .collect();
+
         serde_json::json!({
             "enabled": self.enabled,
             "window_seconds": self.window_seconds,
@@ -272,6 +333,7 @@ impl CorrelationConfig {
             "confidence_threshold": self.confidence_threshold,
             "default_weight": self.default_weight,
             "sources": sources,
+            "webhook_adapters": webhook_adapters,
         })
     }
 }
