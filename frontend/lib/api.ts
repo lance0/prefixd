@@ -740,6 +740,36 @@ export interface SourceConfig {
   confidence_mapping: Record<string, number>
 }
 
+export interface WebhookFieldMap {
+  victim_ip: string
+  vector?: string | null
+  timestamp?: string | null
+  bps?: string | null
+  pps?: string | null
+  confidence?: string | null
+  source_id?: string | null
+  top_dst_ports?: string | null
+  action?: string | null
+}
+
+export type WebhookAuth =
+  | { type: "hmac"; secret_env: string; header: string; algorithm: string }
+  | { type: "bearer" }
+  | { type: "none" }
+
+export interface WebhookAdapter {
+  name: string
+  description: string
+  enabled: boolean
+  auth: WebhookAuth
+  root_path?: string | null
+  fields: WebhookFieldMap
+  vector_map?: Record<string, string>
+  default_vector?: string | null
+  confidence_scale?: number | null
+  source_id_prefix?: string | null
+}
+
 export interface CorrelationConfig {
   enabled: boolean
   window_seconds: number
@@ -747,6 +777,7 @@ export interface CorrelationConfig {
   confidence_threshold: number
   default_weight: number
   sources: Record<string, SourceConfig>
+  webhook_adapters?: WebhookAdapter[]
 }
 
 export interface CorrelationConfigResponse {

@@ -170,6 +170,21 @@ curl -X POST http://localhost/v1/events \
 - **Alertmanager** → `POST /v1/signals/alertmanager` — maps labels/annotations to events
 - **FastNetMon** → `POST /v1/signals/fastnetmon` — accepts native JSON payload
 
+**Generic webhook adapter** — For detectors without a native integration (commercial DDoS appliances, internal abuse systems, cloud alerting), configure a named adapter in `correlation.yaml` with JSONPath field mappings:
+
+```yaml
+webhook_adapters:
+  - name: radware
+    auth: { type: hmac, secret_env: RADWARE_WEBHOOK_SECRET, header: X-Signature-SHA256, algorithm: sha256 }
+    root_path: "$.alerts[*]"
+    fields:
+      victim_ip: "$.target.ip"
+      vector: "$.alert_type"
+      bps: "$.traffic.bps"
+```
+
+POST your JSON to `/v1/signals/webhook/{name}`. See [Generic Webhook Adapter](docs/detectors/generic-webhook.md).
+
 With [multi-signal correlation](docs/configuration.md#correlation) enabled, events from multiple detectors targeting the same IP are grouped and corroborated before triggering mitigation.
 
 See [FastNetMon Integration](docs/detectors/fastnetmon.md) for a complete setup guide.
@@ -184,7 +199,7 @@ Configure GoBGP neighbors in `configs/gobgp.conf` and set up FlowSpec import pol
 
 | Category | What it does |
 |----------|--------------|
-| **Signal Ingestion** | HTTP API + native Alertmanager and FastNetMon webhook adapters |
+| **Signal Ingestion** | HTTP API + native Alertmanager and FastNetMon webhooks + configurable generic webhook adapter with JSONPath mapping |
 | **Multi-Signal Correlation** | Time-windowed grouping of events from multiple detectors with source weighting and corroboration |
 | **Policy Engine** | YAML playbooks define per-vector responses with escalation |
 | **Guardrails** | Quotas, safelist, /32-only enforcement, mandatory TTLs |
@@ -200,7 +215,7 @@ Configure GoBGP neighbors in `configs/gobgp.conf` and set up FlowSpec import pol
 
 ## How It Works
 
-1. **Detector sends event** → `POST /v1/events`, `/v1/signals/alertmanager`, or `/v1/signals/fastnetmon`
+1. **Detector sends event** → `POST /v1/events`, `/v1/signals/alertmanager`, `/v1/signals/fastnetmon`, or a configured `/v1/signals/webhook/{name}`
 2. **Inventory lookup** → Find customer/service owning the IP
 3. **Signal correlation** → Group related signals by (victim_ip, vector), check corroboration
 4. **Playbook match** → Determine action (police/discard) based on vector

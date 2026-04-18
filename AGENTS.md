@@ -45,7 +45,7 @@ src/
 ├── auth/              # AuthBackend (axum-login), mode-aware auth (none/bearer/credentials/mtls)
 ├── bgp/               # FlowSpecAnnouncer trait, GoBGP gRPC client, mock
 ├── config/            # Settings, Inventory, Playbooks (YAML parsing)
-├── correlation/       # Multi-signal correlation engine (config, engine, signal groups)
+├── correlation/       # Multi-signal correlation engine (config, engine, signal groups, webhook adapter)
 ├── db/                # PostgreSQL repository with sqlx + MockRepository for testing
 ├── domain/            # Core types: AttackEvent, Mitigation, FlowSpecRule
 ├── guardrails/        # Validation, quotas, safelist protection
@@ -164,6 +164,7 @@ See `docs/adr/` for all 19 Architecture Decision Records.
 - `GET /v1/signal-groups/{id}` - Signal group detail with contributing events
 - `POST /v1/signals/alertmanager` - Alertmanager webhook adapter (v4 payload)
 - `POST /v1/signals/fastnetmon` - FastNetMon webhook adapter (native JSON)
+- `POST /v1/signals/webhook/{name}` - Generic webhook adapter (configured in `correlation.yaml`; JSONPath field mapping; HMAC/bearer/none auth)
 - `GET /v1/config/correlation` - Correlation config (admin, secrets redacted)
 - `PUT /v1/config/correlation` - Update correlation config (admin only, writes YAML + hot-reload)
 
@@ -254,8 +255,8 @@ Completed:
 - Nginx reverse proxy (single-origin deployment)
 - ErrorBoundary wrapping all dashboard pages
 - Cross-entity navigation (command palette → detail pages, event↔mitigation linking, audit log → mitigations, clickable stat cards)
-- Multi-signal correlation engine with signal groups, Alertmanager and FastNetMon adapters
-- 19 Architecture Decision Records
+- Multi-signal correlation engine with signal groups, Alertmanager/FastNetMon adapters, and a generic JSONPath-driven webhook adapter (ADR 020)
+- 20 Architecture Decision Records
 - CLI tool (prefixdctl) for all API operations
 - OpenAPI spec with utoipa annotations
 - 179 backend unit tests + 99 integration + 16 postgres tests (+ 17 ignored requiring GoBGP/Docker)

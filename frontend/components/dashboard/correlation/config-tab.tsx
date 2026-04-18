@@ -33,11 +33,14 @@ import type { CorrelationConfig, SourceConfig } from "@/lib/api"
 import { Settings, Plus, Pencil, Trash2, Save, Loader2, AlertCircle, Link as LinkIcon } from "lucide-react"
 import Link from "next/link"
 
+import { WebhookAdaptersEditor } from "./webhook-adapters"
+
 export function ConfigTab() {
   return (
     <div className="space-y-6">
       <CorrelationSettingsEditor />
       <SignalSourceCards />
+      <WebhookAdaptersEditor />
       <PlaybookOverrides />
     </div>
   )

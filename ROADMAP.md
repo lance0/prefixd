@@ -278,7 +278,9 @@ Example: FastNetMon says UDP flood at 0.6 confidence + router CPU spiking + host
 
 - [x] Prometheus/Alertmanager adapter (`POST /v1/signals/alertmanager` webhook receiver) — maps labels/annotations to attack events, handles batched alerts
 - [x] FastNetMon webhook adapter (`POST /v1/signals/fastnetmon`) — classifies vectors from traffic breakdown, configurable confidence mapping
+- [x] Generic webhook adapter (`POST /v1/signals/webhook/{name}`) — operator-configured JSONPath mapping, HMAC/bearer/none auth, array batching via root_path (ADR 020)
 - [ ] Router telemetry adapter (JTI, gNMI)
+- [ ] Generic adapter transform functions (unit conversion, regex extract, computed fields)
 
 ### Correlation Engine
 
@@ -303,8 +305,9 @@ Broader ecosystem integration and advanced capabilities for large-scale deployme
 ### Integrations
 
 - [ ] NetBox inventory sync (replace YAML inventory with NetBox as source-of-truth)
-- [ ] FastNetMon native adapter (common pairing for self-hosted deployments)
+- [x] FastNetMon native adapter (common pairing for self-hosted deployments) — shipped v0.14.0
 - [ ] Scrubber vendor integrations (complement cloud/hardware mitigation with policy automation)
+- [ ] Reference integration recipes for commercial DDoS appliances (Radware, NETSCOUT, A10) via the generic webhook adapter
 - [ ] LDAP/AD auth backend (group-to-role mapping)
 - [ ] RADIUS/ISE auth backend (attribute mapping to roles)
 - [ ] Customer self-service portal (per-customer dashboards for MSSPs)
