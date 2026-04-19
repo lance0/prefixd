@@ -66,6 +66,21 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
             "signal_groups_open_unique",
             include_str!("../../migrations/008_signal_groups_open_unique.sql"),
         ),
+        (
+            9,
+            "corroborating_signals",
+            include_str!("../../migrations/009_corroborating_signals.sql"),
+        ),
+        (
+            10,
+            "corroborator_ingested_at",
+            include_str!("../../migrations/010_corroborator_ingested_at.sql"),
+        ),
+        (
+            11,
+            "backfill_primary_dimensions",
+            include_str!("../../migrations/011_backfill_primary_dimensions.sql"),
+        ),
     ];
 
     // Bootstrap: run all migrations first (they use IF NOT EXISTS)

@@ -15,6 +15,16 @@ sources:
     weight: 0.8
     type: telemetry
     confidence_mapping: {}
+  # Example corroborating source (ADR 021). Uncomment to enable.
+  # Corroborators post to /v1/signals/corroborator and never trigger
+  # mitigations on their own — they only strengthen open signal groups
+  # that share at least one populated match_dimension.
+  # router-cpu:
+  #   weight: 0.4
+  #   type: telemetry
+  #   confidence_mapping: {}
+  #   mode: corroborating
+  #   match_dimensions: [pop, customer_id]
 default_weight: 1.0
 
 # Generic webhook adapters. Each entry becomes a named endpoint at

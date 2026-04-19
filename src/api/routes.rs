@@ -118,6 +118,14 @@ fn api_routes() -> Router<Arc<AppState>> {
         )
         .route("/v1/signals/fastnetmon", post(handlers::ingest_fastnetmon))
         .route("/v1/signals/webhook/{name}", post(handlers::ingest_webhook))
+        .route(
+            "/v1/signals/corroborator",
+            post(handlers::ingest_corroborator),
+        )
+        .route(
+            "/v1/signals/corroborator/activity",
+            axum::routing::get(handlers::get_corroborator_activity),
+        )
 }
 
 /// Common layers applied to both production and test routers

@@ -232,10 +232,12 @@ pub fn test_inventory() -> Inventory {
                 Asset {
                     ip: "203.0.113.10".to_string(),
                     role: Some("web".to_string()),
+                    interface: None,
                 },
                 Asset {
                     ip: "203.0.113.11".to_string(),
                     role: Some("web".to_string()),
+                    interface: None,
                 },
             ],
             allowed_ports: AllowedPorts {
@@ -467,6 +469,7 @@ impl E2ETestContext {
                 weight: 1.0,
                 r#type: "detector".to_string(),
                 confidence_mapping: HashMap::new(),
+                ..Default::default()
             },
         );
         sources.insert(
@@ -475,6 +478,7 @@ impl E2ETestContext {
                 weight: 0.8,
                 r#type: "telemetry".to_string(),
                 confidence_mapping: HashMap::new(),
+                ..Default::default()
             },
         );
         settings.correlation = CorrelationConfig {

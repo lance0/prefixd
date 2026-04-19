@@ -115,10 +115,12 @@ export default function SignalGroupDetailPage({
     )
   }
 
-  // Sort events chronologically (earliest first)
+  // Sort events chronologically (earliest first), placing rows with a
+  // missing ingest time at the end rather than sorting them as epoch 0.
+  const ingestTs = (t: string | null | undefined) =>
+    t ? new Date(t).getTime() : Number.POSITIVE_INFINITY
   const sortedEvents = [...group.events].sort(
-    (a, b) =>
-      new Date(a.ingested_at).getTime() - new Date(b.ingested_at).getTime(),
+    (a, b) => ingestTs(a.ingested_at) - ingestTs(b.ingested_at),
   )
 
   // Confidence breakdown calculations
@@ -222,13 +224,22 @@ export default function SignalGroupDetailPage({
                           className={`absolute -left-[21px] top-1 h-3 w-3 rounded-full ${sourceColor(event.source)}`}
                         />
                         <div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <Badge
                               variant="outline"
                               className="text-[10px] font-mono"
                             >
                               {event.source}
                             </Badge>
+                            {event.is_corroborating && (
+                              <Badge
+                                variant="secondary"
+                                className="text-[10px] font-mono bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30"
+                                title="Corroborating signal — strengthened the group but cannot trigger mitigations alone"
+                              >
+                                corroborating
+                              </Badge>
+                            )}
                             <span className="text-xs text-muted-foreground tabular-nums">
                               Confidence:{" "}
                               {event.confidence != null
@@ -237,7 +248,7 @@ export default function SignalGroupDetailPage({
                             </span>
                           </div>
                           <p className="text-xs text-muted-foreground font-mono mt-1">
-                            {formatTimestamp(event.ingested_at)}
+                            {event.ingested_at ? formatTimestamp(event.ingested_at) : "Unknown ingest time"}
                           </p>
                           <p className="text-xs text-muted-foreground mt-1">
                             Event{" "}

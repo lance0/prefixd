@@ -901,6 +901,111 @@ webhook_adapters:
 
 See `docs/configuration.md` for the complete schema.
 
+### Corroborator Signal
+
+Ingest a **corroborating signal** from a source configured with
+`mode: corroborating` in `correlation.yaml`. Corroborators don't carry a
+`victim_ip`; instead they match open signal groups on lighter dimensions
+(`customer_id`, `pop`, `service_id`, `interface`) declared in the
+source's `match_dimensions`. See [ADR 021](adr/021-corroborating-signals.md).
+
+```http
+POST /v1/signals/corroborator
+Content-Type: application/json
+
+{
+  "source": "router-cpu",
+  "vector": "udp_flood",
+  "customer_id": "cust_42",
+  "pop": "iad1",
+  "service_id": "svc_web",
+  "interface": "et-0/0/12",
+  "confidence": 0.6
+}
+```
+
+**Fields:**
+
+- `source` — Must match a `sources` entry in `correlation.yaml` with
+  `mode: corroborating`.
+- `vector` *(optional)* — When set, only groups with a matching `vector`
+  are eligible. When absent, any open group matching on dimensions is
+  eligible.
+- `customer_id`, `pop`, `service_id`, `interface` *(optional)* — At
+  least one must be populated AND must appear in the source's
+  `match_dimensions`. Matching is OR across **declared** dimensions
+  only; undeclared fields are ignored even if populated. This prevents
+  a source configured for `[pop]` from accidentally attaching to groups
+  via a stray `customer_id`.
+- `confidence` *(optional)* — 0.0–1.0. Contributes to the group's
+  `derived_confidence` via the source's configured `weight`.
+
+**Response:**
+
+```json
+{
+  "signal_id": "a4f1b2c3-…",
+  "status": "attached",
+  "attached_group_ids": ["e2b9…-1f3c"],
+  "cached": true
+}
+```
+
+- `status` = `attached` when at least one open signal group matched and
+  was strengthened. `status` = `cached` when no group matched; the
+  signal is held for up to `window_seconds` and drained on matching
+  primary event arrival.
+- `attached_group_ids` — UUIDs of signal groups this signal contributed
+  to.
+- `cached` — currently always `true` (signals are retained in the cache
+  after attach for late fan-out). This field is flagged for removal in
+  a follow-up release in favor of `status` alone; new integrations
+  should rely on `status` / `attached_group_ids` instead.
+
+**Error responses:**
+
+- `400` — `source` is not configured, is configured as `mode=primary`,
+  or none of its declared `match_dimensions` were populated on the
+  signal.
+- `400` — correlation engine is disabled.
+
+**Invariant:** A signal group composed entirely of corroborating
+signals never triggers a mitigation, regardless of how high its
+`derived_confidence` climbs. Primary events are required.
+
+### Get Corroborator Activity
+
+```http
+GET /v1/signals/corroborator/activity?minutes=60
+```
+
+Returns per-source corroborator activity aggregated across the live
+cache (`corroborating_signals`) and attached corroborator rows on
+signal groups (`signal_group_events WHERE is_corroborating`). Intended
+for operator dashboards; corroborating-only sources never appear in
+the primary `/v1/events` stream, so this endpoint is how the UI knows
+they're alive.
+
+**Query parameters:**
+
+- `minutes` *(optional, default 60, range 1–1440)* — Lookback window.
+
+**Response:**
+
+```json
+{
+  "since": "2026-04-19T16:00:00Z",
+  "sources": [
+    {"source": "router-cpu",       "last_seen": "2026-04-19T16:59:21Z", "count": 42},
+    {"source": "pop-utilization",  "last_seen": "2026-04-19T16:58:05Z", "count": 11}
+  ]
+}
+```
+
+Each source may be counted once per table if it both attached to a
+group and kept its live cache row for late fan-out; the intent is
+"activity volume", not "distinct signals".
+
 ---
 
 ## Safelist

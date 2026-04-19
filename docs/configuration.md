@@ -316,6 +316,36 @@ correlation:
 |-------|------|---------|-------------|
 | `weight` | float | `1.0` | Weight in derived confidence computation (higher = more influence) |
 | `type` | string | `""` | Descriptive type (`detector`, `telemetry`, `manual`) |
+| `mode` | string | `primary` | `primary` = can trigger mitigations; `corroborating` = only strengthens other sources (ADR 021) |
+| `match_dimensions` | list | `[]` | Required when `mode=corroborating`. Drawn from `customer_id`, `pop`, `service_id`, `interface`. Must be empty when `mode=primary`. |
+
+**Corroborating sources example:**
+
+```yaml
+sources:
+  fastnetmon:
+    mode: primary        # default; can trigger mitigations
+    weight: 1.0
+    type: detector
+  router-cpu:
+    mode: corroborating  # strengthens groups but never fires alone
+    weight: 0.5
+    type: telemetry
+    match_dimensions: [pop, customer_id]
+```
+
+Corroborating sources post to `POST /v1/signals/corroborator` instead of
+`/v1/events`. Each signal must populate at least one of its declared
+`match_dimensions`. Matching against open signal groups uses OR across
+**declared** dimensions only — a source declared for `[pop]` cannot
+attach via an undeclared `customer_id`/`service_id`/`interface` even if
+those values happen to match. A signal group must contain at least one
+primary event before it can trigger a mitigation — corroborators alone
+are never sufficient. Misconfiguration (`mode=corroborating` with empty
+`match_dimensions`, or `mode=primary` with non-empty `match_dimensions`)
+is rejected both on `PUT /v1/config/correlation` and on daemon boot.
+See [ADR 021](adr/021-corroborating-signals.md) and
+[docs/detectors/corroborating-signals.md](detectors/corroborating-signals.md).
 
 **Derived confidence** is computed as a weighted average:
 
@@ -492,10 +522,19 @@ services:
     name: "Web Servers"
     assets:
       - ip: "203.0.113.20"
+        interface: "et-0/0/12"   # optional; see below
       - ip: "203.0.113.21"
     allowed_ports:
       tcp: [80, 443]
 ```
+
+**Asset fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ip` | string | Asset IPv4 or IPv6 address (exact match) |
+| `role` | string | Optional free-form role tag (e.g. `web`, `db`) |
+| `interface` | string | Optional router/switch interface name. When present, the interface is attached to the resolved `IpContext` on incoming events and flows into the signal group's `primary_dimensions`. Required if you want interface-only corroborating signals (see [ADR 021](adr/021-corroborating-signals.md)) to match this asset's groups. |
 
 ### Allowed Ports
 

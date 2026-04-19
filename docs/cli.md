@@ -205,6 +205,28 @@ prefixdctl reload
 prefixdctl migrations
 ```
 
+### Send a Corroborating Signal
+
+Post a [corroborating signal](../docs/detectors/corroborating-signals.md)
+from a source configured with `mode: corroborating` in
+`correlation.yaml`. Useful for ad-hoc testing or for coarse telemetry
+scripts that don't carry a victim `/32`.
+
+```bash
+prefixdctl send-corroborator \
+  --source router-cpu \
+  --pop iad1 \
+  --customer-id cust_42 \
+  --confidence 0.6 \
+  --vector udp_flood
+```
+
+At least one of `--customer-id`, `--pop`, `--service-id`, `--interface`
+is required. The source's configured `match_dimensions` determine which
+of these the server actually accepts. JSON output mode
+(`prefixdctl -f json send-corroborator …`) returns the raw response
+including `signal_id` and `attached_group_ids`.
+
 ---
 
 ## Output Formats

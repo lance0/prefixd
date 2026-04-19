@@ -2,7 +2,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::config::{CorrelationConfig, PlaybookCorrelationOverride};
+use super::config::{CorrelationConfig, MatchDimension, PlaybookCorrelationOverride};
 
 /// Represents a signal group — a collection of related attack events grouped
 /// by (victim_ip, vector) within a time window.
@@ -17,6 +17,74 @@ pub struct SignalGroup {
     pub source_count: i32,
     pub status: SignalGroupStatus,
     pub corroboration_met: bool,
+    /// Aggregated dimensions contributed by primary events in this group.
+    /// Used by the corroborator matching flow (ADR 021).
+    #[serde(default)]
+    pub primary_dimensions: PrimaryDimensions,
+}
+
+/// Serializable form of aggregated primary-event dimensions. Stored in the
+/// `signal_groups.primary_dimensions` JSONB column.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PrimaryDimensions {
+    #[serde(default)]
+    pub customer_ids: Vec<String>,
+    #[serde(default)]
+    pub pops: Vec<String>,
+    #[serde(default)]
+    pub service_ids: Vec<String>,
+    #[serde(default)]
+    pub interfaces: Vec<String>,
+}
+
+impl PrimaryDimensions {
+    pub fn add_customer(&mut self, v: impl Into<String>) {
+        let v = v.into();
+        if !self.customer_ids.contains(&v) {
+            self.customer_ids.push(v);
+        }
+    }
+    pub fn add_pop(&mut self, v: impl Into<String>) {
+        let v = v.into();
+        if !self.pops.contains(&v) {
+            self.pops.push(v);
+        }
+    }
+    pub fn add_service(&mut self, v: impl Into<String>) {
+        let v = v.into();
+        if !self.service_ids.contains(&v) {
+            self.service_ids.push(v);
+        }
+    }
+    pub fn add_interface(&mut self, v: impl Into<String>) {
+        let v = v.into();
+        if !self.interfaces.contains(&v) {
+            self.interfaces.push(v);
+        }
+    }
+
+    /// Returns true if any of `dims`' populated values overlap with this
+    /// group's stored primary dimensions.
+    pub fn matches_probe(&self, dims: &EventDimensions) -> bool {
+        dims.customer_ids
+            .iter()
+            .any(|c| self.customer_ids.contains(c))
+            || dims.pops.iter().any(|p| self.pops.contains(p))
+            || dims
+                .service_ids
+                .iter()
+                .any(|s| self.service_ids.contains(s))
+            || dims.interfaces.iter().any(|i| self.interfaces.contains(i))
+    }
+
+    pub fn to_event_dimensions(&self) -> EventDimensions {
+        EventDimensions {
+            customer_ids: self.customer_ids.iter().cloned().collect(),
+            pops: self.pops.iter().cloned().collect(),
+            service_ids: self.service_ids.iter().cloned().collect(),
+            interfaces: self.interfaces.iter().cloned().collect(),
+        }
+    }
 }
 
 /// Status of a signal group.
@@ -63,6 +131,8 @@ pub struct SignalGroupEvent {
     pub group_id: Uuid,
     pub event_id: Uuid,
     pub source_weight: f32,
+    #[serde(default)]
+    pub is_corroborating: bool,
     // Denormalized fields from the event (for API responses)
     pub source: Option<String>,
     pub confidence: Option<f32>,
@@ -76,6 +146,84 @@ pub struct SignalGroupFilter {
     pub vector: Option<String>,
     pub start: Option<DateTime<Utc>>,
     pub end: Option<DateTime<Utc>>,
+}
+
+/// A corroborating signal produced by a source in `mode: corroborating`.
+/// Does not carry a `victim_ip`; instead, carries one or more dimensions
+/// used to match open signal groups whose primary events share the same
+/// dimension. See ADR 021.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CorroboratingSignal {
+    pub signal_id: Uuid,
+    pub source: String,
+    /// Optional vector narrower. When `Some`, only groups with a matching
+    /// vector are considered. When `None`, any open group whose dimensions
+    /// match is eligible.
+    #[serde(default)]
+    pub vector: Option<String>,
+    #[serde(default)]
+    pub customer_id: Option<String>,
+    #[serde(default)]
+    pub pop: Option<String>,
+    #[serde(default)]
+    pub service_id: Option<String>,
+    #[serde(default)]
+    pub interface: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<f32>,
+    /// Frozen at ingest from the source's configured weight.
+    pub weight: f32,
+    pub ingested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    #[serde(default)]
+    pub raw_details: Option<serde_json::Value>,
+    /// Groups this signal has been attached to. Populated when the signal
+    /// attaches either at ingest or later via cache drain.
+    #[serde(default)]
+    pub attached_group_ids: Vec<Uuid>,
+}
+
+impl CorroboratingSignal {
+    /// True iff at least one matching dimension is populated.
+    pub fn has_any_dimension(&self) -> bool {
+        self.customer_id.is_some()
+            || self.pop.is_some()
+            || self.service_id.is_some()
+            || self.interface.is_some()
+    }
+}
+
+/// The set of dimensions extracted from one or more primary events in a
+/// signal group. Corroborating signals match if ANY of their populated
+/// dimensions equals the corresponding dimension in this struct.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventDimensions {
+    pub customer_ids: std::collections::HashSet<String>,
+    pub pops: std::collections::HashSet<String>,
+    pub service_ids: std::collections::HashSet<String>,
+    pub interfaces: std::collections::HashSet<String>,
+}
+
+impl EventDimensions {
+    pub fn is_empty(&self) -> bool {
+        self.customer_ids.is_empty()
+            && self.pops.is_empty()
+            && self.service_ids.is_empty()
+            && self.interfaces.is_empty()
+    }
+
+    pub fn add_customer(&mut self, v: impl Into<String>) {
+        self.customer_ids.insert(v.into());
+    }
+    pub fn add_pop(&mut self, v: impl Into<String>) {
+        self.pops.insert(v.into());
+    }
+    pub fn add_service(&mut self, v: impl Into<String>) {
+        self.service_ids.insert(v.into());
+    }
+    pub fn add_interface(&mut self, v: impl Into<String>) {
+        self.interfaces.insert(v.into());
+    }
 }
 
 /// Explanation of a correlation decision — for human-readable audit trail.
@@ -102,6 +250,13 @@ pub struct SourceContribution {
 pub struct CorrelationEngine;
 
 impl CorrelationEngine {
+    const ALL_MATCH_DIMENSIONS: [MatchDimension; 4] = [
+        MatchDimension::CustomerId,
+        MatchDimension::Pop,
+        MatchDimension::ServiceId,
+        MatchDimension::Interface,
+    ];
+
     /// Create a new signal group for the given (victim_ip, vector).
     pub fn create_group(victim_ip: &str, vector: &str, window_seconds: u32) -> SignalGroup {
         let now = Utc::now();
@@ -115,6 +270,7 @@ impl CorrelationEngine {
             source_count: 0,
             status: SignalGroupStatus::Open,
             corroboration_met: false,
+            primary_dimensions: PrimaryDimensions::default(),
         }
     }
 
@@ -167,6 +323,75 @@ impl CorrelationEngine {
         let threshold = config.effective_confidence_threshold(playbook_override);
 
         source_count as u32 >= min_sources && derived_confidence >= threshold
+    }
+
+    /// Corroboration is only "met" when the group contains ≥1 primary event.
+    /// A group composed entirely of corroborating signals can never trigger
+    /// a mitigation (ADR 021 invariant).
+    pub fn check_corroboration_with_primary(
+        source_count: i32,
+        derived_confidence: f32,
+        has_primary_event: bool,
+        config: &CorrelationConfig,
+        playbook_override: Option<&PlaybookCorrelationOverride>,
+    ) -> bool {
+        has_primary_event
+            && Self::check_corroboration(
+                source_count,
+                derived_confidence,
+                config,
+                playbook_override,
+            )
+    }
+
+    /// Decide whether a corroborating signal matches a group based on its
+    /// dimensions vs the group's aggregated dimensions. Matching is an OR
+    /// over each populated dimension — any shared value qualifies.
+    ///
+    /// If the signal carries a `vector`, the group's vector must match.
+    pub fn corroborator_matches(
+        signal: &CorroboratingSignal,
+        group: &SignalGroup,
+        group_dims: &EventDimensions,
+    ) -> bool {
+        Self::corroborator_matches_declared(
+            signal,
+            &group.vector,
+            group_dims,
+            &Self::ALL_MATCH_DIMENSIONS,
+        )
+    }
+
+    pub fn corroborator_matches_declared(
+        signal: &CorroboratingSignal,
+        group_vector: &str,
+        group_dims: &EventDimensions,
+        declared_dims: &[MatchDimension],
+    ) -> bool {
+        if let Some(v) = &signal.vector
+            && v != group_vector
+        {
+            return false;
+        }
+
+        declared_dims.iter().any(|dim| match dim {
+            MatchDimension::CustomerId => signal
+                .customer_id
+                .as_ref()
+                .is_some_and(|cid| group_dims.customer_ids.contains(cid)),
+            MatchDimension::Pop => signal
+                .pop
+                .as_ref()
+                .is_some_and(|pop| group_dims.pops.contains(pop)),
+            MatchDimension::ServiceId => signal
+                .service_id
+                .as_ref()
+                .is_some_and(|sid| group_dims.service_ids.contains(sid)),
+            MatchDimension::Interface => signal
+                .interface
+                .as_ref()
+                .is_some_and(|iface| group_dims.interfaces.contains(iface)),
+        })
     }
 
     /// Produce a human-readable explanation of the correlation decision.
@@ -474,6 +699,7 @@ mod tests {
             source_count: 2,
             status: SignalGroupStatus::Open,
             corroboration_met: true,
+            primary_dimensions: PrimaryDimensions::default(),
         };
 
         let contributions = vec![
@@ -514,6 +740,7 @@ mod tests {
             source_count: 1,
             status: SignalGroupStatus::Open,
             corroboration_met: false,
+            primary_dimensions: PrimaryDimensions::default(),
         };
 
         let contributions = vec![SourceContribution {
@@ -560,5 +787,164 @@ mod tests {
     fn test_signal_group_status_invalid() {
         let result: Result<SignalGroupStatus, _> = "invalid".parse();
         assert!(result.is_err());
+    }
+
+    // ── Corroborating signal matching (ADR 021) ────────────────────────
+
+    fn test_group(vector: &str) -> SignalGroup {
+        SignalGroup {
+            group_id: Uuid::new_v4(),
+            victim_ip: "203.0.113.5".to_string(),
+            vector: vector.to_string(),
+            created_at: Utc::now(),
+            window_expires_at: Utc::now() + Duration::seconds(300),
+            derived_confidence: 0.0,
+            source_count: 0,
+            status: SignalGroupStatus::Open,
+            corroboration_met: false,
+            primary_dimensions: PrimaryDimensions::default(),
+        }
+    }
+
+    fn test_signal() -> CorroboratingSignal {
+        CorroboratingSignal {
+            signal_id: Uuid::new_v4(),
+            source: "router-cpu".into(),
+            vector: None,
+            customer_id: None,
+            pop: None,
+            service_id: None,
+            interface: None,
+            confidence: Some(0.6),
+            weight: 0.5,
+            ingested_at: Utc::now(),
+            expires_at: Utc::now() + Duration::seconds(300),
+            raw_details: None,
+            attached_group_ids: vec![],
+        }
+    }
+
+    #[test]
+    fn corroborator_matches_on_customer_id() {
+        let group = test_group("udp_flood");
+        let mut dims = EventDimensions::default();
+        dims.add_customer("cust_42");
+        let mut sig = test_signal();
+        sig.customer_id = Some("cust_42".into());
+        assert!(CorrelationEngine::corroborator_matches(&sig, &group, &dims));
+    }
+
+    #[test]
+    fn corroborator_matches_on_pop() {
+        let group = test_group("udp_flood");
+        let mut dims = EventDimensions::default();
+        dims.add_pop("iad1");
+        let mut sig = test_signal();
+        sig.pop = Some("iad1".into());
+        assert!(CorrelationEngine::corroborator_matches(&sig, &group, &dims));
+    }
+
+    #[test]
+    fn corroborator_matches_on_interface() {
+        let group = test_group("udp_flood");
+        let mut dims = EventDimensions::default();
+        dims.add_interface("et-0/0/12");
+        let mut sig = test_signal();
+        sig.interface = Some("et-0/0/12".into());
+        assert!(CorrelationEngine::corroborator_matches(&sig, &group, &dims));
+    }
+
+    #[test]
+    fn corroborator_matches_or_logic_across_dimensions() {
+        // Only pop matches; customer_id does not. OR logic means it still matches.
+        let group = test_group("udp_flood");
+        let mut dims = EventDimensions::default();
+        dims.add_pop("iad1");
+        dims.add_customer("cust_real");
+        let mut sig = test_signal();
+        sig.customer_id = Some("cust_mismatch".into());
+        sig.pop = Some("iad1".into());
+        assert!(CorrelationEngine::corroborator_matches(&sig, &group, &dims));
+    }
+
+    #[test]
+    fn corroborator_no_match_when_no_dimension_overlaps() {
+        let group = test_group("udp_flood");
+        let mut dims = EventDimensions::default();
+        dims.add_pop("iad1");
+        let mut sig = test_signal();
+        sig.pop = Some("sfo3".into());
+        sig.customer_id = Some("cust_42".into()); // not in group
+        assert!(!CorrelationEngine::corroborator_matches(
+            &sig, &group, &dims
+        ));
+    }
+
+    #[test]
+    fn corroborator_vector_filter_rejects_mismatched_group() {
+        let group = test_group("udp_flood");
+        let mut dims = EventDimensions::default();
+        dims.add_pop("iad1");
+        let mut sig = test_signal();
+        sig.vector = Some("syn_flood".into());
+        sig.pop = Some("iad1".into());
+        assert!(!CorrelationEngine::corroborator_matches(
+            &sig, &group, &dims
+        ));
+    }
+
+    #[test]
+    fn corroborator_vector_filter_accepts_matching_group() {
+        let group = test_group("udp_flood");
+        let mut dims = EventDimensions::default();
+        dims.add_pop("iad1");
+        let mut sig = test_signal();
+        sig.vector = Some("udp_flood".into());
+        sig.pop = Some("iad1".into());
+        assert!(CorrelationEngine::corroborator_matches(&sig, &group, &dims));
+    }
+
+    #[test]
+    fn corroborator_declared_matching_ignores_undeclared_dimensions() {
+        let group = test_group("udp_flood");
+        let mut dims = EventDimensions::default();
+        dims.add_customer("cust_42");
+        let mut sig = test_signal();
+        sig.customer_id = Some("cust_42".into());
+        assert!(!CorrelationEngine::corroborator_matches_declared(
+            &sig,
+            &group.vector,
+            &dims,
+            &[MatchDimension::Pop],
+        ));
+    }
+
+    #[test]
+    fn has_any_dimension_detects_populated_signal() {
+        let mut sig = test_signal();
+        assert!(!sig.has_any_dimension());
+        sig.pop = Some("iad1".into());
+        assert!(sig.has_any_dimension());
+    }
+
+    #[test]
+    fn check_corroboration_with_primary_requires_primary_event() {
+        let config = CorrelationConfig {
+            min_sources: 2,
+            confidence_threshold: 0.5,
+            ..Default::default()
+        };
+        // 2 sources, confidence 0.8 — numerically meets corroboration...
+        assert!(CorrelationEngine::check_corroboration(
+            2, 0.8, &config, None
+        ));
+        // ...but with zero primary events, corroboration_with_primary says no.
+        assert!(!CorrelationEngine::check_corroboration_with_primary(
+            2, 0.8, false, &config, None,
+        ));
+        // Flip has_primary_event to true and it fires.
+        assert!(CorrelationEngine::check_corroboration_with_primary(
+            2, 0.8, true, &config, None,
+        ));
     }
 }

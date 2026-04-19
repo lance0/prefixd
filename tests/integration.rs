@@ -103,6 +103,7 @@ fn test_inventory() -> Inventory {
             assets: vec![Asset {
                 ip: "203.0.113.10".to_string(),
                 role: Some("dns".to_string()),
+                interface: None,
             }],
             allowed_ports: AllowedPorts {
                 udp: vec![53],
@@ -1898,6 +1899,7 @@ fn test_settings_with_correlation(
                     weight: 1.0,
                     r#type: "detector".to_string(),
                     confidence_mapping: std::collections::HashMap::new(),
+                    ..Default::default()
                 },
             );
             m.insert(
@@ -1906,6 +1908,7 @@ fn test_settings_with_correlation(
                     weight: 1.5,
                     r#type: "detector".to_string(),
                     confidence_mapping: std::collections::HashMap::new(),
+                    ..Default::default()
                 },
             );
             m
@@ -3931,6 +3934,7 @@ async fn setup_app_fastnetmon_with_mapping(
             weight: 1.0,
             r#type: "detector".to_string(),
             confidence_mapping,
+            ..Default::default()
         },
     );
 
@@ -4976,4 +4980,590 @@ async fn test_webhook_vector_map_and_scaling() {
     let (status, json) = post_webhook(&app, "scaled", body, &[]).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["processed"], 1);
+}
+
+// ── Corroborating signals (ADR 021) ─────────────────────────────────
+
+async fn setup_app_with_corroborating_source(
+    source_name: &str,
+    dims: Vec<prefixd::correlation::MatchDimension>,
+    weight: f32,
+) -> axum::Router {
+    use prefixd::correlation::{SourceConfig, SourceMode};
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+    let mut settings = test_settings_with_correlation(true, 2, 0.5);
+    settings.correlation.sources.insert(
+        source_name.to_string(),
+        SourceConfig {
+            weight,
+            r#type: "telemetry".to_string(),
+            confidence_mapping: std::collections::HashMap::new(),
+            mode: SourceMode::Corroborating,
+            match_dimensions: dims,
+        },
+    );
+
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo,
+        announcer,
+        std::path::PathBuf::from("."),
+    )
+    .expect("failed to create app state");
+
+    create_test_router(state)
+}
+
+async fn post_corroborator(
+    app: &axum::Router,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/signals/corroborator")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
+    (status, json)
+}
+
+#[tokio::test]
+async fn test_corroborator_primary_source_rejected() {
+    // Default source config (no mode) is primary; posting to corroborator
+    // endpoint must be rejected.
+    let app = setup_app_with_corroborating_source(
+        "different-source",
+        vec![prefixd::correlation::MatchDimension::Pop],
+        0.5,
+    )
+    .await;
+    let body = serde_json::json!({
+        "source": "fastnetmon",  // configured as primary in base settings
+        "pop": "test-pop"
+    });
+    let (status, _) = post_corroborator(&app, body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_corroborator_requires_declared_dimension() {
+    // Source declares match_dimensions=[pop] but signal doesn't carry pop → 400.
+    let app = setup_app_with_corroborating_source(
+        "router-cpu",
+        vec![prefixd::correlation::MatchDimension::Pop],
+        0.5,
+    )
+    .await;
+    let body = serde_json::json!({
+        "source": "router-cpu",
+        "customer_id": "cust_1"  // wrong dimension
+    });
+    let (status, _) = post_corroborator(&app, body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_corroborator_caches_when_no_matching_group() {
+    // No primary events yet → signal is cached.
+    let app = setup_app_with_corroborating_source(
+        "router-cpu",
+        vec![prefixd::correlation::MatchDimension::Pop],
+        0.5,
+    )
+    .await;
+    let body = serde_json::json!({
+        "source": "router-cpu",
+        "pop": "test-pop",
+        "confidence": 0.7
+    });
+    let (status, json) = post_corroborator(&app, body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["status"], "cached");
+    assert!(json["attached_group_ids"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_corroborator_attaches_to_matching_primary_group() {
+    // 1) Primary event creates a signal group. 2) Corroborator with matching
+    // dimension attaches and drives source_count to 2.
+    use prefixd::correlation::{MatchDimension, SourceConfig, SourceMode};
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+    let mut settings = test_settings_with_correlation(true, 2, 0.5);
+    settings.correlation.sources.insert(
+        "router-cpu".to_string(),
+        SourceConfig {
+            weight: 0.8,
+            r#type: "telemetry".to_string(),
+            confidence_mapping: std::collections::HashMap::new(),
+            mode: SourceMode::Corroborating,
+            match_dimensions: vec![MatchDimension::Pop],
+        },
+    );
+
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        announcer,
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+    let app = create_test_router(state);
+
+    // Step 1: post a primary event — source_count=1, corroboration_met=false (min_sources=2)
+    let event_body = serde_json::json!({
+        "source": "fastnetmon",
+        "vector": "udp_flood",
+        "victim_ip": "203.0.113.10",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "confidence": 0.9,
+        "action": "ban"
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    // Step 2: corroborator posts with matching pop
+    let sig_body = serde_json::json!({
+        "source": "router-cpu",
+        "pop": "test1",
+        "vector": "udp_flood",
+        "confidence": 0.6
+    });
+    let resp2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/signals/corroborator")
+                .header("content-type", "application/json")
+                .body(Body::from(sig_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp2.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["status"], "attached");
+    assert_eq!(json["attached_group_ids"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_primary_event_rejects_corroborating_source_before_write() {
+    use prefixd::correlation::{MatchDimension, SourceConfig, SourceMode};
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+    let mut settings = test_settings_with_correlation(true, 1, 0.5);
+    settings.correlation.sources.insert(
+        "router-cpu".to_string(),
+        SourceConfig {
+            weight: 0.8,
+            r#type: "telemetry".to_string(),
+            confidence_mapping: std::collections::HashMap::new(),
+            mode: SourceMode::Corroborating,
+            match_dimensions: vec![MatchDimension::Pop],
+        },
+    );
+
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        announcer,
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+    let app = create_test_router(state);
+
+    let event_body = serde_json::json!({
+        "source": "router-cpu",
+        "vector": "udp_flood",
+        "victim_ip": "203.0.113.10",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "confidence": 0.9,
+        "action": "ban"
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let stored = repo
+        .list_events(&prefixd::db::ListParams::default())
+        .await
+        .unwrap();
+    assert!(stored.is_empty(), "rejected event should not be persisted");
+}
+
+#[tokio::test]
+async fn test_corroborator_does_not_match_via_undeclared_dimension() {
+    use prefixd::correlation::{MatchDimension, SourceConfig, SourceMode};
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+    let mut settings = test_settings_with_correlation(true, 2, 0.5);
+    settings.correlation.sources.insert(
+        "router-cpu".to_string(),
+        SourceConfig {
+            weight: 0.8,
+            r#type: "telemetry".to_string(),
+            confidence_mapping: std::collections::HashMap::new(),
+            mode: SourceMode::Corroborating,
+            match_dimensions: vec![MatchDimension::Pop],
+        },
+    );
+
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo,
+        announcer,
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+    let app = create_test_router(state);
+
+    let event_body = serde_json::json!({
+        "source": "fastnetmon",
+        "vector": "udp_flood",
+        "victim_ip": "203.0.113.10",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "confidence": 0.9,
+        "action": "ban"
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let sig_body = serde_json::json!({
+        "source": "router-cpu",
+        "pop": "wrong-pop",
+        "customer_id": "cust_test",
+        "vector": "udp_flood",
+        "confidence": 0.6
+    });
+    let (status, json) = post_corroborator(&app, sig_body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["status"], "cached");
+    assert!(json["attached_group_ids"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_corroborator_attaches_on_interface_dimension() {
+    use prefixd::correlation::{MatchDimension, SourceConfig, SourceMode};
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+    let mut settings = test_settings_with_correlation(true, 2, 0.5);
+    settings.correlation.sources.insert(
+        "router-iface".to_string(),
+        SourceConfig {
+            weight: 0.8,
+            r#type: "telemetry".to_string(),
+            confidence_mapping: std::collections::HashMap::new(),
+            mode: SourceMode::Corroborating,
+            match_dimensions: vec![MatchDimension::Interface],
+        },
+    );
+    let inventory = Inventory::new(vec![Customer {
+        customer_id: "cust_test".to_string(),
+        name: "Test Customer".to_string(),
+        prefixes: vec!["203.0.113.0/24".to_string()],
+        policy_profile: prefixd::config::PolicyProfile::Normal,
+        services: vec![Service {
+            service_id: "svc_dns".to_string(),
+            name: "DNS".to_string(),
+            assets: vec![Asset {
+                ip: "203.0.113.10".to_string(),
+                role: Some("dns".to_string()),
+                interface: Some("xe-0/0/0".to_string()),
+            }],
+            allowed_ports: AllowedPorts {
+                udp: vec![53],
+                tcp: vec![53],
+            },
+        }],
+    }]);
+
+    let state = AppState::new(
+        settings,
+        inventory,
+        test_playbooks(),
+        repo,
+        announcer,
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+    let app = create_test_router(state);
+
+    let event_body = serde_json::json!({
+        "source": "fastnetmon",
+        "vector": "udp_flood",
+        "victim_ip": "203.0.113.10",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "confidence": 0.9,
+        "action": "ban"
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let sig_body = serde_json::json!({
+        "source": "router-iface",
+        "interface": "xe-0/0/0",
+        "vector": "udp_flood",
+        "confidence": 0.6
+    });
+    let (status, json) = post_corroborator(&app, sig_body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["status"], "attached");
+    assert_eq!(json["attached_group_ids"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_corroborator_alone_never_triggers_mitigation() {
+    // Ingest two corroborators but zero primary events. Even if min_sources=1,
+    // check_corroboration_with_primary must prevent a mitigation from firing.
+    // Here we just verify that no signal group is created by corroborator-only.
+    let app = setup_app_with_corroborating_source(
+        "router-cpu",
+        vec![prefixd::correlation::MatchDimension::Pop],
+        1.0,
+    )
+    .await;
+    for _ in 0..2 {
+        let body = serde_json::json!({
+            "source": "router-cpu",
+            "pop": "test-pop"
+        });
+        let (status, json) = post_corroborator(&app, body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["status"], "cached");
+    }
+    // Listing signal groups should show none — corroborators alone don't
+    // create groups.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/signal-groups?limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["groups"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_corroborator_rejected_when_correlation_disabled() {
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+    let settings = test_settings_with_correlation(false, 1, 0.5);
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo,
+        announcer,
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+    let app = create_test_router(state);
+
+    let body = serde_json::json!({"source": "router-cpu", "pop": "x"});
+    let (status, _) = post_corroborator(&app, body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_expired_sweep_splits_attached_vs_unattached() {
+    use chrono::{Duration, Utc};
+    use prefixd::correlation::CorroboratingSignal;
+    use uuid::Uuid;
+
+    let repo = MockRepository::new();
+    let now = Utc::now();
+
+    // Unattached, expired — should count toward unattached_expired.
+    repo.insert_corroborating_signal(&CorroboratingSignal {
+        signal_id: Uuid::new_v4(),
+        source: "router-cpu".to_string(),
+        vector: Some("udp_flood".to_string()),
+        customer_id: None,
+        pop: Some("iad1".to_string()),
+        service_id: None,
+        interface: None,
+        confidence: Some(0.5),
+        weight: 0.5,
+        ingested_at: now - Duration::seconds(600),
+        expires_at: now - Duration::seconds(60),
+        raw_details: None,
+        attached_group_ids: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Attached, expired — should count toward attached_expired, NOT the
+    // cache-miss metric.
+    repo.insert_corroborating_signal(&CorroboratingSignal {
+        signal_id: Uuid::new_v4(),
+        source: "router-cpu".to_string(),
+        vector: Some("udp_flood".to_string()),
+        customer_id: None,
+        pop: Some("iad1".to_string()),
+        service_id: None,
+        interface: None,
+        confidence: Some(0.5),
+        weight: 0.5,
+        ingested_at: now - Duration::seconds(600),
+        expires_at: now - Duration::seconds(60),
+        raw_details: None,
+        attached_group_ids: vec![Uuid::new_v4()],
+    })
+    .await
+    .unwrap();
+
+    // Unattached, still fresh — should survive the sweep.
+    repo.insert_corroborating_signal(&CorroboratingSignal {
+        signal_id: Uuid::new_v4(),
+        source: "router-cpu".to_string(),
+        vector: Some("udp_flood".to_string()),
+        customer_id: None,
+        pop: Some("iad1".to_string()),
+        service_id: None,
+        interface: None,
+        confidence: Some(0.5),
+        weight: 0.5,
+        ingested_at: now,
+        expires_at: now + Duration::seconds(300),
+        raw_details: None,
+        attached_group_ids: vec![],
+    })
+    .await
+    .unwrap();
+
+    let stats = repo
+        .delete_expired_corroborating_signals(now)
+        .await
+        .unwrap();
+    assert_eq!(stats.unattached_expired, 1);
+    assert_eq!(stats.attached_expired, 1);
+    assert_eq!(repo.count_cached_corroborators(now).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_corroborator_source_activity_merges_cache_rows() {
+    use chrono::{Duration, Utc};
+    use prefixd::correlation::CorroboratingSignal;
+    use uuid::Uuid;
+
+    let repo = MockRepository::new();
+    let now = Utc::now();
+
+    for (src, delta) in [
+        ("router-cpu", 30),
+        ("router-cpu", 60),
+        ("pop-utilization", 15),
+    ] {
+        repo.insert_corroborating_signal(&CorroboratingSignal {
+            signal_id: Uuid::new_v4(),
+            source: src.to_string(),
+            vector: None,
+            customer_id: None,
+            pop: Some("iad1".to_string()),
+            service_id: None,
+            interface: None,
+            confidence: Some(0.5),
+            weight: 0.5,
+            ingested_at: now - Duration::seconds(delta),
+            expires_at: now + Duration::seconds(300),
+            raw_details: None,
+            attached_group_ids: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let activity = repo
+        .corroborator_source_activity(now - Duration::minutes(10))
+        .await
+        .unwrap();
+    let mut by_source: std::collections::HashMap<_, _> = activity
+        .into_iter()
+        .map(|r| (r.source.clone(), r))
+        .collect();
+    assert_eq!(by_source.len(), 2);
+    let cpu = by_source.remove("router-cpu").unwrap();
+    assert_eq!(cpu.count, 2);
+    assert!(cpu.last_seen.is_some());
+    assert_eq!(by_source.remove("pop-utilization").unwrap().count, 1);
 }

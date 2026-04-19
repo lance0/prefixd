@@ -10,6 +10,29 @@ use crate::observability::AuditEntry;
 
 use super::{GlobalStats, PopInfo, SafelistEntry, TimeseriesBucket};
 
+/// Return value for `delete_expired_corroborating_signals`.
+///
+/// `unattached_expired` is the count of signals the scheduler should
+/// increment `CORROBORATOR_EXPIRED_TOTAL` by: signals that were cached
+/// because no primary group matched at ingest and then timed out without
+/// ever attaching. `attached_expired` rows are the audit copies retained
+/// for late fan-out; their deletion is bookkeeping, not a cache miss.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CorroboratorSweepStats {
+    pub unattached_expired: u64,
+    pub attached_expired: u64,
+}
+
+/// Per-source activity summary for the Signals dashboard, covering both
+/// primary-event sources (via the `events` table) and corroborator-only
+/// sources (via `corroborating_signals` + `signal_group_events`).
+#[derive(Debug, Clone, Default)]
+pub struct CorroboratorSourceActivity {
+    pub source: String,
+    pub last_seen: Option<DateTime<Utc>>,
+    pub count: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct NotificationPreferences {
     #[serde(default)]
@@ -145,6 +168,15 @@ pub trait RepositoryTrait: Send + Sync {
     async fn get_signal_group(&self, group_id: Uuid) -> Result<Option<SignalGroup>>;
     /// Find an open signal group matching (victim_ip, vector) whose window hasn't expired.
     async fn find_open_group(&self, victim_ip: &str, vector: &str) -> Result<Option<SignalGroup>>;
+    /// Find all open signal groups whose aggregated event dimensions match
+    /// any of the populated dimensions in `dims` and (if `vector` is `Some`)
+    /// whose vector matches. Used by the corroborator ingest handler.
+    async fn find_open_groups_by_dimensions(
+        &self,
+        vector: &Option<String>,
+        dims: &crate::correlation::EventDimensions,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<SignalGroup>>;
     /// Add an event to a signal group (junction table). Returns false if already linked.
     async fn add_event_to_group(
         &self,
@@ -169,4 +201,64 @@ pub trait RepositoryTrait: Send + Sync {
         &self,
         signal_group_id: Uuid,
     ) -> Result<Option<Uuid>>;
+
+    // Corroborating signals (ADR 021)
+
+    /// Attach a corroborating signal to a signal group. Uses `event_id =
+    /// signal.signal_id` in the junction table and denormalizes source /
+    /// confidence so `list_signal_group_events` can render the row without
+    /// touching `corroborating_signals`.
+    async fn add_corroborator_event_to_group(
+        &self,
+        group_id: Uuid,
+        signal: &crate::correlation::CorroboratingSignal,
+    ) -> Result<bool>;
+    /// Returns true if the group has at least one `is_corroborating=false`
+    /// event (a primary event). Used to enforce the ADR 021 invariant that
+    /// groups of only corroborators cannot trigger mitigations.
+    async fn group_has_primary_event(&self, group_id: Uuid) -> Result<bool>;
+    /// Insert a corroborating signal into the floating cache (used when the
+    /// signal arrives before any matching primary signal group exists).
+    async fn insert_corroborating_signal(
+        &self,
+        signal: &crate::correlation::CorroboratingSignal,
+    ) -> Result<()>;
+    /// Find cached corroborating signals whose dimensions match the given
+    /// event dimensions and haven't expired. Used to drain the cache when
+    /// a primary event arrives.
+    async fn find_matching_corroborators(
+        &self,
+        vector: &str,
+        dims: &crate::correlation::EventDimensions,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<crate::correlation::CorroboratingSignal>>;
+    /// Record that a cached corroborating signal has been attached to a
+    /// signal group. Appends `group_id` to the signal's `attached_group_ids`.
+    async fn mark_corroborator_attached(&self, signal_id: Uuid, group_id: Uuid) -> Result<()>;
+    /// Delete corroborating signals whose `expires_at` is in the past.
+    /// Returns `CorroboratorSweepStats` so the scheduler can attribute
+    /// `CORROBORATOR_EXPIRED_TOTAL` to signals that expired *without* ever
+    /// attaching, while still GCing attached rows from the cache.
+    async fn delete_expired_corroborating_signals(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<CorroboratorSweepStats>;
+    /// Count currently-cached (unattached, unexpired) corroborating signals.
+    /// For operator dashboards / metrics.
+    async fn count_cached_corroborators(&self, now: chrono::DateTime<chrono::Utc>) -> Result<u64>;
+    /// List currently-cached corroborating signals for admin UI / debugging.
+    async fn list_cached_corroborators(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        limit: i64,
+    ) -> Result<Vec<crate::correlation::CorroboratingSignal>>;
+    /// Aggregate corroborator activity per source since `since`, across
+    /// both the live cache (`corroborating_signals`) and attached rows
+    /// (`signal_group_events WHERE is_corroborating`). Used by the
+    /// Signals dashboard to reflect `mode: corroborating` source health
+    /// that otherwise never shows up in the primary `/v1/events` stream.
+    async fn corroborator_source_activity(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<CorroboratorSourceActivity>>;
 }

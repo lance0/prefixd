@@ -29,7 +29,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useCorrelationConfig, useConfigPlaybooks } from "@/hooks/use-api"
 import { usePermissions } from "@/hooks/use-permissions"
 import { updateCorrelationConfig } from "@/lib/api"
-import type { CorrelationConfig, SourceConfig } from "@/lib/api"
+import type {
+  CorrelationConfig,
+  MatchDimension,
+  SourceConfig,
+  SourceMode,
+} from "@/lib/api"
 import { Settings, Plus, Pencil, Trash2, Save, Loader2, AlertCircle, Link as LinkIcon } from "lucide-react"
 import Link from "next/link"
 
@@ -291,11 +296,22 @@ function SignalSourceCards() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {sources.map(([name, src]) => (
               <div key={name} className="border border-border rounded-md p-3">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-mono font-medium">{name}</span>
-                  <Badge variant="outline" className="text-[10px] font-mono">
-                    {src.type || "unknown"}
-                  </Badge>
+                <div className="flex items-center justify-between mb-2 gap-1">
+                  <span className="text-sm font-mono font-medium truncate">{name}</span>
+                  <div className="flex gap-1 shrink-0">
+                    {src.mode === "corroborating" && (
+                      <Badge
+                        variant="secondary"
+                        className="text-[10px] font-mono bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30"
+                        title="Corroborating-only source: cannot trigger mitigations on its own"
+                      >
+                        corroborating
+                      </Badge>
+                    )}
+                    <Badge variant="outline" className="text-[10px] font-mono">
+                      {src.type || "unknown"}
+                    </Badge>
+                  </div>
                 </div>
                 <div className="text-xs font-mono text-muted-foreground space-y-0.5">
                   <div className="flex justify-between">
@@ -307,6 +323,14 @@ function SignalSourceCards() {
                       <span>Mappings</span>
                       <span className="text-foreground">
                         {Object.keys(src.confidence_mapping).length}
+                      </span>
+                    </div>
+                  )}
+                  {src.mode === "corroborating" && src.match_dimensions && src.match_dimensions.length > 0 && (
+                    <div className="flex justify-between">
+                      <span>Match on</span>
+                      <span className="text-foreground truncate ml-2">
+                        {src.match_dimensions.join(", ")}
                       </span>
                     </div>
                   )}
@@ -395,28 +419,51 @@ function SourceDialog({
   const [name, setName] = useState(initialName || "")
   const [weight, setWeight] = useState(initialConfig?.weight?.toString() || "1.0")
   const [type, setType] = useState(initialConfig?.type || "detector")
+  const [mode, setMode] = useState<SourceMode>(initialConfig?.mode ?? "primary")
+  const [matchDims, setMatchDims] = useState<MatchDimension[]>(
+    initialConfig?.match_dimensions ?? []
+  )
+  const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
-  // Reset form when opened
+  const resetForm = useCallback(() => {
+    setName(initialName || "")
+    setWeight(initialConfig?.weight?.toString() || "1.0")
+    setType(initialConfig?.type || "detector")
+    setMode(initialConfig?.mode ?? "primary")
+    setMatchDims(initialConfig?.match_dimensions ?? [])
+    setFormError(null)
+  }, [initialName, initialConfig])
+
   const handleOpenChange = (isOpen: boolean) => {
     if (!isOpen) {
       onClose()
     } else {
-      setName(initialName || "")
-      setWeight(initialConfig?.weight?.toString() || "1.0")
-      setType(initialConfig?.type || "detector")
+      resetForm()
     }
   }
 
-  // Sync form when initialName/initialConfig change
   useEffect(() => {
-    setName(initialName || "")
-    setWeight(initialConfig?.weight?.toString() || "1.0")
-    setType(initialConfig?.type || "detector")
-  }, [initialName, initialConfig])
+    resetForm()
+  }, [resetForm])
+
+  const toggleDimension = (dim: MatchDimension) => {
+    setMatchDims((prev) =>
+      prev.includes(dim) ? prev.filter((d) => d !== dim) : [...prev, dim]
+    )
+  }
 
   const handleSave = async () => {
     if (!name.trim()) return
+    setFormError(null)
+    if (mode === "corroborating" && matchDims.length === 0) {
+      setFormError("Select at least one match dimension for corroborating sources")
+      return
+    }
+    if (mode === "primary" && matchDims.length > 0) {
+      setFormError("Match dimensions are only valid for corroborating sources")
+      return
+    }
     setSaving(true)
     try {
       await onSave(
@@ -425,6 +472,8 @@ function SourceDialog({
           weight: parseFloat(weight) || 1.0,
           type,
           confidence_mapping: initialConfig?.confidence_mapping ?? {},
+          mode,
+          match_dimensions: mode === "corroborating" ? matchDims : [],
         },
         isNew,
       )
@@ -476,6 +525,65 @@ function SourceDialog({
               step={0.1}
             />
           </div>
+          <div className="space-y-1.5">
+            <Label className="text-xs font-mono">Mode</Label>
+            <Select
+              value={mode}
+              onValueChange={(v) => {
+                const nextMode = v as SourceMode
+                setMode(nextMode)
+                if (nextMode === "primary") {
+                  setMatchDims([])
+                }
+              }}
+            >
+              <SelectTrigger className="h-8 text-xs font-mono">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="primary" className="text-xs font-mono">
+                  Primary (can trigger mitigations)
+                </SelectItem>
+                <SelectItem value="corroborating" className="text-xs font-mono">
+                  Corroborating (strengthens other sources only)
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-[10px] font-mono text-muted-foreground">
+              Corroborating sources post to /v1/signals/corroborator and never
+              fire mitigations on their own (ADR 021).
+            </p>
+          </div>
+          {mode === "corroborating" && (
+            <div className="space-y-1.5">
+              <Label className="text-xs font-mono">Match dimensions</Label>
+              <div className="grid grid-cols-2 gap-1.5">
+                {(["customer_id", "pop", "service_id", "interface"] as MatchDimension[]).map(
+                  (dim) => (
+                    <button
+                      key={dim}
+                      type="button"
+                      onClick={() => toggleDimension(dim)}
+                      className={`h-7 text-[11px] font-mono rounded border px-2 ${
+                        matchDims.includes(dim)
+                          ? "bg-primary/10 border-primary/40 text-primary"
+                          : "border-border text-muted-foreground hover:bg-muted/40"
+                      }`}
+                    >
+                      {dim}
+                    </button>
+                  )
+                )}
+              </div>
+              <p className="text-[10px] font-mono text-muted-foreground">
+                Signals from this source must populate at least one of these
+                fields; the matcher uses OR across dimensions.
+              </p>
+            </div>
+          )}
+          {formError && (
+            <p className="text-xs font-mono text-destructive">{formError}</p>
+          )}
         </div>
         <DialogFooter>
           <Button variant="ghost" size="sm" onClick={onClose} className="text-xs font-mono">
@@ -555,6 +663,35 @@ function PlaybookOverrides() {
 }
 
 // ── Validation ────────────────────────────
+
+/**
+ * Validate a SourceConfig as submitted by the SourceDialog. Mirrors the
+ * server-side validator in src/correlation/config.rs so the user sees the
+ * error before round-tripping to the API.
+ */
+export function validateSourceConfig(
+  name: string,
+  src: SourceConfig
+): string[] {
+  const errors: string[] = []
+  if (!name.trim()) errors.push("Source name is required")
+  if (!Number.isFinite(src.weight) || src.weight < 0) {
+    errors.push("Weight must be a non-negative number")
+  }
+  const mode: SourceMode = src.mode ?? "primary"
+  const dims = src.match_dimensions ?? []
+  if (mode === "primary" && dims.length > 0) {
+    errors.push(
+      "match_dimensions is only valid for mode=corroborating — clear it or switch modes"
+    )
+  }
+  if (mode === "corroborating" && dims.length === 0) {
+    errors.push(
+      "Corroborating sources require at least one match_dimension"
+    )
+  }
+  return errors
+}
 
 function validateConfig(config: CorrelationConfig): string[] {
   const errors: string[] = []

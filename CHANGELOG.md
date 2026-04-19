@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Corroborating signals (ADR 021)** — New class of correlation signals that strengthen open signal groups without ever triggering mitigations on their own. Targets coarse telemetry (router CPU, interface utilization, per-customer NetFlow, PoP-level metrics) that shouldn't name a victim IP but is valuable alongside a real detector.
+  - Configure via `mode: corroborating` + `match_dimensions: [pop, customer_id, service_id, interface]` on any entry in `correlation.yaml`'s `sources` map. Declared dimensions are **authoritative**: a source declared for `[pop]` can never attach via an undeclared `customer_id`/`service_id`/`interface`, even if those values happen to match an open group. Validator rejects misconfiguration on both `PUT /v1/config/correlation` and on YAML load — the daemon refuses to boot with invalid correlation config.
+  - New endpoint `POST /v1/signals/corroborator` accepts dimension-tagged signals (no `victim_ip`). Matches open signal groups using OR-semantics **across declared dimensions only**, with an optional `vector` narrower. Unmatched signals cache for up to `window_seconds` and drain when a matching primary event arrives.
+  - Engine invariant enforced in two places: (a) `check_corroboration_with_primary` requires at least one primary event before `corroboration_met` can flip true, and (b) the corroborator-side aggregate recompute refuses to promote `corroboration_met` from false→true on its own — only the primary-ingest path (which has playbook-override context) can do that.
+  - `POST /v1/events` rejects corroborating-only sources at handler entry, before any ban/unban branching and before any DB writes. Nothing persists from a rejected event.
+  - New `interface` field on inventory `Asset` entries feeds into `IpContext.interface`, so interface-only corroborators (a common gNMI / SNMP shape) now have a real matchable dimension.
+  - Reconciliation loop sweeps expired corroborators. Three new Prometheus metrics: `prefixd_corroborator_ingested_total{source}`, `_attached_total{source}`, `_expired_total` (unlabelled — per-source attribution deferred to PR B; see ROADMAP). `_expired_total` counts only *unattached* cache misses — signals that attached and then had their cache row GC'd no longer inflate the counter. Migrations 009, 010, and 011 (the last backfills `primary_dimensions` for pre-upgrade open signal groups from their mitigations so corroborators can attach to in-flight incidents immediately after upgrade).
+  - New endpoint `GET /v1/signals/corroborator/activity?minutes=N` returns per-source `(last_seen, count)` aggregated across the live cache *and* attached `signal_group_events` rows. The frontend merges this into the Signal Sources tab so `mode: corroborating` sources no longer render as "never seen" simply because they don't post to `/v1/events`.
+  - Dashboard: per-source mode + dimension picker in the Correlation Config tab (switching back to `primary` auto-clears declared dimensions); corroborating badge on signal group detail's contributing-events list; null-safe `ingested_at` rendering for corroborator rows.
+  - New CLI: `prefixdctl send-corroborator --source router-cpu --pop iad1 ...`.
+  - See [ADR 021](docs/adr/021-corroborating-signals.md) for rationale; migrations 009 + 010 for schema; [docs/detectors/corroborating-signals.md](docs/detectors/corroborating-signals.md) for operator quickstart.
+
 ## [0.15.0] - 2026-04-18
 
 ### Added

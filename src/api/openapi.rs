@@ -59,6 +59,8 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
         super::handlers::ingest_alertmanager,
         super::handlers::ingest_fastnetmon,
         super::handlers::ingest_webhook,
+        super::handlers::ingest_corroborator,
+        super::handlers::get_corroborator_activity,
         super::handlers::get_correlation_config,
         super::handlers::update_correlation_config,
     ),
@@ -111,6 +113,13 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
             WebhookFieldMap,
             WebhookResponse,
             WebhookEventResult,
+            super::handlers::CorroboratorInput,
+            super::handlers::CorroboratorResponse,
+            super::handlers::CorroboratorActivityResponse,
+            super::handlers::CorroboratorActivityEntry,
+            crate::correlation::PrimaryDimensions,
+            crate::correlation::MatchDimension,
+            crate::correlation::SourceMode,
         )
     ),
     tags(

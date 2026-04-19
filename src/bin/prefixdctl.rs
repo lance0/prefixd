@@ -57,6 +57,38 @@ enum Commands {
 
     /// Show applied database migrations (requires DATABASE_URL)
     Migrations,
+
+    /// Send a corroborating signal (ADR 021). Source must be configured
+    /// with mode=corroborating in correlation.yaml.
+    SendCorroborator {
+        /// Signal source name (must match correlation.yaml entry)
+        #[arg(short, long)]
+        source: String,
+
+        /// Optional vector narrower (udp_flood, syn_flood, ...)
+        #[arg(short, long)]
+        vector: Option<String>,
+
+        /// Customer ID to match on
+        #[arg(long)]
+        customer_id: Option<String>,
+
+        /// POP to match on
+        #[arg(long)]
+        pop: Option<String>,
+
+        /// Service ID to match on
+        #[arg(long)]
+        service_id: Option<String>,
+
+        /// Interface to match on
+        #[arg(long)]
+        interface: Option<String>,
+
+        /// Confidence (0.0–1.0)
+        #[arg(long)]
+        confidence: Option<f32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -310,6 +342,28 @@ async fn main() -> ExitCode {
         Commands::Peers => cmd_peers(&client, cli.format).await,
         Commands::Reload => cmd_reload(&client, cli.format).await,
         Commands::Migrations => cmd_migrations(cli.format).await,
+        Commands::SendCorroborator {
+            source,
+            vector,
+            customer_id,
+            pop,
+            service_id,
+            interface,
+            confidence,
+        } => {
+            cmd_send_corroborator(
+                &client,
+                source,
+                vector,
+                customer_id,
+                pop,
+                service_id,
+                interface,
+                confidence,
+                cli.format,
+            )
+            .await
+        }
     };
 
     match result {
@@ -587,6 +641,79 @@ async fn cmd_reload(client: &Client, format: OutputFormat) -> Result<(), String>
         }
     }
 
+    Ok(())
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CorroboratorResponse {
+    signal_id: String,
+    status: String,
+    attached_group_ids: Vec<String>,
+    #[serde(default)]
+    cached: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_send_corroborator(
+    client: &Client,
+    source: String,
+    vector: Option<String>,
+    customer_id: Option<String>,
+    pop: Option<String>,
+    service_id: Option<String>,
+    interface: Option<String>,
+    confidence: Option<f32>,
+    format: OutputFormat,
+) -> Result<(), String> {
+    if customer_id.is_none() && pop.is_none() && service_id.is_none() && interface.is_none() {
+        return Err(
+            "at least one of --customer-id, --pop, --service-id, --interface is required"
+                .to_string(),
+        );
+    }
+
+    let mut body = serde_json::Map::new();
+    body.insert("source".to_string(), serde_json::json!(source));
+    if let Some(v) = vector {
+        body.insert("vector".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = customer_id {
+        body.insert("customer_id".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = pop {
+        body.insert("pop".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = service_id {
+        body.insert("service_id".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = interface {
+        body.insert("interface".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = confidence {
+        body.insert("confidence".to_string(), serde_json::json!(v));
+    }
+
+    let resp: CorroboratorResponse = client
+        .post("/v1/signals/corroborator", &serde_json::Value::Object(body))
+        .await?;
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+        }
+        OutputFormat::Table => {
+            println!("signal_id:          {}", resp.signal_id);
+            println!("status:             {}", resp.status);
+            println!(
+                "attached_groups:    {}",
+                if resp.attached_group_ids.is_empty() {
+                    "(none - cached)".to_string()
+                } else {
+                    resp.attached_group_ids.join(", ")
+                }
+            );
+        }
+    }
     Ok(())
 }
 

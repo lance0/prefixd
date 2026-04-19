@@ -690,9 +690,10 @@ export interface SignalGroupEvent {
   source: string
   confidence: number | null
   source_weight: number
-  ingested_at: string
+  ingested_at: string | null
   victim_ip: string
   vector: string
+  is_corroborating?: boolean
 }
 
 export interface SignalGroupsResponse {
@@ -734,10 +735,42 @@ export async function getSignalGroupDetail(id: string): Promise<SignalGroupDetai
 
 // Correlation Config
 
+export type SourceMode = "primary" | "corroborating"
+export type MatchDimension = "customer_id" | "pop" | "service_id" | "interface"
+
 export interface SourceConfig {
   weight: number
   type: string
   confidence_mapping: Record<string, number>
+  mode?: SourceMode
+  match_dimensions?: MatchDimension[]
+}
+
+export interface CorroboratorInput {
+  source: string
+  vector?: string
+  customer_id?: string
+  pop?: string
+  service_id?: string
+  interface?: string
+  confidence?: number
+}
+
+export interface CorroboratorResponse {
+  signal_id: string
+  status: "attached" | "cached"
+  attached_group_ids: string[]
+  cached: boolean
+}
+
+export async function sendCorroborator(
+  input: CorroboratorInput
+): Promise<CorroboratorResponse> {
+  return fetchApi<CorroboratorResponse>("/v1/signals/corroborator", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  })
 }
 
 export interface WebhookFieldMap {
@@ -809,12 +842,30 @@ export interface SignalSourceStatus {
   healthy: boolean
 }
 
+interface CorroboratorActivityEntry {
+  source: string
+  last_seen: string | null
+  count: number
+}
+
+interface CorroboratorActivityResponse {
+  since: string
+  sources: CorroboratorActivityEntry[]
+}
+
 export async function getSignalSources(): Promise<SignalSourceStatus[]> {
-  // Signal source status is derived from correlation config + recent events.
-  // We fetch correlation config and recent events, then combine them.
-  const [config, eventsResp] = await Promise.all([
+  // Signal source status is derived from correlation config + recent
+  // events + corroborator activity. Corroborating-only sources never hit
+  // /v1/events, so we also fetch per-source activity from
+  // /v1/signals/corroborator/activity and merge it in. Without this step
+  // mode=corroborating sources would always render as "never seen /
+  // unhealthy" even while posting.
+  const [config, eventsResp, corroboratorResp] = await Promise.all([
     getCorrelationConfig(),
     getEvents({ limit: 1000 }),
+    fetchApi<CorroboratorActivityResponse>(
+      "/v1/signals/corroborator/activity?minutes=60",
+    ).catch(() => ({ since: new Date().toISOString(), sources: [] })),
   ])
 
   const sourceMap = new Map<string, SignalSourceStatus>()
@@ -846,6 +897,30 @@ export async function getSignalSources(): Promise<SignalSourceStatus[]> {
         weight: config.default_weight,
         last_seen: event.ingested_at,
         event_count: 1,
+        healthy: false,
+      })
+    }
+  }
+
+  // Merge corroborator activity (backend-aggregated across both
+  // corroborating_signals cache and attached signal_group_events).
+  for (const row of corroboratorResp.sources ?? []) {
+    const existing = sourceMap.get(row.source)
+    if (existing) {
+      existing.event_count += row.count
+      if (
+        row.last_seen &&
+        (!existing.last_seen || row.last_seen > existing.last_seen)
+      ) {
+        existing.last_seen = row.last_seen
+      }
+    } else {
+      sourceMap.set(row.source, {
+        name: row.source,
+        type: "unknown",
+        weight: config.default_weight,
+        last_seen: row.last_seen,
+        event_count: row.count,
         healthy: false,
       })
     }

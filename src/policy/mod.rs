@@ -163,6 +163,7 @@ mod tests {
             policy_profile: PolicyProfile::Normal,
             service_id: Some("svc_1".to_string()),
             service_name: Some("Test Service".to_string()),
+            interface: None,
             allowed_ports: AllowedPorts {
                 udp: udp_ports,
                 tcp: tcp_ports,
