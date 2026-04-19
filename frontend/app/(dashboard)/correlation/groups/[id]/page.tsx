@@ -222,13 +222,22 @@ export default function SignalGroupDetailPage({
                           className={`absolute -left-[21px] top-1 h-3 w-3 rounded-full ${sourceColor(event.source)}`}
                         />
                         <div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <Badge
                               variant="outline"
                               className="text-[10px] font-mono"
                             >
                               {event.source}
                             </Badge>
+                            {event.is_corroborating && (
+                              <Badge
+                                variant="secondary"
+                                className="text-[10px] font-mono bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30"
+                                title="Corroborating signal — strengthened the group but cannot trigger mitigations alone"
+                              >
+                                corroborating
+                              </Badge>
+                            )}
                             <span className="text-xs text-muted-foreground tabular-nums">
                               Confidence:{" "}
                               {event.confidence != null

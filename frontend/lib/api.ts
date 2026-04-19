@@ -693,6 +693,7 @@ export interface SignalGroupEvent {
   ingested_at: string
   victim_ip: string
   vector: string
+  is_corroborating?: boolean
 }
 
 export interface SignalGroupsResponse {
@@ -734,10 +735,42 @@ export async function getSignalGroupDetail(id: string): Promise<SignalGroupDetai
 
 // Correlation Config
 
+export type SourceMode = "primary" | "corroborating"
+export type MatchDimension = "customer_id" | "pop" | "service_id" | "interface"
+
 export interface SourceConfig {
   weight: number
   type: string
   confidence_mapping: Record<string, number>
+  mode?: SourceMode
+  match_dimensions?: MatchDimension[]
+}
+
+export interface CorroboratorInput {
+  source: string
+  vector?: string
+  customer_id?: string
+  pop?: string
+  service_id?: string
+  interface?: string
+  confidence?: number
+}
+
+export interface CorroboratorResponse {
+  signal_id: string
+  status: "attached" | "cached"
+  attached_group_ids: string[]
+  cached: boolean
+}
+
+export async function sendCorroborator(
+  input: CorroboratorInput
+): Promise<CorroboratorResponse> {
+  return fetchApi<CorroboratorResponse>("/v1/signals/corroborator", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  })
 }
 
 export interface WebhookFieldMap {
