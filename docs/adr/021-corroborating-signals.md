@@ -202,10 +202,31 @@ initial implementation. All were fixed before merge. Notable ones:
    the resolved playbook override and is allowed to promote the flag.
    Corroborator ingest still updates `derived_confidence` and
    `source_count`.
-8. **Expiry metric simplified.** `prefixd_corroborator_expired_total`
-   was labelled by source but only ever emitted `source="unknown"`. It's
-   now an unlabelled counter incremented by sweep count. Per-source
-   attribution is tracked as a follow-up (PR B).
+8. **Expiry metric simplified and narrowed to true cache misses.**
+   `prefixd_corroborator_expired_total` was labelled by source but only
+   ever emitted `source="unknown"`. It's now an unlabelled counter. The
+   sweep path also no longer inflates it with attached rows: the
+   repository now splits the delete into `(unattached_expired,
+   attached_expired)` and the scheduler only increments the counter by
+   the first. Attached rows are still cleaned from the cache for GC,
+   but their deletion is bookkeeping rather than a cache miss.
+   Per-source attribution is still deferred to PR B.
+9. **Pre-upgrade open groups are matchable immediately.** Migration
+   009 defaulted `signal_groups.primary_dimensions` to `{}`, which
+   meant groups that existed before the upgrade could never be matched
+   by corroborators until another primary event happened to populate
+   them. Migration 011 backfills dimensions best-effort from each
+   group's existing mitigations (`customer_id`, `pop`, `service_id`
+   are denormalized there). Interface is left empty pre-upgrade since
+   it's a brand-new inventory field.
+10. **Signal Sources dashboard reflects corroborator traffic.**
+    `getSignalSources()` on the frontend combined correlation config
+    with the `/v1/events` stream, which meant `mode: corroborating`
+    sources always rendered as `last_seen: null` / unhealthy even while
+    actively posting. A new backend endpoint
+    `GET /v1/signals/corroborator/activity?minutes=N` aggregates per-
+    source activity across the live cache and attached
+    `signal_group_events` rows, and the frontend merges that result in.
 
 ## Known limits / deferred to PR B
 
@@ -224,7 +245,8 @@ initial implementation. All were fixed before merge. Notable ones:
 ## References
 
 - `migrations/009_corroborating_signals.sql`,
-  `migrations/010_corroborator_ingested_at.sql`
+  `migrations/010_corroborator_ingested_at.sql`,
+  `migrations/011_backfill_primary_dimensions.sql`
 - `src/correlation/engine.rs` — `CorroboratingSignal`,
   `EventDimensions`, `PrimaryDimensions`,
   `check_corroboration_with_primary`, `corroborator_matches_declared`.

@@ -10,6 +10,29 @@ use crate::observability::AuditEntry;
 
 use super::{GlobalStats, PopInfo, SafelistEntry, TimeseriesBucket};
 
+/// Return value for `delete_expired_corroborating_signals`.
+///
+/// `unattached_expired` is the count of signals the scheduler should
+/// increment `CORROBORATOR_EXPIRED_TOTAL` by: signals that were cached
+/// because no primary group matched at ingest and then timed out without
+/// ever attaching. `attached_expired` rows are the audit copies retained
+/// for late fan-out; their deletion is bookkeeping, not a cache miss.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CorroboratorSweepStats {
+    pub unattached_expired: u64,
+    pub attached_expired: u64,
+}
+
+/// Per-source activity summary for the Signals dashboard, covering both
+/// primary-event sources (via the `events` table) and corroborator-only
+/// sources (via `corroborating_signals` + `signal_group_events`).
+#[derive(Debug, Clone, Default)]
+pub struct CorroboratorSourceActivity {
+    pub source: String,
+    pub last_seen: Option<DateTime<Utc>>,
+    pub count: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct NotificationPreferences {
     #[serde(default)]
@@ -213,11 +236,13 @@ pub trait RepositoryTrait: Send + Sync {
     /// signal group. Appends `group_id` to the signal's `attached_group_ids`.
     async fn mark_corroborator_attached(&self, signal_id: Uuid, group_id: Uuid) -> Result<()>;
     /// Delete corroborating signals whose `expires_at` is in the past.
-    /// Returns the number of rows removed.
+    /// Returns `CorroboratorSweepStats` so the scheduler can attribute
+    /// `CORROBORATOR_EXPIRED_TOTAL` to signals that expired *without* ever
+    /// attaching, while still GCing attached rows from the cache.
     async fn delete_expired_corroborating_signals(
         &self,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64>;
+    ) -> Result<CorroboratorSweepStats>;
     /// Count currently-cached (unattached, unexpired) corroborating signals.
     /// For operator dashboards / metrics.
     async fn count_cached_corroborators(&self, now: chrono::DateTime<chrono::Utc>) -> Result<u64>;
@@ -227,4 +252,13 @@ pub trait RepositoryTrait: Send + Sync {
         now: chrono::DateTime<chrono::Utc>,
         limit: i64,
     ) -> Result<Vec<crate::correlation::CorroboratingSignal>>;
+    /// Aggregate corroborator activity per source since `since`, across
+    /// both the live cache (`corroborating_signals`) and attached rows
+    /// (`signal_group_events WHERE is_corroborating`). Used by the
+    /// Signals dashboard to reflect `mode: corroborating` source health
+    /// that otherwise never shows up in the primary `/v1/events` stream.
+    async fn corroborator_source_activity(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<CorroboratorSourceActivity>>;
 }

@@ -5443,3 +5443,127 @@ async fn test_corroborator_rejected_when_correlation_disabled() {
     let (status, _) = post_corroborator(&app, body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn test_expired_sweep_splits_attached_vs_unattached() {
+    use chrono::{Duration, Utc};
+    use prefixd::correlation::CorroboratingSignal;
+    use uuid::Uuid;
+
+    let repo = MockRepository::new();
+    let now = Utc::now();
+
+    // Unattached, expired — should count toward unattached_expired.
+    repo.insert_corroborating_signal(&CorroboratingSignal {
+        signal_id: Uuid::new_v4(),
+        source: "router-cpu".to_string(),
+        vector: Some("udp_flood".to_string()),
+        customer_id: None,
+        pop: Some("iad1".to_string()),
+        service_id: None,
+        interface: None,
+        confidence: Some(0.5),
+        weight: 0.5,
+        ingested_at: now - Duration::seconds(600),
+        expires_at: now - Duration::seconds(60),
+        raw_details: None,
+        attached_group_ids: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Attached, expired — should count toward attached_expired, NOT the
+    // cache-miss metric.
+    repo.insert_corroborating_signal(&CorroboratingSignal {
+        signal_id: Uuid::new_v4(),
+        source: "router-cpu".to_string(),
+        vector: Some("udp_flood".to_string()),
+        customer_id: None,
+        pop: Some("iad1".to_string()),
+        service_id: None,
+        interface: None,
+        confidence: Some(0.5),
+        weight: 0.5,
+        ingested_at: now - Duration::seconds(600),
+        expires_at: now - Duration::seconds(60),
+        raw_details: None,
+        attached_group_ids: vec![Uuid::new_v4()],
+    })
+    .await
+    .unwrap();
+
+    // Unattached, still fresh — should survive the sweep.
+    repo.insert_corroborating_signal(&CorroboratingSignal {
+        signal_id: Uuid::new_v4(),
+        source: "router-cpu".to_string(),
+        vector: Some("udp_flood".to_string()),
+        customer_id: None,
+        pop: Some("iad1".to_string()),
+        service_id: None,
+        interface: None,
+        confidence: Some(0.5),
+        weight: 0.5,
+        ingested_at: now,
+        expires_at: now + Duration::seconds(300),
+        raw_details: None,
+        attached_group_ids: vec![],
+    })
+    .await
+    .unwrap();
+
+    let stats = repo
+        .delete_expired_corroborating_signals(now)
+        .await
+        .unwrap();
+    assert_eq!(stats.unattached_expired, 1);
+    assert_eq!(stats.attached_expired, 1);
+    assert_eq!(repo.count_cached_corroborators(now).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_corroborator_source_activity_merges_cache_rows() {
+    use chrono::{Duration, Utc};
+    use prefixd::correlation::CorroboratingSignal;
+    use uuid::Uuid;
+
+    let repo = MockRepository::new();
+    let now = Utc::now();
+
+    for (src, delta) in [
+        ("router-cpu", 30),
+        ("router-cpu", 60),
+        ("pop-utilization", 15),
+    ] {
+        repo.insert_corroborating_signal(&CorroboratingSignal {
+            signal_id: Uuid::new_v4(),
+            source: src.to_string(),
+            vector: None,
+            customer_id: None,
+            pop: Some("iad1".to_string()),
+            service_id: None,
+            interface: None,
+            confidence: Some(0.5),
+            weight: 0.5,
+            ingested_at: now - Duration::seconds(delta),
+            expires_at: now + Duration::seconds(300),
+            raw_details: None,
+            attached_group_ids: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let activity = repo
+        .corroborator_source_activity(now - Duration::minutes(10))
+        .await
+        .unwrap();
+    let mut by_source: std::collections::HashMap<_, _> = activity
+        .into_iter()
+        .map(|r| (r.source.clone(), r))
+        .collect();
+    assert_eq!(by_source.len(), 2);
+    let cpu = by_source.remove("router-cpu").unwrap();
+    assert_eq!(cpu.count, 2);
+    assert!(cpu.last_seen.is_some());
+    assert_eq!(by_source.remove("pop-utilization").unwrap().count, 1);
+}

@@ -973,6 +973,39 @@ Content-Type: application/json
 signals never triggers a mitigation, regardless of how high its
 `derived_confidence` climbs. Primary events are required.
 
+### Get Corroborator Activity
+
+```http
+GET /v1/signals/corroborator/activity?minutes=60
+```
+
+Returns per-source corroborator activity aggregated across the live
+cache (`corroborating_signals`) and attached corroborator rows on
+signal groups (`signal_group_events WHERE is_corroborating`). Intended
+for operator dashboards; corroborating-only sources never appear in
+the primary `/v1/events` stream, so this endpoint is how the UI knows
+they're alive.
+
+**Query parameters:**
+
+- `minutes` *(optional, default 60, range 1–1440)* — Lookback window.
+
+**Response:**
+
+```json
+{
+  "since": "2026-04-19T16:00:00Z",
+  "sources": [
+    {"source": "router-cpu",       "last_seen": "2026-04-19T16:59:21Z", "count": 42},
+    {"source": "pop-utilization",  "last_seen": "2026-04-19T16:58:05Z", "count": 11}
+  ]
+}
+```
+
+Each source may be counted once per table if it both attached to a
+group and kept its live cache row for late fan-out; the intent is
+"activity volume", not "distinct signals".
+
 ---
 
 ## Safelist

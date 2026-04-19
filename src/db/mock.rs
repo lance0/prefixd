@@ -789,11 +789,25 @@ impl RepositoryTrait for MockRepository {
     async fn delete_expired_corroborating_signals(
         &self,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64> {
+    ) -> Result<crate::db::traits::CorroboratorSweepStats> {
         let mut cache = self.corroborating_signals.lock().unwrap();
-        let before = cache.len();
-        cache.retain(|s| s.expires_at > now);
-        Ok((before - cache.len()) as u64)
+        let mut unattached = 0u64;
+        let mut attached = 0u64;
+        cache.retain(|s| {
+            if s.expires_at > now {
+                return true;
+            }
+            if s.attached_group_ids.is_empty() {
+                unattached += 1;
+            } else {
+                attached += 1;
+            }
+            false
+        });
+        Ok(crate::db::traits::CorroboratorSweepStats {
+            unattached_expired: unattached,
+            attached_expired: attached,
+        })
     }
 
     async fn count_cached_corroborators(&self, now: chrono::DateTime<chrono::Utc>) -> Result<u64> {
@@ -815,6 +829,35 @@ impl RepositoryTrait for MockRepository {
             .filter(|s| s.expires_at > now && s.attached_group_ids.is_empty())
             .take(limit.max(0) as usize)
             .cloned()
+            .collect())
+    }
+
+    async fn corroborator_source_activity(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<crate::db::traits::CorroboratorSourceActivity>> {
+        use std::collections::HashMap;
+        let cache = self.corroborating_signals.lock().unwrap();
+        let mut agg: HashMap<String, (Option<chrono::DateTime<chrono::Utc>>, u64)> = HashMap::new();
+        for s in cache.iter() {
+            if s.ingested_at < since {
+                continue;
+            }
+            let entry = agg.entry(s.source.clone()).or_insert((None, 0));
+            entry.1 += 1;
+            if entry.0.is_none_or(|t| t < s.ingested_at) {
+                entry.0 = Some(s.ingested_at);
+            }
+        }
+        Ok(agg
+            .into_iter()
+            .map(
+                |(source, (last_seen, count))| crate::db::traits::CorroboratorSourceActivity {
+                    source,
+                    last_seen,
+                    count,
+                },
+            )
             .collect())
     }
 }

@@ -5352,6 +5352,76 @@ async fn ingest_corroborator_inner(
     ))
 }
 
+/// Per-source activity shape returned by
+/// `GET /v1/signals/corroborator/activity`. Powers the Signals dashboard
+/// cards for `mode: corroborating` sources, which never appear in the
+/// primary `/v1/events` stream.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct CorroboratorActivityResponse {
+    pub since: chrono::DateTime<chrono::Utc>,
+    pub sources: Vec<CorroboratorActivityEntry>,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct CorroboratorActivityEntry {
+    pub source: String,
+    pub last_seen: Option<chrono::DateTime<chrono::Utc>>,
+    pub count: u64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CorroboratorActivityQuery {
+    /// Optional minutes-back window; defaults to 60 minutes.
+    #[serde(default)]
+    pub minutes: Option<u32>,
+}
+
+/// Aggregate corroborator activity per source across the live cache and
+/// attached signal-group rows. Used by the frontend to show a `last_seen`
+/// / `count` for sources configured as `mode: corroborating`, since those
+/// sources don't produce primary events.
+#[utoipa::path(
+    get,
+    path = "/v1/signals/corroborator/activity",
+    tag = "signals",
+    params(("minutes" = Option<u32>, Query, description = "Lookback window in minutes (default 60)")),
+    responses(
+        (status = 200, description = "Per-source corroborator activity", body = CorroboratorActivityResponse),
+        (status = 401, description = "Authentication required"),
+    )
+)]
+pub async fn get_corroborator_activity(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<CorroboratorActivityQuery>,
+) -> impl IntoResponse {
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    if let Err(_status) = require_auth(&state, &auth_session, auth_header) {
+        return Err(AppError(PrefixdError::Unauthorized(
+            "authentication required".into(),
+        )));
+    }
+    let minutes = query.minutes.unwrap_or(60).clamp(1, 24 * 60);
+    let since = chrono::Utc::now() - chrono::Duration::minutes(minutes as i64);
+    let rows = state
+        .repo
+        .corroborator_source_activity(since)
+        .await
+        .map_err(AppError)?;
+    Ok(Json(CorroboratorActivityResponse {
+        since,
+        sources: rows
+            .into_iter()
+            .map(|r| CorroboratorActivityEntry {
+                source: r.source,
+                last_seen: r.last_seen,
+                count: r.count,
+            })
+            .collect(),
+    }))
+}
+
 /// Recompute a signal group's derived_confidence, source_count and
 /// corroboration_met flag from its events (including corroborators).
 async fn recompute_group_aggregates(state: &Arc<AppState>, group_id: Uuid) -> Result<(), AppError> {

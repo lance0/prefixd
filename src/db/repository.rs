@@ -1331,12 +1331,44 @@ impl RepositoryTrait for Repository {
     async fn delete_expired_corroborating_signals(
         &self,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64> {
-        let result = sqlx::query("DELETE FROM corroborating_signals WHERE expires_at <= $1")
-            .bind(now)
-            .execute(&self.pool)
-            .await?;
-        Ok(result.rows_affected())
+    ) -> Result<crate::db::traits::CorroboratorSweepStats> {
+        // Two statements so the scheduler can attribute the expired metric
+        // to truly-unattached signals (cache misses) while still cleaning
+        // attached audit rows. Both run inside the same request round-trip
+        // order but we don't need a transaction: the counters are
+        // monotonic and the delete predicate is narrow.
+        let unattached: (i64,) = sqlx::query_as(
+            r#"
+            WITH deleted AS (
+                DELETE FROM corroborating_signals
+                WHERE expires_at <= $1
+                  AND cardinality(attached_group_ids) = 0
+                RETURNING signal_id
+            )
+            SELECT COUNT(*) FROM deleted
+            "#,
+        )
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        let attached: (i64,) = sqlx::query_as(
+            r#"
+            WITH deleted AS (
+                DELETE FROM corroborating_signals
+                WHERE expires_at <= $1
+                  AND cardinality(attached_group_ids) > 0
+                RETURNING signal_id
+            )
+            SELECT COUNT(*) FROM deleted
+            "#,
+        )
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(crate::db::traits::CorroboratorSweepStats {
+            unattached_expired: unattached.0.max(0) as u64,
+            attached_expired: attached.0.max(0) as u64,
+        })
     }
 
     async fn count_cached_corroborators(&self, now: chrono::DateTime<chrono::Utc>) -> Result<u64> {
@@ -1370,6 +1402,52 @@ impl RepositoryTrait for Repository {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn corroborator_source_activity(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::db::traits::CorroboratorSourceActivity>> {
+        // Union the live cache (`corroborating_signals`) with attached
+        // corroborator rows on signal groups (`signal_group_events WHERE
+        // is_corroborating`). A signal that both attached *and* remains in
+        // the cache for late fan-out is counted once per table; the
+        // dashboard treats this as "activity volume" rather than "distinct
+        // signals", which is accurate enough for a health indicator.
+        let rows: Vec<(String, Option<DateTime<Utc>>, i64)> = sqlx::query_as(
+            r#"
+            SELECT source,
+                   MAX(ingested_at) AS last_seen,
+                   COUNT(*)         AS n
+            FROM (
+                SELECT source, ingested_at
+                FROM corroborating_signals
+                WHERE ingested_at >= $1
+                UNION ALL
+                SELECT corroborator_source        AS source,
+                       corroborator_ingested_at  AS ingested_at
+                FROM signal_group_events
+                WHERE is_corroborating = true
+                  AND corroborator_source IS NOT NULL
+                  AND corroborator_ingested_at IS NOT NULL
+                  AND corroborator_ingested_at >= $1
+            ) AS combined
+            GROUP BY source
+            "#,
+        )
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(source, last_seen, n)| crate::db::traits::CorroboratorSourceActivity {
+                    source,
+                    last_seen,
+                    count: n.max(0) as u64,
+                },
+            )
+            .collect())
     }
 }
 

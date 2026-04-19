@@ -122,6 +122,10 @@ fn api_routes() -> Router<Arc<AppState>> {
             "/v1/signals/corroborator",
             post(handlers::ingest_corroborator),
         )
+        .route(
+            "/v1/signals/corroborator/activity",
+            axum::routing::get(handlers::get_corroborator_activity),
+        )
 }
 
 /// Common layers applied to both production and test routers

@@ -202,21 +202,30 @@ impl ReconciliationLoop {
     }
 
     async fn sweep_corroborator_cache(&self) -> anyhow::Result<()> {
-        // Delete expired unattached corroborating signals from the cache and
-        // bump `CORROBORATOR_EXPIRED_TOTAL` by the delete count. The metric
-        // is currently unlabelled; per-source attribution requires reading
-        // rows before delete and is tracked as a PR B follow-up (see
-        // ROADMAP -> Correlation Engine -> Corroborating signals v2).
+        // Clean expired rows from the corroborating_signals cache. The
+        // repository splits the delete into unattached vs attached so we
+        // only charge `CORROBORATOR_EXPIRED_TOTAL` for true cache misses
+        // (ingested, never matched any group, timed out). Attached rows
+        // still get GC'd but don't inflate the expired counter — their
+        // audit trail already lives on signal_group_events.
+        //
+        // Per-source attribution for the expired counter is deferred to
+        // PR B (see ROADMAP -> Correlation Engine -> Corroborating
+        // signals v2).
         let now = chrono::Utc::now();
-        let deleted = self.repo.delete_expired_corroborating_signals(now).await?;
-        if deleted > 0 {
+        let stats = self.repo.delete_expired_corroborating_signals(now).await?;
+        let total = stats.unattached_expired + stats.attached_expired;
+        if total > 0 {
             tracing::info!(
-                deleted = deleted,
+                unattached_expired = stats.unattached_expired,
+                attached_expired = stats.attached_expired,
                 "swept expired corroborating signals from cache"
             );
-            crate::observability::metrics::CORROBORATOR_EXPIRED_TOTAL
-                .with_label_values(&[] as &[&str])
-                .inc_by(deleted as f64);
+            if stats.unattached_expired > 0 {
+                crate::observability::metrics::CORROBORATOR_EXPIRED_TOTAL
+                    .with_label_values(&[] as &[&str])
+                    .inc_by(stats.unattached_expired as f64);
+            }
         }
         Ok(())
     }
