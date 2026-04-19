@@ -148,15 +148,36 @@ def post_cpu_alert(pop: str, utilization: float):
 - **A group without a primary event will not mitigate.** Even if you
   send 10 corroborators and `min_sources=1`, the engine refuses to flip
   `corroboration_met=true` without at least one `/v1/events` post.
-- **Dimensions match with OR semantics.** A signal with both
-  `pop=iad1` and `customer_id=cust_42` matches any open group sharing
-  *either* value, not just both.
+- **Declared dimensions are authoritative.** If a source declares
+  `match_dimensions: [pop]`, a signal from that source that happens to
+  carry a `customer_id` will *not* match groups on customer. Populate
+  whatever you like; only declared dimensions are consulted. This keeps
+  accidental cross-customer matches from leaking out of a source that
+  should only match on PoP.
+- **Dimensions match with OR semantics.** Across *declared* dimensions
+  only: a source declaring `[pop, customer_id]` matches any group
+  sharing its `pop` **or** its `customer_id`, not just both.
 - **Vector is optional.** Omitting `vector` lets the signal corroborate
   groups for any attack type in the matching dimensions.
 - **Per-source weight still governs derived confidence.** Set a
   conservative weight (e.g. 0.3–0.5) so a single corroborator can't
   single-handedly cross a threshold that should require a targeted
   primary event.
+
+## 7. Known limits
+
+See the ADR 021 "Known limits / deferred to PR B" section for the
+authoritative list. Most operator-visible one right now:
+
+- A corroborator that arrives *after* a primary event and pushes
+  aggregates past the threshold does **not** immediately trigger the
+  mitigation. Finalization happens on the next primary-ingest path. In
+  practice this means: if two primary events fire inside the window,
+  the corroborator's contribution is picked up. If only one primary
+  fires and a corroborator arrives later, the mitigation waits on
+  another primary signal (or on the cache drain when the next primary
+  for the same dimensions lands). Tracked as PR B work item
+  *Playbook-override-aware corroborator finalization*.
 
 ## Troubleshooting
 

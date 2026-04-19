@@ -933,7 +933,10 @@ Content-Type: application/json
   eligible.
 - `customer_id`, `pop`, `service_id`, `interface` *(optional)* — At
   least one must be populated AND must appear in the source's
-  `match_dimensions`. Matching is OR across populated dimensions.
+  `match_dimensions`. Matching is OR across **declared** dimensions
+  only; undeclared fields are ignored even if populated. This prevents
+  a source configured for `[pop]` from accidentally attaching to groups
+  via a stray `customer_id`.
 - `confidence` *(optional)* — 0.0–1.0. Contributes to the group's
   `derived_confidence` via the source's configured `weight`.
 
@@ -954,6 +957,10 @@ Content-Type: application/json
   primary event arrival.
 - `attached_group_ids` — UUIDs of signal groups this signal contributed
   to.
+- `cached` — currently always `true` (signals are retained in the cache
+  after attach for late fan-out). This field is flagged for removal in
+  a follow-up release in favor of `status` alone; new integrations
+  should rely on `status` / `attached_group_ids` instead.
 
 **Error responses:**
 

@@ -164,12 +164,74 @@ deployment.
 - Metrics (`prefixd_corroborator_ingested_total`, `_attached_total`,
   `_expired_total`) surface cache health for SRE dashboards.
 
+## Review remediations (merged into the shipping revision)
+
+The first review pass surfaced several bugs between the design and the
+initial implementation. All were fixed before merge. Notable ones:
+
+1. **Primary-event rejection moved to handler entry.** The check for
+   `mode=corroborating` sources posting to `/v1/events` originally lived
+   inside `handle_ban`, leaving `unban` and the validation path able to
+   persist state before rejection. It now fires in `ingest_event` before
+   any branching or DB writes.
+2. **Declared dimensions are authoritative.** Matching originally only
+   checked that a signal had *some* populated dimension, then fell
+   through to compare all four against the group. A source declared for
+   `[pop]` could therefore attach via an undeclared `customer_id`. Both
+   the ingest path and the cache-drain path now filter strictly against
+   the source's declared `match_dimensions` via
+   `corroborator_matches_declared`.
+3. **Interface dimension is wired end-to-end.** `Asset.interface` was
+   added to inventory and is now carried through `IpContext` into
+   `primary_dimensions` on primary ingest. Interface-only corroborators
+   can now actually match.
+4. **Config validation on load.** `CorrelationConfig::load` and
+   `Settings::load` now run `validate()` on YAML parsing. A
+   misconfigured `mode=corroborating` source can no longer boot the
+   daemon; `PUT /v1/config/correlation` already enforced this.
+5. **Corroborator rows carry their own timestamp.** Migration 010 adds
+   `signal_group_events.corroborator_ingested_at`; the
+   `list_signal_group_events` query is fully `CASE`-split on
+   `is_corroborating` so the frontend never sees a `null` ingest time
+   for a corroborator row masquerading as a missing event. Frontend
+   `SignalGroupEvent.ingested_at` is typed `string | null` defensively.
+6. **Cached-corroborator counting matches trait docs.** Both Postgres
+   and Mock implementations now return only unattached, unexpired rows.
+7. **`recompute_group_aggregates` no longer flips
+   `corroboration_met=true` alone.** Only the primary-ingest path has
+   the resolved playbook override and is allowed to promote the flag.
+   Corroborator ingest still updates `derived_confidence` and
+   `source_count`.
+8. **Expiry metric simplified.** `prefixd_corroborator_expired_total`
+   was labelled by source but only ever emitted `source="unknown"`. It's
+   now an unlabelled counter incremented by sweep count. Per-source
+   attribution is tracked as a follow-up (PR B).
+
+## Known limits / deferred to PR B
+
+- A corroborator that lands late in the window and pushes a group over
+  its threshold does not immediately fire the mitigation; it waits for
+  the next primary-path event (if any) to re-evaluate. This is a
+  product choice, not a correctness gap — implementing playbook-
+  override-aware finalization on the corroborator path is scheduled for
+  PR B (see ROADMAP).
+- `prefixd_corroborator_expired_total` has no source label. PR B will
+  restore per-source attribution by collecting rows before delete.
+- `CorroboratorResponse.cached` is always `true`; the field is
+  redundant given `status ∈ {attached, cached}` and is flagged for
+  removal in PR B.
+
 ## References
 
-- `migrations/009_corroborating_signals.sql`
-- `src/correlation/engine.rs` — `CorroboratingSignal`, `EventDimensions`,
-  `check_corroboration_with_primary`, `corroborator_matches`.
-- `src/api/handlers.rs` — `ingest_corroborator`, cache drain in event
-  ingest.
+- `migrations/009_corroborating_signals.sql`,
+  `migrations/010_corroborator_ingested_at.sql`
+- `src/correlation/engine.rs` — `CorroboratingSignal`,
+  `EventDimensions`, `PrimaryDimensions`,
+  `check_corroboration_with_primary`, `corroborator_matches_declared`.
+- `src/api/handlers.rs` — `ingest_event` early-rejection,
+  `ingest_corroborator`, declared-dimension filter, cache drain.
+- `src/config/inventory.rs` — `Asset.interface`, `IpContext.interface`.
+- `src/config/settings.rs` — boot-time validation.
 - `src/scheduler/reconcile.rs` — `sweep_corroborator_cache`.
+- `src/observability/metrics.rs` — corroborator metrics.
 - ADR 018 — the underlying correlation engine this builds on.
