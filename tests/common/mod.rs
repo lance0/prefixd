@@ -232,10 +232,12 @@ pub fn test_inventory() -> Inventory {
                 Asset {
                     ip: "203.0.113.10".to_string(),
                     role: Some("web".to_string()),
+                    interface: None,
                 },
                 Asset {
                     ip: "203.0.113.11".to_string(),
                     role: Some("web".to_string()),
+                    interface: None,
                 },
             ],
             allowed_ports: AllowedPorts {

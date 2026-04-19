@@ -103,6 +103,7 @@ fn test_inventory() -> Inventory {
             assets: vec![Asset {
                 ip: "203.0.113.10".to_string(),
                 role: Some("dns".to_string()),
+                interface: None,
             }],
             allowed_ports: AllowedPorts {
                 udp: vec![53],
@@ -5153,7 +5154,7 @@ async fn test_corroborator_attaches_to_matching_primary_group() {
     // Step 2: corroborator posts with matching pop
     let sig_body = serde_json::json!({
         "source": "router-cpu",
-        "pop": "test-pop",
+        "pop": "test1",
         "vector": "udp_flood",
         "confidence": 0.6
     });
@@ -5174,6 +5175,210 @@ async fn test_corroborator_attaches_to_matching_primary_group() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["status"], "attached");
+    assert_eq!(json["attached_group_ids"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_primary_event_rejects_corroborating_source_before_write() {
+    use prefixd::correlation::{MatchDimension, SourceConfig, SourceMode};
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+    let mut settings = test_settings_with_correlation(true, 1, 0.5);
+    settings.correlation.sources.insert(
+        "router-cpu".to_string(),
+        SourceConfig {
+            weight: 0.8,
+            r#type: "telemetry".to_string(),
+            confidence_mapping: std::collections::HashMap::new(),
+            mode: SourceMode::Corroborating,
+            match_dimensions: vec![MatchDimension::Pop],
+        },
+    );
+
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        announcer,
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+    let app = create_test_router(state);
+
+    let event_body = serde_json::json!({
+        "source": "router-cpu",
+        "vector": "udp_flood",
+        "victim_ip": "203.0.113.10",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "confidence": 0.9,
+        "action": "ban"
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let stored = repo
+        .list_events(&prefixd::db::ListParams::default())
+        .await
+        .unwrap();
+    assert!(stored.is_empty(), "rejected event should not be persisted");
+}
+
+#[tokio::test]
+async fn test_corroborator_does_not_match_via_undeclared_dimension() {
+    use prefixd::correlation::{MatchDimension, SourceConfig, SourceMode};
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+    let mut settings = test_settings_with_correlation(true, 2, 0.5);
+    settings.correlation.sources.insert(
+        "router-cpu".to_string(),
+        SourceConfig {
+            weight: 0.8,
+            r#type: "telemetry".to_string(),
+            confidence_mapping: std::collections::HashMap::new(),
+            mode: SourceMode::Corroborating,
+            match_dimensions: vec![MatchDimension::Pop],
+        },
+    );
+
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo,
+        announcer,
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+    let app = create_test_router(state);
+
+    let event_body = serde_json::json!({
+        "source": "fastnetmon",
+        "vector": "udp_flood",
+        "victim_ip": "203.0.113.10",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "confidence": 0.9,
+        "action": "ban"
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let sig_body = serde_json::json!({
+        "source": "router-cpu",
+        "pop": "wrong-pop",
+        "customer_id": "cust_test",
+        "vector": "udp_flood",
+        "confidence": 0.6
+    });
+    let (status, json) = post_corroborator(&app, sig_body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["status"], "cached");
+    assert!(json["attached_group_ids"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_corroborator_attaches_on_interface_dimension() {
+    use prefixd::correlation::{MatchDimension, SourceConfig, SourceMode};
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+    let mut settings = test_settings_with_correlation(true, 2, 0.5);
+    settings.correlation.sources.insert(
+        "router-iface".to_string(),
+        SourceConfig {
+            weight: 0.8,
+            r#type: "telemetry".to_string(),
+            confidence_mapping: std::collections::HashMap::new(),
+            mode: SourceMode::Corroborating,
+            match_dimensions: vec![MatchDimension::Interface],
+        },
+    );
+    let inventory = Inventory::new(vec![Customer {
+        customer_id: "cust_test".to_string(),
+        name: "Test Customer".to_string(),
+        prefixes: vec!["203.0.113.0/24".to_string()],
+        policy_profile: prefixd::config::PolicyProfile::Normal,
+        services: vec![Service {
+            service_id: "svc_dns".to_string(),
+            name: "DNS".to_string(),
+            assets: vec![Asset {
+                ip: "203.0.113.10".to_string(),
+                role: Some("dns".to_string()),
+                interface: Some("xe-0/0/0".to_string()),
+            }],
+            allowed_ports: AllowedPorts {
+                udp: vec![53],
+                tcp: vec![53],
+            },
+        }],
+    }]);
+
+    let state = AppState::new(
+        settings,
+        inventory,
+        test_playbooks(),
+        repo,
+        announcer,
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+    let app = create_test_router(state);
+
+    let event_body = serde_json::json!({
+        "source": "fastnetmon",
+        "vector": "udp_flood",
+        "victim_ip": "203.0.113.10",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "confidence": 0.9,
+        "action": "ban"
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let sig_body = serde_json::json!({
+        "source": "router-iface",
+        "interface": "xe-0/0/0",
+        "vector": "udp_flood",
+        "confidence": 0.6
+    });
+    let (status, json) = post_corroborator(&app, sig_body).await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(json["status"], "attached");
     assert_eq!(json["attached_group_ids"].as_array().unwrap().len(), 1);
 }

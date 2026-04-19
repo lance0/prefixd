@@ -380,6 +380,13 @@ impl Settings {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let settings: Settings = serde_yaml::from_str(&content)?;
+        let correlation_errors = settings.correlation.validate();
+        if !correlation_errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "invalid correlation config in settings: {}",
+                correlation_errors.join("; ")
+            ));
+        }
         Ok(settings)
     }
 }

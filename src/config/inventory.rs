@@ -10,9 +10,9 @@ use std::str::FromStr;
 pub struct Inventory {
     pub customers: Vec<Customer>,
     #[serde(skip)]
-    ip_index_v4: HashMap<Ipv4Addr, (String, Option<String>)>,
+    ip_index_v4: HashMap<Ipv4Addr, (String, Option<String>, Option<String>)>,
     #[serde(skip)]
-    ip_index_v6: HashMap<Ipv6Addr, (String, Option<String>)>,
+    ip_index_v6: HashMap<Ipv6Addr, (String, Option<String>, Option<String>)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +53,8 @@ pub struct Asset {
     pub ip: String,
     #[serde(default)]
     pub role: Option<String>,
+    #[serde(default)]
+    pub interface: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -70,6 +72,7 @@ pub struct IpContext {
     pub policy_profile: PolicyProfile,
     pub service_id: Option<String>,
     pub service_name: Option<String>,
+    pub interface: Option<String>,
     pub allowed_ports: AllowedPorts,
 }
 
@@ -103,6 +106,7 @@ impl Inventory {
                             (
                                 customer.customer_id.clone(),
                                 Some(service.service_id.clone()),
+                                asset.interface.clone(),
                             ),
                         );
                     } else if let Ok(ip) = Ipv6Addr::from_str(&asset.ip) {
@@ -111,6 +115,7 @@ impl Inventory {
                             (
                                 customer.customer_id.clone(),
                                 Some(service.service_id.clone()),
+                                asset.interface.clone(),
                             ),
                         );
                     }
@@ -131,8 +136,8 @@ impl Inventory {
 
     fn lookup_ipv4(&self, ip: Ipv4Addr) -> Option<IpContext> {
         // Check direct asset match first
-        if let Some((customer_id, service_id)) = self.ip_index_v4.get(&ip) {
-            return self.build_context(customer_id, service_id.as_deref());
+        if let Some((customer_id, service_id, interface)) = self.ip_index_v4.get(&ip) {
+            return self.build_context(customer_id, service_id.as_deref(), interface.clone());
         }
 
         // Fall back to prefix match
@@ -140,7 +145,7 @@ impl Inventory {
             for prefix_str in &customer.prefixes {
                 if let Ok(prefix) = Ipv4Net::from_str(prefix_str) {
                     if prefix.contains(&ip) {
-                        return self.build_context(&customer.customer_id, None);
+                        return self.build_context(&customer.customer_id, None, None);
                     }
                 }
             }
@@ -151,8 +156,8 @@ impl Inventory {
 
     fn lookup_ipv6(&self, ip: Ipv6Addr) -> Option<IpContext> {
         // Check direct asset match first
-        if let Some((customer_id, service_id)) = self.ip_index_v6.get(&ip) {
-            return self.build_context(customer_id, service_id.as_deref());
+        if let Some((customer_id, service_id, interface)) = self.ip_index_v6.get(&ip) {
+            return self.build_context(customer_id, service_id.as_deref(), interface.clone());
         }
 
         // Fall back to prefix match
@@ -160,7 +165,7 @@ impl Inventory {
             for prefix_str in &customer.prefixes {
                 if let Ok(prefix) = Ipv6Net::from_str(prefix_str) {
                     if prefix.contains(&ip) {
-                        return self.build_context(&customer.customer_id, None);
+                        return self.build_context(&customer.customer_id, None, None);
                     }
                 }
             }
@@ -169,7 +174,12 @@ impl Inventory {
         None
     }
 
-    fn build_context(&self, customer_id: &str, service_id: Option<&str>) -> Option<IpContext> {
+    fn build_context(
+        &self,
+        customer_id: &str,
+        service_id: Option<&str>,
+        interface: Option<String>,
+    ) -> Option<IpContext> {
         let customer = self
             .customers
             .iter()
@@ -196,6 +206,7 @@ impl Inventory {
             policy_profile: customer.policy_profile,
             service_id: svc_id,
             service_name: svc_name,
+            interface,
             allowed_ports,
         })
     }

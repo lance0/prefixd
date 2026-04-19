@@ -2,7 +2,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::config::{CorrelationConfig, PlaybookCorrelationOverride};
+use super::config::{CorrelationConfig, MatchDimension, PlaybookCorrelationOverride};
 
 /// Represents a signal group — a collection of related attack events grouped
 /// by (victim_ip, vector) within a time window.
@@ -75,6 +75,15 @@ impl PrimaryDimensions {
                 .iter()
                 .any(|s| self.service_ids.contains(s))
             || dims.interfaces.iter().any(|i| self.interfaces.contains(i))
+    }
+
+    pub fn to_event_dimensions(&self) -> EventDimensions {
+        EventDimensions {
+            customer_ids: self.customer_ids.iter().cloned().collect(),
+            pops: self.pops.iter().cloned().collect(),
+            service_ids: self.service_ids.iter().cloned().collect(),
+            interfaces: self.interfaces.iter().cloned().collect(),
+        }
     }
 }
 
@@ -241,6 +250,13 @@ pub struct SourceContribution {
 pub struct CorrelationEngine;
 
 impl CorrelationEngine {
+    const ALL_MATCH_DIMENSIONS: [MatchDimension; 4] = [
+        MatchDimension::CustomerId,
+        MatchDimension::Pop,
+        MatchDimension::ServiceId,
+        MatchDimension::Interface,
+    ];
+
     /// Create a new signal group for the given (victim_ip, vector).
     pub fn create_group(victim_ip: &str, vector: &str, window_seconds: u32) -> SignalGroup {
         let now = Utc::now();
@@ -338,33 +354,44 @@ impl CorrelationEngine {
         group: &SignalGroup,
         group_dims: &EventDimensions,
     ) -> bool {
+        Self::corroborator_matches_declared(
+            signal,
+            &group.vector,
+            group_dims,
+            &Self::ALL_MATCH_DIMENSIONS,
+        )
+    }
+
+    pub fn corroborator_matches_declared(
+        signal: &CorroboratingSignal,
+        group_vector: &str,
+        group_dims: &EventDimensions,
+        declared_dims: &[MatchDimension],
+    ) -> bool {
         if let Some(v) = &signal.vector
-            && v != &group.vector
+            && v != group_vector
         {
             return false;
         }
 
-        if let Some(cid) = &signal.customer_id
-            && group_dims.customer_ids.contains(cid)
-        {
-            return true;
-        }
-        if let Some(pop) = &signal.pop
-            && group_dims.pops.contains(pop)
-        {
-            return true;
-        }
-        if let Some(sid) = &signal.service_id
-            && group_dims.service_ids.contains(sid)
-        {
-            return true;
-        }
-        if let Some(iface) = &signal.interface
-            && group_dims.interfaces.contains(iface)
-        {
-            return true;
-        }
-        false
+        declared_dims.iter().any(|dim| match dim {
+            MatchDimension::CustomerId => signal
+                .customer_id
+                .as_ref()
+                .is_some_and(|cid| group_dims.customer_ids.contains(cid)),
+            MatchDimension::Pop => signal
+                .pop
+                .as_ref()
+                .is_some_and(|pop| group_dims.pops.contains(pop)),
+            MatchDimension::ServiceId => signal
+                .service_id
+                .as_ref()
+                .is_some_and(|sid| group_dims.service_ids.contains(sid)),
+            MatchDimension::Interface => signal
+                .interface
+                .as_ref()
+                .is_some_and(|iface| group_dims.interfaces.contains(iface)),
+        })
     }
 
     /// Produce a human-readable explanation of the correlation decision.
@@ -875,6 +902,21 @@ mod tests {
         sig.vector = Some("udp_flood".into());
         sig.pop = Some("iad1".into());
         assert!(CorrelationEngine::corroborator_matches(&sig, &group, &dims));
+    }
+
+    #[test]
+    fn corroborator_declared_matching_ignores_undeclared_dimensions() {
+        let group = test_group("udp_flood");
+        let mut dims = EventDimensions::default();
+        dims.add_customer("cust_42");
+        let mut sig = test_signal();
+        sig.customer_id = Some("cust_42".into());
+        assert!(!CorrelationEngine::corroborator_matches_declared(
+            &sig,
+            &group.vector,
+            &dims,
+            &[MatchDimension::Pop],
+        ));
     }
 
     #[test]

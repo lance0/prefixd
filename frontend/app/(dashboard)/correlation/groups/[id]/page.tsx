@@ -118,7 +118,7 @@ export default function SignalGroupDetailPage({
   // Sort events chronologically (earliest first)
   const sortedEvents = [...group.events].sort(
     (a, b) =>
-      new Date(a.ingested_at).getTime() - new Date(b.ingested_at).getTime(),
+      new Date(a.ingested_at ?? 0).getTime() - new Date(b.ingested_at ?? 0).getTime(),
   )
 
   // Confidence breakdown calculations
@@ -246,7 +246,7 @@ export default function SignalGroupDetailPage({
                             </span>
                           </div>
                           <p className="text-xs text-muted-foreground font-mono mt-1">
-                            {formatTimestamp(event.ingested_at)}
+                            {event.ingested_at ? formatTimestamp(event.ingested_at) : "Unknown ingest time"}
                           </p>
                           <p className="text-xs text-muted-foreground mt-1">
                             Event{" "}

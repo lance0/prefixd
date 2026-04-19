@@ -214,11 +214,9 @@ impl ReconciliationLoop {
                 deleted = deleted,
                 "swept expired corroborating signals from cache"
             );
-            for _ in 0..deleted {
-                crate::observability::metrics::CORROBORATOR_EXPIRED_TOTAL
-                    .with_label_values(&["unknown"])
-                    .inc();
-            }
+            crate::observability::metrics::CORROBORATOR_EXPIRED_TOTAL
+                .with_label_values(&[] as &[&str])
+                .inc_by(deleted as f64);
         }
         Ok(())
     }

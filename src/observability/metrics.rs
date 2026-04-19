@@ -269,7 +269,7 @@ pub static CORROBORATOR_EXPIRED_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
         "prefixd_corroborator_expired_total",
         "Corroborating signals removed by cache sweep without ever attaching",
-        &["source"]
+        &[]
     )
     .unwrap()
 });

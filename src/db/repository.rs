@@ -1059,13 +1059,26 @@ impl RepositoryTrait for Repository {
         let rows = sqlx::query_as::<_, SignalGroupEventRow>(
             r#"
             SELECT sge.group_id, sge.event_id, sge.source_weight, sge.is_corroborating,
-                   COALESCE(e.source, sge.corroborator_source) AS source,
-                   COALESCE(e.confidence, sge.corroborator_confidence) AS confidence,
-                   e.ingested_at
+                   CASE
+                       WHEN sge.is_corroborating THEN sge.corroborator_source
+                       ELSE e.source
+                   END AS source,
+                   CASE
+                       WHEN sge.is_corroborating THEN sge.corroborator_confidence
+                       ELSE e.confidence
+                   END AS confidence,
+                   CASE
+                       WHEN sge.is_corroborating THEN sge.corroborator_ingested_at
+                       ELSE e.ingested_at
+                   END AS ingested_at
             FROM signal_group_events sge
             LEFT JOIN events e ON e.event_id = sge.event_id
             WHERE sge.group_id = $1
-            ORDER BY COALESCE(e.ingested_at, NOW()) ASC
+            ORDER BY
+                CASE
+                    WHEN sge.is_corroborating THEN sge.corroborator_ingested_at
+                    ELSE e.ingested_at
+                END ASC NULLS LAST
             "#,
         )
         .bind(group_id)
@@ -1198,9 +1211,10 @@ impl RepositoryTrait for Repository {
             r#"
             INSERT INTO signal_group_events (
                 group_id, event_id, source_weight, is_corroborating,
-                corroborator_signal_id, corroborator_source, corroborator_confidence
+                corroborator_signal_id, corroborator_source, corroborator_confidence,
+                corroborator_ingested_at
             )
-            VALUES ($1, $2, $3, true, $2, $4, $5)
+            VALUES ($1, $2, $3, true, $2, $4, $5, $6)
             ON CONFLICT (group_id, event_id) DO NOTHING
             "#,
         )
@@ -1209,6 +1223,7 @@ impl RepositoryTrait for Repository {
         .bind(signal.weight)
         .bind(&signal.source)
         .bind(signal.confidence)
+        .bind(signal.ingested_at)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)
@@ -1325,11 +1340,12 @@ impl RepositoryTrait for Repository {
     }
 
     async fn count_cached_corroborators(&self, now: chrono::DateTime<chrono::Utc>) -> Result<u64> {
-        let row: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM corroborating_signals WHERE expires_at > $1")
-                .bind(now)
-                .fetch_one(&self.pool)
-                .await?;
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM corroborating_signals WHERE expires_at > $1 AND cardinality(attached_group_ids) = 0",
+        )
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
         Ok(row.0.max(0) as u64)
     }
 
@@ -1344,6 +1360,7 @@ impl RepositoryTrait for Repository {
                    confidence, weight, ingested_at, expires_at, raw_details, attached_group_ids
             FROM corroborating_signals
             WHERE expires_at > $1
+              AND cardinality(attached_group_ids) = 0
             ORDER BY ingested_at DESC
             LIMIT $2
             "#,

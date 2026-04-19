@@ -22,6 +22,7 @@ fn test_inventory() -> Inventory {
                     .map(|j| Asset {
                         ip: format!("203.0.{}.{}", i, j + 10),
                         role: Some("server".to_string()),
+                        interface: None,
                     })
                     .collect(),
                 allowed_ports: AllowedPorts {

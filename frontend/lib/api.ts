@@ -690,7 +690,7 @@ export interface SignalGroupEvent {
   source: string
   confidence: number | null
   source_weight: number
-  ingested_at: string
+  ingested_at: string | null
   victim_ip: string
   vector: string
   is_corroborating?: boolean

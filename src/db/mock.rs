@@ -580,10 +580,7 @@ impl RepositoryTrait for MockRepository {
     async fn update_signal_group(&self, group: &SignalGroup) -> Result<()> {
         let mut groups = self.signal_groups.lock().unwrap();
         if let Some(existing) = groups.iter_mut().find(|g| g.group_id == group.group_id) {
-            existing.derived_confidence = group.derived_confidence;
-            existing.source_count = group.source_count;
-            existing.status = group.status;
-            existing.corroboration_met = group.corroboration_met;
+            *existing = group.clone();
         }
         Ok(())
     }
@@ -691,30 +688,13 @@ impl RepositoryTrait for MockRepository {
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<SignalGroup>> {
         let groups = self.signal_groups.lock().unwrap();
-        let events = self.events.lock().unwrap();
-        let links = self.signal_group_events.lock().unwrap();
-
-        let mut out = Vec::new();
-        for g in groups.iter() {
-            if g.status != SignalGroupStatus::Open || g.window_expires_at <= now {
-                continue;
-            }
-            if let Some(v) = vector.as_ref()
-                && &g.vector != v
-            {
-                continue;
-            }
-            // Aggregate dimensions of primary events in this group by looking
-            // up IpContext via inventory - mock doesn't have inventory, so
-            // fall back to a simple pop-based heuristic: any group's event
-            // matches if its source/vector matches OR any of this group's
-            // primary events' victim_ip appears in dims.customer_ids/pops.
-            // We keep the mock behavior simple — match ANY open group in
-            // range. Real Postgres implementation queries the junction table.
-            let _ = (&events, &links, dims);
-            out.push(g.clone());
-        }
-        Ok(out)
+        Ok(groups
+            .iter()
+            .filter(|g| g.status == SignalGroupStatus::Open && g.window_expires_at > now)
+            .filter(|g| vector.as_ref().is_none_or(|v| &g.vector == v))
+            .filter(|g| g.primary_dimensions.matches_probe(dims))
+            .cloned()
+            .collect())
     }
 
     async fn find_mitigation_id_by_signal_group(
@@ -818,7 +798,10 @@ impl RepositoryTrait for MockRepository {
 
     async fn count_cached_corroborators(&self, now: chrono::DateTime<chrono::Utc>) -> Result<u64> {
         let cache = self.corroborating_signals.lock().unwrap();
-        Ok(cache.iter().filter(|s| s.expires_at > now).count() as u64)
+        Ok(cache
+            .iter()
+            .filter(|s| s.expires_at > now && s.attached_group_ids.is_empty())
+            .count() as u64)
     }
 
     async fn list_cached_corroborators(
@@ -829,7 +812,7 @@ impl RepositoryTrait for MockRepository {
         let cache = self.corroborating_signals.lock().unwrap();
         Ok(cache
             .iter()
-            .filter(|s| s.expires_at > now)
+            .filter(|s| s.expires_at > now && s.attached_group_ids.is_empty())
             .take(limit.max(0) as usize)
             .cloned()
             .collect())

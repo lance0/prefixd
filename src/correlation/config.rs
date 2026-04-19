@@ -232,6 +232,13 @@ impl CorrelationConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: CorrelationConfig = serde_yaml::from_str(&content)?;
+        let errors = config.validate();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "invalid correlation config: {}",
+                errors.join("; ")
+            ));
+        }
         Ok(config)
     }
 

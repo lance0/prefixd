@@ -527,7 +527,16 @@ function SourceDialog({
           </div>
           <div className="space-y-1.5">
             <Label className="text-xs font-mono">Mode</Label>
-            <Select value={mode} onValueChange={(v) => setMode(v as SourceMode)}>
+            <Select
+              value={mode}
+              onValueChange={(v) => {
+                const nextMode = v as SourceMode
+                setMode(nextMode)
+                if (nextMode === "primary") {
+                  setMatchDims([])
+                }
+              }}
+            >
               <SelectTrigger className="h-8 text-xs font-mono">
                 <SelectValue />
               </SelectTrigger>

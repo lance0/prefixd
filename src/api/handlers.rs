@@ -442,6 +442,21 @@ pub async fn ingest_event(
         validate_string_len(eid, "event_id", MAX_STRING_LEN).map_err(AppError)?;
     }
 
+    let correlation_config = state.correlation_config.read().await.clone();
+    if correlation_config.source_mode(&input.source)
+        == crate::correlation::SourceMode::Corroborating
+    {
+        tracing::warn!(
+            source = %input.source,
+            action = %input.action,
+            "rejected /v1/events from corroborating-only source"
+        );
+        return Err(AppError(PrefixdError::InvalidRequest(format!(
+            "source '{}' is configured as mode=corroborating and cannot post to /v1/events. Use POST /v1/signals/corroborator instead.",
+            input.source
+        ))));
+    }
+
     // Branch on action type
     match input.action.as_str() {
         "unban" => handle_unban(state, input).await,
@@ -674,21 +689,7 @@ async fn handle_ban(
     let mut correlation_context: Option<CorrelationContext> = None;
 
     if correlation_config.enabled {
-        use crate::correlation::{CorrelationEngine, SourceMode};
-
-        // Reject primary-event ingestion from sources configured as
-        // corroborating. Those sources must use POST /v1/signals/corroborator.
-        if correlation_config.source_mode(&event.source) == SourceMode::Corroborating {
-            tracing::warn!(
-                source = %event.source,
-                "rejected /v1/events from corroborating-only source"
-            );
-            return Err(AppError(PrefixdError::InvalidRequest(format!(
-                "source '{}' is configured as mode=corroborating and cannot \
-                 post primary events. Use POST /v1/signals/corroborator instead.",
-                event.source
-            ))));
-        }
+        use crate::correlation::CorrelationEngine;
 
         let vector_str = event.vector.clone();
 
@@ -707,6 +708,11 @@ async fn handle_ban(
                 .add_customer(ctx.customer_id.clone());
             if let Some(sid) = ctx.service_id.as_ref() {
                 new_group.primary_dimensions.add_service(sid.clone());
+            }
+            if let Some(interface) = ctx.interface.as_ref() {
+                new_group
+                    .primary_dimensions
+                    .add_interface(interface.clone());
             }
         }
         let group = state
@@ -727,6 +733,9 @@ async fn handle_ban(
                 .add_customer(ctx.customer_id.clone());
             if let Some(sid) = ctx.service_id.as_ref() {
                 group.primary_dimensions.add_service(sid.clone());
+            }
+            if let Some(interface) = ctx.interface.as_ref() {
+                group.primary_dimensions.add_interface(interface.clone());
             }
             group.primary_dimensions.add_pop(state.settings.pop.clone());
             dims_changed = before != group.primary_dimensions;
@@ -765,6 +774,9 @@ async fn handle_ban(
                 if let Some(sid) = ctx.service_id.as_ref() {
                     d.add_service(sid.clone());
                 }
+                if let Some(interface) = ctx.interface.as_ref() {
+                    d.add_interface(interface.clone());
+                }
             }
             d
         };
@@ -775,6 +787,15 @@ async fn handle_ban(
                 .await
                 .map_err(AppError)?;
             for sig in &matches {
+                let declared = correlation_config.match_dimensions(&sig.source);
+                if !CorrelationEngine::corroborator_matches_declared(
+                    sig,
+                    &group.vector,
+                    &event_dims,
+                    declared,
+                ) {
+                    continue;
+                }
                 if sig.attached_group_ids.contains(&group.group_id) {
                     continue;
                 }
@@ -5177,7 +5198,7 @@ async fn ingest_corroborator_inner(
     state: Arc<AppState>,
     input: CorroboratorInput,
 ) -> Result<impl IntoResponse, AppError> {
-    use crate::correlation::{CorroboratingSignal, EventDimensions, SourceMode};
+    use crate::correlation::{CorrelationEngine, CorroboratingSignal, EventDimensions, SourceMode};
 
     let correlation_config = state.correlation_config.read().await.clone();
 
@@ -5246,16 +5267,24 @@ async fn ingest_corroborator_inner(
     // open signal group that has a primary event sharing at least one of
     // these dimension values.
     let mut probe = EventDimensions::default();
-    if let Some(v) = &signal.customer_id {
+    if declared.contains(&crate::correlation::MatchDimension::CustomerId)
+        && let Some(v) = &signal.customer_id
+    {
         probe.add_customer(v);
     }
-    if let Some(v) = &signal.pop {
+    if declared.contains(&crate::correlation::MatchDimension::Pop)
+        && let Some(v) = &signal.pop
+    {
         probe.add_pop(v);
     }
-    if let Some(v) = &signal.service_id {
+    if declared.contains(&crate::correlation::MatchDimension::ServiceId)
+        && let Some(v) = &signal.service_id
+    {
         probe.add_service(v);
     }
-    if let Some(v) = &signal.interface {
+    if declared.contains(&crate::correlation::MatchDimension::Interface)
+        && let Some(v) = &signal.interface
+    {
         probe.add_interface(v);
     }
 
@@ -5263,7 +5292,17 @@ async fn ingest_corroborator_inner(
         .repo
         .find_open_groups_by_dimensions(&signal.vector, &probe, now)
         .await
-        .map_err(AppError)?;
+        .map_err(AppError)?
+        .into_iter()
+        .filter(|group| {
+            CorrelationEngine::corroborator_matches_declared(
+                &signal,
+                &group.vector,
+                &group.primary_dimensions.to_event_dimensions(),
+                declared,
+            )
+        })
+        .collect::<Vec<_>>();
 
     let mut attached_group_ids = Vec::new();
     for group in &matching_groups {
@@ -5342,20 +5381,19 @@ async fn recompute_group_aggregates(state: &Arc<AppState>, group_id: Uuid) -> Re
     let sources: Vec<String> = events.iter().filter_map(|e| e.source.clone()).collect();
     let count = CorrelationEngine::count_distinct_sources(&sources);
 
-    let correlation_config = state.correlation_config.read().await.clone();
     let has_primary = events.iter().any(|e| !e.is_corroborating);
-    let met = CorrelationEngine::check_corroboration_with_primary(
-        count,
-        derived,
-        has_primary,
-        &correlation_config,
-        None,
-    );
 
     let mut updated = group;
     updated.derived_confidence = derived;
     updated.source_count = count;
-    updated.corroboration_met = met;
+    // Only primary ingest has enough context to evaluate playbook-specific
+    // overrides safely. Corroborator-only recomputes update aggregates but do
+    // not promote a group from false->true on their own.
+    updated.corroboration_met = if has_primary {
+        updated.corroboration_met
+    } else {
+        false
+    };
     state
         .repo
         .update_signal_group(&updated)
