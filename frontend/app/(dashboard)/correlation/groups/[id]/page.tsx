@@ -115,10 +115,12 @@ export default function SignalGroupDetailPage({
     )
   }
 
-  // Sort events chronologically (earliest first)
+  // Sort events chronologically (earliest first), placing rows with a
+  // missing ingest time at the end rather than sorting them as epoch 0.
+  const ingestTs = (t: string | null | undefined) =>
+    t ? new Date(t).getTime() : Number.POSITIVE_INFINITY
   const sortedEvents = [...group.events].sort(
-    (a, b) =>
-      new Date(a.ingested_at ?? 0).getTime() - new Date(b.ingested_at ?? 0).getTime(),
+    (a, b) => ingestTs(a.ingested_at) - ingestTs(b.ingested_at),
   )
 
   // Confidence breakdown calculations

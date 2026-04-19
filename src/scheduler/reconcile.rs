@@ -202,11 +202,11 @@ impl ReconciliationLoop {
     }
 
     async fn sweep_corroborator_cache(&self) -> anyhow::Result<()> {
-        // Sample source labels for the expired metric BEFORE deleting, so we
-        // can attribute expiries. For simplicity we just increment the
-        // counter by total deleted with an "unknown" label; an operator who
-        // wants per-source attribution can scrape the metric and compare
-        // with CORROBORATOR_INGESTED_TOTAL.
+        // Delete expired unattached corroborating signals from the cache and
+        // bump `CORROBORATOR_EXPIRED_TOTAL` by the delete count. The metric
+        // is currently unlabelled; per-source attribution requires reading
+        // rows before delete and is tracked as a PR B follow-up (see
+        // ROADMAP -> Correlation Engine -> Corroborating signals v2).
         let now = chrono::Utc::now();
         let deleted = self.repo.delete_expired_corroborating_signals(now).await?;
         if deleted > 0 {
