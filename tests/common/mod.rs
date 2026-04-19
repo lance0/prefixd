@@ -467,6 +467,7 @@ impl E2ETestContext {
                 weight: 1.0,
                 r#type: "detector".to_string(),
                 confidence_mapping: HashMap::new(),
+                ..Default::default()
             },
         );
         sources.insert(
@@ -475,6 +476,7 @@ impl E2ETestContext {
                 weight: 0.8,
                 r#type: "telemetry".to_string(),
                 confidence_mapping: HashMap::new(),
+                ..Default::default()
             },
         );
         settings.correlation = CorrelationConfig {

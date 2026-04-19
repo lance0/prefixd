@@ -45,6 +45,30 @@ pub struct CorrelationConfig {
     pub webhook_adapters: Vec<super::webhook::WebhookAdapter>,
 }
 
+/// Whether a signal source is allowed to create / trigger mitigations on its
+/// own (`Primary`) or can only corroborate signal groups created by primary
+/// sources (`Corroborating`). See ADR 021.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceMode {
+    #[default]
+    Primary,
+    Corroborating,
+}
+
+/// Dimensions a corroborating signal can present for matching to open signal
+/// groups. Every group aggregates the same dimensions from its primary events
+/// (via inventory lookup) and a corroborator matches if ANY of its present
+/// dimensions equals the group's corresponding dimension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchDimension {
+    CustomerId,
+    Pop,
+    ServiceId,
+    Interface,
+}
+
 /// Configuration for a single detection/signal source.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SourceConfig {
@@ -62,6 +86,30 @@ pub struct SourceConfig {
     /// Used by signal adapters (e.g., FastNetMon) to map action types to confidence.
     #[serde(default)]
     pub confidence_mapping: HashMap<String, f32>,
+
+    /// Whether this source can trigger mitigations on its own (`primary`) or
+    /// only corroborates existing signal groups (`corroborating`). Defaults
+    /// to `primary` for backward compatibility.
+    #[serde(default)]
+    pub mode: SourceMode,
+
+    /// For corroborating sources: which dimensions this source supplies when
+    /// sending signals. Must be non-empty when `mode: corroborating`.
+    /// Ignored for primary sources.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub match_dimensions: Vec<MatchDimension>,
+}
+
+impl Default for SourceConfig {
+    fn default() -> Self {
+        Self {
+            weight: default_weight(),
+            r#type: String::new(),
+            confidence_mapping: HashMap::new(),
+            mode: SourceMode::Primary,
+            match_dimensions: Vec::new(),
+        }
+    }
 }
 
 /// Per-playbook correlation override. When present on a playbook, these values
@@ -116,6 +164,24 @@ impl CorrelationConfig {
             .get(source)
             .map(|s| s.weight)
             .unwrap_or(self.default_weight)
+    }
+
+    /// Resolve the `SourceMode` for a given source name. Unknown sources default
+    /// to `Primary` for backward-compatibility with v0.15.0 and earlier.
+    pub fn source_mode(&self, source: &str) -> SourceMode {
+        self.sources
+            .get(source)
+            .map(|s| s.mode)
+            .unwrap_or(SourceMode::Primary)
+    }
+
+    /// Resolve the `match_dimensions` declared for a corroborating source.
+    /// Returns an empty slice for unknown / primary sources.
+    pub fn match_dimensions(&self, source: &str) -> &[MatchDimension] {
+        self.sources
+            .get(source)
+            .map(|s| s.match_dimensions.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Resolve effective min_sources, using a per-playbook override if provided.
@@ -248,6 +314,24 @@ impl CorrelationConfig {
                     ));
                 }
             }
+            match source.mode {
+                SourceMode::Primary => {
+                    if !source.match_dimensions.is_empty() {
+                        errors.push(format!(
+                            "source '{}': match_dimensions is only valid for mode=corroborating",
+                            name
+                        ));
+                    }
+                }
+                SourceMode::Corroborating => {
+                    if source.match_dimensions.is_empty() {
+                        errors.push(format!(
+                            "source '{}': match_dimensions must be non-empty when mode=corroborating",
+                            name
+                        ));
+                    }
+                }
+            }
         }
 
         let mut seen_names = std::collections::HashSet::new();
@@ -323,6 +407,8 @@ impl CorrelationConfig {
                         "weight": source.weight,
                         "type": source.r#type,
                         "confidence_mapping": source.confidence_mapping,
+                        "mode": source.mode,
+                        "match_dimensions": source.match_dimensions,
                     }),
                 )
             })
@@ -463,6 +549,7 @@ sources:
                 weight: 2.0,
                 r#type: "detector".to_string(),
                 confidence_mapping: HashMap::new(),
+                ..Default::default()
             },
         );
         assert_eq!(config.source_weight("fastnetmon"), 2.0);
@@ -667,6 +754,7 @@ sources:
                 weight: 1.0,
                 r#type: "detector".to_string(),
                 confidence_mapping: mapping,
+                ..Default::default()
             },
         );
         // Overridden values
@@ -742,6 +830,7 @@ sources:
                 weight: -0.5,
                 r#type: "detector".to_string(),
                 confidence_mapping: HashMap::new(),
+                ..Default::default()
             },
         );
         let errors = config.validate();
@@ -760,6 +849,7 @@ sources:
                 weight: 1.0,
                 r#type: "detector".to_string(),
                 confidence_mapping: mapping,
+                ..Default::default()
             },
         );
         let errors = config.validate();
@@ -779,6 +869,7 @@ sources:
                 weight: 2.0,
                 r#type: "detector".to_string(),
                 confidence_mapping: HashMap::new(),
+                ..Default::default()
             },
         );
         let redacted = config.redacted();
@@ -807,6 +898,7 @@ sources:
                 weight: 1.5,
                 r#type: "detector".to_string(),
                 confidence_mapping: HashMap::new(),
+                ..Default::default()
             },
         );
 
@@ -933,5 +1025,128 @@ sources:
         config.webhook_adapters.push(adapter);
         let errors = config.validate();
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    // ── Corroborating source mode + match_dimensions ──────────────────
+
+    #[test]
+    fn default_source_mode_is_primary() {
+        let src: SourceConfig = serde_yaml::from_str("weight: 1.0\ntype: detector").unwrap();
+        assert_eq!(src.mode, SourceMode::Primary);
+        assert!(src.match_dimensions.is_empty());
+    }
+
+    #[test]
+    fn source_mode_corroborating_deserializes() {
+        let yaml = r#"
+weight: 0.5
+type: telemetry
+mode: corroborating
+match_dimensions: [customer_id, pop]
+"#;
+        let src: SourceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(src.mode, SourceMode::Corroborating);
+        assert_eq!(
+            src.match_dimensions,
+            vec![MatchDimension::CustomerId, MatchDimension::Pop]
+        );
+    }
+
+    #[test]
+    fn validate_rejects_corroborating_without_match_dimensions() {
+        let mut config = CorrelationConfig::default();
+        config.sources.insert(
+            "router-cpu".into(),
+            SourceConfig {
+                weight: 0.5,
+                r#type: "telemetry".into(),
+                confidence_mapping: HashMap::new(),
+                mode: SourceMode::Corroborating,
+                match_dimensions: vec![],
+            },
+        );
+        let errors = config.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("match_dimensions must be non-empty")),
+            "expected match_dimensions error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_match_dimensions_on_primary() {
+        let mut config = CorrelationConfig::default();
+        config.sources.insert(
+            "fastnetmon".into(),
+            SourceConfig {
+                weight: 1.0,
+                r#type: "detector".into(),
+                confidence_mapping: HashMap::new(),
+                mode: SourceMode::Primary,
+                match_dimensions: vec![MatchDimension::Pop],
+            },
+        );
+        let errors = config.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("only valid for mode=corroborating")),
+            "expected primary-mode error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_valid_corroborating_source() {
+        let mut config = CorrelationConfig::default();
+        config.sources.insert(
+            "router-cpu".into(),
+            SourceConfig {
+                weight: 0.5,
+                r#type: "telemetry".into(),
+                confidence_mapping: HashMap::new(),
+                mode: SourceMode::Corroborating,
+                match_dimensions: vec![MatchDimension::Pop, MatchDimension::CustomerId],
+            },
+        );
+        let errors = config.validate();
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn source_mode_unknown_source_defaults_primary() {
+        let config = CorrelationConfig::default();
+        assert_eq!(config.source_mode("never-heard-of-it"), SourceMode::Primary);
+        assert!(config.match_dimensions("never-heard-of-it").is_empty());
+    }
+
+    #[test]
+    fn redacted_includes_mode_and_match_dimensions() {
+        let mut config = CorrelationConfig::default();
+        config.sources.insert(
+            "router-cpu".into(),
+            SourceConfig {
+                weight: 0.5,
+                r#type: "telemetry".into(),
+                confidence_mapping: HashMap::new(),
+                mode: SourceMode::Corroborating,
+                match_dimensions: vec![MatchDimension::Pop],
+            },
+        );
+        let redacted = config.redacted();
+        assert_eq!(redacted["sources"]["router-cpu"]["mode"], "corroborating");
+        let dims = &redacted["sources"]["router-cpu"]["match_dimensions"];
+        assert_eq!(dims[0], "pop");
+    }
+
+    #[test]
+    fn invalid_match_dimension_value_fails_deserialize() {
+        let yaml = r#"
+weight: 0.5
+mode: corroborating
+match_dimensions: [customer_id, bogus_dimension]
+"#;
+        let res: Result<SourceConfig, _> = serde_yaml::from_str(yaml);
+        assert!(res.is_err(), "expected deserialize error");
     }
 }

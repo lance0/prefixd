@@ -1898,6 +1898,7 @@ fn test_settings_with_correlation(
                     weight: 1.0,
                     r#type: "detector".to_string(),
                     confidence_mapping: std::collections::HashMap::new(),
+                    ..Default::default()
                 },
             );
             m.insert(
@@ -1906,6 +1907,7 @@ fn test_settings_with_correlation(
                     weight: 1.5,
                     r#type: "detector".to_string(),
                     confidence_mapping: std::collections::HashMap::new(),
+                    ..Default::default()
                 },
             );
             m
@@ -3931,6 +3933,7 @@ async fn setup_app_fastnetmon_with_mapping(
             weight: 1.0,
             r#type: "detector".to_string(),
             confidence_mapping,
+            ..Default::default()
         },
     );
 
