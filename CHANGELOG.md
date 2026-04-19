@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-04-19
+
 ### Added
 
 - **Corroborating signals (ADR 021)** — New class of correlation signals that strengthen open signal groups without ever triggering mitigations on their own. Targets coarse telemetry (router CPU, interface utilization, per-customer NetFlow, PoP-level metrics) that shouldn't name a victim IP but is valuable alongside a real detector.
@@ -884,7 +886,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/lance0/prefixd/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/lance0/prefixd/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/lance0/prefixd/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/lance0/prefixd/compare/v0.13.0...v0.14.0
