@@ -1911,6 +1911,7 @@ fn test_settings_with_correlation(
             m
         },
         default_weight: 1.0,
+        webhook_adapters: Vec::new(),
     };
     settings
 }
@@ -4708,4 +4709,271 @@ async fn test_openapi_includes_correlation_config() {
         schemas.contains_key("SourceConfig"),
         "OpenAPI spec should include SourceConfig schema"
     );
+}
+
+// =============================================================================
+// Generic webhook adapter integration tests
+// =============================================================================
+
+async fn setup_app_with_webhooks(
+    adapters: Vec<prefixd::correlation::WebhookAdapter>,
+) -> axum::Router {
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+    let settings = test_settings_with_correlation(true, 1, 0.5);
+
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo,
+        announcer,
+        std::path::PathBuf::from("."),
+    )
+    .expect("failed to create app state");
+
+    {
+        let mut cfg = state.correlation_config.write().await;
+        cfg.webhook_adapters = adapters;
+    }
+
+    create_test_router(state)
+}
+
+fn basic_webhook_adapter(name: &str) -> prefixd::correlation::WebhookAdapter {
+    use prefixd::correlation::{WebhookAdapter, WebhookAuth, WebhookFieldMap};
+    WebhookAdapter {
+        name: name.to_string(),
+        description: "test".into(),
+        enabled: true,
+        auth: WebhookAuth::None,
+        root_path: None,
+        fields: WebhookFieldMap {
+            victim_ip: "$.ip".into(),
+            vector: Some("$.vector".into()),
+            timestamp: None,
+            bps: Some("$.bps".into()),
+            pps: Some("$.pps".into()),
+            confidence: Some("$.score".into()),
+            source_id: Some("$.id".into()),
+            top_dst_ports: None,
+            action: None,
+        },
+        vector_map: Default::default(),
+        default_vector: None,
+        confidence_scale: None,
+        source_id_prefix: None,
+    }
+}
+
+async fn post_webhook(
+    app: &axum::Router,
+    name: &str,
+    body: &str,
+    extra_headers: &[(&str, &str)],
+) -> (StatusCode, serde_json::Value) {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/signals/webhook/{name}"))
+        .header("content-type", "application/json");
+    for (k, v) in extra_headers {
+        req = req.header(*k, *v);
+    }
+    let response = app
+        .clone()
+        .oneshot(req.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
+    (status, json)
+}
+
+#[tokio::test]
+async fn test_webhook_single_event_happy_path() {
+    let app = setup_app_with_webhooks(vec![basic_webhook_adapter("radware")]).await;
+    let body = r#"{
+        "id": "alert-1",
+        "ip": "203.0.113.5",
+        "vector": "udp_flood",
+        "bps": 100000,
+        "pps": 500,
+        "score": 0.9
+    }"#;
+    let (status, json) = post_webhook(&app, "radware", body, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["processed"], 1);
+    assert_eq!(json["failed"], 0);
+    assert_eq!(json["results"][0]["index"], 0);
+}
+
+#[tokio::test]
+async fn test_webhook_name_not_configured_returns_404() {
+    let app = setup_app_with_webhooks(vec![basic_webhook_adapter("radware")]).await;
+    let body = r#"{"ip":"203.0.113.5"}"#;
+    let (status, _json) = post_webhook(&app, "unknown", body, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_webhook_disabled_adapter_returns_404() {
+    let mut adapter = basic_webhook_adapter("radware");
+    adapter.enabled = false;
+    let app = setup_app_with_webhooks(vec![adapter]).await;
+    let body = r#"{"ip":"203.0.113.5"}"#;
+    let (status, _json) = post_webhook(&app, "radware", body, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_webhook_invalid_name_returns_404() {
+    let app = setup_app_with_webhooks(vec![]).await;
+    // Path traversal attempt
+    let body = r#"{}"#;
+    let (status, _json) = post_webhook(&app, "UPPER", body, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_webhook_missing_required_field_reports_error_in_result() {
+    let app = setup_app_with_webhooks(vec![basic_webhook_adapter("radware")]).await;
+    // Missing $.ip
+    let body = r#"{"vector":"udp_flood"}"#;
+    let (status, json) = post_webhook(&app, "radware", body, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["processed"], 0);
+    assert_eq!(json["failed"], 1);
+    assert_eq!(json["results"][0]["status"], "error");
+    let err = json["results"][0]["error"].as_str().unwrap();
+    assert!(
+        err.contains("victim_ip"),
+        "error should mention field: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_webhook_root_path_iterates_batch() {
+    let mut adapter = basic_webhook_adapter("batchy");
+    adapter.root_path = Some("$.alerts[*]".into());
+    let app = setup_app_with_webhooks(vec![adapter]).await;
+    let body = r#"{
+        "alerts": [
+            {"id":"a","ip":"203.0.113.1","vector":"udp_flood"},
+            {"id":"b","ip":"203.0.113.2","vector":"syn_flood"},
+            {"id":"c","ip":"203.0.113.3","vector":"icmp_flood"}
+        ]
+    }"#;
+    let (status, json) = post_webhook(&app, "batchy", body, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["processed"], 3);
+    assert_eq!(json["failed"], 0);
+    assert_eq!(json["results"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn test_webhook_malformed_json_returns_400() {
+    let app = setup_app_with_webhooks(vec![basic_webhook_adapter("radware")]).await;
+    let body = r#"{not json"#;
+    let (status, _json) = post_webhook(&app, "radware", body, &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_webhook_hmac_accepts_correct_signature() {
+    use hmac::Mac;
+    use prefixd::correlation::WebhookAuth;
+
+    // Use a random env var name to avoid parallel-test contention
+    let env_name = "PREFIXD_TEST_HMAC_SECRET_POS";
+    let secret = "super-secret";
+    // SAFETY: test-only; other tests use different env var names
+    unsafe { std::env::set_var(env_name, secret) };
+
+    let mut adapter = basic_webhook_adapter("signed");
+    adapter.auth = WebhookAuth::Hmac {
+        secret_env: env_name.into(),
+        header: "X-Signature-SHA256".into(),
+        algorithm: "sha256".into(),
+    };
+    let app = setup_app_with_webhooks(vec![adapter]).await;
+
+    let body = r#"{"ip":"203.0.113.5","vector":"udp_flood"}"#;
+    let mut mac =
+        <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(body.as_bytes());
+    let sig = hex::encode(mac.finalize().into_bytes());
+
+    let (status, json) = post_webhook(&app, "signed", body, &[("X-Signature-SHA256", &sig)]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["processed"], 1);
+
+    unsafe { std::env::remove_var(env_name) };
+}
+
+#[tokio::test]
+async fn test_webhook_hmac_rejects_wrong_signature() {
+    use prefixd::correlation::WebhookAuth;
+
+    let env_name = "PREFIXD_TEST_HMAC_SECRET_NEG";
+    unsafe { std::env::set_var(env_name, "super-secret") };
+
+    let mut adapter = basic_webhook_adapter("signed2");
+    adapter.auth = WebhookAuth::Hmac {
+        secret_env: env_name.into(),
+        header: "X-Signature-SHA256".into(),
+        algorithm: "sha256".into(),
+    };
+    let app = setup_app_with_webhooks(vec![adapter]).await;
+
+    let body = r#"{"ip":"203.0.113.5","vector":"udp_flood"}"#;
+    let wrong_sig = "0".repeat(64);
+
+    let (status, _json) =
+        post_webhook(&app, "signed2", body, &[("X-Signature-SHA256", &wrong_sig)]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    unsafe { std::env::remove_var(env_name) };
+}
+
+#[tokio::test]
+async fn test_webhook_hmac_missing_header_returns_401() {
+    use prefixd::correlation::WebhookAuth;
+
+    let env_name = "PREFIXD_TEST_HMAC_SECRET_MISS";
+    unsafe { std::env::set_var(env_name, "super-secret") };
+
+    let mut adapter = basic_webhook_adapter("signed3");
+    adapter.auth = WebhookAuth::Hmac {
+        secret_env: env_name.into(),
+        header: "X-Signature-SHA256".into(),
+        algorithm: "sha256".into(),
+    };
+    let app = setup_app_with_webhooks(vec![adapter]).await;
+
+    let body = r#"{"ip":"203.0.113.5"}"#;
+    let (status, _json) = post_webhook(&app, "signed3", body, &[]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    unsafe { std::env::remove_var(env_name) };
+}
+
+#[tokio::test]
+async fn test_webhook_vector_map_and_scaling() {
+    let mut adapter = basic_webhook_adapter("scaled");
+    adapter.vector_map.insert("UDP".into(), "udp_flood".into());
+    adapter.confidence_scale = Some(100.0);
+    let app = setup_app_with_webhooks(vec![adapter]).await;
+
+    let body = r#"{
+        "id":"x",
+        "ip":"203.0.113.5",
+        "vector":"UDP",
+        "score":77
+    }"#;
+    let (status, json) = post_webhook(&app, "scaled", body, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["processed"], 1);
 }

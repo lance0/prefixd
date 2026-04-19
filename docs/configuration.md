@@ -354,6 +354,89 @@ When a playbook has no `correlation` override, the global defaults from `prefixd
 
 Correlation config changes take effect on `POST /v1/config/reload` without restart (same as inventory and playbooks).
 
+#### Generic Webhook Adapters
+
+For detection or telemetry systems without a native adapter (Alertmanager, FastNetMon), configure a generic webhook adapter. Each entry becomes a new endpoint at `POST /v1/signals/webhook/{name}` that accepts arbitrary JSON and maps it to an `AttackEvent` via JSONPath.
+
+```yaml
+correlation:
+  webhook_adapters:
+    - name: radware                       # URL-safe: [a-z0-9-]{1,64}
+      description: "Radware DefensePro"
+      enabled: true
+      auth:
+        type: hmac                        # hmac | bearer | none
+        secret_env: RADWARE_WEBHOOK_SECRET
+        header: X-Signature-SHA256
+        algorithm: sha256                 # sha256 only in v1
+      root_path: "$.alerts[*]"            # optional: iterate an array
+      fields:
+        victim_ip: "$.target.ip"          # REQUIRED
+        vector: "$.alert_type"
+        timestamp: "$.time"
+        bps: "$.traffic.bps"
+        pps: "$.traffic.pps"
+        confidence: "$.score"
+        source_id: "$.id"
+        top_dst_ports: "$.ports"
+        action: "$.action"                # "ban" (default) or "unban"
+      vector_map:                         # normalize detector strings
+        UDP_FLOOD: udp_flood
+        SYN_FLOOD: syn_flood
+      default_vector: unknown
+      confidence_scale: 100               # divide extracted value by this
+      source_id_prefix: "radware-"
+```
+
+**Adapter schema:**
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `name` | yes | string | URL path segment, `[a-z0-9-]{1,64}` |
+| `description` | no | string | Human-readable label |
+| `enabled` | no | boolean (default `true`) | Disabled adapters return 404 |
+| `auth` | yes | object | Authentication scheme (see below) |
+| `root_path` | no | JSONPath | When set, each match produces one event |
+| `fields.victim_ip` | yes | JSONPath | String extraction; must parse as an IP |
+| `fields.vector` | no | JSONPath | String; normalized via `vector_map` + `default_vector` |
+| `fields.timestamp` | no | JSONPath | RFC 3339 string; defaults to receive time |
+| `fields.bps` / `fields.pps` | no | JSONPath | Numbers |
+| `fields.confidence` | no | JSONPath | Number; scaled via `confidence_scale`, clamped to `[0,1]` |
+| `fields.source_id` | no | JSONPath | String/number; becomes `event_id` with optional prefix |
+| `fields.top_dst_ports` | no | JSONPath | Array of port numbers |
+| `fields.action` | no | JSONPath | `ban` (default) or `unban` |
+| `vector_map` | no | map | Raw detector string → prefixd vector name |
+| `default_vector` | no | string | Fallback when vector missing or not in map |
+| `confidence_scale` | no | float | Divisor (e.g. `100` for 0–100 scales) |
+| `source_id_prefix` | no | string | Prefix prepended to extracted `source_id` |
+
+**Authentication:**
+
+| `auth.type` | Meaning |
+|-------------|---------|
+| `hmac` | HMAC-SHA256 over the raw body. `auth.header` is the request header (default `X-Signature-SHA256`). `auth.secret_env` is the env var holding the secret. Comparison is constant-time. Hex digest may be prefixed with `sha256=`. |
+| `bearer` | Reuses global session/bearer auth. |
+| `none` | No auth (lab use only). |
+
+**JSONPath quick reference** (RFC 9535 via `serde_json_path`):
+
+- `$.field` — root field lookup
+- `$.a.b.c` — nested lookup
+- `$.items[0]` — array index
+- `$.items[*]` — array iteration (only meaningful as `root_path`)
+- `$.items[?(@.severity=="high")]` — filter expression
+
+**Weighting:** To weight a webhook adapter's events in correlation, register its name in `sources:` alongside detector/alertmanager:
+
+```yaml
+sources:
+  radware:
+    weight: 1.2
+    type: detector
+```
+
+Adapters not listed fall back to `default_weight`.
+
 ### Shutdown
 
 ```yaml

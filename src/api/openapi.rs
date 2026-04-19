@@ -8,12 +8,13 @@ use super::handlers::{
     ErrorResponse, EventResponse, EventsListResponse, FastNetMonAttackDetails, FastNetMonPayload,
     HealthResponse, IpHistoryResponse, MitigationResponse, MitigationsListResponse,
     PublicHealthResponse, ReloadResponse, SignalGroupDetailResponse, SignalGroupsListResponse,
-    TimeseriesResponse,
+    TimeseriesResponse, WebhookEventResult, WebhookResponse,
 };
 use crate::correlation::config::{CorrelationConfig, SourceConfig};
 use crate::correlation::engine::{
     CorrelationExplanation, SignalGroup, SignalGroupEvent, SignalGroupStatus, SourceContribution,
 };
+use crate::correlation::webhook::{WebhookAdapter, WebhookAuth, WebhookFieldMap};
 use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, SafelistEntry};
 
 #[derive(OpenApi)]
@@ -57,6 +58,7 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
         super::handlers::get_signal_group,
         super::handlers::ingest_alertmanager,
         super::handlers::ingest_fastnetmon,
+        super::handlers::ingest_webhook,
         super::handlers::get_correlation_config,
         super::handlers::update_correlation_config,
     ),
@@ -104,6 +106,11 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
             SourceContribution,
             CorrelationConfig,
             SourceConfig,
+            WebhookAdapter,
+            WebhookAuth,
+            WebhookFieldMap,
+            WebhookResponse,
+            WebhookEventResult,
         )
     ),
     tags(

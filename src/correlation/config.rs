@@ -38,6 +38,11 @@ pub struct CorrelationConfig {
     /// Default weight assigned to events from sources not listed in `sources`.
     #[serde(default = "default_weight")]
     pub default_weight: f32,
+
+    /// Generic webhook adapters, each exposed at `POST /v1/signals/webhook/{name}`.
+    /// See `docs/configuration.md` for the schema.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhook_adapters: Vec<super::webhook::WebhookAdapter>,
 }
 
 /// Configuration for a single detection/signal source.
@@ -82,6 +87,7 @@ impl Default for CorrelationConfig {
             confidence_threshold: default_confidence_threshold(),
             sources: HashMap::new(),
             default_weight: default_weight(),
+            webhook_adapters: Vec::new(),
         }
     }
 }
@@ -244,6 +250,63 @@ impl CorrelationConfig {
             }
         }
 
+        let mut seen_names = std::collections::HashSet::new();
+        for adapter in &self.webhook_adapters {
+            if !super::webhook::is_valid_name(&adapter.name) {
+                errors.push(format!(
+                    "webhook_adapter '{}': name must match [a-z0-9-]{{1,64}}",
+                    adapter.name
+                ));
+            }
+            if !seen_names.insert(adapter.name.clone()) {
+                errors.push(format!(
+                    "webhook_adapter '{}': duplicate name",
+                    adapter.name
+                ));
+            }
+            if let Err(e) = super::webhook::CompiledAdapter::compile(adapter) {
+                errors.push(format!(
+                    "webhook_adapter '{}': invalid JSONPath: {}",
+                    adapter.name, e
+                ));
+            }
+
+            if let Some(scale) = adapter.confidence_scale {
+                if !scale.is_finite() || scale <= 0.0_f32 {
+                    errors.push(format!(
+                        "webhook_adapter '{}': confidence_scale must be a finite value > 0 (got {})",
+                        adapter.name, scale
+                    ));
+                }
+            }
+
+            if let super::webhook::WebhookAuth::Hmac {
+                secret_env,
+                header,
+                algorithm,
+            } = &adapter.auth
+            {
+                if secret_env.trim().is_empty() {
+                    errors.push(format!(
+                        "webhook_adapter '{}': auth.secret_env must not be empty for HMAC",
+                        adapter.name
+                    ));
+                }
+                if header.trim().is_empty() {
+                    errors.push(format!(
+                        "webhook_adapter '{}': auth.header must not be empty for HMAC",
+                        adapter.name
+                    ));
+                }
+                if algorithm != "sha256" {
+                    errors.push(format!(
+                        "webhook_adapter '{}': auth.algorithm must be \"sha256\" (got \"{}\")",
+                        adapter.name, algorithm
+                    ));
+                }
+            }
+        }
+
         errors
     }
 
@@ -265,6 +328,39 @@ impl CorrelationConfig {
             })
             .collect();
 
+        let webhook_adapters: Vec<serde_json::Value> = self
+            .webhook_adapters
+            .iter()
+            .map(|a| {
+                let auth_json = match &a.auth {
+                    super::webhook::WebhookAuth::Hmac {
+                        secret_env,
+                        header,
+                        algorithm,
+                    } => serde_json::json!({
+                        "type": "hmac",
+                        "secret_env": secret_env,
+                        "header": header,
+                        "algorithm": algorithm,
+                    }),
+                    super::webhook::WebhookAuth::Bearer => serde_json::json!({ "type": "bearer" }),
+                    super::webhook::WebhookAuth::None => serde_json::json!({ "type": "none" }),
+                };
+                serde_json::json!({
+                    "name": a.name,
+                    "description": a.description,
+                    "enabled": a.enabled,
+                    "auth": auth_json,
+                    "root_path": a.root_path,
+                    "fields": a.fields,
+                    "vector_map": a.vector_map,
+                    "default_vector": a.default_vector,
+                    "confidence_scale": a.confidence_scale,
+                    "source_id_prefix": a.source_id_prefix,
+                })
+            })
+            .collect();
+
         serde_json::json!({
             "enabled": self.enabled,
             "window_seconds": self.window_seconds,
@@ -272,6 +368,7 @@ impl CorrelationConfig {
             "confidence_threshold": self.confidence_threshold,
             "default_weight": self.default_weight,
             "sources": sources,
+            "webhook_adapters": webhook_adapters,
         })
     }
 }
@@ -720,5 +817,121 @@ sources:
         assert!(loaded.enabled);
         assert_eq!(loaded.min_sources, 3);
         assert_eq!(loaded.sources["test"].weight, 1.5);
+    }
+
+    fn webhook_adapter_for_tests() -> super::super::webhook::WebhookAdapter {
+        super::super::webhook::WebhookAdapter {
+            name: "radware".into(),
+            description: String::new(),
+            enabled: true,
+            auth: super::super::webhook::WebhookAuth::Hmac {
+                secret_env: "RADWARE_SECRET".into(),
+                header: "X-Signature-SHA256".into(),
+                algorithm: "sha256".into(),
+            },
+            root_path: None,
+            fields: super::super::webhook::WebhookFieldMap {
+                victim_ip: "$.target.ip".into(),
+                vector: None,
+                timestamp: None,
+                bps: None,
+                pps: None,
+                confidence: None,
+                source_id: None,
+                top_dst_ports: None,
+                action: None,
+            },
+            vector_map: HashMap::new(),
+            default_vector: None,
+            confidence_scale: None,
+            source_id_prefix: None,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_nonpositive_confidence_scale() {
+        let mut config = CorrelationConfig::default();
+        let mut adapter = webhook_adapter_for_tests();
+        adapter.confidence_scale = Some(0.0);
+        config.webhook_adapters.push(adapter);
+        let errors = config.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("confidence_scale")),
+            "expected confidence_scale error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_confidence_scale() {
+        let mut config = CorrelationConfig::default();
+        let mut adapter = webhook_adapter_for_tests();
+        adapter.confidence_scale = Some(f32::INFINITY);
+        config.webhook_adapters.push(adapter);
+        let errors = config.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("confidence_scale")),
+            "expected confidence_scale error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_hmac_secret_env() {
+        let mut config = CorrelationConfig::default();
+        let mut adapter = webhook_adapter_for_tests();
+        adapter.auth = super::super::webhook::WebhookAuth::Hmac {
+            secret_env: "   ".into(),
+            header: "X-Signature-SHA256".into(),
+            algorithm: "sha256".into(),
+        };
+        config.webhook_adapters.push(adapter);
+        let errors = config.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("secret_env")),
+            "expected secret_env error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_hmac_header() {
+        let mut config = CorrelationConfig::default();
+        let mut adapter = webhook_adapter_for_tests();
+        adapter.auth = super::super::webhook::WebhookAuth::Hmac {
+            secret_env: "SECRET".into(),
+            header: String::new(),
+            algorithm: "sha256".into(),
+        };
+        config.webhook_adapters.push(adapter);
+        let errors = config.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("auth.header")),
+            "expected auth.header error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unknown_hmac_algorithm() {
+        let mut config = CorrelationConfig::default();
+        let mut adapter = webhook_adapter_for_tests();
+        adapter.auth = super::super::webhook::WebhookAuth::Hmac {
+            secret_env: "SECRET".into(),
+            header: "X-Signature-SHA256".into(),
+            algorithm: "sha512".into(),
+        };
+        config.webhook_adapters.push(adapter);
+        let errors = config.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("auth.algorithm")),
+            "expected auth.algorithm error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_valid_webhook_adapter() {
+        let mut config = CorrelationConfig::default();
+        let mut adapter = webhook_adapter_for_tests();
+        adapter.confidence_scale = Some(100.0);
+        config.webhook_adapters.push(adapter);
+        let errors = config.validate();
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
     }
 }

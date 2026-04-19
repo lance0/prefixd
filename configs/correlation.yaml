@@ -16,3 +16,39 @@ sources:
     type: telemetry
     confidence_mapping: {}
 default_weight: 1.0
+
+# Generic webhook adapters. Each entry becomes a named endpoint at
+# POST /v1/signals/webhook/{name} and maps an arbitrary JSON payload into an
+# AttackEvent via JSONPath expressions.
+#
+# See docs/configuration.md for the full schema and field reference.
+#
+# Example (disabled by default):
+# webhook_adapters:
+#   - name: example-detector
+#     description: Example generic detector integration
+#     enabled: false
+#     auth:
+#       type: hmac                        # hmac | bearer | none
+#       secret_env: EXAMPLE_WEBHOOK_SECRET
+#       header: X-Signature-SHA256
+#       algorithm: sha256
+#     # root_path iterates an array of alerts in one payload (omit for single-event POSTs)
+#     root_path: "$.alerts[*]"
+#     fields:
+#       victim_ip: "$.target.ip"          # REQUIRED
+#       vector: "$.alert_type"            # optional; falls back to default_vector
+#       timestamp: "$.time"               # optional; RFC3339 string expected
+#       bps: "$.traffic.bps"              # optional
+#       pps: "$.traffic.pps"              # optional
+#       confidence: "$.score"             # optional; see confidence_scale
+#       source_id: "$.id"                 # optional; used for dedup
+#       top_dst_ports: "$.ports"          # optional; array of port numbers
+#       action: "$.action"                # optional; "ban" (default) or "unban"
+#     vector_map:
+#       UDP_FLOOD: udp_flood
+#       SYN_FLOOD: syn_flood
+#       TCP_SYN: syn_flood
+#     default_vector: unknown
+#     confidence_scale: 100               # divide extracted score by this (for 0-100 scales)
+#     source_id_prefix: "example-"

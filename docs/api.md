@@ -835,6 +835,72 @@ notify_script_path = /usr/bin/curl -s -X POST http://prefixd.example.com/v1/sign
 
 See `docs/detectors/fastnetmon.md` for a complete integration guide.
 
+### Generic Webhook Adapter
+
+For detectors without a native adapter, configure a generic webhook adapter in
+`correlation.yaml` and POST arbitrary JSON. Fields are extracted via JSONPath.
+
+```http
+POST /v1/signals/webhook/{name}
+Content-Type: application/json
+X-Signature-SHA256: <hex-encoded HMAC-SHA256 of request body>
+
+<any JSON payload matching the adapter's field mappings>
+```
+
+**Path parameter:**
+
+- `name` — Must match a `webhook_adapters[].name` entry in `correlation.yaml`. Names are restricted to `[a-z0-9-]{1,64}`.
+
+**Authentication:**
+
+- `hmac` — HMAC-SHA256 over the raw request body. Header name is configurable (default `X-Signature-SHA256`). The hex digest may be prefixed with `sha256=` (GitHub-style). Secret is read from the env var named in `auth.secret_env`.
+- `bearer` — Reuses the global session/bearer auth backend.
+- `none` — No auth enforced (intended for lab use only).
+
+**Response:**
+
+```json
+{
+  "processed": 2,
+  "failed": 0,
+  "results": [
+    { "index": 0, "status": "mitigated", "event_id": "…", "mitigation_id": "…" },
+    { "index": 1, "status": "duplicate" }
+  ]
+}
+```
+
+**Configuration example** (`configs/correlation.yaml`):
+
+```yaml
+webhook_adapters:
+  - name: radware
+    enabled: true
+    auth:
+      type: hmac
+      secret_env: RADWARE_WEBHOOK_SECRET
+      header: X-Signature-SHA256
+      algorithm: sha256
+    root_path: "$.alerts[*]"
+    fields:
+      victim_ip: "$.target.ip"
+      vector: "$.alert_type"
+      timestamp: "$.time"
+      bps: "$.metrics.bps"
+      pps: "$.metrics.pps"
+      confidence: "$.score"
+      source_id: "$.id"
+    vector_map:
+      UDP_FLOOD: udp_flood
+      SYN_FLOOD: syn_flood
+    default_vector: unknown
+    confidence_scale: 100
+    source_id_prefix: "radware-"
+```
+
+See `docs/configuration.md` for the complete schema.
+
 ---
 
 ## Safelist

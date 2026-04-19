@@ -23,6 +23,7 @@ Any system that can POST JSON works. Tested with:
 - **FastNetMon Community** - Notify script integration ([setup guide](docs/detectors/fastnetmon.md))
 - **FastNetMon** (native webhook) - `POST /v1/signals/fastnetmon` accepts FastNetMon's JSON payload directly, classifies vector from traffic breakdown, configurable confidence mapping
 - **Prometheus/Alertmanager** - `POST /v1/signals/alertmanager` accepts Alertmanager v4 webhook payloads, maps labels/annotations to event fields, handles batched alerts with per-alert results
+- **Generic webhook adapter** - `POST /v1/signals/webhook/{name}` for detectors without a native adapter. Configured per-adapter in `correlation.yaml` with JSONPath field mappings, HMAC-SHA256 / bearer / none authentication, optional array batching via `root_path`, vector normalization, and confidence scaling. See ADR 020 and [docs/detectors/generic-webhook.md](docs/detectors/generic-webhook.md).
 - **Custom scripts** - Simple curl calls to `POST /v1/events`
 
 ### Event Schema

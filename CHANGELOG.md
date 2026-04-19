@@ -5,6 +5,12 @@ All notable changes to prefixd will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Generic webhook adapter** — Integrate any detector or telemetry source that can POST JSON without writing Rust. Configure a named adapter in `correlation.yaml` with JSONPath field mappings, HMAC/bearer/none auth, optional batching via `root_path`, vector normalization, and confidence scaling. Events flow through the standard correlation and policy pipeline. New endpoint: `POST /v1/signals/webhook/{name}`. See `docs/configuration.md` for the schema and `docs/api.md` for usage.
+
 ## [0.14.1] - 2026-04-03
 
 ### Fixed

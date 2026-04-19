@@ -4778,3 +4778,240 @@ fn format_duration(seconds: i64) -> String {
         format!("{}m", minutes)
     }
 }
+
+// ==========================================================================
+// Generic webhook adapter
+// ==========================================================================
+
+/// Per-event result for the generic webhook endpoint.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct WebhookEventResult {
+    /// Position in the payload (0 for single-event adapters, 0..N for root_path).
+    pub index: usize,
+    /// Processing status (processed, duplicate, withdrawn, withdrawn_noop, error).
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mitigation_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response for the generic webhook endpoint.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct WebhookResponse {
+    pub processed: u32,
+    pub failed: u32,
+    pub results: Vec<WebhookEventResult>,
+}
+
+/// Ingest signals from a generic configured webhook adapter
+#[utoipa::path(
+    post,
+    path = "/v1/signals/webhook/{name}",
+    tag = "signals",
+    params(("name" = String, Path, description = "Adapter name as configured in correlation.yaml")),
+    request_body(content = serde_json::Value, description = "Arbitrary JSON payload mapped via the adapter's JSONPath fields"),
+    responses(
+        (status = 200, description = "Events processed", body = WebhookResponse),
+        (status = 400, description = "Malformed payload or no mappable events"),
+        (status = 401, description = "HMAC/bearer verification failed"),
+        (status = 404, description = "Adapter not configured or disabled"),
+    )
+)]
+pub async fn ingest_webhook(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    ingest_webhook_inner(state, auth_session, name, headers, body).await
+}
+
+async fn ingest_webhook_inner(
+    state: Arc<AppState>,
+    auth_session: AuthSession,
+    name: String,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<WebhookResponse>), AppError> {
+    if !crate::correlation::is_valid_name(&name) {
+        return Err(AppError(PrefixdError::NotFound(format!(
+            "webhook adapter '{name}' not found"
+        ))));
+    }
+
+    // Resolve adapter config
+    let (adapter, compiled) = {
+        let cfg = state.correlation_config.read().await;
+        let adapter = cfg
+            .webhook_adapters
+            .iter()
+            .find(|a| a.name == name && a.enabled)
+            .cloned()
+            .ok_or_else(|| {
+                AppError(PrefixdError::NotFound(format!(
+                    "webhook adapter '{name}' not found"
+                )))
+            })?;
+        drop(cfg);
+        let compiled = crate::correlation::CompiledAdapter::compile(&adapter).map_err(|e| {
+            AppError(PrefixdError::Internal(format!(
+                "adapter '{name}' has invalid JSONPath: {e}"
+            )))
+        })?;
+        (adapter, compiled)
+    };
+
+    // Auth check per adapter
+    match &adapter.auth {
+        crate::correlation::WebhookAuth::Hmac {
+            secret_env,
+            header,
+            algorithm,
+        } => {
+            if algorithm != "sha256" {
+                return Err(AppError(PrefixdError::Internal(format!(
+                    "adapter '{name}' uses unsupported HMAC algorithm '{algorithm}'"
+                ))));
+            }
+            let Ok(secret) = std::env::var(secret_env) else {
+                return Err(AppError(PrefixdError::Internal(format!(
+                    "adapter '{name}' HMAC secret env var '{secret_env}' not set"
+                ))));
+            };
+            let sig = headers
+                .get(header.as_str())
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| {
+                    AppError(PrefixdError::Unauthorized(format!(
+                        "missing HMAC signature header '{header}'"
+                    )))
+                })?;
+            if !crate::correlation::verify_hmac_sha256(secret.as_bytes(), &body, sig) {
+                return Err(AppError(PrefixdError::Unauthorized(
+                    "HMAC signature verification failed".into(),
+                )));
+            }
+        }
+        crate::correlation::WebhookAuth::Bearer => {
+            let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+            if require_auth(&state, &auth_session, auth_header).is_err() {
+                return Err(AppError(PrefixdError::Unauthorized(
+                    "authentication required".into(),
+                )));
+            }
+        }
+        crate::correlation::WebhookAuth::None => {
+            // No-auth is caller's responsibility; logged once at startup.
+        }
+    }
+
+    // Parse body
+    let payload: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
+        AppError(PrefixdError::InvalidRequest(format!(
+            "malformed JSON payload: {e}"
+        )))
+    })?;
+
+    let mapped = crate::correlation::map_payload(&adapter, &compiled, &payload);
+    if mapped.is_empty() {
+        return Err(AppError(PrefixdError::InvalidRequest(
+            "no events extracted from payload".into(),
+        )));
+    }
+
+    let mut results = Vec::with_capacity(mapped.len());
+    let mut processed = 0u32;
+    let mut failed = 0u32;
+
+    for (index, mapped_event) in mapped.into_iter().enumerate() {
+        match mapped_event {
+            Err(e) => {
+                failed += 1;
+                results.push(WebhookEventResult {
+                    index,
+                    status: "error".into(),
+                    event_id: None,
+                    mitigation_id: None,
+                    error: Some(e.to_string()),
+                });
+            }
+            Ok(input) => match input.action.as_str() {
+                "unban" => match handle_unban(state.clone(), input).await {
+                    Ok((_status, Json(resp))) => {
+                        processed += 1;
+                        results.push(WebhookEventResult {
+                            index,
+                            status: "withdrawn".into(),
+                            event_id: Some(resp.event_id),
+                            mitigation_id: resp.mitigation_id,
+                            error: None,
+                        });
+                    }
+                    Err(AppError(e)) => {
+                        processed += 1;
+                        results.push(WebhookEventResult {
+                            index,
+                            status: "withdrawn_noop".into(),
+                            event_id: None,
+                            mitigation_id: None,
+                            error: Some(e.to_string()),
+                        });
+                    }
+                },
+                _ => match handle_ban(state.clone(), input).await {
+                    Ok((_status, Json(resp))) => {
+                        processed += 1;
+                        results.push(WebhookEventResult {
+                            index,
+                            status: resp.status,
+                            event_id: Some(resp.event_id),
+                            mitigation_id: resp.mitigation_id,
+                            error: None,
+                        });
+                    }
+                    Err(AppError(PrefixdError::DuplicateEvent { .. })) => {
+                        processed += 1;
+                        results.push(WebhookEventResult {
+                            index,
+                            status: "duplicate".into(),
+                            event_id: None,
+                            mitigation_id: None,
+                            error: None,
+                        });
+                    }
+                    Err(AppError(e)) => {
+                        failed += 1;
+                        results.push(WebhookEventResult {
+                            index,
+                            status: "error".into(),
+                            event_id: None,
+                            mitigation_id: None,
+                            error: Some(e.to_string()),
+                        });
+                    }
+                },
+            },
+        }
+    }
+
+    tracing::info!(
+        adapter = %adapter.name,
+        processed = processed,
+        failed = failed,
+        total = results.len(),
+        "webhook payload processed"
+    );
+
+    Ok((
+        StatusCode::OK,
+        Json(WebhookResponse {
+            processed,
+            failed,
+            results,
+        }),
+    ))
+}
