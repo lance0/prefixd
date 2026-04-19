@@ -7,9 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-04-18
+
 ### Added
 
-- **Generic webhook adapter** — Integrate any detector or telemetry source that can POST JSON without writing Rust. Configure a named adapter in `correlation.yaml` with JSONPath field mappings, HMAC/bearer/none auth, optional batching via `root_path`, vector normalization, and confidence scaling. Events flow through the standard correlation and policy pipeline. New endpoint: `POST /v1/signals/webhook/{name}`. See `docs/configuration.md` for the schema and `docs/api.md` for usage.
+- **Generic webhook adapter** — Integrate any detector or telemetry source that can POST JSON without writing Rust. Configure a named adapter in `correlation.yaml` with JSONPath field mappings, HMAC/bearer/none auth, optional batching via `root_path`, vector normalization, and confidence scaling. Events flow through the standard correlation and policy pipeline. New endpoint: `POST /v1/signals/webhook/{name}`. See [ADR 020](docs/adr/020-generic-webhook-adapter.md) for design rationale, [docs/detectors/generic-webhook.md](docs/detectors/generic-webhook.md) for an end-to-end walkthrough, and `docs/configuration.md` / `docs/api.md` for schema reference.
+- **Webhook adapter config validation** — `CorrelationConfig::validate()` now rejects `confidence_scale <= 0` or non-finite, empty `auth.secret_env` / `auth.header`, and non-`sha256` HMAC algorithms. Misconfiguration surfaces as a 400 on PUT/reload instead of runtime 500s.
+- **Frontend CRUD editor** for webhook adapters on the Correlation Config tab (all three auth modes, JSONPath field mapping, vector normalization, HMAC secret env-var reference, endpoint copy button).
+
+### Fixed
+
+- **Rust 1.95 CI compatibility** — Addressed new clippy lints (`collapsible_match`, `cloned_ref_to_slice_refs`, `field_reassign_with_default`) and match-exhaustiveness in `gobgp.rs` guard patterns.
+- **Webhook `action` validation** — Invalid `action` values (e.g. `"resolved"`, typos) now produce a per-event mapping error instead of silently defaulting to `"ban"`. Missing/null still defaults to `"ban"`.
+
+### Changed
+
+- **Security advisory bumps** — `rustls-webpki` 0.103.10 → 0.103.12 (RUSTSEC-2026-0098/0099). `RUSTSEC-2026-0097` (`rand`) added to `cargo-audit` ignore list pending upstream fix.
+- **New dependencies** — `serde_json_path 0.7` (RFC 9535 JSONPath), `subtle 2` (constant-time compare for HMAC).
 
 ## [0.14.1] - 2026-04-03
 
@@ -856,6 +870,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/lance0/prefixd/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/lance0/prefixd/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/lance0/prefixd/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/lance0/prefixd/compare/v0.12.0...v0.13.0
