@@ -9,7 +9,8 @@ use super::{
     SafelistEntry, TimeseriesBucket,
 };
 use crate::correlation::engine::{
-    SignalGroup, SignalGroupEvent, SignalGroupFilter, SignalGroupStatus,
+    CorroboratingSignal, EventDimensions, SignalGroup, SignalGroupEvent, SignalGroupFilter,
+    SignalGroupStatus,
 };
 use crate::domain::{AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole};
 use crate::error::Result;
@@ -23,8 +24,22 @@ pub struct MockRepository {
     operators: Mutex<Vec<Operator>>,
     notification_prefs: Mutex<HashMap<Uuid, NotificationPreferences>>,
     signal_groups: Mutex<Vec<SignalGroup>>,
-    signal_group_events: Mutex<Vec<(Uuid, Uuid, f32)>>, // (group_id, event_id, source_weight)
+    signal_group_events: Mutex<Vec<MockGroupEventLink>>,
+    corroborating_signals: Mutex<Vec<CorroboratingSignal>>,
 }
+
+/// Mock-only junction-table row:
+/// (group_id, event_id, source_weight, is_corroborating,
+///  denorm_source, denorm_confidence, denorm_ingested_at).
+type MockGroupEventLink = (
+    Uuid,
+    Uuid,
+    f32,
+    bool,
+    Option<String>,
+    Option<f32>,
+    Option<chrono::DateTime<chrono::Utc>>,
+);
 
 impl MockRepository {
     pub fn new() -> Self {
@@ -37,6 +52,7 @@ impl MockRepository {
             notification_prefs: Mutex::new(HashMap::new()),
             signal_groups: Mutex::new(Vec::new()),
             signal_group_events: Mutex::new(Vec::new()),
+            corroborating_signals: Mutex::new(Vec::new()),
         }
     }
 }
@@ -597,14 +613,13 @@ impl RepositoryTrait for MockRepository {
         source_weight: f32,
     ) -> Result<bool> {
         let mut links = self.signal_group_events.lock().unwrap();
-        // Check for duplicate
         if links
             .iter()
-            .any(|(gid, eid, _)| *gid == group_id && *eid == event_id)
+            .any(|(gid, eid, _, _, _, _, _)| *gid == group_id && *eid == event_id)
         {
             return Ok(false);
         }
-        links.push((group_id, event_id, source_weight));
+        links.push((group_id, event_id, source_weight, false, None, None, None));
         Ok(true)
     }
 
@@ -614,18 +629,21 @@ impl RepositoryTrait for MockRepository {
 
         Ok(links
             .iter()
-            .filter(|(gid, _, _)| *gid == group_id)
-            .map(|(gid, eid, weight)| {
-                let event = events.iter().find(|e| e.event_id == *eid);
-                SignalGroupEvent {
-                    group_id: *gid,
-                    event_id: *eid,
-                    source_weight: *weight,
-                    source: event.map(|e| e.source.clone()),
-                    confidence: event.and_then(|e| e.confidence),
-                    ingested_at: event.map(|e| e.ingested_at),
-                }
-            })
+            .filter(|(gid, _, _, _, _, _, _)| *gid == group_id)
+            .map(
+                |(gid, eid, weight, is_corroborating, dsource, dconf, dts)| {
+                    let event = events.iter().find(|e| e.event_id == *eid);
+                    SignalGroupEvent {
+                        group_id: *gid,
+                        event_id: *eid,
+                        source_weight: *weight,
+                        is_corroborating: *is_corroborating,
+                        source: event.map(|e| e.source.clone()).or_else(|| dsource.clone()),
+                        confidence: event.and_then(|e| e.confidence).or(*dconf),
+                        ingested_at: event.map(|e| e.ingested_at).or(*dts),
+                    }
+                },
+            )
             .collect())
     }
 
@@ -666,6 +684,39 @@ impl RepositoryTrait for MockRepository {
             .collect())
     }
 
+    async fn find_open_groups_by_dimensions(
+        &self,
+        vector: &Option<String>,
+        dims: &EventDimensions,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<SignalGroup>> {
+        let groups = self.signal_groups.lock().unwrap();
+        let events = self.events.lock().unwrap();
+        let links = self.signal_group_events.lock().unwrap();
+
+        let mut out = Vec::new();
+        for g in groups.iter() {
+            if g.status != SignalGroupStatus::Open || g.window_expires_at <= now {
+                continue;
+            }
+            if let Some(v) = vector.as_ref()
+                && &g.vector != v
+            {
+                continue;
+            }
+            // Aggregate dimensions of primary events in this group by looking
+            // up IpContext via inventory - mock doesn't have inventory, so
+            // fall back to a simple pop-based heuristic: any group's event
+            // matches if its source/vector matches OR any of this group's
+            // primary events' victim_ip appears in dims.customer_ids/pops.
+            // We keep the mock behavior simple — match ANY open group in
+            // range. Real Postgres implementation queries the junction table.
+            let _ = (&events, &links, dims);
+            out.push(g.clone());
+        }
+        Ok(out)
+    }
+
     async fn find_mitigation_id_by_signal_group(
         &self,
         signal_group_id: Uuid,
@@ -675,5 +726,112 @@ impl RepositoryTrait for MockRepository {
             .iter()
             .find(|m| m.signal_group_id == Some(signal_group_id))
             .map(|m| m.mitigation_id))
+    }
+
+    // Corroborating signals (ADR 021)
+
+    async fn add_corroborator_event_to_group(
+        &self,
+        group_id: Uuid,
+        signal: &CorroboratingSignal,
+    ) -> Result<bool> {
+        let mut links = self.signal_group_events.lock().unwrap();
+        if links
+            .iter()
+            .any(|(gid, eid, _, _, _, _, _)| *gid == group_id && *eid == signal.signal_id)
+        {
+            return Ok(false);
+        }
+        links.push((
+            group_id,
+            signal.signal_id,
+            signal.weight,
+            true,
+            Some(signal.source.clone()),
+            signal.confidence,
+            Some(signal.ingested_at),
+        ));
+        Ok(true)
+    }
+
+    async fn group_has_primary_event(&self, group_id: Uuid) -> Result<bool> {
+        let links = self.signal_group_events.lock().unwrap();
+        Ok(links
+            .iter()
+            .any(|(gid, _, _, is_corr, _, _, _)| *gid == group_id && !*is_corr))
+    }
+
+    async fn insert_corroborating_signal(&self, signal: &CorroboratingSignal) -> Result<()> {
+        self.corroborating_signals
+            .lock()
+            .unwrap()
+            .push(signal.clone());
+        Ok(())
+    }
+
+    async fn find_matching_corroborators(
+        &self,
+        vector: &str,
+        dims: &EventDimensions,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<CorroboratingSignal>> {
+        let cache = self.corroborating_signals.lock().unwrap();
+        Ok(cache
+            .iter()
+            .filter(|s| s.expires_at > now)
+            .filter(|s| s.vector.as_deref().is_none_or(|v| v == vector))
+            .filter(|s| {
+                s.customer_id
+                    .as_ref()
+                    .is_some_and(|c| dims.customer_ids.contains(c))
+                    || s.pop.as_ref().is_some_and(|p| dims.pops.contains(p))
+                    || s.service_id
+                        .as_ref()
+                        .is_some_and(|sid| dims.service_ids.contains(sid))
+                    || s.interface
+                        .as_ref()
+                        .is_some_and(|i| dims.interfaces.contains(i))
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn mark_corroborator_attached(&self, signal_id: Uuid, group_id: Uuid) -> Result<()> {
+        let mut cache = self.corroborating_signals.lock().unwrap();
+        if let Some(s) = cache.iter_mut().find(|s| s.signal_id == signal_id)
+            && !s.attached_group_ids.contains(&group_id)
+        {
+            s.attached_group_ids.push(group_id);
+        }
+        Ok(())
+    }
+
+    async fn delete_expired_corroborating_signals(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        let mut cache = self.corroborating_signals.lock().unwrap();
+        let before = cache.len();
+        cache.retain(|s| s.expires_at > now);
+        Ok((before - cache.len()) as u64)
+    }
+
+    async fn count_cached_corroborators(&self, now: chrono::DateTime<chrono::Utc>) -> Result<u64> {
+        let cache = self.corroborating_signals.lock().unwrap();
+        Ok(cache.iter().filter(|s| s.expires_at > now).count() as u64)
+    }
+
+    async fn list_cached_corroborators(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        limit: i64,
+    ) -> Result<Vec<CorroboratingSignal>> {
+        let cache = self.corroborating_signals.lock().unwrap();
+        Ok(cache
+            .iter()
+            .filter(|s| s.expires_at > now)
+            .take(limit.max(0) as usize)
+            .cloned()
+            .collect())
     }
 }

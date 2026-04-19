@@ -674,21 +674,70 @@ async fn handle_ban(
     let mut correlation_context: Option<CorrelationContext> = None;
 
     if correlation_config.enabled {
-        use crate::correlation::CorrelationEngine;
+        use crate::correlation::{CorrelationEngine, SourceMode};
+
+        // Reject primary-event ingestion from sources configured as
+        // corroborating. Those sources must use POST /v1/signals/corroborator.
+        if correlation_config.source_mode(&event.source) == SourceMode::Corroborating {
+            tracing::warn!(
+                source = %event.source,
+                "rejected /v1/events from corroborating-only source"
+            );
+            return Err(AppError(PrefixdError::InvalidRequest(format!(
+                "source '{}' is configured as mode=corroborating and cannot \
+                 post primary events. Use POST /v1/signals/corroborator instead.",
+                event.source
+            ))));
+        }
 
         let vector_str = event.vector.clone();
 
-        // Find or create signal group
-        let new_group = CorrelationEngine::create_group(
+        // Build primary dimensions from settings + inventory context
+        let mut new_group = CorrelationEngine::create_group(
             &event.victim_ip,
             &vector_str,
             correlation_config.window_seconds,
         );
+        new_group
+            .primary_dimensions
+            .add_pop(state.settings.pop.clone());
+        if let Some(ctx) = context.as_ref() {
+            new_group
+                .primary_dimensions
+                .add_customer(ctx.customer_id.clone());
+            if let Some(sid) = ctx.service_id.as_ref() {
+                new_group.primary_dimensions.add_service(sid.clone());
+            }
+        }
         let group = state
             .repo
             .insert_signal_group(&new_group)
             .await
             .map_err(AppError)?;
+
+        // If we joined an existing group, union its stored dimensions with
+        // this event's so that future corroborators can match on any primary
+        // event's dimensions, not just the first one's.
+        let mut group = group;
+        let mut dims_changed = false;
+        if let Some(ctx) = context.as_ref() {
+            let before = group.primary_dimensions.clone();
+            group
+                .primary_dimensions
+                .add_customer(ctx.customer_id.clone());
+            if let Some(sid) = ctx.service_id.as_ref() {
+                group.primary_dimensions.add_service(sid.clone());
+            }
+            group.primary_dimensions.add_pop(state.settings.pop.clone());
+            dims_changed = before != group.primary_dimensions;
+        }
+        if dims_changed {
+            state
+                .repo
+                .update_signal_group(&group)
+                .await
+                .map_err(AppError)?;
+        }
 
         let is_new_group = group.group_id == new_group.group_id;
         if is_new_group {
@@ -704,6 +753,48 @@ async fn handle_ban(
             .add_event_to_group(group.group_id, event.event_id, source_weight)
             .await
             .map_err(AppError)?;
+
+        // Drain any cached corroborating signals whose dimensions match this
+        // event's dimensions and vector. Attach them to the group and record
+        // the back-reference on the signal (so cache sweep won't double-apply).
+        let event_dims = {
+            let mut d = crate::correlation::EventDimensions::default();
+            d.add_pop(&state.settings.pop);
+            if let Some(ctx) = context.as_ref() {
+                d.add_customer(ctx.customer_id.clone());
+                if let Some(sid) = ctx.service_id.as_ref() {
+                    d.add_service(sid.clone());
+                }
+            }
+            d
+        };
+        if !event_dims.is_empty() {
+            let matches = state
+                .repo
+                .find_matching_corroborators(&vector_str, &event_dims, Utc::now())
+                .await
+                .map_err(AppError)?;
+            for sig in &matches {
+                if sig.attached_group_ids.contains(&group.group_id) {
+                    continue;
+                }
+                let attached = state
+                    .repo
+                    .add_corroborator_event_to_group(group.group_id, sig)
+                    .await
+                    .map_err(AppError)?;
+                if attached {
+                    state
+                        .repo
+                        .mark_corroborator_attached(sig.signal_id, group.group_id)
+                        .await
+                        .map_err(AppError)?;
+                    crate::observability::metrics::CORROBORATOR_ATTACHED_TOTAL
+                        .with_label_values(&[&sig.source])
+                        .inc();
+                }
+            }
+        }
 
         // Recompute derived confidence from all events in group
         let group_events = state
@@ -5014,4 +5105,261 @@ async fn ingest_webhook_inner(
             results,
         }),
     ))
+}
+
+// ── Corroborating signals (ADR 021) ────────────────────────────────────
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CorroboratorInput {
+    pub source: String,
+    #[serde(default)]
+    pub vector: Option<String>,
+    #[serde(default)]
+    pub customer_id: Option<String>,
+    #[serde(default)]
+    pub pop: Option<String>,
+    #[serde(default)]
+    pub service_id: Option<String>,
+    #[serde(default)]
+    pub interface: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<f32>,
+    #[serde(default)]
+    pub raw_details: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CorroboratorResponse {
+    pub signal_id: Uuid,
+    pub status: String,
+    pub attached_group_ids: Vec<Uuid>,
+    pub cached: bool,
+}
+
+/// Ingest a corroborating signal.
+///
+/// Corroborating signals come from sources configured as `mode: corroborating`
+/// in `correlation.yaml`. They don't carry a `victim_ip` — they match open
+/// signal groups using lighter dimensions (customer_id, pop, service_id,
+/// interface) declared in the source's `match_dimensions`.
+///
+/// If one or more open signal groups match, the signal is attached to each
+/// and strengthens their derived confidence. Otherwise the signal is cached
+/// with a TTL equal to `correlation.window_seconds` and will be drained when
+/// a matching primary event arrives, or expired via the cache sweep.
+#[utoipa::path(
+    post,
+    path = "/v1/signals/corroborator",
+    tag = "signals",
+    request_body = CorroboratorInput,
+    responses(
+        (status = 200, description = "Signal ingested", body = CorroboratorResponse),
+        (status = 400, description = "Invalid source mode or missing dimensions"),
+        (status = 401, description = "Authentication required"),
+    )
+)]
+pub async fn ingest_corroborator(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
+    Json(input): Json<CorroboratorInput>,
+) -> impl IntoResponse {
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    if let Err(_status) = require_auth(&state, &auth_session, auth_header) {
+        return Err(AppError(PrefixdError::Unauthorized(
+            "authentication required".into(),
+        )));
+    }
+    ingest_corroborator_inner(state, input).await
+}
+
+async fn ingest_corroborator_inner(
+    state: Arc<AppState>,
+    input: CorroboratorInput,
+) -> Result<impl IntoResponse, AppError> {
+    use crate::correlation::{CorroboratingSignal, EventDimensions, SourceMode};
+
+    let correlation_config = state.correlation_config.read().await.clone();
+
+    if !correlation_config.enabled {
+        return Err(AppError(PrefixdError::InvalidRequest(
+            "correlation engine is disabled".to_string(),
+        )));
+    }
+
+    if correlation_config.source_mode(&input.source) != SourceMode::Corroborating {
+        return Err(AppError(PrefixdError::InvalidRequest(format!(
+            "source '{}' is not configured as mode=corroborating; \
+             post primary events to /v1/events instead.",
+            input.source
+        ))));
+    }
+
+    // Enforce that at least one declared match_dimension is populated on the
+    // signal. This prevents a corroborating source from attaching to any
+    // random open group by accident.
+    let declared = correlation_config.match_dimensions(&input.source);
+    let supplied_any = declared.iter().any(|dim| match dim {
+        crate::correlation::MatchDimension::CustomerId => input.customer_id.is_some(),
+        crate::correlation::MatchDimension::Pop => input.pop.is_some(),
+        crate::correlation::MatchDimension::ServiceId => input.service_id.is_some(),
+        crate::correlation::MatchDimension::Interface => input.interface.is_some(),
+    });
+    if !supplied_any {
+        return Err(AppError(PrefixdError::InvalidRequest(format!(
+            "source '{}' requires at least one of its declared match_dimensions \
+             ({}) to be populated on each signal",
+            input.source,
+            declared
+                .iter()
+                .map(|d| d.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ))));
+    }
+
+    let now = Utc::now();
+    let expires_at = now + chrono::Duration::seconds(correlation_config.window_seconds as i64);
+    let weight = correlation_config.source_weight(&input.source);
+
+    let mut signal = CorroboratingSignal {
+        signal_id: Uuid::new_v4(),
+        source: input.source.clone(),
+        vector: input.vector.clone(),
+        customer_id: input.customer_id.clone(),
+        pop: input.pop.clone(),
+        service_id: input.service_id.clone(),
+        interface: input.interface.clone(),
+        confidence: input.confidence,
+        weight,
+        ingested_at: now,
+        expires_at,
+        raw_details: input.raw_details.clone(),
+        attached_group_ids: vec![],
+    };
+
+    crate::observability::metrics::CORROBORATOR_INGESTED_TOTAL
+        .with_label_values(&[&signal.source])
+        .inc();
+
+    // Build a dimension probe representing THIS signal. We search for any
+    // open signal group that has a primary event sharing at least one of
+    // these dimension values.
+    let mut probe = EventDimensions::default();
+    if let Some(v) = &signal.customer_id {
+        probe.add_customer(v);
+    }
+    if let Some(v) = &signal.pop {
+        probe.add_pop(v);
+    }
+    if let Some(v) = &signal.service_id {
+        probe.add_service(v);
+    }
+    if let Some(v) = &signal.interface {
+        probe.add_interface(v);
+    }
+
+    let matching_groups = state
+        .repo
+        .find_open_groups_by_dimensions(&signal.vector, &probe, now)
+        .await
+        .map_err(AppError)?;
+
+    let mut attached_group_ids = Vec::new();
+    for group in &matching_groups {
+        let attached = state
+            .repo
+            .add_corroborator_event_to_group(group.group_id, &signal)
+            .await
+            .map_err(AppError)?;
+        if attached {
+            attached_group_ids.push(group.group_id);
+            crate::observability::metrics::CORROBORATOR_ATTACHED_TOTAL
+                .with_label_values(&[&signal.source])
+                .inc();
+            // Recompute group aggregates to include this corroborator.
+            recompute_group_aggregates(&state, group.group_id).await?;
+        }
+    }
+
+    // Always cache the signal too, so late-arriving primary events within
+    // the window can also attach to it. The cache table tracks attached_group_ids.
+    signal.attached_group_ids = attached_group_ids.clone();
+    state
+        .repo
+        .insert_corroborating_signal(&signal)
+        .await
+        .map_err(AppError)?;
+
+    tracing::info!(
+        signal_id = %signal.signal_id,
+        source = %signal.source,
+        attached_groups = attached_group_ids.len(),
+        "corroborating signal ingested"
+    );
+
+    Ok((
+        StatusCode::OK,
+        Json(CorroboratorResponse {
+            signal_id: signal.signal_id,
+            status: if attached_group_ids.is_empty() {
+                "cached".to_string()
+            } else {
+                "attached".to_string()
+            },
+            attached_group_ids,
+            cached: true,
+        }),
+    ))
+}
+
+/// Recompute a signal group's derived_confidence, source_count and
+/// corroboration_met flag from its events (including corroborators).
+async fn recompute_group_aggregates(state: &Arc<AppState>, group_id: Uuid) -> Result<(), AppError> {
+    use crate::correlation::CorrelationEngine;
+
+    let group = match state
+        .repo
+        .get_signal_group(group_id)
+        .await
+        .map_err(AppError)?
+    {
+        Some(g) => g,
+        None => return Ok(()),
+    };
+
+    let events = state
+        .repo
+        .list_signal_group_events(group_id)
+        .await
+        .map_err(AppError)?;
+
+    let pairs: Vec<(Option<f32>, f32)> = events
+        .iter()
+        .map(|e| (e.confidence, e.source_weight))
+        .collect();
+    let derived = CorrelationEngine::compute_derived_confidence(&pairs);
+    let sources: Vec<String> = events.iter().filter_map(|e| e.source.clone()).collect();
+    let count = CorrelationEngine::count_distinct_sources(&sources);
+
+    let correlation_config = state.correlation_config.read().await.clone();
+    let has_primary = events.iter().any(|e| !e.is_corroborating);
+    let met = CorrelationEngine::check_corroboration_with_primary(
+        count,
+        derived,
+        has_primary,
+        &correlation_config,
+        None,
+    );
+
+    let mut updated = group;
+    updated.derived_confidence = derived;
+    updated.source_count = count;
+    updated.corroboration_met = met;
+    state
+        .repo
+        .update_signal_group(&updated)
+        .await
+        .map_err(AppError)?;
+    Ok(())
 }

@@ -69,6 +69,17 @@ pub enum MatchDimension {
     Interface,
 }
 
+impl MatchDimension {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CustomerId => "customer_id",
+            Self::Pop => "pop",
+            Self::ServiceId => "service_id",
+            Self::Interface => "interface",
+        }
+    }
+}
+
 /// Configuration for a single detection/signal source.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SourceConfig {

@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use super::{ListParams, NotificationPreferences, RepositoryTrait};
 use crate::correlation::engine::{
-    SignalGroup, SignalGroupEvent, SignalGroupFilter, SignalGroupStatus,
+    CorroboratingSignal, EventDimensions, SignalGroup, SignalGroupEvent, SignalGroupFilter,
+    SignalGroupStatus,
 };
 use crate::domain::{
     AttackEvent, Mitigation, MitigationRow, MitigationStatus, Operator, OperatorRole,
@@ -909,18 +910,19 @@ impl RepositoryTrait for Repository {
             r#"
             WITH existing AS (
                 SELECT group_id, victim_ip, vector, created_at, window_expires_at,
-                       derived_confidence, source_count, status, corroboration_met
+                       derived_confidence, source_count, status, corroboration_met,
+                       primary_dimensions
                 FROM signal_groups
                 WHERE victim_ip = $2 AND vector = $3 AND status = 'open'
                   AND window_expires_at > NOW()
                 LIMIT 1
             ), inserted AS (
                 INSERT INTO signal_groups (group_id, victim_ip, vector, created_at, window_expires_at,
-                    derived_confidence, source_count, status, corroboration_met)
-                SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
+                    derived_confidence, source_count, status, corroboration_met, primary_dimensions)
+                SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
                 WHERE NOT EXISTS (SELECT 1 FROM existing)
                 RETURNING group_id, victim_ip, vector, created_at, window_expires_at,
-                    derived_confidence, source_count, status, corroboration_met
+                    derived_confidence, source_count, status, corroboration_met, primary_dimensions
             )
             SELECT * FROM existing
             UNION ALL
@@ -937,6 +939,7 @@ impl RepositoryTrait for Repository {
         .bind(group.source_count)
         .bind(group.status.as_str())
         .bind(group.corroboration_met)
+        .bind(serde_json::to_value(&group.primary_dimensions).unwrap_or(serde_json::json!({})))
         .fetch_one(&self.pool)
         .await;
 
@@ -953,7 +956,8 @@ impl RepositoryTrait for Repository {
                 let row = sqlx::query_as::<_, SignalGroupRow>(
                     r#"
                     SELECT group_id, victim_ip, vector, created_at, window_expires_at,
-                           derived_confidence, source_count, status, corroboration_met
+                           derived_confidence, source_count, status, corroboration_met,
+                           primary_dimensions
                     FROM signal_groups
                     WHERE victim_ip = $1 AND vector = $2 AND status = 'open'
                       AND window_expires_at > NOW()
@@ -977,7 +981,8 @@ impl RepositoryTrait for Repository {
                 derived_confidence = $2,
                 source_count = $3,
                 status = $4,
-                corroboration_met = $5
+                corroboration_met = $5,
+                primary_dimensions = $6
             WHERE group_id = $1
             "#,
         )
@@ -986,6 +991,7 @@ impl RepositoryTrait for Repository {
         .bind(group.source_count)
         .bind(group.status.as_str())
         .bind(group.corroboration_met)
+        .bind(serde_json::to_value(&group.primary_dimensions).unwrap_or(serde_json::json!({})))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -995,7 +1001,8 @@ impl RepositoryTrait for Repository {
         let row = sqlx::query_as::<_, SignalGroupRow>(
             r#"
             SELECT group_id, victim_ip, vector, created_at, window_expires_at,
-                   derived_confidence, source_count, status, corroboration_met
+                   derived_confidence, source_count, status, corroboration_met,
+                   primary_dimensions
             FROM signal_groups WHERE group_id = $1
             "#,
         )
@@ -1009,7 +1016,8 @@ impl RepositoryTrait for Repository {
         let row = sqlx::query_as::<_, SignalGroupRow>(
             r#"
             SELECT group_id, victim_ip, vector, created_at, window_expires_at,
-                   derived_confidence, source_count, status, corroboration_met
+                   derived_confidence, source_count, status, corroboration_met,
+                   primary_dimensions
             FROM signal_groups
             WHERE victim_ip = $1 AND vector = $2 AND status = 'open'
               AND window_expires_at > NOW()
@@ -1031,8 +1039,8 @@ impl RepositoryTrait for Repository {
     ) -> Result<bool> {
         let result = sqlx::query(
             r#"
-            INSERT INTO signal_group_events (group_id, event_id, source_weight)
-            VALUES ($1, $2, $3)
+            INSERT INTO signal_group_events (group_id, event_id, source_weight, is_corroborating)
+            VALUES ($1, $2, $3, false)
             ON CONFLICT (group_id, event_id) DO NOTHING
             "#,
         )
@@ -1045,14 +1053,19 @@ impl RepositoryTrait for Repository {
     }
 
     async fn list_signal_group_events(&self, group_id: Uuid) -> Result<Vec<SignalGroupEvent>> {
+        // For primary rows, source/confidence/ingested_at come from the events table.
+        // For corroborator rows (is_corroborating=true), event_id is the corroborator's
+        // signal_id and the denormalized columns on signal_group_events provide the data.
         let rows = sqlx::query_as::<_, SignalGroupEventRow>(
             r#"
-            SELECT sge.group_id, sge.event_id, sge.source_weight,
-                   e.source, e.confidence, e.ingested_at
+            SELECT sge.group_id, sge.event_id, sge.source_weight, sge.is_corroborating,
+                   COALESCE(e.source, sge.corroborator_source) AS source,
+                   COALESCE(e.confidence, sge.corroborator_confidence) AS confidence,
+                   e.ingested_at
             FROM signal_group_events sge
             LEFT JOIN events e ON e.event_id = sge.event_id
             WHERE sge.group_id = $1
-            ORDER BY e.ingested_at ASC
+            ORDER BY COALESCE(e.ingested_at, NOW()) ASC
             "#,
         )
         .bind(group_id)
@@ -1070,7 +1083,8 @@ impl RepositoryTrait for Repository {
         let rows = sqlx::query_as::<_, SignalGroupRow>(
             r#"
             SELECT group_id, victim_ip, vector, created_at, window_expires_at,
-                   derived_confidence, source_count, status, corroboration_met
+                   derived_confidence, source_count, status, corroboration_met,
+                   primary_dimensions
             FROM signal_groups
             WHERE ($1::text IS NULL OR status = $1)
               AND ($2::text IS NULL OR vector = $2)
@@ -1104,7 +1118,8 @@ impl RepositoryTrait for Repository {
         let rows: Vec<SignalGroupRow> = sqlx::query_as(
             r#"
             SELECT group_id, victim_ip, vector, created_at, window_expires_at,
-                   derived_confidence, source_count, status, corroboration_met
+                   derived_confidence, source_count, status, corroboration_met,
+                   primary_dimensions
             FROM signal_groups
             WHERE status = 'open' AND window_expires_at <= NOW()
             "#,
@@ -1112,6 +1127,51 @@ impl RepositoryTrait for Repository {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn find_open_groups_by_dimensions(
+        &self,
+        vector: &Option<String>,
+        dims: &EventDimensions,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<SignalGroup>> {
+        let customers: Vec<String> = dims.customer_ids.iter().cloned().collect();
+        let pops: Vec<String> = dims.pops.iter().cloned().collect();
+        let services: Vec<String> = dims.service_ids.iter().cloned().collect();
+        let interfaces: Vec<String> = dims.interfaces.iter().cloned().collect();
+
+        // Use ?| (JSONB has-any-keys) is not safe for arbitrary values. We
+        // fetch candidates via simple filter (vector + status + window) and
+        // do the dimension overlap in Rust. Signal groups are a bounded set
+        // (usually <100 open at a time), so this is fine.
+        let rows: Vec<SignalGroupRow> = sqlx::query_as(
+            r#"
+            SELECT group_id, victim_ip, vector, created_at, window_expires_at,
+                   derived_confidence, source_count, status, corroboration_met,
+                   primary_dimensions
+            FROM signal_groups
+            WHERE status = 'open'
+              AND window_expires_at > $1
+              AND ($2::text IS NULL OR vector = $2)
+            "#,
+        )
+        .bind(now)
+        .bind(vector.as_deref())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let probe = EventDimensions {
+            customer_ids: customers.iter().cloned().collect(),
+            pops: pops.iter().cloned().collect(),
+            service_ids: services.iter().cloned().collect(),
+            interfaces: interfaces.iter().cloned().collect(),
+        };
+
+        Ok(rows
+            .into_iter()
+            .map(SignalGroup::from)
+            .filter(|g| g.primary_dimensions.matches_probe(&probe))
+            .collect())
     }
 
     async fn find_mitigation_id_by_signal_group(
@@ -1125,6 +1185,211 @@ impl RepositoryTrait for Repository {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|r| r.0))
+    }
+
+    // Corroborating signals (ADR 021)
+
+    async fn add_corroborator_event_to_group(
+        &self,
+        group_id: Uuid,
+        signal: &CorroboratingSignal,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO signal_group_events (
+                group_id, event_id, source_weight, is_corroborating,
+                corroborator_signal_id, corroborator_source, corroborator_confidence
+            )
+            VALUES ($1, $2, $3, true, $2, $4, $5)
+            ON CONFLICT (group_id, event_id) DO NOTHING
+            "#,
+        )
+        .bind(group_id)
+        .bind(signal.signal_id)
+        .bind(signal.weight)
+        .bind(&signal.source)
+        .bind(signal.confidence)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn group_has_primary_event(&self, group_id: Uuid) -> Result<bool> {
+        let row: (bool,) = sqlx::query_as(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM signal_group_events
+                WHERE group_id = $1 AND is_corroborating = false
+            )
+            "#,
+        )
+        .bind(group_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    async fn insert_corroborating_signal(&self, signal: &CorroboratingSignal) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO corroborating_signals (
+                signal_id, source, vector, customer_id, pop, service_id, interface,
+                confidence, weight, ingested_at, expires_at, raw_details, attached_group_ids
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            "#,
+        )
+        .bind(signal.signal_id)
+        .bind(&signal.source)
+        .bind(signal.vector.as_deref())
+        .bind(signal.customer_id.as_deref())
+        .bind(signal.pop.as_deref())
+        .bind(signal.service_id.as_deref())
+        .bind(signal.interface.as_deref())
+        .bind(signal.confidence)
+        .bind(signal.weight)
+        .bind(signal.ingested_at)
+        .bind(signal.expires_at)
+        .bind(signal.raw_details.clone())
+        .bind(&signal.attached_group_ids)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn find_matching_corroborators(
+        &self,
+        vector: &str,
+        dims: &EventDimensions,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<CorroboratingSignal>> {
+        // Pull all unexpired, unattached-to-this-group candidates matching the
+        // vector filter (or with no vector filter), then apply the dimension
+        // OR-match in Rust to keep the SQL predicate tractable.
+        let customers: Vec<String> = dims.customer_ids.iter().cloned().collect();
+        let pops: Vec<String> = dims.pops.iter().cloned().collect();
+        let services: Vec<String> = dims.service_ids.iter().cloned().collect();
+        let interfaces: Vec<String> = dims.interfaces.iter().cloned().collect();
+
+        let rows: Vec<CorroboratingSignalRow> = sqlx::query_as(
+            r#"
+            SELECT signal_id, source, vector, customer_id, pop, service_id, interface,
+                   confidence, weight, ingested_at, expires_at, raw_details, attached_group_ids
+            FROM corroborating_signals
+            WHERE expires_at > $1
+              AND (vector IS NULL OR vector = $2)
+              AND (
+                   (customer_id IS NOT NULL AND customer_id = ANY($3))
+                OR (pop IS NOT NULL AND pop = ANY($4))
+                OR (service_id IS NOT NULL AND service_id = ANY($5))
+                OR (interface IS NOT NULL AND interface = ANY($6))
+              )
+            "#,
+        )
+        .bind(now)
+        .bind(vector)
+        .bind(&customers)
+        .bind(&pops)
+        .bind(&services)
+        .bind(&interfaces)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn mark_corroborator_attached(&self, signal_id: Uuid, group_id: Uuid) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE corroborating_signals
+            SET attached_group_ids =
+                CASE WHEN $2 = ANY(attached_group_ids) THEN attached_group_ids
+                     ELSE array_append(attached_group_ids, $2) END
+            WHERE signal_id = $1
+            "#,
+        )
+        .bind(signal_id)
+        .bind(group_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_expired_corroborating_signals(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM corroborating_signals WHERE expires_at <= $1")
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn count_cached_corroborators(&self, now: chrono::DateTime<chrono::Utc>) -> Result<u64> {
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM corroborating_signals WHERE expires_at > $1")
+                .bind(now)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(row.0.max(0) as u64)
+    }
+
+    async fn list_cached_corroborators(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        limit: i64,
+    ) -> Result<Vec<CorroboratingSignal>> {
+        let rows: Vec<CorroboratingSignalRow> = sqlx::query_as(
+            r#"
+            SELECT signal_id, source, vector, customer_id, pop, service_id, interface,
+                   confidence, weight, ingested_at, expires_at, raw_details, attached_group_ids
+            FROM corroborating_signals
+            WHERE expires_at > $1
+            ORDER BY ingested_at DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(now)
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct CorroboratingSignalRow {
+    signal_id: Uuid,
+    source: String,
+    vector: Option<String>,
+    customer_id: Option<String>,
+    pop: Option<String>,
+    service_id: Option<String>,
+    interface: Option<String>,
+    confidence: Option<f32>,
+    weight: f32,
+    ingested_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    raw_details: Option<serde_json::Value>,
+    attached_group_ids: Vec<Uuid>,
+}
+
+impl From<CorroboratingSignalRow> for CorroboratingSignal {
+    fn from(row: CorroboratingSignalRow) -> Self {
+        Self {
+            signal_id: row.signal_id,
+            source: row.source,
+            vector: row.vector,
+            customer_id: row.customer_id,
+            pop: row.pop,
+            service_id: row.service_id,
+            interface: row.interface,
+            confidence: row.confidence,
+            weight: row.weight,
+            ingested_at: row.ingested_at,
+            expires_at: row.expires_at,
+            raw_details: row.raw_details,
+            attached_group_ids: row.attached_group_ids,
+        }
     }
 }
 
@@ -1141,6 +1406,7 @@ struct SignalGroupRow {
     source_count: i32,
     status: String,
     corroboration_met: bool,
+    primary_dimensions: serde_json::Value,
 }
 
 impl From<SignalGroupRow> for SignalGroup {
@@ -1155,6 +1421,7 @@ impl From<SignalGroupRow> for SignalGroup {
             source_count: row.source_count,
             status: row.status.parse().unwrap_or(SignalGroupStatus::Open),
             corroboration_met: row.corroboration_met,
+            primary_dimensions: serde_json::from_value(row.primary_dimensions).unwrap_or_default(),
         }
     }
 }
@@ -1164,6 +1431,7 @@ struct SignalGroupEventRow {
     group_id: Uuid,
     event_id: Uuid,
     source_weight: f32,
+    is_corroborating: bool,
     source: Option<String>,
     confidence: Option<f32>,
     ingested_at: Option<DateTime<Utc>>,
@@ -1175,6 +1443,7 @@ impl From<SignalGroupEventRow> for SignalGroupEvent {
             group_id: row.group_id,
             event_id: row.event_id,
             source_weight: row.source_weight,
+            is_corroborating: row.is_corroborating,
             source: row.source,
             confidence: row.confidence,
             ingested_at: row.ingested_at,

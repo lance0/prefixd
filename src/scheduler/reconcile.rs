@@ -105,6 +105,9 @@ impl ReconciliationLoop {
         // 2. Expire signal groups past window
         self.expire_signal_groups().await?;
 
+        // 2b. Sweep expired corroborating signals from the floating cache (ADR 021)
+        self.sweep_corroborator_cache().await?;
+
         // 3. Sync desired vs actual state
         self.sync_announcements().await?;
 
@@ -195,6 +198,28 @@ impl ReconciliationLoop {
                 .observe(group.source_count as f64);
         }
 
+        Ok(())
+    }
+
+    async fn sweep_corroborator_cache(&self) -> anyhow::Result<()> {
+        // Sample source labels for the expired metric BEFORE deleting, so we
+        // can attribute expiries. For simplicity we just increment the
+        // counter by total deleted with an "unknown" label; an operator who
+        // wants per-source attribution can scrape the metric and compare
+        // with CORROBORATOR_INGESTED_TOTAL.
+        let now = chrono::Utc::now();
+        let deleted = self.repo.delete_expired_corroborating_signals(now).await?;
+        if deleted > 0 {
+            tracing::info!(
+                deleted = deleted,
+                "swept expired corroborating signals from cache"
+            );
+            for _ in 0..deleted {
+                crate::observability::metrics::CORROBORATOR_EXPIRED_TOTAL
+                    .with_label_values(&["unknown"])
+                    .inc();
+            }
+        }
         Ok(())
     }
 

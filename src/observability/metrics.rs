@@ -242,6 +242,38 @@ pub static CORROBORATION_TIMEOUT_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Counter for corroborating signals ingested (before any match check).
+pub static CORROBORATOR_INGESTED_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "prefixd_corroborator_ingested_total",
+        "Total corroborating signals ingested via /v1/signals/corroborator",
+        &["source"]
+    )
+    .unwrap()
+});
+
+/// Counter for corroborating signals successfully attached to a signal group,
+/// either immediately at ingest or later by cache drain.
+pub static CORROBORATOR_ATTACHED_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "prefixd_corroborator_attached_total",
+        "Total corroborating signals attached to a signal group",
+        &["source"]
+    )
+    .unwrap()
+});
+
+/// Counter for corroborating signals that expired without ever attaching
+/// to a signal group (swept by the cache reaper).
+pub static CORROBORATOR_EXPIRED_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "prefixd_corroborator_expired_total",
+        "Corroborating signals removed by cache sweep without ever attaching",
+        &["source"]
+    )
+    .unwrap()
+});
+
 /// Generate Prometheus metrics output
 pub fn gather_metrics() -> String {
     let encoder = TextEncoder::new();
@@ -280,6 +312,9 @@ pub fn init_metrics() {
     Lazy::force(&CORRELATION_CONFIDENCE);
     Lazy::force(&CORROBORATION_MET_TOTAL);
     Lazy::force(&CORROBORATION_TIMEOUT_TOTAL);
+    Lazy::force(&CORROBORATOR_INGESTED_TOTAL);
+    Lazy::force(&CORROBORATOR_ATTACHED_TOTAL);
+    Lazy::force(&CORROBORATOR_EXPIRED_TOTAL);
 }
 
 /// Update database pool metrics from sqlx pool stats
