@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Corroborating signals (ADR 021)** — New class of correlation signals that strengthen open signal groups without ever triggering mitigations on their own. Targets coarse telemetry (router CPU, interface utilization, per-customer NetFlow, PoP-level metrics) that shouldn't name a victim IP but is valuable alongside a real detector.
+  - Configure via `mode: corroborating` + `match_dimensions: [pop, customer_id, ...]` on any entry in `correlation.yaml`'s `sources` map. Validator rejects mixing modes with incompatible dimensions on `PUT /v1/config/correlation`.
+  - New endpoint `POST /v1/signals/corroborator` accepts dimension-tagged signals (no `victim_ip`). Matches open signal groups using OR-semantics across populated dimensions, with an optional `vector` narrower. Unmatched signals cache for up to `window_seconds` and drain when a matching primary event arrives.
+  - Engine invariant enforced: a group composed entirely of corroborators never reaches `corroboration_met=true`. At least one primary event is required.
+  - Reconciliation loop sweeps expired corroborators. Three new Prometheus metrics: `prefixd_corroborator_ingested_total`, `_attached_total`, `_expired_total` (all labelled by source).
+  - Dashboard: per-source mode + dimension picker in the Correlation Config tab; corroborating badge on signal group detail's contributing-events list.
+  - New CLI: `prefixdctl send-corroborator --source router-cpu --pop iad1 ...`.
+  - See [ADR 021](docs/adr/021-corroborating-signals.md) for rationale and migration 009 for schema.
+
 ## [0.15.0] - 2026-04-18
 
 ### Added

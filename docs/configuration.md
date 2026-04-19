@@ -316,6 +316,30 @@ correlation:
 |-------|------|---------|-------------|
 | `weight` | float | `1.0` | Weight in derived confidence computation (higher = more influence) |
 | `type` | string | `""` | Descriptive type (`detector`, `telemetry`, `manual`) |
+| `mode` | string | `primary` | `primary` = can trigger mitigations; `corroborating` = only strengthens other sources (ADR 021) |
+| `match_dimensions` | list | `[]` | Required when `mode=corroborating`. Drawn from `customer_id`, `pop`, `service_id`, `interface`. Must be empty when `mode=primary`. |
+
+**Corroborating sources example:**
+
+```yaml
+sources:
+  fastnetmon:
+    mode: primary        # default; can trigger mitigations
+    weight: 1.0
+    type: detector
+  router-cpu:
+    mode: corroborating  # strengthens groups but never fires alone
+    weight: 0.5
+    type: telemetry
+    match_dimensions: [pop, customer_id]
+```
+
+Corroborating sources post to `POST /v1/signals/corroborator` instead of
+`/v1/events`. Each signal must populate at least one of its declared
+`match_dimensions`. Matching against open signal groups uses OR across
+populated dimensions. A signal group must contain at least one primary
+event before it can trigger a mitigation — corroborators alone are
+never sufficient. See [ADR 021](adr/021-corroborating-signals.md).
 
 **Derived confidence** is computed as a weighted average:
 

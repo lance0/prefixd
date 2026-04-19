@@ -901,6 +901,71 @@ webhook_adapters:
 
 See `docs/configuration.md` for the complete schema.
 
+### Corroborator Signal
+
+Ingest a **corroborating signal** from a source configured with
+`mode: corroborating` in `correlation.yaml`. Corroborators don't carry a
+`victim_ip`; instead they match open signal groups on lighter dimensions
+(`customer_id`, `pop`, `service_id`, `interface`) declared in the
+source's `match_dimensions`. See [ADR 021](adr/021-corroborating-signals.md).
+
+```http
+POST /v1/signals/corroborator
+Content-Type: application/json
+
+{
+  "source": "router-cpu",
+  "vector": "udp_flood",
+  "customer_id": "cust_42",
+  "pop": "iad1",
+  "service_id": "svc_web",
+  "interface": "et-0/0/12",
+  "confidence": 0.6
+}
+```
+
+**Fields:**
+
+- `source` — Must match a `sources` entry in `correlation.yaml` with
+  `mode: corroborating`.
+- `vector` *(optional)* — When set, only groups with a matching `vector`
+  are eligible. When absent, any open group matching on dimensions is
+  eligible.
+- `customer_id`, `pop`, `service_id`, `interface` *(optional)* — At
+  least one must be populated AND must appear in the source's
+  `match_dimensions`. Matching is OR across populated dimensions.
+- `confidence` *(optional)* — 0.0–1.0. Contributes to the group's
+  `derived_confidence` via the source's configured `weight`.
+
+**Response:**
+
+```json
+{
+  "signal_id": "a4f1b2c3-…",
+  "status": "attached",
+  "attached_group_ids": ["e2b9…-1f3c"],
+  "cached": true
+}
+```
+
+- `status` = `attached` when at least one open signal group matched and
+  was strengthened. `status` = `cached` when no group matched; the
+  signal is held for up to `window_seconds` and drained on matching
+  primary event arrival.
+- `attached_group_ids` — UUIDs of signal groups this signal contributed
+  to.
+
+**Error responses:**
+
+- `400` — `source` is not configured, is configured as `mode=primary`,
+  or none of its declared `match_dimensions` were populated on the
+  signal.
+- `400` — correlation engine is disabled.
+
+**Invariant:** A signal group composed entirely of corroborating
+signals never triggers a mitigation, regardless of how high its
+`derived_confidence` climbs. Primary events are required.
+
 ---
 
 ## Safelist

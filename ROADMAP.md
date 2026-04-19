@@ -288,6 +288,7 @@ Example: FastNetMon says UDP flood at 0.6 confidence + router CPU spiking + host
 - [x] Source weighting and reliability scoring
 - [x] Corroboration requirements ("require 2+ sources")
 - [x] Correlation explainability (`why` details in API/UI for each mitigation decision)
+- [x] Corroborating-only signals — coarse telemetry (router CPU, PoP interface, per-customer NetFlow) can strengthen groups without ever triggering mitigations on its own (ADR 021)
 - [ ] Replay mode for tuning (simulate historical incidents without announcing FlowSpec rules)
 
 ### Confidence Model
