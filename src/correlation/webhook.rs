@@ -149,6 +149,11 @@ pub enum MapError {
     InvalidIp(String),
     #[error("invalid timestamp '{0}' in payload")]
     InvalidTimestamp(String),
+    #[error("invalid value for field '{field}' (expected {expected})")]
+    InvalidValue {
+        field: &'static str,
+        expected: &'static str,
+    },
 }
 
 /// Validate that a webhook adapter name is safe for use as a URL path segment.
@@ -326,14 +331,20 @@ fn map_one(
                 .collect::<Vec<u16>>()
         });
 
-    let action = compiled
+    let action = match compiled
         .action
         .as_ref()
         .and_then(|p| p.query(node).at_most_one().ok().flatten())
-        .and_then(|v| v.as_str())
-        .filter(|s| *s == "ban" || *s == "unban")
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "ban".to_string());
+    {
+        None | Some(Value::Null) => "ban".to_string(),
+        Some(Value::String(s)) if s == "ban" || s == "unban" => s.clone(),
+        Some(_) => {
+            return Err(MapError::InvalidValue {
+                field: "action",
+                expected: "\"ban\" or \"unban\"",
+            });
+        }
+    };
 
     Ok(AttackEventInput {
         event_id,
@@ -488,6 +499,43 @@ mod tests {
             results.into_iter().next().unwrap(),
             Err(MapError::MissingRequired("victim_ip"))
         ));
+    }
+
+    #[test]
+    fn invalid_action_value_is_rejected() {
+        let mut adapter = basic_adapter();
+        adapter.fields.action = Some("$.action".into());
+        let compiled = CompiledAdapter::compile(&adapter).unwrap();
+        let body = json!({
+            "target": { "ip": "203.0.113.5" },
+            "alert_type": "udp_flood",
+            "action": "resolved"
+        });
+        let results = map_payload(&adapter, &compiled, &body);
+        assert!(matches!(
+            results.into_iter().next().unwrap(),
+            Err(MapError::InvalidValue {
+                field: "action",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn missing_action_defaults_to_ban() {
+        let mut adapter = basic_adapter();
+        adapter.fields.action = Some("$.action".into());
+        let compiled = CompiledAdapter::compile(&adapter).unwrap();
+        let body = json!({
+            "target": { "ip": "203.0.113.5" },
+            "alert_type": "udp_flood"
+        });
+        let event = map_payload(&adapter, &compiled, &body)
+            .into_iter()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.action, "ban");
     }
 
     #[test]

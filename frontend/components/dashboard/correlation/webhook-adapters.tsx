@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect } from "react"
 import { toast } from "sonner"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -322,10 +322,10 @@ function AdapterDialog({
   const [form, setForm] = useState<WebhookAdapter>(initial ?? newAdapter())
   const [saving, setSaving] = useState(false)
 
-  // Reset form when dialog opens with new adapter
-  useState(() => {
-    if (initial) setForm(initial)
-  })
+  // Reset form whenever `initial` changes (dialog opened for a different adapter).
+  useEffect(() => {
+    setForm(initial ?? newAdapter())
+  }, [initial])
 
   const isNew = !existingNames.includes(form.name)
   const errors = validateAdapter(form, existingNames, isNew)

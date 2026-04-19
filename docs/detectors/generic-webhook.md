@@ -28,46 +28,66 @@ openssl rand -hex 32   # 64-character hex string
 
 The secret must be present at prefixd startup; it is read from the environment, **not** from YAML. The API will never return it.
 
-### 2. Add the adapter to `correlation.yaml`
+### 2. Add the adapter to the correlation config
+
+prefixd accepts correlation config in two layouts (either is fine; the standalone file takes precedence when both exist):
+
+- **Standalone `configs/correlation.yaml`** (recommended) — top-level keys directly, no wrapping `correlation:` section.
+- **Embedded in `configs/prefixd.yaml`** — nested under a `correlation:` key alongside other daemon settings.
+
+**Standalone `configs/correlation.yaml`:**
+
+```yaml
+enabled: true
+# … your existing correlation settings …
+
+sources:
+  radware:
+    weight: 1.2
+    type: detector
+
+webhook_adapters:
+  - name: radware
+    description: "Radware DefensePro alert stream"
+    enabled: true
+    auth:
+      type: hmac
+      secret_env: RADWARE_WEBHOOK_SECRET
+      header: X-Signature-SHA256
+      algorithm: sha256
+    root_path: "$.alerts[*]"
+    fields:
+      victim_ip: "$.target.ip"
+      vector: "$.alert_type"
+      timestamp: "$.time"
+      bps: "$.traffic.bps"
+      pps: "$.traffic.pps"
+      confidence: "$.score"
+      source_id: "$.id"
+      top_dst_ports: "$.ports"
+      action: "$.action"
+    vector_map:
+      UDP_FLOOD: udp_flood
+      SYN_FLOOD: syn_flood
+      DNS_AMP: dns_amp
+      NTP_AMP: ntp_amp
+    default_vector: unknown
+    confidence_scale: 100
+    source_id_prefix: "radware-"
+```
+
+**Embedded in `configs/prefixd.yaml`** (same fields, one level deeper):
 
 ```yaml
 correlation:
   enabled: true
-  # … your existing correlation settings …
-
   sources:
     radware:
       weight: 1.2
       type: detector
-
   webhook_adapters:
     - name: radware
-      description: "Radware DefensePro alert stream"
-      enabled: true
-      auth:
-        type: hmac
-        secret_env: RADWARE_WEBHOOK_SECRET
-        header: X-Signature-SHA256
-        algorithm: sha256
-      root_path: "$.alerts[*]"
-      fields:
-        victim_ip: "$.target.ip"
-        vector: "$.alert_type"
-        timestamp: "$.time"
-        bps: "$.traffic.bps"
-        pps: "$.traffic.pps"
-        confidence: "$.score"
-        source_id: "$.id"
-        top_dst_ports: "$.ports"
-        action: "$.action"
-      vector_map:
-        UDP_FLOOD: udp_flood
-        SYN_FLOOD: syn_flood
-        DNS_AMP: dns_amp
-        NTP_AMP: ntp_amp
-      default_vector: unknown
-      confidence_scale: 100
-      source_id_prefix: "radware-"
+      # … same adapter fields as above
 ```
 
 Reload the config (no restart required):
@@ -155,10 +175,17 @@ The adapter uses RFC 9535 JSONPath (`serde_json_path`):
 | Symptom | Likely cause |
 |---|---|
 | HTTP 404 | Adapter name mismatch, or `enabled: false` |
-| HTTP 401 with `"signature mismatch"` | Shared secret differs between sender and `RADWARE_WEBHOOK_SECRET`, or the sender hashed a different byte range (e.g. after `Content-Encoding: gzip`) — ensure HMAC is computed over the raw request body prefixd receives |
-| HTTP 400 with `"victim_ip not found"` | JSONPath didn't match; verify with `jq` locally against a real payload |
+| HTTP 401 with `"missing HMAC signature header"` | Sender didn't include the signature header named in `auth.header` |
+| HTTP 401 with `"HMAC signature verification failed"` | Shared secret differs between sender and `RADWARE_WEBHOOK_SECRET`, or the sender hashed a different byte range (e.g. after `Content-Encoding: gzip`) — ensure HMAC is computed over the raw request body prefixd receives |
+| HTTP 400 with `"invalid JSON"` | Payload isn't valid JSON at all |
+| HTTP 400 with `"no events extracted from payload"` | `root_path` matched zero nodes — verify the expression against a real payload |
+| HTTP 200 with per-event `results[].status="error"` and `"required field 'victim_ip' missing from payload"` | JSONPath for `victim_ip` didn't match; verify with `jq` locally |
+| HTTP 200 with per-event `results[].status="error"` and `"invalid IP address"` | `victim_ip` extracted but didn't parse as an IP — check for port suffixes or extra whitespace |
+| HTTP 200 with per-event `results[].status="error"` and `"invalid value for field 'action'"` | Payload contained an `action` field with something other than `"ban"` or `"unban"` |
 | Events appear but `vector: unknown` | Raw vector string isn't in `vector_map`; add it, or accept `default_vector` |
 | Confidence always 1.0 | `confidence_scale` missing or mis-set; detectors that emit 0–100 need `confidence_scale: 100` |
+
+Mapping failures never fail the whole batch — they produce per-event `status: "error"` entries with the error message inline, and the overall HTTP status stays `200` so the sender doesn't retry valid events in the same payload.
 
 ## Promoting to a native adapter
 
