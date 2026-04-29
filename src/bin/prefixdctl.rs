@@ -649,8 +649,6 @@ struct CorroboratorResponse {
     signal_id: String,
     status: String,
     attached_group_ids: Vec<String>,
-    #[serde(default)]
-    cached: bool,
 }
 
 #[allow(clippy::too_many_arguments)]

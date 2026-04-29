@@ -5162,9 +5162,13 @@ pub struct CorroboratorInput {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CorroboratorResponse {
     pub signal_id: Uuid,
+    /// One of "attached" (one or more groups matched) or "cached"
+    /// (no matching group; held in the corroborator cache until a
+    /// matching primary event arrives or TTL expires). Use this
+    /// instead of the v0.16.0 `cached` boolean field, which is
+    /// removed in v0.17.0.
     pub status: String,
     pub attached_group_ids: Vec<Uuid>,
-    pub cached: bool,
 }
 
 /// Ingest a corroborating signal.
@@ -5357,7 +5361,6 @@ async fn ingest_corroborator_inner(
                 "attached".to_string()
             },
             attached_group_ids,
-            cached: true,
         }),
     ))
 }

@@ -760,7 +760,6 @@ export interface CorroboratorResponse {
   signal_id: string
   status: "attached" | "cached"
   attached_group_ids: string[]
-  cached: boolean
 }
 
 export async function sendCorroborator(

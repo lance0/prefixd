@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Corroborating signals v2 (PR B)** — Follow-up to ADR 021's initial ship that addresses the four review-deferred items as a coordinated set:
+  - **Playbook-aware late finalization.** Migration `012_signal_groups_playbook.sql` adds nullable `signal_groups.playbook_name`, populated by the daemon on the next primary event for each group via `COALESCE`. The corroborator-side aggregate recompute now re-resolves the playbook by name from live state and is allowed to flip `corroboration_met=true` using the override min_sources/threshold. Conservative fallback is preserved: a NULL or stale `playbook_name` still keeps the v0.16.0 no-flip behavior (the next primary event picks up the flag).
+  - **Per-source attribution on `prefixd_corroborator_expired_total`.** The counter regains its `{source}` label set, with `delete_expired_corroborating_signals` collecting attribution in the same `DELETE … RETURNING` query that performs the delete. **Operator note:** this is a label change. PromQL queries written against the v0.16.0 unlabelled counter must add a `sum()` to recover the previous shape.
+  - **New gauge `prefixd_corroborator_cache_size{source}`** updated by the reconcile loop after each sweep. Operators can alert on caches growing without bound (e.g. a source posting heavily while no matching primary event ever lands). Stale labels are explicitly zeroed when a source's cache drains between ticks.
+  - **Cached-corroborators admin endpoint and dashboard panel.** `GET /v1/signals/corroborator/cache` (admin-only) returns `{ now, total, by_source[], signals[] }` filtered to unattached + unexpired rows, with optional `?source=` and `?limit=` (clamped to 1..1000). New "Cache" tab on the Correlation page renders per-source counts plus a dense table of cached signals with relative ingested/expires timestamps and dimension chips. Backed by a new `useCachedCorroborators` SWR hook (30s refresh).
+  - **`CorroboratorResponse.cached` removed** in favor of the existing `status ∈ {attached, cached}` discriminator. The boolean was always `true` and added no information; status fully describes the outcome. Coordinated minor breaking change — bump to v0.17.0 — since the endpoint is new in this release line.
+
 ## [0.16.0] - 2026-04-19
 
 ### Added
