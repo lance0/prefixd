@@ -5870,3 +5870,93 @@ async fn test_late_corroborator_skips_when_playbook_name_is_stale() {
         "stale playbook_name should not allow promotion"
     );
 }
+
+#[tokio::test]
+async fn test_cache_listing_endpoint_returns_unattached_signals() {
+    use chrono::{Duration, Utc};
+    use prefixd::correlation::{CorroboratingSignal, MatchDimension, SourceConfig, SourceMode};
+    use uuid::Uuid;
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+    let mut settings = test_settings_with_correlation(true, 1, 0.5);
+    settings.correlation.sources.insert(
+        "router-cpu".to_string(),
+        SourceConfig {
+            weight: 0.5,
+            r#type: "telemetry".to_string(),
+            confidence_mapping: std::collections::HashMap::new(),
+            mode: SourceMode::Corroborating,
+            match_dimensions: vec![MatchDimension::Pop],
+        },
+    );
+
+    let now = Utc::now();
+    repo.insert_corroborating_signal(&CorroboratingSignal {
+        signal_id: Uuid::new_v4(),
+        source: "router-cpu".to_string(),
+        vector: Some("udp_flood".to_string()),
+        customer_id: None,
+        pop: Some("iad1".to_string()),
+        service_id: None,
+        interface: None,
+        confidence: Some(0.5),
+        weight: 0.5,
+        ingested_at: now,
+        expires_at: now + Duration::seconds(300),
+        raw_details: None,
+        attached_group_ids: vec![],
+    })
+    .await
+    .unwrap();
+    // Attached row that should NOT show up in the listing.
+    repo.insert_corroborating_signal(&CorroboratingSignal {
+        signal_id: Uuid::new_v4(),
+        source: "router-cpu".to_string(),
+        vector: Some("udp_flood".to_string()),
+        customer_id: None,
+        pop: Some("iad1".to_string()),
+        service_id: None,
+        interface: None,
+        confidence: Some(0.5),
+        weight: 0.5,
+        ingested_at: now,
+        expires_at: now + Duration::seconds(300),
+        raw_details: None,
+        attached_group_ids: vec![Uuid::new_v4()],
+    })
+    .await
+    .unwrap();
+
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo,
+        announcer,
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+    let app = create_test_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/signals/corroborator/cache?limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let signals = json["signals"].as_array().unwrap();
+    assert_eq!(signals.len(), 1, "attached signal should be excluded");
+    assert_eq!(json["total"], 1);
+    assert_eq!(json["by_source"][0]["source"], "router-cpu");
+    assert_eq!(json["by_source"][0]["count"], 1);
+}

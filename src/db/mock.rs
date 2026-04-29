@@ -823,11 +823,13 @@ impl RepositoryTrait for MockRepository {
         &self,
         now: chrono::DateTime<chrono::Utc>,
         limit: i64,
+        source: Option<&str>,
     ) -> Result<Vec<CorroboratingSignal>> {
         let cache = self.corroborating_signals.lock().unwrap();
         Ok(cache
             .iter()
             .filter(|s| s.expires_at > now && s.attached_group_ids.is_empty())
+            .filter(|s| source.is_none_or(|src| s.source == src))
             .take(limit.max(0) as usize)
             .cloned()
             .collect())

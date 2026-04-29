@@ -5432,6 +5432,90 @@ pub async fn get_corroborator_activity(
     }))
 }
 
+/// Cached-corroborators listing endpoint (PR B). Admin-only. Lists
+/// signals currently in the corroborator cache that are unattached and
+/// unexpired — i.e. waiting for a matching primary event to drain.
+/// Useful for L1 ops to spot a source that's posting heavily but never
+/// landing on a real incident.
+#[derive(Debug, serde::Deserialize)]
+pub struct CachedCorroboratorsQuery {
+    /// Page size; clamped to [1, 1000].
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Filter by signal source. Optional.
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct CachedCorroboratorsResponse {
+    pub now: chrono::DateTime<chrono::Utc>,
+    pub total: u64,
+    pub by_source: Vec<CachedCorroboratorBySource>,
+    pub signals: Vec<crate::correlation::CorroboratingSignal>,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct CachedCorroboratorBySource {
+    pub source: String,
+    pub count: u64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/signals/corroborator/cache",
+    tag = "signals",
+    params(
+        ("limit"  = Option<u32>,    Query, description = "Page size, default 100, max 1000"),
+        ("source" = Option<String>, Query, description = "Filter by signal source"),
+    ),
+    responses(
+        (status = 200, description = "Cached corroborator listing", body = CachedCorroboratorsResponse),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "Admin role required"),
+    )
+)]
+pub async fn list_cached_corroborators_handler(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<CachedCorroboratorsQuery>,
+) -> impl IntoResponse {
+    use crate::domain::OperatorRole;
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    if let Err(status) = require_role(&state, &auth_session, auth_header, OperatorRole::Admin) {
+        let msg = if status == StatusCode::UNAUTHORIZED {
+            "authentication required"
+        } else {
+            "admin role required"
+        };
+        return Err(AppError(PrefixdError::Unauthorized(msg.into())));
+    }
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000) as i64;
+    let now = chrono::Utc::now();
+    let signals = state
+        .repo
+        .list_cached_corroborators(now, limit, query.source.as_deref())
+        .await
+        .map_err(AppError)?;
+    let by_source_rows = state
+        .repo
+        .count_cached_corroborators_by_source(now)
+        .await
+        .map_err(AppError)?;
+    let total = by_source_rows.iter().map(|(_, n)| *n).sum();
+    let by_source = by_source_rows
+        .into_iter()
+        .map(|(source, count)| CachedCorroboratorBySource { source, count })
+        .collect();
+    Ok(Json(CachedCorroboratorsResponse {
+        now,
+        total,
+        by_source,
+        signals,
+    }))
+}
+
 /// Recompute a signal group's derived_confidence, source_count and
 /// corroboration_met flag from its events (including corroborators).
 ///

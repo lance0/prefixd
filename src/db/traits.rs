@@ -254,11 +254,14 @@ pub trait RepositoryTrait: Send + Sync {
     /// Count currently-cached (unattached, unexpired) corroborating signals.
     /// For operator dashboards / metrics.
     async fn count_cached_corroborators(&self, now: chrono::DateTime<chrono::Utc>) -> Result<u64>;
-    /// List currently-cached corroborating signals for admin UI / debugging.
+    /// List currently-cached corroborating signals for admin UI /
+    /// debugging. When `source` is `Some`, results are filtered to
+    /// only that source.
     async fn list_cached_corroborators(
         &self,
         now: chrono::DateTime<chrono::Utc>,
         limit: i64,
+        source: Option<&str>,
     ) -> Result<Vec<crate::correlation::CorroboratingSignal>>;
     /// Aggregate corroborator activity per source since `since`, across
     /// both the live cache (`corroborating_signals`) and attached rows

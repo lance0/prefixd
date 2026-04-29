@@ -1392,6 +1392,7 @@ impl RepositoryTrait for Repository {
         &self,
         now: chrono::DateTime<chrono::Utc>,
         limit: i64,
+        source: Option<&str>,
     ) -> Result<Vec<CorroboratingSignal>> {
         let rows: Vec<CorroboratingSignalRow> = sqlx::query_as(
             r#"
@@ -1400,12 +1401,14 @@ impl RepositoryTrait for Repository {
             FROM corroborating_signals
             WHERE expires_at > $1
               AND cardinality(attached_group_ids) = 0
+              AND ($3::text IS NULL OR source = $3)
             ORDER BY ingested_at DESC
             LIMIT $2
             "#,
         )
         .bind(now)
         .bind(limit.max(0))
+        .bind(source)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(Into::into).collect())

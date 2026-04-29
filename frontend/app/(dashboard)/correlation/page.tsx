@@ -4,11 +4,12 @@ import { useState } from "react"
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
-import { Radio, Layers, Settings } from "lucide-react"
+import { Radio, Layers, Settings, Database } from "lucide-react"
 import { useOpenSignalGroupCount } from "@/hooks/use-api"
 import { SignalsTab } from "@/components/dashboard/correlation/signals-tab"
 import { GroupsTab } from "@/components/dashboard/correlation/groups-tab"
 import { ConfigTab } from "@/components/dashboard/correlation/config-tab"
+import { CacheTab } from "@/components/dashboard/correlation/cache-tab"
 
 export default function CorrelationPage() {
   const [activeTab, setActiveTab] = useState("signals")
@@ -40,6 +41,10 @@ export default function CorrelationPage() {
                   </Badge>
                 )}
               </TabsTrigger>
+              <TabsTrigger value="cache" className="text-xs">
+                <Database className="h-3 w-3 mr-1.5" />
+                Cache
+              </TabsTrigger>
               <TabsTrigger value="config" className="text-xs">
                 <Settings className="h-3 w-3 mr-1.5" />
                 Config
@@ -52,6 +57,10 @@ export default function CorrelationPage() {
 
             <TabsContent value="groups" className="mt-4">
               <GroupsTab />
+            </TabsContent>
+
+            <TabsContent value="cache" className="mt-4">
+              <CacheTab />
             </TabsContent>
 
             <TabsContent value="config" className="mt-4">
