@@ -715,6 +715,9 @@ async fn handle_ban(
                     .add_interface(interface.clone());
             }
         }
+        // Remember the resolved playbook on the group so the corroborator
+        // path (PR B) can re-resolve the override at recompute time.
+        new_group.playbook_name = matching_playbook.map(|p| p.name.clone());
         let group = state
             .repo
             .insert_signal_group(&new_group)
@@ -740,7 +743,14 @@ async fn handle_ban(
             group.primary_dimensions.add_pop(state.settings.pop.clone());
             dims_changed = before != group.primary_dimensions;
         }
-        if dims_changed {
+        // Backfill playbook_name on existing groups created before PR B (or
+        // before any primary event resolved a playbook). COALESCE in
+        // update_signal_group keeps an existing non-NULL value stable.
+        let playbook_changed = group.playbook_name.is_none() && matching_playbook.is_some();
+        if playbook_changed {
+            group.playbook_name = matching_playbook.map(|p| p.name.clone());
+        }
+        if dims_changed || playbook_changed {
             state
                 .repo
                 .update_signal_group(&group)
@@ -5424,6 +5434,14 @@ pub async fn get_corroborator_activity(
 
 /// Recompute a signal group's derived_confidence, source_count and
 /// corroboration_met flag from its events (including corroborators).
+///
+/// PR B: this path now re-resolves the playbook-specific correlation
+/// override using the stored `playbook_name` on the group, and is
+/// allowed to flip `corroboration_met` from false→true even when the
+/// triggering ingest was a corroborator. We deliberately do NOT
+/// actuate a mitigation from here — the next primary-path event will
+/// pick up the flipped flag and trigger normally. This keeps mitigation
+/// actuation single-sourced through `handle_ban`.
 async fn recompute_group_aggregates(state: &Arc<AppState>, group_id: Uuid) -> Result<(), AppError> {
     use crate::correlation::CorrelationEngine;
 
@@ -5453,17 +5471,68 @@ async fn recompute_group_aggregates(state: &Arc<AppState>, group_id: Uuid) -> Re
 
     let has_primary = events.iter().any(|e| !e.is_corroborating);
 
+    // Resolve the playbook override using the group's stored playbook_name.
+    // If the group was created before PR B (playbook_name is NULL) or the
+    // playbook has since been removed, fall back to the conservative
+    // pre-PR-B behavior: aggregates update, but we don't flip
+    // corroboration_met → true on the corroborator path.
+    let was_met = group.corroboration_met;
+    let mut newly_met = false;
+    let new_met = if has_primary {
+        let correlation_config = state.correlation_config.read().await.clone();
+        let playbooks = state.playbooks.read().await.clone();
+        let resolved_playbook = group
+            .playbook_name
+            .as_deref()
+            .and_then(|name| playbooks.playbooks.iter().find(|p| p.name == name));
+        let override_ = resolved_playbook.and_then(|p| p.correlation.as_ref());
+        match (resolved_playbook, group.playbook_name.as_deref()) {
+            (Some(_), _) => {
+                let met = CorrelationEngine::check_corroboration_with_primary(
+                    count,
+                    derived,
+                    has_primary,
+                    &correlation_config,
+                    override_,
+                );
+                if met && !was_met {
+                    newly_met = true;
+                }
+                met
+            }
+            (None, Some(missing)) => {
+                tracing::debug!(
+                    group_id = %group_id,
+                    playbook = %missing,
+                    "stored playbook_name no longer resolves; keeping previous corroboration_met"
+                );
+                was_met
+            }
+            (None, None) => {
+                // Pre-PR-B group with no resolved playbook yet — preserve
+                // previous behavior.
+                was_met
+            }
+        }
+    } else {
+        // No primary event yet → invariant: corroboration cannot be met.
+        false
+    };
+
+    if newly_met {
+        tracing::info!(
+            group_id = %group_id,
+            derived_confidence = derived,
+            source_count = count,
+            playbook = ?group.playbook_name,
+            "signal group reached corroboration threshold via corroborator path; awaiting next primary event to actuate mitigation"
+        );
+    }
+
     let mut updated = group;
     updated.derived_confidence = derived;
     updated.source_count = count;
-    // Only primary ingest has enough context to evaluate playbook-specific
-    // overrides safely. Corroborator-only recomputes update aggregates but do
-    // not promote a group from false->true on their own.
-    updated.corroboration_met = if has_primary {
-        updated.corroboration_met
-    } else {
-        false
-    };
+    updated.corroboration_met = new_met;
     state
         .repo
         .update_signal_group(&updated)

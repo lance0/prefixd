@@ -5567,3 +5567,207 @@ async fn test_corroborator_source_activity_merges_cache_rows() {
     assert!(cpu.last_seen.is_some());
     assert_eq!(by_source.remove("pop-utilization").unwrap().count, 1);
 }
+
+#[tokio::test]
+async fn test_late_corroborator_finalizes_with_playbook_override() {
+    // PR B: a late corroborator can flip corroboration_met=true on its
+    // own path, using the override resolved from the group's stored
+    // playbook_name. We set up a group whose primary event lands below
+    // the global threshold but above the playbook override threshold,
+    // and confirm a corroborator promotes the flag.
+    use prefixd::correlation::{
+        MatchDimension, PlaybookCorrelationOverride, SourceConfig, SourceMode,
+    };
+    use prefixd::domain::AttackVector;
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+
+    // Global config: min_sources=3, threshold=0.9 — primary alone is far
+    // from meeting it. The playbook override drops both to 2 / 0.5, so a
+    // single corroborator (count → 2) should finalize.
+    let mut settings = test_settings_with_correlation(true, 3, 0.9);
+    settings.correlation.sources.insert(
+        "router-cpu".to_string(),
+        SourceConfig {
+            weight: 0.6,
+            r#type: "telemetry".to_string(),
+            confidence_mapping: std::collections::HashMap::new(),
+            mode: SourceMode::Corroborating,
+            match_dimensions: vec![MatchDimension::Pop],
+        },
+    );
+
+    let playbooks = Playbooks {
+        playbooks: vec![Playbook {
+            name: "udp_flood_test".to_string(),
+            match_criteria: PlaybookMatch {
+                vector: AttackVector::UdpFlood,
+                require_top_ports: false,
+            },
+            correlation: Some(PlaybookCorrelationOverride {
+                min_sources: Some(2),
+                confidence_threshold: Some(0.5),
+            }),
+            steps: vec![PlaybookStep {
+                action: PlaybookAction::Police,
+                rate_bps: Some(5_000_000),
+                ttl_seconds: 120,
+                require_confidence_at_least: None,
+                require_persistence_seconds: None,
+            }],
+        }],
+    };
+
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        playbooks,
+        repo.clone(),
+        announcer,
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+    let app = create_test_router(state);
+
+    // Step 1: primary event — group exists, playbook_name is set,
+    // corroboration_met=false (single source against override min=2).
+    let event_body = serde_json::json!({
+        "source": "fastnetmon",
+        "vector": "udp_flood",
+        "victim_ip": "203.0.113.10",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "confidence": 0.7,
+        "action": "ban"
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let groups_before = repo
+        .list_signal_groups(
+            &prefixd::correlation::engine::SignalGroupFilter::default(),
+            &prefixd::db::ListParams {
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(groups_before.len(), 1);
+    let group = &groups_before[0];
+    assert_eq!(group.playbook_name.as_deref(), Some("udp_flood_test"));
+    assert!(
+        !group.corroboration_met,
+        "single primary event should not yet meet override threshold"
+    );
+
+    // Step 2: corroborator with matching pop → group now has 2 distinct
+    // sources, derived_confidence above 0.5, override allows promotion.
+    let sig_body = serde_json::json!({
+        "source": "router-cpu",
+        "pop": "test1",
+        "vector": "udp_flood",
+        "confidence": 0.6
+    });
+    let resp2 = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/signals/corroborator")
+                .header("content-type", "application/json")
+                .body(Body::from(sig_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK);
+
+    let groups_after = repo
+        .list_signal_groups(
+            &prefixd::correlation::engine::SignalGroupFilter::default(),
+            &prefixd::db::ListParams {
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let group_after = &groups_after[0];
+    assert!(
+        group_after.corroboration_met,
+        "late corroborator should finalize via playbook override"
+    );
+    assert_eq!(group_after.source_count, 2);
+}
+
+#[tokio::test]
+async fn test_late_corroborator_skips_when_playbook_name_is_stale() {
+    // If a group's stored playbook_name no longer resolves (admin removed
+    // it), the corroborator path falls back to conservative behavior:
+    // aggregates update but corroboration_met is preserved (not flipped).
+    use prefixd::correlation::CorroboratingSignal;
+    use prefixd::correlation::engine::{PrimaryDimensions, SignalGroup, SignalGroupStatus};
+    use uuid::Uuid;
+
+    let repo = MockRepository::new();
+    let now = chrono::Utc::now();
+    let group_id = Uuid::new_v4();
+
+    repo.insert_signal_group(&SignalGroup {
+        group_id,
+        victim_ip: "203.0.113.10".to_string(),
+        vector: "udp_flood".to_string(),
+        created_at: now,
+        window_expires_at: now + chrono::Duration::seconds(300),
+        derived_confidence: 0.0,
+        source_count: 0,
+        status: SignalGroupStatus::Open,
+        corroboration_met: false,
+        primary_dimensions: {
+            let mut d = PrimaryDimensions::default();
+            d.add_pop("test1".to_string());
+            d
+        },
+        playbook_name: Some("does_not_exist".to_string()),
+    })
+    .await
+    .unwrap();
+    // Seed a primary event link so has_primary=true.
+    repo.add_event_to_group(group_id, Uuid::new_v4(), 1.0)
+        .await
+        .unwrap();
+    repo.insert_corroborating_signal(&CorroboratingSignal {
+        signal_id: Uuid::new_v4(),
+        source: "router-cpu".to_string(),
+        vector: Some("udp_flood".to_string()),
+        customer_id: None,
+        pop: Some("test1".to_string()),
+        service_id: None,
+        interface: None,
+        confidence: Some(0.9),
+        weight: 1.0,
+        ingested_at: now,
+        expires_at: now + chrono::Duration::seconds(300),
+        raw_details: None,
+        attached_group_ids: vec![],
+    })
+    .await
+    .unwrap();
+
+    let group = repo.get_signal_group(group_id).await.unwrap().unwrap();
+    assert!(
+        !group.corroboration_met,
+        "stale playbook_name should not allow promotion"
+    );
+}

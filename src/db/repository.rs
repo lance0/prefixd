@@ -911,18 +911,20 @@ impl RepositoryTrait for Repository {
             WITH existing AS (
                 SELECT group_id, victim_ip, vector, created_at, window_expires_at,
                        derived_confidence, source_count, status, corroboration_met,
-                       primary_dimensions
+                       primary_dimensions, playbook_name
                 FROM signal_groups
                 WHERE victim_ip = $2 AND vector = $3 AND status = 'open'
                   AND window_expires_at > NOW()
                 LIMIT 1
             ), inserted AS (
                 INSERT INTO signal_groups (group_id, victim_ip, vector, created_at, window_expires_at,
-                    derived_confidence, source_count, status, corroboration_met, primary_dimensions)
-                SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+                    derived_confidence, source_count, status, corroboration_met, primary_dimensions,
+                    playbook_name)
+                SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
                 WHERE NOT EXISTS (SELECT 1 FROM existing)
                 RETURNING group_id, victim_ip, vector, created_at, window_expires_at,
-                    derived_confidence, source_count, status, corroboration_met, primary_dimensions
+                    derived_confidence, source_count, status, corroboration_met, primary_dimensions,
+                    playbook_name
             )
             SELECT * FROM existing
             UNION ALL
@@ -940,6 +942,7 @@ impl RepositoryTrait for Repository {
         .bind(group.status.as_str())
         .bind(group.corroboration_met)
         .bind(serde_json::to_value(&group.primary_dimensions).unwrap_or(serde_json::json!({})))
+        .bind(group.playbook_name.as_deref())
         .fetch_one(&self.pool)
         .await;
 
@@ -957,7 +960,7 @@ impl RepositoryTrait for Repository {
                     r#"
                     SELECT group_id, victim_ip, vector, created_at, window_expires_at,
                            derived_confidence, source_count, status, corroboration_met,
-                           primary_dimensions
+                           primary_dimensions, playbook_name
                     FROM signal_groups
                     WHERE victim_ip = $1 AND vector = $2 AND status = 'open'
                       AND window_expires_at > NOW()
@@ -982,7 +985,8 @@ impl RepositoryTrait for Repository {
                 source_count = $3,
                 status = $4,
                 corroboration_met = $5,
-                primary_dimensions = $6
+                primary_dimensions = $6,
+                playbook_name = COALESCE($7, playbook_name)
             WHERE group_id = $1
             "#,
         )
@@ -992,6 +996,7 @@ impl RepositoryTrait for Repository {
         .bind(group.status.as_str())
         .bind(group.corroboration_met)
         .bind(serde_json::to_value(&group.primary_dimensions).unwrap_or(serde_json::json!({})))
+        .bind(group.playbook_name.as_deref())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1002,7 +1007,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT group_id, victim_ip, vector, created_at, window_expires_at,
                    derived_confidence, source_count, status, corroboration_met,
-                   primary_dimensions
+                   primary_dimensions, playbook_name
             FROM signal_groups WHERE group_id = $1
             "#,
         )
@@ -1017,7 +1022,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT group_id, victim_ip, vector, created_at, window_expires_at,
                    derived_confidence, source_count, status, corroboration_met,
-                   primary_dimensions
+                   primary_dimensions, playbook_name
             FROM signal_groups
             WHERE victim_ip = $1 AND vector = $2 AND status = 'open'
               AND window_expires_at > NOW()
@@ -1097,7 +1102,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT group_id, victim_ip, vector, created_at, window_expires_at,
                    derived_confidence, source_count, status, corroboration_met,
-                   primary_dimensions
+                   primary_dimensions, playbook_name
             FROM signal_groups
             WHERE ($1::text IS NULL OR status = $1)
               AND ($2::text IS NULL OR vector = $2)
@@ -1132,7 +1137,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT group_id, victim_ip, vector, created_at, window_expires_at,
                    derived_confidence, source_count, status, corroboration_met,
-                   primary_dimensions
+                   primary_dimensions, playbook_name
             FROM signal_groups
             WHERE status = 'open' AND window_expires_at <= NOW()
             "#,
@@ -1161,7 +1166,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT group_id, victim_ip, vector, created_at, window_expires_at,
                    derived_confidence, source_count, status, corroboration_met,
-                   primary_dimensions
+                   primary_dimensions, playbook_name
             FROM signal_groups
             WHERE status = 'open'
               AND window_expires_at > $1
@@ -1502,6 +1507,7 @@ struct SignalGroupRow {
     status: String,
     corroboration_met: bool,
     primary_dimensions: serde_json::Value,
+    playbook_name: Option<String>,
 }
 
 impl From<SignalGroupRow> for SignalGroup {
@@ -1517,6 +1523,7 @@ impl From<SignalGroupRow> for SignalGroup {
             status: row.status.parse().unwrap_or(SignalGroupStatus::Open),
             corroboration_met: row.corroboration_met,
             primary_dimensions: serde_json::from_value(row.primary_dimensions).unwrap_or_default(),
+            playbook_name: row.playbook_name,
         }
     }
 }
