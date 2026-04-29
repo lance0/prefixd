@@ -5483,29 +5483,34 @@ pub async fn list_cached_corroborators_handler(
     auth_session: AuthSession,
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<CachedCorroboratorsQuery>,
-) -> impl IntoResponse {
+) -> Result<Json<CachedCorroboratorsResponse>, StatusCode> {
     use crate::domain::OperatorRole;
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    if let Err(status) = require_role(&state, &auth_session, auth_header, OperatorRole::Admin) {
-        let msg = if status == StatusCode::UNAUTHORIZED {
-            "authentication required"
-        } else {
-            "admin role required"
-        };
-        return Err(AppError(PrefixdError::Unauthorized(msg.into())));
-    }
+    require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+
     let limit = query.limit.unwrap_or(100).clamp(1, 1000) as i64;
     let now = chrono::Utc::now();
     let signals = state
         .repo
         .list_cached_corroborators(now, limit, query.source.as_deref())
         .await
-        .map_err(AppError)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // When ?source= is provided, scope total + by_source to that
+    // source as well so the response is internally consistent
+    // (otherwise clients see a `total` that doesn't match the rows
+    // they were just handed).
     let by_source_rows = state
         .repo
         .count_cached_corroborators_by_source(now)
         .await
-        .map_err(AppError)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let by_source_rows: Vec<(String, u64)> = match query.source.as_deref() {
+        Some(filter) => by_source_rows
+            .into_iter()
+            .filter(|(s, _)| s == filter)
+            .collect(),
+        None => by_source_rows,
+    };
     let total = by_source_rows.iter().map(|(_, n)| *n).sum();
     let by_source = by_source_rows
         .into_iter()

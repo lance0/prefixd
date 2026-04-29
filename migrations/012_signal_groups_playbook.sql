@@ -11,35 +11,21 @@
 -- writes it; the corroborator path looks it up and resolves the override
 -- against the live playbook config.
 --
--- Backfill: best-effort, copy the playbook name from any mitigation that
--- was triggered by this group. If no mitigation exists yet (e.g. the
--- group is below threshold and only has a single primary event), the
--- column stays NULL and the corroborator recompute falls back to the
--- v0.16.0 conservative behavior. The next primary event for the same
--- group will fill it in.
+-- Backfill is intentionally NOT done in SQL. `mitigations.match_json`
+-- doesn't carry the resolved playbook name, and re-running the matcher
+-- against a playbook YAML snapshot at migration time is brittle (the
+-- live playbook list may have changed between when the group was
+-- created and when this migration runs).
+--
+-- Instead, the daemon backfills `playbook_name` at runtime using
+-- `COALESCE(playbook_name, $resolved)` on the next primary-event ingest
+-- path for each group that still has it NULL (see
+-- `handle_ban` in `src/api/handlers.rs`). Until that next primary event
+-- arrives, the corroborator-side recompute path falls back to the
+-- v0.16.0 conservative behavior (no flip of `corroboration_met`).
 
 ALTER TABLE signal_groups
     ADD COLUMN IF NOT EXISTS playbook_name TEXT;
-
-WITH agg AS (
-    SELECT m.signal_group_id AS group_id,
-           -- All mitigations from one signal group should share a playbook
-           -- (groups are keyed by vector and playbooks fan out by vector),
-           -- so MIN() is safe and deterministic for the rare race where a
-           -- vector matched two playbooks.
-           MIN(m.match_json) AS sample_match_json
-    FROM mitigations m
-    WHERE m.signal_group_id IS NOT NULL
-    GROUP BY m.signal_group_id
-)
-UPDATE signal_groups sg
-SET playbook_name = agg.group_id::text  -- placeholder, replaced below
-FROM agg
-WHERE 1 = 0;
--- The actual backfill happens at runtime: the daemon will resolve and
--- populate `playbook_name` on the next primary event for any group that
--- still has it NULL. Doing this in SQL is brittle because match_json
--- doesn't carry a playbook reference; we'd be re-running the matcher.
 
 CREATE INDEX IF NOT EXISTS idx_signal_groups_playbook
     ON signal_groups (playbook_name)

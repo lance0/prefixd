@@ -5813,24 +5813,57 @@ async fn test_late_corroborator_finalizes_with_playbook_override() {
 #[tokio::test]
 async fn test_late_corroborator_skips_when_playbook_name_is_stale() {
     // If a group's stored playbook_name no longer resolves (admin removed
-    // it), the corroborator path falls back to conservative behavior:
-    // aggregates update but corroboration_met is preserved (not flipped).
-    use prefixd::correlation::CorroboratingSignal;
+    // it from the live config), the corroborator path falls back to the
+    // conservative v0.16.0 behavior: aggregates update on each ingest
+    // but corroboration_met is *not* flipped from false -> true. We
+    // exercise this end-to-end by:
+    //   1) seeding an open group whose stored playbook name doesn't
+    //      exist in the live playbook list,
+    //   2) posting a corroborator that *would* satisfy the override if
+    //      the playbook resolved, and
+    //   3) asserting the flag stayed false even though source_count and
+    //      derived_confidence advanced.
+    use chrono::{Duration, Utc};
     use prefixd::correlation::engine::{PrimaryDimensions, SignalGroup, SignalGroupStatus};
+    use prefixd::correlation::{MatchDimension, SourceConfig, SourceMode};
     use uuid::Uuid;
 
-    let repo = MockRepository::new();
-    let now = chrono::Utc::now();
-    let group_id = Uuid::new_v4();
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
 
+    // Global config that would never trigger on its own (min=3, 0.9).
+    // No playbook named `no_such_playbook` is configured, so the stored
+    // value won't resolve; conservative fallback should fire.
+    //
+    // We register two corroborating sources on the same dimension so a
+    // pair of POSTs gets us source_count=2 — enough to *would-be*
+    // satisfy a 2/0.5 override if the playbook resolved.
+    let mut settings = test_settings_with_correlation(true, 3, 0.9);
+    for src in ["router-cpu", "pop-utilization"] {
+        settings.correlation.sources.insert(
+            src.to_string(),
+            SourceConfig {
+                weight: 0.6,
+                r#type: "telemetry".to_string(),
+                confidence_mapping: std::collections::HashMap::new(),
+                mode: SourceMode::Corroborating,
+                match_dimensions: vec![MatchDimension::Pop],
+            },
+        );
+    }
+
+    // Seed a group as if a primary event already created it pointing at
+    // a playbook that has since been removed from config.
+    let now = Utc::now();
+    let group_id = Uuid::new_v4();
     repo.insert_signal_group(&SignalGroup {
         group_id,
         victim_ip: "203.0.113.10".to_string(),
         vector: "udp_flood".to_string(),
         created_at: now,
-        window_expires_at: now + chrono::Duration::seconds(300),
-        derived_confidence: 0.0,
-        source_count: 0,
+        window_expires_at: now + Duration::seconds(300),
+        derived_confidence: 0.7,
+        source_count: 1,
         status: SignalGroupStatus::Open,
         corroboration_met: false,
         primary_dimensions: {
@@ -5838,36 +5871,63 @@ async fn test_late_corroborator_skips_when_playbook_name_is_stale() {
             d.add_pop("test1".to_string());
             d
         },
-        playbook_name: Some("does_not_exist".to_string()),
+        playbook_name: Some("no_such_playbook".to_string()),
     })
     .await
     .unwrap();
-    // Seed a primary event link so has_primary=true.
+    // Make has_primary=true so the corroborator path is even allowed
+    // to consider the group.
     repo.add_event_to_group(group_id, Uuid::new_v4(), 1.0)
         .await
         .unwrap();
-    repo.insert_corroborating_signal(&CorroboratingSignal {
-        signal_id: Uuid::new_v4(),
-        source: "router-cpu".to_string(),
-        vector: Some("udp_flood".to_string()),
-        customer_id: None,
-        pop: Some("test1".to_string()),
-        service_id: None,
-        interface: None,
-        confidence: Some(0.9),
-        weight: 1.0,
-        ingested_at: now,
-        expires_at: now + chrono::Duration::seconds(300),
-        raw_details: None,
-        attached_group_ids: vec![],
-    })
-    .await
-    .unwrap();
+
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(), // does NOT contain "no_such_playbook"
+        repo.clone(),
+        announcer,
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+    let app = create_test_router(state);
+
+    // POST two corroborators from distinct sources matching on pop.
+    // Without the stale-playbook guard, recompute_group_aggregates
+    // would resolve the override and flip corroboration_met to true
+    // (source_count reaches 2, derived_confidence above 0.5 override).
+    // With the guard, both ingests advance aggregates but the flag
+    // stays false.
+    for src in ["router-cpu", "pop-utilization"] {
+        let body = serde_json::json!({
+            "source": src,
+            "pop": "test1",
+            "vector": "udp_flood",
+            "confidence": 0.9
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/signals/corroborator")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 
     let group = repo.get_signal_group(group_id).await.unwrap().unwrap();
+    assert_eq!(
+        group.source_count, 2,
+        "aggregates should still update on the corroborator path"
+    );
     assert!(
         !group.corroboration_met,
-        "stale playbook_name should not allow promotion"
+        "stale playbook_name must keep the conservative no-flip behavior"
     );
 }
 
@@ -5959,4 +6019,86 @@ async fn test_cache_listing_endpoint_returns_unattached_signals() {
     assert_eq!(json["total"], 1);
     assert_eq!(json["by_source"][0]["source"], "router-cpu");
     assert_eq!(json["by_source"][0]["count"], 1);
+}
+
+#[tokio::test]
+async fn test_cache_listing_endpoint_source_filter_scopes_aggregates() {
+    // Regression: when `?source=` is passed, total + by_source must
+    // also be filtered to that source. Otherwise clients see a `total`
+    // that doesn't match the rows they were just handed.
+    use chrono::{Duration, Utc};
+    use prefixd::correlation::{CorroboratingSignal, MatchDimension, SourceConfig, SourceMode};
+    use uuid::Uuid;
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+    let mut settings = test_settings_with_correlation(true, 1, 0.5);
+    for src in ["router-cpu", "pop-utilization"] {
+        settings.correlation.sources.insert(
+            src.to_string(),
+            SourceConfig {
+                weight: 0.5,
+                r#type: "telemetry".to_string(),
+                confidence_mapping: std::collections::HashMap::new(),
+                mode: SourceMode::Corroborating,
+                match_dimensions: vec![MatchDimension::Pop],
+            },
+        );
+    }
+
+    // Three rows: 2 router-cpu, 1 pop-utilization. All unattached + unexpired.
+    let now = Utc::now();
+    for src in ["router-cpu", "router-cpu", "pop-utilization"] {
+        repo.insert_corroborating_signal(&CorroboratingSignal {
+            signal_id: Uuid::new_v4(),
+            source: src.to_string(),
+            vector: Some("udp_flood".to_string()),
+            customer_id: None,
+            pop: Some("iad1".to_string()),
+            service_id: None,
+            interface: None,
+            confidence: Some(0.5),
+            weight: 0.5,
+            ingested_at: now,
+            expires_at: now + Duration::seconds(300),
+            raw_details: None,
+            attached_group_ids: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo,
+        announcer,
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+    let app = create_test_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/signals/corroborator/cache?source=pop-utilization&limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let signals = json["signals"].as_array().unwrap();
+    assert_eq!(signals.len(), 1);
+    assert_eq!(json["total"], 1, "total must be scoped to ?source=");
+    let by_source = json["by_source"].as_array().unwrap();
+    assert_eq!(by_source.len(), 1);
+    assert_eq!(by_source[0]["source"], "pop-utilization");
+    assert_eq!(by_source[0]["count"], 1);
 }
