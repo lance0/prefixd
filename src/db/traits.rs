@@ -12,15 +12,23 @@ use super::{GlobalStats, PopInfo, SafelistEntry, TimeseriesBucket};
 
 /// Return value for `delete_expired_corroborating_signals`.
 ///
-/// `unattached_expired` is the count of signals the scheduler should
-/// increment `CORROBORATOR_EXPIRED_TOTAL` by: signals that were cached
-/// because no primary group matched at ingest and then timed out without
-/// ever attaching. `attached_expired` rows are the audit copies retained
-/// for late fan-out; their deletion is bookkeeping, not a cache miss.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// `unattached_expired` is per-source counts of signals the scheduler
+/// should increment `CORROBORATOR_EXPIRED_TOTAL{source}` by: signals
+/// that were cached because no primary group matched at ingest and
+/// then timed out without ever attaching. `attached_expired` rows are
+/// the audit copies retained for late fan-out; their deletion is
+/// bookkeeping, not a cache miss, so we don't attribute them by
+/// source.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CorroboratorSweepStats {
-    pub unattached_expired: u64,
+    pub unattached_expired: std::collections::HashMap<String, u64>,
     pub attached_expired: u64,
+}
+
+impl CorroboratorSweepStats {
+    pub fn unattached_total(&self) -> u64 {
+        self.unattached_expired.values().sum()
+    }
 }
 
 /// Per-source activity summary for the Signals dashboard, covering both
@@ -261,4 +269,13 @@ pub trait RepositoryTrait: Send + Sync {
         &self,
         since: DateTime<Utc>,
     ) -> Result<Vec<CorroboratorSourceActivity>>;
+    /// Per-source counts of currently-cached unattached, unexpired
+    /// corroborating signals. Used by the reconcile loop to set the
+    /// `prefixd_corroborator_cache_size{source}` gauge on each tick so
+    /// operators can alert on caches that grow without bound (e.g.
+    /// when a source posts but no matching primary event ever lands).
+    async fn count_cached_corroborators_by_source(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<(String, u64)>>;
 }

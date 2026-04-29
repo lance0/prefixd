@@ -1337,24 +1337,22 @@ impl RepositoryTrait for Repository {
         &self,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<crate::db::traits::CorroboratorSweepStats> {
-        // Two statements so the scheduler can attribute the expired metric
-        // to truly-unattached signals (cache misses) while still cleaning
-        // attached audit rows. Both run inside the same request round-trip
-        // order but we don't need a transaction: the counters are
-        // monotonic and the delete predicate is narrow.
-        let unattached: (i64,) = sqlx::query_as(
+        // Two statements: one DELETE-RETURNING grouped by source for
+        // per-source attribution on the expired metric; another for
+        // attached rows (no source attribution — they aren't cache misses).
+        let unattached_rows: Vec<(String, i64)> = sqlx::query_as(
             r#"
             WITH deleted AS (
                 DELETE FROM corroborating_signals
                 WHERE expires_at <= $1
                   AND cardinality(attached_group_ids) = 0
-                RETURNING signal_id
+                RETURNING source
             )
-            SELECT COUNT(*) FROM deleted
+            SELECT source, COUNT(*)::BIGINT AS n FROM deleted GROUP BY source
             "#,
         )
         .bind(now)
-        .fetch_one(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
         let attached: (i64,) = sqlx::query_as(
             r#"
@@ -1370,8 +1368,12 @@ impl RepositoryTrait for Repository {
         .bind(now)
         .fetch_one(&self.pool)
         .await?;
+        let unattached_expired = unattached_rows
+            .into_iter()
+            .map(|(source, n)| (source, n.max(0) as u64))
+            .collect();
         Ok(crate::db::traits::CorroboratorSweepStats {
-            unattached_expired: unattached.0.max(0) as u64,
+            unattached_expired,
             attached_expired: attached.0.max(0) as u64,
         })
     }
@@ -1407,6 +1409,28 @@ impl RepositoryTrait for Repository {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn count_cached_corroborators_by_source(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<(String, u64)>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            r#"
+            SELECT source, COUNT(*)::BIGINT AS n
+            FROM corroborating_signals
+            WHERE expires_at > $1
+              AND cardinality(attached_group_ids) = 0
+            GROUP BY source
+            "#,
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(source, n)| (source, n.max(0) as u64))
+            .collect())
     }
 
     async fn corroborator_source_activity(

@@ -5515,9 +5515,108 @@ async fn test_expired_sweep_splits_attached_vs_unattached() {
         .delete_expired_corroborating_signals(now)
         .await
         .unwrap();
-    assert_eq!(stats.unattached_expired, 1);
+    assert_eq!(stats.unattached_total(), 1);
+    assert_eq!(stats.unattached_expired.get("router-cpu"), Some(&1));
     assert_eq!(stats.attached_expired, 1);
     assert_eq!(repo.count_cached_corroborators(now).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_expired_sweep_attributes_per_source() {
+    use chrono::{Duration, Utc};
+    use prefixd::correlation::CorroboratingSignal;
+    use uuid::Uuid;
+
+    let repo = MockRepository::new();
+    let now = Utc::now();
+
+    // 2 expired unattached from router-cpu, 1 from pop-utilization
+    for src in ["router-cpu", "router-cpu", "pop-utilization"] {
+        repo.insert_corroborating_signal(&CorroboratingSignal {
+            signal_id: Uuid::new_v4(),
+            source: src.to_string(),
+            vector: None,
+            customer_id: None,
+            pop: Some("iad1".to_string()),
+            service_id: None,
+            interface: None,
+            confidence: Some(0.5),
+            weight: 0.5,
+            ingested_at: now - Duration::seconds(600),
+            expires_at: now - Duration::seconds(60),
+            raw_details: None,
+            attached_group_ids: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let stats = repo
+        .delete_expired_corroborating_signals(now)
+        .await
+        .unwrap();
+    assert_eq!(stats.unattached_expired.len(), 2);
+    assert_eq!(stats.unattached_expired.get("router-cpu"), Some(&2));
+    assert_eq!(stats.unattached_expired.get("pop-utilization"), Some(&1));
+    assert_eq!(stats.attached_expired, 0);
+}
+
+#[tokio::test]
+async fn test_count_cached_corroborators_by_source() {
+    use chrono::{Duration, Utc};
+    use prefixd::correlation::CorroboratingSignal;
+    use uuid::Uuid;
+
+    let repo = MockRepository::new();
+    let now = Utc::now();
+
+    // 3 unattached unexpired from a, 1 unattached unexpired from b,
+    // 1 attached unexpired from a (excluded), 1 expired unattached from a
+    // (excluded).
+    let cases = [
+        ("a", false, false, 0i64),    // unexpired, unattached
+        ("a", false, false, 0),       // unexpired, unattached
+        ("a", false, false, 0),       // unexpired, unattached
+        ("b", false, false, 0),       // unexpired, unattached
+        ("a", true, false, 0),        // attached -> excluded
+        ("a", false, true, -3600i64), // expired -> excluded (insert with past expires_at)
+    ];
+    for (src, attached, expired, ingest_offset) in cases {
+        repo.insert_corroborating_signal(&CorroboratingSignal {
+            signal_id: Uuid::new_v4(),
+            source: src.to_string(),
+            vector: None,
+            customer_id: None,
+            pop: Some("iad1".to_string()),
+            service_id: None,
+            interface: None,
+            confidence: Some(0.5),
+            weight: 0.5,
+            ingested_at: now + Duration::seconds(ingest_offset),
+            expires_at: if expired {
+                now - Duration::seconds(60)
+            } else {
+                now + Duration::seconds(300)
+            },
+            raw_details: None,
+            attached_group_ids: if attached {
+                vec![Uuid::new_v4()]
+            } else {
+                vec![]
+            },
+        })
+        .await
+        .unwrap();
+    }
+
+    let counts: std::collections::HashMap<String, u64> = repo
+        .count_cached_corroborators_by_source(now)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(counts.get("a"), Some(&3));
+    assert_eq!(counts.get("b"), Some(&1));
 }
 
 #[tokio::test]
