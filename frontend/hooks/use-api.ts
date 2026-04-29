@@ -363,3 +363,25 @@ export function useOpenSignalGroupCount() {
   const { data } = useSignalGroups({ status: "open", limit: 1 })
   return data?.count ?? 0
 }
+
+export function useCachedCorroborators(params: {
+  source?: string
+  limit?: number
+} = {}) {
+  const key = `cached-corroborators:${params.source ?? ""}:${params.limit ?? 100}`
+  return useSWR(
+    key,
+    MOCK_MODE
+      ? async () => ({
+          now: new Date().toISOString(),
+          total: 0,
+          by_source: [],
+          signals: [],
+        } as Awaited<ReturnType<typeof api.getCachedCorroborators>>)
+      : () => api.getCachedCorroborators(params),
+    {
+      refreshInterval: 30_000,
+      revalidateOnFocus: !MOCK_MODE,
+    },
+  )
+}

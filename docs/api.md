@@ -946,8 +946,7 @@ Content-Type: application/json
 {
   "signal_id": "a4f1b2c3-…",
   "status": "attached",
-  "attached_group_ids": ["e2b9…-1f3c"],
-  "cached": true
+  "attached_group_ids": ["e2b9…-1f3c"]
 }
 ```
 
@@ -957,10 +956,11 @@ Content-Type: application/json
   primary event arrival.
 - `attached_group_ids` — UUIDs of signal groups this signal contributed
   to.
-- `cached` — currently always `true` (signals are retained in the cache
-  after attach for late fan-out). This field is flagged for removal in
-  a follow-up release in favor of `status` alone; new integrations
-  should rely on `status` / `attached_group_ids` instead.
+
+> **v0.17.0 breaking change:** the always-true `cached` field on this
+> response was dropped. `status ∈ {attached, cached}` is the canonical
+> discriminator. Update integrations that read `cached` to read
+> `status === "cached"` instead.
 
 **Error responses:**
 
@@ -1005,6 +1005,61 @@ they're alive.
 Each source may be counted once per table if it both attached to a
 group and kept its live cache row for late fan-out; the intent is
 "activity volume", not "distinct signals".
+
+---
+
+### List Cached Corroborators (admin)
+
+```http
+GET /v1/signals/corroborator/cache?source=router-cpu&limit=200
+```
+
+**Admin-only.** Lists corroborating signals currently in the cache that
+are unattached and unexpired — i.e., signals that posted before any
+matching primary event landed and are still waiting inside the
+`window_seconds` TTL. Use this to debug a `mode: corroborating` source
+that ingests heavily but never seems to attach.
+
+**Query parameters:**
+
+- `limit` *(optional, default 100, range 1–1000)* — Page size.
+- `source` *(optional)* — Filter by signal source name.
+
+**Response:**
+
+```json
+{
+  "now": "2026-04-29T18:23:00Z",
+  "total": 17,
+  "by_source": [
+    {"source": "router-cpu",      "count": 11},
+    {"source": "pop-utilization", "count": 6}
+  ],
+  "signals": [
+    {
+      "signal_id": "...",
+      "source": "router-cpu",
+      "vector": "udp_flood",
+      "customer_id": null,
+      "pop": "iad1",
+      "service_id": null,
+      "interface": null,
+      "confidence": 0.7,
+      "weight": 0.6,
+      "ingested_at": "2026-04-29T18:22:55Z",
+      "expires_at":  "2026-04-29T18:27:55Z",
+      "raw_details": {...},
+      "attached_group_ids": []
+    }
+  ]
+}
+```
+
+- `total` and `by_source[]` summarize **unattached, unexpired** rows
+  globally (not just the page).
+- `signals[]` is paginated by `limit` and ordered by `ingested_at` desc.
+- Pair this with the new `prefixd_corroborator_cache_size{source}`
+  gauge for alerting on caches growing without bound.
 
 ---
 

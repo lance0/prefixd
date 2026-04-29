@@ -760,7 +760,6 @@ export interface CorroboratorResponse {
   signal_id: string
   status: "attached" | "cached"
   attached_group_ids: string[]
-  cached: boolean
 }
 
 export async function sendCorroborator(
@@ -851,6 +850,46 @@ interface CorroboratorActivityEntry {
 interface CorroboratorActivityResponse {
   since: string
   sources: CorroboratorActivityEntry[]
+}
+
+export interface CachedCorroboratorSignal {
+  signal_id: string
+  source: string
+  vector: string | null
+  customer_id: string | null
+  pop: string | null
+  service_id: string | null
+  interface: string | null
+  confidence: number | null
+  weight: number
+  ingested_at: string
+  expires_at: string
+  raw_details: unknown
+  attached_group_ids: string[]
+}
+
+export interface CachedCorroboratorBySource {
+  source: string
+  count: number
+}
+
+export interface CachedCorroboratorsResponse {
+  now: string
+  total: number
+  by_source: CachedCorroboratorBySource[]
+  signals: CachedCorroboratorSignal[]
+}
+
+export async function getCachedCorroborators(
+  params: { source?: string; limit?: number } = {},
+): Promise<CachedCorroboratorsResponse> {
+  const qs = new URLSearchParams()
+  if (params.source) qs.set("source", params.source)
+  if (params.limit) qs.set("limit", String(params.limit))
+  const suffix = qs.toString() ? `?${qs}` : ""
+  return fetchApi<CachedCorroboratorsResponse>(
+    `/v1/signals/corroborator/cache${suffix}`,
+  )
 }
 
 export async function getSignalSources(): Promise<SignalSourceStatus[]> {

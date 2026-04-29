@@ -81,6 +81,11 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
             "backfill_primary_dimensions",
             include_str!("../../migrations/011_backfill_primary_dimensions.sql"),
         ),
+        (
+            12,
+            "signal_groups_playbook",
+            include_str!("../../migrations/012_signal_groups_playbook.sql"),
+        ),
     ];
 
     // Bootstrap: run all migrations first (they use IF NOT EXISTS)

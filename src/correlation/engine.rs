@@ -21,6 +21,15 @@ pub struct SignalGroup {
     /// Used by the corroborator matching flow (ADR 021).
     #[serde(default)]
     pub primary_dimensions: PrimaryDimensions,
+    /// Name of the playbook that matched the primary event(s) for this
+    /// group. Used by the corroborator path (PR B) to re-resolve the
+    /// playbook-specific correlation override (`min_sources`,
+    /// `confidence_threshold`) without needing the full primary-event
+    /// context. NULL means: no primary event resolved a playbook yet
+    /// (or we're upgrading from a pre-PR-B build); corroborator-only
+    /// recompute falls back to the conservative no-flip behavior.
+    #[serde(default)]
+    pub playbook_name: Option<String>,
 }
 
 /// Serializable form of aggregated primary-event dimensions. Stored in the
@@ -271,6 +280,7 @@ impl CorrelationEngine {
             status: SignalGroupStatus::Open,
             corroboration_met: false,
             primary_dimensions: PrimaryDimensions::default(),
+            playbook_name: None,
         }
     }
 
@@ -700,6 +710,7 @@ mod tests {
             status: SignalGroupStatus::Open,
             corroboration_met: true,
             primary_dimensions: PrimaryDimensions::default(),
+            playbook_name: None,
         };
 
         let contributions = vec![
@@ -741,6 +752,7 @@ mod tests {
             status: SignalGroupStatus::Open,
             corroboration_met: false,
             primary_dimensions: PrimaryDimensions::default(),
+            playbook_name: None,
         };
 
         let contributions = vec![SourceContribution {
@@ -803,6 +815,7 @@ mod tests {
             status: SignalGroupStatus::Open,
             corroboration_met: false,
             primary_dimensions: PrimaryDimensions::default(),
+            playbook_name: None,
         }
     }
 

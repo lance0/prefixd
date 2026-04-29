@@ -791,14 +791,15 @@ impl RepositoryTrait for MockRepository {
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<crate::db::traits::CorroboratorSweepStats> {
         let mut cache = self.corroborating_signals.lock().unwrap();
-        let mut unattached = 0u64;
+        let mut unattached: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
         let mut attached = 0u64;
         cache.retain(|s| {
             if s.expires_at > now {
                 return true;
             }
             if s.attached_group_ids.is_empty() {
-                unattached += 1;
+                *unattached.entry(s.source.clone()).or_insert(0) += 1;
             } else {
                 attached += 1;
             }
@@ -822,14 +823,31 @@ impl RepositoryTrait for MockRepository {
         &self,
         now: chrono::DateTime<chrono::Utc>,
         limit: i64,
+        source: Option<&str>,
     ) -> Result<Vec<CorroboratingSignal>> {
         let cache = self.corroborating_signals.lock().unwrap();
         Ok(cache
             .iter()
             .filter(|s| s.expires_at > now && s.attached_group_ids.is_empty())
+            .filter(|s| source.is_none_or(|src| s.source == src))
             .take(limit.max(0) as usize)
             .cloned()
             .collect())
+    }
+
+    async fn count_cached_corroborators_by_source(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<(String, u64)>> {
+        use std::collections::HashMap;
+        let cache = self.corroborating_signals.lock().unwrap();
+        let mut counts: HashMap<String, u64> = HashMap::new();
+        for s in cache.iter() {
+            if s.expires_at > now && s.attached_group_ids.is_empty() {
+                *counts.entry(s.source.clone()).or_insert(0) += 1;
+            }
+        }
+        Ok(counts.into_iter().collect())
     }
 
     async fn corroborator_source_activity(

@@ -17,6 +17,11 @@ pub struct ReconciliationLoop {
     dry_run: bool,
     ws_broadcast: Option<broadcast::Sender<WsMessage>>,
     alerting: Option<Arc<RwLock<Arc<AlertingService>>>>,
+    /// Set of source labels we last set on
+    /// `CORROBORATOR_CACHE_SIZE`. Used to zero-out gauges when a
+    /// source's cache drains to empty between ticks (Prometheus would
+    /// otherwise keep the last non-zero value forever).
+    last_cache_sources: tokio::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl ReconciliationLoop {
@@ -33,6 +38,7 @@ impl ReconciliationLoop {
             dry_run,
             ws_broadcast: None,
             alerting: None,
+            last_cache_sources: tokio::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -203,30 +209,48 @@ impl ReconciliationLoop {
 
     async fn sweep_corroborator_cache(&self) -> anyhow::Result<()> {
         // Clean expired rows from the corroborating_signals cache. The
-        // repository splits the delete into unattached vs attached so we
-        // only charge `CORROBORATOR_EXPIRED_TOTAL` for true cache misses
-        // (ingested, never matched any group, timed out). Attached rows
-        // still get GC'd but don't inflate the expired counter — their
-        // audit trail already lives on signal_group_events.
+        // repository splits the delete into unattached (per-source) vs
+        // attached: only true cache misses (ingested, never matched any
+        // group, timed out) charge `CORROBORATOR_EXPIRED_TOTAL{source}`.
+        // Attached rows are GC'd silently — their audit trail already
+        // lives on signal_group_events.
         //
-        // Per-source attribution for the expired counter is deferred to
-        // PR B (see ROADMAP -> Correlation Engine -> Corroborating
-        // signals v2).
+        // After the sweep we also refresh `CORROBORATOR_CACHE_SIZE{source}`
+        // so operators can alert on caches growing without bound.
         let now = chrono::Utc::now();
         let stats = self.repo.delete_expired_corroborating_signals(now).await?;
-        let total = stats.unattached_expired + stats.attached_expired;
+        let unattached_total = stats.unattached_total();
+        let total = unattached_total + stats.attached_expired;
         if total > 0 {
             tracing::info!(
-                unattached_expired = stats.unattached_expired,
+                unattached_expired = unattached_total,
                 attached_expired = stats.attached_expired,
                 "swept expired corroborating signals from cache"
             );
-            if stats.unattached_expired > 0 {
+            for (source, count) in &stats.unattached_expired {
                 crate::observability::metrics::CORROBORATOR_EXPIRED_TOTAL
-                    .with_label_values(&[] as &[&str])
-                    .inc_by(stats.unattached_expired as f64);
+                    .with_label_values(&[source.as_str()])
+                    .inc_by(*count as f64);
             }
         }
+
+        // Refresh the cache_size gauge: zero out previous values for
+        // sources that no longer have rows, then set per-source counts.
+        let by_source = self.repo.count_cached_corroborators_by_source(now).await?;
+        let live_sources: std::collections::HashSet<String> =
+            by_source.iter().map(|(s, _)| s.clone()).collect();
+        let mut last = self.last_cache_sources.lock().await;
+        for stale in last.difference(&live_sources) {
+            crate::observability::metrics::CORROBORATOR_CACHE_SIZE
+                .with_label_values(&[stale.as_str()])
+                .set(0.0);
+        }
+        for (source, count) in &by_source {
+            crate::observability::metrics::CORROBORATOR_CACHE_SIZE
+                .with_label_values(&[source.as_str()])
+                .set(*count as f64);
+        }
+        *last = live_sources;
         Ok(())
     }
 

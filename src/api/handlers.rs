@@ -715,6 +715,9 @@ async fn handle_ban(
                     .add_interface(interface.clone());
             }
         }
+        // Remember the resolved playbook on the group so the corroborator
+        // path (PR B) can re-resolve the override at recompute time.
+        new_group.playbook_name = matching_playbook.map(|p| p.name.clone());
         let group = state
             .repo
             .insert_signal_group(&new_group)
@@ -740,7 +743,14 @@ async fn handle_ban(
             group.primary_dimensions.add_pop(state.settings.pop.clone());
             dims_changed = before != group.primary_dimensions;
         }
-        if dims_changed {
+        // Backfill playbook_name on existing groups created before PR B (or
+        // before any primary event resolved a playbook). COALESCE in
+        // update_signal_group keeps an existing non-NULL value stable.
+        let playbook_changed = group.playbook_name.is_none() && matching_playbook.is_some();
+        if playbook_changed {
+            group.playbook_name = matching_playbook.map(|p| p.name.clone());
+        }
+        if dims_changed || playbook_changed {
             state
                 .repo
                 .update_signal_group(&group)
@@ -5152,9 +5162,13 @@ pub struct CorroboratorInput {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CorroboratorResponse {
     pub signal_id: Uuid,
+    /// One of "attached" (one or more groups matched) or "cached"
+    /// (no matching group; held in the corroborator cache until a
+    /// matching primary event arrives or TTL expires). Use this
+    /// instead of the v0.16.0 `cached` boolean field, which is
+    /// removed in v0.17.0.
     pub status: String,
     pub attached_group_ids: Vec<Uuid>,
-    pub cached: bool,
 }
 
 /// Ingest a corroborating signal.
@@ -5347,7 +5361,6 @@ async fn ingest_corroborator_inner(
                 "attached".to_string()
             },
             attached_group_ids,
-            cached: true,
         }),
     ))
 }
@@ -5422,8 +5435,105 @@ pub async fn get_corroborator_activity(
     }))
 }
 
+/// Cached-corroborators listing endpoint (PR B). Admin-only. Lists
+/// signals currently in the corroborator cache that are unattached and
+/// unexpired — i.e. waiting for a matching primary event to drain.
+/// Useful for L1 ops to spot a source that's posting heavily but never
+/// landing on a real incident.
+#[derive(Debug, serde::Deserialize)]
+pub struct CachedCorroboratorsQuery {
+    /// Page size; clamped to [1, 1000].
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Filter by signal source. Optional.
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct CachedCorroboratorsResponse {
+    pub now: chrono::DateTime<chrono::Utc>,
+    pub total: u64,
+    pub by_source: Vec<CachedCorroboratorBySource>,
+    pub signals: Vec<crate::correlation::CorroboratingSignal>,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct CachedCorroboratorBySource {
+    pub source: String,
+    pub count: u64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/signals/corroborator/cache",
+    tag = "signals",
+    params(
+        ("limit"  = Option<u32>,    Query, description = "Page size, default 100, max 1000"),
+        ("source" = Option<String>, Query, description = "Filter by signal source"),
+    ),
+    responses(
+        (status = 200, description = "Cached corroborator listing", body = CachedCorroboratorsResponse),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "Admin role required"),
+    )
+)]
+pub async fn list_cached_corroborators_handler(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<CachedCorroboratorsQuery>,
+) -> Result<Json<CachedCorroboratorsResponse>, StatusCode> {
+    use crate::domain::OperatorRole;
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000) as i64;
+    let now = chrono::Utc::now();
+    let signals = state
+        .repo
+        .list_cached_corroborators(now, limit, query.source.as_deref())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // When ?source= is provided, scope total + by_source to that
+    // source as well so the response is internally consistent
+    // (otherwise clients see a `total` that doesn't match the rows
+    // they were just handed).
+    let by_source_rows = state
+        .repo
+        .count_cached_corroborators_by_source(now)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let by_source_rows: Vec<(String, u64)> = match query.source.as_deref() {
+        Some(filter) => by_source_rows
+            .into_iter()
+            .filter(|(s, _)| s == filter)
+            .collect(),
+        None => by_source_rows,
+    };
+    let total = by_source_rows.iter().map(|(_, n)| *n).sum();
+    let by_source = by_source_rows
+        .into_iter()
+        .map(|(source, count)| CachedCorroboratorBySource { source, count })
+        .collect();
+    Ok(Json(CachedCorroboratorsResponse {
+        now,
+        total,
+        by_source,
+        signals,
+    }))
+}
+
 /// Recompute a signal group's derived_confidence, source_count and
 /// corroboration_met flag from its events (including corroborators).
+///
+/// PR B: this path now re-resolves the playbook-specific correlation
+/// override using the stored `playbook_name` on the group, and is
+/// allowed to flip `corroboration_met` from false→true even when the
+/// triggering ingest was a corroborator. We deliberately do NOT
+/// actuate a mitigation from here — the next primary-path event will
+/// pick up the flipped flag and trigger normally. This keeps mitigation
+/// actuation single-sourced through `handle_ban`.
 async fn recompute_group_aggregates(state: &Arc<AppState>, group_id: Uuid) -> Result<(), AppError> {
     use crate::correlation::CorrelationEngine;
 
@@ -5453,17 +5563,68 @@ async fn recompute_group_aggregates(state: &Arc<AppState>, group_id: Uuid) -> Re
 
     let has_primary = events.iter().any(|e| !e.is_corroborating);
 
+    // Resolve the playbook override using the group's stored playbook_name.
+    // If the group was created before PR B (playbook_name is NULL) or the
+    // playbook has since been removed, fall back to the conservative
+    // pre-PR-B behavior: aggregates update, but we don't flip
+    // corroboration_met → true on the corroborator path.
+    let was_met = group.corroboration_met;
+    let mut newly_met = false;
+    let new_met = if has_primary {
+        let correlation_config = state.correlation_config.read().await.clone();
+        let playbooks = state.playbooks.read().await.clone();
+        let resolved_playbook = group
+            .playbook_name
+            .as_deref()
+            .and_then(|name| playbooks.playbooks.iter().find(|p| p.name == name));
+        let override_ = resolved_playbook.and_then(|p| p.correlation.as_ref());
+        match (resolved_playbook, group.playbook_name.as_deref()) {
+            (Some(_), _) => {
+                let met = CorrelationEngine::check_corroboration_with_primary(
+                    count,
+                    derived,
+                    has_primary,
+                    &correlation_config,
+                    override_,
+                );
+                if met && !was_met {
+                    newly_met = true;
+                }
+                met
+            }
+            (None, Some(missing)) => {
+                tracing::debug!(
+                    group_id = %group_id,
+                    playbook = %missing,
+                    "stored playbook_name no longer resolves; keeping previous corroboration_met"
+                );
+                was_met
+            }
+            (None, None) => {
+                // Pre-PR-B group with no resolved playbook yet — preserve
+                // previous behavior.
+                was_met
+            }
+        }
+    } else {
+        // No primary event yet → invariant: corroboration cannot be met.
+        false
+    };
+
+    if newly_met {
+        tracing::info!(
+            group_id = %group_id,
+            derived_confidence = derived,
+            source_count = count,
+            playbook = ?group.playbook_name,
+            "signal group reached corroboration threshold via corroborator path; awaiting next primary event to actuate mitigation"
+        );
+    }
+
     let mut updated = group;
     updated.derived_confidence = derived;
     updated.source_count = count;
-    // Only primary ingest has enough context to evaluate playbook-specific
-    // overrides safely. Corroborator-only recomputes update aggregates but do
-    // not promote a group from false->true on their own.
-    updated.corroboration_met = if has_primary {
-        updated.corroboration_met
-    } else {
-        false
-    };
+    updated.corroboration_met = new_met;
     state
         .repo
         .update_signal_group(&updated)

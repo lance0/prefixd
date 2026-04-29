@@ -269,7 +269,20 @@ pub static CORROBORATOR_EXPIRED_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
         "prefixd_corroborator_expired_total",
         "Corroborating signals removed by cache sweep without ever attaching",
-        &[]
+        &["source"]
+    )
+    .unwrap()
+});
+
+/// Currently-cached, unattached, unexpired corroborating signals by source.
+/// Updated by the reconcile loop every tick after the sweep. Operators can
+/// alert on this gauge growing without bound (e.g. a source posting heavily
+/// while no matching primary event ever lands).
+pub static CORROBORATOR_CACHE_SIZE: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_corroborator_cache_size",
+        "Currently-cached unattached corroborating signals, by source",
+        &["source"]
     )
     .unwrap()
 });
@@ -315,6 +328,7 @@ pub fn init_metrics() {
     Lazy::force(&CORROBORATOR_INGESTED_TOTAL);
     Lazy::force(&CORROBORATOR_ATTACHED_TOTAL);
     Lazy::force(&CORROBORATOR_EXPIRED_TOTAL);
+    Lazy::force(&CORROBORATOR_CACHE_SIZE);
 }
 
 /// Update database pool metrics from sqlx pool stats

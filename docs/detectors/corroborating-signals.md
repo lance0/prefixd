@@ -82,16 +82,18 @@ Response:
 {
   "signal_id": "…",
   "status": "attached",
-  "attached_group_ids": ["…"],
-  "cached": true
+  "attached_group_ids": ["…"]
 }
 ```
 
-- `attached` — at least one open signal group matched and was
+- `status: attached` — at least one open signal group matched and was
   strengthened.
-- `cached` — no matching group yet; the signal is held for up to
-  `correlation.window_seconds` and drained if a matching primary event
-  arrives in that window.
+- `status: cached` — no matching group yet; the signal is held for up
+  to `correlation.window_seconds` and drained if a matching primary
+  event arrives in that window.
+
+> The v0.16.0 `cached: true` field on this response was always-true
+> and was removed in v0.17.0. Branch on `status` instead.
 
 ## 3. From the CLI
 
@@ -166,18 +168,27 @@ def post_cpu_alert(pop: str, utilization: float):
 
 ## 7. Known limits
 
-See the ADR 021 "Known limits / deferred to PR B" section for the
-authoritative list. Most operator-visible one right now:
+All five PR B follow-ups from the ADR 021 review shipped in v0.17.0.
+A few residual operator notes:
 
-- A corroborator that arrives *after* a primary event and pushes
-  aggregates past the threshold does **not** immediately trigger the
-  mitigation. Finalization happens on the next primary-ingest path. In
-  practice this means: if two primary events fire inside the window,
-  the corroborator's contribution is picked up. If only one primary
-  fires and a corroborator arrives later, the mitigation waits on
-  another primary signal (or on the cache drain when the next primary
-  for the same dimensions lands). Tracked as PR B work item
-  *Playbook-override-aware corroborator finalization*.
+- **Mitigation still actuates from the primary path.** A late
+  corroborator can flip `corroboration_met` to true on its own (using
+  the playbook override stored on the group), but the FlowSpec
+  announcement is still triggered by the next primary event for that
+  group. This keeps actuation single-sourced. In practice: the flag
+  promotion is observable on `GET /v1/signal-groups/{id}` and on the
+  dashboard immediately; the mitigation lands when a matching primary
+  ingest happens (which, given the corroborator just confirmed the
+  group, is usually within seconds).
+- **Stale playbook names are conservative.** If an operator removed a
+  playbook between group creation and a late corroborator landing,
+  recompute will keep the v0.16.0 no-flip behavior. Re-add the
+  playbook (or wait for the next primary event with a fresh playbook
+  name) to recover.
+- **Cache-size gauge is per-source.** Alert on
+  `prefixd_corroborator_cache_size{source="..."}` rather than a sum
+  to detect a single misconfigured source filling the cache without
+  affecting the global view.
 
 ## Troubleshooting
 

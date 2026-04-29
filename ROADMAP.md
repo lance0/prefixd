@@ -289,12 +289,12 @@ Example: FastNetMon says UDP flood at 0.6 confidence + router CPU spiking + host
 - [x] Corroboration requirements ("require 2+ sources")
 - [x] Correlation explainability (`why` details in API/UI for each mitigation decision)
 - [x] Corroborating-only signals v1 — coarse telemetry (router CPU, PoP interface, per-customer NetFlow) can strengthen groups without ever triggering mitigations on its own (ADR 021, PR #109)
-- [ ] **Corroborating signals v2 (PR B)** — follow-ups from the ADR 021 review:
-  - [ ] Playbook-override-aware corroborator finalization: let a late corroborator promote `corroboration_met` → `true` on its own path, using the resolved override from the group's most recent primary event. Eliminates the current dependency on "another primary event fires within the window" for late corroborators to take effect.
-  - [ ] Per-source attribution on `prefixd_corroborator_expired_total`: select expiring rows grouped by source before delete so the metric can be labelled without a full rewrite of the sweep path.
-  - [ ] API cleanup: drop the redundant `cached: true` field from `CorroboratorResponse`; `status ∈ {attached, cached}` already fully describes the outcome. Coordinate with a minor API version bump since the endpoint is new in this release.
-  - [ ] Dashboard "cached corroborators" panel: small widget on the Correlation dashboard showing live count of unattached-but-unexpired corroborators per source, sourced from a new `/v1/signals/corroborator/cache` listing endpoint (admin-only).
-  - [ ] Gauge metric `prefixd_corroborator_cache_size{source}` updated by the reconcile loop for Prometheus alerting on runaway caches.
+- [x] **Corroborating signals v2 (PR B)** — follow-ups from the ADR 021 review (shipped in v0.17.0):
+  - [x] Playbook-override-aware corroborator finalization: late corroborators now promote `corroboration_met` → `true` on their own path using the override resolved from `signal_groups.playbook_name` (migration 012). Conservative fallback preserved when the stored playbook is missing from live config.
+  - [x] Per-source attribution on `prefixd_corroborator_expired_total{source}`: counter regains `&["source"]` label set; sweep collects attribution via `DELETE … RETURNING` grouped by source.
+  - [x] API cleanup: dropped the redundant `cached: true` field from `CorroboratorResponse`; `status ∈ {attached, cached}` is the discriminator.
+  - [x] Dashboard "cached corroborators" panel: new Cache tab on the Correlation page backed by `GET /v1/signals/corroborator/cache` (admin-only) showing per-source counts and a dense signal table.
+  - [x] Gauge metric `prefixd_corroborator_cache_size{source}` updated by the reconcile loop after each sweep; stale labels zeroed on drain.
 - [ ] Router telemetry adapter (JTI, gNMI) as the first production consumer of corroborator mode (already listed under Signal Adapters)
 - [ ] Replay mode for tuning (simulate historical incidents without announcing FlowSpec rules)
 

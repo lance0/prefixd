@@ -230,17 +230,59 @@ initial implementation. All were fixed before merge. Notable ones:
 
 ## Known limits / deferred to PR B
 
-- A corroborator that lands late in the window and pushes a group over
-  its threshold does not immediately fire the mitigation; it waits for
-  the next primary-path event (if any) to re-evaluate. This is a
-  product choice, not a correctness gap — implementing playbook-
-  override-aware finalization on the corroborator path is scheduled for
-  PR B (see ROADMAP).
-- `prefixd_corroborator_expired_total` has no source label. PR B will
-  restore per-source attribution by collecting rows before delete.
-- `CorroboratorResponse.cached` is always `true`; the field is
-  redundant given `status ∈ {attached, cached}` and is flagged for
-  removal in PR B.
+(All five PR B items shipped in v0.17.0 — see CHANGELOG and the
+"PR B addenda" section below for design notes on each.)
+
+## PR B addenda (v0.17.0)
+
+- **Late corroborator finalization is now playbook-aware.** Migration
+  `012_signal_groups_playbook.sql` adds nullable
+  `signal_groups.playbook_name`. The daemon writes it on group create
+  and `COALESCE`-backfills it on the next primary event for any
+  pre-upgrade group. The corroborator-side aggregate recompute
+  re-resolves the playbook by name from live state; if the playbook
+  exists, it applies the override min_sources/threshold and is now
+  allowed to flip `corroboration_met` from false → true. If the stored
+  name is NULL or no longer resolves (admin removed the playbook), the
+  conservative v0.16.0 behavior is preserved: aggregates update but the
+  flag is not flipped — the next primary event picks it up. This
+  decouples late corroborator finalization from "another primary event
+  must fire within the window" without weakening the
+  primary-required-once invariant.
+
+  Mitigation actuation deliberately stays single-sourced through
+  `handle_ban`; corroborator-path recompute updates state but does not
+  fire FlowSpec. The next primary event reads the now-true flag and
+  triggers normally. This keeps the actuation surface narrow and
+  preserves the existing test/audit surface for mitigations.
+
+- **Per-source attribution on the expired counter.**
+  `delete_expired_corroborating_signals` now uses a single
+  `DELETE … RETURNING source` with `GROUP BY source` so attribution is
+  collected in the same query that performs the delete (no
+  read-then-delete race). `CORROBORATOR_EXPIRED_TOTAL` regains its
+  `&["source"]` label set. Operator note: this is a label change.
+  PromQL queries written against the v0.16.0 unlabelled counter must
+  add `sum()` to recover the previous shape.
+
+- **`prefixd_corroborator_cache_size{source}` gauge.** Updated by the
+  reconcile loop after each sweep using the new
+  `count_cached_corroborators_by_source(now)` repository method. The
+  scheduler keeps an in-process `last_cache_sources` set so labels
+  whose source drained between ticks are explicitly zeroed (Prometheus
+  would otherwise keep stale non-zero values forever).
+
+- **`/v1/signals/corroborator/cache` admin endpoint.** Returns
+  `{ now, total, by_source[], signals[] }` filtered to
+  unattached + unexpired rows. Optional `?source=` and `?limit=`
+  (clamped to 1..1000). Dashboard-side, the new Cache tab on the
+  Correlation page renders per-source badges and a dense table of
+  cached signals.
+
+- **`CorroboratorResponse.cached` removed.** Always-true booleans add
+  no information. `status ∈ {attached, cached}` is the canonical
+  discriminator. v0.17.0 minor breaking change since the endpoint is
+  new in this release line.
 
 ## References
 

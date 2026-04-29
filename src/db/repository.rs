@@ -911,18 +911,20 @@ impl RepositoryTrait for Repository {
             WITH existing AS (
                 SELECT group_id, victim_ip, vector, created_at, window_expires_at,
                        derived_confidence, source_count, status, corroboration_met,
-                       primary_dimensions
+                       primary_dimensions, playbook_name
                 FROM signal_groups
                 WHERE victim_ip = $2 AND vector = $3 AND status = 'open'
                   AND window_expires_at > NOW()
                 LIMIT 1
             ), inserted AS (
                 INSERT INTO signal_groups (group_id, victim_ip, vector, created_at, window_expires_at,
-                    derived_confidence, source_count, status, corroboration_met, primary_dimensions)
-                SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+                    derived_confidence, source_count, status, corroboration_met, primary_dimensions,
+                    playbook_name)
+                SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
                 WHERE NOT EXISTS (SELECT 1 FROM existing)
                 RETURNING group_id, victim_ip, vector, created_at, window_expires_at,
-                    derived_confidence, source_count, status, corroboration_met, primary_dimensions
+                    derived_confidence, source_count, status, corroboration_met, primary_dimensions,
+                    playbook_name
             )
             SELECT * FROM existing
             UNION ALL
@@ -940,6 +942,7 @@ impl RepositoryTrait for Repository {
         .bind(group.status.as_str())
         .bind(group.corroboration_met)
         .bind(serde_json::to_value(&group.primary_dimensions).unwrap_or(serde_json::json!({})))
+        .bind(group.playbook_name.as_deref())
         .fetch_one(&self.pool)
         .await;
 
@@ -957,7 +960,7 @@ impl RepositoryTrait for Repository {
                     r#"
                     SELECT group_id, victim_ip, vector, created_at, window_expires_at,
                            derived_confidence, source_count, status, corroboration_met,
-                           primary_dimensions
+                           primary_dimensions, playbook_name
                     FROM signal_groups
                     WHERE victim_ip = $1 AND vector = $2 AND status = 'open'
                       AND window_expires_at > NOW()
@@ -982,7 +985,8 @@ impl RepositoryTrait for Repository {
                 source_count = $3,
                 status = $4,
                 corroboration_met = $5,
-                primary_dimensions = $6
+                primary_dimensions = $6,
+                playbook_name = COALESCE($7, playbook_name)
             WHERE group_id = $1
             "#,
         )
@@ -992,6 +996,7 @@ impl RepositoryTrait for Repository {
         .bind(group.status.as_str())
         .bind(group.corroboration_met)
         .bind(serde_json::to_value(&group.primary_dimensions).unwrap_or(serde_json::json!({})))
+        .bind(group.playbook_name.as_deref())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1002,7 +1007,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT group_id, victim_ip, vector, created_at, window_expires_at,
                    derived_confidence, source_count, status, corroboration_met,
-                   primary_dimensions
+                   primary_dimensions, playbook_name
             FROM signal_groups WHERE group_id = $1
             "#,
         )
@@ -1017,7 +1022,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT group_id, victim_ip, vector, created_at, window_expires_at,
                    derived_confidence, source_count, status, corroboration_met,
-                   primary_dimensions
+                   primary_dimensions, playbook_name
             FROM signal_groups
             WHERE victim_ip = $1 AND vector = $2 AND status = 'open'
               AND window_expires_at > NOW()
@@ -1097,7 +1102,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT group_id, victim_ip, vector, created_at, window_expires_at,
                    derived_confidence, source_count, status, corroboration_met,
-                   primary_dimensions
+                   primary_dimensions, playbook_name
             FROM signal_groups
             WHERE ($1::text IS NULL OR status = $1)
               AND ($2::text IS NULL OR vector = $2)
@@ -1132,7 +1137,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT group_id, victim_ip, vector, created_at, window_expires_at,
                    derived_confidence, source_count, status, corroboration_met,
-                   primary_dimensions
+                   primary_dimensions, playbook_name
             FROM signal_groups
             WHERE status = 'open' AND window_expires_at <= NOW()
             "#,
@@ -1161,7 +1166,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT group_id, victim_ip, vector, created_at, window_expires_at,
                    derived_confidence, source_count, status, corroboration_met,
-                   primary_dimensions
+                   primary_dimensions, playbook_name
             FROM signal_groups
             WHERE status = 'open'
               AND window_expires_at > $1
@@ -1332,24 +1337,22 @@ impl RepositoryTrait for Repository {
         &self,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<crate::db::traits::CorroboratorSweepStats> {
-        // Two statements so the scheduler can attribute the expired metric
-        // to truly-unattached signals (cache misses) while still cleaning
-        // attached audit rows. Both run inside the same request round-trip
-        // order but we don't need a transaction: the counters are
-        // monotonic and the delete predicate is narrow.
-        let unattached: (i64,) = sqlx::query_as(
+        // Two statements: one DELETE-RETURNING grouped by source for
+        // per-source attribution on the expired metric; another for
+        // attached rows (no source attribution — they aren't cache misses).
+        let unattached_rows: Vec<(String, i64)> = sqlx::query_as(
             r#"
             WITH deleted AS (
                 DELETE FROM corroborating_signals
                 WHERE expires_at <= $1
                   AND cardinality(attached_group_ids) = 0
-                RETURNING signal_id
+                RETURNING source
             )
-            SELECT COUNT(*) FROM deleted
+            SELECT source, COUNT(*)::BIGINT AS n FROM deleted GROUP BY source
             "#,
         )
         .bind(now)
-        .fetch_one(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
         let attached: (i64,) = sqlx::query_as(
             r#"
@@ -1365,8 +1368,12 @@ impl RepositoryTrait for Repository {
         .bind(now)
         .fetch_one(&self.pool)
         .await?;
+        let unattached_expired = unattached_rows
+            .into_iter()
+            .map(|(source, n)| (source, n.max(0) as u64))
+            .collect();
         Ok(crate::db::traits::CorroboratorSweepStats {
-            unattached_expired: unattached.0.max(0) as u64,
+            unattached_expired,
             attached_expired: attached.0.max(0) as u64,
         })
     }
@@ -1385,6 +1392,7 @@ impl RepositoryTrait for Repository {
         &self,
         now: chrono::DateTime<chrono::Utc>,
         limit: i64,
+        source: Option<&str>,
     ) -> Result<Vec<CorroboratingSignal>> {
         let rows: Vec<CorroboratingSignalRow> = sqlx::query_as(
             r#"
@@ -1393,15 +1401,39 @@ impl RepositoryTrait for Repository {
             FROM corroborating_signals
             WHERE expires_at > $1
               AND cardinality(attached_group_ids) = 0
+              AND ($3::text IS NULL OR source = $3)
             ORDER BY ingested_at DESC
             LIMIT $2
             "#,
         )
         .bind(now)
         .bind(limit.max(0))
+        .bind(source)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn count_cached_corroborators_by_source(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<(String, u64)>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            r#"
+            SELECT source, COUNT(*)::BIGINT AS n
+            FROM corroborating_signals
+            WHERE expires_at > $1
+              AND cardinality(attached_group_ids) = 0
+            GROUP BY source
+            "#,
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(source, n)| (source, n.max(0) as u64))
+            .collect())
     }
 
     async fn corroborator_source_activity(
@@ -1502,6 +1534,7 @@ struct SignalGroupRow {
     status: String,
     corroboration_met: bool,
     primary_dimensions: serde_json::Value,
+    playbook_name: Option<String>,
 }
 
 impl From<SignalGroupRow> for SignalGroup {
@@ -1517,6 +1550,7 @@ impl From<SignalGroupRow> for SignalGroup {
             status: row.status.parse().unwrap_or(SignalGroupStatus::Open),
             corroboration_met: row.corroboration_met,
             primary_dimensions: serde_json::from_value(row.primary_dimensions).unwrap_or_default(),
+            playbook_name: row.playbook_name,
         }
     }
 }

@@ -84,8 +84,8 @@ prost-build = "0.14"
 tokio-test = "0.4"
 tempfile = "3"
 criterion = { version = "0.8", features = ["async_tokio"] }
-testcontainers = "0.26"
-testcontainers-modules = { version = "0.14", features = ["postgres"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
 proptest = "1"
 
 [[bench]]
