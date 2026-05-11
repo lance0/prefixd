@@ -4,9 +4,10 @@ use tokio::sync::broadcast;
 
 use crate::alerting::AlertingService;
 use crate::bgp::FlowSpecAnnouncer;
-use crate::correlation::SignalGroupStatus;
+use crate::correlation::{CorrelationEngine, SignalGroupStatus};
 use crate::db::RepositoryTrait;
 use crate::domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule, MitigationStatus};
+use crate::state::AppState;
 use crate::ws::WsMessage;
 use tokio::sync::RwLock;
 
@@ -17,6 +18,11 @@ pub struct ReconciliationLoop {
     dry_run: bool,
     ws_broadcast: Option<broadcast::Sender<WsMessage>>,
     alerting: Option<Arc<RwLock<Arc<AlertingService>>>>,
+    /// Shared application state — used by the ADR 022 confidence-decay
+    /// refresh path to read the current correlation config + playbooks
+    /// on each tick (so hot-reloads propagate without restart). Optional
+    /// so test harnesses can construct the loop standalone.
+    state: Option<Arc<AppState>>,
     /// Set of source labels we last set on
     /// `CORROBORATOR_CACHE_SIZE`. Used to zero-out gauges when a
     /// source's cache drains to empty between ticks (Prometheus would
@@ -38,8 +44,18 @@ impl ReconciliationLoop {
             dry_run,
             ws_broadcast: None,
             alerting: None,
+            state: None,
             last_cache_sources: tokio::sync::Mutex::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// Wire the shared `AppState` for paths that need live access to the
+    /// correlation config or playbooks (currently: ADR 022 confidence
+    /// decay refresh). Without this, decay refresh is a no-op and
+    /// `derived_confidence` is only updated on event ingest.
+    pub fn with_app_state(mut self, state: Arc<AppState>) -> Self {
+        self.state = Some(state);
+        self
     }
 
     /// Set the WebSocket broadcast sender for real-time notifications
@@ -113,6 +129,10 @@ impl ReconciliationLoop {
 
         // 2b. Sweep expired corroborating signals from the floating cache (ADR 021)
         self.sweep_corroborator_cache().await?;
+
+        // 2c. Refresh decayed confidence on open signal groups (ADR 022).
+        // No-op when confidence decay is disabled or wiring isn't present.
+        self.refresh_decayed_confidence().await?;
 
         // 3. Sync desired vs actual state
         self.sync_announcements().await?;
@@ -251,6 +271,74 @@ impl ReconciliationLoop {
                 .set(*count as f64);
         }
         *last = live_sources;
+        Ok(())
+    }
+
+    /// ADR 022: re-compute and persist `derived_confidence` on every open
+    /// signal group using the configured exponential half-life. Skipped
+    /// when correlation config / playbooks aren't wired (e.g. in tests)
+    /// or when decay is disabled (`half_life_seconds == 0`).
+    ///
+    /// Enforces one-shot `corroboration_met` semantics: a group whose
+    /// flag is already true is never flipped back to false by decay,
+    /// even if its decayed confidence drops below threshold. Decay only
+    /// affects the stored value.
+    async fn refresh_decayed_confidence(&self) -> anyhow::Result<()> {
+        let Some(state) = self.state.as_ref() else {
+            return Ok(());
+        };
+
+        let cfg = state.correlation_config.read().await.clone();
+        if cfg.confidence_decay_half_life_seconds == 0 {
+            return Ok(());
+        }
+
+        let groups = self.repo.list_open_signal_groups().await?;
+        if groups.is_empty() {
+            crate::observability::metrics::SIGNAL_GROUP_DECAY_REFRESHES_TOTAL.inc();
+            return Ok(());
+        }
+
+        let playbooks = state.playbooks.read().await.clone();
+        let now = chrono::Utc::now();
+
+        for group in groups {
+            let events = self.repo.list_signal_group_events(group.group_id).await?;
+            if events.is_empty() {
+                continue;
+            }
+
+            let resolved_playbook = group
+                .playbook_name
+                .as_deref()
+                .and_then(|name| playbooks.playbooks.iter().find(|p| p.name == name));
+            let override_ = resolved_playbook.and_then(|p| p.correlation.as_ref());
+            let half_life = cfg.effective_decay_half_life(override_);
+            if half_life == 0 {
+                continue;
+            }
+
+            let triples: Vec<crate::correlation::ConfidenceTriple> = events
+                .iter()
+                .map(|e| (e.confidence, e.source_weight, e.ingested_at))
+                .collect();
+            let new_derived =
+                CorrelationEngine::compute_derived_confidence_decayed(&triples, now, half_life);
+
+            // Skip rewrite when nothing meaningful changed (avoids
+            // churning the row + WAL on idle groups).
+            if (new_derived - group.derived_confidence).abs() < 0.0005 {
+                continue;
+            }
+
+            let mut updated = group;
+            updated.derived_confidence = new_derived;
+            // corroboration_met is sticky once true (ADR 022); the field
+            // is left as-is. source_count is unaffected by decay.
+            self.repo.update_signal_group(&updated).await?;
+        }
+
+        crate::observability::metrics::SIGNAL_GROUP_DECAY_REFRESHES_TOTAL.inc();
         Ok(())
     }
 

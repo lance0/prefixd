@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-05-11
+
+### Added
+
+- **Confidence decay for signal groups (ADR 022).** Exponential time decay applied to per-event confidence contributions when computing `derived_confidence`. Each event's effective weight is multiplied by `0.5 ^ (age_seconds / half_life_seconds)`, so older corroborating evidence smoothly loses influence without ever being discarded. Default is disabled (`confidence_decay_half_life_seconds: 0`); zero behavior change for existing deployments.
+  - **Global config:** `correlation.confidence_decay_half_life_seconds: u32` (default 0). Validated to `0 ≤ H ≤ 10 × window_seconds`.
+  - **Per-playbook override:** `correlation_override.confidence_decay_half_life_seconds: Option<u32>`. `Some(0)` explicitly disables decay for the playbook; `None` falls through to global.
+  - **Reconcile loop step.** New `refresh_decayed_confidence` step iterates every open signal group each tick (default 30 s) and recomputes `derived_confidence` from current events with decay applied. No-op when decay is disabled.
+  - **One-shot `corroboration_met`.** When `derived_confidence` falls below the threshold due to decay, `corroboration_met` is now sticky (`met_now || was_met`) — once a group has authorized mitigation, decay never revokes that authorization for the group's lifetime.
+  - **Metric:** `prefixd_signal_group_decay_refreshes_total` counter ticks once per `refresh_decayed_confidence` invocation. Alert on "decay loop not running" by watching for the counter going flat.
+  - **UI:** Group detail page surfaces "decayed, half-life Ns" next to `derived_confidence` when decay is active for the group's effective playbook.
+  - 17 new tests (7 engine unit + 7 config unit + 3 integration) covering decay math, override resolution, validation, disabled paths, and one-shot stickiness.
+
 ## [0.17.1] - 2026-05-11
 
 ### Changed

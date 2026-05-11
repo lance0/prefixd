@@ -4,6 +4,10 @@ use uuid::Uuid;
 
 use super::config::{CorrelationConfig, MatchDimension, PlaybookCorrelationOverride};
 
+/// A confidence-weight-age triple used by the decay-aware compute path.
+/// (confidence, source_weight, ingested_at)
+pub type ConfidenceTriple = (Option<f32>, f32, Option<DateTime<Utc>>);
+
 /// Represents a signal group — a collection of related attack events grouped
 /// by (victim_ip, vector) within a time window.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -311,6 +315,65 @@ impl CorrelationEngine {
         (sum_weighted / sum_weights) as f32
     }
 
+    /// Decay-aware variant of [`compute_derived_confidence`]. Each event's
+    /// source weight is multiplied by an exponential factor of
+    /// `0.5^(age_seconds / half_life_seconds)` before participating in the
+    /// weighted average.
+    ///
+    /// Semantics:
+    /// - `half_life_seconds == 0` short-circuits to the original
+    ///   weighted average (`events_with_age` is mapped to `(confidence, weight)`
+    ///   pairs and decay is skipped). This keeps the v0.17.x behavior
+    ///   bit-identical when decay is disabled.
+    /// - Events whose `ingested_at` is `None` (e.g. older rows that
+    ///   pre-date denormalization) are treated as age=0, i.e. they
+    ///   contribute at full weight. This avoids destabilizing existing
+    ///   groups on upgrade.
+    /// - Future-dated events (clock skew) are clamped to age=0.
+    ///
+    /// See ADR 022.
+    pub fn compute_derived_confidence_decayed(
+        events_with_age: &[ConfidenceTriple],
+        now: DateTime<Utc>,
+        half_life_seconds: u32,
+    ) -> f32 {
+        if events_with_age.is_empty() {
+            return 0.0;
+        }
+
+        if half_life_seconds == 0 {
+            let pairs: Vec<(Option<f32>, f32)> =
+                events_with_age.iter().map(|(c, w, _)| (*c, *w)).collect();
+            return Self::compute_derived_confidence(&pairs);
+        }
+
+        let half_life = half_life_seconds as f64;
+        let mut sum_weighted = 0.0f64;
+        let mut sum_weights = 0.0f64;
+
+        for &(confidence, weight, ingested_at) in events_with_age {
+            let conf = confidence.unwrap_or(0.0) as f64;
+            let base_weight = weight as f64;
+            let age_secs = match ingested_at {
+                Some(t) => {
+                    let dt = (now - t).num_milliseconds() as f64 / 1000.0;
+                    dt.max(0.0)
+                }
+                None => 0.0,
+            };
+            let decay = (0.5f64).powf(age_secs / half_life);
+            let effective_weight = base_weight * decay;
+            sum_weighted += conf * effective_weight;
+            sum_weights += effective_weight;
+        }
+
+        if sum_weights == 0.0 {
+            return 0.0;
+        }
+
+        (sum_weighted / sum_weights) as f32
+    }
+
     /// Count distinct sources from a list of source names.
     pub fn count_distinct_sources(sources: &[String]) -> i32 {
         let mut seen = std::collections::HashSet::new();
@@ -556,6 +619,89 @@ mod tests {
         assert!((CorrelationEngine::compute_derived_confidence(&e3) - 0.6).abs() < 0.001);
     }
 
+    // ── Confidence decay (ADR 022) ─────────────────────────────────────
+
+    #[test]
+    fn test_decay_disabled_matches_undecayed() {
+        // half_life=0 ⇒ identical result to the unadorned helper, ignoring
+        // ingested_at entirely.
+        let now = Utc::now();
+        let events = vec![
+            (Some(0.9), 2.0, Some(now - chrono::Duration::seconds(300))),
+            (Some(0.3), 1.0, Some(now - chrono::Duration::seconds(900))),
+        ];
+        let decayed = CorrelationEngine::compute_derived_confidence_decayed(&events, now, 0);
+        let pairs = vec![(Some(0.9), 2.0), (Some(0.3), 1.0)];
+        let plain = CorrelationEngine::compute_derived_confidence(&pairs);
+        assert!((decayed - plain).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_decay_single_event_at_half_life_halves_weight() {
+        // One event at age=half_life ⇒ effective weight halves but it's
+        // the only event, so derived confidence is unchanged.
+        let now = Utc::now();
+        let events = vec![(Some(0.8), 1.0, Some(now - chrono::Duration::seconds(60)))];
+        let decayed = CorrelationEngine::compute_derived_confidence_decayed(&events, now, 60);
+        assert!((decayed - 0.8).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_decay_clamps_negative_age() {
+        // Future-dated ingested_at (clock skew) is treated as age=0.
+        let now = Utc::now();
+        let events = vec![(Some(0.6), 1.0, Some(now + chrono::Duration::seconds(120)))];
+        let decayed = CorrelationEngine::compute_derived_confidence_decayed(&events, now, 60);
+        assert!((decayed - 0.6).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_decay_none_ingested_at_full_weight() {
+        // Rows that pre-date denormalization (ingested_at=None) contribute
+        // at full weight rather than being silently dropped.
+        let now = Utc::now();
+        let events = vec![(Some(1.0), 1.0, None)];
+        let decayed = CorrelationEngine::compute_derived_confidence_decayed(&events, now, 60);
+        assert!((decayed - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_decay_two_events_fresh_dominates_stale() {
+        // Fresh confidence=0.9, weight=1.0, age=0 ⇒ effective weight = 1.0
+        // Stale confidence=0.1, weight=1.0, age=2*HL ⇒ effective weight = 0.25
+        // Expected: (0.9*1.0 + 0.1*0.25) / (1.0 + 0.25) = 0.925 / 1.25 = 0.74
+        let now = Utc::now();
+        let events = vec![
+            (Some(0.9), 1.0, Some(now)),
+            (Some(0.1), 1.0, Some(now - chrono::Duration::seconds(120))),
+        ];
+        let decayed = CorrelationEngine::compute_derived_confidence_decayed(&events, now, 60);
+        assert!((decayed - 0.74).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_decay_empty_events_returns_zero() {
+        let now = Utc::now();
+        let events: Vec<ConfidenceTriple> = vec![];
+        let decayed = CorrelationEngine::compute_derived_confidence_decayed(&events, now, 60);
+        assert_eq!(decayed, 0.0);
+    }
+
+    #[test]
+    fn test_decay_extreme_age_does_not_panic() {
+        // Very old event with reasonable half-life ⇒ contribution rounds to ~0
+        // but math is finite and non-NaN.
+        let now = Utc::now();
+        let events = vec![(
+            Some(0.7),
+            1.0,
+            Some(now - chrono::Duration::seconds(10_000_000)),
+        )];
+        let decayed = CorrelationEngine::compute_derived_confidence_decayed(&events, now, 60);
+        assert!(decayed.is_finite());
+        assert!((0.0..=1.0).contains(&decayed));
+    }
+
     // ── Distinct source counting ───────────────────────────────────────
 
     #[test]
@@ -625,7 +771,7 @@ mod tests {
         };
         let override_ = PlaybookCorrelationOverride {
             min_sources: Some(3),
-            confidence_threshold: None,
+            ..Default::default()
         };
         // 2 sources meets global (2), but override requires 3
         assert!(!CorrelationEngine::check_corroboration(
@@ -651,8 +797,8 @@ mod tests {
             ..Default::default()
         };
         let override_ = PlaybookCorrelationOverride {
-            min_sources: None,
             confidence_threshold: Some(0.8),
+            ..Default::default()
         };
         // 0.6 meets global (0.5) but not override (0.8)
         assert!(!CorrelationEngine::check_corroboration(

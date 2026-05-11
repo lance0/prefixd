@@ -808,6 +808,7 @@ export interface CorrelationConfig {
   min_sources: number
   confidence_threshold: number
   default_weight: number
+  confidence_decay_half_life_seconds?: number
   sources: Record<string, SourceConfig>
   webhook_adapters?: WebhookAdapter[]
 }

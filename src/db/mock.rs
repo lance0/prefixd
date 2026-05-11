@@ -681,6 +681,15 @@ impl RepositoryTrait for MockRepository {
             .collect())
     }
 
+    async fn list_open_signal_groups(&self) -> Result<Vec<SignalGroup>> {
+        let groups = self.signal_groups.lock().unwrap();
+        Ok(groups
+            .iter()
+            .filter(|g| g.status == SignalGroupStatus::Open)
+            .cloned()
+            .collect())
+    }
+
     async fn find_open_groups_by_dimensions(
         &self,
         vector: &Option<String>,

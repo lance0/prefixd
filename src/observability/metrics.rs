@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use prometheus::{
-    CounterVec, Encoder, GaugeVec, Histogram, HistogramVec, TextEncoder, register_counter_vec,
-    register_gauge_vec, register_histogram, register_histogram_vec,
+    Counter, CounterVec, Encoder, GaugeVec, Histogram, HistogramVec, TextEncoder, register_counter,
+    register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
 };
 
 // Event metrics
@@ -287,6 +287,17 @@ pub static CORROBORATOR_CACHE_SIZE: Lazy<GaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Counter of confidence-decay refresh sweeps performed by the
+/// reconciliation loop (one sample per tick, regardless of how many groups
+/// were refreshed). Useful as a heartbeat for ADR 022 plumbing.
+pub static SIGNAL_GROUP_DECAY_REFRESHES_TOTAL: Lazy<Counter> = Lazy::new(|| {
+    register_counter!(
+        "prefixd_signal_group_decay_refreshes_total",
+        "Number of reconcile-loop ticks that refreshed decayed confidence for open signal groups"
+    )
+    .unwrap()
+});
+
 /// Generate Prometheus metrics output
 pub fn gather_metrics() -> String {
     let encoder = TextEncoder::new();
@@ -329,6 +340,7 @@ pub fn init_metrics() {
     Lazy::force(&CORROBORATOR_ATTACHED_TOTAL);
     Lazy::force(&CORROBORATOR_EXPIRED_TOTAL);
     Lazy::force(&CORROBORATOR_CACHE_SIZE);
+    Lazy::force(&SIGNAL_GROUP_DECAY_REFRESHES_TOTAL);
 }
 
 /// Update database pool metrics from sqlx pool stats

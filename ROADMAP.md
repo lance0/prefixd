@@ -301,7 +301,7 @@ Example: FastNetMon says UDP flood at 0.6 confidence + router CPU spiking + host
 ### Confidence Model
 
 - [x] Derived confidence from traffic patterns
-- [ ] Confidence decay over time
+- [x] Confidence decay over time
 - [x] Per-playbook thresholds
 
 ---

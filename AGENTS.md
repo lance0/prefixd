@@ -122,7 +122,7 @@ tests/
 10. **Route-group auth guard** - Next.js `(dashboard)/layout.tsx` wraps all protected pages
 11. **Mode-aware auth** - `none`/`bearer`/`credentials`/`mtls` with role checks on protected endpoints
 
-See `docs/adr/` for all 19 Architecture Decision Records.
+See `docs/adr/` for all 22 Architecture Decision Records.
 
 ## API Endpoints
 
@@ -258,8 +258,8 @@ Completed:
 - Nginx reverse proxy (single-origin deployment)
 - ErrorBoundary wrapping all dashboard pages
 - Cross-entity navigation (command palette → detail pages, event↔mitigation linking, audit log → mitigations, clickable stat cards)
-- Multi-signal correlation engine with signal groups, Alertmanager/FastNetMon adapters, a generic JSONPath-driven webhook adapter (ADR 020), and corroborating-only signals from coarse telemetry (ADR 021)
-- 21 Architecture Decision Records
+- Multi-signal correlation engine with signal groups, Alertmanager/FastNetMon adapters, a generic JSONPath-driven webhook adapter (ADR 020), corroborating-only signals from coarse telemetry (ADR 021), and exponential confidence decay over time (ADR 022)
+- 22 Architecture Decision Records
 - CLI tool (prefixdctl) for all API operations
 - OpenAPI spec with utoipa annotations
 - 179 backend unit tests + 99 integration + 16 postgres tests (+ 17 ignored requiring GoBGP/Docker)

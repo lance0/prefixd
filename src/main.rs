@@ -104,7 +104,8 @@ async fn main() -> anyhow::Result<()> {
         state.is_dry_run(),
     )
     .with_ws_broadcast(state.ws_broadcast.clone())
-    .with_alerting(state.alerting.clone());
+    .with_alerting(state.alerting.clone())
+    .with_app_state(state.clone());
 
     let shutdown_rx = state.subscribe_shutdown();
     tokio::spawn(async move {

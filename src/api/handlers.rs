@@ -834,11 +834,16 @@ async fn handle_ban(
             .await
             .map_err(AppError)?;
 
-        let confidence_pairs: Vec<(Option<f32>, f32)> = group_events
+        let confidence_triples: Vec<crate::correlation::ConfidenceTriple> = group_events
             .iter()
-            .map(|ge| (ge.confidence, ge.source_weight))
+            .map(|ge| (ge.confidence, ge.source_weight, ge.ingested_at))
             .collect();
-        let derived_confidence = CorrelationEngine::compute_derived_confidence(&confidence_pairs);
+        let half_life = correlation_config.effective_decay_half_life(playbook_override);
+        let derived_confidence = CorrelationEngine::compute_derived_confidence_decayed(
+            &confidence_triples,
+            chrono::Utc::now(),
+            half_life,
+        );
 
         let source_names: Vec<String> = group_events
             .iter()
@@ -5553,11 +5558,6 @@ async fn recompute_group_aggregates(state: &Arc<AppState>, group_id: Uuid) -> Re
         .await
         .map_err(AppError)?;
 
-    let pairs: Vec<(Option<f32>, f32)> = events
-        .iter()
-        .map(|e| (e.confidence, e.source_weight))
-        .collect();
-    let derived = CorrelationEngine::compute_derived_confidence(&pairs);
     let sources: Vec<String> = events.iter().filter_map(|e| e.source.clone()).collect();
     let count = CorrelationEngine::count_distinct_sources(&sources);
 
@@ -5570,14 +5570,26 @@ async fn recompute_group_aggregates(state: &Arc<AppState>, group_id: Uuid) -> Re
     // corroboration_met → true on the corroborator path.
     let was_met = group.corroboration_met;
     let mut newly_met = false;
+    let correlation_config = state.correlation_config.read().await.clone();
+    let playbooks = state.playbooks.read().await.clone();
+    let resolved_playbook = group
+        .playbook_name
+        .as_deref()
+        .and_then(|name| playbooks.playbooks.iter().find(|p| p.name == name));
+    let playbook_override_for_decay = resolved_playbook.and_then(|p| p.correlation.as_ref());
+    let half_life = correlation_config.effective_decay_half_life(playbook_override_for_decay);
+    let triples: Vec<crate::correlation::ConfidenceTriple> = events
+        .iter()
+        .map(|e| (e.confidence, e.source_weight, e.ingested_at))
+        .collect();
+    let derived = CorrelationEngine::compute_derived_confidence_decayed(
+        &triples,
+        chrono::Utc::now(),
+        half_life,
+    );
+
     let new_met = if has_primary {
-        let correlation_config = state.correlation_config.read().await.clone();
-        let playbooks = state.playbooks.read().await.clone();
-        let resolved_playbook = group
-            .playbook_name
-            .as_deref()
-            .and_then(|name| playbooks.playbooks.iter().find(|p| p.name == name));
-        let override_ = resolved_playbook.and_then(|p| p.correlation.as_ref());
+        let override_ = playbook_override_for_decay;
         match (resolved_playbook, group.playbook_name.as_deref()) {
             (Some(_), _) => {
                 let met = CorrelationEngine::check_corroboration_with_primary(
@@ -5590,7 +5602,11 @@ async fn recompute_group_aggregates(state: &Arc<AppState>, group_id: Uuid) -> Re
                 if met && !was_met {
                     newly_met = true;
                 }
-                met
+                // ADR 022 one-shot semantics: corroboration_met is sticky
+                // once true. Decay can lower derived_confidence below the
+                // threshold but must not undo a mitigation decision that
+                // already triggered.
+                met || was_met
             }
             (None, Some(missing)) => {
                 tracing::debug!(
@@ -5607,8 +5623,9 @@ async fn recompute_group_aggregates(state: &Arc<AppState>, group_id: Uuid) -> Re
             }
         }
     } else {
-        // No primary event yet → invariant: corroboration cannot be met.
-        false
+        // No primary event yet → invariant: corroboration cannot be met
+        // unless it was already true (sticky).
+        was_met
     };
 
     if newly_met {

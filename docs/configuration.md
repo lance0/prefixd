@@ -284,6 +284,13 @@ correlation:
   # Global minimum derived confidence threshold (0.0-1.0).
   # A signal group must reach this threshold (in addition to min_sources) before triggering.
   confidence_threshold: 0.5
+
+  # Exponential half-life applied to per-event confidence contributions when
+  # computing derived_confidence. 0 disables decay (default). When set, an
+  # event's effective weight is multiplied by 0.5^(age_seconds / H), so
+  # older corroborating evidence smoothly loses influence. See ADR 022.
+  # Must satisfy 0 <= H <= 10 * window_seconds.
+  confidence_decay_half_life_seconds: 0
   
   # Default weight for sources not listed below
   default_weight: 1.0
@@ -307,6 +314,7 @@ correlation:
 | `window_seconds` | integer | `300` | Time window for grouping signals (seconds) |
 | `min_sources` | integer | `1` | Minimum distinct sources to trigger mitigation |
 | `confidence_threshold` | float | `0.5` | Minimum derived confidence to trigger |
+| `confidence_decay_half_life_seconds` | integer | `0` | Exponential half-life (seconds) for time-decaying per-event confidence contributions; 0 disables decay. Bounded by `10 × window_seconds`. See [ADR 022](adr/022-confidence-decay.md). |
 | `default_weight` | float | `1.0` | Weight for unknown/unconfigured sources |
 | `sources` | map | `{}` | Per-source weight and type configuration |
 
@@ -367,6 +375,7 @@ playbooks:
     correlation:
       min_sources: 2           # Require corroboration for UDP floods
       confidence_threshold: 0.7
+      confidence_decay_half_life_seconds: 60   # Faster decay for noisy vector
     steps:
       - action: police
         rate_bps: 5000000
@@ -379,6 +388,7 @@ When a playbook has no `correlation` override, the global defaults from `prefixd
 |----------------|------|-------------|
 | `min_sources` | integer | Override global min_sources for this playbook |
 | `confidence_threshold` | float | Override global confidence_threshold for this playbook |
+| `confidence_decay_half_life_seconds` | integer (optional) | Override global half-life. `0` explicitly disables decay for this playbook even when the global is non-zero; omit to inherit the global value. |
 
 #### Hot Reload
 
