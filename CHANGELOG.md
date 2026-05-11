@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-05-11
+
+### Changed
+
+- **Dependency bump bundle.** Bumps `hmac 0.12 → 0.13`, `sha2 0.10 → 0.11`, `clap 4.6.0 → 4.6.1`, `rand 0.10.0 → 0.10.1`. The `hmac`/`sha2` bumps are coupled (hmac 0.13 pulls digest 0.11, locking it to sha2 0.11) and required importing `hmac::KeyInit` explicitly in `src/correlation/webhook.rs` and `src/alerting/generic.rs` — `new_from_slice` moved off the `Mac` trait in 0.13. No runtime behavior change. Closes #106, #118, #119, #120.
+
+### Deferred
+
+- **`password-hash 0.5 → 0.6` (#116).** Not bumped. `argon2 0.6` is still RC (latest stable: 0.6.0-rc.8) and `argon2 0.5` (current stable) still depends on `password-hash 0.5`, so bumping `password-hash` alone would create a dual-version transitive with no security gain. Will revisit when argon2 0.6 stabilizes.
+
 ## [0.17.0] - 2026-04-29
 
 ### Added
@@ -897,7 +907,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/lance0/prefixd/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/lance0/prefixd/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/lance0/prefixd/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/lance0/prefixd/compare/v0.14.1...v0.15.0
