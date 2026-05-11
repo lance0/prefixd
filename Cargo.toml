@@ -60,8 +60,8 @@ thiserror = "2"
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+hmac = "0.13"
 hex = "0.4"
 subtle = "2"
 serde_json_path = "0.7"
@@ -73,7 +73,7 @@ urlencoding = "2"
 
 # OpenAPI
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
-rand = "0.10.0"
+rand = "0.10.1"
 
 [build-dependencies]
 tonic-build = "0.14"
