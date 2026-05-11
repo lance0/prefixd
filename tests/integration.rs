@@ -4906,7 +4906,7 @@ async fn test_webhook_hmac_accepts_correct_signature() {
 
     let body = r#"{"ip":"203.0.113.5","vector":"udp_flood"}"#;
     let mut mac =
-        <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(secret.as_bytes()).unwrap();
+        <hmac::Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(body.as_bytes());
     let sig = hex::encode(mac.finalize().into_bytes());
 
