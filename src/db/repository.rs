@@ -1147,6 +1147,21 @@ impl RepositoryTrait for Repository {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    async fn list_open_signal_groups(&self) -> Result<Vec<SignalGroup>> {
+        let rows: Vec<SignalGroupRow> = sqlx::query_as(
+            r#"
+            SELECT group_id, victim_ip, vector, created_at, window_expires_at,
+                   derived_confidence, source_count, status, corroboration_met,
+                   primary_dimensions, playbook_name
+            FROM signal_groups
+            WHERE status = 'open'
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
     async fn find_open_groups_by_dimensions(
         &self,
         vector: &Option<String>,

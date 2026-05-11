@@ -29,5 +29,6 @@ Format follows [Michael Nygard's template](https://cognitect.com/blog/2011/11/15
 | [019](019-signal-adapter-architecture.md) | Signal Adapter Architecture | Accepted | 2026-03-19 |
 | [020](020-generic-webhook-adapter.md) | Generic Webhook Adapter | Accepted | 2026-04-18 |
 | [021](021-corroborating-signals.md) | Corroborating Signals | Accepted | 2026-04-19 |
+| [022](022-confidence-decay.md) | Confidence Decay for Signal Groups | Accepted | 2026-05-11 |
 
 ADRs are numbered sequentially as written. Retroactive ADRs (009-013) were documented on 2026-02-18 but dated to when the decision was originally made.

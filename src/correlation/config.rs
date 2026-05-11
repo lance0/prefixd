@@ -39,6 +39,14 @@ pub struct CorrelationConfig {
     #[serde(default = "default_weight")]
     pub default_weight: f32,
 
+    /// Exponential half-life (in seconds) applied to the contribution of each
+    /// event's confidence to the group's `derived_confidence`. An event of
+    /// age `t` contributes `weight * 0.5^(t / half_life_seconds)`. A value of
+    /// `0` (the default) disables decay entirely — equivalent to v0.17.x
+    /// behavior. See ADR 022.
+    #[serde(default)]
+    pub confidence_decay_half_life_seconds: u32,
+
     /// Generic webhook adapters, each exposed at `POST /v1/signals/webhook/{name}`.
     /// See `docs/configuration.md` for the schema.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -126,7 +134,7 @@ impl Default for SourceConfig {
 /// Per-playbook correlation override. When present on a playbook, these values
 /// override the global `min_sources` and `confidence_threshold` for events
 /// matching that playbook.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PlaybookCorrelationOverride {
     /// Override for the minimum number of distinct sources.
     #[serde(default)]
@@ -135,6 +143,13 @@ pub struct PlaybookCorrelationOverride {
     /// Override for the minimum derived confidence threshold.
     #[serde(default)]
     pub confidence_threshold: Option<f32>,
+
+    /// Override for the exponential half-life applied to event confidence
+    /// contributions. `Some(0)` explicitly disables decay for this
+    /// playbook even when the global value is non-zero; `None` falls
+    /// through to the global setting. See ADR 022.
+    #[serde(default)]
+    pub confidence_decay_half_life_seconds: Option<u32>,
 }
 
 impl Default for CorrelationConfig {
@@ -146,6 +161,7 @@ impl Default for CorrelationConfig {
             confidence_threshold: default_confidence_threshold(),
             sources: HashMap::new(),
             default_weight: default_weight(),
+            confidence_decay_half_life_seconds: 0,
             webhook_adapters: Vec::new(),
         }
     }
@@ -213,6 +229,17 @@ impl CorrelationConfig {
         playbook_override
             .and_then(|o| o.confidence_threshold)
             .unwrap_or(self.confidence_threshold)
+    }
+
+    /// Resolve the effective confidence-decay half-life (seconds), using a
+    /// per-playbook override if provided. `0` means decay disabled.
+    pub fn effective_decay_half_life(
+        &self,
+        playbook_override: Option<&PlaybookCorrelationOverride>,
+    ) -> u32 {
+        playbook_override
+            .and_then(|o| o.confidence_decay_half_life_seconds)
+            .unwrap_or(self.confidence_decay_half_life_seconds)
     }
 
     /// Resolve confidence for a given source and action type using the per-source
@@ -318,6 +345,20 @@ impl CorrelationConfig {
 
         if self.default_weight < 0.0 {
             errors.push("default_weight must be >= 0.0".to_string());
+        }
+
+        // Sanity bound: a half-life shorter than 1s or much larger than the
+        // correlation window is almost certainly a config error. We allow
+        // up to 10x the window so operators can keep long-lived correlation
+        // groups with slower decay without tripping validation.
+        if self.confidence_decay_half_life_seconds > 0 {
+            if self.confidence_decay_half_life_seconds > self.window_seconds.saturating_mul(10) {
+                errors.push(format!(
+                    "confidence_decay_half_life_seconds ({}) must be <= 10 * window_seconds ({})",
+                    self.confidence_decay_half_life_seconds,
+                    self.window_seconds.saturating_mul(10)
+                ));
+            }
         }
 
         for (name, source) in &self.sources {
@@ -471,6 +512,7 @@ impl CorrelationConfig {
             "min_sources": self.min_sources,
             "confidence_threshold": self.confidence_threshold,
             "default_weight": self.default_weight,
+            "confidence_decay_half_life_seconds": self.confidence_decay_half_life_seconds,
             "sources": sources,
             "webhook_adapters": webhook_adapters,
         })
@@ -605,7 +647,7 @@ sources:
         };
         let override_ = PlaybookCorrelationOverride {
             min_sources: Some(3),
-            confidence_threshold: None,
+            ..Default::default()
         };
         assert_eq!(config.effective_min_sources(Some(&override_)), 3);
     }
@@ -618,7 +660,7 @@ sources:
         };
         let override_ = PlaybookCorrelationOverride {
             min_sources: None,
-            confidence_threshold: None,
+            ..Default::default()
         };
         assert_eq!(config.effective_min_sources(Some(&override_)), 2);
     }
@@ -639,8 +681,8 @@ sources:
             ..Default::default()
         };
         let override_ = PlaybookCorrelationOverride {
-            min_sources: None,
             confidence_threshold: Some(0.8),
+            ..Default::default()
         };
         assert_eq!(config.effective_confidence_threshold(Some(&override_)), 0.8);
     }
@@ -898,6 +940,91 @@ sources:
         assert_eq!(redacted["default_weight"], 1.0);
         assert_eq!(redacted["sources"]["fastnetmon"]["weight"], 2.0);
         assert_eq!(redacted["sources"]["fastnetmon"]["type"], "detector");
+    }
+
+    #[test]
+    fn test_decay_default_is_disabled() {
+        let cfg = CorrelationConfig::default();
+        assert_eq!(cfg.confidence_decay_half_life_seconds, 0);
+        assert_eq!(cfg.effective_decay_half_life(None), 0);
+    }
+
+    #[test]
+    fn test_decay_global_used_when_no_override() {
+        let cfg = CorrelationConfig {
+            confidence_decay_half_life_seconds: 90,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_decay_half_life(None), 90);
+    }
+
+    #[test]
+    fn test_decay_playbook_override_takes_precedence() {
+        let cfg = CorrelationConfig {
+            confidence_decay_half_life_seconds: 90,
+            ..Default::default()
+        };
+        let override_ = PlaybookCorrelationOverride {
+            confidence_decay_half_life_seconds: Some(15),
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_decay_half_life(Some(&override_)), 15);
+    }
+
+    #[test]
+    fn test_decay_playbook_override_can_disable() {
+        // Some(0) explicitly disables even when global is non-zero.
+        let cfg = CorrelationConfig {
+            confidence_decay_half_life_seconds: 90,
+            ..Default::default()
+        };
+        let override_ = PlaybookCorrelationOverride {
+            confidence_decay_half_life_seconds: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_decay_half_life(Some(&override_)), 0);
+    }
+
+    #[test]
+    fn test_decay_validation_rejects_excessive_half_life() {
+        // half_life > 10 * window is flagged as a likely misconfiguration.
+        let cfg = CorrelationConfig {
+            window_seconds: 60,
+            confidence_decay_half_life_seconds: 700,
+            ..Default::default()
+        };
+        let errs = cfg.validate();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("confidence_decay_half_life_seconds")),
+            "expected decay validation error, got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn test_decay_validation_accepts_within_bound() {
+        let cfg = CorrelationConfig {
+            window_seconds: 60,
+            confidence_decay_half_life_seconds: 600,
+            ..Default::default()
+        };
+        let errs = cfg.validate();
+        assert!(
+            errs.is_empty(),
+            "expected no errors at exact 10x bound, got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn test_decay_appears_in_redacted_view() {
+        let cfg = CorrelationConfig {
+            confidence_decay_half_life_seconds: 120,
+            ..Default::default()
+        };
+        let r = cfg.redacted();
+        assert_eq!(r["confidence_decay_half_life_seconds"], 120);
     }
 
     #[test]

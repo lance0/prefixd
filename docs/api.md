@@ -546,7 +546,7 @@ GET /v1/signal-groups/{id}
 Authorization: Bearer <token>
 ```
 
-Returns group metadata and all contributing events with source, confidence, and source weight.
+Returns group metadata and all contributing events with source, confidence, and source weight. When `correlation.confidence_decay_half_life_seconds` (or the playbook override) is non-zero, `derived_confidence` is computed with exponential time decay applied — older events contribute proportionally less weight. See [ADR 022](adr/022-confidence-decay.md). The `corroboration_met` flag is sticky: once set to `true` it never reverts to `false`, even if decay drives `derived_confidence` back under the threshold.
 
 **Response:**
 

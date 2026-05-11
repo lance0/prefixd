@@ -449,6 +449,14 @@ export default function SignalGroupDetailPage({
                 <div>
                   <p className="text-xs text-muted-foreground mb-1">
                     Derived Confidence
+                    {correlationConfig &&
+                    correlationConfig.confidence_decay_half_life_seconds &&
+                    correlationConfig.confidence_decay_half_life_seconds > 0 ? (
+                      <span className="ml-1 text-muted-foreground/70">
+                        (decayed, half-life{" "}
+                        {correlationConfig.confidence_decay_half_life_seconds}s)
+                      </span>
+                    ) : null}
                   </p>
                   <div className="flex items-center gap-2">
                     <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">

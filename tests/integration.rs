@@ -1914,7 +1914,7 @@ fn test_settings_with_correlation(
             m
         },
         default_weight: 1.0,
-        webhook_adapters: Vec::new(),
+        ..Default::default()
     };
     settings
 }
@@ -5707,6 +5707,7 @@ async fn test_late_corroborator_finalizes_with_playbook_override() {
             correlation: Some(PlaybookCorrelationOverride {
                 min_sources: Some(2),
                 confidence_threshold: Some(0.5),
+                ..Default::default()
             }),
             steps: vec![PlaybookStep {
                 action: PlaybookAction::Police,
@@ -5928,6 +5929,324 @@ async fn test_late_corroborator_skips_when_playbook_name_is_stale() {
     assert!(
         !group.corroboration_met,
         "stale playbook_name must keep the conservative no-flip behavior"
+    );
+}
+
+// ── ADR 022: confidence decay over time ─────────────────────────────────
+
+#[tokio::test]
+async fn test_decay_refresh_lowers_derived_confidence() {
+    // With two events of different ages and confidences, exponential decay
+    // shifts the weighted average toward the fresher event. We seed:
+    //   - Aged event: confidence=0.9, weight=1.0, age=~3 half-lives (180s)
+    //   - Fresh event: confidence=0.1, weight=1.0, age=~0
+    // Without decay: weighted avg = (0.9 + 0.1) / 2 = 0.5
+    // With decay (HL=60): aged effective weight = 1.0 * 0.5^3 = 0.125
+    //   ⇒ (0.9*0.125 + 0.1*1.0) / (0.125 + 1.0) = 0.2125 / 1.125 ≈ 0.189
+    use chrono::{Duration, Utc};
+    use prefixd::bgp::FlowSpecAnnouncer;
+    use prefixd::correlation::engine::{PrimaryDimensions, SignalGroup, SignalGroupStatus};
+    use prefixd::scheduler::ReconciliationLoop;
+    use uuid::Uuid;
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer: Arc<dyn FlowSpecAnnouncer> = Arc::new(MockAnnouncer::new());
+
+    let mut settings = test_settings_with_correlation(true, 1, 0.0);
+    settings.correlation.window_seconds = 3600;
+    settings.correlation.confidence_decay_half_life_seconds = 60;
+
+    let now = Utc::now();
+    let aged_ingested_at = now - Duration::seconds(180); // 3 half-lives
+
+    // Aged event: high confidence but old
+    let aged_id = Uuid::new_v4();
+    repo.insert_event(&prefixd::domain::AttackEvent {
+        event_id: aged_id,
+        external_event_id: None,
+        source: "detector_a".to_string(),
+        victim_ip: "203.0.113.10".to_string(),
+        event_timestamp: aged_ingested_at,
+        ingested_at: aged_ingested_at,
+        vector: "udp_flood".to_string(),
+        protocol: None,
+        bps: None,
+        pps: None,
+        top_dst_ports_json: "[]".to_string(),
+        confidence: Some(0.9),
+        action: "ban".to_string(),
+        raw_details: None,
+    })
+    .await
+    .unwrap();
+
+    // Fresh event: low confidence but recent
+    let fresh_id = Uuid::new_v4();
+    repo.insert_event(&prefixd::domain::AttackEvent {
+        event_id: fresh_id,
+        external_event_id: None,
+        source: "detector_b".to_string(),
+        victim_ip: "203.0.113.10".to_string(),
+        event_timestamp: now,
+        ingested_at: now,
+        vector: "udp_flood".to_string(),
+        protocol: None,
+        bps: None,
+        pps: None,
+        top_dst_ports_json: "[]".to_string(),
+        confidence: Some(0.1),
+        action: "ban".to_string(),
+        raw_details: None,
+    })
+    .await
+    .unwrap();
+
+    let group_id = Uuid::new_v4();
+    repo.insert_signal_group(&SignalGroup {
+        group_id,
+        victim_ip: "203.0.113.10".to_string(),
+        vector: "udp_flood".to_string(),
+        created_at: aged_ingested_at,
+        window_expires_at: now + Duration::seconds(1800),
+        derived_confidence: 0.5, // pre-decay weighted average
+        source_count: 2,
+        status: SignalGroupStatus::Open,
+        corroboration_met: false,
+        primary_dimensions: PrimaryDimensions::default(),
+        playbook_name: None,
+    })
+    .await
+    .unwrap();
+    repo.add_event_to_group(group_id, aged_id, 1.0)
+        .await
+        .unwrap();
+    repo.add_event_to_group(group_id, fresh_id, 1.0)
+        .await
+        .unwrap();
+
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        announcer.clone(),
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+
+    let reconciler = ReconciliationLoop::new(repo.clone(), announcer.clone(), 30, true)
+        .with_app_state(state.clone());
+    reconciler.reconcile().await.expect("reconcile");
+
+    let after = repo.get_signal_group(group_id).await.unwrap().unwrap();
+    // Decay should shift average toward the fresh low-confidence event.
+    // Expected ≈ 0.189, definitely < 0.5 (the undecayed average)
+    assert!(
+        after.derived_confidence < 0.35,
+        "expected decayed confidence < 0.35, got {}",
+        after.derived_confidence
+    );
+    assert!(
+        after.derived_confidence > 0.1,
+        "should not drop to floor of fresh event alone, got {}",
+        after.derived_confidence
+    );
+    assert_eq!(
+        after.source_count, 2,
+        "source_count unaffected by decay (ADR 022)"
+    );
+}
+
+#[tokio::test]
+async fn test_decay_one_shot_corroboration_no_flap_back() {
+    // corroboration_met=true is sticky: once set, decay-induced drops in
+    // derived_confidence below the configured threshold must NOT flip
+    // the flag back to false. We seed two events (one aged, one fresh)
+    // so decay actually shifts the weighted average.
+    use chrono::{Duration, Utc};
+    use prefixd::bgp::FlowSpecAnnouncer;
+    use prefixd::correlation::engine::{PrimaryDimensions, SignalGroup, SignalGroupStatus};
+    use prefixd::scheduler::ReconciliationLoop;
+    use uuid::Uuid;
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer: Arc<dyn FlowSpecAnnouncer> = Arc::new(MockAnnouncer::new());
+
+    let mut settings = test_settings_with_correlation(true, 1, 0.5);
+    settings.correlation.window_seconds = 3600;
+    settings.correlation.confidence_decay_half_life_seconds = 60;
+
+    let now = Utc::now();
+    let aged_ingested_at = now - Duration::seconds(300); // 5 half-lives
+
+    // Aged event (conf=0.1, weight=1.0)
+    let aged_id = Uuid::new_v4();
+    repo.insert_event(&prefixd::domain::AttackEvent {
+        event_id: aged_id,
+        external_event_id: None,
+        source: "detector_a".to_string(),
+        victim_ip: "203.0.113.10".to_string(),
+        event_timestamp: aged_ingested_at,
+        ingested_at: aged_ingested_at,
+        vector: "udp_flood".to_string(),
+        protocol: None,
+        bps: None,
+        pps: None,
+        top_dst_ports_json: "[]".to_string(),
+        confidence: Some(0.1),
+        action: "ban".to_string(),
+        raw_details: None,
+    })
+    .await
+    .unwrap();
+
+    // Fresh event (conf=0.1, weight=1.0)
+    let fresh_id = Uuid::new_v4();
+    repo.insert_event(&prefixd::domain::AttackEvent {
+        event_id: fresh_id,
+        external_event_id: None,
+        source: "detector_b".to_string(),
+        victim_ip: "203.0.113.10".to_string(),
+        event_timestamp: now,
+        ingested_at: now,
+        vector: "udp_flood".to_string(),
+        protocol: None,
+        bps: None,
+        pps: None,
+        top_dst_ports_json: "[]".to_string(),
+        confidence: Some(0.1),
+        action: "ban".to_string(),
+        raw_details: None,
+    })
+    .await
+    .unwrap();
+
+    let group_id = Uuid::new_v4();
+    repo.insert_signal_group(&SignalGroup {
+        group_id,
+        victim_ip: "203.0.113.10".to_string(),
+        vector: "udp_flood".to_string(),
+        created_at: aged_ingested_at,
+        window_expires_at: now + Duration::seconds(1800),
+        derived_confidence: 0.7, // was high when corroboration triggered
+        source_count: 2,
+        status: SignalGroupStatus::Open,
+        corroboration_met: true, // already triggered earlier
+        primary_dimensions: PrimaryDimensions::default(),
+        playbook_name: None,
+    })
+    .await
+    .unwrap();
+    repo.add_event_to_group(group_id, aged_id, 1.0)
+        .await
+        .unwrap();
+    repo.add_event_to_group(group_id, fresh_id, 1.0)
+        .await
+        .unwrap();
+
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        announcer.clone(),
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+
+    let reconciler = ReconciliationLoop::new(repo.clone(), announcer.clone(), 30, true)
+        .with_app_state(state.clone());
+    reconciler.reconcile().await.expect("reconcile");
+
+    let after = repo.get_signal_group(group_id).await.unwrap().unwrap();
+    // Both events have conf=0.1 so decayed average will be ~0.1 < 0.5 threshold
+    assert!(
+        after.derived_confidence < 0.5,
+        "decay should drop confidence below the 0.5 threshold (got {})",
+        after.derived_confidence
+    );
+    assert!(
+        after.corroboration_met,
+        "corroboration_met must stay true even when decay drops confidence below threshold"
+    );
+}
+
+#[tokio::test]
+async fn test_decay_disabled_does_not_touch_groups() {
+    // With half_life_seconds=0, refresh_decayed_confidence is a no-op
+    // even on groups with very old events.
+    use chrono::{Duration, Utc};
+    use prefixd::bgp::FlowSpecAnnouncer;
+    use prefixd::correlation::engine::{PrimaryDimensions, SignalGroup, SignalGroupStatus};
+    use prefixd::scheduler::ReconciliationLoop;
+    use uuid::Uuid;
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer: Arc<dyn FlowSpecAnnouncer> = Arc::new(MockAnnouncer::new());
+
+    let settings = test_settings_with_correlation(true, 1, 0.5);
+    assert_eq!(settings.correlation.confidence_decay_half_life_seconds, 0);
+
+    let now = Utc::now();
+    let event_id = Uuid::new_v4();
+    repo.insert_event(&prefixd::domain::AttackEvent {
+        event_id,
+        external_event_id: None,
+        source: "detector_a".to_string(),
+        victim_ip: "203.0.113.10".to_string(),
+        event_timestamp: now - Duration::seconds(3600),
+        ingested_at: now - Duration::seconds(3600),
+        vector: "udp_flood".to_string(),
+        protocol: None,
+        bps: None,
+        pps: None,
+        top_dst_ports_json: "[]".to_string(),
+        confidence: Some(0.85),
+        action: "ban".to_string(),
+        raw_details: None,
+    })
+    .await
+    .unwrap();
+
+    let group_id = Uuid::new_v4();
+    repo.insert_signal_group(&SignalGroup {
+        group_id,
+        victim_ip: "203.0.113.10".to_string(),
+        vector: "udp_flood".to_string(),
+        created_at: now - Duration::seconds(3600),
+        window_expires_at: now + Duration::seconds(7200),
+        derived_confidence: 0.85,
+        source_count: 1,
+        status: SignalGroupStatus::Open,
+        corroboration_met: false,
+        primary_dimensions: PrimaryDimensions::default(),
+        playbook_name: None,
+    })
+    .await
+    .unwrap();
+    repo.add_event_to_group(group_id, event_id, 1.0)
+        .await
+        .unwrap();
+
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        announcer.clone(),
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+
+    let reconciler = ReconciliationLoop::new(repo.clone(), announcer.clone(), 30, true)
+        .with_app_state(state.clone());
+    reconciler.reconcile().await.expect("reconcile");
+
+    let after = repo.get_signal_group(group_id).await.unwrap().unwrap();
+    assert!(
+        (after.derived_confidence - 0.85).abs() < 1e-3,
+        "decay disabled ⇒ derived_confidence unchanged; got {}",
+        after.derived_confidence
     );
 }
 

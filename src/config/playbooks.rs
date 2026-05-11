@@ -443,6 +443,7 @@ playbooks:
                 correlation: Some(PlaybookCorrelationOverride {
                     min_sources: Some(2),
                     confidence_threshold: Some(0.8),
+                    ..Default::default()
                 }),
                 steps: vec![PlaybookStep {
                     action: PlaybookAction::Police,

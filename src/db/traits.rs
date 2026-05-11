@@ -204,6 +204,11 @@ pub trait RepositoryTrait: Send + Sync {
     async fn count_open_groups(&self) -> Result<u32>;
     /// Find open signal groups whose window has expired (for expiry sweep).
     async fn find_expired_signal_groups(&self) -> Result<Vec<SignalGroup>>;
+    /// List currently open signal groups (status = 'open'). Used by the
+    /// reconcile loop's confidence-decay refresh path. No pagination —
+    /// callers should expect O(open_groups) results which in practice is
+    /// bounded by the corroboration window size.
+    async fn list_open_signal_groups(&self) -> Result<Vec<SignalGroup>>;
     /// Find the mitigation ID linked to a specific signal group (if any).
     async fn find_mitigation_id_by_signal_group(
         &self,
