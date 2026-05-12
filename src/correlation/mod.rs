@@ -5,6 +5,6 @@ pub mod webhook;
 pub use config::*;
 pub use engine::*;
 pub use webhook::{
-    CompiledAdapter, MapError, WebhookAdapter, WebhookAuth, WebhookFieldMap, is_valid_name,
-    map_payload, verify_hmac_sha256,
+    CompiledAdapter, CompiledTransform, MapError, WebhookAdapter, WebhookAuth, WebhookFieldMap,
+    WebhookTransform, is_valid_name, map_payload, verify_hmac_sha256,
 };

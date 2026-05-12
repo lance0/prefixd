@@ -280,7 +280,7 @@ Example: FastNetMon says UDP flood at 0.6 confidence + router CPU spiking + host
 - [x] FastNetMon webhook adapter (`POST /v1/signals/fastnetmon`) — classifies vectors from traffic breakdown, configurable confidence mapping
 - [x] Generic webhook adapter (`POST /v1/signals/webhook/{name}`) — operator-configured JSONPath mapping, HMAC/bearer/none auth, array batching via root_path (ADR 020)
 - [ ] Router telemetry adapter (JTI, gNMI)
-- [ ] Generic adapter transform functions (unit conversion, regex extract, computed fields)
+- [x] Generic adapter transform functions (unit conversion, regex extract, computed fields)
 
 ### Correlation Engine
 

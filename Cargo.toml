@@ -65,6 +65,7 @@ hmac = "0.13"
 hex = "0.4"
 subtle = "2"
 serde_json_path = "0.7"
+regex = "1"
 ipnet = { version = "2", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 async-trait = "0.1"

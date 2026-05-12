@@ -1082,6 +1082,7 @@ sources:
             default_vector: None,
             confidence_scale: None,
             source_id_prefix: None,
+            transforms: HashMap::new(),
         }
     }
 
