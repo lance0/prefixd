@@ -426,6 +426,20 @@ correlation:
       default_vector: unknown
       confidence_scale: 100               # divide extracted value by this
       source_id_prefix: "radware-"
+      transforms:                         # optional per-field transforms
+        bps:
+          type: unit_conversion           # Mbps -> bps
+          multiplier: 1000000
+        vector:
+          type: regex_extract             # pull "udp_flood" out of free-form text
+          pattern: "(\\w+)_flood"
+          group: 0                        # 0=whole match, 1+=capture group N
+        pps:
+          type: computed                  # derive pps from packets/second fields
+          paths:
+            - "$.metrics.packets"
+            - "$.metrics.duration_inv"
+          scale: 1.0
 ```
 
 **Adapter schema:**
@@ -449,6 +463,17 @@ correlation:
 | `default_vector` | no | string | Fallback when vector missing or not in map |
 | `confidence_scale` | no | float | Divisor (e.g. `100` for 0–100 scales) |
 | `source_id_prefix` | no | string | Prefix prepended to extracted `source_id` |
+| `transforms` | no | map | Per-field transforms applied post-extraction (see below) |
+
+**Field transforms.** Each entry in `transforms` maps a field name to a single transform. Only `bps`, `pps`, `confidence` (numeric) and `vector` (string) accept transforms; the daemon rejects the adapter at load time if a transform is attached to a different field or with the wrong shape.
+
+| `transforms.<field>.type` | Applies to | Other keys | Behavior |
+|---|---|---|---|
+| `unit_conversion` | `bps`, `pps`, `confidence` | `multiplier` (float, must be finite) | Multiplies the extracted value. Use for `Mbps→bps` (`1_000_000`), `kpps→pps` (`1000`), `%→ratio` (`0.01`). Missing values stay `None`. |
+| `regex_extract` | `vector` | `pattern` (string regex), `group` (int, default `0`) | Replaces the extracted string with `captures.get(group).as_str()`. No match ⇒ field is treated as missing and falls through to `vector_map` / `default_vector`. The regex is compiled once at config load. |
+| `computed` | `bps`, `pps`, `confidence` | `paths` (array of JSONPath), `scale` (float, default `1.0`) | Bypasses the field's primary `fields.<name>` JSONPath. Evaluates `scale * Π(extract(path_i))`. Any path that resolves to null or non-number ⇒ field is `None`. Useful for fields not directly present in the payload (e.g. derive `bps = packets × avg_size × 8`). |
+
+For `confidence`, the order of operations is: JSONPath extract → transform → `confidence_scale` divisor → clamp to `[0, 1]`.
 
 **Authentication:**
 

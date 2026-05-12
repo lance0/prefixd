@@ -4767,6 +4767,7 @@ fn basic_webhook_adapter(name: &str) -> prefixd::correlation::WebhookAdapter {
         default_vector: None,
         confidence_scale: None,
         source_id_prefix: None,
+        transforms: Default::default(),
     }
 }
 
@@ -4980,6 +4981,136 @@ async fn test_webhook_vector_map_and_scaling() {
     let (status, json) = post_webhook(&app, "scaled", body, &[]).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["processed"], 1);
+}
+
+#[tokio::test]
+async fn test_webhook_unit_conversion_transform_end_to_end() {
+    use prefixd::correlation::WebhookTransform;
+    let mut adapter = basic_webhook_adapter("megabit");
+    adapter.transforms.insert(
+        "bps".into(),
+        WebhookTransform::UnitConversion {
+            multiplier: 1_000_000.0,
+        },
+    );
+    let app = setup_app_with_webhooks(vec![adapter]).await;
+
+    // Detector reports bps=250 (intended Mbps); transform should yield 250M.
+    let body = r#"{
+        "id":"u1",
+        "ip":"203.0.113.5",
+        "vector":"udp_flood",
+        "bps":250,
+        "pps":1
+    }"#;
+    let (status, json) = post_webhook(&app, "megabit", body, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["processed"], 1);
+    // Verify the transform actually reshaped the bps value by inspecting the
+    // ingested event surfaced via the events API.
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri("/v1/events")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let events: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let arr = events["events"].as_array().expect("events array");
+    let found = arr
+        .iter()
+        .find(|e| e["victim_ip"] == "203.0.113.5")
+        .expect("ingested event");
+    assert_eq!(found["bps"], 250_000_000);
+}
+
+#[tokio::test]
+async fn test_webhook_regex_extract_transform_end_to_end() {
+    use prefixd::correlation::WebhookTransform;
+    let mut adapter = basic_webhook_adapter("regex");
+    adapter.fields.vector = Some("$.description".into());
+    adapter.default_vector = Some("unknown".into());
+    adapter.transforms.insert(
+        "vector".into(),
+        WebhookTransform::RegexExtract {
+            pattern: r"(\w+)_flood".into(),
+            group: 0,
+        },
+    );
+    let app = setup_app_with_webhooks(vec![adapter]).await;
+
+    let body = r#"{
+        "id":"r1",
+        "ip":"203.0.113.6",
+        "description":"Customer 12 hit by udp_flood at 50Gbps"
+    }"#;
+    let (status, json) = post_webhook(&app, "regex", body, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["processed"], 1);
+
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri("/v1/events")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let events: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let arr = events["events"].as_array().expect("events array");
+    let found = arr
+        .iter()
+        .find(|e| e["victim_ip"] == "203.0.113.6")
+        .expect("ingested event");
+    assert_eq!(found["vector"], "udp_flood");
+}
+
+#[tokio::test]
+async fn test_webhook_computed_transform_end_to_end() {
+    use prefixd::correlation::WebhookTransform;
+    let mut adapter = basic_webhook_adapter("computed");
+    adapter.fields.bps = None;
+    adapter.transforms.insert(
+        "bps".into(),
+        WebhookTransform::Computed {
+            paths: vec!["$.packets".into(), "$.avg_size".into()],
+            scale: 8.0,
+        },
+    );
+    let app = setup_app_with_webhooks(vec![adapter]).await;
+
+    let body = r#"{
+        "id":"c1",
+        "ip":"203.0.113.7",
+        "vector":"udp_flood",
+        "packets": 500000,
+        "avg_size": 1024,
+        "pps": 100
+    }"#;
+    let (status, json) = post_webhook(&app, "computed", body, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["processed"], 1);
+
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri("/v1/events")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let events: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let arr = events["events"].as_array().expect("events array");
+    let found = arr
+        .iter()
+        .find(|e| e["victim_ip"] == "203.0.113.7")
+        .expect("ingested event");
+    // 500_000 * 1024 * 8 = 4_096_000_000
+    assert_eq!(found["bps"], 4_096_000_000_i64);
 }
 
 // ── Corroborating signals (ADR 021) ─────────────────────────────────

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-05-11
+
+### Added
+
+- **Generic webhook adapter transforms.** Per-field transforms applied after JSONPath extraction in the generic webhook adapter (ADR 020). Three variants cover the common shapes:
+  - `unit_conversion` — multiply an extracted numeric value (`bps`, `pps`, `confidence`) by a constant. Useful for `Mbps→bps`, `kpps→pps`, percentage → ratio.
+  - `regex_extract` — pull a capture group out of an extracted `vector` string. Lets operators map free-form alert descriptions ("Detected: udp_flood at 250Gbps") onto prefixd vector names without writing a shim.
+  - `computed` — replace a numeric field's value with `scale * Π(extract(path_i))`. Lets operators derive fields not directly present in the payload (e.g. `bps = packets × avg_size × 8`).
+  - All transforms are validated at config load (regex compiles, multipliers are finite, transform shape matches field type) so misconfigurations fail fast on `POST /v1/config/reload` rather than silently producing zero events.
+  - 17 new tests (14 unit + 3 end-to-end integration) covering each variant, compile-time validation, type-mismatch rejection, missing-value passthrough, and interaction with the existing `confidence_scale` clamp pipeline.
+
 ## [0.18.0] - 2026-05-11
 
 ### Added
@@ -920,7 +931,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.18.1...HEAD
+[0.18.1]: https://github.com/lance0/prefixd/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/lance0/prefixd/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/lance0/prefixd/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/lance0/prefixd/compare/v0.16.0...v0.17.0
