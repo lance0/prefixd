@@ -21,6 +21,19 @@ impl Guardrails {
         quotas: QuotasConfig,
         timers: &TimersConfig,
     ) -> Self {
+        if !config.allow_src_prefix_match
+            || !config.allow_tcp_flags_match
+            || !config.allow_fragment_match
+            || !config.allow_packet_length_match
+        {
+            tracing::warn!(
+                allow_src_prefix = config.allow_src_prefix_match,
+                allow_tcp_flags = config.allow_tcp_flags_match,
+                allow_fragment = config.allow_fragment_match,
+                allow_packet_length = config.allow_packet_length_match,
+                "guardrail allow_* flags are configured but not yet enforced; FlowSpec match types are limited to dst_prefix+protocol+ports"
+            );
+        }
         let min_ttl = config.min_ttl_seconds.unwrap_or(timers.min_ttl_seconds);
         let max_ttl = config.max_ttl_seconds.unwrap_or(timers.max_ttl_seconds);
         Self {

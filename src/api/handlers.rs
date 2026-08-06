@@ -380,6 +380,7 @@ fn validate_cidr(prefix: &str) -> Result<(), PrefixdError> {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct CreateMitigationRequest {
     operator_id: String,
     reason: String,
@@ -392,14 +393,14 @@ pub struct CreateMitigationRequest {
     rate_bps: Option<u64>,
     ttl_seconds: u32,
 }
-
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct WithdrawRequest {
     operator_id: String,
     reason: String,
 }
-
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct AddSafelistRequest {
     operator_id: String,
     prefix: String,
@@ -540,7 +541,9 @@ async fn handle_unban(
     // Store the unban event
     let source = input.source.clone();
     let unban_event = AttackEvent::from_input(input);
-    let _ = state.repo.insert_event(&unban_event).await;
+    if let Err(e) = state.repo.insert_event(&unban_event).await {
+        tracing::warn!(error = %e, "failed to insert unban event");
+    }
 
     // Withdraw from BGP (if not dry-run)
     if !state.is_dry_run() {
@@ -968,6 +971,10 @@ async fn handle_ban(
         }
     };
 
+    // Serialize mitigation creation to prevent TOCTOU race between
+    // find_active_by_scope and insert_mitigation.
+    let _mitigation_guard = state.mitigation_lock.lock().await;
+
     // Check for existing mitigation with same scope
     let scope_hash = intent.match_criteria.compute_scope_hash();
     if let Ok(Some(mut existing)) = state
@@ -1006,7 +1013,6 @@ async fn handle_ban(
         ));
     }
 
-    // Validate guardrails
     let guardrails = Guardrails::with_timers(
         state.settings.guardrails.clone(),
         state.settings.quotas.clone(),
@@ -1017,7 +1023,7 @@ async fn handle_ban(
         .repo
         .is_safelisted(&event.victim_ip)
         .await
-        .unwrap_or(false);
+        .map_err(AppError)?;
 
     if let Err(e) = guardrails
         .validate(&intent, state.repo.as_ref(), is_safelisted)
@@ -1080,11 +1086,12 @@ async fn handle_ban(
         .with_label_values(&[&mitigation.action_type.to_string(), &state.settings.pop])
         .inc();
 
-    // Resolve signal group to 'resolved' now that mitigation is confirmed
     if let Some(group_id) = signal_group_id {
         if let Ok(Some(mut group)) = state.repo.get_signal_group(group_id).await {
             group.status = crate::correlation::SignalGroupStatus::Resolved;
-            let _ = state.repo.update_signal_group(&group).await;
+            if let Err(e) = state.repo.update_signal_group(&group).await {
+                tracing::warn!(error = %e, group_id = %group.group_id, "failed to mark signal group resolved");
+            }
         }
     }
 
@@ -1203,7 +1210,8 @@ pub async fn list_audit(
     Query(query): Query<CursorQuery>,
 ) -> Result<Json<AuditListResponse>, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    use crate::domain::OperatorRole;
+    let _operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
 
     let limit = clamp_limit(query.limit.unwrap_or(100));
     let cursor = query.cursor.as_deref().and_then(decode_cursor);
@@ -1456,7 +1464,9 @@ pub async fn create_mitigation(
 ) -> Result<impl IntoResponse, StatusCode> {
     // Check auth first
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    use crate::domain::OperatorRole;
+    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
+    let operator_id = operator.username.clone();
 
     // Validate input
     if let Err(e) = validate_ip(&req.victim_ip) {
@@ -1465,7 +1475,7 @@ pub async fn create_mitigation(
     if let Err(e) = validate_string_len(&req.reason, "reason", MAX_STRING_LEN) {
         return Ok(AppError(e).into_response());
     }
-    if let Err(e) = validate_string_len(&req.operator_id, "operator_id", MAX_USERNAME_LEN) {
+    if let Err(e) = validate_string_len(&operator_id, "operator_id", MAX_USERNAME_LEN) {
         return Ok(AppError(e).into_response());
     }
 
@@ -1509,14 +1519,14 @@ pub async fn create_mitigation(
     let inventory = state.inventory.read().await;
     let customer_id = inventory.lookup_ip(&req.victim_ip).map(|c| c.customer_id);
     drop(inventory);
-
+    let prefix_len = if req.victim_ip.contains(':') { 128 } else { 32 };
     let intent = MitigationIntent {
         event_id: Uuid::new_v4(),
         customer_id,
         service_id: None,
         pop: state.settings.pop.clone(),
         match_criteria: MatchCriteria {
-            dst_prefix: format!("{}/32", req.victim_ip),
+            dst_prefix: format!("{}/{}", req.victim_ip, prefix_len),
             protocol,
             dst_ports: req.dst_ports,
         },
@@ -1534,11 +1544,10 @@ pub async fn create_mitigation(
         state.settings.quotas.clone(),
         &state.settings.timers,
     );
-    let is_safelisted = state
-        .repo
-        .is_safelisted(&req.victim_ip)
-        .await
-        .unwrap_or(false);
+    let is_safelisted = match state.repo.is_safelisted(&req.victim_ip).await {
+        Ok(v) => v,
+        Err(e) => return Ok(AppError(e).into_response()),
+    };
     if let Err(e) = guardrails
         .validate(&intent, state.repo.as_ref(), is_safelisted)
         .await
@@ -1600,11 +1609,11 @@ pub async fn withdraw_mitigation(
 ) -> Result<impl IntoResponse, StatusCode> {
     // Check auth
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    use crate::domain::OperatorRole;
+    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
+    let operator_id = operator.username;
 
-    if req.operator_id.is_empty()
-        || validate_string_len(&req.operator_id, "operator_id", MAX_USERNAME_LEN).is_err()
-    {
+    if validate_string_len(&operator_id, "operator_id", MAX_USERNAME_LEN).is_err() {
         return Err(StatusCode::BAD_REQUEST);
     }
     if validate_string_len(&req.reason, "reason", MAX_STRING_LEN).is_err() {
@@ -1640,7 +1649,7 @@ pub async fn withdraw_mitigation(
     }
 
     let action_type_str = mitigation.action_type.to_string();
-    mitigation.withdraw(Some(format!("{}: {}", req.operator_id, req.reason)));
+    mitigation.withdraw(Some(format!("{}: {}", operator_id, req.reason)));
     state
         .repo
         .update_mitigation(&mitigation)
@@ -1670,7 +1679,7 @@ pub async fn withdraw_mitigation(
 
     tracing::info!(
         mitigation_id = %mitigation.mitigation_id,
-        operator = %req.operator_id,
+        operator = %operator_id,
         "mitigation withdrawn"
     );
 
@@ -1680,6 +1689,7 @@ pub async fn withdraw_mitigation(
 const MAX_BULK_WITHDRAW: usize = 100;
 
 #[derive(Deserialize, ToSchema)]
+#[allow(dead_code)]
 pub struct BulkWithdrawRequest {
     mitigation_ids: Vec<Uuid>,
     operator_id: String,
@@ -1717,14 +1727,14 @@ pub async fn bulk_withdraw_mitigations(
     Json(req): Json<BulkWithdrawRequest>,
 ) -> Result<Json<BulkWithdrawResponse>, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    use crate::domain::OperatorRole;
+    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
+    let operator_id = operator.username;
 
     if req.mitigation_ids.is_empty() || req.mitigation_ids.len() > MAX_BULK_WITHDRAW {
         return Err(StatusCode::BAD_REQUEST);
     }
-    if req.operator_id.is_empty()
-        || validate_string_len(&req.operator_id, "operator_id", MAX_USERNAME_LEN).is_err()
-    {
+    if validate_string_len(&operator_id, "operator_id", MAX_USERNAME_LEN).is_err() {
         return Err(StatusCode::BAD_REQUEST);
     }
     if validate_string_len(&req.reason, "reason", MAX_STRING_LEN).is_err() {
@@ -1784,7 +1794,7 @@ pub async fn bulk_withdraw_mitigations(
             }
         }
 
-        mitigation.withdraw(Some(format!("{}: {}", req.operator_id, req.reason)));
+        mitigation.withdraw(Some(format!("{}: {}", operator_id, req.reason)));
         if let Err(e) = state.repo.update_mitigation(&mitigation).await {
             tracing::error!(error = %e, mitigation_id = %id, "DB update failed in bulk withdraw");
             failed += 1;
@@ -1817,7 +1827,7 @@ pub async fn bulk_withdraw_mitigations(
     }
 
     tracing::info!(
-        operator = %req.operator_id,
+        operator = %operator_id,
         withdrawn = withdrawn,
         failed = failed,
         total = req.mitigation_ids.len(),
@@ -1834,6 +1844,7 @@ pub async fn bulk_withdraw_mitigations(
 const MAX_BULK_ACKNOWLEDGE: usize = 100;
 
 #[derive(Deserialize, ToSchema)]
+#[allow(dead_code)]
 pub struct BulkAcknowledgeRequest {
     mitigation_ids: Vec<Uuid>,
     operator_id: String,
@@ -1871,20 +1882,20 @@ pub async fn bulk_acknowledge_mitigations(
     Json(req): Json<BulkAcknowledgeRequest>,
 ) -> Result<Json<BulkAcknowledgeResponse>, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    use crate::domain::OperatorRole;
+    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
+    let operator_id = operator.username;
 
     if req.mitigation_ids.is_empty() || req.mitigation_ids.len() > MAX_BULK_ACKNOWLEDGE {
         return Err(StatusCode::BAD_REQUEST);
     }
-    if req.operator_id.is_empty()
-        || validate_string_len(&req.operator_id, "operator_id", MAX_USERNAME_LEN).is_err()
-    {
+    if validate_string_len(&operator_id, "operator_id", MAX_USERNAME_LEN).is_err() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
     let acked_ids = state
         .repo
-        .acknowledge_mitigations(&req.mitigation_ids, &req.operator_id)
+        .acknowledge_mitigations(&req.mitigation_ids, &operator_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -1909,7 +1920,7 @@ pub async fn bulk_acknowledge_mitigations(
     let failed = req.mitigation_ids.len() as u32 - acknowledged;
 
     tracing::info!(
-        operator = %req.operator_id,
+        operator = %operator_id,
         acknowledged = acknowledged,
         failed = failed,
         total = req.mitigation_ids.len(),
@@ -2090,10 +2101,12 @@ pub async fn add_safelist(
     Json(req): Json<AddSafelistRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    use crate::domain::OperatorRole;
+    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    let operator_id = operator.username;
 
     validate_cidr(&req.prefix).map_err(|_| StatusCode::BAD_REQUEST)?;
-    validate_string_len(&req.operator_id, "operator_id", MAX_USERNAME_LEN)
+    validate_string_len(&operator_id, "operator_id", MAX_USERNAME_LEN)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     if let Some(ref reason) = req.reason {
         validate_string_len(reason, "reason", MAX_STRING_LEN)
@@ -2102,11 +2115,11 @@ pub async fn add_safelist(
 
     state
         .repo
-        .insert_safelist(&req.prefix, &req.operator_id, req.reason.as_deref())
+        .insert_safelist(&req.prefix, &operator_id, req.reason.as_deref())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    tracing::info!(prefix = %req.prefix, operator = %req.operator_id, "safelist entry added");
+    tracing::info!(prefix = %req.prefix, operator = %operator_id, "safelist entry added");
     Ok(StatusCode::CREATED)
 }
 
@@ -2117,7 +2130,8 @@ pub async fn remove_safelist(
     Path(prefix): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    use crate::domain::OperatorRole;
+    let _operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
 
     let removed = state
         .repo
@@ -2259,7 +2273,8 @@ pub async fn reload_config(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    use crate::domain::OperatorRole;
+    let _operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
 
     match state.reload_config().await {
         Ok(reloaded) => {
@@ -2498,6 +2513,7 @@ pub struct CreateOperatorRequest {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ChangePasswordRequest {
+    pub current_password: String,
     pub new_password: String,
 }
 
@@ -2711,7 +2727,7 @@ pub async fn change_password(
     use super::auth::require_role;
     use crate::domain::OperatorRole;
     use argon2::{
-        Argon2, PasswordHasher,
+        Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
         password_hash::{SaltString, rand_core::OsRng},
     };
 
@@ -2739,6 +2755,18 @@ pub async fn change_password(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Verify current password
+    let parsed_hash = match PasswordHash::new(&target.password_hash) {
+        Ok(h) => h,
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    if Argon2::default()
+        .verify_password(req.current_password.as_bytes(), &parsed_hash)
+        .is_err()
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     // Hash new password
     let salt = SaltString::generate(&mut OsRng);

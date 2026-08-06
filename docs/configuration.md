@@ -177,7 +177,15 @@ guardrails:
   # TTL bounds (optional overrides; if omitted, uses timers.min/max_ttl_seconds)
   min_ttl_seconds: 30
   max_ttl_seconds: 1800
+  
+  # FlowSpec match-type toggles (all default false)
+  allow_src_prefix_match: false
+  allow_tcp_flags_match: false
+  allow_fragment_match: false
+  allow_packet_length_match: false
 ```
+
+> **NOTE:** `allow_src_prefix_match`, `allow_tcp_flags_match`, `allow_fragment_match`, and `allow_packet_length_match` are parsed but not yet enforced. FlowSpec match types are currently limited to dst_prefix + protocol + ports.
 
 ### Quotas
 
@@ -226,12 +234,15 @@ timers:
 escalation:
   # Enable automatic escalation (police → discard)
   enabled: true
-  
+
   # Minimum time before escalation eligible
   min_persistence_seconds: 120
-  
+
   # Minimum confidence for escalation
   min_confidence: 0.7
+
+  # Maximum total duration for escalated mitigations (seconds, default: 1800)
+  max_escalated_duration_seconds: 1800
 ```
 
 ### Observability
@@ -589,6 +600,8 @@ assets:
     range_end: "203.0.113.110"  # 11 IPs
 ```
 
+> **NOTE:** This field is not yet implemented and will be silently ignored if specified.
+
 ### Policy Profiles
 
 | Profile | Thresholds | Escalation | TTLs |
@@ -628,6 +641,8 @@ match:
   protocol: udp        # Optional: protocol filter
 ```
 
+> **NOTE:** `source` and `protocol` are not yet implemented and will be silently ignored if specified. Only `vector` is currently used for playbook matching.
+
 ### Actions
 
 | Action | Parameters | Description |
@@ -660,6 +675,8 @@ steps:
 ### Default Playbook
 
 Fallback when no playbook matches:
+
+> **NOTE:** This field is not yet implemented and will be silently ignored if specified. Fallback behavior is handled by the built-in `unknown` playbook match.
 
 ```yaml
 default_playbook:
@@ -704,14 +721,14 @@ playbooks:
   # Amplification attacks: police only
   - name: dns_amp
     match:
-      vector: dns_amplification
+      vector: udp_flood
     steps:
       - action: police
         rate_bps: 50000000
         ttl_seconds: 120
 
   # Conservative fallback
-  - name: unknown
+  - name: unknown_conservative
     match:
       vector: unknown
     steps:

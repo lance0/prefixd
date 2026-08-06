@@ -502,6 +502,7 @@ impl CorrelationConfig {
                     "default_vector": a.default_vector,
                     "confidence_scale": a.confidence_scale,
                     "source_id_prefix": a.source_id_prefix,
+                    "transforms": a.transforms,
                 })
             })
             .collect();

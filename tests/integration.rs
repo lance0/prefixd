@@ -6552,3 +6552,805 @@ async fn test_cache_listing_endpoint_source_filter_scopes_aggregates() {
     assert_eq!(by_source[0]["source"], "pop-utilization");
     assert_eq!(by_source[0]["count"], 1);
 }
+
+// ==========================================================================
+// Integration tests for untested API endpoints
+// ==========================================================================
+
+// ─── Operators CRUD ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_list_operators() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/operators")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 0);
+    assert!(json["operators"].is_array());
+}
+
+#[tokio::test]
+async fn test_create_operator() {
+    let app = setup_app().await;
+
+    let body = serde_json::json!({
+        "username": "newadmin",
+        "password": "supersecret",
+        "role": "admin"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/operators")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let resp_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+    assert_eq!(json["username"], "newadmin");
+    assert_eq!(json["role"], "admin");
+}
+
+#[tokio::test]
+async fn test_create_operator_duplicate() {
+    let app = setup_app().await;
+
+    let body = serde_json::json!({
+        "username": "dupadmin",
+        "password": "supersecret",
+        "role": "admin"
+    });
+
+    // First create succeeds
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/operators")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Second create with same username fails with 409
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/operators")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn test_delete_operator() {
+    let app = setup_app().await;
+
+    // Create an operator to delete
+    let create_body = serde_json::json!({
+        "username": "delete_me",
+        "password": "supersecret",
+        "role": "admin"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/operators")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let resp_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+    let operator_id = json["operator_id"].as_str().unwrap();
+
+    // Delete the operator
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/operators/{}", operator_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn test_delete_operator_not_found() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/v1/operators/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_change_password() {
+    let app = setup_app().await;
+
+    // Create an operator
+    let create_body = serde_json::json!({
+        "username": "pwd_user",
+        "password": "supersecret",
+        "role": "admin"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/operators")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let resp_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+    let operator_id = json["operator_id"].as_str().unwrap();
+
+    // Change password
+    let pwd_body = serde_json::json!({
+        "current_password": "supersecret",
+        "new_password": "newsupersecret"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/operators/{}/password", operator_id))
+                .header("content-type", "application/json")
+                .body(Body::from(pwd_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+// ─── Safelist CRUD ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_list_safelist() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/safelist")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json.is_array());
+}
+
+#[tokio::test]
+async fn test_add_safelist() {
+    let app = setup_app().await;
+
+    let body = serde_json::json!({
+        "operator_id": "test_operator",
+        "prefix": "198.51.100.0/24",
+        "reason": "test safelist"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/safelist")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn test_add_safelist_invalid_prefix() {
+    let app = setup_app().await;
+
+    let body = serde_json::json!({
+        "operator_id": "test_operator",
+        "prefix": "not-a-valid-cidr"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/safelist")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_remove_safelist() {
+    let app = setup_app().await;
+
+    // Add a safelist entry first
+    let add_body = serde_json::json!({
+        "operator_id": "test_operator",
+        "prefix": "198.51.100.1"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/safelist")
+                .header("content-type", "application/json")
+                .body(Body::from(add_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Remove it
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/v1/safelist/198.51.100.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn test_remove_safelist_not_found() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/v1/safelist/198.51.100.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// ─── Manual mitigate ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_create_mitigation() {
+    let app = setup_app().await;
+
+    let body = serde_json::json!({
+        "operator_id": "test_operator",
+        "reason": "manual mitigation",
+        "victim_ip": "203.0.113.10",
+        "protocol": "udp",
+        "dst_ports": [53],
+        "action": "discard",
+        "ttl_seconds": 120
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mitigations")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn test_create_mitigation_safelisted() {
+    let app = setup_app().await;
+
+    // Safelist the victim IP first
+    let safelist_body = serde_json::json!({
+        "operator_id": "test_operator",
+        "prefix": "203.0.113.10/32"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/safelist")
+                .header("content-type", "application/json")
+                .body(Body::from(safelist_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Attempt to mitigate the safelisted IP
+    let body = serde_json::json!({
+        "operator_id": "test_operator",
+        "reason": "manual mitigation",
+        "victim_ip": "203.0.113.10",
+        "protocol": "udp",
+        "dst_ports": [53],
+        "action": "discard",
+        "ttl_seconds": 120
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mitigations")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn test_create_mitigation_invalid_ip() {
+    let app = setup_app().await;
+
+    let body = serde_json::json!({
+        "operator_id": "test_operator",
+        "reason": "manual mitigation",
+        "victim_ip": "not-an-ip",
+        "protocol": "udp",
+        "action": "discard",
+        "ttl_seconds": 120
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mitigations")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_create_mitigation_invalid_protocol() {
+    let app = setup_app().await;
+
+    let body = serde_json::json!({
+        "operator_id": "test_operator",
+        "reason": "manual mitigation",
+        "victim_ip": "203.0.113.10",
+        "protocol": "gre",
+        "action": "discard",
+        "ttl_seconds": 120
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mitigations")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_create_mitigation_police_no_rate() {
+    let app = setup_app().await;
+
+    let body = serde_json::json!({
+        "operator_id": "test_operator",
+        "reason": "manual mitigation",
+        "victim_ip": "203.0.113.10",
+        "protocol": "udp",
+        "action": "police",
+        "ttl_seconds": 120
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mitigations")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ─── Audit log ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_list_audit() {
+    let app = setup_app().await;
+
+    // Ingest an event to generate an audit entry
+    let event_json = r#"{
+        "timestamp": "2026-01-16T14:00:00Z",
+        "source": "test",
+        "victim_ip": "203.0.113.10",
+        "vector": "udp_flood",
+        "pps": 50000
+    }"#;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event_json))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/audit")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["count"].as_u64().is_some() || json["entries"].is_array());
+}
+
+#[tokio::test]
+async fn test_list_audit_empty() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/audit")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 0);
+    assert_eq!(json["entries"].as_array().unwrap().len(), 0);
+}
+
+// ─── Stats ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_get_stats() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["total_active"].is_number());
+    assert!(json["total_mitigations"].is_number());
+    assert!(json["total_events"].is_number());
+    assert!(json["pops"].is_array());
+}
+
+// ─── Auth ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_get_me() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/auth/me")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Auth mode is None, but get_me uses auth_session.user directly (no
+    // require_auth). With no session, expect 401.
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_logout() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/logout")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+// ─── Single mitigation withdraw ────────────────────────────────────────
+
+#[tokio::test]
+async fn test_withdraw_single_mitigation() {
+    let app = setup_app().await;
+
+    // Ingest an event to create a mitigation
+    let event_json = r#"{
+        "timestamp": "2026-01-16T14:00:00Z",
+        "source": "test",
+        "victim_ip": "203.0.113.10",
+        "vector": "udp_flood",
+        "pps": 50000
+    }"#;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event_json))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    // Get the mitigation ID
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/mitigations")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let mitigations = json["mitigations"].as_array().unwrap();
+    assert!(!mitigations.is_empty());
+    let mitigation_id = mitigations[0]["mitigation_id"].as_str().unwrap();
+
+    // Withdraw it
+    let withdraw_body = serde_json::json!({
+        "operator_id": "test_operator",
+        "reason": "manual withdraw"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/mitigations/{}/withdraw", mitigation_id))
+                .header("content-type", "application/json")
+                .body(Body::from(withdraw_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_withdraw_nonexistent_mitigation() {
+    let app = setup_app().await;
+
+    let withdraw_body = serde_json::json!({
+        "operator_id": "test_operator",
+        "reason": "withdraw nonexistent"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mitigations/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/withdraw")
+                .header("content-type", "application/json")
+                .body(Body::from(withdraw_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// ─── Event ingestion edge cases ────────────────────────────────────────
+
+#[tokio::test]
+async fn test_ingest_event_malformed_json() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from("{ this is not valid json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_ingest_event_missing_victim_ip() {
+    let app = setup_app().await;
+
+    let event_json = r#"{
+        "timestamp": "2026-01-16T14:00:00Z",
+        "source": "test",
+        "vector": "udp_flood",
+        "pps": 50000
+    }"#;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event_json))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn test_ingest_event_unknown_vector() {
+    let app = setup_app().await;
+
+    // "unknown" is a valid AttackVector variant (deserializes) but matches
+    // no playbook, so the event is accepted with status accepted_no_playbook.
+    let event_json = r#"{
+        "timestamp": "2026-01-16T14:00:00Z",
+        "source": "test",
+        "victim_ip": "203.0.113.10",
+        "vector": "unknown",
+        "pps": 50000
+    }"#;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event_json))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "accepted_no_playbook");
+    assert!(json["mitigation_id"].is_null());
+}

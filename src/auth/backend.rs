@@ -1,13 +1,25 @@
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum_login::{AuthUser, AuthnBackend, UserId};
 use serde::Deserialize;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use uuid::Uuid;
 
 use crate::db::RepositoryTrait;
 use crate::domain::Operator;
 
-/// Credentials for login
+static DUMMY_HASH: LazyLock<String> = LazyLock::new(|| {
+    Argon2::default()
+        .hash_password(
+            b"dummy-password-not-a-real-password",
+            &argon2::password_hash::SaltString::generate(
+                &mut argon2::password_hash::rand_core::OsRng,
+            ),
+        )
+        .map(|h| h.to_string())
+        .unwrap_or_default()
+});
+
 #[derive(Clone, Deserialize)]
 pub struct Credentials {
     pub username: String,
@@ -57,6 +69,11 @@ impl AuthnBackend for AuthBackend {
         let operator = match self.repo.get_operator_by_username(&creds.username).await {
             Ok(Some(op)) => op,
             Ok(None) => {
+                // Run dummy Argon2 verify to prevent timing-based username enumeration
+                if let Ok(dummy_hash) = PasswordHash::new(&DUMMY_HASH) {
+                    let _ =
+                        Argon2::default().verify_password(creds.password.as_bytes(), &dummy_hash);
+                }
                 tracing::debug!(username = %creds.username, "operator not found");
                 return Ok(None);
             }

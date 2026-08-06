@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback, useMemo, createContext, useContext, type ReactNode } from "react"
+import { useRouter } from "next/navigation"
 import { type Operator, type LoginRequest, login as apiLogin, logout as apiLogout, getCurrentUser } from "@/lib/auth"
 
 interface AuthContextValue {
@@ -17,7 +18,7 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [operator, setOperator] = useState<Operator | null>(null)
   const [isLoading, setIsLoading] = useState(true)
-
+  const router = useRouter()
   const refresh = useCallback(async () => {
     try {
       const user = await getCurrentUser()
@@ -33,10 +34,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Clear operator on 401 from any API call (session expired)
   useEffect(() => {
-    const handleAuthExpired = () => setOperator(null)
+    const handleAuthExpired = () => {
+      setOperator(null)
+      router.push("/login")
+    }
     window.addEventListener("prefixd:auth-expired", handleAuthExpired)
     return () => window.removeEventListener("prefixd:auth-expired", handleAuthExpired)
-  }, [])
+  }, [router])
 
   const login = useCallback(async (credentials: LoginRequest) => {
     const user = await apiLogin(credentials)

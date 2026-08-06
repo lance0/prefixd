@@ -232,12 +232,13 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
         bulkWithdrawReason || "Bulk withdrawal",
         "dashboard"
       )
-      setBulkWithdrawOpen(false)
       setBulkWithdrawReason("")
       setSelectedIds(new Set())
       mutate()
       if (result.failed > 0) {
         setBulkWithdrawError(`${result.withdrawn} withdrawn, ${result.failed} failed`)
+      } else {
+        setBulkWithdrawOpen(false)
       }
     } catch (e) {
       setBulkWithdrawError(e instanceof Error ? e.message : "Bulk withdraw failed")

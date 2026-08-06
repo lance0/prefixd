@@ -1652,6 +1652,105 @@ Requires admin role.
 }
 ```
 
+### Correlation Config
+
+```http
+GET /v1/config/correlation
+Authorization: Bearer <token>
+```
+
+Returns the correlation engine configuration with secrets redacted. See the [Correlation](configuration.md#correlation) section for field semantics.
+
+**Response:**
+
+```json
+{
+  "config": {
+    "enabled": true,
+    "window_seconds": 300,
+    "min_sources": 1,
+    "confidence_threshold": 0.5,
+    "default_weight": 1.0,
+    "confidence_decay_half_life_seconds": 0,
+    "sources": {
+      "fastnetmon": {
+        "weight": 1.0,
+        "type": "detector",
+        "confidence_mapping": {},
+        "mode": "primary",
+        "match_dimensions": []
+      }
+    },
+    "webhook_adapters": [
+      {
+        "name": "radware",
+        "description": "Radware DefensePro",
+        "enabled": true,
+        "auth": {
+          "type": "hmac",
+          "secret_env": "RADWARE_WEBHOOK_SECRET",
+          "header": "X-Signature-SHA256",
+          "algorithm": "sha256"
+        },
+        "root_path": null,
+        "fields": {
+          "victim_ip": "$.target.ip",
+          "vector": "$.alert_type"
+        },
+        "vector_map": {},
+        "default_vector": "unknown",
+        "confidence_scale": null,
+        "source_id_prefix": null,
+        "transforms": {}
+      }
+    ]
+  },
+  "loaded_at": "2026-02-22T21:00:00Z"
+}
+```
+
+HMAC `secret_env` values are returned as-is (they name an environment variable, not a secret). No raw secret values are exposed.
+
+### Update Correlation Config
+
+```http
+PUT /v1/config/correlation
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "enabled": true,
+  "window_seconds": 300,
+  "min_sources": 2,
+  "confidence_threshold": 0.7,
+  "default_weight": 1.0,
+  "sources": {
+    "fastnetmon": { "weight": 1.0, "type": "detector", "mode": "primary" }
+  }
+}
+```
+
+**Admin only.** Validates the config, writes it to `correlation.yaml` (with `.bak` backup), and hot-reloads the in-memory correlation engine. Returns the updated config with secrets redacted.
+
+Validation rules (rejected with 400 on failure):
+- `window_seconds` must be > 0
+- `min_sources` must be >= 1
+- `confidence_threshold` must be between 0.0 and 1.0
+- `default_weight` must be >= 0.0
+- `confidence_decay_half_life_seconds` must be <= 10 × `window_seconds`
+- Per-source `mode=corroborating` requires a non-empty `match_dimensions`; `mode=primary` requires empty `match_dimensions`
+- Webhook adapter `name` must match `[a-z0-9-]{1,64}` and be unique
+
+**Response:** Same shape as `GET /v1/config/correlation`, with `loaded_at` set to the update timestamp.
+
+**Error response (400):**
+
+```json
+{
+  "errors": ["source 'router-cpu': match_dimensions must be non-empty when mode=corroborating"]
+}
+```
+
 ### List POPs
 
 ```http
@@ -1686,7 +1785,7 @@ POST /v1/config/reload
 
 ```json
 {
-  "reloaded": ["inventory", "playbooks", "alerting"],
+  "reloaded": ["inventory", "playbooks", "correlation", "alerting"],
   "timestamp": "2026-02-22T21:00:00Z"
 }
 ```

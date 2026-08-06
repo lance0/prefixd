@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::Request,
+    extract::{Request, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
@@ -58,7 +58,7 @@ impl RateLimiter {
 
 /// Rate limiting middleware
 pub async fn rate_limit_middleware(
-    limiter: Arc<RateLimiter>,
+    State(limiter): State<Arc<RateLimiter>>,
     request: Request,
     next: Next,
 ) -> Response {
