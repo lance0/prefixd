@@ -12,7 +12,11 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_sessions_sqlx_store::PostgresStore;
 use utoipa::OpenApi;
 
-use super::{handlers, openapi::ApiDoc};
+use super::{
+    handlers,
+    openapi::ApiDoc,
+    ratelimit::{RateLimiter, rate_limit_middleware},
+};
 use crate::AppState;
 use crate::auth::AuthBackend;
 use crate::ws;
@@ -133,8 +137,8 @@ fn api_routes() -> Router<Arc<AppState>> {
 }
 
 /// Common layers applied to both production and test routers
-fn common_layers(router: Router) -> Router {
-    router
+fn common_layers(router: Router, state: &AppState) -> Router {
+    let router = router
         .layer(axum::middleware::from_fn(super::request_id::request_id))
         .layer(axum::middleware::from_fn(super::metrics::http_metrics))
         .layer(SetResponseHeaderLayer::overriding(
@@ -149,7 +153,14 @@ fn common_layers(router: Router) -> Router {
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
         ))
-        .layer(RequestBodyLimitLayer::new(1024 * 1024))
+        .layer(RequestBodyLimitLayer::new(1024 * 1024));
+
+    // Apply rate limiting middleware (always configured — RateLimitConfig has defaults)
+    let limiter = RateLimiter::new(state.settings.http.rate_limit.clone());
+    router.layer(axum::middleware::from_fn_with_state(
+        limiter,
+        rate_limit_middleware,
+    ))
 }
 
 /// Create the production router with PostgreSQL session store
@@ -163,9 +174,12 @@ pub fn create_router(
         .layer(auth_layer)
         .with_state(state.clone());
 
-    common_layers(router).layer(if let Some(ref origin) = state.settings.http.cors_origin {
+    common_layers(router, &state).layer(if let Some(origin) = &state.settings.http.cors_origin {
         CorsLayer::new()
-            .allow_origin(origin.parse::<HeaderValue>().expect("invalid cors_origin"))
+            .allow_origin(origin.parse::<HeaderValue>().unwrap_or_else(|_| {
+                tracing::warn!(origin = %origin, "invalid cors_origin, falling back to wildcard");
+                HeaderValue::from_static("*")
+            }))
             .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
             .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::COOKIE])
             .allow_credentials(true)
@@ -193,5 +207,5 @@ pub fn create_test_router(state: Arc<AppState>) -> Router {
         .layer(auth_layer)
         .with_state(state.clone());
 
-    common_layers(router)
+    common_layers(router, &state)
 }

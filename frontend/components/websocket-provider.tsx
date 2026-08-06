@@ -92,7 +92,14 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
 
           // Handle ResyncRequired by invalidating SWR caches
           if (message.type === "ResyncRequired") {
-            mutate(() => true) // Revalidate all keys
+            mutate((key) =>
+              typeof key === "string" &&
+              (key.startsWith("mitigations") ||
+                key.startsWith("events") ||
+                key === "stats" ||
+                key === "dashboard" ||
+                key.startsWith("signal-groups"))
+            )
             if (showToast) toast.info("Configuration reloaded from disk")
           }
 
@@ -178,6 +185,17 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
       disconnect()
     }
   }, [connect, disconnect])
+
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (!document.hidden && wsRef.current?.readyState !== WebSocket.OPEN) {
+        reconnectAttemptsRef.current = 0
+        connect()
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibility)
+    return () => document.removeEventListener("visibilitychange", handleVisibility)
+  }, [connect])
 
   const value = useMemo(
     () => ({

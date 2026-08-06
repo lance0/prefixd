@@ -166,7 +166,8 @@ async function doFetch<T>(url: string, options: RequestInit): Promise<T> {
     throw new Error(`API error ${res.status}: ${error}`)
   }
 
-  return res.json()
+  const text = await res.text()
+  return (text ? JSON.parse(text) : null) as T
 }
 
 export async function getHealth(): Promise<PublicHealthResponse> {

@@ -99,7 +99,7 @@ docs/
 ├── api.md                     # Full API reference with examples
 ├── deployment.md              # Docker + nginx deployment guide
 ├── configuration.md           # Full configuration reference
-└── adr/                       # 19 Architecture Decision Records (001-019)
+└── adr/                       # 22 Architecture Decision Records (001-022)
 grafana/                       # Prometheus config, Grafana provisioning, dashboard JSON
 tests/
 ├── integration.rs             # 99 integration tests (health, config, mitigations, events, filters, bulk withdraw, cursor pagination, bulk acknowledge, per-dest routing, preferences, event batch, incident reports, signal groups, correlation, signal adapters)
@@ -132,10 +132,18 @@ See `docs/adr/` for all 22 Architecture Decision Records.
 - `GET /metrics` - Prometheus metrics
 - `GET /openapi.json` - OpenAPI spec
 
+### Session & WebSocket (session auth)
+- `POST /v1/auth/logout` - End session
+- `GET /v1/auth/me` - Current operator profile
+- `GET /v1/ws/feed` - Real-time WebSocket feed (mitigation/event updates)
+
 ### Authenticated
 - `GET /v1/health/detail` - Full operational status (BGP peers, DB, uptime, active mitigations)
 - `POST /v1/events` - Ingest attack event
+- `POST /v1/events/batch` - Batch ingest up to 100 attack events
+- `GET /v1/events` - List events (cursor pagination, date range filters)
 - `GET /v1/mitigations` - List mitigations (supports `?status=active&customer_id=cust_123`)
+- `POST /v1/mitigations` - Create mitigation (manual "Mitigate Now")
 - `GET /v1/mitigations/{id}` - Get mitigation detail
 - `POST /v1/mitigations/withdraw` - Bulk withdraw mitigations (up to 100 IDs)
 - `POST /v1/mitigations/acknowledge` - Bulk acknowledge mitigations (up to 100 IDs)
@@ -143,7 +151,7 @@ See `docs/adr/` for all 22 Architecture Decision Records.
 - `GET/POST /v1/safelist` - List/add safelist entries
 - `DELETE /v1/safelist/{prefix}` - Remove safelist entry
 - `GET /v1/config/settings` - Running config (allowlist-redacted)
-- `GET /v1/config/inventory` - Customer/service/IP data
+- `POST /v1/config/reload` - Hot-reload inventory + playbooks + correlation + alerting
 - `GET /v1/config/playbooks` - Playbook definitions
 - `PUT /v1/config/playbooks` - Update playbooks (admin only, writes YAML + hot-reload)
 - `POST /v1/config/reload` - Hot-reload inventory + playbooks + alerting
@@ -154,6 +162,7 @@ See `docs/adr/` for all 22 Architecture Decision Records.
 - `PUT /v1/preferences` - Update notification preferences (muted events, quiet hours)
 - `GET /v1/stats` - Global statistics
 - `GET /v1/stats/timeseries` - Time-series data for charts
+- `GET /v1/reports/incident` - Incident report (mitigation + event summary)
 - `GET /v1/ip/{ip}/history` - IP history (events + mitigations + context)
 - `GET /v1/pops` - Points of presence
 - `GET /v1/audit` - Audit log

@@ -371,7 +371,9 @@ impl DestinationConfig {
                 "api_key": "***",
                 "region": region,
             }),
-            Self::Generic { url, headers, .. } => {
+            Self::Generic {
+                url: _, headers, ..
+            } => {
                 let redacted_headers: HashMap<_, _> = headers
                     .keys()
                     .cloned()
@@ -379,7 +381,7 @@ impl DestinationConfig {
                     .collect();
                 serde_json::json!({
                     "type": "generic",
-                    "url": url,
+                    "url": "***",
                     "secret": "***",
                     "headers": redacted_headers,
                 })
@@ -757,18 +759,32 @@ impl AlertingConfig {
                 DestinationConfig::Generic { secret, url, .. } => {
                     if secret.as_deref() == Some(REDACTED) {
                         let u = url.clone();
-                        let matches: Vec<String> = current
-                            .destinations
-                            .iter()
-                            .filter_map(|d| match d {
-                                DestinationConfig::Generic {
-                                    secret: Some(s),
-                                    url: existing_url,
-                                    ..
-                                } if existing_url == &u => Some(s.clone()),
-                                _ => None,
-                            })
-                            .collect();
+                        let matches: Vec<String> = if u == REDACTED {
+                            // URL is also redacted — match by uniqueness among Generic destinations
+                            current
+                                .destinations
+                                .iter()
+                                .filter_map(|d| match d {
+                                    DestinationConfig::Generic {
+                                        secret: Some(s), ..
+                                    } => Some(s.clone()),
+                                    _ => None,
+                                })
+                                .collect()
+                        } else {
+                            current
+                                .destinations
+                                .iter()
+                                .filter_map(|d| match d {
+                                    DestinationConfig::Generic {
+                                        secret: Some(s),
+                                        url: existing_url,
+                                        ..
+                                    } if existing_url == &u => Some(s.clone()),
+                                    _ => None,
+                                })
+                                .collect()
+                        };
                         match matches.as_slice() {
                             [s] => *secret = Some(s.clone()),
                             [] => errors.push(format!(

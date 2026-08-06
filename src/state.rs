@@ -42,7 +42,11 @@ pub struct AppState {
     pub correlation_loaded_at: RwLock<DateTime<Utc>>,
     /// PostgreSQL pool for metrics (None in tests with MockRepository)
     pub db_pool: Option<PgPool>,
-    config_dir: PathBuf,
+    /// Serializes mitigation creation to prevent TOCTOU race between
+    /// find_active_by_scope and insert_mitigation in handle_ban.
+    pub mitigation_lock: tokio::sync::Mutex<()>,
+    /// Directory containing config files (for hot-reload)
+    pub config_dir: PathBuf,
     shutting_down: AtomicBool,
 }
 
@@ -116,6 +120,7 @@ impl AppState {
             start_time: Instant::now(),
             inventory_loaded_at: RwLock::new(Utc::now()),
             playbooks_loaded_at: RwLock::new(Utc::now()),
+            mitigation_lock: tokio::sync::Mutex::new(()),
             db_pool,
             config_dir,
             shutting_down: AtomicBool::new(false),

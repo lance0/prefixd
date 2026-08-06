@@ -12,6 +12,14 @@ vi.mock("@/lib/auth", () => ({
   logout: () => mockLogout(),
 }))
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    push: vi.fn(),
+    replace: vi.fn(),
+    refresh: vi.fn(),
+  }),
+}))
+
 import { AuthProvider, useAuth } from "@/hooks/use-auth"
 
 function wrapper({ children }: { children: ReactNode }) {
