@@ -7,6 +7,11 @@ on:
   pull_request:
     branches: [main]
 
+# Superseded runs on the same branch/PR are pointless once a newer commit lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -52,11 +57,22 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-clippy-
+
       - name: Check formatting
         run: cargo fmt --check
 
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
   build:
     name: Build
@@ -103,6 +119,24 @@ jobs:
           name: prefixd-sbom
           path: prefixd-sbom.cdx.json
 
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run test
+
+      - run: bun run build
+
   security:
     name: Security Audit
     runs-on: ubuntu-latest
@@ -112,15 +146,12 @@ jobs:
       - name: Audit Rust dependencies
         uses: actions-rust-lang/audit@v1
         with:
+          # Only advisories with no fixed release upstream. Everything else is
+          # resolved by bumping the transitive dep in Cargo.lock.
           # RUSTSEC-2023-0071: rsa crate (from sqlx-mysql, not used - we use postgres only)
           # RUSTSEC-2025-0134: rustls-pemfile unmaintained (transitive dep, awaiting upstream fix)
           # RUSTSEC-2026-0097: rand unsoundness with custom logger (no fix available; we don't use custom logger)
-          # RUSTSEC-2026-0145: astral-tokio-tar PAX desync (dev-only dep via testcontainers)
-          # RUSTSEC-2026-0185: quinn-proto remote memory exhaustion (not used on our target platform)
-          # RUSTSEC-2026-0190: event-listener !Send unsoundness (transitive via sqlx, awaiting upstream fix)
-          # RUSTSEC-2026-0204: crossbeam-epoch invalid pointer deref (dev-only dep via criterion)
-          # RUSTSEC-2026-0221: event-listener StackSlot !Send (transitive via sqlx, awaiting upstream fix)
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0134,RUSTSEC-2026-0097,RUSTSEC-2026-0145,RUSTSEC-2026-0185,RUSTSEC-2026-0190,RUSTSEC-2026-0204,RUSTSEC-2026-0221
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0134,RUSTSEC-2026-0097
           denyWarnings: false
           createIssues: false
 
@@ -138,7 +169,7 @@ jobs:
   docker:
     name: Docker
     runs-on: ubuntu-latest
-    needs: [test, lint, security]
+    needs: [test, lint, frontend, security]
     if: github.event_name == 'push'
     permissions:
       contents: read
