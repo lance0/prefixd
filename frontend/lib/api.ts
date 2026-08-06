@@ -167,7 +167,7 @@ async function doFetch<T>(url: string, options: RequestInit): Promise<T> {
   }
 
   const text = await res.text()
-  return (text ? JSON.parse(text) : null) as T
+  return (text.trim() ? JSON.parse(text) : null) as T
 }
 
 export async function getHealth(): Promise<PublicHealthResponse> {
@@ -444,11 +444,16 @@ export async function deleteOperator(id: string): Promise<void> {
 
 export async function changePassword(
   id: string,
-  newPassword: string
+  newPassword: string,
+  currentPassword?: string
 ): Promise<void> {
+  const body: Record<string, string> = { new_password: newPassword }
+  if (currentPassword) {
+    body.current_password = currentPassword
+  }
   await fetchApi(`/v1/operators/${id}/password`, {
     method: "PUT",
-    body: JSON.stringify({ new_password: newPassword }),
+    body: JSON.stringify(body),
   })
 }
 

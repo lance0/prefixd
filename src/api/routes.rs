@@ -175,14 +175,17 @@ pub fn create_router(
         .with_state(state.clone());
 
     common_layers(router, &state).layer(if let Some(origin) = &state.settings.http.cors_origin {
-        CorsLayer::new()
-            .allow_origin(origin.parse::<HeaderValue>().unwrap_or_else(|_| {
-                tracing::warn!(origin = %origin, "invalid cors_origin, falling back to wildcard");
-                HeaderValue::from_static("*")
-            }))
-            .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::COOKIE])
-            .allow_credentials(true)
+        match origin.parse::<HeaderValue>() {
+            Ok(parsed) => CorsLayer::new()
+                .allow_origin(parsed)
+                .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::COOKIE])
+                .allow_credentials(true),
+            Err(_) => {
+                tracing::error!(origin = %origin, "invalid cors_origin, CORS disabled");
+                CorsLayer::new()
+            }
+        }
     } else {
         CorsLayer::new()
     })

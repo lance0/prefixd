@@ -26,7 +26,7 @@ impl Guardrails {
             || !config.allow_fragment_match
             || !config.allow_packet_length_match
         {
-            tracing::warn!(
+            tracing::debug!(
                 allow_src_prefix = config.allow_src_prefix_match,
                 allow_tcp_flags = config.allow_tcp_flags_match,
                 allow_fragment = config.allow_fragment_match,

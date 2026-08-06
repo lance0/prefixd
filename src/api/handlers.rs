@@ -382,6 +382,7 @@ fn validate_cidr(prefix: &str) -> Result<(), PrefixdError> {
 #[derive(Deserialize)]
 #[allow(dead_code)]
 pub struct CreateMitigationRequest {
+    #[serde(default)]
     operator_id: String,
     reason: String,
     victim_ip: String,
@@ -396,12 +397,14 @@ pub struct CreateMitigationRequest {
 #[derive(Deserialize)]
 #[allow(dead_code)]
 pub struct WithdrawRequest {
+    #[serde(default)]
     operator_id: String,
     reason: String,
 }
 #[derive(Deserialize)]
 #[allow(dead_code)]
 pub struct AddSafelistRequest {
+    #[serde(default)]
     operator_id: String,
     prefix: String,
     #[serde(default)]
@@ -1467,6 +1470,7 @@ pub async fn create_mitigation(
     use crate::domain::OperatorRole;
     let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
     let operator_id = operator.username.clone();
+    let _mitigation_guard = state.mitigation_lock.lock().await;
 
     // Validate input
     if let Err(e) = validate_ip(&req.victim_ip) {
@@ -1692,6 +1696,7 @@ const MAX_BULK_WITHDRAW: usize = 100;
 #[allow(dead_code)]
 pub struct BulkWithdrawRequest {
     mitigation_ids: Vec<Uuid>,
+    #[serde(default)]
     operator_id: String,
     reason: String,
 }
@@ -1847,6 +1852,7 @@ const MAX_BULK_ACKNOWLEDGE: usize = 100;
 #[allow(dead_code)]
 pub struct BulkAcknowledgeRequest {
     mitigation_ids: Vec<Uuid>,
+    #[serde(default)]
     operator_id: String,
 }
 
@@ -2513,6 +2519,8 @@ pub struct CreateOperatorRequest {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ChangePasswordRequest {
+    /// Current password — required for self-change, optional for admin reset
+    #[serde(default)]
     pub current_password: String,
     pub new_password: String,
 }
@@ -2756,16 +2764,18 @@ pub async fn change_password(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Verify current password
-    let parsed_hash = match PasswordHash::new(&target.password_hash) {
-        Ok(h) => h,
-        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-    };
-    if Argon2::default()
-        .verify_password(req.current_password.as_bytes(), &parsed_hash)
-        .is_err()
-    {
-        return Err(StatusCode::BAD_REQUEST);
+    // Verify current password (required for self-change, skipped for admin reset of other users)
+    if is_self {
+        let parsed_hash = match PasswordHash::new(&target.password_hash) {
+            Ok(h) => h,
+            Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+        if Argon2::default()
+            .verify_password(req.current_password.as_bytes(), &parsed_hash)
+            .is_err()
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
     }
 
     // Hash new password
