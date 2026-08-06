@@ -92,14 +92,20 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
 
           // Handle ResyncRequired by invalidating SWR caches
           if (message.type === "ResyncRequired") {
-            mutate((key) =>
-              typeof key === "string" &&
-              (key.startsWith("mitigations") ||
-                key.startsWith("events") ||
-                key === "stats" ||
-                key === "dashboard" ||
-                key.startsWith("signal-groups"))
-            )
+            mutate((key) => {
+              const k = typeof key === "string"
+                ? key
+                : Array.isArray(key) && typeof key[0] === "string"
+                  ? key[0] as string
+                  : null
+              return k !== null && (
+                k.startsWith("mitigations") ||
+                k.startsWith("events") ||
+                k === "stats" ||
+                k === "dashboard" ||
+                k.startsWith("signal-groups")
+              )
+            })
             if (showToast) toast.info("Configuration reloaded from disk")
           }
 

@@ -49,7 +49,7 @@ impl RateLimiter {
         } else {
             // Calculate how long until a token is available
             let wait_time = Duration::from_secs_f64(
-                (1.0 - state.tokens) / self.config.events_per_second as f64,
+                (1.0 - state.tokens) / (self.config.events_per_second.max(1)) as f64,
             );
             Err(wait_time)
         }

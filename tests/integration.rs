@@ -6761,6 +6761,53 @@ async fn test_change_password() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
+#[tokio::test]
+async fn test_change_password_admin_reset_without_current() {
+    let app = setup_app().await;
+
+    // Create an operator
+    let create_body = serde_json::json!({
+        "username": "reset_user",
+        "password": "supersecret",
+        "role": "operator"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/operators")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let resp_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+    let operator_id = json["operator_id"].as_str().unwrap();
+
+    // Admin reset without current_password (auth_mode=none → synthetic admin)
+    let pwd_body = serde_json::json!({
+        "new_password": "newsupersecret"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/operators/{}/password", operator_id))
+                .header("content-type", "application/json")
+                .body(Body::from(pwd_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
 // ─── Safelist CRUD ──────────────────────────────────────────────────────
 
 #[tokio::test]
