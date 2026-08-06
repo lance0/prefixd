@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.19.0] - 2026-08-06
+## [0.19.1] - 2026-08-06
+
+### Changed
+- **Next.js upgraded 16.1.7 → 16.3.0.** Fixes Docker build failure with Turbopack catch-all route page data collection.
+- **Bun Docker image upgraded 1.3.10 → 1.3.14.** Resolves Turbopack runtime module loading issue in Docker builds.
+
+### Fixed
+- **Docker dashboard build.** Frontend Dockerfile now uses Bun 1.3.14 (compatible with Next.js 16.3 Turbopack). The `force-dynamic` export added to the catch-all API proxy route prevents build-time page data collection errors.
+- **Docker Compose port conflict.** Nginx port mapped to 8088 to avoid conflict with host nginx on port 80.
+
 
 ### Security
 
@@ -979,7 +988,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.19.1...HEAD
+[0.19.1]: https://github.com/lance0/prefixd/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/lance0/prefixd/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/lance0/prefixd/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/lance0/prefixd/compare/v0.17.1...v0.18.0

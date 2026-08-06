@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 
+export const dynamic = "force-dynamic"
+
 // Backend URL - only accessed server-side, so no NEXT_PUBLIC_ needed
 const PREFIXD_API = process.env.PREFIXD_API || "http://prefixd:8080"
 

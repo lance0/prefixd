@@ -1,6 +1,5 @@
 # Build stage
-# Pinned: bun 1.3.11+ segfaults during next build in Docker/CI (oven-sh/bun#24397)
-FROM oven/bun:1.3.10 AS builder
+FROM oven/bun:1.3.14 AS builder
 
 WORKDIR /app
 
@@ -18,7 +17,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN bun run build
 
 # Production stage
-FROM oven/bun:1.3.10-slim AS runner
+FROM oven/bun:1.3.14-slim AS runner
 
 WORKDIR /app
 
