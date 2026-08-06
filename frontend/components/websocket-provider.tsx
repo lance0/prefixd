@@ -160,7 +160,8 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         if (reconnectAttemptsRef.current < maxReconnectAttempts) {
           reconnectAttemptsRef.current++
           const delay = reconnectInterval * Math.min(reconnectAttemptsRef.current, 5)
-          reconnectTimeoutRef.current = setTimeout(connect, delay)
+          const jitter = Math.random() * reconnectInterval
+          reconnectTimeoutRef.current = setTimeout(connect, delay + jitter)
         }
       }
 

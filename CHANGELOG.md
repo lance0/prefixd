@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-06
+
+### Security
+
+- **Rate limiting middleware activated.** The `RateLimiter` implementation (previously dead code) is now wired into the router via `common_layers`. All API endpoints are rate-limited using a global token bucket (configurable via `http.rate_limit.events_per_second` and `burst`, always-on with defaults).
+- **Login timing attack mitigated.** `AuthBackend::authenticate()` now runs a dummy Argon2 password verification when the operator is not found, eliminating the timing side-channel that enabled username enumeration.
+- **Operator ID IDOR fixed.** Five mutation handlers (`create_mitigation`, `withdraw_mitigation`, `bulk_withdraw`, `bulk_acknowledge`, `add_safelist`) now derive `operator_id` from the authenticated session (`operator.username`) instead of trusting the client-supplied request body field. The `operator_id` field remains in request structs with `#[serde(default)]` for backward compatibility but is ignored.
+- **Safelist operations require Admin role.** `add_safelist` and `remove_safelist` now use `require_role(Admin)` instead of `require_auth()`. Viewers can no longer disable DDoS protection for arbitrary IPs.
+- **`reload_config` requires Admin role.** Any authenticated user could previously trigger a config reload from disk.
+- **`list_audit` requires Operator role.** Audit logs are no longer accessible to Viewer-role users.
+- **`change_password` verifies current password for self-change.** Admin resets of other users' passwords skip the check, preserving the admin password-reset flow. Frontend updated to send `current_password` for self-change.
+- **CORS invalid-origin handling.** Invalid `cors_origin` config no longer panics; instead disables CORS with an error log (previously panicked via `.expect()`, then regressed to a wildcard+credentials panic, now graceful).
+- **Generic alerting URL redacted.** `DestinationConfig::Generic` redacted view now masks the webhook URL (same as Slack/Discord/Teams).
+- **Correlation HMAC `secret_env` redacted.** The env var name is no longer exposed in the redacted correlation config API response.
+- **Dead auth middleware removed.** `auth_middleware`, `hybrid_auth_middleware`, and `validate_bearer_token` (never wired into the router) have been removed. All auth flows through `require_auth()` / `require_role()`.
+
+### Fixed
+
+- **`doFetch()` empty-body crash.** The frontend API client unconditionally called `res.json()` on all responses, causing `SyntaxError` on 201/204 empty-body responses from safelist, password, and notification mutations. Now uses `res.text()` + conditional `JSON.parse`.
+- **TOCTOU race in `handle_ban`.** `find_active_by_scope` + `insert_mitigation` were non-atomic; concurrent ban events for the same victim created duplicate FlowSpec announcements. Added `mitigation_lock: Mutex<()>` to serialize the find+insert critical section. Lock is dropped before the BGP announce call to avoid blocking.
+- **Safelist check fail-open.** `is_safelisted()` used `.unwrap_or(false)`, allowing mitigations for safelisted IPs on DB errors. Now fails closed via `.map_err(AppError)?`.
+- **WebSocket permanent death after 10 reconnects.** Added `visibilitychange` listener that resets the reconnect counter and reconnects when the tab becomes visible.
+- **Auth-expired redirect.** 401 events now call `router.push('/login')` instead of only clearing the operator, preventing RequireAuth from hanging on a spinner.
+- **SWR thundering herd on ResyncRequired.** `mutate(() => true)` scoped to volatile keys (mitigations, events, stats, dashboard, signal-groups) and now handles both string and array SWR keys.
+- **Bulk withdraw error display.** Dialog stays open on partial failure so the error message remains visible.
+- **IPv6 `/32` prefix in `create_mitigation`.** Now uses `/128` for IPv6 victims (was hardcoded `/32`).
+- **Silent error swallowing.** Unban event insertion and signal group resolution now log warnings on DB errors instead of silently discarding them.
+- **Guardrails warning log level.** Unenforced `allow_*` flag warning changed from `warn!` to `debug!` to prevent log spam under attack load.
+- **Rate limiter division by zero.** `events_per_second=0` no longer panics (guarded with `.max(1)`).
+
+### Changed
+
+- **Dependency bumps.** `rustls 0.23.37→0.23.40`, `regex 1.12.2→1.12.3`, `tower-http 0.6.8→0.6.10`, `tokio 1.52.1→1.52.3`, `reqwest 0.13.2→0.13.3`, `actions/checkout 6→7`, `actions/cache 5→6`, `vite 7→8.2.0`, `@vitejs/plugin-react 5→6`, `typescript 5→7.0.2`, `jsdom 28→29`, `lucide-react 0.575→1.28`.
+
+### Added
+
+- **22 integration tests** for previously untested API endpoints: operators CRUD (6), safelist CRUD (5), manual mitigate (5), audit log (2), stats (1), auth (2), single withdraw (2), event edge cases (3). Plus 1 admin-reset-without-password test. Total: 427 tests (250 unit + 161 integration + 16 postgres; 17 ignored requiring GoBGP/Docker).
+- **Documentation.** Added API docs for `GET/PUT /v1/config/correlation`. Updated AGENTS.md endpoint list (7 missing endpoints added) and ADR count (19→22). Documented `max_escalated_duration_seconds`, guardrails `allow_*` flags, and rate limiting middleware behavior.
+- **OpenAPI spec.** Registered 9 missing handlers (change_password, login, logout, get_me, create_operator, delete_operator, list_operators, add_safelist, remove_safelist) in the OpenAPI `paths()` array.
+
+### Documentation
+
+- Annotated 4 phantom config fields as unimplemented (`range_end`, `match.source`, `match.protocol`, `default_playbook`).
+- Fixed reload response example (missing "correlation").
+- Fixed playbook example vector (`dns_amplification` → `udp_flood`).
+- Added `transforms` field to correlation config redacted output.
+- Updated `change_password` API docs with `current_password` field and admin-reset behavior.
+
 ## [0.18.1] - 2026-05-11
 
 ### Added
@@ -931,7 +979,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.18.1...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/lance0/prefixd/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/lance0/prefixd/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/lance0/prefixd/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/lance0/prefixd/compare/v0.17.0...v0.17.1

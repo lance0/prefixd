@@ -134,6 +134,7 @@ export default function AdminPage() {
   // Change password state
   const [passwordTarget, setPasswordTarget] = useState<OperatorInfo | null>(null)
   const [newUserPassword, setNewUserPassword] = useState("")
+  const [currentPassword, setCurrentPassword] = useState("")
   const [isChangingPassword, setIsChangingPassword] = useState(false)
 
   const handleAddSafelist = async () => {
@@ -212,14 +213,20 @@ export default function AdminPage() {
 
   const handleChangePassword = async () => {
     if (!passwordTarget || !newUserPassword.trim()) return
-    
+    if (operator?.id === passwordTarget.operator_id && !currentPassword.trim()) return
+
     setIsChangingPassword(true)
     setUserError(null)
-    
+
     try {
-      await changePassword(passwordTarget.operator_id, newUserPassword)
+      await changePassword(
+        passwordTarget.operator_id,
+        newUserPassword,
+        operator?.id === passwordTarget.operator_id ? currentPassword : undefined
+      )
       setPasswordTarget(null)
       setNewUserPassword("")
+      setCurrentPassword("")
     } catch (err) {
       setUserError(err instanceof Error ? err.message : "Failed to change password")
     } finally {
@@ -758,6 +765,17 @@ export default function AdminPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
+            {operator?.id === passwordTarget?.operator_id && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Current Password</label>
+                <Input
+                  type="password"
+                  placeholder="enter your current password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                />
+              </div>
+            )}
             <div className="space-y-2">
               <label className="text-sm font-medium">New Password</label>
               <Input
@@ -780,7 +798,11 @@ export default function AdminPage() {
             </Button>
             <Button
               onClick={handleChangePassword}
-              disabled={newUserPassword.length < 8 || isChangingPassword}
+              disabled={
+                newUserPassword.length < 8 ||
+                isChangingPassword ||
+                (operator?.id === passwordTarget?.operator_id && currentPassword.length === 0)
+              }
             >
               {isChangingPassword ? (
                 <RefreshCw className="size-4 animate-spin" />
