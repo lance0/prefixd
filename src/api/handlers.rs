@@ -401,7 +401,7 @@ pub struct WithdrawRequest {
     operator_id: String,
     reason: String,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[allow(dead_code)]
 pub struct AddSafelistRequest {
     #[serde(default)]
@@ -1016,6 +1016,8 @@ async fn handle_ban(
         ));
     }
 
+    drop(_mitigation_guard);
+
     let guardrails = Guardrails::with_timers(
         state.settings.guardrails.clone(),
         state.settings.quotas.clone(),
@@ -1571,6 +1573,8 @@ pub async fn create_mitigation(
     }
 
     // Create and announce
+    drop(_mitigation_guard);
+
     let mut mitigation =
         Mitigation::from_intent(intent, req.victim_ip, crate::domain::AttackVector::Unknown);
 
@@ -1658,7 +1662,10 @@ pub async fn withdraw_mitigation(
         .repo
         .update_mitigation(&mitigation)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "withdraw_mitigation failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     crate::observability::metrics::MITIGATIONS_WITHDRAWN
         .with_label_values(&[
@@ -1762,7 +1769,8 @@ pub async fn bulk_withdraw_mitigations(
                 });
                 continue;
             }
-            Err(_) => {
+            Err(e) => {
+                tracing::error!(error = %e, mitigation_id = %id, "bulk_withdraw: get_mitigation failed");
                 failed += 1;
                 results.push(BulkWithdrawResult {
                     mitigation_id: *id,
@@ -1903,7 +1911,10 @@ pub async fn bulk_acknowledge_mitigations(
         .repo
         .acknowledge_mitigations(&req.mitigation_ids, &operator_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "bulk_acknowledge failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let mut results = Vec::with_capacity(req.mitigation_ids.len());
     for id in &req.mitigation_ids {
@@ -2100,6 +2111,19 @@ pub async fn list_safelist(
     Ok(Json(entries))
 }
 
+/// Add a prefix to the safelist (admin only)
+#[utoipa::path(
+    post,
+    path = "/v1/safelist",
+    tag = "safelist",
+    request_body = AddSafelistRequest,
+    responses(
+        (status = 201, description = "Safelist entry created"),
+        (status = 400, description = "Invalid prefix"),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "Insufficient permissions")
+    )
+)]
 pub async fn add_safelist(
     State(state): State<Arc<AppState>>,
     auth_session: AuthSession,
@@ -2123,12 +2147,30 @@ pub async fn add_safelist(
         .repo
         .insert_safelist(&req.prefix, &operator_id, req.reason.as_deref())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "add_safelist failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     tracing::info!(prefix = %req.prefix, operator = %operator_id, "safelist entry added");
     Ok(StatusCode::CREATED)
 }
 
+/// Remove a prefix from the safelist (admin only)
+#[utoipa::path(
+    delete,
+    path = "/v1/safelist/{prefix}",
+    tag = "safelist",
+    params(
+        ("prefix" = String, Path, description = "CIDR prefix to remove")
+    ),
+    responses(
+        (status = 204, description = "Safelist entry removed"),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 404, description = "Prefix not in safelist")
+    )
+)]
 pub async fn remove_safelist(
     State(state): State<Arc<AppState>>,
     auth_session: AuthSession,
@@ -2139,11 +2181,10 @@ pub async fn remove_safelist(
     use crate::domain::OperatorRole;
     let _operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
 
-    let removed = state
-        .repo
-        .remove_safelist(&prefix)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let removed = state.repo.remove_safelist(&prefix).await.map_err(|e| {
+        tracing::error!(error = %e, "remove_safelist failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     if removed {
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -2292,7 +2333,8 @@ pub async fn reload_config(
                 timestamp: chrono::Utc::now().to_rfc3339(),
             }))
         }
-        Err(_) => {
+        Err(e) => {
+            tracing::error!(error = %e, "reload_config failed");
             crate::observability::CONFIG_RELOADS
                 .with_label_values(&["error"])
                 .inc();
@@ -2441,10 +2483,10 @@ pub async fn login(
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
 
-    auth_session
-        .login(&operator)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    auth_session.login(&operator).await.map_err(|e| {
+        tracing::error!(error = %e, "login failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     clear_login_attempts(&username).await;
 
@@ -2638,7 +2680,10 @@ pub async fn create_operator(
         .repo
         .create_operator(&req.username, &password_hash, role, Some(&admin.username))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "create_operator failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     tracing::info!(
         username = %operator.username,
@@ -2694,11 +2739,10 @@ pub async fn delete_operator(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let deleted = state
-        .repo
-        .delete_operator(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let deleted = state.repo.delete_operator(id).await.map_err(|e| {
+        tracing::error!(error = %e, "delete_operator failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     if deleted {
         tracing::info!(operator_id = %id, deleted_by = %admin.username, "operator deleted");
@@ -2762,7 +2806,11 @@ pub async fn change_password(
         .get_operator_by_id(id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or(if is_self {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::NOT_FOUND
+        })?;
 
     // Verify current password (required for self-change, skipped for admin reset of other users)
     if is_self {
@@ -2789,7 +2837,10 @@ pub async fn change_password(
         .repo
         .update_operator_password(id, &password_hash)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "change_password failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     tracing::info!(
         operator_id = %id,

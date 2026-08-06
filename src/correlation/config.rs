@@ -479,12 +479,11 @@ impl CorrelationConfig {
             .map(|a| {
                 let auth_json = match &a.auth {
                     super::webhook::WebhookAuth::Hmac {
-                        secret_env,
+                        secret_env: _,
                         header,
                         algorithm,
                     } => serde_json::json!({
                         "type": "hmac",
-                        "secret_env": secret_env,
                         "header": header,
                         "algorithm": algorithm,
                     }),

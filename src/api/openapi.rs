@@ -1,12 +1,13 @@
 use utoipa::OpenApi;
 
 use super::handlers::{
-    AlertmanagerAlert, AlertmanagerAlertResult, AlertmanagerWebhookPayload,
+    AddSafelistRequest, AlertmanagerAlert, AlertmanagerAlertResult, AlertmanagerWebhookPayload,
     AlertmanagerWebhookResponse, AuditListResponse, BatchEventRequest, BatchEventResponse,
     BatchEventResult, BulkAcknowledgeRequest, BulkAcknowledgeResponse, BulkAcknowledgeResult,
-    BulkWithdrawRequest, BulkWithdrawResponse, BulkWithdrawResult, CorrelationContext,
-    ErrorResponse, EventResponse, EventsListResponse, FastNetMonAttackDetails, FastNetMonPayload,
-    HealthResponse, IpHistoryResponse, MitigationResponse, MitigationsListResponse,
+    BulkWithdrawRequest, BulkWithdrawResponse, BulkWithdrawResult, ChangePasswordRequest,
+    CorrelationContext, CreateOperatorRequest, ErrorResponse, EventResponse, EventsListResponse,
+    FastNetMonAttackDetails, FastNetMonPayload, HealthResponse, IpHistoryResponse, LoginRequest,
+    LoginResponse, MitigationResponse, MitigationsListResponse, OperatorInfo, OperatorListResponse,
     PublicHealthResponse, ReloadResponse, SignalGroupDetailResponse, SignalGroupsListResponse,
     TimeseriesResponse, WebhookEventResult, WebhookResponse,
 };
@@ -64,6 +65,15 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
         super::handlers::list_cached_corroborators_handler,
         super::handlers::get_correlation_config,
         super::handlers::update_correlation_config,
+        super::handlers::login,
+        super::handlers::logout,
+        super::handlers::get_me,
+        super::handlers::list_operators,
+        super::handlers::create_operator,
+        super::handlers::delete_operator,
+        super::handlers::change_password,
+        super::handlers::add_safelist,
+        super::handlers::remove_safelist,
     ),
     components(
         schemas(
@@ -78,6 +88,13 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
             PopStats,
             PopInfo,
             SafelistEntry,
+            AddSafelistRequest,
+            LoginRequest,
+            LoginResponse,
+            CreateOperatorRequest,
+            ChangePasswordRequest,
+            OperatorInfo,
+            OperatorListResponse,
             TimeseriesResponse,
             IpHistoryResponse,
             BulkWithdrawRequest,
@@ -128,6 +145,8 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
     tags(
         (name = "health", description = "Health and status endpoints"),
         (name = "events", description = "Attack event ingestion"),
+        (name = "auth", description = "Authentication and session management"),
+        (name = "operators", description = "Operator account management"),
         (name = "mitigations", description = "Mitigation management"),
         (name = "safelist", description = "Safelist management"),
         (name = "config", description = "Configuration management"),

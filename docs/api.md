@@ -1274,11 +1274,19 @@ Content-Type: application/json
 
 ```json
 {
+  "current_password": "oldpassword123",
   "new_password": "newsecurepassword123"
 }
 ```
 
-Admins can change any password. Non-admins can only change their own.
+**Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `current_password` | string | required for self-change, optional for admin reset | Current password. Must match the operator's existing password when changing own password. Ignored for admin resets of other operators. |
+| `new_password` | string | yes | New password (min 8 chars). |
+
+Admins can change any operator's password without supplying the current password (admin reset). Non-admins can only change their own password and must provide `current_password`, which is verified against the stored hash before the change is applied.
 
 **Response (204 No Content)**
 
@@ -1286,8 +1294,9 @@ Admins can change any password. Non-admins can only change their own.
 
 | Status | Reason |
 |--------|--------|
-| 400 | Password too short (min 8 chars) |
-| 403 | Insufficient permissions |
+| 400 | Password too short (min 8 chars) or incorrect current password |
+| 401 | Not authenticated |
+| 403 | Insufficient permissions (non-admin attempting to change another operator's password) |
 | 404 | Operator not found |
 
 ---

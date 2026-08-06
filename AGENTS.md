@@ -102,7 +102,7 @@ docs/
 └── adr/                       # 22 Architecture Decision Records (001-022)
 grafana/                       # Prometheus config, Grafana provisioning, dashboard JSON
 tests/
-├── integration.rs             # 99 integration tests (health, config, mitigations, events, filters, bulk withdraw, cursor pagination, bulk acknowledge, per-dest routing, preferences, event batch, incident reports, signal groups, correlation, signal adapters)
+├── integration.rs             # 161 integration tests (health, config, mitigations, events, filters, bulk withdraw, cursor pagination, bulk acknowledge, per-dest routing, preferences, event batch, incident reports, signal groups, correlation, signal adapters, operators CRUD, safelist CRUD, manual mitigate, audit, stats, auth)
 ├── integration_e2e.rs         # 9 end-to-end tests (ignored without Docker)
 ├── integration_gobgp.rs       # 8 tests (GoBGP integration, ignored without GoBGP)
 └── integration_postgres.rs    # 16 integration tests (Postgres-backed flows, signal groups)
@@ -210,7 +210,7 @@ See `docs/adr/` for all 22 Architecture Decision Records.
 # Backend unit tests (179 tests)
 cargo test
 
-# All backend tests including integration (294 runnable: 179 unit + 99 integration + 16 postgres; 17 ignored requiring GoBGP/Docker)
+# All backend tests including integration (427 runnable: 250 unit + 161 integration + 16 postgres; 17 ignored requiring GoBGP/Docker)
 cargo test --features test-utils
 
 # Lint
@@ -248,7 +248,7 @@ docker compose logs prefixd   # View daemon logs
 
 Services: nginx (80), prefixd (8080), dashboard (3000), postgres (5432), gobgp (50051/179), prometheus (9091), grafana (3001)
 
-## Current State (v0.18.1)
+## Current State (v0.19.0)
 
 Completed:
 - HTTP API with mode-aware auth and rate limiting
@@ -271,8 +271,8 @@ Completed:
 - 22 Architecture Decision Records
 - CLI tool (prefixdctl) for all API operations
 - OpenAPI spec with utoipa annotations
-- 179 backend unit tests + 99 integration + 16 postgres tests (+ 17 ignored requiring GoBGP/Docker)
-- Vitest + Testing Library frontend test infrastructure (64 tests)
+- 250 backend unit tests + 161 integration + 16 postgres tests (+ 17 ignored requiring GoBGP/Docker)
+- Vitest + Testing Library frontend test infrastructure (87 tests)
 
 ## Code Conventions
 

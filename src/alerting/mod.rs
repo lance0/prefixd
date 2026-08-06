@@ -540,7 +540,7 @@ impl AlertingConfig {
                     }
                 }
                 DestinationConfig::Generic { url, .. } => {
-                    if url.is_empty() {
+                    if url.is_empty() || url == REDACTED {
                         errors.push(format!("{}: url is required", ctx));
                     } else if url.len() > 1024 {
                         errors.push(format!("{}: url exceeds 1024 chars", ctx));

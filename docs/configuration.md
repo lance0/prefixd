@@ -131,6 +131,8 @@ http:
     burst: 500              # Burst capacity
 ```
 
+> **Note:** Rate limiting is applied globally via middleware to **all routes** and is always-on. Even if `events_per_second` and `burst` are omitted, default values are used. When a client exceeds the configured rate, the API responds with `429 Too Many Requests` and a body of the form `{"error":"rate_limited","retry_after_seconds":N}`, where `N` is the number of seconds to wait before retrying.
+
 ### BGP
 
 ```yaml
