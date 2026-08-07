@@ -162,9 +162,11 @@ jobs:
         working-directory: frontend
         run: |
           bun install --frozen-lockfile
-          # picomatch <4.0.4 (GHSA-c2c7-rcm5-vvqj, GHSA-3v7f-55p6-f55p) is a transitive
-          # dev dep pinned by vite/vitest — cannot fix without vite 8 major upgrade
-          bun audit || echo "::warning::bun audit found vulnerabilities (see above)"
+          # Fails the build. Fix advisories by bumping the dep (`bun update`, or an
+          # `overrides` entry in package.json when it is pinned transitively). Only
+          # add --ignore=<GHSA-id> for an advisory with no fixed release upstream,
+          # and say why in a comment here.
+          bun audit
 
   docker:
     name: Docker
