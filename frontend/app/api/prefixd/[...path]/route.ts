@@ -5,6 +5,13 @@ export const dynamic = "force-dynamic"
 // Backend URL - only accessed server-side, so no NEXT_PUBLIC_ needed
 const PREFIXD_API = process.env.PREFIXD_API || "http://prefixd:8080"
 
+// Next.js hands over already percent-decoded segments, so path separators that
+// arrived encoded (e.g. the `%2F` in a CIDR: /v1/safelist/8.9.8.9%2F32) would
+// otherwise be re-sent as real separators and 404 in the backend router.
+function upstreamPath(path: string[], search = ""): string {
+  return "/" + path.map(encodeURIComponent).join("/") + search
+}
+
 async function proxyRequest(request: NextRequest, path: string) {
   const url = `${PREFIXD_API}${path}`
   
@@ -53,8 +60,7 @@ export async function GET(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const { path } = await params
-  const fullPath = "/" + path.join("/") + (request.nextUrl.search || "")
-  return proxyRequest(request, fullPath)
+  return proxyRequest(request, upstreamPath(path, request.nextUrl.search || ""))
 }
 
 export async function POST(
@@ -62,8 +68,7 @@ export async function POST(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const { path } = await params
-  const fullPath = "/" + path.join("/")
-  return proxyRequest(request, fullPath)
+  return proxyRequest(request, upstreamPath(path))
 }
 
 export async function PUT(
@@ -71,8 +76,7 @@ export async function PUT(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const { path } = await params
-  const fullPath = "/" + path.join("/")
-  return proxyRequest(request, fullPath)
+  return proxyRequest(request, upstreamPath(path))
 }
 
 export async function DELETE(
@@ -80,6 +84,5 @@ export async function DELETE(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const { path } = await params
-  const fullPath = "/" + path.join("/")
-  return proxyRequest(request, fullPath)
+  return proxyRequest(request, upstreamPath(path))
 }

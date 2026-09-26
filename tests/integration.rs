@@ -6918,6 +6918,73 @@ async fn test_remove_safelist() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
+/// Dashboard/CLI send the CIDR as a single percent-encoded path segment.
+#[tokio::test]
+async fn test_remove_safelist_percent_encoded_cidr() {
+    let app = setup_app().await;
+
+    let add_body = serde_json::json!({ "prefix": "203.0.113.9/32" });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/safelist")
+                .header("content-type", "application/json")
+                .body(Body::from(add_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/v1/safelist/203.0.113.9%2F32")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+/// Proxies that decode `%2F` (or hand-written curl calls) send the CIDR with a
+/// literal slash; the route must accept that form too.
+#[tokio::test]
+async fn test_remove_safelist_literal_slash_cidr() {
+    let app = setup_app().await;
+
+    let add_body = serde_json::json!({ "prefix": "203.0.113.10/32" });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/safelist")
+                .header("content-type", "application/json")
+                .body(Body::from(add_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/v1/safelist/203.0.113.10/32")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
 #[tokio::test]
 async fn test_remove_safelist_not_found() {
     let app = setup_app().await;

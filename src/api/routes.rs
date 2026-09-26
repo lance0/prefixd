@@ -68,8 +68,10 @@ fn api_routes() -> Router<Arc<AppState>> {
             "/v1/safelist",
             get(handlers::list_safelist).post(handlers::add_safelist),
         )
+        // Wildcard capture: prefixes contain a slash (8.9.8.9/32). Proxies differ
+        // in whether they hand over `%2F` or a raw slash, so accept both.
         .route(
-            "/v1/safelist/{prefix}",
+            "/v1/safelist/{*prefix}",
             axum::routing::delete(handlers::remove_safelist),
         )
         .route("/v1/config/reload", post(handlers::reload_config))
