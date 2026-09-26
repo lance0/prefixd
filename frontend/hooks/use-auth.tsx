@@ -57,7 +57,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     () => ({
       operator,
       isLoading,
-      isAuthenticated: operator !== null,
+      isAuthenticated: Boolean(operator),
       login,
       logout,
       refresh,
