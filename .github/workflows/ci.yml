@@ -147,11 +147,13 @@ jobs:
         uses: actions-rust-lang/audit@v1
         with:
           # Only advisories with no fixed release upstream. Everything else is
-          # resolved by bumping the transitive dep in Cargo.lock.
-          # RUSTSEC-2023-0071: rsa crate (from sqlx-mysql, not used - we use postgres only)
-          # RUSTSEC-2025-0134: rustls-pemfile unmaintained (transitive dep, awaiting upstream fix)
-          # RUSTSEC-2026-0097: rand unsoundness with custom logger (no fix available; we don't use custom logger)
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0134,RUSTSEC-2026-0097
+          # resolved by bumping the dependency in Cargo.lock -- or by dropping
+          # our own use of it (rustls-pemfile was replaced by rustls-pki-types).
+          # RUSTSEC-2023-0071: rsa crate - in Cargo.lock as an optional dependency
+          #   of sqlx's mysql driver, which is never compiled (postgres only).
+          # RUSTSEC-2026-0097: rand unsoundness with a custom logger; we do not
+          #   install one (rand 0.8 via sqlx-postgres, 0.9 via testcontainers).
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2026-0097
           denyWarnings: false
           createIssues: false
 
