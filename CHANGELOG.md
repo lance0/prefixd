@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Rust dependency advisories cleared.** `h2` 0.4.13 → 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames) and `rustls` 0.23.40 → 0.23.45 (RUSTSEC-2026-0285, TLS 1.3 handshake messages accepted across encryption level boundaries); `chacha20` 0.10.0 → 0.10.2 replaces a yanked release. `cargo audit` now reports only the three advisories already documented in CI (`rsa` via unused `sqlx-mysql`, unmaintained `rustls-pemfile`, `rand` custom-logger unsoundness).
+- **Frontend dependency advisories cleared.** `next` 16.3.0 → 16.3.6 (two critical: unauthenticated RCE on Windows-hosted servers, and AVIF image-optimization RCE), `js-yaml` 4.3.1 → 4.3.2, `vitest` 4.1.10 → 4.1.11, `nanoid` 3.3.17 → 3.3.19; `sharp` and `baseline-browser-mapping` come along with the `next` bump. `bun audit` reports no vulnerabilities.
+
 ## [0.19.1] - 2026-08-06
 
 ### Changed
