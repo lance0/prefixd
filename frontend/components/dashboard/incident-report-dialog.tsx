@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Copy, Download, FileText, Loader2 } from "lucide-react"
 import { toast } from "sonner"
+import { copyText } from "@/lib/clipboard"
 
 interface IncidentReportDialogProps {
   markdown: string | null
@@ -31,7 +32,10 @@ export function IncidentReportDialog({
 
   const handleCopy = async () => {
     if (!markdown) return
-    await navigator.clipboard.writeText(markdown)
+    if (!(await copyText(markdown))) {
+      toast.error("Copy failed — clipboard unavailable")
+      return
+    }
     setCopied(true)
     toast.success("Report copied to clipboard")
     setTimeout(() => setCopied(false), 2000)

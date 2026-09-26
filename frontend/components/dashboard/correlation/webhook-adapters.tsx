@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect } from "react"
 import { toast } from "sonner"
+import { copyText } from "@/lib/clipboard"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -269,10 +270,12 @@ function AdapterRow({
           <button
             type="button"
             aria-label="Copy endpoint"
-            onClick={() => {
-              navigator.clipboard.writeText(endpoint).then(() => {
+            onClick={async () => {
+              if (await copyText(endpoint)) {
                 toast.success("Endpoint copied")
-              })
+              } else {
+                toast.error("Copy failed — clipboard unavailable")
+              }
             }}
             className="p-1 hover:bg-muted rounded"
           >

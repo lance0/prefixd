@@ -142,15 +142,28 @@ EVENT_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null |
 
 # Infer attack vector from raw details
 VECTOR="unknown"
-RAW_LOWER=$(echo "$RAW_DETAILS" | tr '[:upper:]' '[:lower:]')
-if [[ "$RAW_LOWER" == *"udp"* ]]; then
-    VECTOR="udp_flood"
-elif [[ "$RAW_LOWER" == *"syn"* ]]; then
+RAW_LOWER=$(printf '%s' "$RAW_DETAILS" | tr '[:upper:]' '[:lower:]')
+
+# FastNetMon lists every protocol it tracks, including idle ones (e.g.
+# "outgoing udp traffic: 0 mbps"). Lines reporting a zero metric carry no
+# attack signal, so drop them before matching -- otherwise a SYN flood whose
+# details also mention udp at 0 mbps was mislabelled as udp_flood. Details
+# without a metric (e.g. "attack type: syn_flood") always survive.
+ZERO_METRIC_RE='(^|[^0-9.])0+(\.0+)?[[:space:]]*(mbps|kbps|gbps|bps|pps|kpps|mpps|fps|flows)'
+RAW_SIGNAL=$(printf '%s\n' "$RAW_LOWER" | grep -vE "$ZERO_METRIC_RE" || true)
+
+# \b keeps "ack" out of "packets"; the *_ and "tcp_*" alternatives keep
+# "syn_flood"/"tcp_syn" matching. TCP flag vectors are tested before udp for
+# mixed floods.
+VECTOR="unknown"
+if grep -qE '\bsyn\b|syn_|tcp[ _-]syn' <<< "$RAW_SIGNAL"; then
     VECTOR="syn_flood"
-elif [[ "$RAW_LOWER" == *"ack"* ]]; then
+elif grep -qE '\back\b|ack_|tcp[ _-]ack' <<< "$RAW_SIGNAL"; then
     VECTOR="ack_flood"
-elif [[ "$RAW_LOWER" == *"icmp"* ]]; then
+elif grep -qE '\bicmp\b|icmp_' <<< "$RAW_SIGNAL"; then
     VECTOR="icmp_flood"
+elif grep -qE '\budp\b|udp_' <<< "$RAW_SIGNAL"; then
+    VECTOR="udp_flood"
 fi
 
 # Build JSON payload

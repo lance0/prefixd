@@ -1113,7 +1113,13 @@ DELETE /v1/safelist/{prefix}
 Authorization: Bearer <token>
 ```
 
+`prefix` is the stored CIDR, e.g. `8.9.8.9/32`. Both a percent-encoded separator
+(`/v1/safelist/8.9.8.9%2F32`) and a literal slash (`/v1/safelist/8.9.8.9/32`)
+are accepted, so proxies that decode `%2F` work too.
+
 **Response (204 No Content)**
+
+**Response (404 Not Found)** — prefix is not in the safelist.
 
 ---
 

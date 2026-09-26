@@ -85,15 +85,21 @@ Unban correlation is done by querying active mitigations for the victim IP and w
 
 ## Vector Detection
 
-The script infers attack vectors from FastNetMon's stdin details:
+The script infers the attack vector from FastNetMon's stdin details:
 
-| FastNetMon Detail | prefixd Vector |
-|------------------|----------------|
-| Contains "udp"   | `udp_flood`    |
-| Contains "syn"   | `syn_flood`    |
-| Contains "ack"   | `ack_flood`    |
-| Contains "icmp"  | `icmp_flood`   |
-| Other            | `unknown`      |
+| Detail token                       | prefixd Vector |
+|------------------------------------|----------------|
+| `syn` / `syn_` / `tcp_syn`         | `syn_flood`    |
+| `ack` / `ack_` / `tcp_ack`         | `ack_flood`    |
+| `icmp` / `icmp_`                   | `icmp_flood`   |
+| `udp` / `udp_`                     | `udp_flood`    |
+| Other / no signal                  | `unknown`      |
+
+Rules that keep the mapping honest:
+
+- Lines reporting a **zero metric** (`outgoing udp traffic: 0 mbps`) are ignored — FastNetMon lists every protocol it tracks, and a SYN flood otherwise matches the idle `udp` line first.
+- TCP flag tokens are matched before `udp` for mixed floods.
+- Matches are word-bounded, so `ack` is not detected inside `packets`.
 
 ## Testing
 

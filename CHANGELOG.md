@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Safelist removal from the dashboard returned 404.** The Next.js API proxy joins percent-decoded route segments, so `DELETE /v1/safelist/8.9.8.9%2F32` reached the backend as `/v1/safelist/8.9.8.9/32` and missed the single-segment route. The proxy now re-encodes each segment, and the route accepts a literal slash form (`{*prefix}`) for proxies that decode `%2F`.
+- **Dashboard had no sign-out (and no role-based permissions).** `/v1/auth/login` and `/v1/auth/me` return a flat operator (`operator_id`), but the client read `data.operator`, leaving `operator` as `undefined`. The user menu (and therefore sign-out) never rendered, and role checks denied admin actions to authenticated admins. Auth responses are now mapped to the client `Operator` shape and `isAuthenticated` is a strict boolean.
+- **FastNetMon SYN floods labelled `udp_flood`.** Vector detection matched the first protocol word anywhere in the attack details, so an idle line such as `outgoing udp traffic: 0 mbps` won over `syn_flood`. Zero-metric lines are ignored, TCP flag vectors are matched before `udp`, and matches are word-bounded (`ack` no longer matches inside `packets`).
+- **Copy buttons failed silently on plain-HTTP deployments.** `navigator.clipboard` only exists in secure contexts, so the incident report, FlowSpec rule, and webhook endpoint copy actions threw and reported nothing when the dashboard was served over HTTP. The copy helper now falls back to a hidden textarea, checks `clipboard-write` permission, and surfaces a "Copy failed — clipboard unavailable" toast instead of claiming success. Chrome ignores clipboard writes entirely for plain-HTTP origins (other than `localhost`), so production dashboards need HTTPS for clipboard actions — documented in `docs/deployment.md`.
+
 ## [0.19.1] - 2026-08-06
 
 ### Changed

@@ -14,8 +14,11 @@ export interface LoginRequest {
   password: string
 }
 
-export interface LoginResponse {
-  operator: Operator
+/** Wire shape of /v1/auth/login and /v1/auth/me responses (flat, snake_case). */
+export interface OperatorResponse {
+  operator_id: string
+  username: string
+  role: OperatorRole
 }
 
 export interface AuthState {
@@ -40,8 +43,8 @@ export async function login(credentials: LoginRequest): Promise<Operator> {
     throw new Error(`Login failed: ${error}`)
   }
 
-  const data: LoginResponse = await res.json()
-  return data.operator
+  const data: OperatorResponse = await res.json()
+  return { id: data.operator_id, username: data.username, role: data.role }
 }
 
 export async function logout(): Promise<void> {
@@ -64,8 +67,11 @@ export async function getCurrentUser(): Promise<Operator | null> {
       throw new Error("Failed to get current user")
     }
 
-    const data: { operator: Operator } = await res.json()
-    return data.operator
+    const data: OperatorResponse = await res.json()
+    if (!data?.operator_id) {
+      return null
+    }
+    return { id: data.operator_id, username: data.username, role: data.role }
   } catch {
     return null
   }

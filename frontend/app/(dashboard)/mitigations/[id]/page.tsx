@@ -15,6 +15,8 @@ import { ArrowLeft, Check, Clock, Copy, FileText, ShieldAlert, Activity, GitBran
 import { FlowSpecPreview, formatFlowSpecRule } from "@/components/dashboard/flowspec-preview"
 import { IncidentReportDialog } from "@/components/dashboard/incident-report-dialog"
 import { withdrawMitigation, getIncidentReport } from "@/lib/api"
+import { copyText } from "@/lib/clipboard"
+import { toast } from "sonner"
 import { useState } from "react"
 import {
   AlertDialog,
@@ -82,8 +84,11 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
   const [showReportDialog, setShowReportDialog] = useState(false)
   const [reportLoading, setReportLoading] = useState(false)
 
-  const copyToClipboard = (text: string, field: string) => {
-    navigator.clipboard.writeText(text)
+  const copyToClipboard = async (text: string, field: string) => {
+    if (!(await copyText(text))) {
+      toast.error("Copy failed — clipboard unavailable")
+      return
+    }
     setCopied(field)
     setTimeout(() => setCopied(null), 2000)
   }

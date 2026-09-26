@@ -137,6 +137,18 @@ When deploying to a remote server, ensure:
 open http://your-server
 ```
 
+### Clipboard on Plain HTTP
+
+Browsers only allow clipboard writes from a **secure context**. Chrome reports
+`clipboard-write: denied` for plain-HTTP origins other than `localhost` and
+ignores the copy request, so the dashboard's copy buttons (incident report,
+FlowSpec rule, webhook endpoint) fail there — they show a "Copy failed —
+clipboard unavailable" toast rather than pretending to succeed.
+
+Serve the dashboard over HTTPS (see `configs/nginx.conf` and `docs/adr/005-*.md`)
+to enable clipboard actions in production. `http://localhost` also works for
+local development.
+
 ### Local Development (Outside Docker)
 
 For frontend development without Docker:

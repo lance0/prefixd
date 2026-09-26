@@ -9,6 +9,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { SourceBadge } from "./source-badge"
 import { ConfidenceBar } from "./confidence-bar"
 import type { Event } from "@/lib/api"
+import { copyText } from "@/lib/clipboard"
+import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { useReducedMotion } from "@/hooks/use-reduced-motion"
 
@@ -84,8 +86,11 @@ export function EventDetailPanel({ event, onClose }: EventDetailPanelProps) {
 
   if (!event) return null
 
-  const copyToClipboard = (text: string, field: string) => {
-    navigator.clipboard.writeText(text)
+  const copyToClipboard = async (text: string, field: string) => {
+    if (!(await copyText(text))) {
+      toast.error("Copy failed — clipboard unavailable")
+      return
+    }
     setCopied(field)
     setTimeout(() => setCopied(null), 2000)
   }
