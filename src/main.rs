@@ -162,9 +162,9 @@ async fn start_tls_server(
 ) -> anyhow::Result<()> {
     use axum_server::tls_rustls::RustlsConfig;
     use rustls::RootCertStore;
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use rustls::server::WebPkiClientVerifier;
-    use std::fs::File;
-    use std::io::BufReader;
 
     let rustls_config = if require_client_cert {
         let ca_path = tls_config
@@ -172,29 +172,25 @@ async fn start_tls_server(
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("mTLS requires ca_path to be set"))?;
 
-        let ca_file = File::open(ca_path)?;
-        let mut ca_reader = BufReader::new(ca_file);
-        let ca_certs: Vec<_> =
-            rustls_pemfile::certs(&mut ca_reader).collect::<Result<Vec<_>, _>>()?;
-
         let mut root_store = RootCertStore::empty();
-        for cert in ca_certs {
-            root_store.add(cert)?;
+        for cert in CertificateDer::pem_file_iter(ca_path)? {
+            root_store.add(cert?)?;
         }
 
         let client_verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
             .build()
             .map_err(|e| anyhow::anyhow!("failed to build client verifier: {}", e))?;
 
-        let cert_file = File::open(&tls_config.cert_path)?;
-        let mut cert_reader = BufReader::new(cert_file);
         let certs: Vec<_> =
-            rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
+            CertificateDer::pem_file_iter(&tls_config.cert_path)?.collect::<Result<Vec<_>, _>>()?;
 
-        let key_file = File::open(&tls_config.key_path)?;
-        let mut key_reader = BufReader::new(key_file);
-        let key = rustls_pemfile::private_key(&mut key_reader)?
-            .ok_or_else(|| anyhow::anyhow!("no private key found in {}", tls_config.key_path))?;
+        let key = PrivateKeyDer::from_pem_file(&tls_config.key_path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to read private key from {}: {}",
+                tls_config.key_path,
+                e
+            )
+        })?;
 
         let config = rustls::ServerConfig::builder()
             .with_client_cert_verifier(client_verifier)
