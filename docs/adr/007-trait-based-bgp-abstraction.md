@@ -19,16 +19,19 @@ Define a `FlowSpecAnnouncer` trait that abstracts BGP operations:
 ```rust
 #[async_trait]
 pub trait FlowSpecAnnouncer: Send + Sync {
-    async fn announce(&self, rule: &FlowSpecRule) -> Result<(), PrefixdError>;
-    async fn withdraw(&self, rule: &FlowSpecRule) -> Result<(), PrefixdError>;
-    async fn get_rib(&self) -> Result<Vec<FlowSpecRule>, PrefixdError>;
-    async fn get_peers(&self) -> Result<Vec<PeerStatus>, PrefixdError>;
+    async fn announce(&self, rule: &FlowSpecRule) -> Result<()>;
+    async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()>;
+    async fn list_active(&self) -> Result<Vec<FlowSpecRule>>;
+    async fn session_status(&self) -> Result<Vec<PeerStatus>>;
 }
 ```
 
-Two implementations:
-- `GoBgpAnnouncer` -- real gRPC client for production
-- `MockAnnouncer` -- in-memory store for tests, records all calls
+(The trait is defined in `src/bgp/announcer.rs`; `Result` is `crate::error::Result`.)
+
+Three implementations (the last named one lands with ADR 023):
+- `GoBgpAnnouncer` — GoBGP gRPC client (the shipped backend, ADR 001)
+- `RustBgpdAnnouncer` — rustbgpd gRPC client ([ADR 023](023-rustbgpd-over-grpc.md))
+- `MockAnnouncer` — in-memory store for tests, records all calls
 
 ## Consequences
 

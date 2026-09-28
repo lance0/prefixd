@@ -287,7 +287,7 @@ Current version: **v0.18.1**
 
 - **Issues:** [GitHub Issues](https://github.com/lance0/prefixd/issues)
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
-- **Architecture Decision Records:** [docs/adr/](docs/adr/) (19 ADRs)
+- **Architecture Decision Records:** [docs/adr/](docs/adr/) (24 ADRs)
 
 ---
 
