@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR 023 — Drive rustbgpd over gRPC Instead of Embedding Its Crates](023-rustbgpd-over-grpc.md) (2026-09-28). The reasoning below is kept as the historical record: GoBGP remains the shipped backend until the rustbgpd path passes interop re-validation.
 
 ## Date
 

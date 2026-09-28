@@ -164,7 +164,7 @@ Target: Validated with real routers, stable API, production-proven. Operators tr
 
 ### Dependency Security Cadence
 
-- [ ] Monthly GoBGP baseline bump policy (track upstream releases, especially parser hardening like v3.35.0)
+- [ ] Monthly BGP speaker baseline bump policy — today GoBGP (track upstream releases, especially parser hardening like v3.35.0); after [ADR 023](docs/adr/023-rustbgpd-over-grpc.md) lands, the same cadence applies to the pinned rustbgpd release
 - [x] CVE gate in CI (cargo audit + bun audit gate Docker publishing; fail build on known vulnerabilities)
 - [x] SBOM generation (CycloneDX JSON, published as release artifact on version tags)
 - [x] FlowSpec NLRI parser fuzz/regression tests (proptest in CI + cargo-fuzz for offline coverage)
@@ -233,38 +233,74 @@ Target: Quality-of-life for operators during active incidents. These are the fea
 
 ---
 
-## Native BGP Speaker (rustbgpd)
+## BGP Speaker: rustbgpd (ADR 023)
 
-Replace the GoBGP container dependency with [rustbgpd](https://github.com/lance0/rustbgpd) crates embedded directly into the prefixd binary. Eliminates the separate process, gRPC client overhead, proto compilation, and container orchestration. prefixd becomes a single binary that speaks BGP natively.
+Replace the GoBGP container with the first-party [rustbgpd](https://github.com/lance0/rustbgpd) daemon, driven over gRPC behind the existing `FlowSpecAnnouncer` trait.
 
-### Phase 1: Embedded Announcer
+**Why not embedding:** rustbgpd's `rib`, `transport` and `api` crates are `publish = false` and its own `docs/reference/embedding.md` states *"Never publish as a library: transport, api, evpn, evpn-linux, the daemon binary"* while naming gRPC ("Shape A") as the recommended production embedding. Embedding would also drop the fail-open property of ADR 003, which depends on the speaker being a separate process whose session drop clears routes. See [ADR 023](docs/adr/023-rustbgpd-over-grpc.md).
 
-- [ ] Add `rustbgpd-wire`, `rustbgpd-fsm`, `rustbgpd-transport`, `rustbgpd-rib` as workspace dependencies
-- [ ] Implement `RustBgpdAnnouncer` behind the existing `FlowSpecAnnouncer` trait (announce, withdraw, list_active, session_status)
-- [ ] Peer lifecycle managed by prefixd config (ASN, neighbor address, AFI-SAFI, timers)
-- [ ] Feature-flag the announcer backend (`--features gobgp` vs `--features native-bgp`, default native)
+### Phase 1: rustbgpd announcer (additive, GoBGP still shipped)
 
-### Phase 2: Reconciliation + RIB Direct Access
+- [ ] Generate a tonic client from rustbgpd's `proto/rustbgpd.proto`; pin an exact rustbgpd version
+- [ ] Implement `RustBgpdAnnouncer` behind `FlowSpecAnnouncer`: `announce` → `InjectionService.AddFlowSpec`, `withdraw` → `DeleteFlowSpec`, `list_active` → `RibService.ListFlowSpecRoutes`, `session_status` → `NeighborService.ListNeighbors`
+- [ ] `bgp.mode: gobgp | rustbgpd | mock` plus a rustbgpd compose service and its TOML config
+- [ ] Auth: bearer token + principal, or native mTLS (rustbgpd v0.73+)
+- [ ] Integration tests against a pinned rustbgpd container (announce, withdraw, TTL-expiry reconciliation)
 
-- [ ] Reconciliation loop reads the embedded RIB directly instead of querying GoBGP via gRPC
-- [ ] Expose BGP session state in health detail endpoint from the embedded FSM
-- [ ] Map existing `gobgp.conf` semantics to rustbgpd peer config (migration path for existing deployments)
+### Phase 2: Parity and validation
+
+- [ ] Reconciliation diffs against `RibService.ListFlowSpecRoutes`; `/v1/health/detail` reads `NeighborService`
+- [ ] Map `gobgp.conf` semantics onto rustbgpd's peer config (neighbours, AFI-SAFI, timers, import/export policy)
+- [ ] Re-run Juniper cJunosEvolved interop (announce, rate-limit, withdraw, TTL expiry) and FRR containerlab
+- [ ] Arista cEOS / Cisco XRd validation (hardware-gated)
+- [ ] Chaos and load suites against rustbgpd
+- [ ] Document the version-pinning policy for the `outside_v1` FlowSpec RPCs
 
 ### Phase 3: Remove GoBGP
 
-- [ ] Remove `proto/` directory and `build.rs` proto compilation
-- [ ] Remove tonic/prost GoBGP client dependencies
-- [ ] Remove `gobgp` service from `docker-compose.yml`
-- [ ] Update all lab topologies (containerlab configs peer directly with prefixd)
-- [ ] Update deployment docs, vendor configs, and troubleshooting guides
-
-### Phase 4: Validation
-
-- [ ] Re-run Juniper cJunosEvolved interop (announce, rate-limit, withdraw, TTL expiry)
-- [ ] Re-run FRR containerlab interop
-- [ ] Arista EOS validation (if hardware available)
-- [ ] Chaos and load test suites pass against embedded speaker
+- [ ] Delete `proto/`, `build.rs` proto compilation, tonic/prost GoBGP deps, the `gobgp` compose service, `tests/integration_gobgp.rs`
+- [ ] Drop the `apipb` re-export and rename the `gobgp` health-config keys
+- [ ] Update lab topologies, deployment docs, vendor configs and troubleshooting guides
 - [ ] Migration guide for existing GoBGP deployments
+
+### Revisit only on trigger
+
+- [ ] Re-evaluate in-process embedding if rustbgpd publishes a supported embedding API with a stability policy
+
+---
+
+## Framework Migration: loco-rs (ADR 024)
+
+Adopt [loco-rs](https://loco.rs) as the target framework and migrate **in stages** — never a big-bang rewrite. The MSRV bump is accepted; the parity decisions (auth, WebSocket, metrics, config hot reload, `prefixdctl`, scheduler) are recorded in [ADR 024](docs/adr/024-loco-staged-migration.md).
+
+### Phase 0: Prerequisites
+
+- [ ] Raise `rust-version` to loco's MSRV (1.94) in `Cargo.toml`, Dockerfile, CONTRIBUTING and CI docs
+- [ ] Pin an exact `loco-rs` version and write down the upgrade cadence
+
+### Phase 1: loco shell (zero behaviour change)
+
+- [ ] loco app boot via `Hooks`, `AppContext`, `cargo loco` CLI, `config/{env}.yaml`
+- [ ] Mount the existing `axum::Router` through `after_routes`; the full test suite stays green
+
+### Phase 2: Data layer, resource by resource
+
+- [ ] SeaORM entities and its migrations per resource, keeping `Repository` as the transitional seam
+- [ ] Replace `MockRepository` with loco's test fixtures where they actually fit
+
+### Phase 3: Handlers → controllers
+
+- [ ] Convert per resource, preserving utoipa annotations on the new signatures
+
+### Phase 4: Batteries
+
+- [ ] Move alert delivery onto loco's Postgres-backed job queue (retry + dead-letter)
+- [ ] Adopt background workers/tasks where they replace hand-rolled `tokio::spawn` loops
+
+### Phase 5: Cleanup
+
+- [ ] Retire the transitional seams; re-decide OpenAPI tooling; fold bespoke middleware into loco's stack where it is a real simplification
+
 
 ---
 

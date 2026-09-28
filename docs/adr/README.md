@@ -8,7 +8,7 @@ Format follows [Michael Nygard's template](https://cognitect.com/blog/2011/11/15
 
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
-| [001](001-gobgp-sidecar.md) | Use GoBGP as a sidecar instead of native BGP | Accepted | 2026-01-15 |
+| [001](001-gobgp-sidecar.md) | Use GoBGP as a sidecar instead of native BGP | Superseded by [023](023-rustbgpd-over-grpc.md) | 2026-01-15 |
 | [002](002-flowspec-only-afi-safi.md) | FlowSpec-only AFI-SAFI for router peers | Accepted | 2026-02-05 |
 | [003](003-fail-open-ttl.md) | Fail-open design with mandatory TTLs | Accepted | 2026-01-15 |
 | [004](004-destination-prefix-32-only.md) | Restrict FlowSpec to /32 destination prefixes | Accepted | 2026-01-15 |
@@ -30,5 +30,7 @@ Format follows [Michael Nygard's template](https://cognitect.com/blog/2011/11/15
 | [020](020-generic-webhook-adapter.md) | Generic Webhook Adapter | Accepted | 2026-04-18 |
 | [021](021-corroborating-signals.md) | Corroborating Signals | Accepted | 2026-04-19 |
 | [022](022-confidence-decay.md) | Confidence Decay for Signal Groups | Accepted | 2026-05-11 |
+| [023](023-rustbgpd-over-grpc.md) | Drive rustbgpd over gRPC instead of embedding its crates | Accepted (supersedes 001) | 2026-09-28 |
+| [024](024-loco-staged-migration.md) | Migrate to loco-rs in stages | Accepted | 2026-09-28 |
 
 ADRs are numbered sequentially as written. Retroactive ADRs (009-013) were documented on 2026-02-18 but dated to when the decision was originally made.
