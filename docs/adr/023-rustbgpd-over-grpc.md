@@ -56,11 +56,11 @@ Reconciliation stays the poll-and-converge loop of ADR 011: it reads the FlowSpe
 
 **Negative:**
 - Still two processes and a gRPC hop per announcement (ADR 001's original trade-off, unchanged).
-- `InjectionService.AddFlowSpec` / `DeleteFlowSpec` / `RibService.ListFlowSpecRoutes` are classified `explicitly_outside_v1` (`docs/reference/v1-stable-surface.json:180`; `Config.flowspec` is `outside_v1` at `:152`). They are functional and documented, but carry no compatibility promise — only a 2-minor / 90-day deprecation floor.
+- `InjectionService.AddFlowSpec` / `DeleteFlowSpec` / `RibService.ListFlowSpecRoutes` are classified `explicitly_outside_v1` (`docs/reference/v1-stable-surface.json:180`; `Config.flowspec` is `outside_v1` at `:152`). They are functional and documented, but carry no compatibility promise — only a 2-minor / 90-day deprecation floor. rustbgpd has since decided to promote them into the v1 inventory before v1.0, scoped and staged behind the advertised-view and injection-contract work, so this is a transitional risk rather than a permanent one.
 - Coupling to rustbgpd's release cadence replaces coupling to GoBGP's.
 
 **Mitigation:**
-- Pin an exact rustbgpd version; treat its CHANGELOG as part of the upgrade checklist.
+- Pin an exact rustbgpd version; treat its CHANGELOG as part of the upgrade checklist. Re-check the stability position on every rustbgpd minor — the promotion of the controller RPCs is staged, and the exact pin only comes off once they are inventoried in the stable surface.
 - Mirror `tests/integration_gobgp.rs` against a pinned rustbgpd container (announce visible in `rbgp rib flowspec`, withdraw clears it, TTL expiry reconciles).
 - Re-run the Juniper cJunosEvolved and FRR interop receipts, then Arista cEOS / Cisco XRd, before deleting the GoBGP path.
 - If rustbgpd later publishes a supported embedding API, revisit this decision — the trait boundary means switching again is contained.
