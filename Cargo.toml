@@ -96,6 +96,8 @@ harness = false
 [features]
 default = []
 test-utils = []
+# rustbgpd speaker backend (ADR 023); off until the GoBGP path is retired.
+bgp-rustbgpd = []
 
 [[bin]]
 name = "prefixd"
