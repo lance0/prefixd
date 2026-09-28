@@ -42,13 +42,16 @@ FlowSpec construction uses `FlowSpecComponent::DestinationPrefix` + `::IpProtoco
 
 The backend becomes a config choice (`bgp.mode: gobgp | rustbgpd | mock`) so the swap can be validated against a live rustbgpd before GoBGP is removed; ADR 001's GoBGP path is deleted once interop re-validation passes. rustbgpd is pinned to an exact version and its CHANGELOG is tracked on upgrade.
 
+Reconciliation stays the poll-and-converge loop of ADR 011: it reads the FlowSpec view every `timers.reconciliation_interval_seconds` (default 30) and corrects drift, unchanged in shape from today. Nothing in prefixd consumes a pushed BGP event stream, so rustbgpd's event history (unicast-only at the time of writing) is not on the critical path — an event subscription would only shorten the window for detecting out-of-band withdrawals, and can be revisited as an optimisation rather than a dependency.
+
 ## Consequences
 
 **Positive:**
 - Keeps the battle-tested protocol path (peer FSM, capability negotiation, GR/LLGR, TCP-AO) in a process that already has interop receipts, instead of prefixd re-implementing ~4k lines of daemon wiring against unpublished crates.
 - Preserves the fail-open property of ADR 003, which depends on the speaker being a separate process.
 - Removes prefixd's own BGP proto maintenance: the GoBGP proto, generated `apipb` re-export and proto build step go away, replaced by a client generated from rustbgpd's self-contained proto.
-- Gains native mTLS gRPC, a token/principal auth model, its own Prometheus surface, and `EventService.WatchEvents` for future event-driven reconciliation.
+- Gains native mTLS gRPC and a token/principal auth model, plus its own Prometheus surface on a separate listener.
+- rustbgpd documents the controller contract being relied on: `AddFlowSpec` is an upsert that always succeeds (so prefixd's reconciliation re-announce is safe), while deleting an absent rule returns `NOT_FOUND` — which prefixd must treat as drift, not failure.
 - rustbgpd ships `examples/ddos-mitigation/config.toml` describing exactly this integration ("Detection → Mitigation platform → rustbgpd (gRPC) → Edge routers"), naming prefixd as the mitigation platform.
 
 **Negative:**
