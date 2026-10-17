@@ -77,6 +77,22 @@ class ChangelogGateTests(unittest.TestCase):
         reason = gate.no_change_reason("Changelog: not needed: Extract a helper without changing routes, payloads or logs.")
         self.assertIn(reason, gate.check(self.root, self.base, "HEAD", reason))
 
+    def test_crlf_rationale_in_multiline_pr_body_is_recognized(self):
+        reason = "Extract a helper without changing routes, payloads or logs."
+        body = f"## Description\r\nChangelog: not needed: {reason}\r\n## Testing\r\n"
+        self.assertEqual(gate.no_change_reason(body), reason)
+
+    def test_rename_out_of_surface_paths_still_requires_a_note(self):
+        self.write("docker-compose.yml", "services: {}\n")
+        self.commit()
+        base = self.git("rev-parse", "HEAD").strip()
+        self.git("config", "diff.renames", "true")
+        (self.root / "archive").mkdir()
+        self.git("mv", "docker-compose.yml", "archive/compose.yml")
+        self.commit()
+        with self.assertRaisesRegex(ValueError, "Candidate paths: docker-compose.yml"):
+            gate.check(self.root, base, "HEAD")
+
     def test_placeholders_and_ambiguous_exceptions_are_rejected(self):
         for body in [
             "Changelog: not needed: <specific reason>",

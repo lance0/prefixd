@@ -51,7 +51,7 @@ class AssembleChangelogTests(unittest.TestCase):
         (root / "changelog.d").mkdir()
         (root / "changelog.d/README.md").write_text("# Fragments\n", encoding="utf-8")
         (root / "docs").mkdir()
-        for name in ["x.md", "y.md", "space name.md"]:
+        for name in ["x.md", "y.md", "space name.md", "guide(v1).md"]:
             (root / "docs" / name).write_text("# Guide\n", encoding="utf-8")
         for name, text in fragments.items():
             (root / "changelog.d" / name).write_text(text, encoding="utf-8")
@@ -122,7 +122,7 @@ class AssembleChangelogTests(unittest.TestCase):
 
 - See the [guide](../docs/x.md#anchor), the
   [upstream](https://example.org/../a.md), and [below](#local-anchor).
-  The path ../docs/y.md and [a label](plain text) stay as written.
+  The path ../docs/y.md and `[a label](plain text)` stay as written.
 """
         root = self.tree(**{"fixed-links.md": fragment})
         assemble.run(root, check=False)
@@ -130,7 +130,7 @@ class AssembleChangelogTests(unittest.TestCase):
         self.assertIn(
             """- See the [guide](docs/x.md#anchor), the
   [upstream](https://example.org/../a.md), and [below](#local-anchor).
-  The path ../docs/y.md and [a label](plain text) stay as written.
+  The path ../docs/y.md and `[a label](plain text)` stay as written.
 """,
             text,
         )
@@ -337,6 +337,7 @@ class AssembleChangelogTests(unittest.TestCase):
 
 - See [guide](../docs/x.md?view=full#missing-anchor "Title"),
   [spaces](<../docs/space name.md>), [encoded](../docs/space%20name.md),
+  [versioned](<../docs/guide(v1).md>),
   [readme](README.md), and [upstream](https://example.invalid/never-fetched).
 """
         root = self.tree(**{"fixed-links.md": fragment})
@@ -345,6 +346,7 @@ class AssembleChangelogTests(unittest.TestCase):
         for expected in [
             '](docs/x.md?view=full#missing-anchor "Title")',
             "](<docs/space name.md>)", "](docs/space%20name.md)", "](changelog.d/README.md)",
+            "](<docs/guide(v1).md>)",
         ]:
             self.assertIn(expected, actual)
 
@@ -356,6 +358,8 @@ class AssembleChangelogTests(unittest.TestCase):
             ("/absolute.md", "must stay relative"),
             ("file:///absolute.md", "must stay relative"),
             ("fixed-links.md", "assembly consumes"),
+            ("<../docs/missing(v1).md>", "does not exist"),
+            ("<../../outside(v1).md>", "escapes the repository"),
         ]:
             root = self.tree(**{"fixed-links.md": f"### Fixed\n\n- See [guide]({target}).\n"})
             before = (root / "CHANGELOG.md").read_bytes()
@@ -363,6 +367,27 @@ class AssembleChangelogTests(unittest.TestCase):
                 assemble.run(root, check=False)
             self.assertEqual((root / "CHANGELOG.md").read_bytes(), before)
             self.assertTrue((root / "changelog.d/fixed-links.md").exists())
+
+    def test_unrecognized_inline_links_fail_without_writes_or_consumption(self):
+        links = [
+            "[guide](../docs/guide(v1).md)",
+            r"[guide](../docs/guide\(v1\).md)",
+            "[guide](../docs/missing(v1).md)",
+            "[guide](../../outside(v1).md)",
+            "[guide](../docs/missing file.md)",
+            "[guide](../docs/missing.md",
+            "[guide](<../docs/x.md)",
+            "[guide](../docs/x.md>)",
+        ]
+        for link in links:
+            for check in [True, False]:
+                with self.subTest(link=link, check=check):
+                    root = self.tree(**{"fixed-links.md": f"### Fixed\n\n- See {link}.\n"})
+                    paths = [root / "CHANGELOG.md", root / "changelog.d/fixed-links.md"]
+                    before = [(p.read_bytes(), p.stat().st_mtime_ns) for p in paths]
+                    with self.assertRaisesRegex(ValueError, "angle brackets"):
+                        assemble.run(root, check=check)
+                    self.assertEqual([(p.read_bytes(), p.stat().st_mtime_ns) for p in paths], before)
 
     def test_symlinks_and_stray_entries_are_refused(self):
         for name in ["fixed-link.md", "README.md"]:

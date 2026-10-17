@@ -24,7 +24,7 @@ SURFACE_FILES = {
     "Cargo.toml", "Cargo.lock", "build.rs", "Dockerfile", "docker-compose.yml",
     "frontend/package.json", "frontend/bun.lock", "frontend/Dockerfile",
 }
-EXCEPTION = re.compile(r"^Changelog:[ \t]*not needed:[ \t]*(\S[^\r\n]*)$", re.I | re.M)
+EXCEPTION = re.compile(r"^Changelog:[ \t]*not needed:[ \t]*(\S[^\r\n]*)\r?$", re.I | re.M)
 
 
 def no_change_reason(body: str) -> str:
@@ -47,7 +47,7 @@ def check(root: Path, base: str, head: str, reason: str = "") -> str:
     # Resolve separately so a supplied ref cannot become a git diff option.
     base_sha = git(root, "rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}").strip()
     head_sha = git(root, "rev-parse", "--verify", "--end-of-options", f"{head}^{{commit}}").strip()
-    paths = git(root, "diff", "--name-only", "-z", f"{base_sha}...{head_sha}", "--").split("\0")
+    paths = git(root, "diff", "--no-renames", "--name-only", "-z", f"{base_sha}...{head_sha}", "--").split("\0")
     surfaces = [
         p for p in paths
         if p in SURFACE_FILES or p.startswith(SURFACE_DIRECTORIES)

@@ -70,7 +70,7 @@ FILENAME = re.compile(
 # This covers inline links in the fragment's restricted prose format.
 FRAGMENT_LINK = re.compile(
     r"(?s)(?<!\\)(?:\\\\)*(?<!`)(?P<tick>`+)(?!`).*?(?<!`)(?P=tick)(?!`)"
-    r"|\]\((?P<target><[^>\n]+>|[^\s()]+)"
+    r"|\]\((?P<target><[^>\n]+>|[^\s()<>]+)"
     r"(?:[ \t]+(?:\"[^\"\n]*\"|'[^'\n]*'))?[ \t]*\)"
 )
 
@@ -114,6 +114,11 @@ def parse_fragment(name: str, text: str) -> Fragment:
     filename = FILENAME.fullmatch(Path(name).name)
     if filename is None or filename["category"] != category.lower().split()[0]:
         raise ValueError(f"{name}: expected lowercase <category>-<slug>.md matching the heading")
+    if "](" in FRAGMENT_LINK.sub("", body):
+        raise ValueError(
+            f"{name}: unsupported inline link; put destinations containing spaces or "
+            "parentheses in angle brackets, and literal examples in inline code"
+        )
     prose = FRAGMENT_LINK.sub(lambda match: "" if match["tick"] else match.group(), body)
     if re.search(r"(?im)^ {0,3}\[[^\]\n]+\]:|<[^>\n]+\b(?:href|src)\s*=", prose):
         raise ValueError(f"{name}: use inline Markdown links, not reference definitions or HTML links")

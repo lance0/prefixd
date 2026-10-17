@@ -56,8 +56,11 @@ against existing `[Unreleased]` entries. Whitespace differences do not hide a
 duplicate. Existing changelog entries and historical formatting are retained;
 the stricter fragment format is not applied retroactively.
 
-Use inline Markdown links, with an optional quoted title. Reference definitions
-and HTML links are unsupported. Relative targets resolve from this directory:
+Use inline Markdown links, with an optional quoted title. Destinations containing
+spaces or parentheses require angle brackets, for example
+`[guide](<../docs/guide(v1).md>)`; escaped parentheses are unsupported. Put literal
+link examples in inline code. Unrecognized `](` syntax, reference definitions
+and HTML links are rejected. Relative targets resolve from this directory:
 write `../docs/...`, not `docs/...`. The assembler rebases them for the root
 changelog, leaving literal inline code unchanged. It checks that local targets
 exist inside the repository and rejects links to fragments that assembly will
