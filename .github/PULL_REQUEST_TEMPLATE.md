@@ -21,7 +21,12 @@ Fixes #(issue number)
 - [ ] I have added tests that prove my fix/feature works
 - [ ] All new and existing tests pass (`cargo test --features test-utils`)
 - [ ] I have updated documentation as needed
-- [ ] I have updated CHANGELOG.md (for user-facing changes)
+- [ ] I have added a changelog.d fragment for observable behavior/interface changes
+
+For an internal/process-only change, explain the preserved behavior with
+`Changelog: not needed: <specific reason>`. Review configuration, API/CLI,
+metrics, log events and migration compatibility using
+[the stability policy](https://github.com/lance0/prefixd/blob/main/docs/reference/stability.md).
 
 ## Testing
 

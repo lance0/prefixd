@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags: ['v*']
   pull_request:
+    types: [opened, synchronize, reopened, edited]
 
 # Superseded runs on the same branch/PR are pointless once a newer commit lands.
 concurrency:
@@ -16,6 +17,26 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  repository-contracts:
+    name: Repository contracts
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Test changelog contracts
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Validate changelog fragments without writing
+        run: python3 scripts/assemble-changelog.py --check
+      - name: Check pull-request release notes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check-changelog.py --base "$BASE_SHA" --head "$HEAD_SHA" --event "$GITHUB_EVENT_PATH"
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -207,7 +228,7 @@ jobs:
   docker:
     name: Docker
     runs-on: ubuntu-latest
-    needs: [test, lint, frontend, security]
+    needs: [test, lint, frontend, security, repository-contracts]
     permissions:
       contents: read
       packages: write

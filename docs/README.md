@@ -30,6 +30,7 @@ rustbgpd router enforcement.
 | [Configuration](reference/configuration.md) | Settings, inventory, playbooks and correlation fields. |
 | [HTTP API](reference/api.md) | Endpoints, payloads and responses. |
 | [API versioning](reference/api-versioning.md) | Compatibility and deprecation policy. |
+| [Stability](reference/stability.md) | Configuration, API/CLI, metrics, log events and state compatibility. |
 | [CLI](reference/cli.md) | prefixdctl commands and options. |
 | [Speaker backends](reference/speaker-backends.md) | Supported choices, pins, controller tests and operational limits. |
 | [Vendor compatibility](reference/vendors.md) | Router support and explicitly scoped lab receipts. |

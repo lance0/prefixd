@@ -60,11 +60,11 @@ cargo test --test integration_gobgp -- --ignored
 Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
-feat: add IPv6 FlowSpec support
-fix: handle GoBGP reconnection correctly
-docs: update deployment guide for GoBGP v4
-refactor: extract guardrails into separate module
-test: add integration tests for reconciliation
+feat(bgp): add IPv6 FlowSpec support
+fix(bgp): handle GoBGP reconnection correctly
+docs(deploy): update the GoBGP deployment guide
+refactor(policy): extract shared guardrails
+test(reconcile): cover speaker recovery
 ```
 
 ### Pull Requests
@@ -80,6 +80,29 @@ PRs should:
 - Include tests for new functionality
 - Update documentation if needed
 - Have a clear description
+
+### Compatibility and release notes
+
+Review the [stability policy](docs/reference/stability.md) for changes to
+configuration, API/CLI behavior, metrics, structured logs or persisted state.
+Add a descriptive fragment under [changelog.d/](changelog.d/README.md) instead of
+editing `CHANGELOG.md` in parallel with other PRs. Name public interfaces and
+public PR references; keep private tracker IDs and operator details out of notes.
+
+```bash
+python3 -m unittest discover -s scripts -p 'test_*.py'
+python3 scripts/assemble-changelog.py --check
+# Check committed changes against the current base branch:
+python3 scripts/check-changelog.py --base origin/main
+```
+
+CI conservatively requires a new or updated fragment for interface candidate
+paths. For an internal/process-only change, put
+`Changelog: not needed: <specific reason>` in the PR description and explain why
+the observable interfaces and behavior are preserved. This rationale is reviewed;
+the checker cannot infer semantics. Documentation/test-only changes need no empty
+release note. Editing the PR description reruns CI with the updated rationale.
+Run these alongside the relevant Rust and dashboard checks.
 
 ---
 
@@ -198,7 +221,7 @@ cargo tarpaulin --out Html
 
 - Keep docs in `docs/` directory
 - Update README.md for user-facing changes
-- Update CHANGELOG.md for releases
+- Add a changelog fragment for operator-visible changes; assemble notes for releases
 
 ### Architecture Decision Records
 
@@ -211,8 +234,12 @@ We document significant design decisions in [docs/adr/](docs/adr/). When making 
 Releases are tagged from `main`:
 
 ```bash
+# Validate, then assemble fragments into the existing Unreleased section.
+python3 scripts/assemble-changelog.py --check
+python3 scripts/assemble-changelog.py
+# Review the diff; the assembler consumes fragments only after writing succeeds.
 # Update version in Cargo.toml
-# Update CHANGELOG.md
+# Roll the reviewed Unreleased notes into the release section in CHANGELOG.md
 # Commit and tag
 git tag v0.14.1
 git push origin v0.14.1

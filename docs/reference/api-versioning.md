@@ -10,6 +10,9 @@ API versions use a simple integer prefix: `/v1/`, `/v2/`, etc.
 
 The current stable version is **v1**.
 
+The route namespace is independent of the daemon's pre-1.0 package version.
+See the [stability policy](stability.md) for the other operator interfaces.
+
 ## Backward Compatibility
 
 Within a major version (e.g., v1), the following changes are considered **non-breaking** and may be introduced at any time:
