@@ -115,6 +115,8 @@ Receipts, attributed per speaker:
 |---|---|---|---|---|
 | 2026-10-18 | rustbgpd 0.77.0 (released image, digest-pinned) | 0.19.1, commit `dfaa4e08e0ed` | Local run, Linux 7.0.0-30 | Pass, 8/8 steps |
 | 2026-10-18 | GoBGP 4.10.0 (`jauderho/gobgp` digest pinned by CI) | 0.19.1, commit `dfaa4e08e0ed` | Local run, Linux 7.0.0-30 | Pass, 8/8 steps |
+| 2026-10-18 | rustbgpd 0.77.0 | 0.19.1, PR merge commit `1810bdb595e6` | [Interop run 39161305632](https://github.com/lance0/prefixd/actions/runs/39161305632), ubuntu-latest, Linux 6.17.0-1022-azure | Pass, 8/8 steps |
+| 2026-10-18 | GoBGP 4.10.0 | 0.19.1, PR merge commit `1810bdb595e6` | [Interop run 39161305632](https://github.com/lance0/prefixd/actions/runs/39161305632), ubuntu-latest, Linux 6.17.0-1022-azure | Pass, 8/8 steps |
 
 Each run asserted the exact FRR rule set (destination, protocol, destination
 port and `FS:rate` traffic-rate action) after each step: manual discard, manual
