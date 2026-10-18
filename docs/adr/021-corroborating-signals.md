@@ -173,7 +173,9 @@ initial implementation. All were fixed before merge. Notable ones:
    `mode=corroborating` sources posting to `/v1/events` originally lived
    inside `handle_ban`, leaving `unban` and the validation path able to
    persist state before rejection. It now fires in `ingest_event` before
-   any branching or DB writes.
+   any branching or DB writes. `handle_ban` repeats the same check so
+   batch and signal-adapter bans cannot bypass it; unban paths other than
+   `/v1/events` are not blocked.
 2. **Declared dimensions are authoritative.** Matching originally only
    checked that a signal had *some* populated dimension, then fell
    through to compare all four against the group. A source declared for

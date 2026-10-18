@@ -454,20 +454,8 @@ pub async fn ingest_event(
         validate_string_len(eid, "event_id", MAX_STRING_LEN).map_err(AppError)?;
     }
 
-    let correlation_config = state.correlation_config.read().await.clone();
-    if correlation_config.source_mode(&input.source)
-        == crate::correlation::SourceMode::Corroborating
-    {
-        tracing::warn!(
-            source = %input.source,
-            action = %input.action,
-            "rejected /v1/events from corroborating-only source"
-        );
-        return Err(AppError(PrefixdError::InvalidRequest(format!(
-            "source '{}' is configured as mode=corroborating and cannot post to /v1/events. Use POST /v1/signals/corroborator instead.",
-            input.source
-        ))));
-    }
+    // Reject before branching so a corroborating source cannot use unban here either (ADR 021).
+    reject_corroborating_source(&state, &input).await?;
 
     // Branch on action type
     match input.action.as_str() {
@@ -702,11 +690,38 @@ async fn handle_unban(
     ))
 }
 
+/// A `mode: corroborating` source must never create a mitigation by itself (ADR 021).
+async fn reject_corroborating_source(
+    state: &AppState,
+    input: &AttackEventInput,
+) -> Result<(), AppError> {
+    if state
+        .correlation_config
+        .read()
+        .await
+        .source_mode(&input.source)
+        != crate::correlation::SourceMode::Corroborating
+    {
+        return Ok(());
+    }
+    tracing::warn!(
+        source = %input.source,
+        action = %input.action,
+        "rejected /v1/events from corroborating-only source"
+    );
+    Err(AppError(PrefixdError::InvalidRequest(format!(
+        "source '{}' is configured as mode=corroborating and cannot post to /v1/events. Use POST /v1/signals/corroborator instead.",
+        input.source
+    ))))
+}
+
 /// Handle ban action - create or extend mitigation
 async fn handle_ban(
     state: Arc<AppState>,
     input: AttackEventInput,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
+    // Every ban path (single, batch, signal adapters) routes through here.
+    reject_corroborating_source(&state, &input).await?;
     validate_confidence(input.confidence).map_err(AppError)?;
     // shortcut: one controller per speaker; use a leader fence before supporting active-active controllers.
     let _mitigation_guard = state.mitigation_lock.lock().await;

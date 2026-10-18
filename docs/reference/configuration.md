@@ -355,8 +355,10 @@ sources:
 ```
 
 Corroborating sources post to `POST /v1/signals/corroborator` instead of
-`/v1/events`. Each signal must populate at least one of its declared
-`match_dimensions`. Matching against open signal groups uses OR across
+`/v1/events`. Ban events from these sources are rejected on `/v1/events`,
+`/v1/events/batch` and the Alertmanager, FastNetMon and webhook adapters.
+Each signal must populate at least one of its declared `match_dimensions`.
+Matching against open signal groups uses OR across
 **declared** dimensions only — a source declared for `[pop]` cannot
 attach via an undeclared `customer_id`/`service_id`/`interface` even if
 those values happen to match. A signal group must contain at least one

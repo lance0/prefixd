@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Reject ban events from `mode: corroborating` sources on `/v1/events/batch`
+  and the Alertmanager, FastNetMon and generic webhook adapters, as single
+  `/v1/events` already did, so such a source can no longer create a mitigation
+  alone. Batch rejects only the offending item; adapter unban and resolved
+  alerts still reach withdrawal.
+
 - Reject local and documentation IPv6 literals in alert destination URL edits,
   including IPv4-mapped forms of blocked IPv4 addresses, and reject absolute
   `localhost.` names and their subdomains. Rejected saves preserve

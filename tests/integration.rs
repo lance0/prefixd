@@ -7464,6 +7464,153 @@ async fn test_primary_event_rejects_corroborating_source_before_write() {
     assert!(stored.is_empty(), "rejected event should not be persisted");
 }
 
+/// Router whose `router-cpu`, `alertmanager` and `fastnetmon` sources are
+/// corroborating-only, alongside the primary `detector_a`.
+fn setup_corroborating_ban_paths() -> (axum::Router, Arc<dyn RepositoryTrait>, Arc<MockAnnouncer>) {
+    use prefixd::correlation::{MatchDimension, SourceConfig, SourceMode};
+
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+    let mut settings = test_settings_with_correlation(true, 1, 0.5);
+    // Enforced so announcement counts prove what reached the speaker.
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    for source in ["router-cpu", "alertmanager", "fastnetmon"] {
+        settings.correlation.sources.insert(
+            source.to_string(),
+            SourceConfig {
+                weight: 0.8,
+                r#type: "telemetry".to_string(),
+                confidence_mapping: std::collections::HashMap::new(),
+                mode: SourceMode::Corroborating,
+                match_dimensions: vec![MatchDimension::Pop],
+            },
+        );
+    }
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        announcer.clone(),
+        std::path::PathBuf::from("."),
+    )
+    .expect("state");
+    (create_test_router(state), repo, announcer)
+}
+
+fn corroborating_rejection(source: &str) -> String {
+    format!(
+        "invalid request: source '{source}' is configured as mode=corroborating and cannot post to /v1/events. Use POST /v1/signals/corroborator instead."
+    )
+}
+
+async fn mitigation_count(repo: &Arc<dyn RepositoryTrait>) -> usize {
+    repo.list_mitigations(
+        None,
+        None,
+        None,
+        None,
+        &prefixd::db::MitigationListParams {
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .len()
+}
+
+#[tokio::test]
+async fn test_batch_rejects_corroborating_ban_per_item() {
+    let (app, repo, announcer) = setup_corroborating_ban_paths();
+    let now = chrono::Utc::now().to_rfc3339();
+    let body = serde_json::json!({
+        "events": [
+            {"timestamp": now, "source": "router-cpu", "victim_ip": "203.0.113.20",
+             "vector": "udp_flood", "confidence": 0.9, "action": "ban", "event_id": "cpu-1"},
+            {"timestamp": now, "source": "detector_a", "victim_ip": "203.0.113.21",
+             "vector": "udp_flood", "confidence": 0.9, "action": "ban"},
+            {"timestamp": now, "source": "router-cpu", "victim_ip": "203.0.113.20",
+             "vector": "udp_flood", "action": "unban", "event_id": "cpu-1"}
+        ]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events/batch")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["accepted"], 2, "{json}");
+    assert_eq!(json["rejected"], 1, "{json}");
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results[0]["status"], "rejected");
+    assert_eq!(results[0]["error"], corroborating_rejection("router-cpu"));
+    assert!(results[1]["mitigation_id"].is_string(), "{json}");
+    // Unban stays on the withdrawal path; nothing to withdraw here.
+    assert_eq!(results[2]["status"], "not_found");
+
+    let events = repo
+        .list_events(&prefixd::db::ListParams::default())
+        .await
+        .unwrap();
+    assert!(
+        events.iter().all(|e| e.source != "router-cpu"),
+        "corroborating ban must not be persisted"
+    );
+    assert_eq!(mitigation_count(&repo).await, 1);
+    assert_eq!(announcer.announced_count().await, 1);
+}
+
+#[tokio::test]
+async fn test_alertmanager_rejects_corroborating_source_ban() {
+    let (app, repo, announcer) = setup_corroborating_ban_paths();
+    let firing = make_alert("firing", "203.0.113.30", "udp_flood", "critical", "am-1");
+    let (status, json) = post_alertmanager(&app, &make_alertmanager_payload(&[firing])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["failed"], 1, "{json}");
+    assert_eq!(json["results"][0]["status"], "error");
+    assert_eq!(
+        json["results"][0]["error"],
+        corroborating_rejection("alertmanager")
+    );
+
+    // Resolution still routes to withdrawal rather than the ban guard.
+    let resolved = make_alert("resolved", "203.0.113.30", "udp_flood", "critical", "am-1");
+    let (status, json) = post_alertmanager(&app, &make_alertmanager_payload(&[resolved])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["failed"], 0, "{json}");
+    assert_eq!(json["results"][0]["status"], "withdrawn");
+
+    let events = repo
+        .list_events(&prefixd::db::ListParams::default())
+        .await
+        .unwrap();
+    assert!(events.is_empty(), "corroborating ban must not be persisted");
+    assert_eq!(mitigation_count(&repo).await, 0);
+    assert_eq!(announcer.announced_count().await, 0);
+}
+
+#[tokio::test]
+async fn test_fastnetmon_rejects_corroborating_source_ban() {
+    let (app, repo, announcer) = setup_corroborating_ban_paths();
+    let payload = make_fastnetmon_payload("ban", "203.0.113.40", Some("fnm-1"));
+    let (status, json) = post_fastnetmon(&app, &payload).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"], corroborating_rejection("fastnetmon"));
+    assert_eq!(mitigation_count(&repo).await, 0);
+    assert_eq!(announcer.announced_count().await, 0);
+}
+
 #[tokio::test]
 async fn test_corroborator_does_not_match_via_undeclared_dimension() {
     use prefixd::correlation::{MatchDimension, SourceConfig, SourceMode};
