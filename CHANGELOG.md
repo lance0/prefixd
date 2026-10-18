@@ -561,6 +561,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to share requests that are still pending, and stop handled failed GET requests
   from also producing unhandled browser rejections during cache cleanup.
 
+- The command palette finds mitigations and events by ID, and rows that load
+  while a search is already typed are no longer hidden.
+
 ### Documentation
 
 - Add the [v0.19.1 → 0.20.0 upgrade guide](https://github.com/lance0/prefixd/blob/v0.20.0/docs/how-to/upgrading.md#v0191--0200)
@@ -592,6 +595,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   completed withdrawals safely and retain pending cleanup, recent history and
   referenced detector/correlation events; audit records are preserved and
   vacuum runs separately.
+
+- The local development guide notes that the dashboard dev server can't serve
+  the live feed; use the nginx origin to test it.
 
 ## [0.19.1] - 2026-08-06
 
