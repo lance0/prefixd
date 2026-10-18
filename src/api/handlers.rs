@@ -236,6 +236,10 @@ pub struct MitigationResponse {
     pub acknowledged_at: Option<String>,
     /// Operator who acknowledged the mitigation
     pub acknowledged_by: Option<String>,
+    /// Operation mode that admitted this mitigation: `dry-run` or `enforced`.
+    /// `null` when the row predates origin tracking; never infer enforcement from it.
+    #[schema(example = "dry-run")]
+    pub origin_mode: Option<String>,
     /// Correlation context (present when mitigation was created via
     /// corroboration from the signal correlation engine)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -268,6 +272,7 @@ impl From<&Mitigation> for MitigationResponse {
             reason: m.reason.clone(),
             acknowledged_at: m.acknowledged_at.map(|t| t.to_rfc3339()),
             acknowledged_by: m.acknowledged_by.clone(),
+            origin_mode: m.origin_mode.map(|mode| mode.as_str().to_owned()),
             // Correlation context is populated asynchronously by handlers
             // that have access to the signal group data. The basic From impl
             // sets it to None — callers enrich it when needed.

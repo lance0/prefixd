@@ -67,6 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `origin_mode` (`dry-run`, `enforced` or `null` when unknown) to
+  mitigation API responses and WebSocket mitigation messages. The dashboard
+  marks dry-run-origin mitigations with a neutral "Simulation" tag on the
+  Overview, list and detail pages; the detail page shows "Origin unknown" for
+  rows that predate origin tracking.
+
 - Show authenticated rustbgpd daemon version, process uptime, readiness and
   observation time in health detail, CLI status and the existing speaker strip.
   Keep controller metadata separate and failed, stale or unsupported observations

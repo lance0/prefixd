@@ -360,6 +360,7 @@ a corrupt lookahead row; it is never silently omitted or reported as end of hist
       "reason": "Vector policy: udp_flood",
       "acknowledged_at": null,
       "acknowledged_by": null,
+      "origin_mode": "enforced",
       "correlation": null
     }
   ],
@@ -368,6 +369,11 @@ a corrupt lookahead row; it is never silently omitted or reported as end of hist
   "has_more": false
 }
 ```
+
+`origin_mode` records the operation mode that admitted the mitigation:
+`dry-run` for a simulation that prefixd never announced, or `enforced`. It is
+`null` for rows created before origin tracking that startup has not tagged;
+treat `null` as unknown, never as enforced. The field is always present.
 
 When a mitigation was created via multi-source corroboration (correlation engine enabled), the `correlation` field contains context about the decision:
 

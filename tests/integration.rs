@@ -14186,3 +14186,65 @@ async fn test_enforced_detector_event_does_not_extend_a_dry_run_simulation() {
     assert_eq!(unchanged.expires_at, simulated.expires_at);
     assert_eq!(speaker.announced_count().await, 0);
 }
+
+#[tokio::test]
+async fn test_mitigation_responses_expose_origin_mode_with_null_for_unknown() {
+    use prefixd::config::OperationMode;
+    let repo = Arc::new(MockRepository::new());
+    let mut rows = Vec::new();
+    for (i, mode) in [
+        Some(OperationMode::DryRun),
+        Some(OperationMode::Enforced),
+        None,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut row = dry_run_row(600);
+        row.match_criteria.dst_prefix = format!("203.0.113.{}/32", 20 + i);
+        row.scope_hash = row.match_criteria.compute_scope_hash();
+        row.origin_mode = mode;
+        repo.insert_mitigation(&row).await.unwrap();
+        rows.push(row);
+    }
+    let app = create_test_router(enforced_state(repo, Arc::new(MockAnnouncer::new())));
+    let get = |uri: String| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        }
+    };
+
+    let list = get("/v1/mitigations".into()).await;
+    for (row, expected) in rows.iter().zip([
+        serde_json::json!("dry-run"),
+        serde_json::json!("enforced"),
+        serde_json::Value::Null,
+    ]) {
+        let id = row.mitigation_id.to_string();
+        let item = list["mitigations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["mitigation_id"] == id.as_str())
+            .unwrap();
+        // Unknown origin is an explicit null, not an omitted field.
+        assert_eq!(item.get("origin_mode"), Some(&expected), "list {id}");
+        let detail = get(format!("/v1/mitigations/{id}")).await;
+        assert_eq!(detail.get("origin_mode"), Some(&expected), "detail {id}");
+    }
+
+    let spec = get("/openapi.json".into()).await;
+    assert!(
+        spec["components"]["schemas"]["MitigationResponse"]["properties"]["origin_mode"]
+            .is_object()
+    );
+}
