@@ -106,6 +106,7 @@ Follow development plans, contribution guidance and release history.
 | [Features](../FEATURES.md) | Feature inventory and limitations. |
 | [Changelog](../CHANGELOG.md) | Release history and unreleased changes. |
 | [Contributing](../CONTRIBUTING.md) | Development workflow and checks. |
+| [Release checklist](project/release-checklist.md) | Release preconditions, version bump and publication steps. |
 | [Security](../SECURITY.md) | Reporting and security guidance. |
 
 Flat guide and reference paths moved into these categories. ADR identifiers and

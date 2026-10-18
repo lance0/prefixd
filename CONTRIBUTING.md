@@ -280,20 +280,11 @@ We document significant design decisions in [docs/adr/](docs/adr/). When making 
 
 ## Release Process
 
-1. Prepare the release on `main`: update the package version in `Cargo.toml`
-   and `Cargo.lock`, and move the completed entries from `CHANGELOG.md` into
-   the dated release section. Review known limitations in the release notes.
-2. Verify all CI checks on the exact release commit, including both speaker
-   suites and both container builds. Tag that commit as `v<package-version>`
-   and push the tag.
-3. Verify the tag's CI run and versioned images for both `ghcr.io/lance0/prefixd`
-   and `ghcr.io/lance0/prefixd-dashboard`.
-4. Create and verify the GitHub Release separately, using the reviewed notes.
-   Attach any intended release assets explicitly.
-
-CI uploads the Linux daemon binary as an Actions artifact and generates an SBOM
-artifact for version tags. It publishes the controller and dashboard containers;
-it does not create a GitHub Release or attach release binaries.
+Follow the [release checklist](docs/project/release-checklist.md). It covers
+the preconditions, CHANGELOG section rules, version bump points and the release
+steps. A `vX.Y.Z` tag runs the release workflow, which publishes both images and
+creates a draft GitHub Release; the owner approves the tag push and publishes
+the release.
 
 ---
 
