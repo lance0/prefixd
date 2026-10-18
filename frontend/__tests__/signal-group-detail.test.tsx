@@ -1,49 +1,15 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, act, within } from "@testing-library/react"
+import { describe, it, expect, beforeEach } from "vitest"
+import { screen, act, within, waitFor, fireEvent } from "@testing-library/react"
 import { Suspense } from "react"
-
-// ─── Mocks ──────────────────────────────────────────────
-
-const mockPush = vi.fn()
-const mockReplace = vi.fn()
-
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: mockPush, replace: mockReplace, back: vi.fn() }),
-  usePathname: () => "/correlation/groups/grp-1",
-  useSearchParams: () => new URLSearchParams(),
-}))
-
-vi.mock("next/link", () => ({
-  default: ({ children, href, ...props }: { children: React.ReactNode; href: string }) => (
-    <a href={href} {...props}>{children}</a>
-  ),
-}))
-
-vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
-
-// Mock use-api hooks
-const mockUseSignalGroupDetail = vi.fn()
-const mockUseCorrelationConfig = vi.fn()
-
-vi.mock("@/hooks/use-api", () => ({
-  useSignalGroupDetail: (...args: unknown[]) => mockUseSignalGroupDetail(...args),
-  useCorrelationConfig: () => mockUseCorrelationConfig(),
-}))
-
-
-
-// Mock DashboardLayout to avoid needing all context providers
-vi.mock("@/components/dashboard/dashboard-layout", () => ({
-  DashboardLayout: ({ children }: { children: React.ReactNode }) => <div data-testid="dashboard-layout">{children}</div>,
-}))
-
-// ─── Imports ────────────────────────────────────────────
-
 import SignalGroupDetailPage from "@/app/(dashboard)/correlation/groups/[id]/page"
+import type { CorrelationConfig, SignalGroupDetailResponse, SignalGroupEvent } from "@/lib/api"
+import { deferred, failure, json, renderApp, settle, useFakeController } from "./support/fake-controller"
+
+const controller = useFakeController()
 
 // ─── Sample Data ────────────────────────────────────────
 
-const sampleEvents = [
+const sampleEvents: SignalGroupEvent[] = [
   {
     group_id: "grp-1",
     event_id: "evt-001-aaaa-bbbb-cccc",
@@ -66,7 +32,7 @@ const sampleEvents = [
   },
 ]
 
-const resolvedGroup = {
+const resolvedGroup: SignalGroupDetailResponse = {
   group_id: "grp-1",
   victim_ip: "203.0.113.10",
   vector: "udp_flood",
@@ -74,13 +40,13 @@ const resolvedGroup = {
   window_expires_at: new Date(Date.now() + 300000).toISOString(),
   derived_confidence: 0.88,
   source_count: 2,
-  status: "resolved" as const,
+  status: "resolved",
   corroboration_met: true,
   events: sampleEvents,
   mitigation_id: "mit-001-aaaa-bbbb-cccc",
 }
 
-const openGroup = {
+const openGroup: SignalGroupDetailResponse = {
   group_id: "grp-2",
   victim_ip: "198.51.100.25",
   vector: "syn_flood",
@@ -88,13 +54,13 @@ const openGroup = {
   window_expires_at: new Date(Date.now() + 180000).toISOString(),
   derived_confidence: 0.45,
   source_count: 1,
-  status: "open" as const,
+  status: "open",
   corroboration_met: false,
   events: [sampleEvents[0]],
   mitigation_id: null,
 }
 
-const expiredGroup = {
+const expiredGroup: SignalGroupDetailResponse = {
   group_id: "grp-3",
   victim_ip: "192.0.2.100",
   vector: "ntp_amplification",
@@ -102,13 +68,13 @@ const expiredGroup = {
   window_expires_at: new Date(Date.now() - 300000).toISOString(),
   derived_confidence: 0.65,
   source_count: 1,
-  status: "expired" as const,
+  status: "expired",
   corroboration_met: false,
   events: [sampleEvents[0]],
   mitigation_id: null,
 }
 
-const sampleConfig = {
+const sampleConfig: CorrelationConfig = {
   enabled: true,
   window_seconds: 300,
   min_sources: 2,
@@ -123,37 +89,42 @@ const sampleConfig = {
 // ─── Setup ──────────────────────────────────────────────
 
 beforeEach(() => {
-  vi.clearAllMocks()
-  mockUseCorrelationConfig.mockReturnValue({
-    data: sampleConfig,
-    error: null,
-    isLoading: false,
-  })
+  serveConfig(sampleConfig)
 })
+
+function serveConfig(config: CorrelationConfig) {
+  controller.route("GET", "/v1/config/correlation", () => json({ config, loaded_at: new Date().toISOString() }))
+}
+
+/** Serves one signal group: its detail, a pending request, or a failure. */
+function serveGroup(id: string, answer: SignalGroupDetailResponse | Response | "pending") {
+  controller.route("GET", `/v1/signal-groups/${id}`, () =>
+    answer === "pending" ? deferred<Response>().promise : answer instanceof Response ? answer : json(answer))
+}
 
 // ─── Tests ──────────────────────────────────────────────
 
 // Helper: render page and wait for the async params promise to resolve
 async function renderPage(id: string) {
-  let result: ReturnType<typeof render>
+  let result!: ReturnType<typeof renderApp>
   await act(async () => {
-    result = render(
+    result = renderApp(
       <Suspense fallback={<div>Loading suspense...</div>}>
         <SignalGroupDetailPage params={Promise.resolve({ id })} />
       </Suspense>,
+      { url: `/correlation/groups/${id}`, withoutAuth: true },
     )
   })
+  await waitFor(() => expect(controller.calls("GET", `/v1/signal-groups/${id}`)).toHaveLength(1))
+  await settle()
+  await settle()
 
-  return result!
+  return result
 }
 
 describe("SignalGroupDetailPage", () => {
   it("renders loading state", async () => {
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: undefined,
-      error: null,
-      isLoading: true,
-    })
+    serveGroup("grp-1", "pending")
 
     await renderPage("grp-1")
 
@@ -163,11 +134,7 @@ describe("SignalGroupDetailPage", () => {
   })
 
   it("renders not-found state for unknown group ID", async () => {
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: undefined,
-      error: new Error("API error 404: signal group not found"),
-      isLoading: false,
-    })
+    serveGroup("unknown-id", failure(404, "signal group not found"))
 
     await renderPage("unknown-id")
 
@@ -181,28 +148,18 @@ describe("SignalGroupDetailPage", () => {
   })
 
   it("renders a retryable error, not not-found, when the request fails", async () => {
-    const mutate = vi.fn()
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: undefined,
-      error: new Error("API error 502: bad gateway"),
-      isLoading: false,
-      mutate,
-    })
+    serveGroup("some-id", failure(502, "bad gateway"))
 
     await renderPage("some-id")
 
     expect(screen.getByRole("alert")).toHaveTextContent("Unable to load this signal group")
     expect(screen.queryByText("Signal group not found")).not.toBeInTheDocument()
-    screen.getByRole("button", { name: "Retry" }).click()
-    expect(mutate).toHaveBeenCalled()
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }))
+    await waitFor(() => expect(controller.calls("GET", "/v1/signal-groups/some-id")).toHaveLength(2))
   })
 
   it("renders resolved group with all sections", async () => {
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: resolvedGroup,
-      error: null,
-      isLoading: false,
-    })
+    serveGroup("grp-1", resolvedGroup)
 
     await renderPage("grp-1")
 
@@ -245,11 +202,7 @@ describe("SignalGroupDetailPage", () => {
   })
 
   it("renders open group with pending corroboration", async () => {
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: openGroup,
-      error: null,
-      isLoading: false,
-    })
+    serveGroup("grp-2", openGroup)
 
     await renderPage("grp-2")
 
@@ -272,11 +225,7 @@ describe("SignalGroupDetailPage", () => {
   })
 
   it("renders expired group with appropriate explanation", async () => {
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: expiredGroup,
-      error: null,
-      isLoading: false,
-    })
+    serveGroup("grp-3", expiredGroup)
 
     await renderPage("grp-3")
 
@@ -294,11 +243,7 @@ describe("SignalGroupDetailPage", () => {
   })
 
   it("renders confidence breakdown with correct math", async () => {
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: resolvedGroup,
-      error: null,
-      isLoading: false,
-    })
+    serveGroup("grp-1", resolvedGroup)
 
     await renderPage("grp-1")
 
@@ -311,15 +256,16 @@ describe("SignalGroupDetailPage", () => {
     expect(screen.getByText("1.8")).toBeInTheDocument()
   })
 
+  // JSON cannot carry NaN, so the API's invalid confidence is an out-of-range fraction.
   it.each([
-    [0, "0%"], [null, "Unavailable"], [NaN, "Invalid"],
+    [0, "0%"], [null, "Unavailable"], [1.5, "Invalid"],
   ])("does not replace raw or weighted confidence %s with a fabricated zero", async (confidence, label) => {
-    mockUseSignalGroupDetail.mockReturnValue({ data: {
+    serveGroup("grp-1", {
       ...resolvedGroup,
       derived_confidence: 0,
       events: [{ ...sampleEvents[0], confidence }],
-    } })
-    mockUseCorrelationConfig.mockReturnValue({ data: { ...sampleConfig, confidence_threshold: 0 } })
+    })
+    serveConfig({ ...sampleConfig, confidence_threshold: 0 })
     await renderPage("grp-1")
     const row = within(screen.getByRole("table")).getByText("fastnetmon").closest("tr")!
     const cells = within(row).getAllByRole("cell")
@@ -330,11 +276,11 @@ describe("SignalGroupDetailPage", () => {
   })
 
   it("matches the backend's zero contribution for valid signals with zero total weight", async () => {
-    mockUseSignalGroupDetail.mockReturnValue({ data: {
+    serveGroup("grp-1", {
       ...resolvedGroup,
       derived_confidence: 0,
       events: sampleEvents.map(event => ({ ...event, source_weight: 0 })),
-    } })
+    })
     await renderPage("grp-1")
     const table = screen.getByRole("table")
 
@@ -350,18 +296,14 @@ describe("SignalGroupDetailPage", () => {
   })
 
   it("shows invalid derived confidence without drawing an evidence bar", async () => {
-    mockUseSignalGroupDetail.mockReturnValue({ data: { ...resolvedGroup, derived_confidence: NaN } })
+    serveGroup("grp-1", { ...resolvedGroup, derived_confidence: 1.5 })
     await renderPage("grp-1")
     expect(screen.getAllByText("Invalid")).toHaveLength(2)
     expect(screen.queryByRole("meter")).not.toBeInTheDocument()
   })
 
   it("renders bidirectional navigation links", async () => {
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: resolvedGroup,
-      error: null,
-      isLoading: false,
-    })
+    serveGroup("grp-1", resolvedGroup)
 
     await renderPage("grp-1")
 

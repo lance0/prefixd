@@ -1,102 +1,25 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, act, within } from "@testing-library/react"
+import { describe, it, expect } from "vitest"
+import { screen, act, within, waitFor, fireEvent } from "@testing-library/react"
 import { Suspense } from "react"
-
-// ─── Mocks ──────────────────────────────────────────────
-
-const mockPush = vi.fn()
-
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: mockPush, back: vi.fn() }),
-  usePathname: () => "/mitigations/mit-001",
-  useSearchParams: () => new URLSearchParams(),
-}))
-
-vi.mock("next/link", () => ({
-  default: ({ children, href, ...props }: { children: React.ReactNode; href: string }) => (
-    <a href={href} {...props}>{children}</a>
-  ),
-}))
-
-vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
-
-// Mock use-api hooks
-const mockUseMitigation = vi.fn()
-const mockUseConfigInventory = vi.fn()
-const mockUseSignalGroupDetail = vi.fn()
-
-vi.mock("@/hooks/use-api", () => ({
-  useMitigation: (...args: unknown[]) => mockUseMitigation(...args),
-  useConfigInventory: () => mockUseConfigInventory(),
-  useSignalGroupDetail: (...args: unknown[]) => mockUseSignalGroupDetail(...args),
-}))
-
-// Mock use-permissions
-vi.mock("@/hooks/use-permissions", () => ({
-  usePermissions: () => ({
-    settled: true,
-    authDisabled: true,
-    isAdmin: true,
-    isOperator: true,
-    canWithdraw: true,
-    canAcknowledge: true,
-  }),
-}))
-
-// Mock DashboardLayout
-vi.mock("@/components/dashboard/dashboard-layout", () => ({
-  DashboardLayout: ({ children }: { children: React.ReactNode }) => (
-    <div data-testid="dashboard-layout">{children}</div>
-  ),
-}))
-
-// Mock StatusBadge and ActionBadge
-vi.mock("@/components/dashboard/status-badge", () => ({
-  StatusBadge: ({ status }: { status: string }) => <span data-testid="status-badge">{status}</span>,
-}))
-
-vi.mock("@/components/dashboard/action-badge", () => ({
-  ActionBadge: () => <span data-testid="action-badge">action</span>,
-}))
-
-// Mock FlowSpecPreview
-vi.mock("@/components/dashboard/flowspec-preview", () => ({
-  FlowSpecPreview: () => <div data-testid="flowspec-preview" />,
-  formatFlowSpecRule: () => "flowspec-rule",
-}))
-
-// Mock IncidentReportDialog
-vi.mock("@/components/dashboard/incident-report-dialog", () => ({
-  IncidentReportDialog: () => null,
-}))
-
-// Mock API functions
-vi.mock("@/lib/api", async () => {
-  const actual = await vi.importActual("@/lib/api")
-
-  return {
-    ...actual,
-    withdrawMitigation: vi.fn(),
-    getIncidentReport: vi.fn(),
-  }
-})
-
-// ─── Imports ────────────────────────────────────────────
+import type { Mitigation, SignalGroupDetailResponse } from "@/lib/api"
+import { failure, json, renderApp, settle, signIn, useFakeController } from "./support/fake-controller"
 
 import MitigationDetailPage from "@/app/(dashboard)/mitigations/[id]/page"
 
+const controller = useFakeController()
+
 // ─── Sample Data ────────────────────────────────────────
 
-const baseMitigation = {
+const baseMitigation: Mitigation = {
   mitigation_id: "mit-001-aaaa-bbbb-cccc",
   scope_hash: "abc123",
-  status: "active" as const,
+  status: "active",
   customer_id: "cust_acme",
   service_id: "svc_dns",
   pop: "iad1",
   victim_ip: "203.0.113.10",
   vector: "udp_flood",
-  action_type: "police" as const,
+  action_type: "police",
   rate_bps: 5000000,
   dst_prefix: "203.0.113.10/32",
   protocol: 17,
@@ -112,9 +35,7 @@ const baseMitigation = {
   acknowledged_by: null,
 }
 
-const correlatedMitigation = {
-  ...baseMitigation,
-  correlation: {
+const correlation = {
     signal_group_id: "sg-001-aaaa-bbbb-cccc-dddd",
     derived_confidence: 0.88,
     source_count: 2,
@@ -122,15 +43,16 @@ const correlatedMitigation = {
     contributing_sources: ["fastnetmon", "alertmanager"],
     explanation:
       'Corroboration achieved: 2 of 2 required sources confirmed UDP flood on 203.0.113.10. Derived confidence 88% (threshold 50%). Sources: fastnetmon (95% × 1.0), alertmanager (80% × 0.8).',
-  },
 }
 
-const nonCorrelatedMitigation = {
+const correlatedMitigation: Mitigation = { ...baseMitigation, correlation }
+
+const nonCorrelatedMitigation: Mitigation = {
   ...baseMitigation,
   correlation: null,
 }
 
-const signalGroupDetailData = {
+const signalGroupDetailData: SignalGroupDetailResponse = {
   group_id: "sg-001-aaaa-bbbb-cccc-dddd",
   victim_ip: "203.0.113.10",
   vector: "udp_flood",
@@ -138,7 +60,7 @@ const signalGroupDetailData = {
   window_expires_at: new Date(Date.now() + 300000).toISOString(),
   derived_confidence: 0.88,
   source_count: 2,
-  status: "resolved" as const,
+  status: "resolved",
   corroboration_met: true,
   mitigation_id: "mit-001-aaaa-bbbb-cccc",
   events: [
@@ -167,38 +89,39 @@ const signalGroupDetailData = {
 
 // ─── Helper ─────────────────────────────────────────────
 
+const mitigationPath = "/v1/mitigations/mit-001-aaaa-bbbb-cccc"
+
+/** Serves the mitigation and, when given, its signal group; auth is disabled so every action is permitted. */
+function serve(mitigation: Mitigation | Response, group?: SignalGroupDetailResponse) {
+  signIn(controller, "none", null)
+  controller.route("GET", "/v1/config/inventory", () => json({ customers: [], total_customers: 0, total_services: 0, total_assets: 0, loaded_at: new Date().toISOString() }))
+  controller.route("GET", mitigationPath, () => mitigation instanceof Response ? mitigation : json(mitigation))
+
+  if (group) controller.route("GET", `/v1/signal-groups/${group.group_id}`, () => json(group))
+}
+
 async function renderPage() {
-  let result: ReturnType<typeof render>
+  let result!: ReturnType<typeof renderApp>
   await act(async () => {
-    result = render(
+    result = renderApp(
       <Suspense fallback={<div>Loading suspense...</div>}>
         <MitigationDetailPage params={Promise.resolve({ id: "mit-001-aaaa-bbbb-cccc" })} />
-      </Suspense>
+      </Suspense>,
+      { url: "/mitigations/mit-001" },
     )
   })
+  await waitFor(() => expect(controller.calls("GET", mitigationPath)).toHaveLength(1))
+  await settle()
+  await settle()
 
-  return result!
+  return result
 }
 
 // ─── Tests ──────────────────────────────────────────────
 
 describe("Mitigation Detail – Correlation Section", () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    mockUseConfigInventory.mockReturnValue({ data: null })
-  })
-
   it("shows Correlation card with all fields for a correlated mitigation", async () => {
-    mockUseMitigation.mockReturnValue({
-      data: correlatedMitigation,
-      isLoading: false,
-      mutate: vi.fn(),
-    })
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: signalGroupDetailData,
-      isLoading: false,
-      error: null,
-    })
+    serve(correlatedMitigation, signalGroupDetailData)
 
     await renderPage()
 
@@ -228,17 +151,14 @@ describe("Mitigation Detail – Correlation Section", () => {
     expect(screen.getByText(/Corroboration achieved/)).toBeTruthy()
   })
 
+  // JSON cannot carry NaN, so the API's invalid confidence is an out-of-range fraction.
   it.each([
-    [0, "0%"], [null, "Unavailable"], [NaN, "Invalid"],
+    [0, "0%"], [null, "Unavailable"], [1.5, "Invalid"],
   ])("preserves source confidence %s in mitigation reasons", async (confidence, label) => {
-    mockUseMitigation.mockReturnValue({ data: {
-      ...correlatedMitigation,
-      correlation: { ...correlatedMitigation.correlation, derived_confidence: 0 },
-    }, mutate: vi.fn() })
-    mockUseSignalGroupDetail.mockReturnValue({ data: {
-      ...signalGroupDetailData,
-      events: [{ ...signalGroupDetailData.events[0], confidence }],
-    } })
+    serve(
+      { ...correlatedMitigation, correlation: { ...correlation, derived_confidence: 0 } },
+      { ...signalGroupDetailData, events: [{ ...signalGroupDetailData.events[0], confidence }] },
+    )
     await renderPage()
     const row = within(screen.getByRole("table")).getByText("fastnetmon").closest("tr")!
     expect(within(row).getAllByRole("cell")[1]).toHaveTextContent(label)
@@ -246,16 +166,7 @@ describe("Mitigation Detail – Correlation Section", () => {
   })
 
   it("shows contributing sources table with confidence and weight from signal group detail", async () => {
-    mockUseMitigation.mockReturnValue({
-      data: correlatedMitigation,
-      isLoading: false,
-      mutate: vi.fn(),
-    })
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: signalGroupDetailData,
-      isLoading: false,
-      error: null,
-    })
+    serve(correlatedMitigation, signalGroupDetailData)
 
     await renderPage()
 
@@ -274,16 +185,7 @@ describe("Mitigation Detail – Correlation Section", () => {
   })
 
   it("shows signal group link that navigates to /correlation/groups/{id}", async () => {
-    mockUseMitigation.mockReturnValue({
-      data: correlatedMitigation,
-      isLoading: false,
-      mutate: vi.fn(),
-    })
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: signalGroupDetailData,
-      isLoading: false,
-      error: null,
-    })
+    serve(correlatedMitigation, signalGroupDetailData)
 
     await renderPage()
 
@@ -295,16 +197,7 @@ describe("Mitigation Detail – Correlation Section", () => {
   })
 
   it("shows muted message for non-correlated mitigation", async () => {
-    mockUseMitigation.mockReturnValue({
-      data: nonCorrelatedMitigation,
-      isLoading: false,
-      mutate: vi.fn(),
-    })
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: null,
-      isLoading: false,
-      error: null,
-    })
+    serve(nonCorrelatedMitigation)
 
     await renderPage()
 
@@ -314,18 +207,8 @@ describe("Mitigation Detail – Correlation Section", () => {
   })
 
   it("hides correlation section when mitigation has no correlation field", async () => {
-    const mitigationWithoutCorrelation = { ...baseMitigation }
     // No correlation field at all
-    mockUseMitigation.mockReturnValue({
-      data: mitigationWithoutCorrelation,
-      isLoading: false,
-      mutate: vi.fn(),
-    })
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: null,
-      isLoading: false,
-      error: null,
-    })
+    serve({ ...baseMitigation })
 
     await renderPage()
 
@@ -334,7 +217,7 @@ describe("Mitigation Detail – Correlation Section", () => {
   })
 
   it("renders pending corroboration badge when not met", async () => {
-    const pendingCorrelation = {
+    serve({
       ...baseMitigation,
       correlation: {
         signal_group_id: "sg-002",
@@ -344,17 +227,6 @@ describe("Mitigation Detail – Correlation Section", () => {
         contributing_sources: ["fastnetmon"],
         explanation: "Awaiting additional sources for corroboration.",
       },
-    }
-
-    mockUseMitigation.mockReturnValue({
-      data: pendingCorrelation,
-      isLoading: false,
-      mutate: vi.fn(),
-    })
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: null,
-      isLoading: false,
-      error: null,
     })
 
     await renderPage()
@@ -364,64 +236,37 @@ describe("Mitigation Detail – Correlation Section", () => {
     expect(screen.queryByText("Corroborated")).toBeNull()
   })
 
-  it("passes signal_group_id to useSignalGroupDetail hook", async () => {
-    mockUseMitigation.mockReturnValue({
-      data: correlatedMitigation,
-      isLoading: false,
-      mutate: vi.fn(),
-    })
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: signalGroupDetailData,
-      isLoading: false,
-      error: null,
-    })
+  it("requests the signal group named by the mitigation's correlation", async () => {
+    serve(correlatedMitigation, signalGroupDetailData)
 
     await renderPage()
 
-    expect(mockUseSignalGroupDetail).toHaveBeenCalledWith(
-      "sg-001-aaaa-bbbb-cccc-dddd"
-    )
+    expect(controller.calls("GET", "/v1/signal-groups/sg-001-aaaa-bbbb-cccc-dddd")).toHaveLength(1)
   })
 
-  it("passes null to useSignalGroupDetail when no correlation", async () => {
-    mockUseMitigation.mockReturnValue({
-      data: nonCorrelatedMitigation,
-      isLoading: false,
-      mutate: vi.fn(),
-    })
-    mockUseSignalGroupDetail.mockReturnValue({
-      data: null,
-      isLoading: false,
-      error: null,
-    })
+  it("requests no signal group when the mitigation has no correlation", async () => {
+    serve(nonCorrelatedMitigation)
 
     await renderPage()
 
-    expect(mockUseSignalGroupDetail).toHaveBeenCalledWith(null)
+    expect(controller.requests.filter((request) => request.path.startsWith("/v1/signal-groups"))).toEqual([])
   })
 })
 
 describe("Mitigation Detail – load failures", () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    mockUseConfigInventory.mockReturnValue({ data: null })
-    mockUseSignalGroupDetail.mockReturnValue({ data: undefined, isLoading: false, error: null })
-  })
-
   it("shows a retryable error rather than not-found when the request fails", async () => {
-    const mutate = vi.fn()
-    mockUseMitigation.mockReturnValue({ data: undefined, error: new Error("API error 500: database unavailable"), isLoading: false, mutate })
+    serve(failure(500, "database unavailable"))
 
     await renderPage()
 
     expect(screen.getByRole("alert").textContent).toContain("Unable to load this mitigation")
     expect(screen.queryByText("Mitigation not found")).toBeNull()
-    screen.getByRole("button", { name: "Retry" }).click()
-    expect(mutate).toHaveBeenCalled()
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }))
+    await waitFor(() => expect(controller.calls("GET", mitigationPath)).toHaveLength(2))
   })
 
   it("keeps not-found for a 404", async () => {
-    mockUseMitigation.mockReturnValue({ data: undefined, error: new Error("API error 404: not found"), isLoading: false, mutate: vi.fn() })
+    serve(failure(404, "not found"))
 
     await renderPage()
 

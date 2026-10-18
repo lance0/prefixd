@@ -1,55 +1,44 @@
-import type { ReactNode } from "react"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
+import { fireEvent, screen, waitFor } from "@testing-library/react"
 import type { Mitigation } from "@/lib/api"
 import { formatUtc } from "@/lib/format"
-
-const mocks = vi.hoisted(() => ({ useMitigations: vi.fn(), useEvents: vi.fn(), mutate: vi.fn() }))
-
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }))
-
-vi.mock("next/link", () => ({
-  default: ({ children, href, ...props }: { children: ReactNode; href: string }) => <a href={href} {...props}>{children}</a>,
-}))
-
-vi.mock("@/hooks/use-api", () => ({ useMitigations: mocks.useMitigations, useEvents: mocks.useEvents }))
-
-vi.mock("@/hooks/use-permissions", () => ({ usePermissions: () => ({ settled: true, canWithdraw: true }) }))
-
-vi.mock("@/lib/api", () => ({ withdrawMitigation: vi.fn(), bulkWithdrawMitigations: vi.fn() }))
-
-vi.mock("@/components/dashboard/mitigate-now-dialog", () => ({ MitigateNowDialog: () => null }))
-
 import { MitigationsContentLive } from "@/components/dashboard/mitigations-content-live"
 import { EventsContentLive } from "@/components/dashboard/events-content-live"
+import { deferred, failure, json, operatorResponse, renderApp, signIn, useFakeController } from "./support/fake-controller"
 
-const loaded = (mitigations: Mitigation[]) => ({ data: { mitigations }, error: undefined, isLoading: false, mutate: mocks.mutate })
+const controller = useFakeController()
 
-afterEach(cleanup)
+function serveMitigations(answer: () => Response | Promise<Response>) {
+  signIn(controller, "credentials", operatorResponse("operator"))
+  controller.route("GET", "/v1/mitigations", answer)
+}
+
+const loaded = (mitigations: Mitigation[]) => () => json({ mitigations, count: mitigations.length, next_cursor: null, has_more: false })
 
 describe("list states", () => {
-  it("shows a failed mitigations fetch as an error with retry, never as an empty table", () => {
-    mocks.useMitigations.mockReturnValue({ data: undefined, error: new Error("HTTP 502"), isLoading: false, mutate: mocks.mutate })
-    render(<MitigationsContentLive />)
-    expect(screen.getByRole("alert")).toHaveTextContent("Unable to load mitigations")
+  it("shows a failed mitigations fetch as an error with retry, never as an empty table", async () => {
+    serveMitigations(() => failure(502))
+    renderApp(<MitigationsContentLive />)
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unable to load mitigations")
     expect(screen.getByRole("alert")).toHaveTextContent("Rules may still be active")
     expect(screen.queryByRole("table")).not.toBeInTheDocument()
     expect(screen.queryByText(/No mitigations/)).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole("button", { name: "Retry mitigations" }))
-    expect(mocks.mutate).toHaveBeenCalled()
+    await waitFor(() => expect(controller.calls("GET", "/v1/mitigations")).toHaveLength(2))
   })
 
-  it("keeps the toolbar usable while showing skeleton rows for the first load", () => {
-    mocks.useMitigations.mockReturnValue({ data: undefined, error: undefined, isLoading: true, mutate: mocks.mutate })
-    render(<MitigationsContentLive />)
+  it("keeps the toolbar usable while showing skeleton rows for the first load", async () => {
+    serveMitigations(() => deferred<Response>().promise)
+    renderApp(<MitigationsContentLive />)
+    await waitFor(() => expect(controller.calls("GET", "/v1/mitigations")).toHaveLength(1))
     expect(screen.getByRole("status", { name: "Loading mitigations" })).toBeInTheDocument()
     expect(screen.getByPlaceholderText("Search IP, vector or ID…")).toBeEnabled()
   })
 
-  it("separates an empty status selection from a search that matches nothing", () => {
-    mocks.useMitigations.mockReturnValue(loaded([]))
-    render(<MitigationsContentLive />)
-    expect(screen.getByText("No mitigations with these statuses")).toBeInTheDocument()
+  it("separates an empty status selection from a search that matches nothing", async () => {
+    serveMitigations(loaded([]))
+    renderApp(<MitigationsContentLive />)
+    expect(await screen.findByText("No mitigations with these statuses")).toBeInTheDocument()
 
     fireEvent.change(screen.getByPlaceholderText("Search IP, vector or ID…"), { target: { value: "198.51.100.9" } })
     expect(screen.getByText("No matching mitigations")).toBeInTheDocument()
@@ -58,17 +47,17 @@ describe("list states", () => {
     expect(screen.getByText("No mitigations with these statuses")).toBeInTheDocument()
   })
 
-  it("exposes status filters as pressed toggles", () => {
-    mocks.useMitigations.mockReturnValue(loaded([]))
-    render(<MitigationsContentLive />)
-    const active = screen.getByRole("button", { name: "active" })
+  it("exposes status filters as pressed toggles", async () => {
+    serveMitigations(loaded([]))
+    renderApp(<MitigationsContentLive />)
+    const active = await screen.findByRole("button", { name: "active" })
     expect(active).toHaveAttribute("aria-pressed", "true")
     fireEvent.click(active)
     expect(active).toHaveAttribute("aria-pressed", "false")
     expect(screen.getByRole("button", { name: "expired" })).toHaveAttribute("aria-pressed", "false")
   })
 
-  it("shows the expiry countdown with its absolute UTC deadline as visible text", () => {
+  it("shows the expiry countdown with its absolute UTC deadline as visible text", async () => {
     const expiresAt = new Date(Date.now() + 26 * 60_000 + 30_000).toISOString()
 
     const now = new Date().toISOString()
@@ -81,15 +70,15 @@ describe("list states", () => {
       reason: "udp flood", acknowledged_at: null, acknowledged_by: null,
     }
 
-    mocks.useMitigations.mockReturnValue(loaded([mitigation]))
-    render(<MitigationsContentLive />)
-    const deadline = screen.getByText(formatUtc(expiresAt))
+    serveMitigations(loaded([mitigation]))
+    renderApp(<MitigationsContentLive />)
+    const deadline = await screen.findByText(formatUtc(expiresAt))
     expect(deadline).toBeVisible()
     expect(deadline.closest("td")).toHaveTextContent(/26m/)
     expect(deadline.closest("td")?.querySelector("time")).toHaveAttribute("dateTime", expiresAt)
   })
 
-  it("tags only dry-run-origin rows as simulations", () => {
+  it("tags only dry-run-origin rows as simulations", async () => {
     const now = new Date().toISOString()
 
     const base: Mitigation = {
@@ -100,12 +89,13 @@ describe("list states", () => {
       last_event_id: "e-1", reason: "udp flood", acknowledged_at: null, acknowledged_by: null, origin_mode: "dry-run",
     }
 
-    mocks.useMitigations.mockReturnValue(loaded([
+    serveMitigations(loaded([
       base,
       { ...base, mitigation_id: "m-2", victim_ip: "203.0.113.2", origin_mode: "enforced" },
       { ...base, mitigation_id: "m-3", victim_ip: "203.0.113.3", origin_mode: null },
     ]))
-    render(<MitigationsContentLive />)
+    renderApp(<MitigationsContentLive />)
+    await screen.findByRole("link", { name: "203.0.113.1" })
     const rowFor = (ip: string) => screen.getByRole("link", { name: ip }).closest("tr")
 
     expect(rowFor("203.0.113.1")).toHaveTextContent("Simulation")
@@ -113,10 +103,10 @@ describe("list states", () => {
     expect(rowFor("203.0.113.3")).not.toHaveTextContent(/Simulation|Origin unknown/)
   })
 
-  it("shows a failed events fetch as an error rather than an empty list", () => {
-    mocks.useEvents.mockReturnValue({ data: undefined, error: new Error("HTTP 500"), isLoading: false, mutate: mocks.mutate })
-    render(<EventsContentLive />)
-    expect(screen.getByRole("alert")).toHaveTextContent("Unable to load events")
+  it("shows a failed events fetch as an error rather than an empty list", async () => {
+    controller.route("GET", "/v1/events", () => failure(500))
+    renderApp(<EventsContentLive />, { withoutAuth: true })
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unable to load events")
     expect(screen.queryByText("No events yet")).not.toBeInTheDocument()
   })
 })
