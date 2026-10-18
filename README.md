@@ -1,5 +1,6 @@
 <p align="center">
-  <img src="frontend/public/icon.svg" alt="prefixd" width="120">
+  <img src="docs/images/prefixd-logo.svg#gh-light-mode-only" alt="prefixd" width="300">
+  <img src="docs/images/prefixd-logo-dark.svg#gh-dark-mode-only" alt="prefixd" width="300">
 </p>
 
 # prefixd
