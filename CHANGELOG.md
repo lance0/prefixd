@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Document maintenance GoBGP↔rustbgpd cutover and rollback with capped expiry,
+  immutable cleanup history, complete snapshots and a resumable journal. Run the
+  real PostgreSQL/peer proof in both pinned rustbgpd CI lanes and retain dated
+  evidence, including failed attempts.
+
 - Add an isolated pinned rustbgpd↔GoBGP FlowSpec peer test for exact dual-family
   receipt, withdrawal/re-announcement and retained nonselected local intent.
 

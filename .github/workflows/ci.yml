@@ -128,16 +128,20 @@ jobs:
           key: ${{ runner.os }}-rustbgpd-${{ matrix.version }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-      - name: Released shared controller contract, TTL and restart recovery
+      - name: Released controller contract and maintenance cutover
         run: |
           set -o pipefail
           scripts/test-rustbgpd.sh 2>&1 | tee rustbgpd-qualification.log
+          scripts/test-speaker-cutover.sh 2>&1 | tee speaker-cutover-qualification.log
       - name: Retain rustbgpd qualification logs
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: rustbgpd-qualification-${{ matrix.version }}-attempt-${{ github.run_attempt }}
-          path: rustbgpd-qualification.log
+          path: |
+            rustbgpd-qualification.log
+            speaker-cutover-qualification.log
+            /tmp/prefixd-speaker-cutover-*
 
   lint:
     name: Lint

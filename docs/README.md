@@ -17,6 +17,7 @@ rustbgpd router enforcement.
 |---|---|
 | [Deployment](how-to/deployment.md) | Configure authentication, peers, TLS, databases and deployment. |
 | [Upgrading and rollback](how-to/upgrading.md) | Back up state and apply version-specific upgrade procedures. |
+| [Change BGP speakers](how-to/speaker-cutover.md) | Drain, transfer, recreate with original expiry and roll back during maintenance. |
 | [Troubleshooting](how-to/troubleshooting.md) | Diagnose API, mitigation and BGP problems. |
 | [Grafana and monitoring](how-to/grafana.md) | Set up dashboards and investigate operational metrics. |
 | [FastNetMon](how-to/detectors/fastnetmon.md) | Connect the detector notify script. |
@@ -45,6 +46,7 @@ rustbgpd router enforcement.
 
 | Page | Scope |
 |---|---|
+| [Speaker maintenance qualification](reference/qualification/speaker-cutover-2026-10-18.md) | Dated pinned GoBGP↔rustbgpd cutover/rollback evidence and failed-run diagnosis. |
 | [Benchmark snapshot](perf/benchmarks.md) | Historical v0.15.0 measurements and instructions; not a current performance qualification. |
 | [Router lab](../lab/README.md) | Lab setup and topology-specific checks. |
 | [Pinned controller images](../tests/fixtures/rustbgpd/releases.json) | Immutable released images used by the controller test suite. |
