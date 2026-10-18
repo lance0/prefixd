@@ -41,7 +41,7 @@
 
   /* Charts */
   --chart-1: oklch(0.44 0.08 185);
-  --chart-2: oklch(0.5 0.08 185);
+  --chart-2: oklch(0.55 0 0);
   --chart-3: oklch(0.45 0 0);
   --chart-4: oklch(0.55 0 0);
   --chart-5: oklch(0.65 0 0);
@@ -58,12 +58,14 @@
   --sidebar-border: oklch(0.88 0 0);
   --sidebar-ring: oklch(0.44 0.08 185);
 
-  /* Semantic colors */
-  --success: oklch(0.44 0.08 185);
+  /* Status scale: colour means state, never decoration. The teal accent is
+     for interaction only (primary action, focus, selection, links). Each
+     status keeps 4.5:1 as text on cards and on its own 10% tint. */
+  --success: oklch(0.5 0.13 150);
   --success-foreground: oklch(0.985 0 0);
-  --warning: oklch(0.5 0.11 70);
+  --warning: oklch(0.52 0.12 70);
   --warning-foreground: oklch(0.985 0 0);
-  --info: oklch(0.5 0.08 185);
+  --info: oklch(0.52 0.11 250);
   --info-foreground: oklch(0.985 0 0);
 }
 
@@ -72,7 +74,8 @@
   --foreground: oklch(0.93 0 0);
   --card: oklch(0.18 0 0);
   --card-foreground: oklch(0.93 0 0);
-  --popover: oklch(0.18 0 0);
+  /* Overlays sit one step above cards. */
+  --popover: oklch(0.21 0 0);
   --popover-foreground: oklch(0.93 0 0);
   --primary: oklch(0.78 0.1 185);
   --primary-foreground: oklch(0.145 0 0);
@@ -88,7 +91,7 @@
   --input: oklch(0.29 0 0);
   --ring: oklch(0.78 0.1 185);
   --chart-1: oklch(0.78 0.1 185);
-  --chart-2: oklch(0.6 0.05 185);
+  --chart-2: oklch(0.6 0 0);
   --chart-3: oklch(0.7 0 0);
   --chart-4: oklch(0.4 0 0);
   --chart-5: oklch(0.3 0 0);
@@ -100,11 +103,11 @@
   --sidebar-accent-foreground: oklch(0.93 0 0);
   --sidebar-border: oklch(0.235 0 0);
   --sidebar-ring: oklch(0.78 0.1 185);
-  --success: oklch(0.65 0.1 185);
+  --success: oklch(0.76 0.13 150);
   --success-foreground: oklch(0.145 0 0);
   --warning: oklch(0.8 0.12 75);
   --warning-foreground: oklch(0.145 0 0);
-  --info: oklch(0.6 0.05 185);
+  --info: oklch(0.75 0.09 250);
   --info-foreground: oklch(0.145 0 0);
 }
 
@@ -135,10 +138,12 @@
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
+  /* Radius tiers: sm 4px pills and tags; md/lg 6px controls and panels;
+     xl 8px overlays (dialogs, menus, popovers). */
   --radius-sm: calc(var(--radius) - 2px);
-  --radius-md: calc(var(--radius) - 1px);
+  --radius-md: var(--radius);
   --radius-lg: var(--radius);
-  --radius-xl: var(--radius);
+  --radius-xl: calc(var(--radius) + 2px);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);

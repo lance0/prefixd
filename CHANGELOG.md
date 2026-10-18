@@ -156,6 +156,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typography and navigation; preserve user zoom and remove decorative pulses,
   hardcoded quota caps and sampled action totals presented as global counts.
 
+- Give dashboard status its own colour scale, separate from the teal accent:
+  active mitigations and healthy services are green, pending and degraded states
+  amber, and escalated or failed states red. Keep one dashboard shell mounted
+  across navigation, tighten card spacing, lift dialogs and menus above page
+  surfaces in dark mode, and match the browser theme colour to each theme.
+  Bandwidth labels drop trailing zeros, such as "5 Mbps".
+
 - Refresh the security support policy, authentication and audit guidance, and
   release checklist to match the maintained release series and CI artifacts.
 
@@ -174,6 +181,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binaries. Current stable tests and lints remain required.
 
 ### Fixed
+
+- Show a healthy controller as healthy on the Administration page. The daemon
+  status pill treated the reported `healthy` value as an error and `degraded` as
+  normal.
 
 - Report playbook name and alert destination string limits in UTF-8 bytes.
   Count playbook names in bytes in both editors, matching the existing server

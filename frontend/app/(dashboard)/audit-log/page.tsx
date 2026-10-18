@@ -1,6 +1,5 @@
 import { Suspense } from "react"
 import { AuditLogContentLive } from "@/components/dashboard/audit-log-content-live"
-import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
 import { RefreshCw } from "lucide-react"
 
 function LoadingState() {
@@ -14,10 +13,10 @@ function LoadingState() {
 
 export default function AuditLogPage() {
   return (
-    <DashboardLayout>
+    <>
       <Suspense fallback={<LoadingState />}>
         <AuditLogContentLive />
       </Suspense>
-    </DashboardLayout>
+    </>
   )
 }

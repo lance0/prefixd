@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import type { Mitigation } from "@/lib/api"
 import { formatConfidence } from "@/lib/confidence"
+import { formatTimeRemaining } from "@/lib/format"
 
 interface ActiveMitigationsMiniProps {
   mitigations: Mitigation[]
@@ -18,17 +19,7 @@ interface ActiveMitigationsMiniProps {
   onRetry?: () => void
 }
 
-export function formatTimeRemaining(expiresAt: string, now: number): string {
-  const diff = Date.parse(expiresAt) - now
-  if (!Number.isFinite(diff)) return "Unavailable"
-  if (diff <= 0) return "Expiry due"
-  const minutes = Math.floor(diff / 60_000)
-  if (minutes === 0) return "<1m"
-  if (minutes < 60) return `${minutes}m`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ${minutes % 60}m`
-  return `${Math.floor(hours / 24)}d ${hours % 24}h`
-}
+export { formatTimeRemaining }
 
 export function formatSourceCount(value?: number): string {
   return value !== undefined && Number.isInteger(value) && value >= 0

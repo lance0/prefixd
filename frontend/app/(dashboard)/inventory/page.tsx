@@ -2,7 +2,6 @@
 
 import { useState, useMemo } from "react"
 import Link from "next/link"
-import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -114,7 +113,7 @@ export default function InventoryPage() {
   }, [data, search])
 
   return (
-    <DashboardLayout>
+    <>
       <div className="flex-1 overflow-auto">
         <div className="p-4 sm:p-6 space-y-4">
           <div className="flex items-center justify-between">
@@ -184,6 +183,6 @@ export default function InventoryPage() {
           )}
         </div>
       </div>
-    </DashboardLayout>
+    </>
   )
 }

@@ -3,7 +3,6 @@
 import { use } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
 import { useSignalGroupDetail, useCorrelationConfig } from "@/hooks/use-api"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -88,18 +87,18 @@ export default function SignalGroupDetailPage({
   // Loading state
   if (isLoading) {
     return (
-      <DashboardLayout>
+      <>
         <div className="flex h-[50vh] items-center justify-center">
           <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
-      </DashboardLayout>
+      </>
     )
   }
 
   // 404 / error state
   if (error || !group) {
     return (
-      <DashboardLayout>
+      <>
         <div className="flex flex-col items-center justify-center h-[50vh] space-y-4">
           <ShieldAlert className="h-12 w-12 text-muted-foreground" />
           <h2 className="text-xl font-semibold">Signal Group Not Found</h2>
@@ -113,7 +112,7 @@ export default function SignalGroupDetailPage({
             <ArrowLeft className="mr-2 h-4 w-4" /> Back to Correlation
           </Button>
         </div>
-      </DashboardLayout>
+      </>
     )
   }
 
@@ -148,7 +147,7 @@ export default function SignalGroupDetailPage({
   const minSources = correlationConfig?.min_sources ?? 1
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-6">
         {/* ── Header ────────────────────────────────────────── */}
         <div>
@@ -488,6 +487,6 @@ export default function SignalGroupDetailPage({
           </div>
         </div>
       </div>
-    </DashboardLayout>
+    </>
   )
 }

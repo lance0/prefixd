@@ -3,7 +3,6 @@
 import { Suspense } from "react"
 import { useSearchParams } from "next/navigation"
 import { MitigationsContentLive } from "@/components/dashboard/mitigations-content-live"
-import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
 import { RefreshCw } from "lucide-react"
 
 function LoadingState() {
@@ -21,10 +20,10 @@ export default function MitigationsPage() {
   const openMitigate = searchParams.get("mitigate") === "true"
 
   return (
-    <DashboardLayout>
+    <>
       <Suspense fallback={<LoadingState />}>
         <MitigationsContentLive initialSearch={ipSearch} initialMitigateOpen={openMitigate} />
       </Suspense>
-    </DashboardLayout>
+    </>
   )
 }

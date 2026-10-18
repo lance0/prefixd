@@ -1,16 +1,10 @@
 import { cn } from "@/lib/utils"
+import { formatBps } from "@/lib/format"
 
 interface ActionBadgeProps {
   actionType: "police" | "discard" | string
   rateBps?: number | null
   size?: "sm" | "default"
-}
-
-function formatBps(bps: number): string {
-  if (bps >= 1_000_000_000) return `${(bps / 1_000_000_000).toFixed(1)} Gbps`
-  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`
-  if (bps >= 1_000) return `${(bps / 1_000).toFixed(1)} Kbps`
-  return `${bps} bps`
 }
 
 export function ActionBadge({ actionType, rateBps, size = "default" }: ActionBadgeProps) {

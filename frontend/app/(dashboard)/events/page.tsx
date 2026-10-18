@@ -3,7 +3,6 @@
 import { Suspense } from "react"
 import { useSearchParams } from "next/navigation"
 import { EventsContentLive } from "@/components/dashboard/events-content-live"
-import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
 import { RefreshCw } from "lucide-react"
 
 function LoadingState() {
@@ -20,10 +19,10 @@ export default function EventsPage() {
   const eventId = searchParams.get("id")
 
   return (
-    <DashboardLayout>
+    <>
       <Suspense fallback={<LoadingState />}>
         <EventsContentLive initialEventId={eventId} />
       </Suspense>
-    </DashboardLayout>
+    </>
   )
 }

@@ -3,7 +3,6 @@
 import { use, useRef, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
 import { useMitigation, useConfigInventory, useSignalGroupDetail } from "@/hooks/use-api"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 import { ActionBadge } from "@/components/dashboard/action-badge"
@@ -132,17 +131,17 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
 
   if (isLoading) {
     return (
-      <DashboardLayout>
+      <>
         <div className="flex h-[50vh] items-center justify-center">
           <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
-      </DashboardLayout>
+      </>
     )
   }
 
   if (!mitigation) {
     return (
-      <DashboardLayout>
+      <>
         <div className="flex flex-col items-center justify-center h-[50vh] space-y-4">
           <ShieldAlert className="h-12 w-12 text-muted-foreground" />
           <h2 className="text-xl font-semibold">Mitigation Not Found</h2>
@@ -151,7 +150,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
             <ArrowLeft className="mr-2 h-4 w-4" /> Back to Mitigations
           </Button>
         </div>
-      </DashboardLayout>
+      </>
     )
   }
 
@@ -162,7 +161,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
   const service = customer?.services.find(s => s.service_id === mitigation.service_id)
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-6">
         {/* Header Section */}
         <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
@@ -620,6 +619,6 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
         onOpenChange={setShowReportDialog}
         loading={reportLoading}
       />
-    </DashboardLayout>
+    </>
   )
 }

@@ -16,7 +16,7 @@ export function ConnectionStatus({ state, className }: ConnectionStatusProps) {
       case "connected":
         return {
           icon: Wifi,
-          color: "text-primary",
+          color: "text-success",
           label: "Connected",
           description: "Real-time updates active",
         }
@@ -24,15 +24,15 @@ export function ConnectionStatus({ state, className }: ConnectionStatusProps) {
         return {
           icon: Clock3,
           color: "text-warning",
-          label: "Connecting...",
+          label: "Connecting…",
           description: "Establishing connection",
         }
       case "disconnected":
         return {
           icon: WifiOff,
-          color: "text-muted-foreground",
+          color: "text-warning",
           label: "Disconnected",
-          description: "Reconnecting...",
+          description: "Live updates paused; reconnecting…",
         }
       case "error":
         return {

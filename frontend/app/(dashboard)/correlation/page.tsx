@@ -1,7 +1,6 @@
 "use client"
 
 import { useState } from "react"
-import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import { Radio, Layers, Settings, Database } from "lucide-react"
@@ -16,7 +15,7 @@ export default function CorrelationPage() {
   const openGroupCount = useOpenSignalGroupCount()
 
   return (
-    <DashboardLayout>
+    <>
       <div className="flex-1 overflow-auto">
         <div className="p-4 sm:p-6 space-y-4">
           <div>
@@ -69,6 +68,6 @@ export default function CorrelationPage() {
           </Tabs>
         </div>
       </div>
-    </DashboardLayout>
+    </>
   )
 }

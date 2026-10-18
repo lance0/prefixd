@@ -2,9 +2,9 @@
 
 import { useState } from "react"
 import { useSWRConfig } from "swr"
-import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { StatusPill, healthTone } from "@/components/dashboard/status-pill"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -243,7 +243,7 @@ export default function AdminPage() {
   }
 
   return (
-    <DashboardLayout>
+    <>
       <Tabs defaultValue="status">
         <TabsList className="font-mono">
           <TabsTrigger value="status" className="text-xs">
@@ -340,9 +340,7 @@ export default function AdminPage() {
                   <CardContent className="space-y-3">
                     <div className="flex justify-between items-center">
                       <span className="text-muted-foreground text-sm">Status</span>
-                      <Badge variant={health.status === "ok" || health.status === "degraded" ? "default" : "destructive"}>
-                        {health.status}
-                      </Badge>
+                      <StatusPill tone={healthTone(health.status)}>{health.status}</StatusPill>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-muted-foreground text-sm">Version</span>
@@ -387,9 +385,7 @@ export default function AdminPage() {
                         {Object.entries(health.bgp_sessions).map(([peer, state]) => (
                           <div key={peer} className="flex items-center justify-between">
                             <span className="text-sm font-mono text-foreground">{peer}</span>
-                            <Badge variant={state === "established" ? "default" : "destructive"}>
-                              {state}
-                            </Badge>
+                            <StatusPill tone={healthTone(state)}>{state}</StatusPill>
                           </div>
                         ))}
                       </div>
@@ -821,6 +817,6 @@ export default function AdminPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </DashboardLayout>
+    </>
   )
 }

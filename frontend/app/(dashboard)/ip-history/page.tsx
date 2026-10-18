@@ -4,7 +4,6 @@ import { formatConfidence } from "@/lib/confidence"
 import { useState } from "react"
 import { useSearchParams, useRouter } from "next/navigation"
 import Link from "next/link"
-import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
 import { useIpHistory } from "@/hooks/use-api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -105,7 +104,7 @@ export default function IpHistoryPage() {
   }
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-4">
         <div>
           <h1 className="text-lg font-semibold">IP History</h1>
@@ -266,6 +265,6 @@ export default function IpHistoryPage() {
         onOpenChange={setShowReportDialog}
         loading={reportLoading}
       />
-    </DashboardLayout>
+    </>
   )
 }

@@ -3,7 +3,6 @@
 import { useCallback, useState } from "react"
 import { useSWRConfig } from "swr"
 import { toast } from "sonner"
-import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -58,7 +57,7 @@ export default function ConfigPage() {
   }, [mutatePlaybooks])
 
   return (
-    <DashboardLayout>
+    <>
       <div className="flex-1 overflow-auto">
         <div className="p-4 sm:p-6 space-y-4">
           <div className="flex items-center justify-between">
@@ -230,6 +229,6 @@ export default function ConfigPage() {
           </Tabs>
         </div>
       </div>
-    </DashboardLayout>
+    </>
   )
 }
