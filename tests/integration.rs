@@ -6748,6 +6748,49 @@ async fn test_webhook_single_event_happy_path() {
 }
 
 #[tokio::test]
+async fn test_detector_adapters_audit_mitigation_creation() {
+    let alertmanager = setup_app_correlation(true, 1, 0.5).await;
+    let alert = make_alert("firing", "203.0.113.10", "udp_flood", "critical", "fp-1");
+    let (_, json) = post_alertmanager(&alertmanager, &make_alertmanager_payload(&[alert])).await;
+    let alertmanager_result = json["results"][0].clone();
+
+    let fastnetmon = setup_app_correlation(true, 1, 0.5).await;
+    let payload = make_fastnetmon_payload("ban", "203.0.113.10", Some("attack-1"));
+    let (_, fastnetmon_result) = post_fastnetmon(&fastnetmon, &payload).await;
+
+    let webhook = setup_app_with_webhooks(vec![basic_webhook_adapter("radware")]).await;
+    let body = r#"{"id":"alert-1","ip":"203.0.113.10","vector":"udp_flood","bps":100000,"pps":500,"score":0.9}"#;
+    let (_, json) = post_webhook(&webhook, "radware", body, &[]).await;
+    let webhook_result = json["results"][0].clone();
+
+    for (app, result, source) in [
+        (&alertmanager, alertmanager_result, "alertmanager"),
+        (&fastnetmon, fastnetmon_result, "fastnetmon"),
+        (&webhook, webhook_result, "radware"),
+    ] {
+        assert!(result["mitigation_id"].is_string(), "{source}: {result}");
+        let response = app
+            .clone()
+            .oneshot(Request::get("/v1/audit").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let audit: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let entries = audit["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{source}: {entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry["action"], "create");
+        assert_eq!(entry["actor_type"], "detector");
+        assert_eq!(entry["actor_id"], source);
+        assert_eq!(entry["target_id"], result["mitigation_id"]);
+        assert_eq!(entry["details"]["event_id"], result["event_id"]);
+        assert_eq!(entry["details"]["origin_mode"], "dry-run");
+    }
+}
+
+#[tokio::test]
 async fn test_webhook_numeric_mapping_failure_has_no_mutations_and_allows_corrected_retry() {
     use prefixd::correlation::WebhookTransform;
 

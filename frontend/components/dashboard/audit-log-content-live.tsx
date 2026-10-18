@@ -291,7 +291,7 @@ export function AuditLogContentLive() {
             action={<Button variant="outline" size="sm" onClick={() => { setSearchQuery(""); setActionFilter("All"); setActorFilter("All") }}>Clear search and filters</Button>}
           />
         ) : (
-          <EmptyState title="No audit entries yet" description="Withdrawals, safelist changes and configuration reloads will be recorded here." />
+          <EmptyState title="No audit entries yet" description="Mitigation creations, withdrawals, safelist changes and configuration reloads will be recorded here." />
         )
       ) : (
         <>

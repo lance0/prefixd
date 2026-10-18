@@ -49,6 +49,7 @@ describe("audit action tones", () => {
   it("flags only rejections and escalations", () => {
     expect(auditActionTone("reject")).toBe("danger")
     expect(auditActionTone("ESCALATE")).toBe("danger")
+    expect(auditActionTone("create")).toBe("neutral")
     expect(auditActionTone("withdraw")).toBe("neutral")
     expect(auditActionTone("safelist_add")).toBe("neutral")
   })

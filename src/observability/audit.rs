@@ -15,6 +15,13 @@ pub enum ActorType {
     Operator,
 }
 
+/// Who created a mitigation: an operator's username or a detector's source name.
+#[derive(Debug, Clone)]
+pub enum CreationActor {
+    Operator(String),
+    Detector(String),
+}
+
 /// Audit log entry
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct AuditEntry {
@@ -81,6 +88,39 @@ impl AuditEntry {
                 "victim_ip": victim_ip,
                 "action_type": action_type
             }),
+        )
+    }
+
+    /// Entry for an admitted mitigation, written in its admission transaction.
+    pub fn mitigation_created(m: &crate::domain::Mitigation, actor: &CreationActor) -> Self {
+        let (actor_type, actor_id, event_id) = match actor {
+            CreationActor::Operator(id) => (ActorType::Operator, id, None),
+            CreationActor::Detector(source) => {
+                (ActorType::Detector, source, Some(m.triggering_event_id))
+            }
+        };
+        let mut details = serde_json::json!({
+            "pop": m.pop,
+            "customer_id": m.customer_id,
+            "victim_ip": m.victim_ip,
+            "scope": m.match_criteria,
+            "action_type": m.action_type,
+            "action_params": m.action_params,
+            "ttl_seconds": (m.expires_at - m.created_at).num_seconds(),
+            "expires_at": m.expires_at,
+            "origin_mode": m.origin_mode.map(crate::config::OperationMode::as_str),
+            "reason": m.reason,
+        });
+        if let Some(event_id) = event_id {
+            details["event_id"] = serde_json::json!(event_id);
+        }
+        Self::new(
+            actor_type,
+            Some(actor_id.clone()),
+            "create",
+            Some("mitigation"),
+            Some(m.mitigation_id.to_string()),
+            details,
         )
     }
 

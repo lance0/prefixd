@@ -4683,6 +4683,10 @@ async fn test_shared_quota_sequential_and_same_controller_controls() {
     assert_eq!(speaker.adds.load(SeqCst), 1);
 }
 
+fn fixture_actor() -> prefixd::observability::CreationActor {
+    prefixd::observability::CreationActor::Operator("fixture".into())
+}
+
 fn assert_quota_error(result: prefixd::error::Result<()>, kind: &str, current: u32, max: u32) {
     match result.unwrap_err() {
         prefixd::error::PrefixdError::GuardrailViolation(
@@ -4733,21 +4737,24 @@ async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
             quotas.max_active_global = 1;
             if status.is_active() {
                 assert_quota_error(
-                    repo.admit_mitigation(&candidate, &quotas).await,
+                    repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+                        .await,
                     "customer",
                     1,
                     1,
                 );
                 candidate.customer_id = None;
                 assert_quota_error(
-                    repo.admit_mitigation(&candidate, &quotas).await,
+                    repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+                        .await,
                     "pop",
                     1,
                     1,
                 );
                 candidate.pop = "quota-b".into();
                 assert_quota_error(
-                    repo.admit_mitigation(&candidate, &quotas).await,
+                    repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+                        .await,
                     "global",
                     1,
                     1,
@@ -4759,7 +4766,8 @@ async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
                 repo.insert_mitigation(&existing).await.unwrap();
                 candidate.customer_id = Some("customer-a".into());
                 assert_quota_error(
-                    repo.admit_mitigation(&candidate, &quotas).await,
+                    repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+                        .await,
                     "customer",
                     2,
                     1,
@@ -4767,20 +4775,24 @@ async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
                 candidate.customer_id = None;
                 candidate.pop = "quota-a".into();
                 assert_quota_error(
-                    repo.admit_mitigation(&candidate, &quotas).await,
+                    repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+                        .await,
                     "pop",
                     2,
                     1,
                 );
                 candidate.pop = "quota-b".into();
                 assert_quota_error(
-                    repo.admit_mitigation(&candidate, &quotas).await,
+                    repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+                        .await,
                     "global",
                     2,
                     1,
                 );
             } else {
-                repo.admit_mitigation(&candidate, &quotas).await.unwrap();
+                repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+                    .await
+                    .unwrap();
             }
         }
     }
@@ -4801,7 +4813,8 @@ async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
         let mut quotas = common::test_settings().quotas;
         quotas.max_active_per_customer = 0;
         assert_quota_error(
-            repo.admit_mitigation(&candidate, &quotas).await,
+            repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+                .await,
             "customer",
             0,
             0,
@@ -4809,7 +4822,8 @@ async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
         candidate.customer_id = None;
         quotas.max_active_per_pop = 0;
         assert_quota_error(
-            repo.admit_mitigation(&candidate, &quotas).await,
+            repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+                .await,
             "pop",
             0,
             0,
@@ -4817,22 +4831,29 @@ async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
         quotas.max_active_per_pop = 1;
         quotas.max_active_global = 0;
         assert_quota_error(
-            repo.admit_mitigation(&candidate, &quotas).await,
+            repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+                .await,
             "global",
             0,
             0,
         );
         quotas.max_active_global = 10;
-        repo.admit_mitigation(&candidate, &quotas).await.unwrap(); // None skips customer zero.
+        repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+            .await
+            .unwrap(); // None skips customer zero.
         candidate.mitigation_id = uuid::Uuid::new_v4();
         candidate.pop = "quota-b".into();
         candidate.customer_id = Some("customer-b".into());
         quotas.max_active_per_customer = 1;
-        repo.admit_mitigation(&candidate, &quotas).await.unwrap(); // independent POP and customer.
+        repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+            .await
+            .unwrap(); // independent POP and customer.
         candidate.mitigation_id = uuid::Uuid::new_v4();
         candidate.customer_id = Some("customer-c".into());
         candidate.pop = "quota-c".into();
-        repo.admit_mitigation(&candidate, &quotas).await.unwrap();
+        repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+            .await
+            .unwrap();
         assert_eq!(repo.count_active_global().await.unwrap(), 3);
     }
 }
@@ -4879,14 +4900,23 @@ async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
             inventory_mitigation(prefix, pop, Utc::now(), MitigationStatus::Active)
         };
         // Under the limit: one counted row, so the second creation is admitted.
-        repo.admit_mitigation(&candidate("203.0.113.10/32", "rate-a"), &quotas)
-            .await
-            .unwrap();
+        repo.admit_mitigation(
+            &candidate("203.0.113.10/32", "rate-a"),
+            &quotas,
+            &fixture_actor(),
+        )
+        .await
+        .unwrap();
         // At the limit, then over it: rejected without persisting or using quota.
         let active = repo.count_active_by_pop("rate-a").await.unwrap();
         for prefix in ["203.0.113.11/32", "203.0.113.12/32"] {
             let rejected = candidate(prefix, "rate-a");
-            assert_rate_error(repo.admit_mitigation(&rejected, &quotas).await, 2, 2);
+            assert_rate_error(
+                repo.admit_mitigation(&rejected, &quotas, &fixture_actor())
+                    .await,
+                2,
+                2,
+            );
             assert!(
                 repo.get_mitigation(rejected.mitigation_id)
                     .await
@@ -4896,14 +4926,22 @@ async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
         }
         assert_eq!(repo.count_active_by_pop("rate-a").await.unwrap(), active);
         // Each POP has its own window.
-        repo.admit_mitigation(&candidate("203.0.113.13/32", "rate-b"), &quotas)
-            .await
-            .unwrap();
+        repo.admit_mitigation(
+            &candidate("203.0.113.13/32", "rate-b"),
+            &quotas,
+            &fixture_actor(),
+        )
+        .await
+        .unwrap();
         // Zero admits no new mitigation, like the active quotas.
         quotas.max_new_per_minute = 0;
         assert_rate_error(
-            repo.admit_mitigation(&candidate("203.0.113.14/32", "rate-c"), &quotas)
-                .await,
+            repo.admit_mitigation(
+                &candidate("203.0.113.14/32", "rate-c"),
+                &quotas,
+                &fixture_actor(),
+            )
+            .await,
             0,
             0,
         );
@@ -4919,7 +4957,7 @@ async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
         let admitted = inventory_mitigation(prefix, "rate-a", Utc::now(), MitigationStatus::Active);
         context
             .repo
-            .admit_mitigation(&admitted, &quotas)
+            .admit_mitigation(&admitted, &quotas, &fixture_actor())
             .await
             .unwrap();
     }
@@ -4929,6 +4967,7 @@ async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
             .admit_mitigation(
                 &inventory_mitigation("203.0.113.15/32", "rate-a", Utc::now(), Active),
                 &quotas,
+                &fixture_actor(),
             )
             .await,
         2,
@@ -4970,7 +5009,9 @@ async fn test_new_mitigation_rate_concurrent_controllers_cannot_share_last_slot(
         );
         let quotas = quotas.clone();
         tasks.push(tokio::spawn(async move {
-            repository.admit_mitigation(&candidate, &quotas).await
+            repository
+                .admit_mitigation(&candidate, &quotas, &fixture_actor())
+                .await
         }));
         if index == 0 {
             wait_quota_lock(&context.pool, false, 1).await;
@@ -5072,6 +5113,155 @@ async fn test_new_mitigation_rate_http_rejects_without_announcing() {
     println!("\n{completion}");
 }
 
+async fn audit_entries(app: &axum::Router) -> Vec<serde_json::Value> {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/audit?limit=1000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    creation_json(response).await["entries"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+#[tokio::test]
+async fn test_creation_audit_manual_event_and_batch_paths() {
+    use prefixd::config::OperationMode;
+    for mode in [OperationMode::Enforced, OperationMode::DryRun] {
+        let context = TestContext::new().await;
+        let mut quotas = common::test_settings().quotas;
+        quotas.max_new_per_minute = 3;
+        let (state, _speaker) = quota_state_in(&context, "audit-a", quotas, mode).await;
+        let app = prefixd::api::create_test_router(state);
+        let batch = Request::builder()
+            .method("POST")
+            .uri("/v1/events/batch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"events": [{
+                    "event_id":"batch-1", "timestamp":chrono::Utc::now(), "source":"batch-test",
+                    "victim_ip":"203.0.113.12", "vector":"udp_flood", "pps":50000,
+                    "top_dst_ports":[53], "confidence":0.9
+                }]})
+                .to_string(),
+            ))
+            .unwrap();
+        let manual = creation_json(
+            app.clone()
+                .oneshot(creation_request("manual", "203.0.113.10", ""))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let event = creation_json(
+            app.clone()
+                .oneshot(creation_request("detector", "203.0.113.11", "single-1"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let batched = creation_json(app.clone().oneshot(batch).await.unwrap()).await;
+        let batched = &batched["results"][0];
+        let expected = [
+            (&manual["mitigation_id"], "operator", "anonymous", None),
+            (
+                &event["mitigation_id"],
+                "detector",
+                "creation-test",
+                Some(&event["event_id"]),
+            ),
+            (
+                &batched["mitigation_id"],
+                "detector",
+                "batch-test",
+                Some(&batched["event_id"]),
+            ),
+        ];
+        // Repeat events extend TTL and rejected admissions are not creations.
+        let extended = app
+            .clone()
+            .oneshot(creation_request("detector", "203.0.113.11", "single-2"))
+            .await
+            .unwrap();
+        assert_eq!(creation_json(extended).await["status"], "extended");
+        let rejected = app
+            .clone()
+            .oneshot(creation_request("manual", "203.0.113.13", ""))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let entries = audit_entries(&app).await;
+        assert_eq!(entries.len(), 3, "{mode:?}: {entries:?}");
+        for (mitigation_id, actor_type, actor_id, event_id) in expected {
+            let entry = entries
+                .iter()
+                .find(|entry| &entry["target_id"] == mitigation_id)
+                .unwrap_or_else(|| panic!("no audit entry for {mitigation_id}"));
+            assert_eq!(entry["action"], "create");
+            assert_eq!(entry["target_type"], "mitigation");
+            assert_eq!(entry["actor_type"], actor_type);
+            assert_eq!(entry["actor_id"], actor_id);
+            let details = &entry["details"];
+            assert_eq!(details.get("event_id"), event_id, "{details}");
+            assert_eq!(details["pop"], "audit-a");
+            assert_eq!(
+                details["scope"]["dst_prefix"],
+                format!("{}/32", details["victim_ip"].as_str().unwrap())
+            );
+            assert!(details["action_type"].is_string());
+            assert!(details["action_params"].is_object());
+            assert!(details["ttl_seconds"].as_i64().unwrap() > 0);
+            assert_eq!(details["origin_mode"], mode.as_str());
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_creation_audit_is_atomic_with_admission() {
+    use std::sync::atomic::Ordering::SeqCst;
+    // Each table's insert fails in turn; the transaction must leave neither row behind.
+    for table in ["audit_log", "mitigations"] {
+        let context = TestContext::new().await;
+        let (state, speaker) =
+            quota_state(&context, "audit-a", common::test_settings().quotas).await;
+        sqlx::raw_sql(&format!("CREATE FUNCTION fail_insert() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected failure'; END; $$ LANGUAGE plpgsql; CREATE TRIGGER fail_insert BEFORE INSERT ON {table} FOR EACH ROW EXECUTE FUNCTION fail_insert();"))
+            .execute(&context.pool).await.unwrap();
+        let app = prefixd::api::create_test_router(state);
+        for kind in ["manual", "detector"] {
+            let response = app
+                .clone()
+                .oneshot(creation_request(kind, "203.0.113.10", kind))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{table}/{kind}"
+            );
+        }
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM mitigations), (SELECT COUNT(*) FROM audit_log)",
+        )
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            counts,
+            (0, 0),
+            "failed {table} insert left a partial admission"
+        );
+        assert_eq!(speaker.adds.load(SeqCst), 0);
+    }
+}
+
 #[tokio::test]
 async fn test_shared_quota_one_connection_overrides_repeatable_read() {
     use prefixd::db::RepositoryTrait;
@@ -5103,8 +5293,11 @@ async fn test_shared_quota_one_connection_overrides_repeatable_read() {
         .execute(&mut *gate)
         .await
         .unwrap();
-    let admission =
-        tokio::spawn(async move { repository.admit_mitigation(&candidate, &quotas).await });
+    let admission = tokio::spawn(async move {
+        repository
+            .admit_mitigation(&candidate, &quotas, &fixture_actor())
+            .await
+    });
     wait_quota_lock(&context.pool, true, 1).await;
     context
         .repo
@@ -5132,6 +5325,7 @@ async fn test_shared_quota_one_connection_overrides_repeatable_read() {
                 MitigationStatus::Active,
             ),
             &common::test_settings().quotas,
+            &fixture_actor(),
         )
         .await
         .unwrap();
@@ -5181,6 +5375,7 @@ async fn test_shared_quota_pool_wait_uses_whole_deadline() {
                 MitigationStatus::Active,
             ),
             &common::test_settings().quotas,
+            &fixture_actor(),
         )
         .await
         .unwrap_err();
@@ -5222,8 +5417,11 @@ async fn test_shared_quota_deadline_does_not_fail_a_slow_commit() {
         .await
         .unwrap();
     let quotas = common::test_settings().quotas;
-    let admission =
-        tokio::spawn(async move { repository.admit_mitigation(&candidate, &quotas).await });
+    let admission = tokio::spawn(async move {
+        repository
+            .admit_mitigation(&candidate, &quotas, &fixture_actor())
+            .await
+    });
     wait_quota_lock(&context.pool, true, 1).await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     gate.commit().await.unwrap();

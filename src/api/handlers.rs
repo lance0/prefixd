@@ -78,6 +78,7 @@ use crate::domain::{
 };
 use crate::error::{GuardrailError, PrefixdError};
 use crate::guardrails::Guardrails;
+use crate::observability::CreationActor;
 use crate::policy::PolicyEngine;
 
 use super::auth::{require_auth, require_role};
@@ -480,12 +481,13 @@ pub async fn ingest_event(
 async fn persist_new_mitigation(
     state: &AppState,
     mitigation: &mut Mitigation,
+    actor: &CreationActor,
 ) -> crate::error::Result<Option<AnnouncementOutcome>> {
     mitigation.activate();
     mitigation.origin_mode = Some(state.settings.mode);
     state
         .repo
-        .admit_mitigation(mitigation, &state.settings.quotas)
+        .admit_mitigation(mitigation, &state.settings.quotas, actor)
         .await
         .inspect_err(|error| {
             let reason = match error {
@@ -1222,7 +1224,8 @@ async fn handle_ban(
         Mitigation::from_intent(intent, event.victim_ip.clone(), event.attack_vector());
     mitigation.signal_group_id = signal_group_id;
 
-    let announcement_outcome = persist_new_mitigation(&state, &mut mitigation)
+    let actor = CreationActor::Detector(event.source.clone());
+    let announcement_outcome = persist_new_mitigation(&state, &mut mitigation, &actor)
         .await
         .inspect_err(|error| {
             if matches!(
@@ -1767,7 +1770,8 @@ pub async fn create_mitigation(
         }
     }
 
-    let announcement_outcome = match persist_new_mitigation(&state, &mut mitigation).await {
+    let actor = CreationActor::Operator(operator_id);
+    let announcement_outcome = match persist_new_mitigation(&state, &mut mitigation, &actor).await {
         Ok(outcome) => outcome,
         Err(error) => return Ok(AppError(error).into_response()),
     };

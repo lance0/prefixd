@@ -135,15 +135,16 @@ pub trait RepositoryTrait: Send + Sync {
     async fn list_audit(&self, params: &ListParams) -> Result<Vec<AuditEntry>>;
 
     // Mitigations
-    /// Raw persistence for fixtures/imports; bypasses quota admission.
+    /// Raw persistence for fixtures/imports; bypasses quota admission and audit.
     /// Production creation must use `admit_mitigation`.
     async fn insert_mitigation(&self, m: &Mitigation) -> Result<()>;
     /// Atomically check customer, POP, then global active quotas, then the POP's
-    /// `max_new_per_minute` rate, and persist new intent.
+    /// `max_new_per_minute` rate, and persist new intent with its `create` audit entry.
     async fn admit_mitigation(
         &self,
         m: &Mitigation,
         quotas: &crate::config::QuotasConfig,
+        actor: &crate::observability::CreationActor,
     ) -> Result<()>;
     async fn update_mitigation(&self, m: &Mitigation) -> Result<()>;
     async fn get_mitigation(&self, id: Uuid) -> Result<Option<Mitigation>>;

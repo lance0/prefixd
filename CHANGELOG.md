@@ -90,6 +90,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Overview, list and detail pages; the detail page shows "Origin unknown" for
   rows that predate origin tracking.
 
+- Audit mitigation creation. Each admitted mitigation writes one `create`
+  audit entry in the same transaction as its row, from manual creation, single
+  and batch events and the Alertmanager, FastNetMon and generic webhook
+  adapters. The entry records the operator, or the detector source and event
+  ID, plus the POP, scope, action and parameters, TTL, origin mode and the
+  mitigation ID as `target_id`. TTL extensions by repeat events and rejected
+  admissions write no entry. The audit log page and its action filter show the
+  new action.
+
 - Show authenticated rustbgpd daemon version, process uptime, readiness and
   observation time in health detail, CLI status and the existing speaker strip.
   Keep controller metadata separate and failed, stale or unsupported observations

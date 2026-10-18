@@ -116,8 +116,9 @@ curl -sS -b cookies.txt 'http://localhost/v1/audit?limit=5' \
 
 The newest entry has `"action": "withdraw"`, your username as `actor_id`, the
 mitigation ID as `target_id`, and a `details.reason` of `admin: drill complete`.
-The audit log records withdrawals and expiries, not creation; the mitigation
-record keeps its own creation time and reason.
+The entry before it has `"action": "create"` for the same `target_id`, with
+your username as `actor_id` and the rule's scope, action, TTL and origin mode in
+`details`.
 
 Repeat the step 4 command: the rule for `203.0.113.10/32` is gone.
 

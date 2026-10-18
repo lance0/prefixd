@@ -2119,6 +2119,43 @@ cause `500`, including the lookahead row used for
 }
 ```
 
+Every admitted mitigation writes one `create` entry in the same database
+transaction as its row, so neither exists without the other. This covers manual
+creation, `/v1/events`, `/v1/events/batch` and the Alertmanager, FastNetMon and
+generic webhook adapters, in both enforced and dry-run modes. `target_id` is the
+mitigation ID. A manual creation has `actor_type: "operator"` and the operator's
+username. A detector creation has `actor_type: "detector"`, the event's `source`
+as `actor_id` (the adapter name for a generic webhook) and the triggering
+`event_id` in `details`:
+
+```json
+{
+  "actor_type": "detector",
+  "actor_id": "fastnetmon",
+  "action": "create",
+  "target_type": "mitigation",
+  "target_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d",
+  "details": {
+    "pop": "iad1",
+    "customer_id": "cust_example",
+    "victim_ip": "203.0.113.10",
+    "scope": { "dst_prefix": "203.0.113.10/32", "protocol": 17, "dst_ports": [53] },
+    "action_type": "police",
+    "action_params": { "rate_bps": 5000000 },
+    "ttl_seconds": 120,
+    "expires_at": "2026-01-18T10:33:00Z",
+    "origin_mode": "enforced",
+    "reason": "udp_flood to DNS (playbook: udp_flood_police)",
+    "event_id": "0b6a5d4e-8f0e-4d55-9a3c-6f1d2e7b9c10"
+  }
+}
+```
+
+A repeat event that extends an existing mitigation's TTL is not a creation and
+writes no audit entry; the mitigation's `last_event_id` and `expires_at` record
+it. Rejected admissions, including guardrail, quota and
+`max_new_per_minute` rejections, write no `create` entry.
+
 ---
 
 ## Metrics

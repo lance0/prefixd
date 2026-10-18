@@ -367,6 +367,7 @@ impl RepositoryTrait for MockRepository {
         &self,
         m: &Mitigation,
         quotas: &crate::config::QuotasConfig,
+        actor: &crate::observability::CreationActor,
     ) -> Result<()> {
         let mut mitigations = self.mitigations.lock().unwrap();
         if let Some(customer_id) = &m.customer_id {
@@ -410,6 +411,10 @@ impl RepositoryTrait for MockRepository {
             quotas.max_new_per_minute,
         )?;
         mitigations.push(m.clone());
+        self.audit
+            .lock()
+            .unwrap()
+            .push(AuditEntry::mitigation_created(m, actor));
         Ok(())
     }
 
