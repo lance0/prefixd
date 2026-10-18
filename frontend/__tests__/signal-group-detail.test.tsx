@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, waitFor, act, within } from "@testing-library/react"
+import { render, screen, act, within } from "@testing-library/react"
 import { Suspense } from "react"
 
 // ─── Mocks ──────────────────────────────────────────────

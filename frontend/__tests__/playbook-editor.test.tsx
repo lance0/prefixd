@@ -21,8 +21,7 @@ const fromApi = [
     correlation: { min_sources: 2, confidence_threshold: null, confidence_decay_half_life_seconds: null },
     steps: [{ action: "police", rate_bps: 10000000, ttl_seconds: 1800, require_confidence_at_least: null, require_persistence_seconds: null }],
   },
-  // SAFETY: the fixture mirrors the API's null-for-absent JSON, which the optional-field type models as undefined.
-] as unknown as ConfigPlaybook[]
+] satisfies ConfigPlaybook[]
 
 afterEach(cleanup)
 

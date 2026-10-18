@@ -1,17 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { login, getCurrentUser } from "@/lib/auth"
+import { login, getCurrentUser, type OperatorResponse } from "@/lib/auth"
 
 const originalFetch = globalThis.fetch
 
-function mockFetch(body: unknown, status: number) {
-  const fetchMock = vi.fn(async () => ({
-    ok: status < 400,
-    status,
-    json: async () => body,
-    text: async () => JSON.stringify(body),
-  }))
+/** A documented operator payload, a partial one, or an error body. */
+type AuthWireBody = Partial<OperatorResponse> | { error: string }
 
-  globalThis.fetch = fetchMock as unknown as typeof fetch
+function mockFetch(body: AuthWireBody, status: number) {
+  const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(body), { status }))
+
+  globalThis.fetch = fetchMock
 
   return fetchMock
 }
@@ -24,7 +22,7 @@ describe("auth API responses", () => {
   // Backend sends a flat snake_case operator (/v1/auth/login, /v1/auth/me).
   // Reading `data.operator` left the dashboard with `undefined`, which hid the
   // user menu (no sign-out) and dropped the role for permission checks.
-  const wire = { operator_id: "abc-123", username: "admin", role: "admin" }
+  const wire: OperatorResponse = { operator_id: "abc-123", username: "admin", role: "admin" }
 
   it("maps the login response to an Operator", async () => {
     mockFetch(wire, 200)

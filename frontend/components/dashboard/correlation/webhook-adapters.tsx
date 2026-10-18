@@ -45,7 +45,6 @@ import type {
   WebhookFieldMap,
 } from "@/lib/api"
 import {
-  Webhook,
   Plus,
   Pencil,
   Trash2,

@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Save } from "lucide-react"
 import { ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { useNotificationPreferences } from "@/hooks/use-api"
-import { updateNotificationPreferences, type NotificationPreferences } from "@/lib/api"
+import { updateNotificationPreferences } from "@/lib/api"
 import { toast } from "sonner"
 
 const EVENT_TYPES = [

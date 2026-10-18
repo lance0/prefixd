@@ -32,11 +32,11 @@ function setClipboard(clipboard: unknown) {
 /** Captures the text handed to execCommand and returns its result. */
 function stubExecCommand(result: boolean) {
   let copied = ""
-  document.execCommand = vi.fn(() => {
+  document.execCommand = vi.fn<typeof document.execCommand>(() => {
     copied = document.querySelector("textarea")?.value ?? ""
 
     return result
-  }) as unknown as typeof document.execCommand
+  })
 
   return () => copied
 }

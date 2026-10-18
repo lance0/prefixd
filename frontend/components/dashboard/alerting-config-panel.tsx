@@ -97,10 +97,6 @@ function destSummary(d: AlertingDestination): string {
   return ""
 }
 
-function isSecretField(field: string): boolean {
-  return ["webhook_url", "bot_token", "routing_key", "api_key", "secret"].includes(field)
-}
-
 function DestinationEventsFilter({ dest, onChange }: { dest: DraftDestination; onChange: (d: DraftDestination) => void }) {
   const destEvents = dest.events ?? []
 

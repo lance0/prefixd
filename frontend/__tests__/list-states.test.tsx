@@ -71,11 +71,15 @@ describe("list states", () => {
   it("shows the expiry countdown with its absolute UTC deadline as visible text", () => {
     const expiresAt = new Date(Date.now() + 26 * 60_000 + 30_000).toISOString()
 
-    // SAFETY: only the fields the row renders are needed for this assertion.
-    const mitigation = {
-      mitigation_id: "m-1", status: "active", victim_ip: "203.0.113.10", vector: "udp_flood", action_type: "police",
-      rate_bps: 5_000_000, dst_ports: [53], customer_id: null, pop: "iad1", created_at: new Date().toISOString(), expires_at: expiresAt,
-    } as unknown as Mitigation
+    const now = new Date().toISOString()
+
+    const mitigation: Mitigation = {
+      mitigation_id: "m-1", scope_hash: "scope-1", status: "active", customer_id: null, service_id: null, pop: "iad1",
+      victim_ip: "203.0.113.10", vector: "udp_flood", action_type: "police", rate_bps: 5_000_000,
+      dst_prefix: "203.0.113.10/32", protocol: 17, dst_ports: [53], created_at: now, updated_at: now,
+      expires_at: expiresAt, withdrawn_at: null, triggering_event_id: "e-1", last_event_id: "e-1",
+      reason: "udp flood", acknowledged_at: null, acknowledged_by: null,
+    }
 
     mocks.useMitigations.mockReturnValue(loaded([mitigation]))
     render(<MitigationsContentLive />)

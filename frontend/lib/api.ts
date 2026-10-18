@@ -561,10 +561,10 @@ export interface ConfigPlaybook {
   } | null
   steps: {
     action: "police" | "discard"
-    rate_bps?: number
+    rate_bps?: number | null
     ttl_seconds: number
-    require_confidence_at_least?: number
-    require_persistence_seconds?: number
+    require_confidence_at_least?: number | null
+    require_persistence_seconds?: number | null
   }[]
 }
 

@@ -142,7 +142,7 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
       open={open}
       onOpenChange={(v) => {
         if (!isSubmitting) {
-          onOpenChange(v);
+          onOpenChange(v)
 
           if (!v) reset()
         }

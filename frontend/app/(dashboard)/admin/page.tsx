@@ -171,7 +171,7 @@ export default function AdminPage() {
       // Refresh all data
       mutate(() => true)
       setTimeout(() => setReloadStatus("idle"), 3000)
-    } catch (err) {
+    } catch {
       setReloadStatus("error")
       setTimeout(() => setReloadStatus("idle"), 3000)
     } finally {

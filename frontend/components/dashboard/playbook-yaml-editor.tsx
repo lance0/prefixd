@@ -24,7 +24,8 @@ function playbooksToYaml(playbooks: ConfigPlaybook[]): string {
       name: p.name,
       match: {
         vector: p.match.vector,
-        ...(p.match.require_top_ports ? { require_top_ports: true } : {}),
+        // undefined keys are omitted by yaml.dump's skipInvalid.
+        require_top_ports: p.match.require_top_ports ? true : undefined,
       },
       // Round-trip per-playbook correlation overrides; omit unset fields.
       correlation: definedFields(p.correlation),

@@ -16,7 +16,7 @@ import {
   CommandSeparator,
   CommandShortcut,
 } from "@/components/ui/command"
-import { LayoutDashboard, Shield, ShieldAlert, Activity, FileText, Settings, Zap, Database, FileCode, History, Waypoints } from "lucide-react"
+import { LayoutDashboard, Shield, ShieldAlert, Activity, FileText, Zap, Database, FileCode, History, Waypoints } from "lucide-react"
 import { useMitigations, useEvents } from "@/hooks/use-api"
 
 interface CommandPaletteProps {

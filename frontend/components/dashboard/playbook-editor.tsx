@@ -12,7 +12,6 @@ import { EmptyState } from "@/components/dashboard/states"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Pencil, Trash2, Plus, GripVertical, Save, Undo2, AlertCircle } from "lucide-react"
-import { cn } from "@/lib/utils"
 import type { ConfigPlaybook } from "@/lib/api"
 
 const VECTORS = ["udp_flood", "syn_flood", "ack_flood", "icmp_flood", "unknown"] as const
