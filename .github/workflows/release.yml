@@ -87,7 +87,7 @@ jobs:
           persist-credentials: false
 
       - name: Install protobuf compiler
-        run: apt-get update && apt-get install -y --no-install-recommends protobuf-compiler
+        run: apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
 
       - name: Build release binaries
         run: cargo build --locked --release --bins
