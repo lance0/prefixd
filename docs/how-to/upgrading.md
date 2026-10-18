@@ -1,5 +1,7 @@
 # Upgrade Guide
 
+Upgrading a v0.19.1 deployment? Follow [v0.19.1 → 0.20.0](#v0191--0200).
+
 ## General Principles
 
 - **Database migrations run automatically** on startup. Legacy speaker state also
@@ -152,7 +154,8 @@ successful read with no peers. Updated CLI/dashboard clients accept responses
 from older daemons that omit `speaker`.
 
 All selectable adapters still support both observations. Normal builds include
-rustbgpd, the default backend; `bgp.backend: gobgp` selects GoBGP explicitly.
+rustbgpd and GoBGP; set `bgp.backend` explicitly. An unset backend
+[resolves from the configured endpoint](../reference/configuration.md#bgp).
 External Rust implementations must implement `FlowSpecWriter` and
 `FlowSpecAnnouncer`, then opt into `FlowSpecReader` and `PeerObserver` through the
 facade accessors where supported. Import those traits for concrete adapter calls.
@@ -259,7 +262,8 @@ These commands update a deployment already using the profiles and named volumes
 below. An earlier stack with the `prefixd` service and `./configs` bind mount is
 outside this procedure: its configuration is not imported, and its container
 name conflicts with the new controller. Keep that deployment intact; do not run
-these commands against it.
+these commands against it. Upgrade it with the
+[v0.19.1 Compose route](#compose-keep-your-file-and-pin-the-image) instead.
 
 Select exactly one profile and its matching controller service:
 
@@ -400,6 +404,216 @@ prefixdctl migrations
 ---
 
 ## Version-Specific Notes
+
+### v0.19.1 → 0.20.0
+
+This upgrade applies migrations 013–015, needs a one-time speaker ownership
+adoption and changes how the configuration is read. Run it as one maintenance
+step: keep the same POP, speaker, endpoint and `mode`, and change nothing else.
+
+#### Before you start
+
+1. **Back up PostgreSQL** (commands below). Keep the v0.19.1 binary or image and
+   a copy of the configuration directory for the
+   [rollback rules](#rollback).
+2. **Keep `mode` unchanged.** Migration 015 tags live mitigations with the mode
+   of the first start; see [mitigation origin mode](#mitigation-origin-mode).
+3. **Keep the speaker.** v0.19.1 always used GoBGP (`bgp.mode: sidecar`, or no
+   `bgp.mode` at all). Keep `bgp.gobgp_grpc` exactly as it is: ownership
+   adoption records that endpoint as this POP's speaker.
+4. API clients must drop saved pagination cursors. Mitigation, event, audit
+   and signal-group cursors from v0.19.1 now return `400`; request the first page
+   again without `cursor`. Settings JSON no longer includes the removed keys.
+5. Source builds need Rust 1.89 or later and `protoc`. The container build pins
+   its own toolchain.
+
+#### Configuration changes
+
+An unchanged v0.19.1 `prefixd.yaml` loads. The upgraded controller stays on
+GoBGP, logs one warning per [removed key](../reference/configuration.md#removed-keys)
+with `rejected_in: "0.21.0"`, then stops before contacting the speaker:
+
+```text
+WARN prefixd: deprecated configuration: removed configuration key is ignored; delete it, key: "observability.audit_log_path", rejected_in: "0.21.0"
+Error: conflict: legacy speaker state requires explicit original-target adoption with --adopt-legacy-speaker
+```
+
+Edit the file before adoption so that 0.21.0 also loads it:
+
+- Delete `escalation`, `http.auth.ldap`, `http.auth.radius`,
+  `timers.correlation_window_seconds`, `observability.audit_log_path`,
+  `observability.metrics_listen` and `shutdown.preserve_announcements`.
+- Replace `bgp.mode: sidecar` with `bgp.backend: gobgp`, or add
+  `backend: gobgp` if `bgp` has no `mode`. Both spellings are the same speaker
+  identity. Without either, a file with `gobgp_grpc` still resolves to GoBGP,
+  with a `bgp.backend` warning; see [backend resolution](../reference/configuration.md#bgp).
+- Leave `pop`, `mode`, `bgp.gobgp_grpc` and everything else as they are.
+
+For the shipped v0.19.1 file the change is:
+
+```diff
+ bgp:
+-  mode: sidecar
++  backend: gobgp
+   gobgp_grpc: "gobgp:50051"
+@@ timers
+-  correlation_window_seconds: 300
+-escalation:
+-  enabled: true
+-  min_persistence_seconds: 120
+-  min_confidence: 0.7
+@@ observability
+-  audit_log_path: "./data/audit.jsonl"
+-  metrics_listen: "0.0.0.0:9090"
+@@ shutdown
+-  preserve_announcements: true
+```
+
+#### Compose: keep your file and pin the image
+
+A v0.19.1 checkout runs the `prefixd` service from `build: .` with `./configs`
+bind-mounted at `/etc/prefixd`. The 0.20.0 `docker-compose.yml` replaces that
+layout with profiles and named volumes, so keep the v0.19.1 checkout and its
+`docker-compose.yml`. Don't pull the new checkout into this directory yet. Run
+these commands in the v0.19.1 checkout:
+
+```bash
+# 1. Back up the database and the configuration
+docker compose exec -T postgres pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+cp -a configs configs-v0.19.1
+
+# 2. Pin the 0.20.0 controller and dashboard images
+cat > docker-compose.override.yml <<'EOF'
+services:
+  prefixd:
+    image: ghcr.io/lance0/prefixd:0.20.0
+  dashboard:
+    image: ghcr.io/lance0/prefixd-dashboard:0.20.0
+EOF
+docker compose pull prefixd dashboard
+
+# 3. Stop only the controller; GoBGP keeps running with its routes
+docker compose stop prefixd
+
+# 4. Edit configs/prefixd.yaml as described above, then adopt the speaker once
+docker compose run --rm --no-deps prefixd --config /etc/prefixd --adopt-legacy-speaker
+
+# 5. Start the controller and dashboard on the pinned images
+docker compose up -d --no-deps --no-build prefixd dashboard
+```
+
+To build the images from source instead, build them from a 0.20.0 checkout in
+another directory, use those tags in the override and skip `docker compose pull`:
+
+```bash
+docker build -t prefixd:0.20.0 /path/to/prefixd-0.20.0
+docker build -t prefixd-dashboard:0.20.0 /path/to/prefixd-0.20.0/frontend
+```
+
+The 0.20.0 image runs as UID 999 instead of root. The controller must be able
+to read `./configs`; the default `0644` file mode is enough. Dashboard
+configuration saves also need write access to the directory, for example
+`sudo chown -R 999:999 configs`. Otherwise saves fail and leave the files
+unchanged.
+
+Adoption applies the migrations, binds the POP to `http://gobgp:50051/`, writes
+an `adopt_speaker_target` audit entry and exits without connecting to GoBGP.
+Don't run `docker compose down`, and don't recreate the `gobgp` service. A new
+GoBGP process starts with an empty RIB.
+
+#### Bare metal
+
+```bash
+pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+sudo cp -a /etc/prefixd /etc/prefixd.v0.19.1
+git fetch --tags && git checkout v0.20.0
+cargo build --release --locked
+sudo systemctl stop prefixd
+sudo cp target/release/prefixd target/release/prefixdctl /usr/local/bin/
+# Edit /etc/prefixd/prefixd.yaml as described above, then adopt the speaker once,
+# as the service user and with the service's DATABASE_URL:
+prefixd --config /etc/prefixd --adopt-legacy-speaker
+sudo systemctl start prefixd
+```
+
+#### Verify
+
+Check these before you resume detector input. Compose commands are shown; on
+bare metal, run `prefixdctl` and `psql` directly.
+
+```bash
+# Startup: migrations applied, GoBGP selected, origin tagging, no errors
+docker compose logs prefixd
+# Expect: database migrations applied, versions: [1, ..., 15]
+#         tagged live mitigations of unknown origin with the startup mode
+#         selecting BGP speaker, mode: Gobgp
+
+# Migrations 013-015 are listed
+docker compose exec prefixd prefixdctl migrations
+
+# Health: status healthy, Speaker: gobgp, peer observation connected
+docker compose exec prefixd prefixdctl --api http://127.0.0.1:8080 status
+
+# Ownership: one binding for your POP, backend gobgp, your original endpoint
+docker compose exec -T postgres psql -U prefixd -d prefixd -c \
+  "SELECT b.pop, t.backend, t.endpoint FROM speaker_pop_bindings b JOIN speaker_targets t USING (target_id);"
+
+# Live mitigations are intact and tagged with your mode
+docker compose exec -T postgres psql -U prefixd -d prefixd -c \
+  "SELECT mitigation_id, victim_ip, status, origin_mode FROM mitigations WHERE status IN ('pending', 'active', 'escalated');"
+
+# Reconciliation: after one interval, no failures are logged
+docker compose logs prefixd | grep -E 'reconciliation (stage )?failed'
+```
+
+The last command should print nothing. `prefixdctl status` reads authenticated
+health detail: it needs `auth.mode: none` or a bearer token in
+`PREFIXD_API_TOKEN`. In `credentials` mode, check health in the dashboard
+instead. If Prometheus scrapes the controller,
+`prefixd_reconciliation_runs_total{status="success"}` increases. Compare the
+GoBGP RIB with the active mitigations:
+
+```bash
+docker compose exec -T gobgp gobgp global rib -a ipv4-flowspec
+```
+
+Remove the deprecated keys now if you haven't already, since 0.21.0 rejects
+them.
+
+#### Switching to rustbgpd later
+
+Switching speakers changes the POP's speaker target, so it's a separate
+maintenance window. Run 0.20.0 on GoBGP first. Then:
+
+1. Follow the [drained target transfer](#drained-target-transfer) on the
+   original GoBGP target: stop detector input, withdraw all active intent, drain
+   pending cleanup, verify the GoBGP RIB has no owned rules and stop the
+   controller.
+2. In the transfer block, set `new_backend` to `rustbgpd` and `new_endpoint` to
+   the new configuration's normalized endpoint. For the Compose `rustbgpd`
+   profile, that's `unix:///run/rustbgpd/grpc.sock`.
+3. Configure `bgp.backend: rustbgpd` with that endpoint and start normally. No
+   adoption flag is needed. For Compose, this is also the move to the
+   [profile layout](#docker-compose-upgrade). Copy your current files out of
+   the checkout with `cp -a configs ../prefixd-configs`. Run
+   `docker compose down` (never `-v`; the same project keeps its
+   `postgres-data` volume) and delete `docker-compose.override.yml`. Then
+   update the checkout and set your settings in `configs/prefixd.yaml`, the
+   `rustbgpd` profile's main file. The profile's named configuration volume is
+   seeded from image defaults and doesn't import `./configs`, so import your
+   files before you start the controller. Add `alerting.yaml` if you have one:
+
+   ```bash
+   docker compose --profile rustbgpd run --rm --no-deps init
+   docker compose --profile rustbgpd run --rm --no-deps \
+     -v "$PWD/../prefixd-configs:/import:ro" --entrypoint install init \
+     -m 0600 -o 999 -g 999 /import/inventory.yaml /import/playbooks.yaml \
+     /import/correlation.yaml /etc/prefixd/
+   ```
+
+Don't point a v0.19.1 configuration at rustbgpd, or change the GoBGP endpoint,
+as part of this upgrade. Startup rejects a target that differs from the bound
+one.
 
 ### v0.13.0 -> v0.14.0
 

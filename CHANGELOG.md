@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- Upgrading from v0.19.1 needs one maintenance step: back up PostgreSQL, keep
+  `mode` and the GoBGP endpoint unchanged, run `prefixd --adopt-legacy-speaker`
+  once, then start normally. Follow
+  [v0.19.1 → 0.20.0](docs/how-to/upgrading.md#v0191--0200), which includes a
+  route for the v0.19.1 Compose layout.
+- An unchanged v0.19.1 `prefixd.yaml` loads. Its removed keys (`escalation`,
+  `http.auth.ldap`, `http.auth.radius`, `timers.correlation_window_seconds`,
+  `observability.audit_log_path`, `observability.metrics_listen` and
+  `shutdown.preserve_announcements`) are ignored with one warning each, and
+  0.21.0 will reject them. Other unknown keys keep their existing handling.
+- An unset `bgp.backend` no longer switches a v0.19.1 GoBGP configuration to
+  rustbgpd. With only `bgp.gobgp_grpc` it resolves to GoBGP and warns; with both
+  `gobgp_grpc` and `rustbgpd` it fails until `bgp.backend` is set. Shipped
+  configurations set `bgp.backend` explicitly.
+
 ### Security
 
 - Keep dry-run mitigations local after a switch to `mode: enforced`. Before
