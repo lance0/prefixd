@@ -2,6 +2,7 @@ import type { ReactNode } from "react"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { Mitigation } from "@/lib/api"
+import { formatUtc } from "@/lib/format"
 
 const mocks = vi.hoisted(() => ({ useMitigations: vi.fn(), useEvents: vi.fn(), mutate: vi.fn() }))
 
@@ -65,6 +66,21 @@ describe("list states", () => {
     fireEvent.click(active)
     expect(active).toHaveAttribute("aria-pressed", "false")
     expect(screen.getByRole("button", { name: "expired" })).toHaveAttribute("aria-pressed", "false")
+  })
+
+  it("shows the expiry countdown with its absolute UTC deadline as visible text", () => {
+    const expiresAt = new Date(Date.now() + 26 * 60_000 + 30_000).toISOString()
+    // SAFETY: only the fields the row renders are needed for this assertion.
+    const mitigation = {
+      mitigation_id: "m-1", status: "active", victim_ip: "203.0.113.10", vector: "udp_flood", action_type: "police",
+      rate_bps: 5_000_000, dst_ports: [53], customer_id: null, pop: "iad1", created_at: new Date().toISOString(), expires_at: expiresAt,
+    } as unknown as Mitigation
+    mocks.useMitigations.mockReturnValue(loaded([mitigation]))
+    render(<MitigationsContentLive />)
+    const deadline = screen.getByText(formatUtc(expiresAt))
+    expect(deadline).toBeVisible()
+    expect(deadline.closest("td")).toHaveTextContent(/26m/)
+    expect(deadline.closest("td")?.querySelector("time")).toHaveAttribute("dateTime", expiresAt)
   })
 
   it("shows a failed events fetch as an error rather than an empty list", () => {

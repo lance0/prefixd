@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { Skeleton } from "@/components/ui/skeleton"
+import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import {
   Dialog,
   DialogContent,
@@ -51,7 +51,6 @@ import {
   Trash2,
   Save,
   Loader2,
-  AlertCircle,
   Copy,
 } from "lucide-react"
 
@@ -115,9 +114,7 @@ export function WebhookAdaptersEditor() {
             Webhook adapters
           </CardTitle>
         </CardHeader>
-        <CardContent>
-          <Skeleton className="h-24 w-full" />
-        </CardContent>
+        <LoadingRows label="Loading webhook adapters" rows={2} />
       </Card>
     )
   }
@@ -130,12 +127,11 @@ export function WebhookAdaptersEditor() {
             Webhook adapters
           </CardTitle>
         </CardHeader>
-        <CardContent>
-          <div className="flex items-center gap-2 text-xs text-destructive">
-            <AlertCircle className="h-4 w-4" />
-            Failed to load configuration
-          </div>
-        </CardContent>
+        <ErrorState
+          title="Unable to load webhook adapters"
+          detail="The correlation configuration could not be read. Existing adapters keep accepting signals; retry to reload."
+          onRetry={() => { void mutate() }}
+        />
       </Card>
     )
   }
@@ -172,8 +168,13 @@ export function WebhookAdaptersEditor() {
         </p>
 
         {adapters.length === 0 ? (
-          <div className="text-xs text-muted-foreground py-4 text-center border border-dashed rounded">
-            No webhook adapters configured
+          <div className="rounded-md border border-dashed">
+            <EmptyState
+              title="No webhook adapters configured"
+              description={isAdmin
+                ? "Add an adapter to accept signals from a detector without a built-in integration."
+                : "An admin can add adapters to accept signals from other detectors."}
+            />
           </div>
         ) : (
           <div className="space-y-2">

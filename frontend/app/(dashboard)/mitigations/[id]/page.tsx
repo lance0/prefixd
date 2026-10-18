@@ -12,12 +12,12 @@ import { Check, Copy, FileText, AlertTriangle, Terminal, CheckCircle2, Info } fr
 import { PageHeader } from "@/components/dashboard/page-header"
 import { StatusPill, Tag } from "@/components/dashboard/status-pill"
 import { Field, FieldList } from "@/components/dashboard/field"
-import { LoadingRows } from "@/components/dashboard/states"
+import { ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatBps, formatTimeRemaining, formatUtc } from "@/lib/format"
 import { FlowSpecPreview, formatFlowSpecRule } from "@/components/dashboard/flowspec-preview"
 import { IncidentReportDialog } from "@/components/dashboard/incident-report-dialog"
-import { withdrawMitigation, getIncidentReport } from "@/lib/api"
+import { withdrawMitigation, getIncidentReport, isNotFound } from "@/lib/api"
 import { copyText } from "@/lib/clipboard"
 import { toast } from "sonner"
 import {
@@ -54,9 +54,9 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
     return () => clearInterval(interval)
   }, [])
 
-  const { data: mitigation, isLoading, mutate } = useMitigation(id)
+  const { data: mitigation, error: mitigationError, isLoading, mutate } = useMitigation(id)
   const { data: inventory } = useConfigInventory()
-  const { data: signalGroupDetail, isLoading: isSignalGroupLoading } = useSignalGroupDetail(
+  const { data: signalGroupDetail, error: signalGroupError, isLoading: isSignalGroupLoading, mutate: mutateSignalGroup } = useSignalGroupDetail(
     mitigation?.correlation?.signal_group_id ?? null
   )
 
@@ -120,6 +120,21 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
       <div className="space-y-6">
         <PageHeader back={{ href: "/mitigations", label: "Mitigations" }} title="Mitigation" />
         <div className="rounded-md border bg-card"><LoadingRows label="Loading mitigation" /></div>
+      </div>
+    )
+  }
+
+  if (!mitigation && mitigationError && !isNotFound(mitigationError)) {
+    return (
+      <div className="space-y-6">
+        <PageHeader back={{ href: "/mitigations", label: "Mitigations" }} title="Mitigation" />
+        <div className="rounded-md border bg-card">
+          <ErrorState
+            title="Unable to load this mitigation"
+            detail={`${mitigationError.message}. The rule may still be active; retry, or check that the controller is reachable.`}
+            onRetry={() => { void mutate() }}
+          />
+        </div>
       </div>
     )
   }
@@ -326,6 +341,14 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                       <p className="text-xs text-muted-foreground">Contributing sources</p>
                       <Skeleton className="h-4 w-full" />
                       <Skeleton className="h-4 w-3/4" />
+                    </div>
+                  ) : signalGroupError && !signalGroupDetail ? (
+                    <div className="rounded-md border">
+                      <ErrorState
+                        title="Unable to load contributing sources"
+                        detail="The correlation summary above is unaffected. Retry, or open the signal group."
+                        onRetry={() => { void mutateSignalGroup() }}
+                      />
                     </div>
                   ) : signalGroupDetail?.events && signalGroupDetail.events.length > 0 ? (
                     <div>

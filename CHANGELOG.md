@@ -182,6 +182,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Withdraw stay visible. The audit log search placeholder is now "Search target
   or details…".
 
+- Chart the overview activity in UTC hours to match the top-bar clock, with UTC
+  tooltips, 12px ticks and an inset last tick; the chart now stays inside its
+  column. Mitigation, corroborator-cache and signal-group expiry show the
+  absolute UTC deadline beside the countdown. Correlation source weights use a
+  neutral ramp with a matching legend. Configuration editors, Administration and
+  notification preferences use the shared empty, loading and error states, and
+  each failed read offers Retry. The Configuration, Administration and
+  Correlation tabs are kept in `?tab=`, so links and refresh reopen the same tab.
+
 - Refresh the security support policy, authentication and audit guidance, and
   release checklist to match the maintained release series and CI artifacts.
 
@@ -200,6 +209,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binaries. Current stable tests and lints remain required.
 
 ### Fixed
+
+- Stop the Playbooks form showing "Unsaved changes" on load. The form dropped
+  each playbook's `correlation` field, so it never matched the loaded playbooks,
+  and saving from either playbook editor erased per-playbook correlation
+  overrides. Both editors now keep them, and Correlation shows each override.
+
+- Show a failed request as a retryable error, not as "not found" or as default
+  values, on the mitigation and signal-group detail pages and in notification
+  preferences, where saving the defaults would have overwritten stored settings.
 
 - Show a healthy controller as healthy on the Administration page. The daemon
   status pill treated the reported `healthy` value as an error and `degraded` as

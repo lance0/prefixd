@@ -22,6 +22,7 @@ import { useHealthDetail, useSafelist, useStats, usePops, useOperators } from "@
 import { addSafelist, removeSafelist, reloadConfig, createOperator, deleteOperator, changePassword, type OperatorInfo } from "@/lib/api"
 import { usePermissions } from "@/hooks/use-permissions"
 import { useAuth } from "@/hooks/use-auth"
+import { useTabParam } from "@/hooks/use-tab-param"
 import {
   Select,
   SelectContent,
@@ -47,7 +48,7 @@ import {
   Key,
 } from "lucide-react"
 import { PageHeader } from "@/components/dashboard/page-header"
-import { ErrorState, LoadingRows } from "@/components/dashboard/states"
+import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { Tag } from "@/components/dashboard/status-pill"
 import { MISSING, formatUtc } from "@/lib/format"
 
@@ -72,13 +73,17 @@ function LoadingCard({ title }: { title: string }) {
   )
 }
 
-function ErrorCard({ title, error }: { title: string; error: string }) {
+function ErrorCard({ title, error, onRetry }: { title: string; error: string; onRetry: () => void }) {
   return (
     <Card>
       <CardHeader>
         <CardTitle>{title}</CardTitle>
       </CardHeader>
-      <ErrorState title={error} detail="This does not mean the service is down. Retrying automatically." />
+      <ErrorState
+        title={error}
+        detail="This does not mean the service is down. Retrying automatically; retry now, or check that the controller is reachable."
+        onRetry={onRetry}
+      />
     </Card>
   )
 }
@@ -92,14 +97,18 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   )
 }
 
+const TABS = ["status", "safelist", "users"] as const
+const TABS_WITHOUT_USERS = ["status", "safelist"] as const
+
 export default function AdminPage() {
   const { mutate } = useSWRConfig()
   const { operator } = useAuth()
   const permissions = usePermissions()
-  const { data: health, error: healthError, isLoading: healthLoading, isStale: healthStale } = useHealthDetail()
-  const { data: stats, error: statsError, isLoading: statsLoading } = useStats()
+  const [activeTab, setActiveTab] = useTabParam(permissions.canManageUsers ? TABS : TABS_WITHOUT_USERS)
+  const { data: health, error: healthError, isLoading: healthLoading, isStale: healthStale, mutate: mutateHealth } = useHealthDetail()
+  const { data: stats, error: statsError, isLoading: statsLoading, mutate: mutateStats } = useStats()
   const { data: safelist, error: safelistError, isLoading: safelistLoading, mutate: mutateSafelist } = useSafelist()
-  const { data: pops, error: popsError, isLoading: popsLoading } = usePops()
+  const { data: pops, error: popsError, isLoading: popsLoading, mutate: mutatePops } = usePops()
   const { data: operators, error: operatorsError, isLoading: operatorsLoading, mutate: mutateOperators } = useOperators()
 
   const [newPrefix, setNewPrefix] = useState("")
@@ -240,7 +249,7 @@ export default function AdminPage() {
         }
       />
 
-      <Tabs defaultValue="status">
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="status">Status</TabsTrigger>
           <TabsTrigger value="safelist">
@@ -261,9 +270,9 @@ export default function AdminPage() {
               {healthLoading ? (
                 <LoadingCard title="Daemon status" />
               ) : healthError ? (
-                <ErrorCard title="Daemon status" error="Failed to connect" />
+                <ErrorCard title="Daemon status" error="Unable to reach the controller" onRetry={() => { void mutateHealth() }} />
               ) : healthStale ? (
-                <ErrorCard title="Daemon status" error="Health observation is stale" />
+                <ErrorCard title="Daemon status" error="Health observation is stale" onRetry={() => { void mutateHealth() }} />
               ) : health ? (
                 <Card>
                   <CardHeader>
@@ -283,9 +292,9 @@ export default function AdminPage() {
               {healthLoading ? (
                 <LoadingCard title="BGP peers" />
               ) : healthError ? (
-                <ErrorCard title="BGP peers" error="Failed to connect" />
+                <ErrorCard title="BGP peers" error="Unable to reach the controller" onRetry={() => { void mutateHealth() }} />
               ) : healthStale ? (
-                <ErrorCard title="BGP peers" error="Health observation is stale" />
+                <ErrorCard title="BGP peers" error="Health observation is stale" onRetry={() => { void mutateHealth() }} />
               ) : health ? (
                 <Card>
                   <CardHeader>
@@ -318,7 +327,7 @@ export default function AdminPage() {
               {statsLoading ? (
                 <LoadingCard title="Current usage" />
               ) : statsError ? (
-                <ErrorCard title="Current usage" error="Failed to load" />
+                <ErrorCard title="Current usage" error="Unable to load usage" onRetry={() => { void mutateStats() }} />
               ) : stats ? (
                 <Card>
                   <CardHeader>
@@ -341,7 +350,7 @@ export default function AdminPage() {
             {popsLoading ? (
               <LoadingCard title="POPs" />
             ) : popsError ? (
-              <ErrorCard title="POPs" error="Failed to load POPs" />
+              <ErrorCard title="POPs" error="Unable to load POPs" onRetry={() => { void mutatePops() }} />
             ) : pops && pops.length > 0 ? (
               <Card>
                 <CardContent className="flex flex-wrap gap-2">
@@ -355,9 +364,10 @@ export default function AdminPage() {
               </Card>
             ) : (
               <Card>
-                <CardContent>
-                  <p className="text-sm text-muted-foreground">No POPs configured</p>
-                </CardContent>
+                <EmptyState
+                  title="No POPs reported"
+                  description="A POP is listed once a mitigation has been recorded for it in this database."
+                />
               </Card>
             )}
           </section>
@@ -413,7 +423,7 @@ export default function AdminPage() {
               {safelistLoading ? (
                 <LoadingRows label="Loading safelist" rows={3} />
               ) : safelistError ? (
-                <ErrorState title="Failed to load safelist" detail="Safelist entries still apply; this view could not be refreshed." />
+                <ErrorState title="Unable to load the safelist" detail="Safelist entries still apply; this view could not be refreshed. Retry before adding or removing prefixes." onRetry={() => { void mutateSafelist() }} />
               ) : safelist && safelist.length > 0 ? (
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
@@ -473,7 +483,12 @@ export default function AdminPage() {
                   </table>
                 </div>
               ) : (
-                <p className="text-sm text-muted-foreground py-4">No safelist entries configured</p>
+                <div className="rounded-md border border-dashed">
+                  <EmptyState
+                    title="No safelist entries"
+                    description="Every prefix can be mitigated. Add a prefix above to protect it from automated mitigation."
+                  />
+                </div>
               )}
             </CardContent>
           </Card>
@@ -563,7 +578,7 @@ export default function AdminPage() {
                 {operatorsLoading ? (
                   <LoadingRows label="Loading operators" rows={3} />
                 ) : operatorsError ? (
-                  <ErrorState title="Failed to load operators" detail="Accounts are unchanged; this view could not be refreshed." />
+                  <ErrorState title="Unable to load operators" detail="Accounts are unchanged; this view could not be refreshed. Retry to reload." onRetry={() => { void mutateOperators() }} />
                 ) : operators && operators.length > 0 ? (
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
@@ -643,7 +658,12 @@ export default function AdminPage() {
                     </table>
                   </div>
                 ) : (
-                  <p className="text-sm text-muted-foreground py-4">No operators configured</p>
+                  <div className="rounded-md border border-dashed">
+                    <EmptyState
+                      title="No operators configured"
+                      description="Create an operator account to give someone access to this dashboard."
+                    />
+                  </div>
                 )}
               </CardContent>
             </Card>

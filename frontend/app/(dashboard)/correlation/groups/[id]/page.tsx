@@ -8,7 +8,8 @@ import { ConfidenceBar } from "@/components/dashboard/confidence-bar"
 import { PageHeader } from "@/components/dashboard/page-header"
 import { StatusPill, Tag, signalGroupTone } from "@/components/dashboard/status-pill"
 import { Field, FieldList } from "@/components/dashboard/field"
-import { LoadingRows } from "@/components/dashboard/states"
+import { ErrorState, LoadingRows } from "@/components/dashboard/states"
+import { isNotFound } from "@/lib/api"
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatConfidence, isConfidence } from "@/lib/confidence"
 import { formatUtc } from "@/lib/format"
@@ -29,7 +30,7 @@ export default function SignalGroupDetailPage({
 }) {
   const { id } = use(params)
 
-  const { data: group, isLoading, error } = useSignalGroupDetail(id)
+  const { data: group, isLoading, error, mutate } = useSignalGroupDetail(id)
   const { data: correlationConfig } = useCorrelationConfig()
 
   if (isLoading) {
@@ -41,7 +42,22 @@ export default function SignalGroupDetailPage({
     )
   }
 
-  if (error || !group) {
+  if (!group && error && !isNotFound(error)) {
+    return (
+      <div className="space-y-6">
+        <PageHeader back={back} title="Signal group" />
+        <div className="rounded-md border bg-card">
+          <ErrorState
+            title="Unable to load this signal group"
+            detail={`${error.message}. Correlation continues on the controller; retry, or check that it is reachable.`}
+            onRetry={() => { void mutate() }}
+          />
+        </div>
+      </div>
+    )
+  }
+
+  if (!group) {
     return (
       <PageHeader
         back={back}

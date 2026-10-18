@@ -75,7 +75,7 @@ export function GroupsTab() {
     limit: 25,
   }
 
-  const { data, error, isLoading, isValidating, size, setSize } = useSignalGroupsPaginated(filterParams)
+  const { data, error, isLoading, isValidating, size, setSize, mutate } = useSignalGroupsPaginated(filterParams)
 
   const groups = data ? data.flatMap((page) => page.groups) : []
   const hasMore = data ? data[data.length - 1]?.has_more ?? false : false
@@ -120,11 +120,15 @@ export function GroupsTab() {
       {isLoading ? (
         <LoadingRows label="Loading signal groups" rows={5} />
       ) : error ? (
-        <ErrorState title="Failed to load signal groups" detail="Signal groups could not be refreshed." />
+        <ErrorState
+          title="Unable to load signal groups"
+          detail="Signal groups could not be refreshed. Correlation continues on the controller; retry to reload this list."
+          onRetry={() => { void mutate() }}
+        />
       ) : groups.length === 0 ? (
         <EmptyState
-          title="No signal groups found"
-          description={hasActiveFilters ? "Try adjusting your filters." : "Signal groups will appear here when events are correlated."}
+          title={hasActiveFilters ? "No matching signal groups" : "No signal groups yet"}
+          description={hasActiveFilters ? "Nothing matches this status and vector. Clear the filters to see every group." : "Signal groups will appear here when events are correlated."}
           action={hasActiveFilters ? <Button variant="outline" size="sm" onClick={clearFilters}>Clear filters</Button> : undefined}
         />
       ) : (
@@ -162,7 +166,10 @@ export function GroupsTab() {
                   </TableCell>
                   <TableCell numeric className="text-muted-foreground">
                     {group.status === "open"
-                      ? <time dateTime={group.window_expires_at} title={formatUtc(group.window_expires_at)}>{formatRelative(group.window_expires_at)}</time>
+                      ? <>
+                          <time dateTime={group.window_expires_at} className="text-foreground">{formatRelative(group.window_expires_at)}</time>
+                          <span className="block whitespace-nowrap text-xs">{formatUtc(group.window_expires_at)}</span>
+                        </>
                       : MISSING}
                   </TableCell>
                 </TableRow>

@@ -8,7 +8,7 @@ import { StatusPill } from "@/components/dashboard/status-pill"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Skeleton } from "@/components/ui/skeleton"
+import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import {
   Dialog,
   DialogContent,
@@ -31,12 +31,13 @@ import { useCorrelationConfig, useConfigPlaybooks } from "@/hooks/use-api"
 import { usePermissions } from "@/hooks/use-permissions"
 import { updateCorrelationConfig } from "@/lib/api"
 import type {
+  ConfigPlaybook,
   CorrelationConfig,
   MatchDimension,
   SourceConfig,
   SourceMode,
 } from "@/lib/api"
-import { Plus, Pencil, Trash2, Save, Loader2, AlertCircle, Link as LinkIcon } from "lucide-react"
+import { Plus, Pencil, Trash2, Save, Loader2, Link as LinkIcon } from "lucide-react"
 import Link from "next/link"
 
 import { WebhookAdaptersEditor } from "./webhook-adapters"
@@ -95,12 +96,10 @@ function CorrelationSettingsEditor() {
   if (isLoading) {
     return (
       <Card>
-        <CardContent>
-          <Skeleton className="h-4 w-32 mb-4" />
-          <Skeleton className="h-8 w-full mb-3" />
-          <Skeleton className="h-8 w-full mb-3" />
-          <Skeleton className="h-8 w-full" />
-        </CardContent>
+        <CardHeader>
+          <CardTitle>Correlation settings</CardTitle>
+        </CardHeader>
+        <LoadingRows label="Loading correlation settings" />
       </Card>
     )
   }
@@ -108,10 +107,14 @@ function CorrelationSettingsEditor() {
   if (error) {
     return (
       <Card>
-        <CardContent className="flex items-center gap-2 text-destructive">
-          <AlertCircle className="h-4 w-4" />
-          <span className="text-sm">Failed to load correlation config</span>
-        </CardContent>
+        <CardHeader>
+          <CardTitle>Correlation settings</CardTitle>
+        </CardHeader>
+        <ErrorState
+          title="Unable to load correlation settings"
+          detail={`${error.message}. The running configuration is unchanged; retry, or check that the controller is reachable.`}
+          onRetry={() => { void mutate() }}
+        />
       </Card>
     )
   }
@@ -285,11 +288,14 @@ function SignalSourceCards() {
           )}
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className={sources.length === 0 ? "p-0" : undefined}>
         {sources.length === 0 ? (
-          <p className="text-xs text-muted-foreground text-center py-4">
-            No signal sources configured
-          </p>
+          <EmptyState
+            title="No signal sources configured"
+            description={isAdmin
+              ? "Events from unknown sources use the default weight. Add a source to set its weight and confidence mapping."
+              : "Events from unknown sources use the default weight. An admin can add sources here."}
+          />
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {sources.map(([name, src]) => (
@@ -605,14 +611,8 @@ function SourceDialog({
 // ── Per-Playbook Overrides ────────────────────────────
 
 function PlaybookOverrides() {
-  const { data: playbooksData } = useConfigPlaybooks()
-
-  if (!playbooksData) return null
-
-  // Check which playbooks have correlation overrides
-  // The playbooks API doesn't currently expose correlation field,
-  // so we show a read-only display with a link to the Playbooks tab
-  const playbooks = playbooksData.playbooks
+  const { data: playbooksData, error, isLoading, mutate } = useConfigPlaybooks()
+  const playbooks = playbooksData?.playbooks ?? []
 
   return (
     <Card>
@@ -621,21 +621,28 @@ function PlaybookOverrides() {
           <CardTitle>
             Per-playbook overrides
           </CardTitle>
-          <Link href="/config" className="text-xs text-primary hover:underline flex items-center gap-1">
-            <LinkIcon className="h-3 w-3" />
+          <Link href="/config?tab=playbooks" className="flex items-center gap-1 rounded-sm text-sm text-primary hover:underline">
+            <LinkIcon className="size-3.5" aria-hidden="true" />
             Edit in playbooks
           </Link>
         </div>
       </CardHeader>
+      {isLoading ? (
+        <LoadingRows label="Loading playbooks" rows={2} />
+      ) : error ? (
+        <ErrorState
+          title="Unable to load playbooks"
+          detail="Per-playbook overrides could not be read. The running playbooks are unchanged; retry to reload."
+          onRetry={() => { void mutate() }}
+        />
+      ) : playbooks.length === 0 ? (
+        <EmptyState
+          title="No playbooks configured"
+          description="Overrides apply per playbook. Without playbooks, events are recorded but no mitigation is proposed."
+          action={<Link href="/config?tab=playbooks" className="rounded-sm text-sm text-primary hover:underline">Configure playbooks</Link>}
+        />
+      ) : (
       <CardContent>
-        {playbooks.length === 0 ? (
-          <p className="text-xs text-muted-foreground text-center py-4">
-            No playbooks configured.{" "}
-            <Link href="/config" className="text-primary hover:underline">
-              Configure playbooks
-            </Link>
-          </p>
-        ) : (
           <div className="space-y-2">
             {playbooks.map((playbook) => (
               <div
@@ -648,16 +655,23 @@ function PlaybookOverrides() {
                     {playbook.match.vector.replace(/_/g, " ")}
                   </span>
                 </div>
-                <Badge variant="outline">
-                  Uses global defaults
-                </Badge>
+                <span className="text-xs text-muted-foreground">{describeOverride(playbook.correlation)}</span>
               </div>
             ))}
           </div>
-        )}
       </CardContent>
+      )}
     </Card>
   )
+}
+
+function describeOverride(override: ConfigPlaybook["correlation"]): string {
+  const parts = [
+    override?.min_sources != null ? `min sources ${override.min_sources}` : null,
+    override?.confidence_threshold != null ? `confidence ≥ ${override.confidence_threshold}` : null,
+    override?.confidence_decay_half_life_seconds != null ? `half-life ${override.confidence_decay_half_life_seconds}s` : null,
+  ].filter((part) => part !== null)
+  return parts.length > 0 ? parts.join(" · ") : "Uses global defaults"
 }
 
 // ── Validation ────────────────────────────

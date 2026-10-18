@@ -163,7 +163,7 @@ describe("SignalGroupDetailPage", () => {
   it("renders not-found state for unknown group ID", async () => {
     mockUseSignalGroupDetail.mockReturnValue({
       data: undefined,
-      error: new Error("Not found"),
+      error: new Error("API error 404: signal group not found"),
       isLoading: false,
     })
 
@@ -176,6 +176,23 @@ describe("SignalGroupDetailPage", () => {
       ),
     ).toBeInTheDocument()
     expect(screen.getByText("Correlation")).toBeInTheDocument()
+  })
+
+  it("renders a retryable error, not not-found, when the request fails", async () => {
+    const mutate = vi.fn()
+    mockUseSignalGroupDetail.mockReturnValue({
+      data: undefined,
+      error: new Error("API error 502: bad gateway"),
+      isLoading: false,
+      mutate,
+    })
+
+    await renderPage("some-id")
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Unable to load this signal group")
+    expect(screen.queryByText("Signal group not found")).not.toBeInTheDocument()
+    screen.getByRole("button", { name: "Retry" }).click()
+    expect(mutate).toHaveBeenCalled()
   })
 
   it("renders resolved group with all sections", async () => {

@@ -26,6 +26,8 @@ function playbooksToYaml(playbooks: ConfigPlaybook[]): string {
         vector: p.match.vector,
         ...(p.match.require_top_ports ? { require_top_ports: true } : {}),
       },
+      // Round-trip per-playbook correlation overrides; omit unset fields.
+      correlation: definedFields(p.correlation),
       steps: p.steps.map((s) => {
         const step: Record<string, unknown> = { action: s.action }
         if (s.rate_bps != null) step.rate_bps = s.rate_bps
@@ -36,7 +38,12 @@ function playbooksToYaml(playbooks: ConfigPlaybook[]): string {
       }),
     })),
   }
-  return yaml.dump(obj, { lineWidth: 120, noRefs: true })
+  return yaml.dump(obj, { lineWidth: 120, noRefs: true, skipInvalid: true })
+}
+
+function definedFields(value: ConfigPlaybook["correlation"]): ConfigPlaybook["correlation"] | undefined {
+  const entries = Object.entries(value ?? {}).filter(([, v]) => v != null)
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined
 }
 
 function parseYaml(text: string): { playbooks?: ConfigPlaybook[]; error?: string } {
@@ -56,6 +63,8 @@ function parseYaml(text: string): { playbooks?: ConfigPlaybook[]; error?: string
           vector: String(match?.vector ?? "unknown"),
           require_top_ports: match?.require_top_ports === true,
         },
+        // Passed through as written; the controller validates the override on save.
+        correlation: (pb.correlation ?? undefined) as ConfigPlaybook["correlation"],
         steps: steps.map((s) => ({
           action: (String(s.action ?? "police")) as "police" | "discard",
           rate_bps: s.rate_bps != null ? Number(s.rate_bps) : undefined,

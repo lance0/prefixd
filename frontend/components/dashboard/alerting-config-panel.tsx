@@ -15,6 +15,7 @@ import { usePermissions } from "@/hooks/use-permissions"
 import { testAlerting, updateAlertingConfig, type AlertingDestination, type AlertingTestResult } from "@/lib/api"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
+import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 
 const DEST_TYPES = ["slack", "discord", "teams", "telegram", "pagerduty", "opsgenie", "generic"] as const
 type DestType = (typeof DEST_TYPES)[number]
@@ -393,10 +394,10 @@ export function AlertingConfigPanel() {
   if (isLoading) {
     return (
       <Card>
-        <CardContent className="flex items-center gap-2 text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          <span className="text-sm">Loading alerting config…</span>
-        </CardContent>
+        <CardHeader>
+          <CardTitle>Alert destinations</CardTitle>
+        </CardHeader>
+        <LoadingRows label="Loading alerting configuration" rows={2} />
       </Card>
     )
   }
@@ -404,9 +405,14 @@ export function AlertingConfigPanel() {
   if (error) {
     return (
       <Card>
-        <CardContent className="text-sm text-destructive">
-          Failed to load alerting config: {error.message}
-        </CardContent>
+        <CardHeader>
+          <CardTitle>Alert destinations</CardTitle>
+        </CardHeader>
+        <ErrorState
+          title="Unable to load alerting configuration"
+          detail={`${error.message}. Alerts keep using the running configuration; retry, or check that the controller is reachable.`}
+          onRetry={() => { void mutateAlerting() }}
+        />
       </Card>
     )
   }
@@ -429,15 +435,18 @@ export function AlertingConfigPanel() {
               ) : null}
             </div>
           </CardHeader>
-          <CardContent className="space-y-2">
-            {data.destinations.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No alert destinations configured. Alerts are not being delivered anywhere.</p>
-            ) : (
-              data.destinations.map((dest, i) => (
+          {data.destinations.length === 0 ? (
+            <EmptyState
+              title="No alert destinations configured"
+              description="Alerts are not being delivered anywhere. An operator with alerting access can add a destination."
+            />
+          ) : (
+            <CardContent className="space-y-2">
+              {data.destinations.map((dest, i) => (
                 <ReadOnlyDestCard key={`${dest.type}-${i}`} dest={dest} testResult={testResults?.[i]} />
-              ))
-            )}
-          </CardContent>
+              ))}
+            </CardContent>
+          )}
         </Card>
         {data.events.length > 0 && (
           <Card>
@@ -521,16 +530,14 @@ export function AlertingConfigPanel() {
         <CardHeader>
           <CardTitle>Alert destinations</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-2">
+        <CardContent className={cn("space-y-2", destinations.length === 0 && "p-0")}>
           {destinations.length === 0 ? (
-            <div className="space-y-1 text-sm">
-              <p className="text-muted-foreground">
-                {isEditing ? "No destinations. Use “Add destination” above." : "No alert destinations configured. Alerts are not being delivered anywhere."}
-              </p>
-              {!isEditing && (
-                <p className="text-xs text-muted-foreground">Choose Edit to add a destination.</p>
-              )}
-            </div>
+            <EmptyState
+              title={isEditing ? "No destinations in this draft" : "No alert destinations configured"}
+              description={isEditing
+                ? "Use “Add destination” above, or discard the draft. Saving with none stops alert delivery."
+                : "Alerts are not being delivered anywhere. Choose Edit to add a destination."}
+            />
           ) : (
             destinations.map((dest, i) => {
               const isEditingThis = isEditing && editingIndex === i

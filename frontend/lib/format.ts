@@ -51,6 +51,15 @@ export function formatUtc(value: string | number | Date, now: number = Date.now(
   return `${part.day} ${part.month}${year} ${part.hour}:${part.minute}:${part.second} UTC`
 }
 
+/** Chart axis tick in UTC, e.g. "16:00", or "18 Oct 16:00" when buckets span days. */
+export function formatUtcTick(value: string | number | Date, withDate = false): string {
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return MISSING
+  const part = Object.fromEntries(utcParts.formatToParts(date).map(p => [p.type, p.value]))
+  const time = `${part.hour}:${part.minute}`
+  return withDate ? `${part.day} ${part.month} ${time}` : time
+}
+
 function compactDuration(ms: number): string {
   const seconds = Math.floor(ms / 1000)
   if (seconds < 60) return `${seconds}s`

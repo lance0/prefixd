@@ -1,7 +1,7 @@
 "use client"
 
-import { useState } from "react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { useTabParam } from "@/hooks/use-tab-param"
 import { Badge } from "@/components/ui/badge"
 import { PageHeader } from "@/components/dashboard/page-header"
 import { useOpenSignalGroupCount } from "@/hooks/use-api"
@@ -10,8 +10,10 @@ import { GroupsTab } from "@/components/dashboard/correlation/groups-tab"
 import { ConfigTab } from "@/components/dashboard/correlation/config-tab"
 import { CacheTab } from "@/components/dashboard/correlation/cache-tab"
 
+const TABS = ["signals", "groups", "cache", "config"] as const
+
 export default function CorrelationPage() {
-  const [activeTab, setActiveTab] = useState("signals")
+  const [activeTab, setActiveTab] = useTabParam(TABS)
   const openGroupCount = useOpenSignalGroupCount()
 
   return (

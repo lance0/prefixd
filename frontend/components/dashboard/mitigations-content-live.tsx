@@ -523,14 +523,14 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                           {formatRelative(mitigation.created_at, now)}
                         </time>
                       </TableCell>
-                      <TableCell className="order-4 justify-self-end p-0 tabular-nums md:px-3 md:py-2">
+                      <TableCell className="order-4 justify-self-end p-0 text-right tabular-nums md:px-3 md:py-2 md:text-left">
                         <time
                           dateTime={mitigation.expires_at}
-                          title={formatUtc(mitigation.expires_at, now)}
-                          className={cn(live && remaining < EXPIRY_WARNING_MS ? "text-warning" : live ? "text-foreground" : "text-muted-foreground")}
+                          className={cn(live && remaining < EXPIRY_WARNING_MS ? "text-warning" : live ? "font-medium text-foreground" : "text-muted-foreground")}
                         >
                           {live ? <><span className="md:hidden">Expires in </span>{formatTimeRemaining(mitigation.expires_at, now)}</> : formatRelative(mitigation.expires_at, now)}
                         </time>
+                        <span className="block whitespace-nowrap text-xs text-muted-foreground">{formatUtc(mitigation.expires_at, now)}</span>
                       </TableCell>
                       <TableCell className="order-6 col-start-2 justify-self-end p-0 md:px-3 md:py-1">
                         <div className="flex items-center justify-end gap-1">

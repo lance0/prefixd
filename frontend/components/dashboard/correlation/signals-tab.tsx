@@ -9,13 +9,14 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { StatusPill, Tag, healthTone, signalGroupTone } from "@/components/dashboard/status-pill"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { useSignalSources, useSignalGroups } from "@/hooks/use-api"
+import { cn } from "@/lib/utils"
 
 function SourceStatusCards() {
-  const { data: sources, error, isLoading } = useSignalSources()
+  const { data: sources, error, isLoading, mutate } = useSignalSources()
 
   if (isLoading) {
     return (
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div role="status" aria-label="Loading signal sources" className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {[1, 2, 3].map((i) => (
           <Card key={i}>
             <CardContent className="space-y-2">
@@ -32,7 +33,11 @@ function SourceStatusCards() {
   if (error) {
     return (
       <div className="rounded-md border bg-card">
-        <ErrorState title="Failed to load signal sources" detail="Source health could not be refreshed. Detectors may still be sending signals." />
+        <ErrorState
+          title="Unable to load signal sources"
+          detail="Source health could not be refreshed. Detectors may still be sending signals; retry, or check that the controller is reachable."
+          onRetry={() => { void mutate() }}
+        />
       </div>
     )
   }
@@ -87,6 +92,9 @@ function SourceStatusCards() {
   )
 }
 
+// Neutral chart ramp: weights are proportions, not status, so they carry no hue.
+const WEIGHT_RAMP = ["bg-chart-2", "bg-chart-3", "bg-chart-4", "bg-chart-5"] as const
+
 function SourceWeightVisualization() {
   const { data: sources } = useSignalSources()
 
@@ -100,13 +108,17 @@ function SourceWeightVisualization() {
         <CardTitle>Source weights</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="flex h-2 gap-0.5 overflow-hidden rounded-sm" role="img" aria-label="Relative source weights">
+        <div
+          className="flex h-2 gap-1"
+          role="img"
+          aria-label={`Relative source weights: ${sources.map((s) => `${s.name} ${s.weight.toFixed(1)}`).join(", ")}`}
+        >
           {sources.map((source, index) => {
             const pct = totalWeight > 0 ? (source.weight / totalWeight) * 100 : 0
             return (
               <div
                 key={source.name}
-                className={index % 2 === 0 ? "bg-muted-foreground" : "bg-muted-foreground/50"}
+                className={cn("rounded-sm", WEIGHT_RAMP[index % WEIGHT_RAMP.length])}
                 style={{ width: `${pct}%`, minWidth: pct > 0 ? "8px" : "0" }}
                 title={`${source.name}: ${source.weight.toFixed(1)} (${pct.toFixed(0)}%)`}
               />
@@ -114,8 +126,9 @@ function SourceWeightVisualization() {
           })}
         </div>
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
-          {sources.map((source) => (
+          {sources.map((source, index) => (
             <div key={source.name} className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span aria-hidden="true" className={cn("size-2 rounded-sm", WEIGHT_RAMP[index % WEIGHT_RAMP.length])} />
               <span>{source.name}</span>
               <span className="text-foreground tabular-nums">{source.weight.toFixed(1)}</span>
             </div>
@@ -127,7 +140,7 @@ function SourceWeightVisualization() {
 }
 
 function RecentSignalsTable() {
-  const { data: groupsResp, error, isLoading } = useSignalGroups({ limit: 20 })
+  const { data: groupsResp, error, isLoading, mutate } = useSignalGroups({ limit: 20 })
   const groups = groupsResp?.groups ?? []
 
   return (
@@ -138,7 +151,11 @@ function RecentSignalsTable() {
       {isLoading ? (
         <LoadingRows label="Loading recent signal groups" rows={5} />
       ) : error ? (
-        <ErrorState title="Failed to load recent signals" detail="Signal groups could not be refreshed." />
+        <ErrorState
+          title="Unable to load recent signal groups"
+          detail="Signal groups could not be refreshed. Correlation continues on the controller; retry to reload this list."
+          onRetry={() => { void mutate() }}
+        />
       ) : groups.length === 0 ? (
         <EmptyState title="No recent signals" description="Signal groups appear here when events are correlated." />
       ) : (

@@ -30,8 +30,8 @@ function getActivityIcon(type: ActivityItem["type"]) {
 }
 
 export function ActivityFeedLive() {
-  const { data: eventsResp, error: eventsError, isLoading: eventsLoading } = useEvents({ limit: 10 })
-  const { data: auditResp, error: auditError, isLoading: auditLoading } = useAuditLog({ limit: 10 })
+  const { data: eventsResp, error: eventsError, isLoading: eventsLoading, mutate: retryEvents } = useEvents({ limit: 10 })
+  const { data: auditResp, error: auditError, isLoading: auditLoading, mutate: retryAudit } = useAuditLog({ limit: 10 })
   const events = eventsResp?.events
   const audit = auditResp?.entries
 
@@ -91,7 +91,7 @@ export function ActivityFeedLive() {
       <section aria-label="Recent activity" className="min-w-0">
         {heading}
         <div className="rounded-md border bg-card">
-          <ErrorState title="Unable to load recent activity" detail="Events and audit entries could not be refreshed. Open the audit log for the full record." />
+          <ErrorState title="Unable to load recent activity" detail="Events and audit entries could not be refreshed. Open the audit log for the full record." onRetry={() => { void Promise.allSettled([retryEvents(), retryAudit()]) }} />
         </div>
       </section>
     )

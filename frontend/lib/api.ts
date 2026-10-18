@@ -168,6 +168,11 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
   return doFetch<T>(url, { ...options, headers })
 }
 
+/** True only for a 404 from the API, so a failed request is never shown as "not found". */
+export function isNotFound(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith("API error 404:")
+}
+
 async function doFetch<T>(url: string, options: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...options,
@@ -519,6 +524,12 @@ export interface ConfigPlaybook {
     vector: string
     require_top_ports?: boolean
   }
+  /** Per-playbook correlation override; the API sends null when none is set. Editors must round-trip it. */
+  correlation?: {
+    min_sources?: number | null
+    confidence_threshold?: number | null
+    confidence_decay_half_life_seconds?: number | null
+  } | null
   steps: {
     action: "police" | "discard"
     rate_bps?: number

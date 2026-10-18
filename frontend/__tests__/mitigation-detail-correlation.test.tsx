@@ -397,3 +397,32 @@ describe("Mitigation Detail – Correlation Section", () => {
     expect(mockUseSignalGroupDetail).toHaveBeenCalledWith(null)
   })
 })
+
+describe("Mitigation Detail – load failures", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockUseConfigInventory.mockReturnValue({ data: null })
+    mockUseSignalGroupDetail.mockReturnValue({ data: undefined, isLoading: false, error: null })
+  })
+
+  it("shows a retryable error rather than not-found when the request fails", async () => {
+    const mutate = vi.fn()
+    mockUseMitigation.mockReturnValue({ data: undefined, error: new Error("API error 500: database unavailable"), isLoading: false, mutate })
+
+    await renderPage()
+
+    expect(screen.getByRole("alert").textContent).toContain("Unable to load this mitigation")
+    expect(screen.queryByText("Mitigation not found")).toBeNull()
+    screen.getByRole("button", { name: "Retry" }).click()
+    expect(mutate).toHaveBeenCalled()
+  })
+
+  it("keeps not-found for a 404", async () => {
+    mockUseMitigation.mockReturnValue({ data: undefined, error: new Error("API error 404: not found"), isLoading: false, mutate: vi.fn() })
+
+    await renderPage()
+
+    expect(screen.getByText("Mitigation not found")).toBeTruthy()
+    expect(screen.queryByRole("alert")).toBeNull()
+  })
+})

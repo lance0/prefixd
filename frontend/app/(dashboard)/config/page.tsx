@@ -13,14 +13,18 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useConfigSettings, useConfigPlaybooks } from "@/hooks/use-api"
 import { reloadConfig, updatePlaybooks, type ConfigPlaybook } from "@/lib/api"
 import { usePermissions } from "@/hooks/use-permissions"
+import { useTabParam } from "@/hooks/use-tab-param"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { RefreshCw, Loader2 } from "lucide-react"
 import { AlertingConfigPanel } from "@/components/dashboard/alerting-config-panel"
 import { PlaybookEditor, ReadOnlyPlaybookCard } from "@/components/dashboard/playbook-editor"
 import { PlaybookYamlEditor } from "@/components/dashboard/playbook-yaml-editor"
 
+const TABS = ["settings", "playbooks", "alerting"] as const
+
 export default function ConfigPage() {
-  const { data: settingsData, error: settingsError } = useConfigSettings()
+  const [activeTab, setActiveTab] = useTabParam(TABS)
+  const { data: settingsData, error: settingsError, mutate: mutateSettings } = useConfigSettings()
   const { data: playbooksData, error: playbooksError, mutate: mutatePlaybooks } = useConfigPlaybooks()
   const { mutate } = useSWRConfig()
   const { canReloadConfig, canEditPlaybooks } = usePermissions()
@@ -92,7 +96,7 @@ export default function ConfigPage() {
         }
       />
 
-      <Tabs defaultValue="settings">
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="settings">Settings</TabsTrigger>
           <TabsTrigger value="playbooks">
@@ -107,7 +111,11 @@ export default function ConfigPage() {
         <TabsContent value="settings" className="mt-4">
           {settingsError ? (
             <div className="rounded-md border bg-card">
-              <ErrorState title="Unable to load settings" detail={settingsError.message} />
+              <ErrorState
+                title="Unable to load settings"
+                detail={`${settingsError.message}. The controller keeps its running configuration; retry, or check that it is reachable.`}
+                onRetry={() => { void mutateSettings() }}
+              />
             </div>
           ) : !settingsData ? (
             <div className="rounded-md border bg-card"><LoadingRows label="Loading settings" /></div>
@@ -131,7 +139,11 @@ export default function ConfigPage() {
         <TabsContent value="playbooks" className="mt-4 space-y-3">
           {playbooksError ? (
             <div className="rounded-md border bg-card">
-              <ErrorState title="Unable to load playbooks" detail={playbooksError.message} />
+              <ErrorState
+                title="Unable to load playbooks"
+                detail={`${playbooksError.message}. The running playbooks are unchanged; retry before editing.`}
+                onRetry={() => { void mutatePlaybooks() }}
+              />
             </div>
           ) : !playbooksData ? (
             <div className="rounded-md border bg-card"><LoadingRows label="Loading playbooks" /></div>

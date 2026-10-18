@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { ActionBadge } from "@/components/dashboard/action-badge"
 import { StatusPill } from "@/components/dashboard/status-pill"
+import { EmptyState } from "@/components/dashboard/states"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Pencil, Trash2, Plus, GripVertical, Save, Undo2, AlertCircle } from "lucide-react"
@@ -46,13 +47,20 @@ function emptyPlaybook(): DraftPlaybook {
   }
 }
 
+// Keep every field the API sent (for example `correlation`), so an untouched draft
+// equals the loaded playbooks and saving never drops settings this form does not edit.
 function toDraft(playbooks: ConfigPlaybook[]): DraftPlaybook[] {
   return playbooks.map((playbook) => ({
+    ...playbook,
     _id: createId(),
-    name: playbook.name,
-    match: playbook.match,
     steps: playbook.steps.map((step) => ({ ...step, _id: createId() })),
   }))
+}
+
+// null and an absent key mean the same thing to the API; compare them as equal.
+function samePlaybooks(a: ConfigPlaybook[], b: ConfigPlaybook[]): boolean {
+  const normalise = (_key: string, value: unknown) => value ?? undefined
+  return JSON.stringify(a, normalise) === JSON.stringify(b, normalise)
 }
 
 function toApiPlaybooks(playbooks: DraftPlaybook[]): ConfigPlaybook[] {
@@ -237,8 +245,8 @@ function StepEditor({
       )}
 
       <div className="pt-5">
-        <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-destructive" onClick={onRemove}>
-          <Trash2 className="h-3.5 w-3.5" />
+        <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-destructive" onClick={onRemove} aria-label={`Remove step ${index + 1}`}>
+          <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
         </Button>
       </div>
     </div>
@@ -284,10 +292,7 @@ export function PlaybookEditor({ playbooks: initialPlaybooks, onSave, saving }: 
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
 
   const apiDraft = useMemo(() => toApiPlaybooks(draft), [draft])
-  const hasChanges = useMemo(
-    () => JSON.stringify(apiDraft) !== JSON.stringify(initialPlaybooks),
-    [apiDraft, initialPlaybooks]
-  )
+  const hasChanges = useMemo(() => !samePlaybooks(apiDraft, initialPlaybooks), [apiDraft, initialPlaybooks])
 
   const errors = useMemo(() => validatePlaybooks(apiDraft), [apiDraft])
 
@@ -357,9 +362,10 @@ export function PlaybookEditor({ playbooks: initialPlaybooks, onSave, saving }: 
       {/* Playbook cards */}
       {draft.length === 0 ? (
         <Card>
-          <CardContent className="text-sm text-muted-foreground">
-            No playbooks configured. Choose “Add playbook” to create one.
-          </CardContent>
+          <EmptyState
+            title="No playbooks configured"
+            description="Without playbooks, events are recorded but no mitigation is proposed. Choose “Add playbook” to create one."
+          />
         </Card>
       ) : (
         draft.map((playbook, index) => {
@@ -378,11 +384,11 @@ export function PlaybookEditor({ playbooks: initialPlaybooks, onSave, saving }: 
                       )}
                     </div>
                     <div className="flex items-center gap-1">
-                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setEditingIndex(index)}>
-                        <Pencil className="h-3.5 w-3.5" />
+                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setEditingIndex(index)} aria-label={`Edit playbook ${playbook.name || index + 1}`}>
+                        <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
                       </Button>
-                      <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive" onClick={() => removePlaybook(index)}>
-                        <Trash2 className="h-3.5 w-3.5" />
+                      <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive" onClick={() => removePlaybook(index)} aria-label={`Remove playbook ${playbook.name || index + 1}`}>
+                        <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                       </Button>
                     </div>
                   </div>

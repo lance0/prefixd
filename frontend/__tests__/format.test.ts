@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { MISSING, formatBps, formatPps, formatRelative, formatTimeRemaining, formatUtc } from "@/lib/format"
+import { MISSING, formatBps, formatPps, formatRelative, formatTimeRemaining, formatUtc, formatUtcTick } from "@/lib/format"
 
 const nbsp = "\u00a0"
 
@@ -78,5 +78,17 @@ describe("formatTimeRemaining", () => {
     const now = Date.parse("2026-10-18T12:00:00Z")
     expect(formatTimeRemaining("2026-10-18T13:05:00Z", now)).toBe("1h 5m")
     expect(formatTimeRemaining("2026-10-18T11:00:00Z", now)).toBe("Expiry due")
+  })
+})
+
+describe("formatUtcTick", () => {
+  it("uses UTC hours, not the local zone", () => {
+    expect(formatUtcTick("2026-10-18T16:05:00Z")).toBe("16:05")
+    expect(formatUtcTick("2026-10-18T00:00:00+02:00")).toBe("22:00")
+  })
+
+  it("adds the UTC day for multi-day ranges and an em dash for bad input", () => {
+    expect(formatUtcTick("2026-10-17T23:30:00Z", true)).toBe("17 Oct 23:30")
+    expect(formatUtcTick("not a date")).toBe(MISSING)
   })
 })

@@ -49,6 +49,12 @@ function ChartContainer({
   const uniqueId = React.useId()
   const chartId = `chart-${id || uniqueId.replace(/:/g, '')}`
 
+  // Recharts 3 sizes the chart inside a zero-size, overflow-visible div. Chromium can
+  // paint that layer wider than the container (seen in beyond-viewport captures), so the
+  // SVG spilled into the neighbouring column. A full-size, clipping box keeps it in its
+  // cell; the outer container keeps min-width: 0, so the chart still shrinks on resize.
+  const sizer = '[&_.recharts-responsive-container>div]:size-full! [&_.recharts-responsive-container>div]:overflow-hidden!'
+
   return (
     <ChartContext.Provider value={{ config }}>
       <div
@@ -56,6 +62,7 @@ function ChartContainer({
         data-chart={chartId}
         className={cn(
           "[&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-grid_line[stroke='#ccc']]:stroke-border/50 [&_.recharts-curve.recharts-tooltip-cursor]:stroke-border [&_.recharts-polar-grid_[stroke='#ccc']]:stroke-border [&_.recharts-radial-bar-background-sector]:fill-muted [&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted [&_.recharts-reference-line_[stroke='#ccc']]:stroke-border flex aspect-video justify-center text-xs [&_.recharts-dot[stroke='#fff']]:stroke-transparent [&_.recharts-layer]:outline-hidden [&_.recharts-sector]:outline-hidden [&_.recharts-sector[stroke='#fff']]:stroke-transparent [&_.recharts-surface]:outline-hidden",
+          sizer,
           className,
         )}
         {...props}

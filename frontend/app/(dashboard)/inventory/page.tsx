@@ -82,7 +82,7 @@ function CustomerSection({ customer, defaultOpen }: { customer: ConfigCustomer; 
 }
 
 export default function InventoryPage() {
-  const { data, error } = useConfigInventory()
+  const { data, error, mutate } = useConfigInventory()
   const [search, setSearch] = useState("")
 
   const filtered = useMemo(() => {
@@ -131,7 +131,7 @@ export default function InventoryPage() {
 
       {error ? (
         <div className="rounded-md border bg-card">
-          <ErrorState title="Unable to load inventory" detail={`${error.message}. Check the controller's inventory file and API connectivity.`} />
+          <ErrorState title="Unable to load inventory" detail={`${error.message}. Check the controller's inventory file and API connectivity.`} onRetry={() => { void mutate() }} />
         </div>
       ) : !data ? (
         <div className="rounded-md border bg-card"><LoadingRows label="Loading inventory" /></div>

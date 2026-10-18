@@ -6,7 +6,8 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Loader2, Save } from "lucide-react"
+import { Save } from "lucide-react"
+import { ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { useNotificationPreferences } from "@/hooks/use-api"
 import { updateNotificationPreferences, type NotificationPreferences } from "@/lib/api"
 import { toast } from "sonner"
@@ -23,7 +24,7 @@ const EVENT_TYPES = [
 const HOURS = Array.from({ length: 24 }, (_, i) => i)
 
 export function NotificationPreferencesPanel() {
-  const { data, isLoading, mutate } = useNotificationPreferences()
+  const { data, error, isLoading, mutate } = useNotificationPreferences()
   const [mutedEvents, setMutedEvents] = useState<string[]>([])
   const [quietStart, setQuietStart] = useState<number | null>(null)
   const [quietEnd, setQuietEnd] = useState<number | null>(null)
@@ -66,11 +67,17 @@ export function NotificationPreferencesPanel() {
   }, [mutedEvents, quietStart, quietEnd, mutate])
 
   if (isLoading) {
+    return <LoadingRows label="Loading notification preferences" rows={3} />
+  }
+
+  // Never show defaults for a failed read: saving them would overwrite the stored preferences.
+  if (error || !data) {
     return (
-      <div className="flex items-center gap-2 p-4 text-muted-foreground">
-        <Loader2 className="h-4 w-4 animate-spin" />
-        <span className="text-sm">Loading preferences…</span>
-      </div>
+      <ErrorState
+        title="Unable to load notification preferences"
+        detail="Your saved preferences are unchanged. Retry before editing them."
+        onRetry={() => { void mutate() }}
+      />
     )
   }
 

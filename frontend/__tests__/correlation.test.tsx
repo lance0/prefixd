@@ -212,7 +212,7 @@ describe("SignalsTab", () => {
 
     render(<SignalsTab />)
 
-    expect(screen.getByText("Failed to load signal sources")).toBeInTheDocument()
+    expect(screen.getByText("Unable to load signal sources")).toBeInTheDocument()
   })
 
   it("renders recent signals table with group data", () => {
@@ -288,7 +288,7 @@ describe("GroupsTab", () => {
 
     render(<GroupsTab />)
 
-    expect(screen.getByText("No signal groups found")).toBeInTheDocument()
+    expect(screen.getByText("No signal groups yet")).toBeInTheDocument()
   })
 
   it("renders loading skeletons", () => {
@@ -319,7 +319,9 @@ describe("GroupsTab", () => {
 
     render(<GroupsTab />)
 
-    expect(screen.getByText("Failed to load signal groups")).toBeInTheDocument()
+    expect(screen.getByRole("alert")).toHaveTextContent("Unable to load signal groups")
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument()
+    expect(screen.queryByText("No signal groups yet")).not.toBeInTheDocument()
   })
 
   it("shows Load More button when has_more is true", () => {

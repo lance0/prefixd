@@ -18,6 +18,7 @@ vi.mock("@/hooks/use-api", async (importOriginal) => ({
   useOperators: () => ({ data: [] }),
 }))
 vi.mock("@/hooks/use-reduced-motion", () => ({ useReducedMotion: () => true }))
+vi.mock("next/navigation", () => ({ usePathname: () => "/admin", useSearchParams: () => new URLSearchParams() }))
 vi.mock("@/hooks/use-permissions", () => ({ usePermissions: () => ({}) }))
 vi.mock("@/hooks/use-auth", () => ({ useAuth: () => ({ operator: null }) }))
 vi.mock("@/components/dashboard/dashboard-layout", () => ({ DashboardLayout: ({ children }: { children: ReactNode }) => <>{children}</> }))

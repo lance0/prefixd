@@ -23,7 +23,7 @@ function dimsLabel(s: {
 }
 
 export function CacheTab() {
-  const { data, error, isLoading } = useCachedCorroborators({ limit: 200 })
+  const { data, error, isLoading, mutate } = useCachedCorroborators({ limit: 200 })
 
   if (isLoading) {
     return <div className="rounded-md border bg-card"><LoadingRows label="Loading corroborator cache" /></div>
@@ -32,7 +32,11 @@ export function CacheTab() {
   if (error) {
     return (
       <div className="rounded-md border bg-card">
-        <ErrorState title="Failed to load corroborator cache" detail="Cached signals could not be refreshed." />
+        <ErrorState
+          title="Unable to load the corroborator cache"
+          detail="Cached signals could not be refreshed; the cache on the controller is unaffected. Retry to reload."
+          onRetry={() => { void mutate() }}
+        />
       </div>
     )
   }
@@ -41,7 +45,7 @@ export function CacheTab() {
     return (
       <div className="rounded-md border bg-card">
         <EmptyState
-          title="No corroborator signals are currently cached."
+          title="No corroborator signals cached"
           description="Cached signals appear here when a corroborating-only source posts before any matching primary event lands."
         />
       </div>
@@ -96,7 +100,8 @@ export function CacheTab() {
                   <time dateTime={s.ingested_at} title={formatUtc(s.ingested_at)}>{formatRelative(s.ingested_at)}</time>
                 </TableCell>
                 <TableCell className="text-muted-foreground tabular-nums">
-                  <time dateTime={s.expires_at} title={formatUtc(s.expires_at)}>{formatRelative(s.expires_at)}</time>
+                  <time dateTime={s.expires_at} className="text-foreground">{formatRelative(s.expires_at)}</time>
+                  <span className="block whitespace-nowrap text-xs">{formatUtc(s.expires_at)}</span>
                 </TableCell>
               </TableRow>
             ))}
