@@ -29,6 +29,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   working, and Compose commands need a speaker profile.
 - Source builds need Rust 1.89 or later.
 
+### Known limitations
+
+- A `201` means prefixd saved intent and the speaker accepted the local
+  request. It doesn't prove export or that a router installed the rule. GoBGP
+  read-back is its accepted local RIB after import policy, not retained intent,
+  and peer health alone doesn't prove a mitigation is installed.
+- TTL expiry needs the running controller. If prefixd stops while the speaker
+  stays up, rules stay announced.
+- Run one controller per POP and speaker target. The lifecycle lock doesn't
+  fence controllers in other processes.
+- Unsupported unrelated local rules on a GoBGP speaker fail the complete
+  observation and block reconciliation until an operator removes them.
+- GoBGP process metadata is unsupported in health detail.
+- Vendor forwarding qualification and a desired/acknowledged announcement
+  ledger remain open; write-only speaker backends, ExaBGP, an HTTP shim, exec
+  transport and runtime plugins aren't supported.
+- Downgrading to v0.19.1 removes dry-run origin protection and ignores pending
+  withdrawal cleanup. Retire dry-run intent and drain cleanup first.
+- Release binaries are Linux amd64 only.
+
 ### Breaking
 
 - Make rustbgpd the default speaker. `bgp.backend` selects `rustbgpd` or
