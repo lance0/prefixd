@@ -156,12 +156,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typography and navigation; preserve user zoom and remove decorative pulses,
   hardcoded quota caps and sampled action totals presented as global counts.
 
-- Give dashboard status its own colour scale, separate from the teal accent:
+- Give dashboard status its own colour scale, separate from the interaction accent:
   active mitigations and healthy services are green, pending and degraded states
   amber, and escalated or failed states red. Keep one dashboard shell mounted
   across navigation, tighten card spacing, lift dialogs and menus above page
   surfaces in dark mode, and match the browser theme colour to each theme.
   Bandwidth labels drop trailing zeros, such as "5 Mbps".
+
+- Adopt a neutral graphite palette: zinc grey surfaces and text with a single
+  blue accent for actions, focus and links, replacing the teal accent.
 
 - Refresh the security support policy, authentication and audit guidance, and
   release checklist to match the maintained release series and CI artifacts.
