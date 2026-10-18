@@ -13916,3 +13916,70 @@ async fn test_timeseries_duration_overflow_preserves_auth_and_shape() {
         }
     }
 }
+
+/// Dry-run intent must stay a local simulation after a restart in enforced mode.
+#[tokio::test]
+async fn test_dry_run_mitigation_is_not_announced_after_switch_to_enforced() {
+    use prefixd::domain::MitigationStatus;
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(MockAnnouncer::new());
+
+    // Controller A: dry-run (the fixture default) admits a detector mitigation.
+    let dry_run = AppState::new(
+        test_settings(),
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    assert!(dry_run.is_dry_run());
+    let event = serde_json::json!({"event_id":"dry-run-rehearsal", "timestamp":chrono::Utc::now(), "source":"test", "victim_ip":"203.0.113.10", "vector":"udp_flood", "pps":50000, "top_dst_ports":[53], "confidence":0.9});
+    let response = create_test_router(dry_run)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+    let simulated = repo.get_mitigation(id).await.unwrap().unwrap();
+    assert_eq!(simulated.status, MitigationStatus::Active);
+    assert!(simulated.expires_at > chrono::Utc::now());
+    assert_eq!(speaker.announced_count().await, 0, "dry-run sent no RPC");
+
+    // Controller B: same database and speaker, restarted in enforced mode.
+    let mut settings = test_settings();
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    let enforced = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    assert!(!enforced.is_dry_run());
+    prefixd::scheduler::ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+        .with_app_state(enforced)
+        .reconcile()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        speaker.announced_count().await,
+        0,
+        "first enforced reconciliation announced a dry-run simulation"
+    );
+}
