@@ -119,7 +119,7 @@ enum OperatorCommands {
 enum MitigationCommands {
     /// List active mitigations
     List {
-        /// Filter by status (active, escalated, expired, withdrawn)
+        /// Filter by status (pending, active, expired, withdrawn, rejected)
         #[arg(short, long)]
         status: Option<String>,
 

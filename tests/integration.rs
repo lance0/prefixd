@@ -3580,6 +3580,30 @@ async fn test_notification_preferences_put_invalid_event() {
 }
 
 #[tokio::test]
+async fn test_notification_preferences_put_accepts_legacy_escalated_event() {
+    let app = setup_app().await;
+
+    let body = serde_json::json!({
+        "muted_events": ["mitigation.escalated"],
+        "quiet_hours_start": null,
+        "quiet_hours_end": null,
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/preferences")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn test_notification_preferences_put_half_configured_quiet_hours() {
     let app = setup_app().await;
 

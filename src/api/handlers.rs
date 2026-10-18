@@ -1368,7 +1368,7 @@ pub async fn list_events(
     path = "/v1/mitigations",
     tag = "mitigations",
     params(
-        ("status" = Option<String>, Query, description = "Comma-separated exact statuses: pending, active, escalated, expired, withdrawn, rejected; every token must be valid and nonempty"),
+        ("status" = Option<String>, Query, description = "Comma-separated exact statuses: pending, active, expired, withdrawn, rejected (legacy escalated is still accepted but never produced); every token must be valid and nonempty"),
         ("customer_id" = Option<String>, Query, description = "Filter by customer ID"),
         ("victim_ip" = Option<String>, Query, description = "Filter by victim IP address"),
         ("pop" = Option<String>, Query, description = "Exact case-sensitive POP; omitted or literal 'all' lists every POP. Empty/NUL identifiers are invalid."),

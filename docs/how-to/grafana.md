@@ -70,12 +70,12 @@ Monitor attack events and policy enforcement:
 | Events (24h) | Total events ingested |
 | Rejected Events (24h) | Events rejected by policy |
 | Guardrail Rejections (24h) | Safety limit triggers |
-| Escalations (24h) | Police → discard escalations |
+| Escalations (24h) | Always zero; escalation is not implemented |
 | Events by Source | Breakdown by detector |
 | Events by Vector | Breakdown by attack type |
 | Guardrail Rejections by Reason | TTL, quota, prefix, safelist |
 | Event Rejections by Reason | Duplicate, rate limit, etc. |
-| Escalations | Transitions over time |
+| Escalations | Always zero; escalation is not implemented |
 | System Events | Config reloads, DB errors |
 
 ## Prometheus Configuration

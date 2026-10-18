@@ -21,11 +21,12 @@ interface WebSocketContextValue {
   isConnected: boolean
 }
 
-const CRITICAL_EVENTS = new Set(["mitigation.created", "mitigation.escalated"])
+const CRITICAL_EVENTS = new Set(["mitigation.created"])
 
 const WS_TO_ALERT_EVENT = new Map([
   ["mitigation_created", "mitigation.created"],
-  ["mitigation_updated", "mitigation.escalated"],
+  // A TTL extension from a repeat detector event; no code path escalates.
+  ["mitigation_updated", "mitigation.created"],
   ["mitigation_withdrawn", "mitigation.withdrawn"],
   ["mitigation_expired", "mitigation.expired"],
   ["resync_required", "config.reloaded"],

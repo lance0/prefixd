@@ -21,9 +21,10 @@ const DEST_TYPES = ["slack", "discord", "teams", "telegram", "pagerduty", "opsge
 
 type DestType = (typeof DEST_TYPES)[number]
 
+// mitigation.escalated is never emitted, so it is not offered. A stored filter
+// that still lists it is kept on save and shown as a badge.
 const EVENT_TYPES = [
   "mitigation.created",
-  "mitigation.escalated",
   "mitigation.withdrawn",
   "mitigation.expired",
   "config.reloaded",

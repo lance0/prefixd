@@ -96,6 +96,5 @@ shutdown:
 #         X-Custom: "value"
 #   events:
 #     - mitigation.created
-#     - mitigation.escalated
 #     - mitigation.withdrawn
 #     - mitigation.expired

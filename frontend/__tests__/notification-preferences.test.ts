@@ -84,6 +84,19 @@ describe("shouldShowToast", () => {
     expect(shouldShowToast("mitigation_created", prefs)).toBe(true)
   })
 
+  it("mutes TTL-extension updates with created and ignores a legacy escalated mute", () => {
+    const legacy: NotificationPreferences = {
+      muted_events: ["mitigation.escalated"],
+      quiet_hours_start: null,
+      quiet_hours_end: null,
+    }
+
+    expect(shouldShowToast("mitigation_updated", legacy)).toBe(true)
+    expect(shouldShowToast("mitigation_created", legacy)).toBe(true)
+    const created: NotificationPreferences = { ...legacy, muted_events: ["mitigation.created"] }
+    expect(shouldShowToast("mitigation_updated", created)).toBe(false)
+  })
+
   it("shows toast for unknown WS message types", () => {
     const prefs: NotificationPreferences = {
       muted_events: ["mitigation.created"],

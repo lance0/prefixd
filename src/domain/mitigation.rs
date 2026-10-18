@@ -13,6 +13,8 @@ use crate::error::{PrefixdError, Result};
 pub enum MitigationStatus {
     Pending,
     Active,
+    // Legacy state: no code path produces it. Kept so stored rows and old
+    // API filters still parse, and live-state queries still cover old rows.
     Escalated,
     Expired,
     Withdrawn,

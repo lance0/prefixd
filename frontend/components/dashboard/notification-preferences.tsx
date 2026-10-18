@@ -12,9 +12,10 @@ import { useNotificationPreferences } from "@/hooks/use-api"
 import { updateNotificationPreferences } from "@/lib/api"
 import { toast } from "sonner"
 
+// mitigation.escalated is never emitted, so it is not offered. A saved mute that
+// still lists it is kept on save; the backend still accepts it.
 const EVENT_TYPES = [
-  { value: "mitigation.created", label: "Mitigation created", critical: true },
-  { value: "mitigation.escalated", label: "Mitigation escalated", critical: true },
+  { value: "mitigation.created", label: "Mitigation created or extended", critical: true },
   { value: "mitigation.withdrawn", label: "Mitigation withdrawn", critical: false },
   { value: "mitigation.expired", label: "Mitigation expired", critical: false },
   { value: "config.reloaded", label: "Configuration reloaded", critical: false },
@@ -119,7 +120,7 @@ export function NotificationPreferencesPanel() {
         <CardHeader>
           <CardTitle>Quiet hours (UTC)</CardTitle>
           <p className="text-xs text-muted-foreground">
-            During quiet hours, only critical events (created, escalated) show toasts.
+            During quiet hours, only critical events (created or extended) show toasts.
           </p>
         </CardHeader>
         <CardContent>

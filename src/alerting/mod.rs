@@ -36,6 +36,8 @@ const MAX_IN_FLIGHT_ALERT_TASKS: usize = 64;
 pub enum AlertEventType {
     #[serde(rename = "mitigation.created")]
     MitigationCreated,
+    // Never emitted: no code path escalates a mitigation. Kept so stored
+    // destination filters and notification mutes that list it still parse.
     #[serde(rename = "mitigation.escalated")]
     MitigationEscalated,
     #[serde(rename = "mitigation.withdrawn")]
@@ -58,6 +60,8 @@ impl AlertEventType {
         Self::GuardrailRejected,
     ];
 
+    /// Values accepted when validating saved preferences, including the
+    /// never-emitted `mitigation.escalated`, so existing mutes still save.
     pub const ALL_STRINGS: &[&str] = &[
         "mitigation.created",
         "mitigation.escalated",
@@ -1031,6 +1035,21 @@ mod tests {
             AlertEventType::MitigationExpired.to_string(),
             "mitigation.expired"
         );
+    }
+
+    #[test]
+    fn test_stored_config_with_legacy_escalated_event_still_parses() {
+        let dest: DestinationConfig = serde_json::from_value(serde_json::json!({
+            "type": "generic",
+            "url": "https://example.com/hook",
+            "events": ["mitigation.escalated"],
+        }))
+        .unwrap();
+        let DestinationConfig::Generic { events, .. } = dest else {
+            panic!("expected generic destination");
+        };
+        assert_eq!(events, vec![AlertEventType::MitigationEscalated]);
+        assert!(AlertEventType::ALL_STRINGS.contains(&"mitigation.escalated"));
     }
 
     fn test_dest() -> DestinationConfig {

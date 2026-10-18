@@ -40,7 +40,8 @@ type SortField = "status" | "victim_ip" | "vector" | "customer_id" | "created_at
 
 type SortDirection = "asc" | "desc"
 
-const STATUS_FILTERS = ["active", "escalated", "pending", "expired", "withdrawn"] as const
+// Escalated is hidden: no code path produces it. Legacy rows still render with a danger pill.
+const STATUS_FILTERS = ["active", "pending", "expired", "withdrawn"] as const
 
 // A countdown under this many minutes reads as a warning.
 const EXPIRY_WARNING_MS = 5 * 60_000
@@ -52,7 +53,7 @@ interface MitigationsContentLiveProps {
 
 export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: MitigationsContentLiveProps = {}) {
   const router = useRouter()
-  const [statusFilters, setStatusFilters] = useState<string[]>(initialSearch ? [] : ["active", "escalated"])
+  const [statusFilters, setStatusFilters] = useState<string[]>(initialSearch ? [] : ["active"])
   const [searchQuery, setSearchQuery] = useState(initialSearch ?? "")
   const [sortField, setSortField] = useState<SortField>("created_at")
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc")

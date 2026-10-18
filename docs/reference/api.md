@@ -306,7 +306,7 @@ Authorization: Bearer <token>
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `status` | string | Filter by one or more statuses (comma-separated): `pending`, `active`, `escalated`, `withdrawn`, `expired`, `rejected` |
+| `status` | string | Filter by one or more statuses (comma-separated): `pending`, `active`, `withdrawn`, `expired`, `rejected`. Legacy `escalated` is still accepted for stored rows; no code path produces it |
 | `customer_id` | string | Filter by customer |
 | `victim_ip` | string | Filter by exact victim IP |
 | `pop` | string | Exact case-sensitive POP identifier; omitted or literal `all` lists every POP |
@@ -1834,7 +1834,7 @@ Returns configured alert destinations with secrets redacted.
       "events": ["mitigation.created"]
     }
   ],
-  "events": ["mitigation.created", "mitigation.escalated"]
+  "events": ["mitigation.created", "mitigation.expired"]
 }
 ```
 
@@ -2258,14 +2258,14 @@ Content-Type: application/json
 }
 ```
 
-Updates the current operator's notification preferences. `muted_events` contains event type strings that should not produce dashboard toast notifications. `quiet_hours_start`/`quiet_hours_end` are UTC hours (0-23); during quiet hours, only critical events (`mitigation.created`, `mitigation.escalated`) produce toasts. Set both to `null` to disable quiet hours.
+Updates the current operator's notification preferences. `muted_events` contains event type strings that should not produce dashboard toast notifications. `quiet_hours_start`/`quiet_hours_end` are UTC hours (0-23); during quiet hours, only critical events (`mitigation.created`) produce toasts. Set both to `null` to disable quiet hours.
 
 **Response:** `200 OK` with no body on success.
 
 **Validation:**
 - `quiet_hours_start` and `quiet_hours_end` must both be present or both be `null` (no half-configured state)
 - `quiet_hours_start`/`quiet_hours_end` must be 0-23 if present
-- `muted_events` entries must be valid event types (`mitigation.created`, `mitigation.escalated`, `mitigation.withdrawn`, `mitigation.expired`, `config.reloaded`, `guardrail.rejected`)
+- `muted_events` entries must be valid event types (`mitigation.created`, `mitigation.withdrawn`, `mitigation.expired`, `config.reloaded`, `guardrail.rejected`). Legacy `mitigation.escalated` is still accepted so saved preferences load; it is never emitted
 
 ---
 

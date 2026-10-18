@@ -168,6 +168,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operators. Playbooks select their first step; historical escalated state and
   the playbook step schema are retained.
 
+- Hide the escalated mitigation state and the `mitigation.escalated` alert
+  event; no code path produces either. The dashboard drops the Escalated status
+  filter, command-palette shortcut and alert/notification options, and the
+  references stop listing them. Stored `escalated` rows, the `status=escalated`
+  API filter and saved alert filters or notification mutes that name
+  `mitigation.escalated` still parse. Dashboard toasts for TTL extensions
+  (`mitigation_updated`) now follow the `mitigation.created` mute instead of the
+  hidden escalated one.
+
 
 - **Breaking:** Remove ineffective `observability.metrics_listen` and
   `observability.audit_log_path` settings. Remove these keys from existing

@@ -177,13 +177,6 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
               <Zap className="mr-2 h-3 w-3 text-muted-foreground" />
               <span>View active mitigations</span>
             </CommandItem>
-            <CommandItem
-              onSelect={() => runCommand(() => router.push("/mitigations?status=escalated"))}
-              className="text-sm"
-            >
-              <span className="mr-2 h-1.5 w-1.5 bg-destructive" />
-              <span>View escalated mitigations</span>
-            </CommandItem>
           </CommandGroup>
         </CommandList>
         <div className="flex items-center justify-between border-t border-border px-3 py-2 text-xs text-muted-foreground">
