@@ -96,10 +96,10 @@ checkout; do not create an npm lockfile. The current lock resolves Next.js
 
 Application-level `NEXT_PUBLIC_MOCK_MODE` has been retired. Development uses the
 normal API client; component tests keep their own controlled API fixtures.
-The removed `next lint` command is no longer advertised. Run `bun run typecheck`,
-`bun run test` and `bun run build` before deployment; production builds enforce
-TypeScript checks. Standalone lint and automated browser CI remain frontend
-tooling work.
+The removed `next lint` command is no longer advertised. Run `bun run lint`,
+`bun run typecheck`, `bun run test` and `bun run build` before deployment;
+production builds enforce TypeScript checks. Automated browser CI remains
+frontend tooling work.
 
 ## Quick Start
 

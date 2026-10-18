@@ -317,6 +317,7 @@ Run tests with native Node.js 26.12.0; production containers build and run with 
 ```bash
 cd frontend
 bun install --frozen-lockfile
+bun run lint
 bun run typecheck
 bun run test
 bun run build
@@ -324,6 +325,10 @@ bun audit
 ```
 
 The dashboard always uses the configured API. Keep response fixtures in tests;
-`NEXT_PUBLIC_MOCK_MODE` is retired. `next lint` was removed upstream; standalone
-lint and automated browser CI remain frontend tooling work. Production
-builds enforce TypeScript checks; `bun run typecheck` runs them independently.
+`NEXT_PUBLIC_MOCK_MODE` is retired. `bun run lint` runs Oxlint with the vendored
+anti-slop rules in `frontend/tools/oxlint/anti-slop/`; it must report no errors
+or warnings. Fix findings rather than suppressing them. Tests replace the
+controller with `frontend/__tests__/support/fake-controller.tsx` behind the real
+fetch path instead of mocking modules. Automated browser CI remains frontend
+tooling work. Production builds enforce TypeScript checks; `bun run typecheck`
+runs them independently.

@@ -60,6 +60,7 @@ build:
 [working-directory: "frontend"]
 frontend:
     bun install --frozen-lockfile
+    bun run lint
     bun run typecheck
     bun run test
     bun run build

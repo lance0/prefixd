@@ -128,6 +128,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discard/policing support.
 
 ### Changed
+- Enforce the vendored anti-slop Oxlint rules on the dashboard: `bun run lint`
+  now runs in `just frontend`, and so in `just gate` and the CI Frontend job.
+  Dashboard tests drive components through a scripted controller behind the
+  real fetch path instead of module mocks. The playbook YAML editor now reports
+  an unknown step action as a parse error.
+
 - Add a sequential local verification gate and focused CI recipes; keep optional
   commit/push hooks scoped, non-mutating and separate from the full pre-PR bar.
 

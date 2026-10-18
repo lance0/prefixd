@@ -258,7 +258,7 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      - name: Frozen install, native types, tests and production build
+      - name: Frozen install, lint, native types, tests and production build
         run: just frontend
 
   security:
