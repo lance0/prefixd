@@ -477,6 +477,7 @@ async fn persist_new_mitigation(
     mitigation: &mut Mitigation,
 ) -> crate::error::Result<Option<AnnouncementOutcome>> {
     mitigation.activate();
+    mitigation.origin_mode = Some(state.settings.mode);
     state
         .repo
         .admit_mitigation(mitigation, &state.settings.quotas)
@@ -797,6 +798,13 @@ async fn handle_ban(
         .await
         .map_err(AppError)?;
         if let Some(owner) = &existing_owner {
+            // Extending a simulation in enforced mode would leave the attack unmitigated.
+            if owner.is_dry_run_origin() && !state.is_dry_run() {
+                return Err(AppError(PrefixdError::Conflict(format!(
+                    "FlowSpec rule is owned by a dry-run simulation; retire it with {}",
+                    crate::domain::RETIRE_DRY_RUN_FLAG
+                ))));
+            }
             FlowSpecAction::from((owner.action_type, &owner.action_params))
                 .traffic_rate_bytes_per_second()
                 .map_err(|error| {

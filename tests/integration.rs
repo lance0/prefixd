@@ -13983,3 +13983,206 @@ async fn test_dry_run_mitigation_is_not_announced_after_switch_to_enforced() {
         "first enforced reconciliation announced a dry-run simulation"
     );
 }
+
+fn dry_run_row(ttl_seconds: u32) -> prefixd::domain::Mitigation {
+    use prefixd::domain::{ActionParams, ActionType, MatchCriteria, Mitigation, MitigationIntent};
+    let mut mitigation = Mitigation::from_intent(
+        MitigationIntent {
+            event_id: uuid::Uuid::new_v4(),
+            customer_id: None,
+            service_id: None,
+            pop: "test1".into(),
+            match_criteria: MatchCriteria {
+                dst_prefix: "203.0.113.10/32".into(),
+                protocol: Some(17),
+                dst_ports: vec![53],
+            },
+            action_type: ActionType::Discard,
+            action_params: ActionParams { rate_bps: None },
+            ttl_seconds,
+            reason: "simulated".into(),
+        },
+        "203.0.113.10".into(),
+        AttackVector::UdpFlood,
+    );
+    mitigation.activate();
+    mitigation.origin_mode = Some(prefixd::config::OperationMode::DryRun);
+    mitigation
+}
+
+fn enforced_state(repo: Arc<MockRepository>, speaker: Arc<MockAnnouncer>) -> Arc<AppState> {
+    let mut settings = test_settings();
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo,
+        speaker,
+        ".".into(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_enforced_expiry_of_dry_run_row_never_deletes_speaker_state() {
+    use prefixd::domain::{MitigationStatus, mitigation_rule};
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(MockAnnouncer::new());
+    let mut simulated = dry_run_row(600);
+    simulated.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+    repo.insert_mitigation(&simulated).await.unwrap();
+    // A rule with the same NLRI that prefixd never announced must survive the expiry.
+    speaker
+        .announce(&mitigation_rule(&simulated))
+        .await
+        .unwrap();
+    let state = enforced_state(repo.clone(), speaker.clone());
+    prefixd::scheduler::ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+        .with_app_state(state)
+        .reconcile()
+        .await
+        .unwrap();
+    let expired = repo
+        .get_mitigation(simulated.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(expired.status, MitigationStatus::Expired);
+    assert_eq!(speaker.announced_count().await, 1, "no speaker deletion");
+    assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_retiring_dry_run_intent_is_local_audited_and_unblocks_enforced_startup() {
+    use prefixd::domain::{
+        MitigationStatus, check_enforced_startup, dry_run_intent, retire_dry_run_intent,
+    };
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(MockAnnouncer::new());
+    let simulated = dry_run_row(600);
+    repo.insert_mitigation(&simulated).await.unwrap();
+    let mut enforced = dry_run_row(600);
+    enforced.mitigation_id = uuid::Uuid::new_v4();
+    enforced.match_criteria.dst_prefix = "203.0.113.11/32".into();
+    enforced.scope_hash = enforced.match_criteria.compute_scope_hash();
+    enforced.origin_mode = Some(prefixd::config::OperationMode::Enforced);
+    repo.insert_mitigation(&enforced).await.unwrap();
+
+    let refusal = check_enforced_startup(repo.as_ref(), "test1")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refusal.contains("1 unexpired dry-run"), "{refusal}");
+    assert!(refusal.contains("--retire-dry-run-intent"), "{refusal}");
+    // Other POPs are not this controller's intent.
+    check_enforced_startup(repo.as_ref(), "other-pop")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        retire_dry_run_intent(repo.as_ref(), "test1", None)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        retire_dry_run_intent(repo.as_ref(), "test1", None)
+            .await
+            .unwrap(),
+        0,
+        "single-shot: nothing left to retire"
+    );
+    check_enforced_startup(repo.as_ref(), "test1")
+        .await
+        .unwrap();
+    assert!(
+        dry_run_intent(repo.as_ref(), "test1")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let retired = repo
+        .get_mitigation(simulated.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retired.status, MitigationStatus::Withdrawn);
+    assert_eq!(
+        repo.get_mitigation(enforced.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MitigationStatus::Active,
+        "enforced intent is untouched"
+    );
+    let audit = repo
+        .list_audit(&prefixd::db::ListParams {
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let retirements: Vec<_> = audit
+        .iter()
+        .filter(|entry| entry.actor_id.as_deref() == Some("retire-dry-run-intent"))
+        .collect();
+    assert_eq!(retirements.len(), 1);
+    assert_eq!(retirements[0].action, "withdraw");
+    assert_eq!(
+        retirements[0].target_id.as_deref(),
+        Some(simulated.mitigation_id.to_string().as_str())
+    );
+
+    // Zero speaker calls: retirement had no speaker, and enforced repair skips it.
+    let state = enforced_state(repo.clone(), speaker.clone());
+    prefixd::scheduler::ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+        .with_app_state(state)
+        .reconcile()
+        .await
+        .unwrap();
+    let announced = speaker.list_active().await.unwrap();
+    assert_eq!(announced.len(), 1, "only enforced intent is repaired");
+    assert_eq!(announced[0].nlri.dst_prefix, "203.0.113.11/32");
+}
+
+#[tokio::test]
+async fn test_enforced_detector_event_does_not_extend_a_dry_run_simulation() {
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(MockAnnouncer::new());
+    let simulated = dry_run_row(600);
+    repo.insert_mitigation(&simulated).await.unwrap();
+    let app = create_test_router(enforced_state(repo.clone(), speaker.clone()));
+    let event = serde_json::json!({"event_id":"enforced-over-simulation", "timestamp":chrono::Utc::now(), "source":"test", "victim_ip":"203.0.113.10", "vector":"udp_flood", "pps":50000, "top_dst_ports":[53], "confidence":0.9});
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("--retire-dry-run-intent"));
+    assert!(
+        repo.find_ban_event_by_external_id("test", "enforced-over-simulation")
+            .await
+            .unwrap()
+            .is_none(),
+        "the detector event stays retryable"
+    );
+    let unchanged = repo
+        .get_mitigation(simulated.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.expires_at, simulated.expires_at);
+    assert_eq!(speaker.announced_count().await, 0);
+}

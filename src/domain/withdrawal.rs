@@ -113,7 +113,8 @@ pub async fn request_withdrawal(
         actor_type,
         actor,
         reason,
-        speaker_delete_required,
+        // A simulation was never sent to the speaker, so its deletion stays local in any mode.
+        speaker_delete_required && !mitigation.is_dry_run_origin(),
     )?;
     request.target_id = binding.map(super::VerifiedSpeakerBinding::target_id);
     if let Some(binding) = binding {
@@ -212,12 +213,37 @@ pub async fn execute_withdrawal(
     request: &WithdrawalRequest,
     binding: Option<&super::VerifiedSpeakerBinding>,
 ) -> Result<Mitigation> {
+    finish_withdrawal_request(repo, Some(announcer), dry_run, request, binding).await
+}
+
+/// Complete a request that needs no speaker deletion, without a speaker connection.
+pub async fn complete_local_withdrawal(
+    repo: &dyn RepositoryTrait,
+    request: &WithdrawalRequest,
+    binding: Option<&super::VerifiedSpeakerBinding>,
+) -> Result<Mitigation> {
+    finish_withdrawal_request(repo, None, false, request, binding).await
+}
+
+async fn finish_withdrawal_request(
+    repo: &dyn RepositoryTrait,
+    announcer: Option<&dyn FlowSpecAnnouncer>,
+    dry_run: bool,
+    request: &WithdrawalRequest,
+    binding: Option<&super::VerifiedSpeakerBinding>,
+) -> Result<Mitigation> {
     let validate_target = |request: &WithdrawalRequest| match binding {
         Some(binding) => {
-            binding.validate_backend(announcer.backend())?;
+            if let Some(announcer) = announcer {
+                binding.validate_backend(announcer.backend())?;
+            }
             binding.validate_request(&request.pop, request.target_id)
         }
-        None if announcer.backend() == "mock" && request.target_id.is_none() => Ok(()),
+        None if announcer.is_none_or(|announcer| announcer.backend() == "mock")
+            && request.target_id.is_none() =>
+        {
+            Ok(())
+        }
         None => Err(super::binding_mismatch()),
     };
     validate_target(request)?;
@@ -239,6 +265,11 @@ pub async fn execute_withdrawal(
             "pending withdrawal requires enforced mode".into(),
         ));
     }
+    if request.speaker_delete_required && announcer.is_none() {
+        return Err(PrefixdError::Conflict(
+            "pending withdrawal requires a speaker deletion".into(),
+        ));
+    }
     check_withdrawal_owner(repo, &request).await?;
     let rule: FlowSpecRule = serde_json::from_str(&request.rule_json)?;
     if rule.nlri_hash() != request.nlri_hash {
@@ -247,7 +278,9 @@ pub async fn execute_withdrawal(
         ));
     }
     let start = std::time::Instant::now();
-    if request.speaker_delete_required {
+    if request.speaker_delete_required
+        && let Some(announcer) = announcer
+    {
         announcer.withdraw(&rule).await?;
     }
     let rpc_seconds = start.elapsed().as_secs_f64();
@@ -265,6 +298,63 @@ pub async fn execute_withdrawal(
         MitigationStatus::Withdrawn | MitigationStatus::Expired
     ));
     Ok(mitigation)
+}
+
+pub const RETIRE_DRY_RUN_FLAG: &str = "--retire-dry-run-intent";
+
+/// Live dry-run simulations at `pop` without a pending withdrawal. Expired rows and
+/// pending requests are left to the scheduler, which completes them locally.
+pub async fn dry_run_intent(repo: &dyn RepositoryTrait, pop: &str) -> Result<Vec<Mitigation>> {
+    let pending = repo.pending_withdrawals(Some(pop)).await?;
+    let now = Utc::now();
+    Ok(repo
+        .active_mitigations_for_pop(pop)
+        .await?
+        .into_iter()
+        .filter(|m| {
+            m.is_dry_run_origin()
+                && m.expires_at > now
+                && !pending.iter().any(|r| r.mitigation_id == m.mitigation_id)
+        })
+        .collect())
+}
+
+/// Enforced mode must not inherit simulations as desired speaker state.
+pub async fn check_enforced_startup(repo: &dyn RepositoryTrait, pop: &str) -> Result<()> {
+    let count = dry_run_intent(repo, pop).await?.len();
+    if count > 0 {
+        return Err(PrefixdError::Conflict(format!(
+            "{count} unexpired dry-run mitigation(s) at POP {pop} would become enforced intent; \
+             retire them locally once with {RETIRE_DRY_RUN_FLAG}"
+        )));
+    }
+    Ok(())
+}
+
+/// Retire every live simulation through an audited, local-only withdrawal; no speaker call.
+pub async fn retire_dry_run_intent(
+    repo: &dyn RepositoryTrait,
+    pop: &str,
+    binding: Option<&super::VerifiedSpeakerBinding>,
+) -> Result<usize> {
+    let intent = dry_run_intent(repo, pop).await?;
+    for mitigation in &intent {
+        let request = request_withdrawal(
+            repo,
+            mitigation,
+            false,
+            "system",
+            "retire-dry-run-intent",
+            "dry-run simulation retired before enforced operation".into(),
+            false,
+            binding,
+        )
+        .await?;
+        complete_local_withdrawal(repo, &request, binding).await?;
+        tracing::info!(mitigation_id = %mitigation.mitigation_id, operation_id = %request.operation_id,
+            "retired dry-run mitigation locally");
+    }
+    Ok(intent.len())
 }
 
 #[cfg(test)]

@@ -104,6 +104,19 @@ pub trait RepositoryTrait: Send + Sync {
         ))
     }
 
+    /// Record `mode` as the origin of this POP's live rows that predate origin
+    /// tracking, with one system audit entry. Never changes `updated_at`, so
+    /// pending withdrawals keep matching. Returns the number of rows tagged.
+    async fn tag_unknown_origin(
+        &self,
+        _pop: &str,
+        _mode: crate::config::OperationMode,
+    ) -> Result<u64> {
+        Err(crate::error::PrefixdError::Config(
+            "mitigation origin tracking is unsupported by this repository".into(),
+        ))
+    }
+
     // Events
     async fn insert_event(&self, event: &AttackEvent) -> Result<()>;
     /// Find the most recent ban event by external_event_id.

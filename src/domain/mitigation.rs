@@ -5,6 +5,7 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 use super::AttackVector;
+use crate::config::OperationMode;
 use crate::error::{PrefixdError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +167,7 @@ pub struct MitigationRow {
     pub acknowledged_at: Option<DateTime<Utc>>,
     pub acknowledged_by: Option<String>,
     pub signal_group_id: Option<Uuid>,
+    pub origin_mode: Option<String>,
 }
 
 /// Domain model for mitigation
@@ -197,6 +199,10 @@ pub struct Mitigation {
     /// the correlation engine's corroboration logic.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal_group_id: Option<Uuid>,
+    /// Operation mode that admitted this row; immutable after creation.
+    /// None only for rows that predate the column and are not yet tagged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_mode: Option<OperationMode>,
 }
 
 impl Mitigation {
@@ -229,6 +235,7 @@ impl Mitigation {
             acknowledged_at: None,
             acknowledged_by: None,
             signal_group_id: None,
+            origin_mode: None,
         }
     }
 
@@ -296,6 +303,16 @@ impl Mitigation {
             ))
         })?;
 
+        let origin_mode = match &row.origin_mode {
+            Some(value) => Some(OperationMode::parse(value).ok_or_else(|| {
+                PrefixdError::Internal(format!(
+                    "invalid origin_mode '{}' for mitigation {}",
+                    value, row.mitigation_id
+                ))
+            })?),
+            None => None,
+        };
+
         Ok(Self {
             mitigation_id: row.mitigation_id,
             scope_hash: row.scope_hash,
@@ -320,11 +337,17 @@ impl Mitigation {
             acknowledged_at: row.acknowledged_at,
             acknowledged_by: row.acknowledged_by,
             signal_group_id: row.signal_group_id,
+            origin_mode,
         })
     }
 
     pub fn is_active(&self) -> bool {
         self.status.is_active()
+    }
+
+    /// A dry-run simulation is never desired speaker state, whatever the current mode.
+    pub fn is_dry_run_origin(&self) -> bool {
+        self.origin_mode == Some(OperationMode::DryRun)
     }
 
     pub fn extend_ttl(&mut self, ttl_seconds: u32, event_id: Uuid) {

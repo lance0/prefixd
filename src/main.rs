@@ -29,6 +29,10 @@ struct Cli {
     /// Adopt legacy state on its original speaker target, audit and exit without connecting
     #[arg(long)]
     adopt_legacy_speaker: bool,
+
+    /// Retire unexpired dry-run mitigations locally, audit and exit without connecting
+    #[arg(long, conflicts_with = "adopt_legacy_speaker")]
+    retire_dry_run_intent: bool,
 }
 
 #[tokio::main]
@@ -68,6 +72,33 @@ async fn main() -> anyhow::Result<()> {
     if cli.adopt_legacy_speaker {
         tracing::info!("speaker ownership adoption complete; no speaker connection attempted");
         return Ok(());
+    }
+    // Rows from before origin tracking take this startup's mode; upgrade without changing mode.
+    let tagged = repo
+        .tag_unknown_origin(&config.settings.pop, config.settings.mode)
+        .await?;
+    if tagged > 0 {
+        tracing::warn!(
+            tagged,
+            origin_mode = config.settings.mode.as_str(),
+            "tagged live mitigations of unknown origin with the startup mode"
+        );
+    }
+    if cli.retire_dry_run_intent {
+        let retired = prefixd::domain::retire_dry_run_intent(
+            repo.as_ref(),
+            &config.settings.pop,
+            Some(&binding),
+        )
+        .await?;
+        tracing::info!(
+            retired,
+            "dry-run intent retired locally; no speaker connection attempted"
+        );
+        return Ok(());
+    }
+    if config.settings.mode == prefixd::config::OperationMode::Enforced {
+        prefixd::domain::check_enforced_startup(repo.as_ref(), &config.settings.pop).await?;
     }
     let announcer = speaker_factory(&config.settings.bgp).await?;
 

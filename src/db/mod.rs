@@ -100,6 +100,11 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
             "speaker_targets",
             include_str!("../../migrations/014_speaker_targets.sql"),
         ),
+        (
+            15,
+            "mitigation_origin_mode",
+            include_str!("../../migrations/015_mitigation_origin_mode.sql"),
+        ),
     ];
 
     // Bootstrap: run all migrations first (they use IF NOT EXISTS)

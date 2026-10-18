@@ -525,8 +525,10 @@ impl ReconciliationLoop {
         }
 
         let now = chrono::Utc::now();
+        // Simulations are never desired speaker state, even after a mode switch.
         active.retain(|mitigation| {
-            mitigation.expires_at > now
+            !mitigation.is_dry_run_origin()
+                && mitigation.expires_at > now
                 && !pending_keys.contains(&ownership_key(&self.build_flowspec_rule(mitigation)))
         });
 

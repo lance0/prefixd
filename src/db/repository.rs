@@ -72,6 +72,22 @@ impl AuditEntry {
     }
 }
 
+/// Startup assumption, not observed history: the operator upgraded without changing mode.
+pub(crate) fn unknown_origin_audit(
+    pop: &str,
+    mode: crate::config::OperationMode,
+    tagged: u64,
+) -> AuditEntry {
+    AuditEntry::new(
+        ActorType::System,
+        Some("startup".into()),
+        "tag_origin_mode",
+        Some("pop"),
+        Some(pop.into()),
+        serde_json::json!({"origin_mode": mode.as_str(), "tagged_mitigations": tagged}),
+    )
+}
+
 #[derive(Clone)]
 pub struct Repository {
     pool: PgPool,
@@ -93,8 +109,8 @@ impl Repository {
                 match_json, action_type, action_params_json, status,
                 created_at, updated_at, expires_at, withdrawn_at,
                 triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
-                signal_group_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+                signal_group_id, origin_mode
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
             "#,
         )
         .bind(m.mitigation_id)
@@ -118,6 +134,7 @@ impl Repository {
         .bind(&m.reason)
         .bind(&m.rejection_reason)
         .bind(m.signal_group_id)
+        .bind(m.origin_mode.map(crate::config::OperationMode::as_str))
         .execute(connection)
         .await?;
         Ok(())
@@ -212,6 +229,25 @@ impl RepositoryTrait for Repository {
             target_id,
             target.clone(),
         ))
+    }
+
+    async fn tag_unknown_origin(
+        &self,
+        pop: &str,
+        mode: crate::config::OperationMode,
+    ) -> Result<u64> {
+        let mut tx = self.pool.begin().await?;
+        let tagged = sqlx::query("UPDATE mitigations SET origin_mode = $2 WHERE pop = $1 AND origin_mode IS NULL AND status IN ('pending', 'active', 'escalated')")
+            .bind(pop).bind(mode.as_str()).execute(&mut *tx).await?.rows_affected();
+        if tagged > 0 {
+            let entry = unknown_origin_audit(pop, mode, tagged);
+            sqlx::query("INSERT INTO audit_log (audit_id, timestamp, actor_type, actor_id, action, target_type, target_id, details_json) VALUES ($1, $2, 'system', $3, $4, $5, $6, $7)")
+                .bind(entry.audit_id).bind(entry.timestamp).bind(entry.actor_id).bind(entry.action)
+                .bind(entry.target_type).bind(entry.target_id).bind(serde_json::to_string(&entry.details)?)
+                .execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(tagged)
     }
 
     async fn insert_event(&self, event: &AttackEvent) -> Result<()> {
@@ -521,7 +557,7 @@ impl RepositoryTrait for Repository {
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
                    triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
-                   acknowledged_at, acknowledged_by, signal_group_id
+                   acknowledged_at, acknowledged_by, signal_group_id, origin_mode
             FROM mitigations WHERE mitigation_id = $1
             "#,
         )
@@ -545,7 +581,7 @@ impl RepositoryTrait for Repository {
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
                    triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
-                   acknowledged_at, acknowledged_by, signal_group_id
+                   acknowledged_at, acknowledged_by, signal_group_id, origin_mode
             FROM mitigations
             WHERE scope_hash = $1 AND pop = $2 AND status IN ('pending', 'active', 'escalated')
             "#,
@@ -567,7 +603,7 @@ impl RepositoryTrait for Repository {
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
                    triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
-                   acknowledged_at, acknowledged_by, signal_group_id
+                   acknowledged_at, acknowledged_by, signal_group_id, origin_mode
             FROM mitigations
             WHERE triggering_event_id = $1 AND status IN ('pending', 'active', 'escalated')
             "#,
@@ -598,7 +634,7 @@ impl RepositoryTrait for Repository {
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
                    triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
-                   acknowledged_at, acknowledged_by, signal_group_id
+                   acknowledged_at, acknowledged_by, signal_group_id, origin_mode
             FROM mitigations
             WHERE ($1::text[] IS NULL OR status = ANY($1))
               AND ($2::text IS NULL OR customer_id = $2)
@@ -696,7 +732,7 @@ impl RepositoryTrait for Repository {
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
                    triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
-                   acknowledged_at, acknowledged_by, signal_group_id
+                   acknowledged_at, acknowledged_by, signal_group_id, origin_mode
             FROM mitigations
             WHERE status IN ('active', 'escalated') AND expires_at < $1
               AND ($2::text IS NULL OR pop = $2)
@@ -921,7 +957,7 @@ impl RepositoryTrait for Repository {
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
                    triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
-                   acknowledged_at, acknowledged_by, signal_group_id
+                   acknowledged_at, acknowledged_by, signal_group_id, origin_mode
             FROM mitigations WHERE victim_ip = $1 ORDER BY created_at DESC LIMIT $2
             "#,
         )
@@ -1935,7 +1971,7 @@ mod checked_timestamp_rows {
         );
         check_row!(
             MitigationRow,
-            "gen_random_uuid() AS mitigation_id, 'scope'::text AS scope_hash, 'test'::text AS pop, NULL::text AS customer_id, NULL::text AS service_id, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, '{}'::text AS match_json, 'discard'::text AS action_type, NULL::text AS action_params_json, 'active'::text AS status, gen_random_uuid() AS triggering_event_id, gen_random_uuid() AS last_event_id, NULL::uuid AS escalated_from_id, NULL::text AS reason, NULL::text AS rejection_reason, NULL::text AS acknowledged_by, NULL::uuid AS signal_group_id",
+            "gen_random_uuid() AS mitigation_id, 'scope'::text AS scope_hash, 'test'::text AS pop, NULL::text AS customer_id, NULL::text AS service_id, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, '{}'::text AS match_json, 'discard'::text AS action_type, NULL::text AS action_params_json, 'active'::text AS status, gen_random_uuid() AS triggering_event_id, gen_random_uuid() AS last_event_id, NULL::uuid AS escalated_from_id, NULL::text AS reason, NULL::text AS rejection_reason, NULL::text AS acknowledged_by, NULL::uuid AS signal_group_id, NULL::text AS origin_mode",
             [created_at, updated_at, expires_at],
             [withdrawn_at, acknowledged_at]
         );

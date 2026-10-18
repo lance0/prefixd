@@ -35,6 +35,22 @@ pub enum OperationMode {
     Enforced,
 }
 
+impl OperationMode {
+    /// Configuration spelling, also persisted as a mitigation's origin mode.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DryRun => "dry-run",
+            Self::Enforced => "enforced",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        [Self::DryRun, Self::Enforced]
+            .into_iter()
+            .find(|mode| mode.as_str() == value)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpConfig {
     pub listen: String,

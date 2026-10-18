@@ -169,6 +169,31 @@ impl RepositoryTrait for MockRepository {
         ))
     }
 
+    async fn tag_unknown_origin(
+        &self,
+        pop: &str,
+        mode: crate::config::OperationMode,
+    ) -> Result<u64> {
+        let mut tagged = 0;
+        for m in self
+            .mitigations
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .filter(|m| m.pop == pop && m.origin_mode.is_none() && m.is_active())
+        {
+            m.origin_mode = Some(mode);
+            tagged += 1;
+        }
+        if tagged > 0 {
+            self.audit
+                .lock()
+                .unwrap()
+                .push(super::repository::unknown_origin_audit(pop, mode, tagged));
+        }
+        Ok(tagged)
+    }
+
     async fn insert_event(&self, event: &AttackEvent) -> Result<()> {
         self.events.lock().unwrap().push(event.clone());
         Ok(())
@@ -385,7 +410,10 @@ impl RepositoryTrait for MockRepository {
             .iter_mut()
             .find(|x| x.mitigation_id == m.mitigation_id)
         {
+            // Like PostgreSQL, updates never rewrite the admitting mode.
+            let origin_mode = existing.origin_mode;
             *existing = m.clone();
+            existing.origin_mode = origin_mode;
         }
         Ok(())
     }

@@ -1018,6 +1018,7 @@ async fn test_timeseries_non_hour_bucket_alignment() {
         acknowledged_at: None,
         acknowledged_by: None,
         signal_group_id: None,
+        origin_mode: None,
     };
 
     ctx.repo
@@ -1122,6 +1123,7 @@ async fn test_ttl_expiry() {
         acknowledged_at: None,
         acknowledged_by: None,
         signal_group_id: None,
+        origin_mode: None,
     };
 
     // Insert the expired mitigation

@@ -1163,3 +1163,247 @@ async fn adoption_process_exits_before_factory_connection_and_mismatch_never_con
         );
     }
 }
+
+#[tokio::test]
+async fn enforced_startup_refuses_dry_run_intent_until_the_flag_retires_it_locally() {
+    use std::{process::Stdio, time::Duration};
+    let ctx = common::TestContext::new().await;
+    let speaker_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = settings(
+        "rehearsal",
+        &format!("http://{}", speaker_listener.local_addr().unwrap()),
+    );
+    config.http.listen = api_listener.local_addr().unwrap().to_string();
+    // Bind first so the simulated row is ordinary current state, not legacy state.
+    ctx.repo
+        .register_speaker_target(
+            "rehearsal",
+            &SpeakerTarget::from_config(&config.bgp).unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+    let mut simulated = mitigation("rehearsal", "203.0.113.10");
+    simulated.origin_mode = Some(OperationMode::DryRun);
+    ctx.repo.insert_mitigation(&simulated).await.unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    for (name, yaml) in [
+        ("prefixd.yaml", serde_saphyr::to_string(&config).unwrap()),
+        (
+            "inventory.yaml",
+            serde_saphyr::to_string(&common::test_inventory()).unwrap(),
+        ),
+        (
+            "playbooks.yaml",
+            serde_saphyr::to_string(&common::test_playbooks()).unwrap(),
+        ),
+    ] {
+        common::write_yaml(directory.path(), name, &yaml);
+    }
+    let command = || {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixd"));
+        command
+            .arg("--config")
+            .arg(directory.path())
+            .env(
+                "DATABASE_URL",
+                &ctx.state.settings.storage.connection_string,
+            )
+            .kill_on_drop(true);
+        command
+    };
+    let no_connection = async || {
+        tokio::time::timeout(Duration::from_millis(100), speaker_listener.accept())
+            .await
+            .is_err()
+    };
+
+    let output = tokio::time::timeout(Duration::from_secs(15), command().output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("1 unexpired dry-run"), "{stderr}");
+    assert!(stderr.contains("--retire-dry-run-intent"), "{stderr}");
+    assert!(
+        no_connection().await,
+        "refusal precedes any speaker connection"
+    );
+
+    for _ in 0..2 {
+        let output = tokio::time::timeout(
+            Duration::from_secs(15),
+            command().arg("--retire-dry-run-intent").output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            no_connection().await,
+            "retirement never contacts the speaker"
+        );
+    }
+    let retired = ctx
+        .repo
+        .get_mitigation(simulated.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retired.status, MitigationStatus::Withdrawn);
+    let (local_only, actor, completed): (bool, String, bool) = sqlx::query_as(
+        "SELECT NOT speaker_delete_required, actor, completed_at IS NOT NULL FROM withdrawal_requests WHERE mitigation_id = $1",
+    )
+    .bind(simulated.mitigation_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap();
+    assert!(local_only && completed);
+    assert_eq!(actor, "retire-dry-run-intent");
+    let audits: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE actor_type = 'system' AND actor_id = 'retire-dry-run-intent' AND action = 'withdraw' AND target_id = $1",
+    )
+    .bind(simulated.mitigation_id.to_string())
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(audits, 1, "a repeated flag run retires nothing new");
+
+    // Positive control: ordinary enforced startup now reaches the speaker.
+    let mut normal = command()
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let accepted = tokio::time::timeout(Duration::from_secs(10), speaker_listener.accept()).await;
+    if normal.try_wait().unwrap().is_none() {
+        normal.kill().await.unwrap();
+    }
+    normal.wait().await.unwrap();
+    assert!(accepted.is_ok(), "enforced startup proceeds once retired");
+}
+
+#[tokio::test]
+async fn unknown_origin_tagging_is_audited_once_and_survives_migration_replay() {
+    let ctx = common::TestContext::new().await;
+    let legacy = mitigation("origin", "203.0.113.10");
+    let mut terminal = mitigation("origin", "203.0.113.11");
+    terminal.withdraw(Some("old".into()));
+    let foreign = mitigation("other-origin", "203.0.113.12");
+    for row in [&legacy, &terminal, &foreign] {
+        assert_eq!(row.origin_mode, None);
+        ctx.repo.insert_mitigation(row).await.unwrap();
+    }
+    // Simulate rows written before migration 015 existed.
+    sqlx::query("UPDATE mitigations SET origin_mode = NULL")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    let pending = request_withdrawal(
+        ctx.repo.as_ref(),
+        &legacy,
+        false,
+        "operator",
+        "upgrade-test",
+        "pending across upgrade".into(),
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    let origin = |id: Uuid| {
+        let pool = ctx.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT origin_mode FROM mitigations WHERE mitigation_id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    for expected in [1, 0] {
+        assert_eq!(
+            ctx.repo
+                .tag_unknown_origin("origin", OperationMode::Enforced)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        origin(legacy.mitigation_id).await.as_deref(),
+        Some("enforced")
+    );
+    assert_eq!(
+        origin(terminal.mitigation_id).await,
+        None,
+        "history is not rewritten"
+    );
+    assert_eq!(
+        origin(foreign.mitigation_id).await,
+        None,
+        "other POPs are untouched"
+    );
+    let details: Vec<Value> = sqlx::query_scalar(
+        "SELECT details_json::jsonb FROM audit_log WHERE action = 'tag_origin_mode' AND actor_type = 'system' AND target_id = 'origin'",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        details,
+        vec![json!({"origin_mode": "enforced", "tagged_mitigations": 1})]
+    );
+
+    // Replaying every migration keeps tags and does not imply acknowledgement.
+    let announcements: i64 = sqlx::query_scalar("SELECT count(*) FROM flowspec_announcements")
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+    init_postgres_pool(&ctx.state.settings.storage.connection_string)
+        .await
+        .unwrap();
+    assert_eq!(
+        origin(legacy.mitigation_id).await.as_deref(),
+        Some("enforced")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM flowspec_announcements")
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap(),
+        announcements
+    );
+    assert!(
+        sqlx::query("UPDATE mitigations SET origin_mode = 'dry_run' WHERE mitigation_id = $1")
+            .bind(legacy.mitigation_id)
+            .execute(&ctx.pool)
+            .await
+            .is_err(),
+        "only configuration spellings are stored"
+    );
+
+    // Tagging left the revision intact, so the pending request still completes.
+    let pending_after = ctx.repo.pending_withdrawals(Some("origin")).await.unwrap();
+    assert_eq!(pending_after.len(), 1);
+    assert_eq!(pending_after[0].operation_id, pending.operation_id);
+    assert!(pending_after[0].speaker_delete_required);
+    let speaker = MockAnnouncer::new();
+    speaker
+        .announce(&prefixd::domain::mitigation_rule(&legacy))
+        .await
+        .unwrap();
+    let done = execute_withdrawal(ctx.repo.as_ref(), &speaker, false, &pending, None)
+        .await
+        .unwrap();
+    assert_eq!(done.status, MitigationStatus::Withdrawn);
+}
