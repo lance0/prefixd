@@ -1,44 +1,69 @@
+<p align="center">
+  <img src="frontend/public/icon.svg" alt="prefixd" width="120">
+</p>
+
 # prefixd
 
 [![Build](https://github.com/lance0/prefixd/actions/workflows/ci.yml/badge.svg)](https://github.com/lance0/prefixd/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/rust-1.89+-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**prefixd** is a BGP FlowSpec policy daemon for automated DDoS mitigation. It receives attack signals from detectors, applies policy-driven playbooks, and announces FlowSpec rules through rustbgpd, with GoBGP available as an explicit alternative.
+**Turn DDoS detector signals into guarded BGP FlowSpec mitigations.**
 
-![Dashboard Overview](docs/images/dashboard-overview.png)
+Detectors post attack events over HTTP. prefixd maps the target to your
+inventory, picks a playbook, checks guardrails, and asks a separate BGP speaker
+to announce a FlowSpec rule with a mandatory TTL. No detector speaks BGP.
 
-*Example data; router installation is unobserved.*
+[Documentation](docs/README.md) · [Quickstart](docs/tutorials/quickstart.md) ·
+[Cookbook](docs/cookbook/README.md) · [Releases](https://github.com/lance0/prefixd/releases)
 
----
+> **Preferred speaker: [rustbgpd](https://github.com/lance0/rustbgpd)**, "an
+> API-first BGP daemon in Rust for route servers, route reflectors, and network
+> automation." prefixd drives it over gRPC, and the `rustbgpd` Compose profile
+> is the default path. GoBGP stays maintained and selectable.
+> [Why rustbgpd](#pairs-with-rustbgpd)
 
-## Why prefixd?
+**Status:** pre-1.0, and the API can change before 1.0. The rustbgpd backend
+and Compose profiles are on `main` and not yet released; the latest release,
+[v0.19.1](https://github.com/lance0/prefixd/releases/tag/v0.19.1), predates them.
 
-You have detectors (FastNetMon, Kentik, Prometheus alerts) that know when you're under attack. You have routers (Juniper, Arista, Cisco) that can filter traffic at line rate with FlowSpec. But there's a gap:
+## Choose your path
 
-| Problem | Without prefixd | With prefixd |
-|---------|-----------------|--------------|
-| **Detector → Router** | Manual CLI or fragile scripts | Automated policy engine |
-| **Response** | Operator-driven configuration | API-driven policy evaluation |
-| **Safety** | Easy to fat-finger, no guardrails | Quotas, safelist, IPv4/IPv6 host destinations, TTLs |
-| **Visibility** | Scattered logs, no audit trail | Dashboard, metrics, audit log |
-| **Expiry** | Forget to remove rules | Controller-driven TTL cleanup |
+### NOC with a detector
 
-**Key idea:** Detectors signal intent, prefixd decides policy. No detector ever speaks BGP directly.
+FastNetMon, Prometheus Alertmanager or any JSON webhook sends attack events.
+prefixd groups signals per target, weighs corroborating sources and applies the
+matching playbook. Controller integration tests cover these adapters; the dated
+profile qualification covers manual mitigation, not detector traffic.
 
-```
-Detector ──► prefixd ──► rustbgpd ──► Routers
-                │
-                ├── Policy Engine (playbooks)
-                ├── Guardrails (quotas, safelist)
-                └── Reconciliation (auto-expire)
-```
+[FastNetMon](docs/how-to/detectors/fastnetmon.md) · [Generic webhook](docs/how-to/detectors/generic-webhook.md) ·
+[Corroborating signals](docs/how-to/detectors/corroborating-signals.md)
 
----
+### Operator during an attack
 
-## Quick Start
+Mitigate a target by hand from the dashboard or API inside the same guardrails,
+then withdraw it with a reason that the audit log keeps. Rehearse policy in
+dry-run before you let it announce.
 
-Clone the repository and start the rustbgpd profile:
+[Manual mitigation](docs/cookbook/manual-mitigation.md) · [Dry-run rollout](docs/cookbook/dry-run-rollout.md) ·
+[Troubleshooting](docs/how-to/troubleshooting.md)
+
+### Automation and integration
+
+Drive events, mitigations, the safelist and configuration through the HTTP API
+or `prefixdctl`. The controller serves its OpenAPI document at `/openapi.json`.
+
+[HTTP API](docs/reference/api.md) · [CLI](docs/reference/cli.md) ·
+[Authentication](docs/how-to/deployment.md#authentication-setup)
+
+prefixd stops at the speaker. Router receipt and enforcement depend on your
+router software, address family and import policy. Existing router receipts are
+scoped to GoBGP; rustbgpd has local and peer tests but no vendor router receipt
+yet. See [vendor compatibility](docs/reference/vendors.md).
+
+## Try it locally
+
+With Git and Docker Compose installed, start the controller, dashboard,
+PostgreSQL and rustbgpd from published images. Nothing compiles locally.
 
 ```bash
 git clone https://github.com/lance0/prefixd.git
@@ -46,227 +71,137 @@ cd prefixd
 docker compose --profile rustbgpd up -d --pull always --no-build
 ```
 
-The prebuilt controller and dashboard images follow the published `main` build.
-No source compilation is needed; see the [local build option](docs/tutorials/quickstart.md#build-from-source)
-when working on the code. The standard controller includes both adapters. This profile starts
-rustbgpd with a private owner-authenticated Unix socket; no management RPC port
-is published. The FlowSpec-only peer example uses a documentation address:
-configure your own edge router in `configs/rustbgpd.toml` before expecting a
-session or enforcement.
+Create the first administrator at the hidden password prompt, then check
+liveness:
 
 ```bash
-# Create the first dashboard administrator; enter a password at the prompt.
 docker compose exec prefixd-rustbgpd prefixdctl operators create \
   --username admin --role admin
 curl http://localhost/v1/health
-open http://localhost
 ```
 
-Use `docker compose --profile gobgp up -d --pull always --no-build` for the GoBGP
-profile, and `prefixd-gobgp` for controller commands. Select exactly one profile.
-Profile selection does not transfer active rules or an existing database's
-speaker ownership binding.
+Open `http://localhost` and sign in. nginx serves the dashboard and API on port
+80, and rustbgpd publishes BGP on 179. Prometheus (9091) and Grafana (3001) bind
+host loopback only. The sample peer uses a documentation address, so it stays
+Idle until you configure your edge router in `configs/rustbgpd.toml`.
 
-The [quickstart](docs/tutorials/quickstart.md) explains configuration storage,
-ports, login and troubleshooting. PostgreSQL and speaker management remain
-internal; nginx serves the application on port 80. Prometheus binds host loopback
-on 9091 and Grafana on 3001; metrics are not forwarded by the public application.
-Running prefixd enforces TTL expiry; an independently running
-speaker can retain rules while the controller is stopped.
+![Dashboard overview](docs/images/dashboard-overview.png)
 
----
+*Synthetic data; router installation is unobserved.*
 
-## Next Steps
+For GoBGP, start a fresh deployment with
+`docker compose --profile gobgp up -d --pull always --no-build` and run
+controller commands in `prefixd-gobgp`. Run one profile at a time: switching
+doesn't move active rules or the database's speaker binding. The
+[quickstart](docs/tutorials/quickstart.md) covers configuration storage,
+building from source and troubleshooting.
 
-Once you have prefixd running locally:
+## Guardrails run before the speaker sees a rule
 
-### 1. Configure your inventory
-
-Edit the running inventory in the persistent config volume (see the [quickstart](docs/tutorials/quickstart.md#configuration-and-persistence)) to map your IP space to customers:
-
-```yaml
-customers:
-  - customer_id: acme
-    name: "ACME Corp"
-    prefixes:
-      - "203.0.113.0/24"
-    services:
-      - service_id: dns
-        assets:
-          - ip: "203.0.113.10"
-        allowed_ports:
-          udp: [53]
-```
-
-### 2. Define playbooks
-
-As an administrator, open **Config → Playbooks** to edit the persisted policies.
-Checkout files seed a new configuration volume; changing them does not replace
-existing volume contents. See [configuration storage](docs/tutorials/quickstart.md#configuration-and-persistence)
-for direct file edits. The initial playbook step selects the action and TTL:
-
-```yaml
-playbooks:
-  - name: udp_flood
-    match:
-      vector: udp_flood
-    steps:
-      - action: police
-        rate_bps: 10000000    # 10 Mbps
-        ttl_seconds: 120
-```
-
-### 3. Connect a detector
-
-Point your detector at prefixd's API. Three integration paths:
-
-**Generic events API** (any detector):
-
-This example uses **bearer mode** with the token configured on the controller.
-The default credentials profile requires a logged-in session cookie instead;
-a bearer header does not sign it in. Choose authentication in the
-[deployment guide](docs/how-to/deployment.md#authentication-setup).
+Detector events and manual requests pass the same checks before prefixd saves
+intent or calls the speaker. A rejection returns `422` with its reason and sends
+nothing to BGP. With the shipped [`configs/prefixd.yaml`](configs/prefixd.yaml),
+sign in and request a mitigation for a safelisted address:
 
 ```bash
-curl -X POST http://localhost/v1/events \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
-  -d '{
-    "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",
-    "source": "fastnetmon",
-    "victim_ip": "203.0.113.10",
-    "vector": "udp_flood",
-    "bps": 5000000000
-  }'
+curl -sS -c cookies.txt -X POST http://localhost/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"your_password_here"}'
+curl -sS -b cookies.txt -X POST http://localhost/v1/mitigations \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"guardrail check","victim_ip":"10.0.0.5","protocol":"udp",
+       "dst_ports":[53],"action":"discard","ttl_seconds":120}'
 ```
 
-**Native adapters** (zero-config signal translation):
-- **Alertmanager** → `POST /v1/signals/alertmanager` — maps labels/annotations to events
-- **FastNetMon** → `POST /v1/signals/fastnetmon` — accepts native JSON payload
-
-**Generic webhook adapter** — For detectors without a native integration (commercial DDoS appliances, internal abuse systems, cloud alerting), configure a named adapter in `correlation.yaml` with JSONPath field mappings:
-
-```yaml
-webhook_adapters:
-  - name: radware
-    auth: { type: hmac, secret_env: RADWARE_WEBHOOK_SECRET, header: X-Signature-SHA256, algorithm: sha256 }
-    root_path: "$.alerts[*]"
-    fields:
-      victim_ip: "$.target.ip"
-      vector: "$.alert_type"
-      bps: "$.traffic.bps"
+```json
+{"error":"guardrail violation: IP 10.0.0.5/32 is safelisted"}
 ```
 
-POST your JSON to `/v1/signals/webhook/{name}`. See [Generic Webhook Adapter](docs/how-to/detectors/generic-webhook.md).
+The other limits in the shipped configuration reject requests the same way:
 
-With [multi-signal correlation](docs/reference/configuration.md#correlation) enabled, events from multiple detectors targeting the same IP are grouped and corroborated before triggering mitigation.
+| Guardrail | Shipped setting | Example rejection |
+|-----------|-----------------|-------------------|
+| Safelist | `10.0.0.0/8`, `192.168.0.0/16`, plus API entries | `IP 10.0.0.5/32 is safelisted` |
+| TTL | Required, 30 to 1800 seconds | `TTL 7200s out of bounds (min=30, max=1800)` |
+| Ports | At most 8 destination ports | `too many ports: 9 (max=8)` |
+| Active quotas | 5 per customer, 200 per POP, 500 global | `quota exceeded: customer (5/5)` |
+| Destination | IPv4 `/32` and IPv6 `/128` host routes only | Intent is always built as a host route |
 
-See [FastNetMon Integration](docs/how-to/detectors/fastnetmon.md) for a complete setup guide.
+Two more rules protect routing state:
 
-### 4. Peer with your routers
+- **Dry-run:** `mode: dry-run` runs the full pipeline and records mitigations,
+  metrics and audit entries, but never calls the speaker. The shipped config
+  sets `mode: enforced`; a config that omits `mode` runs in dry-run.
+- **Immutable withdrawal intent:** an operator withdrawal, detector unban or
+  TTL expiry saves its rule, actor and reason before the speaker call. A failed
+  or uncertain delete stays pending and retries against the same speaker; it
+  can't turn back into an announcement.
 
-Configure rustbgpd neighbors in `configs/rustbgpd.toml` (or `configs/gobgp.conf` for the GoBGP profile) and set up FlowSpec import policies on your routers. See [Router Setup](docs/how-to/deployment.md#router-configuration).
+A `201` means prefixd saved intent and the speaker accepted the local request.
+It doesn't prove that a router installed the rule. The running controller
+enforces TTLs: if prefixd stops while the speaker stays up, rules stay announced.
 
----
+[Guardrail settings](docs/reference/configuration.md#guardrails) ·
+[Withdrawal recovery](docs/reference/speaker-backends.md#withdrawal-recovery) ·
+[Dry-run rollout](docs/cookbook/dry-run-rollout.md)
 
-## Features
+## Install
 
-| Category | What it does |
-|----------|--------------|
-| **Signal Ingestion** | HTTP API + native Alertmanager and FastNetMon webhooks + configurable generic webhook adapter with JSONPath mapping |
-| **Multi-Signal Correlation** | Time-windowed grouping of events from multiple detectors with source weighting and corroboration |
-| **Policy Engine** | YAML playbooks select an initial per-vector action and TTL |
-| **Guardrails** | Quotas, safelist, IPv4/IPv6 host destinations, mandatory TTLs |
-| **BGP FlowSpec** | Announces through rustbgpd or GoBGP (policing and discard actions) |
-| **Reconciliation** | Retries TTL/withdrawal cleanup and repairs supported local drift at the configured interval |
-| **Dashboard** | Real-time web UI with WebSocket updates and toast notifications |
-| **Manual Mitigation** | "Mitigate Now" form for operator-initiated events |
-| **Authentication** | Three roles (admin, operator, viewer) with mode-aware auth (`none`, `bearer`, `credentials`, `mtls`) |
-| **Observability** | Prometheus metrics, Grafana dashboards, structured logs, audit trail |
-| **CLI** | `prefixdctl` for status, mitigations, safelist, config reload |
+CI publishes the controller and dashboard images to `ghcr.io/lance0/prefixd`
+and `ghcr.io/lance0/prefixd-dashboard`. Pin a controller and dashboard built
+from the same revision.
 
----
+- **Run the containers:** follow [image selection](docs/how-to/deployment.md#image-publication-and-selection)
+  and the [deployment guide](docs/how-to/deployment.md).
+- **Build from source:** Rust 1.89 or later and PostgreSQL 14 or later.
+  `cargo build --release` builds `prefixd` and `prefixdctl` with both speaker
+  adapters; see [bare-metal deployment](docs/how-to/deployment.md#bare-metal-deployment)
+  and [contributing](CONTRIBUTING.md#setup).
+- **Before production:** set up [authentication](docs/how-to/deployment.md#authentication-setup),
+  [TLS](docs/how-to/deployment.md#tls-configuration) and
+  [router import policy](docs/how-to/deployment.md#router-configuration). Run one
+  controller per POP and speaker target, and read the
+  [upgrade guide](docs/how-to/upgrading.md) before changing either.
 
-## How It Works
+## Pairs with rustbgpd
 
-1. **Detector sends event** → `POST /v1/events`, `/v1/signals/alertmanager`, `/v1/signals/fastnetmon`, or a configured `/v1/signals/webhook/{name}`
-2. **Inventory lookup** → Find customer/service owning the IP
-3. **Signal correlation** → Group related signals by (victim_ip, vector), check corroboration
-4. **Playbook match** → Determine action (police/discard) based on vector
-5. **Guardrails check** → Validate quotas, safelist, prefix length
-6. **FlowSpec announce** → Send rule to the selected speaker via its adapter
-7. **Router enforcement** → Traffic filtered at line rate
-8. **Auto-expiry** → Rule withdrawn when TTL expires
+prefixd decides what to mitigate; [rustbgpd](https://github.com/lance0/rustbgpd)
+owns the BGP sessions. The two meet at a narrow, tested boundary:
 
-**TTL enforcement:** The running controller withdraws expired mitigations.
-If prefixd stops while its separate BGP speaker stays up, rules can persist
-until reconciliation resumes or an operator withdraws them. See
-[speaker backends](docs/reference/speaker-backends.md) for the rustbgpd rollout and failure
-semantics.
+- **Typed gRPC calls:** prefixd adds, deletes and lists FlowSpec rules through
+  rustbgpd's injection and RIB services, on an owner-only Unix socket locally
+  or verified mTLS remotely. Every mutation returns an explicit outcome.
+- **Reconciliation restores lost rules:** rustbgpd holds injected rules in its
+  process. After a speaker restart, prefixd's database still holds the desired
+  state, and the next reconciliation poll (every 30 seconds in the shipped
+  config) re-adds missing rules.
+- **Qualified versions:** v0.76.0 is the minimum controller contract and
+  v0.77.0 is the Compose pin. CI runs the lifecycle, TTL and restart suite
+  against both immutable images.
 
----
+This qualifies the controller-to-speaker boundary on Linux amd64. It says
+nothing about router enforcement.
+
+[rustbgpd README](https://github.com/lance0/rustbgpd#readme) ·
+[rustbgpd docs](https://github.com/lance0/rustbgpd/blob/main/docs/README.md) ·
+[Speaker backends](docs/reference/speaker-backends.md) ·
+[ADR 023](docs/adr/023-rustbgpd-over-grpc.md)
 
 ## Documentation
 
-| Topic | Link |
-|-------|------|
-| Documentation index | [docs/README.md](docs/README.md) |
-| Local-stack tutorial | [Quickstart](docs/tutorials/quickstart.md) |
-| Full deployment guide | [docs/how-to/deployment.md](docs/how-to/deployment.md) |
-| Configuration reference | [docs/reference/configuration.md](docs/reference/configuration.md) |
-| API reference | [docs/reference/api.md](docs/reference/api.md) |
-| CLI reference | [docs/reference/cli.md](docs/reference/cli.md) |
-| Router setup | [docs/how-to/deployment.md#router-configuration](docs/how-to/deployment.md#router-configuration) |
-| Grafana dashboards | [docs/how-to/grafana.md](docs/how-to/grafana.md) |
-| Architecture | [docs/explanation/architecture.md](docs/explanation/architecture.md) |
+Start with the [documentation index](docs/README.md), or go to your task:
 
----
-
-## Supported Routers
-
-Support depends on the exact router software, address family and action. See the
-[vendor reference](docs/reference/vendors.md) for recorded environments and
-limitations. Existing router receipts are scoped to GoBGP; rustbgpd's local and
-peer receipt tests do not establish vendor forwarding.
-
----
-
-## Requirements
-
-- **Docker** (recommended) or Rust 1.89+ for building from source
-- **PostgreSQL 14+** for state storage
-- **rustbgpd** is the primary Compose profile; GoBGP remains selectable
-
----
-
-## Upgrading
-
-Database migrations run automatically on startup. See **[docs/how-to/upgrading.md](docs/how-to/upgrading.md)** for version-specific notes.
-
-> **v0.12.0 breaking change:** Offset-based pagination (`?offset=N`) has been removed from all list endpoints. Use cursor-based pagination instead (`?cursor=<opaque>&limit=N`). If you have scripts or integrations using `--offset` or `?offset=`, they must be updated. See [ADR 016](docs/adr/016-cursor-pagination.md) for rationale and [upgrading.md](docs/how-to/upgrading.md) for migration examples.
-
----
-
-## Project Status
-
-Published versions: [GitHub Releases](https://github.com/lance0/prefixd/releases).
-
-- Core functionality stable and tested
-- Real-time dashboard with WebSocket updates, toast notifications, and mitigation detail views
-- Full operator workflow: manual mitigation, withdraw, safelist management, config browsing
-- API may change before v1.0
-- See [ROADMAP.md](ROADMAP.md) for planned features
-
----
-
-## Community
-
-- **Issues:** [GitHub Issues](https://github.com/lance0/prefixd/issues)
-- **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
-- **Architecture Decision Records:** [Decision index](docs/adr/README.md)
-
----
+| Task | Guide |
+|------|-------|
+| Run it for the first time | [Quickstart](docs/tutorials/quickstart.md) · [Cookbook](docs/cookbook/README.md) |
+| Connect a detector | [FastNetMon](docs/how-to/detectors/fastnetmon.md) · [Generic webhook](docs/how-to/detectors/generic-webhook.md) · [Correlation](docs/reference/configuration.md#correlation) |
+| Configure, deploy or upgrade | [Configuration](docs/reference/configuration.md) · [Deployment](docs/how-to/deployment.md) · [Upgrading](docs/how-to/upgrading.md) |
+| Automate | [HTTP API](docs/reference/api.md) · [CLI](docs/reference/cli.md) · [API versioning](docs/reference/api-versioning.md) |
+| Choose or operate a speaker | [Speaker backends](docs/reference/speaker-backends.md) · [Vendors](docs/reference/vendors.md) · [Troubleshooting](docs/how-to/troubleshooting.md) |
+| Check the evidence | [Profile qualification](docs/reference/qualification/speaker-profiles-2026-10-18.md) · [Benchmarks (historical)](docs/perf/benchmarks.md) |
+| Understand or contribute | [Architecture](docs/explanation/architecture.md) · [Decisions](docs/adr/README.md) · [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md) |
+| Report a problem | [Issues](https://github.com/lance0/prefixd/issues) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) |
 
 ## License
 
-MIT - See [LICENSE](LICENSE)
+MIT. See [LICENSE](LICENSE).

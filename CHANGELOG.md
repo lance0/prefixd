@@ -373,6 +373,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- Rebuild the README around reader paths, the rustbgpd profile and the
+  guardrails that run before any speaker call. Move setup next steps into the
+  quickstart, add cookbook recipes for manual mitigation and dry-run rollout,
+  and route the documentation index by task.
+
 - Replace the historical roadmap checklist with current remaining work and
   reconcile speaker/framework decisions with shipped defaults, transports and
   durable intent. Remove the unusable duplicate PostgreSQL example; use the

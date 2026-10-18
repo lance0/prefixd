@@ -55,6 +55,11 @@ specific published commit tags or release references you have qualified; see
 
 ## Configure the edge
 
+[rustbgpd](https://github.com/lance0/rustbgpd) is the preferred speaker: a Rust
+BGP daemon that prefixd drives over its gRPC API. Its
+[documentation](https://github.com/lance0/rustbgpd/blob/main/docs/README.md)
+covers peer and policy settings beyond this example.
+
 `configs/rustbgpd.toml` adapts the released rustbgpd DDoS example: both IPv4 and
 IPv6 FlowSpec, explicit reject-import/permit-export policy, and no unicast/RTBH
 family. Replace the documentation peer `192.0.2.1` and AS numbers with your edge
@@ -135,6 +140,26 @@ application proxies block metrics. Change conflicting host port
 mappings before starting. Use HTTPS at the public ingress for a remote deployment.
 The running controller enforces TTLs; stopping it alone does not expire rules.
 
-Continue with [authentication](../how-to/deployment.md#authentication-setup),
-[router configuration](../how-to/deployment.md#router-configuration), and
-[speaker semantics and qualification limits](../reference/speaker-backends.md).
+## Next steps
+
+Adapt the sample policy to your network, then connect a signal source:
+
+1. **Map your address space.** Edit the persisted inventory as shown in
+   [configuration and persistence](#configuration-and-persistence). Each
+   customer lists its prefixes, and each service lists its assets and allowed
+   ports. See the [inventory reference](../reference/configuration.md#inventoryyaml).
+2. **Review playbooks.** As an administrator, open **Config → Playbooks**.
+   Each playbook matches a vector, and the controller applies its first step's
+   action and TTL. See [step selection](../reference/configuration.md#step-selection).
+3. **Rehearse.** Run a [manual mitigation and withdrawal](../cookbook/manual-mitigation.md),
+   or switch to [dry-run](../cookbook/dry-run-rollout.md) before you connect a
+   detector.
+4. **Connect a detector.** Use the [FastNetMon](../how-to/detectors/fastnetmon.md)
+   notify script, [Alertmanager](../how-to/deployment.md#alertmanager-setup), or a
+   [generic webhook adapter](../how-to/detectors/generic-webhook.md). Detectors
+   usually authenticate with a bearer token; choose a mode in
+   [authentication](../how-to/deployment.md#authentication-setup).
+5. **Peer with your routers.** Replace the documentation peer in
+   `configs/rustbgpd.toml` (or `configs/gobgp.conf`) and configure FlowSpec
+   import on the router. See [router configuration](../how-to/deployment.md#router-configuration)
+   and the [speaker semantics and qualification limits](../reference/speaker-backends.md).
