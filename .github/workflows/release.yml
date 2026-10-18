@@ -1,0 +1,280 @@
+name: Release
+
+# A `vX.Y.Z` tag publishes once, fail-closed: the tag must equal the Cargo.toml
+# version, name a commit on main whose ci.yml push run passed, and every build
+# must succeed before anything is pushed. The GitHub Release is created as a
+# draft; publishing it is the owner's step. See docs/project/release-checklist.md.
+#
+# A manual dispatch is a dry run of the same jobs at the chosen ref: the tag name
+# comes from Cargo.toml, images are built and smoke-tested but never pushed, and
+# no release is created. Publication steps are guarded on the push event itself.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify tag, main CI and notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read # read ci.yml runs for the tagged commit
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check tag, main ancestry and exact-commit CI
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            tag="v$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          scripts/release-check.sh "$tag" "$GITHUB_SHA"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract CHANGELOG section
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          scripts/release-notes.py --selftest
+          scripts/release-notes.py "$VERSION" > release-notes.md
+          cat release-notes.md
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
+  binaries:
+    name: Linux binaries and SBOM
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Debian 12 (glibc 2.36), same toolchain as the Dockerfile builder. Building
+    # on the runner would link its newer glibc.
+    container: rust:1.99.1-bookworm@sha256:e12566d5abc17a0da741628782cdb504b68b8961f5bfcf677936bf3e8b32de29
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install protobuf compiler
+        run: apt-get update && apt-get install -y --no-install-recommends protobuf-compiler
+
+      - name: Build release binaries
+        run: cargo build --locked --release --bins
+
+      - name: Generate SBOM
+        run: |
+          cargo install --locked cargo-cyclonedx --version 0.5.9
+          cargo cyclonedx --format json --override-filename prefixd-sbom.cdx
+
+      - name: Package, smoke-test and checksum
+        run: |
+          set -euo pipefail
+          mkdir -p staging dist
+          cp target/release/prefixd target/release/prefixdctl LICENSE staging/
+          test "$(staging/prefixdctl --version)" = "prefixdctl $VERSION"
+          staging/prefixd --help > /dev/null
+          # Version-less name, so releases/latest/download/ URLs stay stable.
+          tar -C staging -czf dist/prefixd-linux-amd64.tar.gz prefixd prefixdctl LICENSE
+          cp prefixd-sbom.cdx.json dist/
+          cd dist
+          sha256sum prefixd-linux-amd64.tar.gz prefixd-sbom.cdx.json > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binaries
+          path: dist/
+          if-no-files-found: error
+
+  images:
+    name: Image (${{ matrix.image }})
+    # Push no image unless the tag checks and binary build passed.
+    needs: [verify, binaries]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: prefixd
+            context: .
+            file: ./Dockerfile
+          - image: prefixd-dashboard
+            context: ./frontend
+            file: ./frontend/Dockerfile
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      REPOSITORY: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REPOSITORY }}
+          # X.Y.Z and X.Y (prereleases get X.Y.Z only). `latest` stays with
+          # ci.yml's main-branch images.
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.verify.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.verify.outputs.tag }}
+
+      - name: Build image for verification
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          load: true
+          tags: ${{ matrix.image }}:verify
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+
+      - name: Smoke-test image
+        run: scripts/release-smoke-image.sh "${{ matrix.image }}" "${{ matrix.image }}:verify" "$VERSION" "$GITHUB_SHA"
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push version tags
+        if: github.event_name == 'push'
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+
+      - name: Record digest
+        if: github.event_name == 'push'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p digests
+          echo "$REPOSITORY $DIGEST" > "digests/${{ matrix.image }}"
+
+      - name: Upload digest
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.image }}
+          path: digests/
+          if-no-files-found: error
+
+  release:
+    name: Draft GitHub Release
+    needs: [verify, binaries, images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the draft release
+    env:
+      TAG: ${{ needs.verify.outputs.tag }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: binaries
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        if: github.event_name == 'push'
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: Assemble release body
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            cat digests/* | sort > dist/image-digests.txt
+            test "$(wc -l < dist/image-digests.txt)" -eq 2
+          fi
+          version="${TAG#v}"
+          image_tags="\`$version\`"
+          [[ "$version" == *-* ]] || image_tags="$image_tags and \`${version%.*}\`"
+          {
+            cat release-notes.md
+            echo
+            echo "## Artifacts"
+            echo
+            echo "Container images, tagged $image_tags:"
+            echo
+            if [ -s dist/image-digests.txt ]; then
+              while read -r repo digest; do echo "- \`$repo@$digest\`"; done < dist/image-digests.txt
+            else
+              echo "- dry run: no images pushed"
+            fi
+            echo
+            echo "SHA256SUMS:"
+            echo
+            echo '```text'
+            cat dist/SHA256SUMS
+            echo '```'
+          } > release-body.md
+          cat release-body.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create draft release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          prerelease=()
+          [[ "$TAG" == *-* ]] && prerelease=(--prerelease)
+          # Fails if a release for this tag already exists; nothing is overwritten.
+          gh release create "$TAG" --draft --verify-tag "${prerelease[@]}" \
+            --title "$TAG" --notes-file release-body.md dist/*

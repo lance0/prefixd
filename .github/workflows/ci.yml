@@ -1,9 +1,9 @@
 name: CI
 
 on:
+  # Version tags publish once, through release.yml.
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
 
 # Superseded runs on the same branch/PR are pointless once a newer commit lands.
@@ -221,19 +221,6 @@ jobs:
           name: prefixd-linux-amd64
           path: target/release/prefixd
 
-      - name: Generate SBOM
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          cargo install cargo-cyclonedx --quiet
-          cargo cyclonedx --format json --override-filename prefixd-sbom.cdx
-
-      - name: Upload SBOM
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v7
-        with:
-          name: prefixd-sbom
-          path: prefixd-sbom.cdx.json
-
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
@@ -340,8 +327,6 @@ jobs:
           tags: |
             type=sha,prefix=
             type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build images (publish on push only)
