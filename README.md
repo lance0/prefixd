@@ -86,7 +86,11 @@ Open `http://localhost` and sign in. nginx serves the dashboard and API on port
 host loopback only. The sample peer uses a documentation address, so it stays
 Idle until you configure your edge router in `configs/rustbgpd.toml`.
 
-![Dashboard overview](docs/images/dashboard-overview.png)
+<img src="docs/images/dashboard-overview.png#gh-light-mode-only" alt="Dashboard overview">
+<img src="docs/images/dashboard-overview-dark.png#gh-dark-mode-only" alt="Dashboard overview">
+
+<img src="docs/images/dashboard-mitigations.png#gh-light-mode-only" alt="Mitigations list">
+<img src="docs/images/dashboard-mitigations-dark.png#gh-dark-mode-only" alt="Mitigations list">
 
 *Synthetic data; router installation is unobserved.*
 

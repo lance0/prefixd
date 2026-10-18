@@ -130,9 +130,10 @@ All failed and diagnostic attempts remain retained:
   the screenshot with no controller, PostgreSQL, real identities or backend
   writes. The earlier driver exit remains 1.
 
-The approved [overview image](../../images/dashboard-overview.png) is a
-1440×1100 light-theme capture from that separate published-dashboard fixture.
-Its data is explicitly synthetic and router installation is labelled unobserved.
+The approved overview image was a 1440×1100 light-theme capture from that
+separate published-dashboard fixture. Its data is explicitly synthetic and
+router installation is labelled unobserved. A later redesign replaced the
+README screenshots; this capture remains in Git history under the hash below.
 PNG SHA-256: `e3c84de9ea79e49c8105b57b42739a338c5efb280882f52550268055a1bc454b`.
 The corrected documentation probe has SHA-256
 `241c95e813944eed3f31f8be30892072de4ffeedf148489d86fe8fd83b29bf81`.
