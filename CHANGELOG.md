@@ -7,22 +7,146 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-19
+
 ### Upgrade notes
 
-- Upgrading from v0.19.1 needs one maintenance step: back up PostgreSQL, keep
-  `mode` and the GoBGP endpoint unchanged, run `prefixd --adopt-legacy-speaker`
-  once, then start normally. Follow
-  [v0.19.1 → 0.20.0](docs/how-to/upgrading.md#v0191--0200), which includes a
-  route for the v0.19.1 Compose layout.
-- An unchanged v0.19.1 `prefixd.yaml` loads. Its removed keys (`escalation`,
-  `http.auth.ldap`, `http.auth.radius`, `timers.correlation_window_seconds`,
+- Upgrading from v0.19.1 is one maintenance step: back up PostgreSQL, keep
+  `pop`, `mode` and the GoBGP endpoint unchanged, run
+  `prefixd --adopt-legacy-speaker` once, then start normally. Migrations
+  013–015 apply on first start. Follow
+  [v0.19.1 → 0.20.0](https://github.com/lance0/prefixd/blob/v0.20.0/docs/how-to/upgrading.md#v0191--0200),
+  which includes a route that keeps the v0.19.1 Compose layout and pins the
+  0.20.0 images.
+- An unchanged v0.19.1 `prefixd.yaml` loads and stays on GoBGP. Its removed
+  keys are ignored with one warning each; 0.21.0 rejects them, so delete them
+  during the upgrade. See Removed below.
+- Switching a POP from `mode: dry-run` to `enforced` now needs
+  `prefixd --retire-dry-run-intent` first while unexpired dry-run mitigations
+  remain. Enforced startup refuses to run until they are retired.
+- Review Breaking below before upgrading: API and detector clients see
+  new `202`, `400`, `409` and `422` responses, saved pagination cursors stop
+  working, and Compose commands need a speaker profile.
+- Source builds need Rust 1.89 or later.
+
+### Breaking
+
+- Make rustbgpd the default speaker. `bgp.backend` selects `rustbgpd` or
+  `gobgp`; `bgp.mode: sidecar` remains a GoBGP spelling. When `bgp.backend` is
+  unset, a configuration with only `bgp.gobgp_grpc` resolves to GoBGP and
+  warns, one with both `bgp.gobgp_grpc` and `bgp.rustbgpd` fails to load until
+  `bgp.backend` is set, and one without `bgp.gobgp_grpc` resolves to rustbgpd.
+  Shipped configurations set `bgp.backend` explicitly. 0.21.0 will require
+  `bgp.backend` whenever `bgp.gobgp_grpc` is set.
+
+- Bind each POP to an immutable, credential-free speaker target before
+  connecting. Migration 014 adds the targets and retains target IDs on
+  withdrawal requests; lifecycle guards reject missing or mismatched ownership,
+  and startup rejects a target that differs from the bound one. A database with
+  v0.19.1 speaker history needs the one-shot `prefixd --adopt-legacy-speaker`,
+  which binds the configured target, audits the adoption and exits without
+  connecting to the speaker. Credential rotation preserves the binding;
+  changing speakers needs the drained target transfer in the upgrade guide.
+
+- Refuse enforced startup while the POP has unexpired dry-run mitigations, and
+  return `409` without storing the event when a detector event would extend
+  one in enforced mode. Retire them with `prefixd --retire-dry-run-intent`.
+  See Security below.
+
+- Reject ban events from `mode: corroborating` sources on `/v1/events/batch`
+  and the Alertmanager, FastNetMon and generic webhook adapters, as `/v1/events`
+  already did. See Security below.
+
+- Return accepted intent with a request-local
+  `announcement_outcome: "unconfirmed"` and mitigation ID after speaker errors,
+  including batch and signal wrappers. Manual creation uses HTTP `202` for this
+  case; ordinary success and dry-run keep `201`. The dashboard warns that
+  announcement is unconfirmed and opens the saved intent.
+
+- Enforce the documented `quotas.max_new_per_minute` limit, which was parsed
+  but never applied. Admission now rejects a new mitigation with `422` when the
+  POP already has that many mitigations created in the trailing 60 seconds,
+  checked in the same serialised transaction as the active quotas, so
+  controllers sharing the database cannot both take the last slot. A rejected
+  request saves nothing, announces nothing and uses no quota slot, and
+  increments `prefixd_guardrail_rejections_total{reason="NewMitigationRateExceeded"}`.
+  Dry-run creations count; TTL extensions by repeat events do not. `0` admits no
+  new mitigations, as for the active quotas. The shipped configs set 30, so a
+  burst above 30 new mitigations a minute at one POP is now rejected; raise the
+  limit before upgrading if you rely on larger bursts.
+
+- Reject duplicate map keys in YAML configuration, which the previous parser
+  could silently replace with the later value. Unknown keys in `observability`
+  and `shutdown` other than the removed keys listed below now fail loading.
+
+- Return structured `400` errors instead of silently dropping or ignoring
+  input: malformed or empty date filters on event, audit, mitigation and
+  signal-group listings; invalid mitigation and signal-group status tokens;
+  empty or NUL POP filters; and malformed, oversized, wrong-endpoint or
+  superseded pagination cursors.
+
+- Reject `http.auth.mode: mtls` at startup without native TLS and nonempty
+  server certificate, key and client-CA paths. See Security below.
+
+- Replace the Compose layout. `docker-compose.yml` now has `rustbgpd` and
+  `gobgp` profiles in one controller image, named volumes seeded from image
+  defaults, and prebuilt `main` images, in place of `build: .` and the
+  `./configs` bind mount. Every Compose command selects a profile. The
+  controller runs as UID 999, and Prometheus and Grafana publish on host
+  loopback only.
+
+- Require Rust 1.89 or later to build.
+
+- Rust library users: `RustBgpdConfig` literals need the new optional identity
+  fields or `..Default::default()`. Removed library items are listed under
+  Removed.
+
+### Removed
+
+- Remove the ineffective configuration keys `escalation`, `http.auth.ldap`,
+  `http.auth.radius`, `timers.correlation_window_seconds`,
   `observability.audit_log_path`, `observability.metrics_listen` and
-  `shutdown.preserve_announcements`) are ignored with one warning each, and
-  0.21.0 will reject them. Other unknown keys keep their existing handling.
-- An unset `bgp.backend` no longer switches a v0.19.1 GoBGP configuration to
-  rustbgpd. With only `bgp.gobgp_grpc` it resolves to GoBGP and warns; with both
-  `gobgp_grpc` and `rustbgpd` it fails until `bgp.backend` is set. Shipped
-  configurations set `bgp.backend` explicitly.
+  `shutdown.preserve_announcements`. 0.20.0 still loads them, ignores them and
+  logs one warning per key with `rejected_in: "0.21.0"`; 0.21.0 rejects them.
+  Settings JSON drops `escalation`, `timers.correlation_window_seconds` and
+  `shutdown.preserve_announcements`, and the shutdown log drops its
+  preserve-announcements attribute. Playbooks select their first step,
+  credentials authentication uses PostgreSQL operators, the correlation engine
+  uses `correlation.window_seconds`, metrics stay on the private API listener
+  and shutdown still leaves speaker rules in place.
+
+- Remove timestamp-only pagination cursors. Mitigation listings use versioned
+  opaque cursors ordered by creation time and mitigation ID; event, audit and
+  signal-group listings use endpoint-specific `e1`, `a1` and `s1` cursors with
+  timestamp/UUID continuation, so timestamp ties no longer omit rows. Cursors
+  saved from v0.19.1 return `400`; restart from the first page. Filters and
+  response fields are unchanged. Undecodable stored rows fail the whole page,
+  including lookahead, rather than silently truncating results or
+  manufacturing audit actors or group dimensions; signal-group detail,
+  open/expired reads and existing-group insert results use the same fallible
+  conversion.
+
+- Hide the escalated mitigation state and the `mitigation.escalated` alert
+  event; no code path produces either. The dashboard drops the Escalated status
+  filter, command-palette shortcut and alert/notification options, and the
+  references stop listing them. Stored `escalated` rows, the `status=escalated`
+  API filter and saved alert filters or notification mutes that name
+  `mitigation.escalated` still parse. Dashboard toasts for TTL extensions
+  (`mitigation_updated`) now follow the `mitigation.created` mute instead of the
+  hidden escalated one.
+
+- Retire dashboard mock mode, unused legacy toast and CSS files, unused UI
+  scaffolding with its 23 exclusive direct dependencies, the stale npm lock and
+  the obsolete `next lint` command. Real API behavior and Sonner notifications
+  are unchanged.
+
+- Remove from the Rust library: `RepositoryTrait::find_active_by_victim` and
+  its PostgreSQL and mock implementations; `Settings.escalation`,
+  `AuthConfig.ldap` and `AuthConfig.radius`; the types `EscalationConfig`,
+  `EscalationEvaluator`, `EscalationDecision`, `LdapConfig` and `RadiusConfig`;
+  `Playbooks::get_escalation_step`; and the unused policy correlation
+  prototype. Historical escalated state and the playbook step schema are
+  retained.
 
 ### Security
 
@@ -45,6 +169,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alone. Batch rejects only the offending item; adapter unban and resolved
   alerts still reach withdrawal.
 
+- Reject `http.auth.mode: mtls` without native TLS and nonempty server
+  certificate, key and client-CA paths before database, speaker or listener
+  startup. Programmatic application-state construction enforces the same
+  validation. Configure all three TLS paths, or use bearer/credentials
+  authentication when a proxy forwards plaintext to prefixd; forwarded identity
+  headers do not authenticate mTLS clients.
+
 - Reject local and documentation IPv6 literals in alert destination URL edits,
   including IPv4-mapped forms of blocked IPv4 addresses, and reject absolute
   `localhost.` names and their subdomains. Rejected saves preserve
@@ -59,37 +190,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   corroborator ingestion changes state. Preserve optional confidence, inclusive
   zero/one boundaries and corrected retries with the same external event ID.
 
-- Check backend dependency licenses, sources and advisories with cargo-deny in
-  the existing security job. Reject unapproved licenses, sources and wildcard
-  requirements while retaining duplicate warnings and the separate full-lock
-  audit's explicit RSA exception.
-
 - Preserve exact policing rates through both speaker encoders, including 1–7 bps
   instead of turning them into discard. Reject missing, zero or inexact police
   rates and rates on discard before saving or extending intent, and when loading
   or editing playbooks. Keep historical malformed actions withdrawable by their
   exact local match.
 
-- Reject `http.auth.mode: mtls` without native TLS and nonempty server certificate,
-  key and client-CA paths before database, speaker or listener startup. Programmatic
-  application-state construction enforces the same validation. Configure all three
-  TLS paths, or use bearer/credentials authentication when a proxy forwards
-  plaintext to prefixd; forwarded identity headers do not authenticate mTLS clients.
-
 - Hide interactive operator-password entry in `prefixdctl` and restore terminal
   echo after input. Fail explicitly when a controlling terminal is unavailable.
-- Refresh the October audit baseline: `rustls` 0.23.46, `quinn-proto` 0.11.18, `h2` 0.4.19 and non-yanked `chacha20` 0.10.2 address current lockfile findings. Patch both `rand` branches to 0.8.6/0.9.3 and remove the now-obsolete RUSTSEC-2026-0097 exception. The only remaining vulnerability exception is `rsa` (RUSTSEC-2023-0071), present through sqlx's optional, uncompiled MySQL driver with no patched release. The maintained YAML replacement below removes the former YAML maintenance warning.
-- Replace unmaintained `rustls-pemfile` with `rustls-pki-types` for certificate, CA and private-key loading; remove its audit exception while preserving mandatory mTLS client verification.
-- Set the Next.js manifest floor to 16.3.8 (lock resolves 16.4.2), the Undici floor to 7.29.1 (lock resolves 7.30.1), and affected frontend transitive dependencies including sharp, source-map-js, js-yaml, Vitest and nanoid. `bun audit` reports no vulnerabilities.
+
+- Check backend dependency licenses, sources and advisories with cargo-deny in
+  the existing security job. Reject unapproved licenses, sources and wildcard
+  requirements while retaining duplicate warnings and the separate full-lock
+  audit's explicit RSA exception.
+
+- Refresh the audit baseline: `rustls` 0.23.46, `quinn-proto` 0.11.18, `h2`
+  0.4.19 and non-yanked `chacha20` 0.10.2 address current lockfile findings.
+  Patch both `rand` branches to 0.8.6/0.9.3 and remove the now-obsolete
+  RUSTSEC-2026-0097 exception. Replace unmaintained `rustls-pemfile` with
+  `rustls-pki-types` for certificate, CA and private-key loading, removing its
+  exception while preserving mandatory mTLS client verification. The
+  maintained YAML parser (see Changed) removes the former YAML
+  maintenance warning. The only remaining vulnerability exception is `rsa`
+  (RUSTSEC-2023-0071), present through sqlx's optional, uncompiled MySQL driver
+  with no patched release.
+
+- Raise dashboard dependencies to Next.js 16.4.2 and Undici 8.12.2, and patch
+  affected frontend transitive dependencies including sharp, source-map-js,
+  js-yaml, Vitest and nanoid. `bun audit` reports no vulnerabilities.
 
 ### Added
 
-- Add an FRR FlowSpec interop workflow and `just interop-frr`. Each leg drives
-  prefixd's HTTP API with rustbgpd 0.77.0 or GoBGP 4.10.0 peered to FRR 10.7.1
-  in containerlab. It asserts the exact rules in FRR's received IPv4 and IPv6
-  FlowSpec tables through discard, police, detector, withdrawal, TTL expiry
-  and speaker-restart steps, and uploads a dated receipt. This is control-plane
-  evidence only. An SR Linux 25.10.1 probe found no FlowSpec support there.
+- Include the rustbgpd speaker adapter in normal builds through the default
+  `bgp-rustbgpd` feature, with authenticated gRPC, local-rule read-back and
+  IPv4/IPv6 discard and policing support. Connect through an owner-only Unix
+  socket or verified native client-certificate mTLS; loopback bearer and
+  verified HTTPS configurations remain supported. Unix reconnects validate
+  ownership and permissions, and certificate and token rotation keep the same
+  speaker target identity. Reject non-root HTTP endpoint paths, because gRPC
+  does not use those prefixes to distinguish speaker targets. Bound initial
+  connections and TLS handshakes to ten seconds.
+
+- Add `rustbgpd` and `gobgp` Compose profiles in one controller image, with
+  private owner-authenticated speaker management and persistent writable
+  configuration seeding that preserves operator edits. The quickstart leads
+  with the prebuilt `main` controller and dashboard images and keeps a local
+  source-build option. Docker copy-up no longer resets private empty-volume
+  ownership or modes, and unused GoBGP profiling and metrics HTTP listeners are
+  disabled.
 
 - Add `origin_mode` (`dry-run`, `enforced` or `null` when unknown) to
   mitigation API responses and WebSocket mitigation messages. The dashboard
@@ -111,56 +259,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Keep controller metadata separate and failed, stale or unsupported observations
   explicit; GoBGP process metadata remains unsupported.
 
-- Include rustbgpd in normal builds and select speakers with `bgp.backend`.
-  Add explicit rustbgpd-first and GoBGP Compose profiles in one controller image,
-  private owner-authenticated management, UID 999 runtime and persistent writable
-  config seeding that preserves operator edits. Lead the quickstart with the
-  existing prebuilt main controller/dashboard images and retain an explicit local
-  source-build option. Prevent Docker copy-up from resetting private empty-volume
-  ownership/modes. Disable unused GoBGP profiling/metrics HTTP listeners.
-
-- Add an isolated pinned rustbgpd↔GoBGP FlowSpec peer test for exact dual-family
-  receipt, withdrawal/re-announcement and retained nonselected local intent.
-
-- Share exact readable-speaker lifecycle checks across Mock, rustbgpd and GoBGP; run pinned isolated GoBGP API/peer/restart qualification in CI and retain backend fixture logs.
-
-- Connect to rustbgpd through an owner-only Unix socket or verified native
-  client-certificate mTLS. Unix reconnects validate ownership and permissions;
-  certificate and token rotation retain the same speaker target identity.
-  Existing loopback bearer and verified HTTPS configurations remain supported.
-  Reject non-root HTTP endpoint paths before registration because gRPC does not
-  use those prefixes to distinguish speaker targets.
-  Rust `RustBgpdConfig` literals need the new optional identity fields or
-  `..Default::default()`; existing YAML retains its defaults.
-  Bound initial network connections and TLS handshakes to ten seconds.
-
 - Add an optional `expires_at_cap` to manual mitigation creation for maintenance
   recreation without extending the original deadline. Existing TTL guardrails
   apply to remaining lifetime. Expired intent is not announced after a database
   wait, including reconciliation's final pending-cleanup check.
 
-- Bind each POP to an immutable, credential-free speaker target before connecting.
-  Migration 014 retains target IDs on withdrawal requests; lifecycle guards reject
-  missing or mismatched ownership. Existing speaker history requires the one-shot
-  `prefixd --adopt-legacy-speaker` upgrade, which audits adoption and exits without
-  connecting to the speaker. Credential rotation preserves the binding.
-
 - Split required speaker writes from optional rule and peer observation while
-  retaining the selected-speaker facade. Health reports backend/availability;
-  CLI and dashboard distinguish unsupported, failed and empty peer reads.
-  All existing adapters retain both observations. Write-only reconciliation skips
-  repairs while preserving desired counts, TTL expiry and pending cleanup;
-  production write-only backends remain gated on a durable announcement ledger.
+  retaining the selected-speaker facade. Health reports backend and
+  availability; CLI and dashboard distinguish unsupported, failed and empty
+  peer reads. All existing adapters retain both observations. Write-only
+  reconciliation skips repairs while preserving desired counts, TTL expiry and
+  pending cleanup; production write-only backends remain gated on a durable
+  announcement ledger.
 
-- Digest-pinned rustbgpd v0.76.0/v0.77.0 CI coverage for local lifecycle, TTL
-  withdrawal and recovery through the same client after a speaker restart.
-- Reconciliation repair outcome counters and operator recovery/alert guidance.
+- Add reconciliation repair outcome counters and operator recovery and alert
+  guidance.
 
-- rustbgpd speaker adapter included through the default `bgp-rustbgpd` feature, with explicit
-  backend selection, authenticated gRPC, local-rule read-back, and IPv4/IPv6
-  discard/policing support.
+- Add `prefixd --version`. `/openapi.json` now reports the package version as
+  `info.version` instead of a fixed `1.0.0`.
+
+- Publish releases through a tag-triggered workflow: version-tagged controller
+  and dashboard images, a Linux amd64 tarball with `prefixd` and `prefixdctl`,
+  a CycloneDX SBOM, `SHA256SUMS` and image digests in a draft GitHub Release,
+  followed by an install-contract check of the published assets. `ci.yml` no
+  longer runs on version tags; it keeps publishing `main`, `latest` and
+  commit images.
+
+- Qualify the speakers in CI with isolated, pinned fixtures: shared
+  readable-speaker lifecycle checks across Mock, rustbgpd and GoBGP;
+  digest-pinned rustbgpd 0.76.0 and 0.77.0 coverage for local lifecycle, TTL
+  withdrawal and recovery through the same client after a speaker restart;
+  GoBGP API, peer and restart qualification; and a rustbgpd↔GoBGP FlowSpec peer
+  test for exact dual-family receipt, withdrawal and re-announcement and
+  retained nonselected local intent. Backend fixture logs are retained.
+
+- Add an FRR FlowSpec interop workflow and `just interop-frr`. Each leg drives
+  prefixd's HTTP API with rustbgpd 0.78.0 or GoBGP 4.10.0 peered to FRR 10.7.1
+  in containerlab. It asserts the exact rules in FRR's received IPv4 and IPv6
+  FlowSpec tables through discard, police, detector, withdrawal, TTL expiry
+  and speaker-restart steps, and uploads a dated receipt. This is control-plane
+  evidence only. An SR Linux 25.10.1 probe found no FlowSpec support there.
 
 ### Changed
+
 - Qualify rustbgpd 0.78.0: Compose and the interop lab pin it; CI tests 0.76.0
   (minimum), 0.77.0 and 0.78.0.
 
@@ -169,69 +310,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bgp_outbound_commit_refusals_total` metric exists, the
   `BgpOutboundRouteDrops` alert drops from critical to warning, and rustls
   0.23.46 security fixes cover its gRPC TLS listener.
-
-- Enforce the vendored anti-slop Oxlint rules on the dashboard: `bun run lint`
-  now runs in `just frontend`, and so in `just gate` and the CI Frontend job.
-  Dashboard tests drive components through a scripted controller behind the
-  real fetch path instead of module mocks. The playbook YAML editor now reports
-  an unknown step action as a parse error.
-
-- Add a sequential local verification gate and focused CI recipes; keep optional
-  commit/push hooks scoped, non-mutating and separate from the full pre-PR bar.
-
-- **Breaking:** Remove the unused Rust API method
-  `RepositoryTrait::find_active_by_victim` and its PostgreSQL and mock
-  implementations.
-
-- **Breaking:** Remove unused `escalation`, `http.auth.ldap` and `http.auth.radius`
-  configuration sections; remove them from controller configurations. Settings
-  JSON drops `escalation`; authentication still exposes only its mode. Remove the
-  public Rust fields `Settings.escalation`, `AuthConfig.ldap` and
-  `AuthConfig.radius`, types `EscalationConfig`, `EscalationEvaluator`,
-  `EscalationDecision`, `LdapConfig` and `RadiusConfig`, and
-  `Playbooks::get_escalation_step`. Credentials authentication uses PostgreSQL
-  operators. Playbooks select their first step; historical escalated state and
-  the playbook step schema are retained.
-
-- Hide the escalated mitigation state and the `mitigation.escalated` alert
-  event; no code path produces either. The dashboard drops the Escalated status
-  filter, command-palette shortcut and alert/notification options, and the
-  references stop listing them. Stored `escalated` rows, the `status=escalated`
-  API filter and saved alert filters or notification mutes that name
-  `mitigation.escalated` still parse. Dashboard toasts for TTL extensions
-  (`mitigation_updated`) now follow the `mitigation.created` mute instead of the
-  hidden escalated one.
-
-
-- **Breaking:** Remove ineffective `observability.metrics_listen` and
-  `observability.audit_log_path` settings. Remove these keys from existing
-  configurations before restarting; unknown observability keys now reject
-  loading. Keep unauthenticated metrics on the private API listener, block public
-  proxy access, and bind Prometheus/Grafana publications to host loopback by default.
-
-- Refresh cursor encoding to base64 0.23.1 with only its standard-library feature;
-  retain the scalar, unpadded cursor format and strict decoding.
-
-- Isolate integration-test HMAC secrets in bounded child processes, use cached
-  bearer-token fixtures and forbid unsafe code in the integration-test crate.
-  Cover real bearer startup loading and missing/empty-token rejection in child tests.
-
-- **Breaking:** Event, audit and signal-group listings now preserve tied timestamps
-  with timestamp/UUID continuation and endpoint-specific `e1`, `a1` and `s1`
-  opaque cursors. Malformed, oversized, wrong-endpoint and superseded timestamp-only
-  cursors return `400`; restart from the first page. Filters and response fields
-  are unchanged. Undecodable eligible stored rows fail the whole page, including
-  lookahead, rather than manufacturing valid audit actors or group dimensions.
-  Signal-group detail, open/expired reads and existing-group insert results use
-  the same fallible conversion; repair corrupt persisted values before retrying.
-
-- Remove the unused policy correlation prototype and ineffective
-  `timers.correlation_window_seconds` configuration/API-settings field. The active
-  multi-signal engine continues to use `correlation.window_seconds`.
-
-- Forbid unsafe code in the library and both binaries, and require explained
-  handwritten lint exemptions in those crates. Narrow ignored request-actor
-  suppressions to their fields.
 
 - Put active mitigation intent, signal evidence, expiry and honest router-observation
   limits first in the operator workspace. Refresh the light/dark theme, Geist
@@ -267,36 +345,192 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each failed read offers Retry. The Configuration, Administration and
   Correlation tabs are kept in `?tab=`, so links and refresh reopen the same tab.
 
-- Refresh the security support policy, authentication and audit guidance, and
-  release checklist to match the maintained release series and CI artifacts.
+- Replace unmaintained backend YAML parsing with `serde-saphyr` 2.0.0. Keep
+  strict booleans, unexpanded merge keys and snippet-free parse errors;
+  duplicate map keys are now rejected (see Breaking).
 
 - Refresh the dashboard toolchain to Bun 1.4.3, native Node.js 26.12.0 tests,
-  React 19.3.1 and current Radix and test dependencies. Next.js remains at 16.4.2.
-- Enforce TypeScript errors in production dashboard builds and add a standalone
-  type check.
-- Update the playbook YAML editor to js-yaml 5 with bundled TypeScript declarations
-  while preserving YAML merge keys.
-- Replace unmaintained backend YAML parsing with `serde-saphyr` 2.0.0 and require Rust 1.89. Keep strict booleans, unexpanded merge keys and snippet-free parse errors; reject duplicate map entries that the previous parser could silently replace.
+  React 19.3.1 and current Radix and test dependencies, with frozen Bun lock
+  installs in CI and containers. Enforce TypeScript errors in production
+  dashboard builds and add a standalone type check. Update the playbook YAML
+  editor to js-yaml 5 with bundled TypeScript declarations while preserving
+  YAML merge keys.
 
-- Remove unused dashboard UI scaffolding and its 23 exclusive direct dependencies.
+- Enforce the vendored anti-slop Oxlint rules on the dashboard: `bun run lint`
+  now runs in `just frontend`, and so in `just gate` and the CI Frontend job.
+  Dashboard tests drive components through a scripted controller behind the
+  real fetch path instead of module mocks. The playbook YAML editor now reports
+  an unknown step action as a parse error.
 
-- Declare Rust 1.89 as the minimum compiler and add locked Linux CI checks for
-  production binaries with rustbgpd, all targets/features and no-default-feature
-  binaries. Current stable tests and lints remain required.
+- Development and CI: add a sequential `just gate` verification bar and focused
+  recipes, with optional non-mutating commit and push hooks; check Rust 1.89
+  and locked Linux builds for production binaries with rustbgpd, all
+  targets/features and no default features; forbid unsafe code in the library,
+  both binaries and the integration-test crate, and require explained lint
+  exemptions; isolate integration-test HMAC secrets in bounded child processes;
+  run pull-request CI for stacked topic branches; build both Docker images on
+  pull requests without publishing; tolerate Docker cache export failures; and
+  refresh compatible Rust patches (futures 0.3.33, prost 0.14.4, serde_json
+  1.0.151, async-trait 0.1.92, base64 0.23.1 with only its standard-library
+  feature).
 
 ### Fixed
 
-- Enforce the documented `quotas.max_new_per_minute` limit, which was parsed
-  but never applied. Admission now rejects a new mitigation with `422` when the
-  POP already has that many mitigations created in the trailing 60 seconds,
-  checked in the same serialised transaction as the active quotas, so
-  controllers sharing the database cannot both take the last slot. A rejected
-  request saves nothing, announces nothing and uses no quota slot, and
-  increments `prefixd_guardrail_rejections_total{reason="NewMitigationRateExceeded"}`.
-  Dry-run creations count; TTL extensions by repeat events do not. `0` admits no
-  new mitigations, as for the active quotas. The shipped configs set 30, so a
-  burst above 30 new mitigations a minute at one POP is now rejected; raise the
-  limit before upgrading if you rely on larger bursts.
+- Admit new mitigations atomically against shared PostgreSQL customer, POP and
+  global quotas. Competing controllers cannot consume the same last slot; quota
+  rejection or a bounded database admission failure sends no announcement from that
+  request. The 5-second admission deadline covers only the work before COMMIT,
+  so a slow COMMIT can no longer return `500` for a mitigation it stored.
+
+- Persist new detector and manual mitigation intent before speaker announcement,
+  preventing a failed insert or interrupted request from leaving an unowned rule.
+  Retain committed intent after speaker errors so readable reconciliation and
+  TTL/withdrawal cleanup can recover it.
+
+- Persist withdrawal intent before speaker RPCs (migration 013) so ambiguous
+  replies and database failures cannot restore a requested deletion. Retry
+  across controller restarts, preserve the original actor/reason in an atomic
+  audit transaction, and reject foreign-POP, shared-owner and stale-operation
+  deletions. New mutations conflicting with pending cleanup return `409`. Drain
+  cleanup before changing speaker targets or downgrading to a binary that
+  ignores the queue.
+
+- Keep expired mitigations eligible for withdrawal retry when the speaker call
+  fails. Successful expiry state and notifications now require a confirmed
+  withdrawal; other expired mitigations are still processed during a failure.
+
+- Detector unban and bulk withdrawal now report speaker failures and preserve
+  active state instead of reporting successful removal. Operators can retry.
+
+- Preserve enforced-mode withdrawal requests across dry-run restarts. Reject
+  canonical duplicate creation before RPC, extend a single canonical detector
+  owner, and let expired legacy duplicate owners complete TTL cleanup once no
+  live owner remains.
+
+- Repair discard/policing action drift as well as missing FlowSpec matches on
+  exclusively administered speaker targets. Reject ambiguous owners and invalid
+  observed inventories, preserve unknown rules, and recheck lifecycle state before
+  each upsert. Converged polls do not repeat announcements; this adds no fence
+  against another controller writing the same local match.
+
+- Recover every eligible desired rule when creation timestamps tie. Reconciliation
+  reads a strict complete owner inventory scoped to the controller's POP; pending
+  creation rows remain excluded from repairs and active-status gauges.
+
+- Isolate expiry inventory to the controller's POP before decoding and fail on
+  corrupt owned rows instead of silently skipping them. Durable withdrawal
+  retries and independent reconciliation stages continue after enumeration fails.
+
+- Failed announcement repairs now make reconciliation fail while other repairs
+  continue. Continue independent reconciliation housekeeping and peer
+  observations after mutation failures, and release the lifecycle lock between
+  scheduler rules. Startup performs one immediate pass, then waits for the
+  interval.
+
+- Require complete dual-family GoBGP local read-back. Received paths are excluded;
+  malformed or unsupported local rules and stream failures fail observation.
+  Bound full inventory and peer streams to 30 seconds, and reject lossy action
+  decoding instead of inventing discard or truncating policing rates.
+
+- Bound complete GoBGP and rustbgpd mutation responses, including stalled bodies
+  and trailers, to 30 seconds per attempt with at most three attempts.
+
+- Select the Rustls crypto provider before TLS startup.
+
+- Canonicalize prefix spelling when computing FlowSpec rule identity so
+  equivalent IPv6 addresses do not trigger repeated reconciliation injections.
+
+- Keep pending or failed-expiry rows in status-active mitigation gauges. Use
+  rustbgpd peer addresses for unique session names and skip unnecessary locked
+  database reads for already-observed announcement candidates.
+
+- Grafana reconciliation runs and configuration reloads now group and label
+  the actual `status` series.
+
+- Preserve host scope for automatic IPv6 mitigations with canonical `/128`
+  destinations, including when prefix guardrails are relaxed. Use ICMPv6 protocol
+  58 in IPv6 event metadata and policy intent; IPv4 retains `/32` and ICMP protocol
+  1, with TCP/UDP behavior unchanged.
+
+- Accept explicit `icmpv6` in manual mitigation requests as IPv6 protocol 58.
+  Keep `icmp` as IPv4 protocol 1 and reject cross-family ICMP choices before
+  saving intent or calling the speaker.
+
+- Reject disjoint detector/service destination-port selections before they become
+  protocol-wide FlowSpec rules or extend an existing wildcard owner. Intentional
+  unconstrained port matches remain supported.
+
+- Apply concrete POP filters before mitigation pagination and match identifiers
+  exactly, preserving omitted/`all` global listings.
+
+- Fail IP history and incident reports when a selected mitigation cannot be decoded,
+  instead of returning successful partial history. Preserve existing IP filters
+  and SQL limits.
+
+- Count successful entries in bulk acknowledgement responses so duplicate IDs
+  agree with the ordered per-entry results while each stored row is updated once.
+
+- Saturate large timeseries day/hour conversions before applying the existing
+  range maximum and bucket minimum, preserving invalid-input defaults.
+
+- Report string-length validation limits in bytes, matching the existing UTF-8
+  byte checks, including playbook names and alert destinations in both
+  dashboard editors; document reason limits without changing accepted input
+  lengths.
+
+- Preserve exact untransformed webhook `bps` and `pps` integers and reject
+  nonfinite or out-of-range floating-point results instead of rounding or
+  saturating them. Fractional rates still truncate toward zero; floating-point
+  endpoints are rejected because JSON parsing can lose the original range.
+
+- Avoid overflow when classifying FastNetMon SYN percentages from large valid
+  integer counters, preserving the existing integer threshold and protocol rules.
+
+- **FastNetMon SYN floods labelled `udp_flood`.** Vector detection matched the
+  first protocol word anywhere in the attack details, so an idle line such as
+  `outgoing udp traffic: 0 mbps` won over `syn_flood`. Zero-metric lines,
+  including `0 packets per second`, are ignored; TCP flag vectors are matched
+  before `udp`; and protocol token boundaries keep `ack` out of `packets` and
+  `Attack_type`.
+
+- Reject non-finite correlation confidence thresholds and source/default weights
+  on YAML loading and API edits, including numeric overflow.
+  Preserve the active correlation configuration after a rejected reload or edit.
+
+- Load saved standalone `correlation.yaml` at startup so correlation editor
+  changes survive restart. Reject invalid or unreadable files instead of silently
+  reverting to inline settings.
+
+- Keep disabled authentication consistently anonymous: reject named login with
+  HTTP 403, ignore retained operator sessions before request tracing, and hide
+  named dashboard controls. Logout still deletes retained sessions. Wait for a
+  known authentication mode before presenting the login form.
+
+- Fix `prefixdctl operators list` against the shipped operator schema while
+  preserving its JSON fields, table output and exclusion of password hashes.
+
+- **Safelist removal from the dashboard returned 404.** The Next.js API proxy
+  joins percent-decoded route segments, so `DELETE /v1/safelist/8.9.8.9%2F32`
+  reached the backend as `/v1/safelist/8.9.8.9/32` and missed the
+  single-segment route. The proxy now re-encodes each segment, and the route
+  accepts a literal slash form (`{*prefix}`) for proxies that decode `%2F`.
+
+- **Dashboard had no sign-out (and no role-based permissions).**
+  `/v1/auth/login` and `/v1/auth/me` return a flat operator (`operator_id`), but
+  the client read `data.operator`, leaving `operator` as `undefined`. The user
+  menu (and therefore sign-out) never rendered, and role checks denied admin
+  actions to authenticated admins. Auth responses are now mapped to the client
+  `Operator` shape and `isAuthenticated` is a strict boolean.
+
+- **Copy buttons failed silently on plain-HTTP deployments.**
+  `navigator.clipboard` only exists in secure contexts, so the incident report,
+  FlowSpec rule, and webhook endpoint copy actions threw and reported nothing
+  when the dashboard was served over HTTP. The copy helper now falls back to a
+  hidden textarea, checks `clipboard-write` permission, and surfaces a "Copy
+  failed — clipboard unavailable" toast instead of claiming success. Chrome
+  ignores clipboard writes entirely for plain-HTTP origins (other than
+  `localhost`), so production dashboards need HTTPS for clipboard actions —
+  documented in `docs/how-to/deployment.md`.
 
 - Stop the Playbooks form showing "Unsaved changes" on load. The form dropped
   each playbook's `correlation` field, so it never matched the loaded playbooks,
@@ -311,85 +545,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status pill treated the reported `healthy` value as an error and `degraded` as
   normal.
 
-- Report playbook name and alert destination string limits in UTF-8 bytes.
-  Count playbook names in bytes in both editors, matching the existing server
-  limit without changing accepted server input lengths.
-
-- **Breaking:** Remove the ineffective `shutdown.preserve_announcements` config
-  key, settings JSON field and shutdown log attribute. Remove the key from existing
-  configs; unknown shutdown fields now fail parsing. Shutdown still signals
-  reconciliation to stop, waits the configured period and leaves speaker rules
-  in place.
-
-- Fail IP history and incident reports when a selected mitigation cannot be decoded,
-  instead of returning successful partial history. Preserve existing IP filters
-  and SQL limits.
-
-- Count successful entries in bulk acknowledgement responses so duplicate IDs
-  agree with the ordered per-entry results while each stored row is updated once.
-
-- Saturate large timeseries day/hour conversions before applying the existing
-  range maximum and bucket minimum, preserving invalid-input defaults.
-
-- Report string-length validation limits in bytes, matching the existing UTF-8
-  byte checks; document reason limits without changing accepted input lengths.
-
-- Admit new mitigations atomically against shared PostgreSQL customer, POP and
-  global quotas. Competing controllers cannot consume the same last slot; quota
-  rejection or a bounded database admission failure sends no announcement from that
-  request. The 5-second admission deadline covers only the work before COMMIT,
-  so a slow COMMIT can no longer return `500` for a mitigation it stored.
-
-- Fix `prefixdctl operators list` against the shipped operator schema while
-  preserving its JSON fields, table output and exclusion of password hashes.
-
-- Preserve exact untransformed webhook `bps` and `pps` integers and reject
-  nonfinite or out-of-range floating-point results instead of rounding or
-  saturating them. Fractional rates still truncate toward zero; floating-point
-  endpoints are rejected because JSON parsing can lose the original range.
-
-- Reject malformed or empty supplied date filters on event, audit, mitigation and
-  signal-group listings, and every invalid mitigation/signal-group status token.
-  Return structured `400` errors before listing instead of silently dropping filters.
-
-- Avoid overflow when classifying FastNetMon SYN percentages from large valid
-  integer counters, preserving the existing integer threshold and protocol rules.
-
-- Apply concrete POP filters before mitigation pagination. Match identifiers
-  exactly, preserve omitted/`all` global listings, and reject empty or NUL filters
-  with `400` instead of ignoring them.
-
-- **Breaking:** Use versioned opaque cursors for mitigation listings, ordered by
-  creation time and mitigation ID so timestamp ties do not omit rows. Reject
-  malformed, oversized and superseded timestamp-only mitigation cursors with
-  `400`; restart a listing without a cursor. Fail corrupted mitigation pages
-  rather than silently truncating their results.
-
 - Display confidence fractions consistently as percentages across event, mitigation
   and correlation views. Preserve zero, distinguish missing and invalid values, and
   avoid implying that confidence confirms mitigation or router installation.
-
-- Restore immediate dashboard retries after failed GET requests while continuing
-  to share requests that are still pending.
-
-- Repair discard/policing action drift as well as missing FlowSpec matches on
-  exclusively administered speaker targets. Reject ambiguous owners and invalid
-  observed inventories, preserve unknown rules, and recheck lifecycle state before
-  each upsert. Converged polls do not repeat announcements; this adds no fence
-  against another controller writing the same local match.
-
-- Reject non-finite correlation confidence thresholds and source/default weights
-  on YAML loading and API edits, including numeric overflow.
-  Preserve the active correlation configuration after a rejected reload or edit.
-
-- Keep disabled authentication consistently anonymous: reject named login with
-  HTTP 403, ignore retained operator sessions before request tracing, and hide
-  named dashboard controls. Logout still deletes retained sessions. Wait for a
-  known authentication mode before presenting the login form.
-
-- Accept explicit `icmpv6` in manual mitigation requests as IPv6 protocol 58.
-  Keep `icmp` as IPv4 protocol 1 and reject cross-family ICMP choices before
-  saving intent or calling the speaker.
 
 - Keep withdrawal confirmations open during requests and failures, preserve
   failed bulk selections and reasons for retry, and report local completion
@@ -399,112 +557,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server's WebSocket event names. Label ordinary updates and feed resynchronization
   accurately.
 
-- Load saved standalone `correlation.yaml` at startup so correlation editor
-  changes survive restart. Reject invalid or unreadable files instead of silently
-  reverting to inline settings.
-
-- Reject disjoint detector/service destination-port selections before they become
-  protocol-wide FlowSpec rules or extend an existing wildcard owner. Intentional
-  unconstrained port matches remain supported.
-
-- Persist new detector and manual mitigation intent before speaker announcement,
-  preventing a failed insert or interrupted request from leaving an unowned rule.
-  Retain committed intent after speaker errors so readable reconciliation and
-  TTL/withdrawal cleanup can recover it.
-- Return accepted intent with a request-local `announcement_outcome: "unconfirmed"`
-  and mitigation ID after speaker errors, including batch and signal wrappers.
-  Manual creation uses HTTP 202 for this case; ordinary success/dry-run keep 201.
-  The dashboard warns that announcement is unconfirmed and opens the saved intent.
-
-- Preserve host scope for automatic IPv6 mitigations with canonical `/128`
-  destinations, including when prefix guardrails are relaxed. Use ICMPv6 protocol
-  58 in IPv6 event metadata and policy intent; IPv4 retains `/32` and ICMP protocol
-  1, with TCP/UDP behavior unchanged.
-
-- Isolate expiry inventory to the controller's POP before decoding and fail on
-  corrupt owned rows instead of silently skipping them. Durable withdrawal
-  retries and independent reconciliation stages continue after enumeration fails.
-
-- Require complete dual-family GoBGP local read-back. Received paths are excluded;
-  malformed or unsupported local rules and stream failures fail observation.
-  Bound full inventory and peer streams to 30 seconds, and reject lossy action
-  decoding instead of inventing discard or truncating policing rates.
-
-- Refresh compatible Rust patches to futures 0.3.33, prost 0.14.4 and
-  serde_json 1.0.151 while preserving the existing advisory fixes.
-
-- Recover every eligible desired rule when creation timestamps tie. Reconciliation
-  reads a strict complete owner inventory scoped to the controller's POP; pending
-  creation rows remain excluded from repairs and active-status gauges.
-
-- Tolerate Docker CI cache export failures after successful image builds and
-  pushes, and let each image matrix job finish independently.
-
-- Dashboard installs now use Bun 1.3.14 and the frozen Bun lock in CI/containers;
-  remove the stale npm lock and obsolete `next lint` command.
-- Retire dashboard mock mode and unused legacy toast/CSS files; keep real API
-  behavior and Sonner notifications. Move development tools out of runtime deps.
-
-- Failed announcement repairs now make reconciliation fail while other repairs
-  continue. Startup performs one immediate pass, then waits for the interval.
-- Grafana reconciliation runs and configuration reloads now group and label
-  the actual `status` series.
-
-- Persist withdrawal intent before speaker RPCs so ambiguous replies and database
-  failures cannot restore a requested deletion. Retry across controller restarts,
-  preserve the original actor/reason in an atomic audit transaction, and reject
-  foreign-POP, shared-owner and stale-operation deletions. New mutations conflicting
-  with pending cleanup return 409. Drain cleanup before changing speaker targets
-  or downgrading to a binary that ignores the queue.
-- Continue independent reconciliation housekeeping and peer observations after
-  mutation failures; release the lifecycle lock between scheduler rules.
-- Preserve enforced-mode withdrawal requests across dry-run restarts. Reject
-  canonical duplicate creation before RPC, extend a single canonical detector
-  owner, and let expired legacy duplicate owners complete TTL cleanup once no
-  live owner remains.
-- Keep pending or failed-expiry rows in status-active mitigation gauges. Use
-  rustbgpd peer addresses for unique session names and skip unnecessary locked
-  database reads for already-observed announcement candidates.
-- Correct the documented history-pruning transaction to retire completed
-  withdrawals safely and retain pending cleanup, recent history and referenced
-  detector/correlation events. Preserve audit records and run vacuum separately.
-- Bound complete GoBGP and rustbgpd mutation responses, including stalled bodies
-  and trailers, to 30 seconds per attempt with at most three attempts.
-
-- Prevent handled failed GET requests from also producing unhandled browser rejections during cache cleanup.
-- **Safelist removal from the dashboard returned 404.** The Next.js API proxy joins percent-decoded route segments, so `DELETE /v1/safelist/8.9.8.9%2F32` reached the backend as `/v1/safelist/8.9.8.9/32` and missed the single-segment route. The proxy now re-encodes each segment, and the route accepts a literal slash form (`{*prefix}`) for proxies that decode `%2F`.
-- **Dashboard had no sign-out (and no role-based permissions).** `/v1/auth/login` and `/v1/auth/me` return a flat operator (`operator_id`), but the client read `data.operator`, leaving `operator` as `undefined`. The user menu (and therefore sign-out) never rendered, and role checks denied admin actions to authenticated admins. Auth responses are now mapped to the client `Operator` shape and `isAuthenticated` is a strict boolean.
-- **FastNetMon SYN floods labelled `udp_flood`.** Vector detection matched the first protocol word anywhere in the attack details, so an idle line such as `outgoing udp traffic: 0 mbps` won over `syn_flood`. Zero-metric lines, including `0 packets per second`, are ignored; TCP flag vectors are matched before `udp`; and protocol token boundaries keep `ack` out of `packets` and `Attack_type`.
-- **Copy buttons failed silently on plain-HTTP deployments.** `navigator.clipboard` only exists in secure contexts, so the incident report, FlowSpec rule, and webhook endpoint copy actions threw and reported nothing when the dashboard was served over HTTP. The copy helper now falls back to a hidden textarea, checks `clipboard-write` permission, and surfaces a "Copy failed — clipboard unavailable" toast instead of claiming success. Chrome ignores clipboard writes entirely for plain-HTTP origins (other than `localhost`), so production dashboards need HTTPS for clipboard actions — documented in `docs/how-to/deployment.md`.
-- Run pull-request CI for stacked topic branches as well as `main`, so dependency-ordered PRs receive their own checks.
-- Build both Docker images on pull requests without registry login or publishing; main/tag pushes retain publishing.
-- Update `async-trait` to 0.1.92 for strict Clippy on Rust 1.99 and select the Rustls provider before TLS startup.
-- Keep expired mitigations eligible for withdrawal retry when the speaker call
-  fails. Successful expiry state and notifications now require a confirmed
-  withdrawal; other expired mitigations are still processed during a failure.
-- Detector unban and bulk withdrawal now report speaker failures and preserve
-  active state instead of reporting successful removal. Operators can retry.
-- Canonicalize prefix spelling when computing FlowSpec rule identity so
-  equivalent IPv6 addresses do not trigger repeated reconciliation injections.
+- Restore immediate dashboard retries after failed GET requests while continuing
+  to share requests that are still pending, and stop handled failed GET requests
+  from also producing unhandled browser rejections during cache cleanup.
 
 ### Documentation
+
+- Add the [v0.19.1 → 0.20.0 upgrade guide](https://github.com/lance0/prefixd/blob/v0.20.0/docs/how-to/upgrading.md#v0191--0200)
+  and a [release checklist](https://github.com/lance0/prefixd/blob/v0.20.0/docs/project/release-checklist.md).
+
+- Publish the [speaker profile qualification record](https://github.com/lance0/prefixd/blob/v0.20.0/docs/reference/qualification/speaker-profiles-2026-10-18.md)
+  for both Compose profiles, and refresh the operator guides and example
+  dashboard image against it.
 
 - Rebuild the README around reader paths, the rustbgpd profile and the
   guardrails that run before any speaker call. Move setup next steps into the
   quickstart, add cookbook recipes for manual mitigation and dry-run rollout,
   and route the documentation index by task.
 
+- Organize guides, references, explanations and historical evidence with a
+  documentation index and local-stack tutorial; retain ADR identifiers.
+
 - Replace the historical roadmap checklist with current remaining work and
   reconcile speaker/framework decisions with shipped defaults, transports and
   durable intent. Remove the unusable duplicate PostgreSQL example; use the
   maintained rustbgpd or GoBGP configuration instead.
 
-- Organize guides, references, explanations and historical evidence with a
-  documentation index and local-stack tutorial; retain ADR identifiers.
-
 - Record the rustbgpd-first, pluggable-speaker rollout while retaining GoBGP.
   Correct the controller-crash claim: a separate BGP daemon can keep advertising
   while prefixd is down; TTL enforcement requires running reconciliation.
+
+- Refresh the security support policy and the authentication and audit
+  guidance. Correct the documented history-pruning transaction to retire
+  completed withdrawals safely and retain pending cleanup, recent history and
+  referenced detector/correlation events; audit records are preserved and
+  vacuum runs separately.
 
 ## [0.19.1] - 2026-08-06
 

@@ -16,7 +16,11 @@ use prefixd::observability::init_tracing;
 use prefixd::scheduler::ReconciliationLoop;
 
 #[derive(Parser)]
-#[command(name = "prefixd", about = "BGP FlowSpec routing policy daemon")]
+#[command(
+    name = "prefixd",
+    version,
+    about = "BGP FlowSpec routing policy daemon"
+)]
 struct Cli {
     /// Path to config directory
     #[arg(short, long, default_value = "/etc/prefixd")]

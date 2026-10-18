@@ -23,7 +23,6 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
 #[openapi(
     info(
         title = "prefixd API",
-        version = "1.0.0",
         description = "BGP FlowSpec routing policy daemon for automated DDoS mitigation",
         license(name = "MIT"),
         contact(name = "prefixd")
@@ -166,3 +165,13 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
     )
 )]
 pub struct ApiDoc;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn info_version_comes_from_cargo() {
+        assert_eq!(ApiDoc::openapi().info.version, env!("CARGO_PKG_VERSION"));
+    }
+}

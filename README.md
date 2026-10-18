@@ -23,9 +23,10 @@ to announce a FlowSpec rule with a mandatory TTL. No detector speaks BGP.
 > is the default path. GoBGP stays maintained and selectable.
 > [Why rustbgpd](#pairs-with-rustbgpd)
 
-**Status:** pre-1.0, and the API can change before 1.0. The rustbgpd backend
-and Compose profiles are on `main` and not yet released; the latest release,
-[v0.19.1](https://github.com/lance0/prefixd/releases/tag/v0.19.1), predates them.
+**Status:** pre-1.0, and the API can change before 1.0. The latest release,
+[v0.20.0](https://github.com/lance0/prefixd/releases/tag/v0.20.0), is the first
+with the rustbgpd backend and Compose profiles. Upgrading from v0.19.1 needs one
+maintenance step; follow the [upgrade guide](docs/how-to/upgrading.md#v0191--0200).
 
 ## Choose your path
 
