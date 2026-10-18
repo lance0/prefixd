@@ -36,13 +36,13 @@ describe("GET request cache", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
-  it.each([401, 403, 500, 503, "offline"])("returns handled %s failures to every caller and permits retry", async (failure) => {
+  it.each([401, 403, 500, 503, "offline"] as const)("returns handled %s failures to every caller and permits retry", async (failure) => {
     const fetchMock = vi.fn()
 
     if (failure === "offline") {
       fetchMock.mockRejectedValueOnce(new TypeError("network offline"))
     } else {
-      fetchMock.mockResolvedValueOnce(new Response("denied", { status: failure as number }))
+      fetchMock.mockResolvedValueOnce(new Response("denied", { status: failure }))
     }
 
     vi.stubGlobal("fetch", fetchMock)

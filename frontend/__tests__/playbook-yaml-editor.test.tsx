@@ -14,6 +14,15 @@ const playbooks: ConfigPlaybook[] = [{
 
 afterEach(cleanup)
 
+/** The YAML editor's textarea, checked rather than asserted. */
+function yamlText(): string {
+  const textbox = screen.getByRole("textbox")
+
+  if (!(textbox instanceof HTMLTextAreaElement)) throw new Error("expected the YAML textarea")
+
+  return textbox.value
+}
+
 function edit(text: string) {
   fireEvent.change(screen.getByRole("textbox"), { target: { value: text } })
 }
@@ -22,7 +31,7 @@ describe("playbook YAML editing", () => {
   it("round-trips generated YAML and preserves zero confidence when applying an edit", async () => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     render(<PlaybookYamlEditor playbooks={playbooks} onSave={onSave} saving={false} />)
-    const initial = (screen.getByRole("textbox") as HTMLTextAreaElement).value
+    const initial = yamlText()
     expect(initial).toContain("require_confidence_at_least: 0")
     expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled()
 
@@ -45,7 +54,7 @@ describe("playbook YAML editing", () => {
   ])("counts UTF-8 name bytes: $label", async ({ name, valid }) => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     render(<PlaybookYamlEditor playbooks={playbooks} onSave={onSave} saving={false} />)
-    const initial = (screen.getByRole("textbox") as HTMLTextAreaElement).value
+    const initial = yamlText()
     edit(initial.replace("udp-policy", name))
     const apply = screen.getByRole("button", { name: "Apply" })
 
@@ -96,6 +105,17 @@ playbooks:
 
     expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled()
     expect(screen.getByText(/YAML parse error:|top-level 'playbooks' array/)).toBeVisible()
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }))
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it("names an unknown step action instead of submitting it", () => {
+    const onSave = vi.fn()
+    render(<PlaybookYamlEditor playbooks={playbooks} onSave={onSave} saving={false} />)
+    edit(yamlText().replace("action: discard", "action: drop"))
+
+    expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled()
+    expect(screen.getByText('Playbook "udp-policy" step 2: action must be one of police, discard')).toBeVisible()
     fireEvent.click(screen.getByRole("button", { name: "Apply" }))
     expect(onSave).not.toHaveBeenCalled()
   })

@@ -25,6 +25,15 @@ const fromApi = [
 
 afterEach(cleanup)
 
+/** The YAML editor's textarea, checked rather than asserted. */
+function yamlText(): string {
+  const textbox = screen.getByRole("textbox")
+
+  if (!(textbox instanceof HTMLTextAreaElement)) throw new Error("expected the YAML textarea")
+
+  return textbox.value
+}
+
 describe("playbook form editor", () => {
   it("is clean on load when the API sends null optional fields and a correlation key", () => {
     render(<PlaybookEditor playbooks={fromApi} onSave={vi.fn()} saving={false} />)
@@ -49,7 +58,7 @@ describe("playbook YAML editor", () => {
   it("round-trips a correlation override and omits unset fields", async () => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     render(<PlaybookYamlEditor playbooks={fromApi} onSave={onSave} saving={false} />)
-    const text = (screen.getByRole("textbox") as HTMLTextAreaElement).value
+    const text = yamlText()
     expect(text).toContain("min_sources: 2")
     expect(text).not.toContain("confidence_threshold")
     expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument()

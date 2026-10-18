@@ -15,7 +15,7 @@ function setClipboardWritePermission(state: PermissionState | "unsupported") {
           throw new TypeError("clipboard-write is not a supported permission name")
         }
 
-        return { state } as PermissionStatus
+        return { state }
       },
     },
   })
@@ -25,7 +25,7 @@ function setSecureContext(value: boolean) {
   Object.defineProperty(window, "isSecureContext", { value, configurable: true })
 }
 
-function setClipboard(clipboard: unknown) {
+function setClipboard(clipboard: Pick<Clipboard, "writeText"> | undefined) {
   Object.defineProperty(navigator, "clipboard", { value: clipboard, configurable: true })
 }
 
@@ -48,7 +48,7 @@ afterEach(() => {
   if (originalClipboard) {
     Object.defineProperty(navigator, "clipboard", originalClipboard)
   } else {
-    delete (navigator as { clipboard?: unknown }).clipboard
+    Reflect.deleteProperty(navigator, "clipboard")
   }
 
   if (originalSecureContext) {

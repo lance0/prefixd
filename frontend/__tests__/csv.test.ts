@@ -1,24 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-const originalBlob = globalThis.Blob
 const originalCreateObjectURL = globalThis.URL.createObjectURL
 const originalRevokeObjectURL = globalThis.URL.revokeObjectURL
 
+/** Captures the Blob handed to the download link and returns a reader for its text. */
 function mockCsvEnvironment() {
-  let capturedContent = ""
-  globalThis.Blob = class MockBlob {
-    constructor(parts: BlobPart[]) {
-      capturedContent = parts[0] as string
-    }
-  } as any
-  globalThis.URL.createObjectURL = vi.fn(() => "blob:mock")
+  let captured = new Blob()
+
+  globalThis.URL.createObjectURL = vi.fn((blob: Blob) => {
+    captured = blob
+
+    return "blob:mock"
+  })
   globalThis.URL.revokeObjectURL = vi.fn()
 
-  return () => capturedContent
+  return () => captured.text()
 }
 
 afterEach(() => {
-  globalThis.Blob = originalBlob
   globalThis.URL.createObjectURL = originalCreateObjectURL
   globalThis.URL.revokeObjectURL = originalRevokeObjectURL
 })
@@ -33,7 +32,7 @@ describe("CSV export", () => {
       ["2", "Bob", "200"],
     ])
 
-    expect(getContent()).toBe("id,name,value\n1,Alice,100\n2,Bob,200")
+    expect(await getContent()).toBe("id,name,value\n1,Alice,100\n2,Bob,200")
   })
 
   it("escapes fields with commas", async () => {
@@ -42,7 +41,7 @@ describe("CSV export", () => {
 
     downloadCsv("test.csv", ["name"], [["hello, world"]])
 
-    expect(getContent()).toBe('name\n"hello, world"')
+    expect(await getContent()).toBe('name\n"hello, world"')
   })
 
   it("escapes fields with quotes", async () => {
@@ -51,7 +50,7 @@ describe("CSV export", () => {
 
     downloadCsv("test.csv", ["name"], [['say "hi"']])
 
-    expect(getContent()).toBe('name\n"say ""hi"""')
+    expect(await getContent()).toBe('name\n"say ""hi"""')
   })
 
   it("sanitizes formula injection characters", async () => {
@@ -67,7 +66,7 @@ describe("CSV export", () => {
       ["normal"],
     ])
 
-    const lines = getContent().split("\n")
+    const lines = (await getContent()).split("\n")
     expect(lines[0]).toBe("data")
     expect(lines[1]).toBe("\"'=CMD(\"\"calc\"\")\"")
     expect(lines[2]).toBe("'+1234")
@@ -82,10 +81,10 @@ describe("CSV export", () => {
     const { downloadCsv } = await import("@/lib/csv")
 
     downloadCsv("test.csv", ["a", "b"], [
-      [undefined as any, null as any],
+      [undefined, null],
       ["", "ok"],
     ])
 
-    expect(getContent()).toBe("a,b\n,\n,ok")
+    expect(await getContent()).toBe("a,b\n,\n,ok")
   })
 })
