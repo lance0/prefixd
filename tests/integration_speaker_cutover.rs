@@ -673,6 +673,52 @@ async fn resolve_marker(
     Ok(Some(row))
 }
 
+fn recreation_ttl(
+    expires_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> std::result::Result<i64, &'static str> {
+    if expires_at <= now {
+        return Err("expired");
+    }
+    let remaining = (expires_at - now).num_seconds();
+    if remaining < MIN_TTL {
+        return Err("below-minimum");
+    }
+    Ok(remaining.min(1800))
+}
+
+#[test]
+fn recreation_ttl_respects_minimum_and_absolute_ceiling() {
+    let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+    for (nanoseconds, expected) in [
+        (-1, Err("expired")),
+        (0, Err("expired")),
+        (1, Err("below-minimum")),
+        (29_000_000_000, Err("below-minimum")),
+        (29_999_999_999, Err("below-minimum")),
+        (30_000_000_000, Ok(30)),
+        (30_999_999_999, Ok(30)),
+        (1_800_999_999_999, Ok(1800)),
+        (1_801_000_000_000, Ok(1800)),
+    ] {
+        let expires_at = now + chrono::Duration::nanoseconds(nanoseconds);
+        let actual = recreation_ttl(expires_at, now);
+        assert_eq!(actual, expected, "remaining nanoseconds: {nanoseconds}");
+        if let Ok(ttl) = actual {
+            assert!(now + chrono::Duration::seconds(ttl) <= expires_at);
+        }
+    }
+}
+
+#[test]
+fn slow_setup_can_expire_both_short_candidates() {
+    let captured_at = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+    let resumed_at = captured_at + chrono::Duration::seconds(46);
+    let decisions = [30, 45]
+        .map(|ttl| recreation_ttl(captured_at + chrono::Duration::seconds(ttl), resumed_at));
+    assert_eq!(decisions, [Err("expired"), Err("expired")]);
+}
+
 async fn recreate(
     controller: &Controller,
     pool: &PgPool,
@@ -722,16 +768,21 @@ async fn recreate(
             recreated.push(row);
             continue;
         }
-        let remaining = (original.expires_at - Utc::now()).num_seconds();
-        if remaining < MIN_TTL {
-            journal(
-                journal_path,
-                json!({"stage":"skip", "old_id":original.mitigation_id,
-                "reason":if remaining <= 0 {"expired"} else {"below-minimum"}, "original_expiry":original.expires_at}),
-            );
-            continue;
-        }
-        let mut request = payload(&original.rule(), remaining.min(1800), &marker);
+        let ttl = match recreation_ttl(original.expires_at, Utc::now()) {
+            Ok(ttl) => ttl,
+            Err(reason) => {
+                if reason == "expired" {
+                    controller.reconcile().await;
+                }
+                journal(
+                    journal_path,
+                    json!({"stage":"skip", "old_id":original.mitigation_id,
+                    "reason":reason, "original_expiry":original.expires_at}),
+                );
+                continue;
+            }
+        };
+        let mut request = payload(&original.rule(), ttl, &marker);
         request["expires_at_cap"] = json!(original.expires_at);
         journal(
             journal_path,
@@ -866,7 +917,8 @@ async fn authenticated_maintenance_cutover_and_rollback_preserve_intent_and_dead
         assert_eq!(response.status(), StatusCode::CREATED);
         originals.push(response_json(response).await);
     }
-    // Keep the real configured minimum: these two admitted rows cross it during maintenance.
+    // Real deadlines cross expiry/the configured minimum; a slow setup may expire both.
+    let mut short_ids = Vec::<Uuid>::new();
     for (index, ttl) in [30, 45].into_iter().enumerate() {
         let rule = FlowSpecRule::new(
             FlowSpecNlri {
@@ -883,6 +935,13 @@ async fn authenticated_maintenance_cutover_and_rollback_preserve_intent_and_dead
             )
             .await;
         assert_eq!(response.status(), StatusCode::CREATED);
+        short_ids.push(
+            response_json(response).await["mitigation_id"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
     }
     let cancelled_rule = FlowSpecRule::new(
         FlowSpecNlri {
@@ -1080,7 +1139,7 @@ async fn authenticated_maintenance_cutover_and_rollback_preserve_intent_and_dead
     let destination =
         Controller::start(&context.pool, rust_settings.clone(), rust_speaker.clone()).await;
     assert_eq!(destination.target_id, new_target);
-    // Delayed recreation must skip both elapsed and positive-but-below-minimum deadlines.
+    // Delayed recreation skips both short rows, even if setup already expired both.
     let short_deadline = first
         .intents
         .iter()
@@ -1431,11 +1490,18 @@ async fn authenticated_maintenance_cutover_and_rollback_preserve_intent_and_dead
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert!(entries.iter().any(|entry| entry["reason"] == "expired"));
-    assert!(
-        entries
-            .iter()
-            .any(|entry| entry["reason"] == "below-minimum")
-    );
+    for id in short_ids {
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry["stage"] == "skip" && entry["old_id"] == id.to_string())
+        );
+        assert!(
+            !entries.iter().any(
+                |entry| entry["stage"] == "create-request" && entry["old_id"] == id.to_string()
+            )
+        );
+    }
     assert_eq!(
         entries
             .iter()

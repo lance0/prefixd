@@ -1,11 +1,13 @@
 # Speaker maintenance qualification — 2026-10-18
 
-The [maintenance procedure](../../how-to/speaker-cutover.md) passed one real
-GoBGP→rustbgpd→GoBGP cycle for each pinned rustbgpd release below. This is a
+The [maintenance procedure](../../how-to/speaker-cutover.md) passed real
+GoBGP→rustbgpd→GoBGP cycles for each pinned rustbgpd release below. Initial runs
+and the [deterministic lifetime follow-up](#deterministic-lifetime-follow-up)
+qualify their respective test source versions. This is a
 small control-plane qualification with a mitigation gap, not seamless migration
 or router forwarding evidence.
 
-## Measured inputs
+## Initial measured inputs
 
 The controller source base was `55351a5e113476cf926d66a9c99dcb58a7a54148`,
 with the new maintenance test and guide. The later minimum-compiler metadata and
@@ -27,7 +29,7 @@ internal; only authenticated RPC reaches ephemeral host-loopback ports. The
 fixture inspects actual addresses/publications and removes its own resources.
 It does not use the production Compose profile or UID999 deployment.
 
-## Checks and results
+## Initial checks and results
 
 | rustbgpd | Result | Single test duration |
 | --- | --- | --- |
@@ -79,7 +81,7 @@ marker control journal. CI runs the case in both released-speaker lanes and
 retains logs and generated artifacts even on failure. Preserve a failed run and
 diagnose it before another attempt.
 
-Measured source hashes:
+Initial measured source hashes:
 
 | File | SHA256 |
 | --- | --- |
@@ -87,7 +89,7 @@ Measured source hashes:
 | `scripts/test-speaker-cutover.sh` | `7c0eb8e24d0183675e3f444820db6f950c401cace6ea490822628639f95e6c3e` |
 | `docs/how-to/speaker-cutover.md` | `cfd7badc9a9950bafea39a12d0ac17bb0f846aed7365f3c04b32fd81248b5598` |
 
-Measured raw artifact hashes:
+Initial measured raw artifact hashes:
 
 | rustbgpd | Artifact | SHA256 |
 | --- | --- | --- |
@@ -101,6 +103,64 @@ Measured raw artifact hashes:
 | 0.77.0 | `rollback-source.json` | `72e92cc131bfa41fab4120aa00ed5826154660aa72cce0f193d967239b478ce8` |
 | 0.77.0 | `journal.jsonl` | `249a3af2e74bf3576bf02e745ca1326b3da0aa430922424324cfd63b960b1798` |
 | 0.77.0 | `unresolved-journal.jsonl` | `426333e2db39dc2d2e17e0ade848d84905912e4012664a918e29f540c1a75380` |
+
+## Deterministic lifetime follow-up
+
+The initial live assertion required one 45-second candidate to remain positive
+but below the configured 30-second minimum after setup. A correct slow run can
+expire both short candidates. The updated test checks both original IDs were
+skipped without creation and retains the real expiry wait and full rollback.
+Minimum-lifetime decisions now also have fixed-time coverage, sampled after the
+awaited recovery lookup in the live path.
+
+Nine boundary inputs cover elapsed/zero lifetime, positive fractional lifetime
+below the minimum, exactly 30 seconds, fractional rounding and the maximum TTL
+without extending the absolute deadline. A second fixed-time case observes
+both 30/45-second deadlines at a reference time 46 seconds later. Reintroducing
+the old mandatory below-minimum assertion in that case failed immediately;
+restoring the corrected source passed both deterministic cases. No wall-clock
+45-second delay or global clock replacement was used for this control.
+
+The follow-up runs used source base
+`2a5011479ef916d72fab0a6677c4776f21539f4c` with the updated test. The compiler,
+immutable speaker images, observed PostgreSQL version and topology match the
+initial measured inputs. Strict peer/raw-route oracles and their ten-second
+receipt deadline are unchanged. These new runs qualify the updated test; the
+initial successful runs above remain evidence for their earlier source only.
+
+| rustbgpd | Result | Single live test duration |
+| --- | --- | --- |
+| 0.76.0 | Pass, 1 case | 34.00 s |
+| 0.77.0 | Pass, 1 case | 34.20 s |
+
+The two non-container deterministic cases passed separately with:
+
+```bash
+RUSTUP_AUTO_INSTALL=0 CARGO_BUILD_JOBS=3 \
+  cargo test --locked --all-features --test integration_speaker_cutover
+```
+
+Follow-up measured source hashes:
+
+| File | SHA256 |
+| --- | --- |
+| `tests/integration_speaker_cutover.rs` | `9831689afc395e2a9cf92a7298511ac0bad8ac2d51a81cb6f5d8956554c7f252` |
+| `docs/how-to/speaker-cutover.md` | `cfd7badc9a9950bafea39a12d0ac17bb0f846aed7365f3c04b32fd81248b5598` |
+
+The runner retains its initial source hash. Follow-up raw artifact hashes:
+
+| rustbgpd | Artifact | SHA256 |
+| --- | --- | --- |
+| 0.76.0 | `go-source.json` | `effd405acbaff082d14b9f6552401fa40dbdcf671cad58ffb930875d41652fb0` |
+| 0.76.0 | `rust-source.json` | `e21f4f686b144071f726eea469586063cf49760955c2cc503eaa408e22aa0945` |
+| 0.76.0 | `rollback-source.json` | `1b62b1863d4df1a90f5b639d1812d698a5fafa3ce167c5618d0d2055f88d177a` |
+| 0.76.0 | `journal.jsonl` | `9bbeaeba061c37ba307ee8886ad8be276aaf7ef00ad578c212dbe1ec0d358405` |
+| 0.76.0 | `unresolved-journal.jsonl` | `3b46138f8c8a3f9fa41f500c4927f7802d025972140762c09e761d1ef3411e68` |
+| 0.77.0 | `go-source.json` | `9fa18e8c6722cd7bc0158081c67e378d768e87c9dbcb70f0cc0f87098e8282af` |
+| 0.77.0 | `rust-source.json` | `d6d48870423da1fd547b5f56c87bff9c703c77e5a5a395a66c67b737d51fb440` |
+| 0.77.0 | `rollback-source.json` | `698b926f5e36dc39d798a7ba993995b67415405b118c3cda18fa63ebe9a77c69` |
+| 0.77.0 | `journal.jsonl` | `b87ada471ac8f9f22c80aaa1bae921db4f8c60a2ccb2c35c7743d6dd279085c0` |
+| 0.77.0 | `unresolved-journal.jsonl` | `3b8f0df4b448a8c638fbbdbb03d79ef1e7681e8f6cc9f9faac4b4c3308ea511b` |
 
 ## Earlier attempts and limits
 
