@@ -44,7 +44,7 @@ export const viewport: Viewport = {
   // Match the page background in each theme (globals.css --background).
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#fafafa" },
-    { media: "(prefers-color-scheme: dark)", color: "#09090b" },
+    { media: "(prefers-color-scheme: dark)", color: "#070707" },
   ],
 }
 

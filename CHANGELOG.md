@@ -169,8 +169,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surfaces in dark mode, and match the browser theme colour to each theme.
   Bandwidth labels drop trailing zeros, such as "5 Mbps".
 
-- Adopt a neutral graphite palette: zinc grey surfaces and text with a single
-  blue accent for actions, focus and links, replacing the teal accent.
+- Adopt the prefixd brand palette: neutral grey surfaces and text with the
+  brand green as the single accent for actions, focus and links, replacing the
+  teal accent. Success states share the green hue; each theme keeps 4.5:1 text
+  contrast for status colours and primary buttons.
 
 - Remove the Severity column from the mitigations list; it was derived from
   status and action and repeated them. Every dashboard page now has one titled
