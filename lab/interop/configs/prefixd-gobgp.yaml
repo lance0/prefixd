@@ -1,0 +1,62 @@
+# Interop lab controller for the GoBGP leg; identical to prefixd-rustbgpd.yaml
+# except for the backend block. GoBGP's API is unauthenticated on loopback in
+# the shared network namespace.
+pop: lab1
+mode: enforced
+
+http:
+  listen: "0.0.0.0:8080"
+  auth:
+    mode: bearer
+    bearer_token_env: "PREFIXD_API_TOKEN"
+
+bgp:
+  backend: gobgp
+  gobgp_grpc: "127.0.0.1:50051"
+  local_asn: 65010
+  router_id: "10.0.0.1"
+  neighbors: []
+
+guardrails:
+  require_ttl: true
+  dst_prefix_minlen: 32
+  dst_prefix_maxlen: 32
+  max_ports: 8
+  allow_src_prefix_match: false
+
+quotas:
+  max_active_per_customer: 10
+  max_active_per_pop: 50
+  max_active_global: 50
+  max_new_per_minute: 30
+
+timers:
+  default_ttl_seconds: 300
+  min_ttl_seconds: 10
+  max_ttl_seconds: 1800
+  reconciliation_interval_seconds: 5
+
+storage:
+  # DATABASE_URL from the lab environment file takes precedence.
+  connection_string: "postgres://unused@127.0.0.1:5432/prefixd"
+
+observability:
+  log_format: json
+  log_level: info
+
+safelist:
+  prefixes:
+    - "10.0.0.0/8"
+
+correlation:
+  enabled: true
+  window_seconds: 300
+  min_sources: 1
+  confidence_threshold: 0.5
+  sources:
+    fastnetmon:
+      weight: 1.0
+      type: detector
+
+shutdown:
+  drain_timeout_seconds: 5

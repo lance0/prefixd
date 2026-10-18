@@ -1,0 +1,25 @@
+# Documentation-range victims used by the interop lab driver.
+customers:
+  - customer_id: cust_lab
+    name: "Interop Lab"
+    prefixes:
+      - "203.0.113.0/24"
+      - "2001:db8:113::/48"
+    policy_profile: normal
+    services:
+      - service_id: svc_lab
+        name: "Lab Hosts"
+        assets:
+          - ip: "203.0.113.10"
+            role: dns
+          - ip: "203.0.113.20"
+            role: web
+          - ip: "203.0.113.30"
+            role: ntp
+          - ip: "203.0.113.40"
+            role: dns
+          - ip: "2001:db8:113::10"
+            role: dns
+        allowed_ports:
+          udp: [53, 123]
+          tcp: [80, 443]

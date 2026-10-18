@@ -1,0 +1,104 @@
+name: Interop
+
+# FlowSpec interop against a real receiving router. Each leg drives prefixd's
+# HTTP API with the speaker in containerlab, peered to FRR 10.7.1, and asserts
+# the exact rules in FRR's received IPv4/IPv6 FlowSpec tables after manual
+# discard and police, a detector event, operator withdrawal, TTL expiry, a
+# speaker restart with prefixd re-injection, and an IPv6 rule. Every run
+# uploads a dated receipt (versions, commands, FRR JSON before and after).
+#
+# Job layout, the install-containerlab action and the FRR lab follow rustbgpd's
+# Interop workflow and its M22 FlowSpec lab. Path filters keep documentation
+# changes from paying for the labs; the nightly run catches image drift.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "proto/**"
+      - "migrations/**"
+      - "configs/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - "lab/**"
+      - "!lab/**/*.md"
+      - ".github/workflows/interop.yml"
+      - ".github/actions/install-containerlab/**"
+  pull_request:
+    paths:
+      - "src/**"
+      - "proto/**"
+      - "migrations/**"
+      - "configs/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - "lab/**"
+      - "!lab/**/*.md"
+      - ".github/workflows/interop.yml"
+      - ".github/actions/install-containerlab/**"
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  frr:
+    name: FlowSpec into FRR (${{ matrix.speaker }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        speaker: [rustbgpd, gobgp]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Check FRR oracle negative controls
+        run: python3 -m unittest discover -s lab/interop -p 'test_*.py'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Reuses the Docker job's layer cache for this commit's controller image.
+      - name: Build prefixd:interop from this commit
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          push: false
+          tags: prefixd:interop
+          build-args: CARGO_BUILD_JOBS=4
+          cache-from: |
+            type=gha,scope=prefixd
+            type=gha,scope=prefixd-interop
+          cache-to: type=gha,scope=prefixd-interop,mode=max,ignore-error=true
+
+      - name: Run FlowSpec interop lab (deploy, test, destroy)
+        env:
+          CLAB: sudo containerlab
+          PREFIXD_INTEROP_RECEIPTS: ${{ runner.temp }}/interop-receipts
+        run: lab/interop/run-frr.sh "${{ matrix.speaker }}"
+
+      - name: Retain dated receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: flowspec-frr-${{ matrix.speaker }}-receipt-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/interop-receipts
+          if-no-files-found: warn

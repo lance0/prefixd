@@ -1,0 +1,35 @@
+# SR Linux FlowSpec probe: offer IPv4 unicast plus both FlowSpec families and
+# record which ones SR Linux negotiates. Probe only; not a qualified config.
+config_epoch = 2
+
+[global]
+asn = 65010
+router_id = "10.0.0.1"
+listen_port = 179
+runtime_state_dir = "/tmp/rustbgpd"
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[global.telemetry.grpc_uds]
+path = "/tmp/rustbgpd/grpc.sock"
+mode = 0o600
+
+[flowspec]
+validation = "off"
+
+[policy.definitions.permit-all]
+default_action = "permit"
+
+[policy]
+import_chain = ["permit-all"]
+export_chain = ["permit-all"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "srlinux-probe"
+families = ["ipv4_unicast", "ipv4_flowspec", "ipv6_flowspec"]
+hold_time = 30

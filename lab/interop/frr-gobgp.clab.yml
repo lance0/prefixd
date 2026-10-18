@@ -1,0 +1,70 @@
+# prefixd -> GoBGP 4.10.0 -> FRR FlowSpec interop lab. Same layout as
+# frr-rustbgpd.clab.yml; the GoBGP image is the digest pinned by CI's GoBGP
+# fixtures. Run it through lab/interop/run-frr.sh gobgp.
+name: prefixd-frr-gobgp
+
+mgmt:
+  network: prefixd-frr-gobgp
+  ipv4-subnet: 172.31.232.0/24
+
+topology:
+  nodes:
+    postgres:
+      kind: linux
+      image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+      cmd: postgres -c listen_addresses=127.0.0.1
+      env:
+        POSTGRES_USER: prefixd
+        POSTGRES_DB: prefixd
+      env-files:
+        - .run/prefixd-frr-gobgp/postgres.env
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+
+    speaker:
+      kind: linux
+      image: jauderho/gobgp:latest@sha256:42b8d0017237e388c55936efe1f23632365b24a31751f6e8815f93e12c4d18c2
+      network-mode: container:postgres
+      stages:
+        create:
+          wait-for:
+            - node: postgres
+              stage: create
+      cmd: /usr/local/bin/gobgpd -f /etc/gobgp/gobgp.toml --api-hosts=127.0.0.1:50051 --pprof-disable --metrics-path=
+      binds:
+        - configs/gobgp.toml:/etc/gobgp/gobgp.toml:ro
+
+    # Started by run-frr.sh once the database and speaker are ready.
+    # Not named "prefixd": containerlab 0.74.3 then fails to resolve the
+    # network-mode container, apparently because the lab name has that prefix.
+    controller:
+      kind: linux
+      image: prefixd:interop
+      network-mode: container:postgres
+      stages:
+        create:
+          wait-for:
+            - node: postgres
+              stage: create
+      entrypoint: sleep
+      cmd: infinity
+      env-files:
+        - .run/prefixd-frr-gobgp/prefixd.env
+      binds:
+        - configs/prefixd-gobgp.yaml:/etc/prefixd/prefixd.yaml:ro
+        - configs/inventory.yaml:/etc/prefixd/inventory.yaml:ro
+        - configs/playbooks.yaml:/etc/prefixd/playbooks.yaml:ro
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1@sha256:e995beaa50fdc9edb35eadcfefa29b7f062cc06f2b812613789b68fa541554d2
+      binds:
+        - configs/frr-daemons:/etc/frr/daemons:ro
+        - configs/frr.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["postgres:eth1", "frr:eth1"]

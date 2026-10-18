@@ -1,0 +1,31 @@
+# Interop lab speaker, adapted from configs/gobgp.conf. prefixd shares this
+# network namespace and reaches the API on loopback only.
+[global.config]
+  as = 65010
+  router-id = "10.0.0.1"
+  port = 179
+
+[global.apply-policy.config]
+  default-import-policy = "accept-route"
+  default-export-policy = "accept-route"
+
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-flowspec"
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv6-flowspec"
+
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "10.0.0.2"
+    peer-as = 65002
+  [neighbors.apply-policy.config]
+    default-import-policy = "reject-route"
+    default-export-policy = "accept-route"
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-flowspec"
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv6-flowspec"

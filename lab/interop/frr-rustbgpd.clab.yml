@@ -1,0 +1,76 @@
+# prefixd -> rustbgpd -> FRR FlowSpec interop lab (CI and `just interop-frr`).
+#
+# Layout follows rustbgpd's M22 FlowSpec lab (tests/interop/m22-flowspec-frr):
+# the speaker is 10.0.0.1 and FRR 10.0.0.2 on one link. The postgres node owns
+# the network namespace and that link, so prefixd reaches the database and the
+# speaker's gRPC listener on loopback, and the speaker container can be stopped
+# and started without breaking prefixd's network. Run it through
+# lab/interop/run-frr.sh, which writes the per-run secrets under .run/.
+name: prefixd-frr-rustbgpd
+
+mgmt:
+  network: prefixd-frr-rustbgpd
+  ipv4-subnet: 172.31.231.0/24
+
+topology:
+  nodes:
+    postgres:
+      kind: linux
+      image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+      cmd: postgres -c listen_addresses=127.0.0.1
+      env:
+        POSTGRES_USER: prefixd
+        POSTGRES_DB: prefixd
+      env-files:
+        - .run/prefixd-frr-rustbgpd/postgres.env
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+
+    speaker:
+      kind: linux
+      image: ghcr.io/lance0/rustbgpd:0.77.0@sha256:6dbfa42c47aa1d063f119f3eff9524aac4585665c0a9c79167ec8d20244bc6c2
+      network-mode: container:postgres
+      stages:
+        create:
+          wait-for:
+            - node: postgres
+              stage: create
+      cmd: rustbgpd /etc/rustbgpd/config.toml
+      binds:
+        - configs/rustbgpd.toml:/etc/rustbgpd/config.toml:ro
+        - .run/prefixd-frr-rustbgpd/rustbgpd.token:/run/lab/rustbgpd.token:ro
+
+    # Started by run-frr.sh once the database and speaker are ready.
+    # Not named "prefixd": containerlab 0.74.3 then fails to resolve the
+    # network-mode container, apparently because the lab name has that prefix.
+    controller:
+      kind: linux
+      image: prefixd:interop
+      network-mode: container:postgres
+      stages:
+        create:
+          wait-for:
+            - node: postgres
+              stage: create
+      entrypoint: sleep
+      cmd: infinity
+      env-files:
+        - .run/prefixd-frr-rustbgpd/prefixd.env
+      binds:
+        - configs/prefixd-rustbgpd.yaml:/etc/prefixd/prefixd.yaml:ro
+        - configs/inventory.yaml:/etc/prefixd/inventory.yaml:ro
+        - configs/playbooks.yaml:/etc/prefixd/playbooks.yaml:ro
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1@sha256:e995beaa50fdc9edb35eadcfefa29b7f062cc06f2b812613789b68fa541554d2
+      binds:
+        - configs/frr-daemons:/etc/frr/daemons:ro
+        - configs/frr.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["postgres:eth1", "frr:eth1"]

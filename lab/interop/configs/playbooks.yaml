@@ -1,0 +1,10 @@
+# One deterministic detector playbook: a UDP flood is policed at 5 Mbit/s
+# (625000 bytes/s on the wire).
+playbooks:
+  - name: udp_flood_police
+    match:
+      vector: udp_flood
+    steps:
+      - action: police
+        rate_bps: 5000000
+        ttl_seconds: 300

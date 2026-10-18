@@ -1,0 +1,46 @@
+# Interop lab speaker, adapted from configs/rustbgpd.toml. prefixd shares this
+# network namespace and uses the loopback TCP listener with a per-run bearer
+# token; the peer is the FRR receiver on the lab link.
+config_epoch = 2
+
+[global]
+asn = 65010
+router_id = "10.0.0.1"
+listen_port = 179
+runtime_state_dir = "/tmp/rustbgpd"
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[global.telemetry.grpc_uds]
+enabled = false
+
+[global.telemetry.grpc_tcp]
+address = "127.0.0.1:50051"
+token_file = "/run/lab/rustbgpd.token"
+principal = "prefixd-lab"
+
+[security.grpc.roles]
+prefixd-lab = "operator"
+
+[flowspec]
+validation = "off"
+
+[policy.definitions.reject-edge-routes]
+default_action = "deny"
+
+[policy.definitions.distribute-mitigation]
+default_action = "permit"
+
+[policy]
+import_chain = ["reject-edge-routes"]
+export_chain = ["distribute-mitigation"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-interop"
+families = ["ipv4_flowspec", "ipv6_flowspec"]
+hold_time = 30

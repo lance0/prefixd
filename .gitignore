@@ -6,3 +6,6 @@ lab/clab-*/
 .claude/
 .factory/
 *.yaml.bak
+lab/interop/clab-*/
+lab/interop/.run/
+__pycache__/
