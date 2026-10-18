@@ -44,7 +44,8 @@ mkdir "$work/bin"
 tar -xzf prefixd-linux-amd64.tar.gz -C "$work/bin"
 reported="$("$work/bin/prefixdctl" --version)"
 [ "$reported" = "prefixdctl $version" ] || fail "tarball prefixdctl reports '$reported'"
-"$work/bin/prefixd" --help >/dev/null
+reported="$("$work/bin/prefixd" --version)"
+[ "$reported" = "prefixd $version" ] || fail "tarball prefixd reports '$reported'"
 echo "ok: tarball binaries run"
 
 jq -e '.bomFormat == "CycloneDX"' prefixd-sbom.cdx.json >/dev/null || fail "prefixd-sbom.cdx.json is not CycloneDX"

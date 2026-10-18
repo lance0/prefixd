@@ -2,7 +2,7 @@
 # Start one release image and check it reports the expected identity.
 #
 # Usage: scripts/release-smoke-image.sh prefixd|prefixd-dashboard IMAGE VERSION [REVISION]
-#   prefixd            labels, `prefixd --help`, `prefixdctl --version`, runs as 999
+#   prefixd            labels, `prefixd --version`, `prefixdctl --version`, runs as 999
 #   prefixd-dashboard  labels, then the server answers GET /login within 60 seconds
 # The daemon needs PostgreSQL and a speaker to start; the speaker suites in
 # ci.yml cover that path, so this checks the shipped binaries only.
@@ -28,7 +28,8 @@ fi
 
 case "$kind" in
 prefixd)
-    docker run --rm "$image" --help >/dev/null
+    reported="$(docker run --rm "$image" --version)"
+    [ "$reported" = "prefixd $version" ] || fail "$image reports '$reported', expected 'prefixd $version'"
     reported="$(docker run --rm --entrypoint prefixdctl "$image" --version)"
     [ "$reported" = "prefixdctl $version" ] || fail "$image reports '$reported', expected 'prefixdctl $version'"
     [ "$(docker run --rm --entrypoint id "$image" -u)" = 999 ] || fail "$image does not run as uid 999"
