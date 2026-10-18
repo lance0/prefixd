@@ -13,7 +13,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright"
-import type { AuditResponse, Mitigation } from "../lib/api"
+import type { AuditDetails, AuditResponse, Mitigation } from "../lib/api"
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const timeout = 15_000
@@ -23,7 +23,31 @@ let browser: Browser | undefined
 let context: BrowserContext | undefined
 let page: Page | undefined
 let releaseResponse = () => {}
-const receipt: Record<string, unknown> = { started_at: new Date().toISOString() }
+
+/** The run record written to receipt.json, filled in as each stage completes. */
+interface SmokeReceipt {
+  started_at: string
+  origin?: string
+  mitigation_id?: string
+  ui_source_supplied_by_caller?: string
+  script_revision?: string
+  script_sha256?: string
+  reason?: string
+  browser_version?: string
+  anonymous_audit_status?: number
+  operator?: { username: string; role: string }
+  withdraw_http_status?: number
+  pending_dialog_verified?: boolean
+  operation_id?: string
+  status?: "passed" | "failed"
+  failed_stage?: string
+  error_name?: string
+  assertion_code?: string
+  assertion_message?: string
+  finished_at?: string
+}
+
+const receipt: SmokeReceipt = { started_at: new Date().toISOString() }
 
 function required(name: string): string {
   const value = process.env[`PREFIXD_SMOKE_${name}`]
@@ -32,7 +56,7 @@ function required(name: string): string {
   return value
 }
 
-async function save(name: string, value: unknown) {
+async function save<T>(name: string, value: T) {
   assert(outputDir)
   await writeFile(resolve(outputDir, name), JSON.stringify(value, null, 2) + "\n", { mode: 0o600 })
 }
@@ -74,6 +98,7 @@ async function run() {
     const response = await request.get(`${api}${path}`, { timeout, maxRedirects: 0 })
     assert.equal(response.status(), 200, `GET ${path} failed`)
 
+    // SAFETY: T is the documented response type; callers assert every field they rely on.
     return response.json() as Promise<T>
   }
 
@@ -135,33 +160,27 @@ async function run() {
   // has been observed, then deliver it unchanged. No fabricated response body.
   stage = "withdraw and verify pending dialog"
   const release = new Promise<void>((resolve) => { releaseResponse = resolve })
-  let responseArrived!: () => void
-  let responseFailed!: (error: unknown) => void
-
-  const arrived = new Promise<void>((resolve, reject) => {
-    responseArrived = resolve
-    responseFailed = reject
-  })
+  const arrived = Promise.withResolvers<void>()
 
   // Attach a handler immediately so a network failure cannot become unhandled.
-  void arrived.catch(() => {})
+  void arrived.promise.catch(() => {})
   await page.route(withdrawUrl, async (route) => {
     try {
       assert.equal(route.request().method(), "POST")
       const response = await route.fetch({ timeout, maxRedirects: 0, maxRetries: 0 })
       receipt.withdraw_http_status = response.status()
-      responseArrived()
+      arrived.resolve()
       await release
       await route.fulfill({ response })
     } catch (error) {
-      responseFailed(error)
+      arrived.reject(error)
       await route.abort().catch(() => {})
     }
   }, { times: 1 })
   const responsePromise = page.waitForResponse((response) => response.url() === withdrawUrl && response.request().method() === "POST")
   void responsePromise.catch(() => {})
   await dialog.getByRole("button", { name: "Withdraw", exact: true }).click()
-  await arrived
+  await arrived.promise
   await dialog.waitFor()
   // Radix keeps a closed dialog visible during its exit animation.
   assert.equal(await dialog.getAttribute("data-state"), "open", "pending dialog must remain open")
@@ -174,6 +193,7 @@ async function run() {
   releaseResponse()
   const response = await responsePromise
   assert.equal(response.status(), 200, "withdrawal did not complete")
+  // SAFETY: only mitigation_id and status are read, and both are asserted below.
   const result = await response.json() as Mitigation
   assert.equal(result.mitigation_id, mitigationId)
   assert.equal(result.status, "withdrawn")
@@ -192,8 +212,7 @@ async function run() {
   assert.equal(entry.actor_type, "operator")
   assert.equal(entry.actor_id, username)
   assert.equal(entry.details.reason, `${username}: ${reason}`)
-  assert.equal(typeof entry.details.operation_id, "string")
-  assert(uuid.test(entry.details.operation_id as string))
+  assert.match(entry.details.operation_id ?? "", uuid)
   await save("audit.json", {
     audit_id: entry.audit_id, timestamp: entry.timestamp, actor_type: entry.actor_type,
     actor_id: entry.actor_id, action: entry.action, target_type: entry.target_type,
@@ -211,7 +230,8 @@ async function run() {
   await row.locator("td").first().click()
   const details = row.locator("xpath=following-sibling::tr[1]").locator("pre")
   await details.waitFor()
-  const rendered = JSON.parse(await details.innerText()) as Record<string, unknown>
+  // SAFETY: the audit log renders entry.details as JSON; both fields read are asserted below.
+  const rendered = JSON.parse(await details.innerText()) as AuditDetails
   assert.equal(rendered.reason, entry.details.reason)
   assert.equal(rendered.operation_id, entry.details.operation_id)
   await page.screenshot({ path: resolve(outputDir, "audit.png"), fullPage: true })
