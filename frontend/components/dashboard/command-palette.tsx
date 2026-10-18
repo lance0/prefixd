@@ -117,6 +117,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
             </CommandItem>
           </CommandGroup>
 
+          {/* cmdk re-filters every item. Without an explicit value it scores the rendered text,
+              which omits IDs and is unreadable for rows that load while a search is typed. */}
           {search.length > 0 && filteredMitigations.length > 0 && (
             <>
               <CommandSeparator />
@@ -124,6 +126,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                 {filteredMitigations.map((m) => (
                   <CommandItem
                     key={m.mitigation_id}
+                    value={m.mitigation_id}
+                    keywords={[m.victim_ip, m.vector, m.customer_id ?? ""]}
                     onSelect={() => runCommand(() => router.push(`/mitigations/${m.mitigation_id}`))}
                     className="flex items-center gap-3 text-sm"
                   >
@@ -144,6 +148,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                 {filteredEvents.map((e) => (
                   <CommandItem
                     key={e.event_id}
+                    value={e.event_id}
+                    keywords={[e.victim_ip, e.vector]}
                     onSelect={() =>
                       runCommand(() => router.push(`/events?id=${encodeURIComponent(e.event_id)}`))
                     }
