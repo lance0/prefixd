@@ -117,7 +117,7 @@ enum OperatorCommands {
 
 #[derive(Subcommand)]
 enum MitigationCommands {
-    /// List active mitigations
+    /// List mitigations, newest first, in every status unless --status is given
     List {
         /// Filter by status (pending, active, expired, withdrawn, rejected)
         #[arg(short, long)]

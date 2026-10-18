@@ -110,7 +110,7 @@ prefixdctl peers
 ### List Mitigations
 
 ```bash
-# All mitigations
+# Newest mitigations in every status (up to --limit, default 50)
 prefixdctl mitigations list
 
 # Filter by status

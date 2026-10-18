@@ -66,7 +66,10 @@ step: police at 5 Mbps for 120 seconds. Other statuses, such as
 `accepted_no_mitigation`, mean policy or correlation chose not to act; see
 [ingest attack event](../reference/api.md#ingest-attack-event).
 
-Guardrails still apply. A safelisted target returns `422` exactly as it does in
+Guardrails still apply. An event for an address that no inventory customer owns
+returns `202` with `accepted_no_mitigation` before guardrails run; the shipped
+safelist covers no shipped inventory address, so events there take this path.
+An owned address that is safelisted returns `422` exactly as it does in
 enforced mode.
 
 ## 3. Review what would have been announced
