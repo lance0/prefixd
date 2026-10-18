@@ -7,6 +7,7 @@ import { render, screen, within } from "@testing-library/react"
 const mockPush = vi.fn()
 const mockReplace = vi.fn()
 const mockSearchParams = new URLSearchParams()
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockPush, replace: mockReplace }),
   usePathname: () => "/correlation",
@@ -26,6 +27,7 @@ vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 // Mock SWR config
 vi.mock("swr", async () => {
   const actual = await vi.importActual("swr")
+
   return { ...actual }
 })
 
@@ -50,6 +52,7 @@ vi.mock("@/hooks/use-api", () => ({
 
 // Mock use-permissions
 const mockPermissions = vi.fn()
+
 vi.mock("@/hooks/use-permissions", () => ({
   usePermissions: () => mockPermissions(),
 }))
@@ -173,6 +176,7 @@ describe("SignalsTab", () => {
       ...sampleGroups[0], group_id: `group-${index}`, derived_confidence: confidence,
     })) } })
     render(<SignalsTab />)
+
     for (const label of ["95%", "0%", "Unavailable", "Invalid"]) {
       expect(screen.getByText(label)).toBeInTheDocument()
     }

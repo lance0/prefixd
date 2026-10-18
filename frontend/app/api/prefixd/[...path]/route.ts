@@ -25,6 +25,7 @@ async function proxyRequest(request: NextRequest, path: string) {
     // Validate the same normalized URL fetch uses: decoded dot segments can
     // otherwise turn an apparent /v1/ path into /metrics on the private API.
     const url = new URL(`${PREFIXD_API}${path}`)
+
     if (!url.pathname.startsWith("/v1/")) {
       return NextResponse.json({ error: "Not found" }, { status: 404 })
     }
@@ -53,6 +54,7 @@ async function proxyRequest(request: NextRequest, path: string) {
     })
   } catch (error) {
     console.error("Proxy error:", error)
+
     return NextResponse.json(
       { error: "Failed to connect to backend" },
       { status: 502 }
@@ -65,6 +67,7 @@ export async function GET(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const { path } = await params
+
   return proxyRequest(request, upstreamPath(path, request.nextUrl.search || ""))
 }
 
@@ -73,6 +76,7 @@ export async function POST(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const { path } = await params
+
   return proxyRequest(request, upstreamPath(path))
 }
 
@@ -81,6 +85,7 @@ export async function PUT(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const { path } = await params
+
   return proxyRequest(request, upstreamPath(path))
 }
 
@@ -89,5 +94,6 @@ export async function DELETE(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const { path } = await params
+
   return proxyRequest(request, upstreamPath(path))
 }

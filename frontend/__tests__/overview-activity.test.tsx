@@ -7,11 +7,13 @@ const mock = vi.hoisted(() => ({
   error: undefined as Error | undefined,
   retry: vi.fn(),
 }))
+
 vi.mock("@/hooks/use-api", () => ({
   useTimeseries: () => ({ data: mock.data, error: mock.error, mutate: mock.retry }),
 }))
 
 afterEach(cleanup)
+
 beforeEach(() => { mock.data = undefined; mock.error = undefined; mock.retry.mockReset() })
 
 describe("overview activity states", () => {

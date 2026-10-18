@@ -19,6 +19,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [operator, setOperator] = useState<Operator | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const router = useRouter()
+
   const refresh = useCallback(async () => {
     try {
       const user = await getCurrentUser()
@@ -38,7 +39,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setOperator(null)
       router.push("/login")
     }
+
     window.addEventListener("prefixd:auth-expired", handleAuthExpired)
+
     return () => window.removeEventListener("prefixd:auth-expired", handleAuthExpired)
   }, [router])
 
@@ -74,8 +77,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 export function useAuth() {
   const context = useContext(AuthContext)
+
   if (!context) {
     throw new Error("useAuth must be used within an AuthProvider")
   }
+
   return context
 }

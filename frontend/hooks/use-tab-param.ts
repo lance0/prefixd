@@ -17,6 +17,7 @@ export function useTabParam<T extends string>(tabs: readonly T[]): [T, (tab: str
 
   const select = useCallback((tab: string) => {
     const params = new URLSearchParams(searchParams.toString())
+
     if (tab === tabs[0]) params.delete("tab")
     else params.set("tab", tab)
     const query = params.toString()

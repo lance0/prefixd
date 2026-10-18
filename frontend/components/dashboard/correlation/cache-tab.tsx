@@ -15,10 +15,15 @@ function dimsLabel(s: {
   interface: string | null
 }): string {
   const parts: string[] = []
+
   if (s.customer_id) parts.push(`customer=${s.customer_id}`)
+
   if (s.pop) parts.push(`pop=${s.pop}`)
+
   if (s.service_id) parts.push(`service=${s.service_id}`)
+
   if (s.interface) parts.push(`iface=${s.interface}`)
+
   return parts.length > 0 ? parts.join(" ") : MISSING
 }
 

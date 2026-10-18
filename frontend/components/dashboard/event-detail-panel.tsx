@@ -24,6 +24,7 @@ interface EventDetailPanelProps {
 
 function protocolName(proto: number | null): string {
   if (proto === null) return MISSING
+
   switch (proto) {
     case 1: return "ICMP (1)"
     case 6: return "TCP (6)"
@@ -49,8 +50,10 @@ export function EventDetailPanel({ event, onClose }: EventDetailPanelProps) {
   const copyToClipboard = async (text: string, field: string) => {
     if (!(await copyText(text))) {
       toast.error("Copy failed — clipboard unavailable")
+
       return
     }
+
     setCopied(field)
     setTimeout(() => setCopied(null), 2000)
   }

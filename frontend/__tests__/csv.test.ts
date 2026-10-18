@@ -13,6 +13,7 @@ function mockCsvEnvironment() {
   } as any
   globalThis.URL.createObjectURL = vi.fn(() => "blob:mock")
   globalThis.URL.revokeObjectURL = vi.fn()
+
   return () => capturedContent
 }
 

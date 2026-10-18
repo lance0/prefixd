@@ -8,6 +8,7 @@ export async function copyText(text: string): Promise<boolean> {
   if (typeof navigator !== "undefined" && window.isSecureContext && navigator.clipboard) {
     try {
       await navigator.clipboard.writeText(text)
+
       return true
     } catch {
       // Permission denied or no transient activation -- try the legacy path.
@@ -19,6 +20,7 @@ export async function copyText(text: string): Promise<boolean> {
   // "nothing was copied" used to look like a working button.
   try {
     const status = await navigator.permissions.query({ name: "clipboard-write" as PermissionName })
+
     if (status.state === "denied") {
       return false
     }
@@ -37,6 +39,7 @@ export async function copyText(text: string): Promise<boolean> {
     textarea.select()
     const copied = document.execCommand("copy")
     document.body.removeChild(textarea)
+
     return copied
   } catch {
     return false

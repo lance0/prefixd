@@ -1,5 +1,6 @@
 function protocolName(proto: number | null): string {
   if (proto === null) return ""
+
   switch (proto) {
     case 1: return "icmp"
     case 6: return "tcp"
@@ -11,9 +12,13 @@ function protocolName(proto: number | null): string {
 // Rule syntax for copy/paste, not display: keep plain ASCII and a fixed decimal.
 function ruleRate(bps: number | null): string {
   if (!bps) return ""
+
   if (bps >= 1_000_000_000) return `${(bps / 1_000_000_000).toFixed(1)} Gbps`
+
   if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`
+
   if (bps >= 1_000) return `${(bps / 1_000).toFixed(1)} Kbps`
+
   return `${bps} bps`
 }
 
@@ -29,6 +34,7 @@ export function formatFlowSpecRule(fields: FlowSpecFields): string {
   const parts: string[] = ["match destination", fields.dst_prefix]
 
   const proto = protocolName(fields.protocol)
+
   if (proto) {
     parts.push("protocol", proto)
   }

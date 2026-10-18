@@ -39,11 +39,13 @@ export async function login(credentials: LoginRequest): Promise<Operator> {
     if (res.status === 401) {
       throw new Error("Invalid username or password")
     }
+
     const error = await res.text()
     throw new Error(`Login failed: ${error}`)
   }
 
   const data: OperatorResponse = await res.json()
+
   return { id: data.operator_id, username: data.username, role: data.role }
 }
 
@@ -64,13 +66,16 @@ export async function getCurrentUser(): Promise<Operator | null> {
       if (res.status === 401) {
         return null
       }
+
       throw new Error("Failed to get current user")
     }
 
     const data: OperatorResponse = await res.json()
+
     if (!data?.operator_id) {
       return null
     }
+
     return { id: data.operator_id, username: data.username, role: data.role }
   } catch {
     return null

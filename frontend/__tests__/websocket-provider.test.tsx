@@ -16,7 +16,9 @@ vi.mock("swr", () => ({
   default: () => ({ data: mocks.preferences }),
   useSWRConfig: () => ({ mutate: mocks.mutate }),
 }))
+
 vi.mock("sonner", () => ({ toast: mocks.toast }))
+
 vi.mock("@/lib/api", () => ({ getNotificationPreferences: vi.fn() }))
 
 import { WebSocketProvider, useWebSocketContext } from "@/components/websocket-provider"
@@ -86,9 +88,12 @@ function mountProvider() {
       <WebSocketProvider>{children}</WebSocketProvider>
     ),
   })
+
   const socket = MockWebSocket.instances[0]
+
   if (!socket) throw new Error("provider did not open a WebSocket")
   act(() => socket.open())
+
   return { ...hook, socket }
 }
 
@@ -155,6 +160,7 @@ describe("WebSocketProvider server frames", () => {
     act(() => socket.receive(frame))
 
     expect(mocks.mutate).toHaveBeenCalled()
+
     for (const show of Object.values(mocks.toast)) expect(show).not.toHaveBeenCalled()
   })
 })

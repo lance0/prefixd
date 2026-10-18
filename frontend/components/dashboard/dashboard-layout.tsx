@@ -21,6 +21,7 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
   // Load collapsed state from localStorage
   useEffect(() => {
     const stored = localStorage.getItem(SIDEBAR_COLLAPSED_KEY)
+
     if (stored !== null) {
       setSidebarCollapsed(stored === "true")
     }

@@ -43,7 +43,9 @@ export function GroupsTab() {
   const updateUrlParams = useCallback(
     (newStatus: string, newVector: string) => {
       const params = new URLSearchParams()
+
       if (newStatus !== "open") params.set("status", newStatus)
+
       if (newVector !== "all") params.set("vector", newVector)
       const query = params.toString()
       router.replace(`/correlation${query ? `?${query}` : ""}`, { scroll: false })
@@ -206,6 +208,7 @@ export function GroupsTab() {
 /** Below 50% reads as a warning; 80% and above is emphasised. Confidence is evidence, not status. */
 function ConfidenceDisplay({ confidence }: { confidence: number }) {
   let colorClass = "text-muted-foreground"
+
   if (isConfidence(confidence)) {
     if (confidence >= 0.8) colorClass = "font-medium text-foreground"
     else if (confidence >= 0.5) colorClass = "text-foreground"

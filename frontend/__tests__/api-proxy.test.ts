@@ -40,6 +40,7 @@ describe("dashboard API proxy boundary", () => {
           new NextRequest("http://dashboard/api/prefixd/metrics", { method }),
           { params: Promise.resolve({ path }) },
         )
+
         expect(response.status, JSON.stringify(path)).toBe(404)
         expect(fetchMock).not.toHaveBeenCalled()
       }
@@ -55,6 +56,7 @@ describe("dashboard API proxy boundary", () => {
       new NextRequest(`http://dashboard${requestPath}`),
       { params: Promise.resolve({ path }) },
     )
+
     expect(response.status).toBe(404)
     expect(fetchMock).not.toHaveBeenCalled()
   })
@@ -82,14 +84,17 @@ describe("dashboard API proxy boundary", () => {
         },
       }))
       const body = method === "GET" ? undefined : JSON.stringify({ reason: "operator request" })
+
       const request = new NextRequest("http://dashboard/api/prefixd/v1/safelist/203.0.113.9%2F32", {
         method,
         headers: { host: "dashboard", authorization: "Bearer opaque", "content-type": "application/json" },
         body,
       })
+
       const response = await routes[method](request, {
         params: Promise.resolve({ path: ["v1", "safelist", "203.0.113.9/32"] }),
       })
+
       const [url, options] = fetchMock.mock.calls[0]
       expect(url.toString()).toBe("http://prefixd:8080/v1/safelist/203.0.113.9%2F32")
       expect(options?.method).toBe(method)
@@ -107,10 +112,12 @@ describe("dashboard API proxy boundary", () => {
 
   it("leaves double-encoded dot segments as unknown API paths for the backend", async () => {
     fetchMock.mockResolvedValue(new Response("not found", { status: 404 }))
+
     const response = await routes.GET(
       new NextRequest("http://dashboard/api/prefixd/v1/%252e%252e/metrics"),
       { params: Promise.resolve({ path: ["v1", "%2e%2e", "metrics"] }) },
     )
+
     expect(fetchMock.mock.calls[0][0].toString()).toBe("http://prefixd:8080/v1/%252e%252e/metrics")
     expect(response.status).toBe(404)
   })
@@ -118,10 +125,12 @@ describe("dashboard API proxy boundary", () => {
   it("keeps upstream connection failures as 502 responses", async () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {})
     fetchMock.mockRejectedValue(new Error("connection refused"))
+
     try {
       const response = await routes.GET(new NextRequest("http://dashboard/api/prefixd/v1/health"), {
         params: Promise.resolve({ path: ["v1", "health"] }),
       })
+
       expect(response.status).toBe(502)
       expect(await response.json()).toEqual({ error: "Failed to connect to backend" })
     } finally {

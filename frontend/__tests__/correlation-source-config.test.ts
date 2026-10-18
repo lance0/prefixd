@@ -27,6 +27,7 @@ describe("validateSourceConfig", () => {
       "fastnetmon",
       base({ mode: "primary", match_dimensions: ["pop"] })
     )
+
     expect(errs.some((e) => e.includes("match_dimensions is only valid"))).toBe(true)
   })
 
@@ -35,6 +36,7 @@ describe("validateSourceConfig", () => {
       "router-cpu",
       base({ mode: "corroborating", match_dimensions: [] })
     )
+
     expect(errs.some((e) => e.includes("at least one match_dimension"))).toBe(true)
   })
 

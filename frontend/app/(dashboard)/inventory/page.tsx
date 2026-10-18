@@ -87,18 +87,28 @@ export default function InventoryPage() {
 
   const filtered = useMemo(() => {
     if (!data) return []
+
     if (!search.trim()) return data.customers
     const q = search.toLowerCase()
+
     return data.customers.filter((c) => {
       if (c.customer_id.toLowerCase().includes(q)) return true
+
       if (c.name.toLowerCase().includes(q)) return true
+
       if (c.policy_profile.toLowerCase().includes(q)) return true
+
       if (c.prefixes.some((p) => p.includes(q))) return true
+
       return c.services.some((s) => {
         if (s.name.toLowerCase().includes(q)) return true
+
         if (s.service_id.toLowerCase().includes(q)) return true
+
         if (s.allowed_ports.tcp?.some((p) => String(p).includes(q))) return true
+
         if (s.allowed_ports.udp?.some((p) => String(p).includes(q))) return true
+
         return s.assets.some((a) => a.ip.includes(q) || a.role?.toLowerCase().includes(q))
       })
     })

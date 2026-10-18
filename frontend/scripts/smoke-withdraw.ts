@@ -28,6 +28,7 @@ const receipt: Record<string, unknown> = { started_at: new Date().toISOString() 
 function required(name: string): string {
   const value = process.env[`PREFIXD_SMOKE_${name}`]
   assert(value, `PREFIXD_SMOKE_${name} is required`)
+
   return value
 }
 
@@ -68,16 +69,20 @@ async function run() {
   context.setDefaultNavigationTimeout(timeout)
   page = await context.newPage()
   const request = context.request
+
   async function read<T>(path: string): Promise<T> {
     const response = await request.get(`${api}${path}`, { timeout, maxRedirects: 0 })
     assert.equal(response.status(), 200, `GET ${path} failed`)
+
     return response.json() as Promise<T>
   }
+
   async function activeFixture() {
     const mitigation = await read<Mitigation>(detailPath)
     assert.equal(mitigation.mitigation_id, mitigationId)
     assert.equal(mitigation.status, "active")
     assert(Date.parse(mitigation.expires_at) > Date.now(), "fixture already expired")
+
     return mitigation
   }
 
@@ -92,10 +97,12 @@ async function run() {
   stage = "log in through browser"
   await page.getByLabel("Username", { exact: true }).fill(username)
   await page.getByLabel("Password", { exact: true }).fill(password)
+
   const [login] = await Promise.all([
     page.waitForResponse((response) => response.url() === `${api}/auth/login` && response.request().method() === "POST"),
     page.getByRole("button", { name: "Sign in", exact: true }).click(),
   ])
+
   assert.equal(login.status(), 200)
   await page.waitForURL((url) => url.origin === origin && url.pathname === "/")
   const operator = await read<{ username: string; role: string }>("/auth/me")
@@ -130,10 +137,12 @@ async function run() {
   const release = new Promise<void>((resolve) => { releaseResponse = resolve })
   let responseArrived!: () => void
   let responseFailed!: (error: unknown) => void
+
   const arrived = new Promise<void>((resolve, reject) => {
     responseArrived = resolve
     responseFailed = reject
   })
+
   // Attach a handler immediately so a network failure cannot become unhandled.
   void arrived.catch(() => {})
   await page.route(withdrawUrl, async (route) => {
@@ -210,6 +219,7 @@ async function run() {
 }
 
 let deadline: ReturnType<typeof setTimeout> | undefined
+
 try {
   await Promise.race([
     run(),
@@ -224,16 +234,19 @@ try {
   receipt.status = "failed"
   receipt.failed_stage = stage
   receipt.error_name = error instanceof Error ? error.name : "UnknownError"
+
   if (error instanceof assert.AssertionError) {
     receipt.assertion_code = error.code
     receipt.assertion_message = error.generatedMessage ? "Assertion failed" : error.message
   }
+
   if (page && outputDir) {
     await page.screenshot({
       path: resolve(outputDir, "failure.png"), fullPage: true, timeout: 5_000,
       mask: [page.locator('input[type="password"]')],
     }).catch(() => {})
   }
+
   console.error(`Withdrawal browser smoke failed at: ${stage}`)
   process.exitCode = 1
 } finally {
@@ -243,6 +256,8 @@ try {
   await context?.close().catch(() => {})
   await browser?.close().catch(() => {})
   receipt.finished_at = new Date().toISOString()
+
   if (outputDir) await save("receipt.json", receipt)
 }
+
 if (receipt.status === "passed") console.log("Withdrawal browser smoke passed")

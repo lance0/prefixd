@@ -10,6 +10,7 @@ export function useReducedMotion(): boolean {
     setReduced(mq.matches)
     const handler = (e: MediaQueryListEvent) => setReduced(e.matches)
     mq.addEventListener("change", handler)
+
     return () => mq.removeEventListener("change", handler)
   }, [])
 

@@ -30,33 +30,42 @@ function playbooksToYaml(playbooks: ConfigPlaybook[]): string {
       correlation: definedFields(p.correlation),
       steps: p.steps.map((s) => {
         const step: Record<string, unknown> = { action: s.action }
+
         if (s.rate_bps != null) step.rate_bps = s.rate_bps
         step.ttl_seconds = s.ttl_seconds
+
         if (s.require_confidence_at_least != null) step.require_confidence_at_least = s.require_confidence_at_least
+
         if (s.require_persistence_seconds != null) step.require_persistence_seconds = s.require_persistence_seconds
+
         return step
       }),
     })),
   }
+
   return yaml.dump(obj, { lineWidth: 120, noRefs: true, skipInvalid: true })
 }
 
 function definedFields(value: ConfigPlaybook["correlation"]): ConfigPlaybook["correlation"] | undefined {
   const entries = Object.entries(value ?? {}).filter(([, v]) => v != null)
+
   return entries.length > 0 ? Object.fromEntries(entries) : undefined
 }
 
 function parseYaml(text: string): { playbooks?: ConfigPlaybook[]; error?: string } {
   try {
     const parsed = yaml.load(text, { schema: PLAYBOOK_YAML_SCHEMA }) as { playbooks?: unknown[] }
+
     if (!parsed || !Array.isArray(parsed.playbooks)) {
       return { error: "YAML must contain a top-level 'playbooks' array" }
     }
+
     // Coerce to ConfigPlaybook shape for validation
     const playbooks: ConfigPlaybook[] = parsed.playbooks.map((p: unknown) => {
       const pb = p as Record<string, unknown>
       const match = pb.match as Record<string, unknown> | undefined
       const steps = (pb.steps as Record<string, unknown>[]) || []
+
       return {
         name: String(pb.name ?? ""),
         match: {
@@ -74,6 +83,7 @@ function parseYaml(text: string): { playbooks?: ConfigPlaybook[]; error?: string
         })),
       }
     })
+
     return { playbooks }
   } catch (e) {
     return { error: `YAML parse error: ${e instanceof Error ? e.message : String(e)}` }
@@ -88,8 +98,10 @@ export function PlaybookYamlEditor({ playbooks: initialPlaybooks, onSave, saving
 
   const { parsed, parseError, validationErrors } = useMemo(() => {
     const result = parseYaml(text)
+
     if (result.error) return { parsed: null, parseError: result.error, validationErrors: [] }
     const valErrors = result.playbooks ? validatePlaybooks(result.playbooks) : []
+
     return { parsed: result.playbooks ?? null, parseError: null, validationErrors: valErrors }
   }, [text])
 

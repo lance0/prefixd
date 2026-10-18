@@ -68,10 +68,12 @@ export function WebhookAdaptersEditor() {
   const persist = useCallback(
     async (updater: (adapters: WebhookAdapter[]) => WebhookAdapter[]) => {
       if (!config) return
+
       const next: CorrelationConfig = {
         ...config,
         webhook_adapters: updater(adapters),
       }
+
       try {
         await updateCorrelationConfig(next)
         await mutate()
@@ -88,11 +90,14 @@ export function WebhookAdaptersEditor() {
   const handleUpsert = (adapter: WebhookAdapter) => {
     persist((list) => {
       const idx = list.findIndex((a) => a.name === adapter.name)
+
       if (idx >= 0) {
         const clone = [...list]
         clone[idx] = adapter
+
         return clone
       }
+
       return [...list, adapter]
     })
     setDialogOpen(false)
@@ -198,6 +203,7 @@ export function WebhookAdaptersEditor() {
         open={dialogOpen}
         onOpenChange={(o) => {
           setDialogOpen(o)
+
           if (!o) setEditing(null)
         }}
         initial={editing}
@@ -239,6 +245,7 @@ function AdapterRow({
   onDelete: () => void
 }) {
   const endpoint = `/v1/signals/webhook/${adapter.name}`
+
   return (
     <div className="flex items-start justify-between rounded border p-3 gap-4">
       <div className="flex-1 min-w-0 space-y-1.5">
@@ -335,6 +342,7 @@ function AdapterDialog({
   const handleSave = async () => {
     if (!canSave) return
     setSaving(true)
+
     try {
       await Promise.resolve(onSubmit(form))
     } finally {
@@ -347,7 +355,9 @@ function AdapterDialog({
       open={open}
       onOpenChange={(o) => {
         onOpenChange(o)
+
         if (o && initial) setForm(initial)
+
         if (o && !initial) setForm(newAdapter())
       }}
     >
@@ -578,6 +588,7 @@ function FieldMapEditor({
     ["top_dst_ports", 'Optional array of ports', false],
     ["action", 'Optional "ban" or "unban"', false],
   ]
+
   return (
     <div className="space-y-2">
       {entries.map(([key, hint, required]) => (
@@ -588,12 +599,14 @@ function FieldMapEditor({
           value={(value[key] ?? "") as string}
           onChange={(v) => {
             const next = { ...value }
+
             if (required) {
               ;(next as WebhookFieldMap).victim_ip = v
             } else {
               ;(next as Record<string, string | null>)[key as string] =
                 v || null
             }
+
             onChange(next)
           }}
         />
@@ -647,6 +660,7 @@ function defaultAuth(type: WebhookAuth["type"]): WebhookAuth {
 
 function vectorMapToText(map: Record<string, string> | undefined): string {
   if (!map) return ""
+
   return Object.entries(map)
     .map(([k, v]) => `${k}=${v}`)
     .join("\n")
@@ -654,15 +668,20 @@ function vectorMapToText(map: Record<string, string> | undefined): string {
 
 function textToVectorMap(text: string): Record<string, string> {
   const out: Record<string, string> = {}
+
   for (const line of text.split("\n")) {
     const trimmed = line.trim()
+
     if (!trimmed || trimmed.startsWith("#")) continue
     const eq = trimmed.indexOf("=")
+
     if (eq <= 0) continue
     const k = trimmed.slice(0, eq).trim()
     const v = trimmed.slice(eq + 1).trim()
+
     if (k && v) out[k] = v
   }
+
   return out
 }
 
@@ -672,18 +691,23 @@ export function validateAdapter(
   isNew: boolean,
 ): string[] {
   const errors: string[] = []
+
   if (!NAME_PATTERN.test(adapter.name)) {
     errors.push("name must match [a-z0-9-]{1,64}")
   }
+
   if (isNew && existingNames.includes(adapter.name)) {
     errors.push(`name '${adapter.name}' is already in use`)
   }
+
   if (!adapter.fields.victim_ip) {
     errors.push("fields.victim_ip is required")
   }
+
   if (adapter.auth.type === "hmac" && !adapter.auth.secret_env) {
     errors.push("auth.secret_env is required for HMAC")
   }
+
   if (
     adapter.confidence_scale !== null &&
     adapter.confidence_scale !== undefined &&
@@ -691,5 +715,6 @@ export function validateAdapter(
   ) {
     errors.push("confidence_scale must be > 0")
   }
+
   return errors
 }

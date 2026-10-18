@@ -32,6 +32,7 @@ export function ActiveMitigationsMini({ mitigations, limit = 8, loading, error, 
     const update = () => setNow(Date.now())
     update()
     const interval = setInterval(update, 15_000)
+
     return () => clearInterval(interval)
   }, [])
   const loaded = mitigations.filter(m => m.status === "active" || m.status === "escalated")

@@ -9,10 +9,14 @@ import { formatUtc } from "@/lib/format"
 export function formatControllerUptime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "unavailable"
   const minutes = Math.floor(seconds / 60)
+
   if (minutes === 0) return `${Math.floor(seconds)}s`
+
   if (minutes < 60) return `${minutes}m`
   const hours = Math.floor(minutes / 60)
+
   if (hours < 24) return `${hours}h ${minutes % 60}m`
+
   return `${Math.floor(hours / 24)}d ${hours % 24}h`
 }
 
@@ -20,6 +24,7 @@ export function BgpSessionStatus() {
   const { data: health, error, isStale: stale, receiptAge: age } = useHealthDetail()
   const daemon = error ? undefined : health?.speaker?.daemon
   const daemonAvailable = daemon?.status === "observed" && !stale
+
   const status = error ? "error"
     : stale ? "stale"
     : !health ? "loading"
@@ -27,6 +32,7 @@ export function BgpSessionStatus() {
     : health.gobgp.status !== "connected" ? "error"
     : Object.keys(health.bgp_sessions).length === 0 ? "no peers"
     : health.bgp_session_up ? "up" : "down"
+
   const observed = error || stale ? undefined : health
   const peers = observed ? Object.values(observed.bgp_sessions) : []
   const established = peers.filter(state => state === "established").length

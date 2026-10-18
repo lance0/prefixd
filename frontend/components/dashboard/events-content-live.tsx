@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils"
 import { downloadCsv } from "@/lib/csv"
 
 type SortField = "timestamp" | "source" | "victim_ip" | "vector" | "bps" | "confidence"
+
 type SortDirection = "asc" | "desc"
 
 interface EventsContentLiveProps {
@@ -50,26 +51,33 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
   const sources = useMemo(() => {
     if (!events) return ["All"]
     const unique = [...new Set(events.map((e) => e.source))]
+
     return ["All", ...unique]
   }, [events])
 
   const vectors = useMemo(() => {
     if (!events) return ["All"]
     const unique = [...new Set(events.map((e) => e.vector))]
+
     return ["All", ...unique]
   }, [events])
 
   const filteredEvents = useMemo(() => {
     if (!events) return []
+
     return events
       .filter((e) => {
         if (sourceFilter !== "All" && e.source !== sourceFilter) return false
+
         if (vectorFilter !== "All" && e.vector !== vectorFilter) return false
+
         if (searchQuery && !e.victim_ip.includes(searchQuery)) return false
+
         return true
       })
       .sort((a, b) => {
         let comparison = 0
+
         switch (sortField) {
           case "timestamp":
             comparison = new Date(a.event_timestamp).getTime() - new Date(b.event_timestamp).getTime()
@@ -90,11 +98,13 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
             comparison = (a.confidence || 0) - (b.confidence || 0)
             break
         }
+
         return sortDirection === "asc" ? comparison : -comparison
       })
   }, [events, sourceFilter, vectorFilter, searchQuery, sortField, sortDirection])
 
   const totalPages = Math.ceil(filteredEvents.length / itemsPerPage)
+
   const paginatedEvents = filteredEvents.slice(
     (currentPage - 1) * itemsPerPage,
     currentPage * itemsPerPage
@@ -102,6 +112,7 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
 
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return null
+
     return sortDirection === "asc" ? (
       <ChevronUp className="size-3" aria-hidden="true" />
     ) : (
@@ -143,10 +154,12 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
             className="size-9 shrink-0"
             onClick={() => {
               const headers = ["event_id", "event_timestamp", "ingested_at", "source", "victim_ip", "vector", "bps", "pps", "confidence"]
+
               const rows = filteredEvents.map((e) => [
                 e.event_id, e.event_timestamp, e.ingested_at, e.source, e.victim_ip, e.vector,
                 String(e.bps ?? ""), String(e.pps ?? ""), String(e.confidence ?? ""),
               ])
+
               downloadCsv(`events-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
             }}
             disabled={filteredEvents.length === 0}
@@ -240,6 +253,7 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
               <TableBody>
                 {paginatedEvents.map((event) => {
                   const vector = event.vector.replace(/_/g, " ")
+
                   return (
                     <TableRow
                       key={event.event_id}

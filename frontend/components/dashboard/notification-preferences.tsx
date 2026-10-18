@@ -43,6 +43,7 @@ export function NotificationPreferencesPanel() {
   const toggleMuted = useCallback((event: string) => {
     setMutedEvents((prev) => {
       const next = prev.includes(event) ? prev.filter((e) => e !== event) : [...prev, event]
+
       return next
     })
     setDirty(true)
@@ -50,6 +51,7 @@ export function NotificationPreferencesPanel() {
 
   const handleSave = useCallback(async () => {
     setSaving(true)
+
     try {
       await updateNotificationPreferences({
         muted_events: mutedEvents,
@@ -94,6 +96,7 @@ export function NotificationPreferencesPanel() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {EVENT_TYPES.map((evt) => {
               const isMuted = mutedEvents.includes(evt.value)
+
               return (
                 <div key={evt.value} className="flex items-center gap-2">
                   <Checkbox
@@ -129,8 +132,10 @@ export function NotificationPreferencesPanel() {
                   setQuietEnd(null)
                 } else {
                   setQuietStart(Number(v))
+
                   if (quietEnd === null) setQuietEnd(8)
                 }
+
                 setDirty(true)
               }}
             >

@@ -7,6 +7,7 @@ const requestCache = new Map<string, Promise<unknown>>()
 
 // Debounce auth-expired events: only dispatch once per 2s window
 let authExpiredTimer: ReturnType<typeof setTimeout> | null = null
+
 function dispatchAuthExpired() {
   if (authExpiredTimer) return
   authExpiredTimer = setTimeout(() => { authExpiredTimer = null }, 2000)
@@ -155,11 +156,13 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
   if (method === "GET") {
     const cacheKey = url
     const cached = requestCache.get(cacheKey)
+
     if (cached) return cached as Promise<T>
     
     const promise = doFetch<T>(url, { ...options, headers }).finally(() => {
       requestCache.delete(cacheKey)
     })
+
     requestCache.set(cacheKey, promise)
     
     return promise
@@ -183,11 +186,13 @@ async function doFetch<T>(url: string, options: RequestInit): Promise<T> {
     if (res.status === 401 && typeof window !== "undefined") {
       dispatchAuthExpired()
     }
+
     const error = await res.text()
     throw new Error(`API error ${res.status}: ${error}`)
   }
 
   const text = await res.text()
+
   return (text.trim() ? JSON.parse(text) : null) as T
 }
 
@@ -198,6 +203,7 @@ export async function getHealth(): Promise<PublicHealthResponse> {
 export async function getHealthDetail(): Promise<HealthResponse> {
   const data = await fetchApi<Omit<HealthResponse, 'bgp_session_up'>>("/v1/health/detail")
   const sessions = Object.values(data.bgp_sessions ?? {})
+
   return {
     ...data,
     bgp_session_up: data.gobgp.status === "connected" && sessions.length > 0 && sessions.every((s) => s === "established"),
@@ -226,18 +232,27 @@ export async function getMitigations(params?: {
   end?: string
 }): Promise<MitigationsResponse> {
   const searchParams = new URLSearchParams()
+
   if (params?.status && params.status.length > 0) {
     searchParams.set("status", params.status.join(","))
   }
+
   if (params?.customer_id) searchParams.set("customer_id", params.customer_id)
+
   if (params?.pop) searchParams.set("pop", params.pop)
+
   if (params?.acknowledged !== undefined) searchParams.set("acknowledged", params.acknowledged.toString())
+
   if (params?.limit) searchParams.set("limit", params.limit.toString())
+
   if (params?.cursor) searchParams.set("cursor", params.cursor)
+
   if (params?.start) searchParams.set("start", params.start)
+
   if (params?.end) searchParams.set("end", params.end)
 
   const query = searchParams.toString()
+
   return fetchApi<MitigationsResponse>(`/v1/mitigations${query ? `?${query}` : ""}`)
 }
 
@@ -342,12 +357,17 @@ export async function getEvents(params?: {
   end?: string
 }): Promise<EventsResponse> {
   const searchParams = new URLSearchParams()
+
   if (params?.limit) searchParams.set("limit", params.limit.toString())
+
   if (params?.cursor) searchParams.set("cursor", params.cursor)
+
   if (params?.start) searchParams.set("start", params.start)
+
   if (params?.end) searchParams.set("end", params.end)
 
   const query = searchParams.toString()
+
   return fetchApi<EventsResponse>(`/v1/events${query ? `?${query}` : ""}`)
 }
 
@@ -377,12 +397,17 @@ export async function getAuditLog(params?: {
   end?: string
 }): Promise<AuditResponse> {
   const searchParams = new URLSearchParams()
+
   if (params?.limit) searchParams.set("limit", params.limit.toString())
+
   if (params?.cursor) searchParams.set("cursor", params.cursor)
+
   if (params?.start) searchParams.set("start", params.start)
+
   if (params?.end) searchParams.set("end", params.end)
 
   const query = searchParams.toString()
+
   return fetchApi<AuditResponse>(`/v1/audit${query ? `?${query}` : ""}`)
 }
 
@@ -426,6 +451,7 @@ export async function getDashboardData(): Promise<{
     getStats(),
     getMitigations({ status: ["active", "escalated"], limit: 100 }),
   ])
+
   return { health, stats, mitigations: mitigationsResp.mitigations }
 }
 
@@ -447,6 +473,7 @@ export interface OperatorListResponse {
 
 export async function getOperators(): Promise<OperatorInfo[]> {
   const response = await fetchApi<OperatorListResponse>("/v1/operators")
+
   return response.operators
 }
 
@@ -471,9 +498,11 @@ export async function changePassword(
   currentPassword?: string
 ): Promise<void> {
   const body: Record<string, string> = { new_password: newPassword }
+
   if (currentPassword) {
     body.current_password = currentPassword
   }
+
   await fetchApi(`/v1/operators/${id}/password`, {
     method: "PUT",
     body: JSON.stringify(body),
@@ -582,10 +611,14 @@ export async function getTimeseries(params?: {
   bucket?: string
 }): Promise<TimeseriesResponse> {
   const searchParams = new URLSearchParams()
+
   if (params?.metric) searchParams.set("metric", params.metric)
+
   if (params?.range) searchParams.set("range", params.range)
+
   if (params?.bucket) searchParams.set("bucket", params.bucket)
   const query = searchParams.toString()
+
   return fetchApi<TimeseriesResponse>(`/v1/stats/timeseries${query ? `?${query}` : ""}`)
 }
 
@@ -665,8 +698,10 @@ export async function updateAlertingConfig(config: UpdateAlertingRequest): Promi
 
 export async function getIpHistory(ip: string, limit?: number): Promise<IpHistoryResponse> {
   const searchParams = new URLSearchParams()
+
   if (limit) searchParams.set("limit", limit.toString())
   const query = searchParams.toString()
+
   return fetchApi<IpHistoryResponse>(`/v1/ip/${encodeURIComponent(ip)}/history${query ? `?${query}` : ""}`)
 }
 
@@ -682,15 +717,20 @@ export interface NotificationPreferences {
 
 export async function getIncidentReport(params: { mitigation_id?: string; ip?: string }): Promise<string> {
   const searchParams = new URLSearchParams()
+
   if (params.mitigation_id) searchParams.set("mitigation_id", params.mitigation_id)
+
   if (params.ip) searchParams.set("ip", params.ip)
+
   const res = await fetch(`${API_BASE}/v1/reports/incident?${searchParams}`, {
     credentials: "include",
   })
+
   if (!res.ok) {
     if (res.status === 401 && typeof window !== "undefined") dispatchAuthExpired()
     throw new Error(`API error ${res.status}: ${await res.text()}`)
   }
+
   return res.text()
 }
 
@@ -753,14 +793,21 @@ export async function getSignalGroups(params?: {
   end?: string
 }): Promise<SignalGroupsResponse> {
   const searchParams = new URLSearchParams()
+
   if (params?.status) searchParams.set("status", params.status)
+
   if (params?.vector) searchParams.set("vector", params.vector)
+
   if (params?.limit) searchParams.set("limit", params.limit.toString())
+
   if (params?.cursor) searchParams.set("cursor", params.cursor)
+
   if (params?.start) searchParams.set("start", params.start)
+
   if (params?.end) searchParams.set("end", params.end)
 
   const query = searchParams.toString()
+
   return fetchApi<SignalGroupsResponse>(`/v1/signal-groups${query ? `?${query}` : ""}`)
 }
 
@@ -771,6 +818,7 @@ export async function getSignalGroupDetail(id: string): Promise<SignalGroupDetai
 // Correlation Config
 
 export type SourceMode = "primary" | "corroborating"
+
 export type MatchDimension = "customer_id" | "pop" | "service_id" | "interface"
 
 export interface SourceConfig {
@@ -855,6 +903,7 @@ export interface CorrelationConfigResponse {
 
 export async function getCorrelationConfig(): Promise<CorrelationConfig> {
   const resp = await fetchApi<CorrelationConfigResponse>("/v1/config/correlation")
+
   return resp.config
 }
 
@@ -863,6 +912,7 @@ export async function updateCorrelationConfig(config: CorrelationConfig): Promis
     method: "PUT",
     body: JSON.stringify(config),
   })
+
   return resp.config
 }
 
@@ -920,9 +970,12 @@ export async function getCachedCorroborators(
   params: { source?: string; limit?: number } = {},
 ): Promise<CachedCorroboratorsResponse> {
   const qs = new URLSearchParams()
+
   if (params.source) qs.set("source", params.source)
+
   if (params.limit) qs.set("limit", String(params.limit))
   const suffix = qs.toString() ? `?${qs}` : ""
+
   return fetchApi<CachedCorroboratorsResponse>(
     `/v1/signals/corroborator/cache${suffix}`,
   )
@@ -960,8 +1013,10 @@ export async function getSignalSources(): Promise<SignalSourceStatus[]> {
   // Enrich with event data
   for (const event of eventsResp.events) {
     const existing = sourceMap.get(event.source)
+
     if (existing) {
       existing.event_count++
+
       if (!existing.last_seen || event.ingested_at > existing.last_seen) {
         existing.last_seen = event.ingested_at
       }
@@ -981,8 +1036,10 @@ export async function getSignalSources(): Promise<SignalSourceStatus[]> {
   // corroborating_signals cache and attached signal_group_events).
   for (const row of corroboratorResp.sources ?? []) {
     const existing = sourceMap.get(row.source)
+
     if (existing) {
       existing.event_count += row.count
+
       if (
         row.last_seen &&
         (!existing.last_seen || row.last_seen > existing.last_seen)
@@ -1003,6 +1060,7 @@ export async function getSignalSources(): Promise<SignalSourceStatus[]> {
 
   // Determine health: seen within last 10 minutes
   const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+
   for (const source of sourceMap.values()) {
     source.healthy = source.last_seen != null && source.last_seen > tenMinutesAgo
   }

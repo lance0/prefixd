@@ -42,6 +42,7 @@ export function Sidebar({ onClose, isCollapsed = false, onToggleCollapse }: Side
         const count = item.href === "/mitigations" ? stats?.total_active ?? 0 : item.href === "/correlation" ? openGroupCount : 0
         const displayCount = count > 99 ? "99+" : count
         const accessibleLabel = count > 0 ? `${item.label} (${displayCount})` : item.label
+
         const link = (
           <Link href={item.href} onClick={onClose} aria-current={isActive ? "page" : undefined} aria-label={collapsed ? accessibleLabel : undefined}
             className={cn("relative flex min-h-10 items-center gap-3 rounded-md px-3 text-sm", collapsed && "justify-center px-0", isActive ? "bg-sidebar-accent font-medium text-primary" : "text-muted-foreground hover:bg-sidebar-accent hover:text-foreground")}>
@@ -50,10 +51,12 @@ export function Sidebar({ onClose, isCollapsed = false, onToggleCollapse }: Side
             {count > 0 ? <span className={cn("rounded-sm bg-muted px-1.5 text-xs text-foreground", collapsed && "absolute -right-1 -top-1")}>{displayCount}</span> : null}
           </Link>
         )
+
         return collapsed ? <Tooltip key={item.href}><TooltipTrigger asChild>{link}</TooltipTrigger><TooltipContent side="right">{accessibleLabel}</TooltipContent></Tooltip> : <div key={item.href}>{link}</div>
       })}
     </nav>
   )
+
   const brand = (
     <Link href="/" aria-label="prefixd overview" onClick={onClose} className="flex items-center gap-2.5 rounded-sm font-semibold">
       <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary font-mono text-xs text-primary-foreground" aria-hidden="true">P</span>

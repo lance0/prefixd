@@ -32,10 +32,13 @@ export function IncidentReportDialog({
 
   const handleCopy = async () => {
     if (!markdown) return
+
     if (!(await copyText(markdown))) {
       toast.error("Copy failed — clipboard unavailable")
+
       return
     }
+
     setCopied(true)
     toast.success("Report copied to clipboard")
     setTimeout(() => setCopied(false), 2000)

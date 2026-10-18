@@ -36,6 +36,7 @@ export default function ConfigPage() {
   const handleReload = async () => {
     setReloading(true)
     setReloadResult(null)
+
     try {
       await reloadConfig()
       await Promise.all([mutate("config-settings"), mutate("config-playbooks"), mutate("config-inventory")])
@@ -50,6 +51,7 @@ export default function ConfigPage() {
 
   const handleSavePlaybooks = useCallback(async (playbooks: ConfigPlaybook[]) => {
     setSaving(true)
+
     try {
       await updatePlaybooks(playbooks)
       await mutatePlaybooks()

@@ -28,6 +28,7 @@ export async function fetchHealthDetailSnapshot(): Promise<HealthDetailSnapshot>
 export function healthReceiptAge(receivedAt: number | undefined, now: number): number | null {
   if (receivedAt === undefined) return null
   const age = now - receivedAt
+
   return Number.isFinite(age) && age >= 0 ? age : null
 }
 
@@ -35,8 +36,10 @@ export function useHealthDetail() {
   const [now, setNow] = useState(() => performance.now())
   useEffect(() => {
     const timer = setInterval(() => setNow(performance.now()), REFRESH_INTERVAL)
+
     return () => clearInterval(timer)
   }, [])
+
   const query = useSWR(
     "health-detail",
     fetchHealthDetailSnapshot,
@@ -45,7 +48,9 @@ export function useHealthDetail() {
       revalidateOnFocus: true,
     }
   )
+
   const receiptAge = healthReceiptAge(query.data?.receivedAt, Math.max(now, performance.now()))
+
   return { ...query, receiptAge, isStale: Boolean(query.data) && (receiptAge === null || receiptAge > 15000) }
 }
 
@@ -176,6 +181,7 @@ export function useConfigPlaybooks() {
 
 export function useTimeseries(metric?: string, range?: string, bucket?: string) {
   const key = ["timeseries", metric || "mitigations", range || "24h", bucket || "1h"]
+
   return useSWR(
     key,
     () => api.getTimeseries({ metric, range, bucket }),
@@ -244,11 +250,13 @@ export function useSignalGroupsPaginated(params?: {
   const getKey = (pageIndex: number, previousPageData: api.SignalGroupsResponse | null) => {
     if (previousPageData && !previousPageData.has_more) return null
     const cursor = previousPageData?.next_cursor ?? undefined
+
     return ["signal-groups-page", JSON.stringify({ ...params, limit, cursor })]
   }
 
   const fetcher = async (_key: string[]): Promise<api.SignalGroupsResponse> => {
         const parsedParams = JSON.parse(_key[1])
+
         return api.getSignalGroups(parsedParams)
       }
 
@@ -293,6 +301,7 @@ export function useCorrelationConfig() {
 
 export function useOpenSignalGroupCount() {
   const { data } = useSignalGroups({ status: "open", limit: 1 })
+
   return data?.count ?? 0
 }
 
@@ -301,6 +310,7 @@ export function useCachedCorroborators(params: {
   limit?: number
 } = {}) {
   const key = `cached-corroborators:${params.source ?? ""}:${params.limit ?? 100}`
+
   return useSWR(
     key,
     () => api.getCachedCorroborators(params),

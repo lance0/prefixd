@@ -6,10 +6,12 @@ import AdminPage from "@/app/(dashboard)/admin/page"
 import { healthReceiptAge, type HealthDetailSnapshot } from "@/hooks/use-api"
 
 const mock = vi.hoisted(() => ({ health: undefined as HealthDetailSnapshot | undefined, error: undefined as Error | undefined }))
+
 vi.mock("swr", async (importOriginal) => ({
   ...await importOriginal<typeof import("swr")>(),
   default: () => ({ data: mock.health, error: mock.error, isLoading: !mock.health && !mock.error }),
 }))
+
 vi.mock("@/hooks/use-api", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/hooks/use-api")>(),
   usePops: () => ({ data: [] }),
@@ -17,13 +19,19 @@ vi.mock("@/hooks/use-api", async (importOriginal) => ({
   useSafelist: () => ({ data: [] }),
   useOperators: () => ({ data: [] }),
 }))
+
 vi.mock("@/hooks/use-reduced-motion", () => ({ useReducedMotion: () => true }))
+
 vi.mock("next/navigation", () => ({ usePathname: () => "/admin", useSearchParams: () => new URLSearchParams() }))
+
 vi.mock("@/hooks/use-permissions", () => ({ usePermissions: () => ({}) }))
+
 vi.mock("@/hooks/use-auth", () => ({ useAuth: () => ({ operator: null }) }))
+
 vi.mock("@/components/dashboard/dashboard-layout", () => ({ DashboardLayout: ({ children }: { children: ReactNode }) => <>{children}</> }))
 
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
+
 beforeEach(() => { mock.health = undefined; mock.error = undefined })
 
 function health(status: string, peers: Record<string, string> = {}): HealthDetailSnapshot {
@@ -55,11 +63,14 @@ describe("speaker observation UI", () => {
 
   it.each([false, true, undefined])("annotates rule-reader availability only when explicitly false (%s)", (reader) => {
     mock.health = health("connected", { router: "established" })
+
     if (reader !== undefined) {
       mock.health.speaker = { backend: "test", capabilities: { rule_reader: reader, peer_observer: true } }
     }
+
     render(<AdminPage />)
     const annotation = screen.queryByText("Rule observation is unsupported by this speaker")
+
     if (reader === false) expect(annotation).toBeInTheDocument()
     else expect(annotation).not.toBeInTheDocument()
     expect(screen.getByText("router")).toBeInTheDocument()
@@ -190,6 +201,7 @@ describe("speaker observation UI", () => {
 
   it.each(["stale", "error"])("hides Admin established badges for %s cached health", (state) => {
     mock.health = health("connected", { router: "established" })
+
     if (state === "stale") mock.health.receivedAt = performance.now() - 20000
     else mock.error = new Error("offline")
     render(<AdminPage />)

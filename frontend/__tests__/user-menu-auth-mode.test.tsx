@@ -12,11 +12,15 @@ const mock = vi.hoisted(() => ({
 }))
 
 vi.mock("@/hooks/use-auth", () => ({ useAuth: () => ({ operator: mock.operator, isLoading: mock.authLoading, logout: mock.logout }) }))
+
 vi.mock("@/hooks/use-api", () => ({ useHealth: () => ({ data: mock.health, isLoading: mock.healthLoading }) }))
+
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: mock.push }) }))
+
 vi.mock("@/components/dashboard/notification-preferences", () => ({ NotificationPreferencesPanel: () => <p>Preferences editor</p> }))
 
 afterEach(cleanup)
+
 beforeEach(() => {
   vi.clearAllMocks()
   mock.health = { auth_mode: "credentials" }

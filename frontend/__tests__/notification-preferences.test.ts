@@ -15,6 +15,7 @@ describe("shouldShowToast", () => {
       quiet_hours_start: null,
       quiet_hours_end: null,
     }
+
     expect(shouldShowToast("mitigation_created", prefs)).toBe(true)
     expect(shouldShowToast("mitigation_expired", prefs)).toBe(true)
   })
@@ -25,6 +26,7 @@ describe("shouldShowToast", () => {
       quiet_hours_start: null,
       quiet_hours_end: null,
     }
+
     expect(shouldShowToast("mitigation_expired", prefs)).toBe(false)
     expect(shouldShowToast("resync_required", prefs)).toBe(false)
     expect(shouldShowToast("mitigation_created", prefs)).toBe(true)
@@ -33,11 +35,13 @@ describe("shouldShowToast", () => {
 
   it("suppresses non-critical events during quiet hours", () => {
     const now = new Date().getUTCHours()
+
     const prefs: NotificationPreferences = {
       muted_events: [],
       quiet_hours_start: now,
       quiet_hours_end: (now + 2) % 24,
     }
+
     // Non-critical: suppressed
     expect(shouldShowToast("mitigation_withdrawn", prefs)).toBe(false)
     expect(shouldShowToast("mitigation_expired", prefs)).toBe(false)
@@ -52,11 +56,13 @@ describe("shouldShowToast", () => {
     // Set quiet hours to a window that doesn't include now
     const start = (now + 4) % 24
     const end = (now + 6) % 24
+
     const prefs: NotificationPreferences = {
       muted_events: [],
       quiet_hours_start: start,
       quiet_hours_end: end,
     }
+
     expect(shouldShowToast("mitigation_expired", prefs)).toBe(true)
     expect(shouldShowToast("mitigation_withdrawn", prefs)).toBe(true)
   })
@@ -67,11 +73,13 @@ describe("shouldShowToast", () => {
     // Set so 'now' is inside the wrap window
     const start = (now - 1 + 24) % 24
     const end = (now + 2) % 24
+
     const prefs: NotificationPreferences = {
       muted_events: [],
       quiet_hours_start: start,
       quiet_hours_end: end,
     }
+
     expect(shouldShowToast("mitigation_expired", prefs)).toBe(false)
     expect(shouldShowToast("mitigation_created", prefs)).toBe(true)
   })
@@ -82,16 +90,19 @@ describe("shouldShowToast", () => {
       quiet_hours_start: null,
       quiet_hours_end: null,
     }
+
     expect(shouldShowToast("SomeUnknownType", prefs)).toBe(true)
   })
 
   it("muting takes precedence over quiet hours critical exception", () => {
     const now = new Date().getUTCHours()
+
     const prefs: NotificationPreferences = {
       muted_events: ["mitigation.created"],
       quiet_hours_start: now,
       quiet_hours_end: (now + 2) % 24,
     }
+
     // Created is critical (would survive quiet hours) but is explicitly muted
     expect(shouldShowToast("mitigation_created", prefs)).toBe(false)
   })

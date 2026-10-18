@@ -7,9 +7,11 @@ interface ConfidenceBarProps {
 
 export function ConfidenceBar({ value }: ConfidenceBarProps) {
   const label = formatConfidence(value)
+
   if (!isConfidence(value)) {
     return <span className="text-xs text-muted-foreground">{label}</span>
   }
+
   const percent = value * 100
 
   return (

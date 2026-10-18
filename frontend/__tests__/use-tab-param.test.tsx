@@ -4,6 +4,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useTabParam } from "@/hooks/use-tab-param"
 
 const nav = vi.hoisted(() => ({ params: new URLSearchParams() }))
+
 vi.mock("next/navigation", () => ({
   usePathname: () => "/config",
   useSearchParams: () => nav.params,
@@ -13,6 +14,7 @@ const TABS = ["settings", "playbooks", "alerting"] as const
 
 function Harness() {
   const [tab, setTab] = useTabParam(TABS)
+
   return (
     <Tabs value={tab} onValueChange={setTab}>
       <TabsList>
@@ -26,6 +28,7 @@ function Harness() {
 const replaceState = vi.spyOn(window.history, "replaceState")
 
 beforeEach(() => { replaceState.mockClear() })
+
 afterEach(cleanup)
 
 describe("useTabParam", () => {

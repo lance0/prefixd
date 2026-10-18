@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils"
 import { downloadCsv } from "@/lib/csv"
 
 type SortField = "timestamp" | "actor" | "action" | "target"
+
 type SortDirection = "asc" | "desc"
 
 function AuditRow({ entry, isExpanded, onToggle }: {
@@ -118,24 +119,31 @@ export function AuditLogContentLive() {
   const actions = useMemo(() => {
     if (!entries) return ["All"]
     const unique = [...new Set(entries.map((e) => e.action))]
+
     return ["All", ...unique]
   }, [entries])
 
   const filteredLogs = useMemo(() => {
     if (!entries) return []
+
     return entries
       .filter((entry) => {
         if (actionFilter !== "All" && entry.action !== actionFilter) return false
+
         if (actorFilter !== "All" && entry.actor_type !== actorFilter) return false
+
         if (searchQuery) {
           const target = entry.target_id || ""
           const details = JSON.stringify(entry.details)
+
           if (!target.includes(searchQuery) && !details.includes(searchQuery)) return false
         }
+
         return true
       })
       .sort((a, b) => {
         let comparison = 0
+
         switch (sortField) {
           case "timestamp":
             comparison = new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
@@ -150,11 +158,13 @@ export function AuditLogContentLive() {
             comparison = (a.target_id || "").localeCompare(b.target_id || "")
             break
         }
+
         return sortDirection === "asc" ? comparison : -comparison
       })
   }, [entries, actionFilter, actorFilter, searchQuery, sortField, sortDirection])
 
   const totalPages = Math.ceil(filteredLogs.length / itemsPerPage)
+
   const paginatedLogs = filteredLogs.slice(
     (currentPage - 1) * itemsPerPage,
     currentPage * itemsPerPage
@@ -172,6 +182,7 @@ export function AuditLogContentLive() {
 
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return null
+
     return sortDirection === "asc" ? (
       <ChevronUp className="size-3" aria-hidden="true" />
     ) : (
@@ -211,10 +222,12 @@ export function AuditLogContentLive() {
           className="size-9 shrink-0"
           onClick={() => {
             const headers = ["timestamp", "actor_type", "actor_id", "action", "target_type", "target_id"]
+
             const rows = filteredLogs.map((e) => [
               e.timestamp, e.actor_type ?? "", e.actor_id ?? "", e.action,
               e.target_type ?? "", e.target_id ?? "",
             ])
+
             downloadCsv(`audit-log-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
           }}
           disabled={filteredLogs.length === 0}
@@ -300,6 +313,7 @@ export function AuditLogContentLive() {
                   isExpanded={expandedId === entry.audit_id}
                   onToggle={() => {
                     const detailsStr = JSON.stringify(entry.details)
+
                     if (detailsStr.length > 50) {
                       setExpandedId(expandedId === entry.audit_id ? null : entry.audit_id)
                     }

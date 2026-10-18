@@ -5,6 +5,7 @@ import { formatControllerUptime } from "@/components/dashboard/bgp-session-statu
 import type { Mitigation } from "@/lib/api"
 
 const now = Date.parse("2026-10-18T12:00:00Z")
+
 const mitigation: Mitigation = {
   mitigation_id: "rule-1", scope_hash: "scope-1", status: "active",
   customer_id: null, service_id: null, pop: "iad1", victim_ip: "203.0.113.10",
@@ -17,6 +18,7 @@ const mitigation: Mitigation = {
 }
 
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(now) })
+
 afterEach(() => { cleanup(); vi.useRealTimers() })
 
 describe("operator evidence formatting", () => {

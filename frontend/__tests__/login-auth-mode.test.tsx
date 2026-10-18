@@ -10,11 +10,15 @@ const mock = vi.hoisted(() => ({
   login: vi.fn(),
   push: vi.fn(),
 }))
+
 vi.mock("@/hooks/use-auth", () => ({ useAuth: () => ({ login: mock.login, isAuthenticated: mock.authenticated, isLoading: mock.authLoading }) }))
+
 vi.mock("@/hooks/use-api", () => ({ useHealth: () => ({ data: mock.health, isLoading: mock.healthLoading }) }))
+
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: mock.push }) }))
 
 afterEach(cleanup)
+
 beforeEach(() => {
   vi.clearAllMocks()
   mock.health = { auth_mode: "credentials" }

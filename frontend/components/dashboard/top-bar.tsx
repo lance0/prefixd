@@ -27,6 +27,7 @@ export function TopBar({ onSearchClick }: TopBarProps) {
     const updateTime = () => setTime(new Date().toLocaleTimeString("en-GB", { timeZone: "UTC", hour12: false }) + " UTC")
     updateTime()
     const interval = setInterval(updateTime, 1000)
+
     return () => clearInterval(interval)
   }, [])
 

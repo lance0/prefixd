@@ -4,6 +4,7 @@ import { ErrorBoundary } from "@/components/error-boundary"
 
 function ThrowingChild({ shouldThrow }: { shouldThrow: boolean }) {
   if (shouldThrow) throw new Error("Test explosion")
+
   return <div>All good</div>
 }
 

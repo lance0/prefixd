@@ -7,9 +7,13 @@ const mock = vi.hoisted(() => ({
   ingest: vi.fn(), push: vi.fn(), close: vi.fn(),
   success: vi.fn(), warning: vi.fn(), error: vi.fn(), info: vi.fn(),
 }))
+
 vi.mock("@/lib/api", () => ({ ingestEvent: mock.ingest }))
+
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: mock.push }) }))
+
 vi.mock("sonner", () => ({ toast: { success: mock.success, warning: mock.warning, error: mock.error, info: mock.info } }))
+
 vi.mock("@/components/ui/dialog", () => ({
   Dialog: ({ children }: { children: ReactNode }) => <>{children}</>,
   DialogContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -17,6 +21,7 @@ vi.mock("@/components/ui/dialog", () => ({
   DialogTitle: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DialogDescription: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }))
+
 vi.mock("@/components/ui/select", () => ({
   Select: ({ value, onValueChange, children }: { value: string; onValueChange: (value: string) => void; children: ReactNode }) =>
     <select aria-label="Attack Vector" value={value} onChange={event => onValueChange(event.target.value)}><option value="" />{children}</select>,
@@ -27,6 +32,7 @@ vi.mock("@/components/ui/select", () => ({
 }))
 
 afterEach(cleanup)
+
 beforeEach(() => { vi.clearAllMocks() })
 
 describe("manual mitigation creation outcome", () => {
@@ -39,6 +45,7 @@ describe("manual mitigation creation outcome", () => {
     await waitFor(() => expect(mock.push).toHaveBeenCalledWith("/mitigations/saved-intent"))
     expect(mock.close).toHaveBeenCalledWith(false)
     expect(mock.ingest).toHaveBeenCalledWith(expect.objectContaining({ victim_ip: "203.0.113.10", vector: "udp_flood", action: "ban" }))
+
     if (outcome === "unconfirmed") {
       expect(mock.warning).toHaveBeenCalledWith("Mitigation intent saved; announcement unconfirmed", expect.objectContaining({ description: expect.stringContaining("saved for reconciliation") }))
       expect(mock.success).not.toHaveBeenCalled()
@@ -46,6 +53,7 @@ describe("manual mitigation creation outcome", () => {
       expect(mock.success).toHaveBeenCalledWith("Mitigation created", expect.any(Object))
       expect(mock.warning).not.toHaveBeenCalled()
     }
+
     expect(mock.error).not.toHaveBeenCalled()
   })
 })

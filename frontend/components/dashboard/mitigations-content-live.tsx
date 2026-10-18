@@ -36,9 +36,11 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { formatRelative, formatTimeRemaining, formatUtc } from "@/lib/format"
 
 type SortField = "status" | "victim_ip" | "vector" | "customer_id" | "created_at" | "expires_at"
+
 type SortDirection = "asc" | "desc"
 
 const STATUS_FILTERS = ["active", "escalated", "pending", "expired", "withdrawn"] as const
+
 // A countdown under this many minutes reads as a warning.
 const EXPIRY_WARNING_MS = 5 * 60_000
 
@@ -81,6 +83,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
     status: statusFilters.length > 0 ? statusFilters : undefined,
     limit: 100,
   })
+
   const mitigations = mitigationsResp?.mitigations
 
   const toggleStatusFilter = (status: string) => {
@@ -104,6 +107,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
     withdrawInFlight.current = true
     setIsWithdrawing(true)
     setWithdrawError(null)
+
     try {
       await withdrawMitigation(withdrawTarget.mitigation_id, withdrawReason || "Manual withdrawal", "dashboard")
       withdrawCompleted.current = true
@@ -122,31 +126,41 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
     if (!mitigations) return { customers: [] as string[], pops: [] as string[] }
     const customerSet = new Set<string>()
     const popSet = new Set<string>()
+
     for (const m of mitigations) {
       if (m.customer_id) customerSet.add(m.customer_id)
+
       if (m.pop) popSet.add(m.pop)
     }
+
     return { customers: [...customerSet].sort(), pops: [...popSet].sort() }
   }, [mitigations])
 
   const filteredMitigations = useMemo(() => {
     if (!mitigations) return []
+
     return mitigations
       .filter((m) => {
         if (customerFilter !== "All" && m.customer_id !== customerFilter) return false
+
         if (popFilter !== "All" && m.pop !== popFilter) return false
+
         if (searchQuery) {
           const q = searchQuery.toLowerCase()
+
           const matches = m.victim_ip.includes(q) ||
             m.vector.toLowerCase().includes(q) ||
             (m.customer_id && m.customer_id.toLowerCase().includes(q)) ||
             m.mitigation_id.toLowerCase().includes(q)
+
           if (!matches) return false
         }
+
         return true
       })
       .sort((a, b) => {
         let comparison = 0
+
         switch (sortField) {
           case "status":
             comparison = a.status.localeCompare(b.status)
@@ -167,6 +181,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
             comparison = new Date(a.expires_at).getTime() - new Date(b.expires_at).getTime()
             break
         }
+
         return sortDirection === "asc" ? comparison : -comparison
       })
   }, [mitigations, customerFilter, popFilter, searchQuery, sortField, sortDirection])
@@ -190,11 +205,13 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev)
+
       if (next.has(id)) {
         next.delete(id)
       } else {
         next.add(id)
       }
+
       return next
     })
   }
@@ -204,17 +221,20 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
     bulkWithdrawInFlight.current = true
     setIsBulkWithdrawing(true)
     setBulkWithdrawError(null)
+
     try {
       const result = await bulkWithdrawMitigations(
         [...selectedIds],
         bulkWithdrawReason || "Bulk withdrawal",
         "dashboard"
       )
+
       setBulkWithdrawResults(result.results)
       setSelectedIds(new Set(result.results
         .filter((item) => item.status !== "withdrawn")
         .map((item) => item.mitigation_id)))
       mutate()
+
       if (result.failed > 0) {
         setBulkWithdrawError(`${result.withdrawn} completed locally, ${result.failed} failed. Retry the failed mitigations.`)
       } else {
@@ -231,6 +251,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   }
 
   const totalPages = Math.ceil(filteredMitigations.length / itemsPerPage)
+
   const paginatedMitigations = filteredMitigations.slice(
     (currentPage - 1) * itemsPerPage,
     currentPage * itemsPerPage
@@ -248,6 +269,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
 
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return null
+
     return sortDirection === "asc" ? (
       <ChevronUp className="size-3" aria-hidden="true" />
     ) : (
@@ -265,11 +287,13 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   )
 
   const filtersActive = searchQuery !== "" || customerFilter !== "All" || popFilter !== "All"
+
   const clearFilters = () => {
     setSearchQuery("")
     setCustomerFilter("All")
     setPopFilter("All")
   }
+
   const now = Date.now()
 
   return (
@@ -335,10 +359,12 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
             className="size-9 shrink-0"
             onClick={() => {
               const headers = ["mitigation_id", "status", "victim_ip", "vector", "action_type", "customer_id", "created_at", "expires_at"]
+
               const rows = filteredMitigations.map((m) => [
                 m.mitigation_id, m.status, m.victim_ip, m.vector, m.action_type,
                 m.customer_id ?? "", m.created_at, m.expires_at,
               ])
+
               downloadCsv(`mitigations-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
             }}
             disabled={filteredMitigations.length === 0}
@@ -405,6 +431,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
           <div role="group" aria-label="Status" className="flex flex-wrap items-center gap-1.5">
             {STATUS_FILTERS.map((status) => {
               const pressed = statusFilters.includes(status)
+
               return (
                 <button
                   key={status}
@@ -480,6 +507,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                   const vector = mitigation.vector.replace(/_/g, " ")
                   const ports = mitigation.dst_ports.length > 0 ? mitigation.dst_ports.join(", ") : "any"
                   const isSelectable = mitigation.status === "active" || mitigation.status === "escalated"
+
                   return (
                     <TableRow
                       key={mitigation.mitigation_id}

@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 
 const DEST_TYPES = ["slack", "discord", "teams", "telegram", "pagerduty", "opsgenie", "generic"] as const
+
 type DestType = (typeof DEST_TYPES)[number]
 
 const EVENT_TYPES = [
@@ -60,6 +61,7 @@ function newId(): string {
 
 function emptyDest(type: DestType): DraftDestination {
   const base: DraftDestination = { type, _id: newId() }
+
   switch (type) {
     case "slack": return { ...base, webhook_url: "", channel: "" }
     case "discord": return { ...base, webhook_url: "" }
@@ -77,15 +79,21 @@ function toDraft(d: AlertingDestination): DraftDestination {
 
 function stripDraftId(d: DraftDestination): AlertingDestination {
   const { _id, ...rest } = d
+
   return rest
 }
 
 function destSummary(d: AlertingDestination): string {
   if (d.type === "slack" && d.channel) return d.channel
+
   if (d.type === "telegram" && d.chat_id) return `chat ${d.chat_id}`
+
   if (d.type === "pagerduty" && d.events_url) return d.events_url
+
   if (d.type === "opsgenie" && d.region) return `${d.region.toUpperCase()} region`
+
   if (d.type === "generic" && d.url) return d.url
+
   return ""
 }
 
@@ -95,10 +103,12 @@ function isSecretField(field: string): boolean {
 
 function DestinationEventsFilter({ dest, onChange }: { dest: DraftDestination; onChange: (d: DraftDestination) => void }) {
   const destEvents = dest.events ?? []
+
   const toggleDestEvent = (event: string) => {
     const next = destEvents.includes(event) ? destEvents.filter((e) => e !== event) : [...destEvents, event]
     onChange({ ...dest, events: next })
   }
+
   return (
     <div className="mt-3 pt-3 border-t border-border/50">
       <Label className="text-muted-foreground">Per-Destination Events</Label>
@@ -258,6 +268,7 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
 
 function ReadOnlyDestCard({ dest, testResult }: { dest: AlertingDestination; testResult?: AlertingTestResult }) {
   const summary = destSummary(dest)
+
   return (
     <div className="bg-secondary/50 px-3 py-2.5">
       <div className="flex items-center gap-3">
@@ -320,6 +331,7 @@ export function AlertingConfigPanel() {
   const hasChanges = useMemo(() => {
     if (!draft || !draftEvents || !data) return false
     const strippedDraft = draft.map(stripDraftId)
+
     return JSON.stringify(strippedDraft) !== JSON.stringify(data.destinations) ||
       JSON.stringify(draftEvents) !== JSON.stringify(data.events)
   }, [draft, draftEvents, data])
@@ -327,6 +339,7 @@ export function AlertingConfigPanel() {
   const handleSave = useCallback(async () => {
     if (!draft || !draftEvents) return
     setSaving(true)
+
     try {
       await updateAlertingConfig({
         destinations: draft.map(stripDraftId),
@@ -346,6 +359,7 @@ export function AlertingConfigPanel() {
     setTesting(true)
     setTestResults(null)
     setTestError(null)
+
     try {
       const response = await testAlerting()
       setTestResults(response.results)
@@ -361,6 +375,7 @@ export function AlertingConfigPanel() {
       const current = prev ?? []
       const next = [...current, emptyDest(type)]
       setEditingIndex(current.length)
+
       return next
     })
     setAddingType(null)
@@ -368,6 +383,7 @@ export function AlertingConfigPanel() {
 
   const removeDest = useCallback((index: number) => {
     setDraft((prev) => (prev ?? []).filter((_, i) => i !== index))
+
     if (editingIndex === index) setEditingIndex(null)
     else if (editingIndex !== null && editingIndex > index) setEditingIndex(editingIndex - 1)
   }, [editingIndex])
@@ -379,12 +395,14 @@ export function AlertingConfigPanel() {
   const toggleEvent = useCallback((event: string) => {
     setDraftEvents((prev) => {
       if (!prev) return prev
+
       return prev.includes(event) ? prev.filter((e) => e !== event) : [...prev, event]
     })
   }, [])
 
   const readOnlyDestinations = useMemo(() => {
     if (!data) return []
+
     return data.destinations.map((dest, i) => ({
       ...dest,
       _id: `readonly-${dest.type}-${destSummary(dest)}-${i}`,

@@ -10,20 +10,25 @@ import { CacheTab } from "@/components/dashboard/correlation/cache-tab"
 import type { Event } from "@/lib/api"
 
 const mock = vi.hoisted(() => ({ events: vi.fn(), history: vi.fn(), cache: vi.fn() }))
+
 vi.mock("@/hooks/use-api", () => ({
   useEvents: () => mock.events(),
   useMitigations: () => ({ data: { mitigations: [] } }),
   useIpHistory: () => mock.history(),
   useCachedCorroborators: () => mock.cache(),
 }))
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
   useSearchParams: () => new URLSearchParams("ip=203.0.113.10"),
 }))
+
 vi.mock("@/hooks/use-reduced-motion", () => ({ useReducedMotion: () => true }))
+
 vi.mock("@/components/dashboard/dashboard-layout", () => ({
   DashboardLayout: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }))
+
 vi.mock("@/components/dashboard/incident-report-dialog", () => ({ IncidentReportDialog: () => null }))
 
 const event: Event = {
@@ -32,11 +37,13 @@ const event: Event = {
   victim_ip: "203.0.113.10", vector: "udp_flood", protocol: 17,
   bps: null, pps: null, top_dst_ports_json: "[53]", confidence: 0.95,
 }
+
 const events = [0.95, 0, null, NaN].map((confidence, index) => ({
   ...event, confidence, event_id: `event-${index}`, victim_ip: `203.0.113.${index + 10}`,
 }))
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+
 beforeEach(() => {
   vi.clearAllMocks()
   vi.stubGlobal("matchMedia", vi.fn((media: string) => ({
@@ -76,6 +83,7 @@ describe("confidence fraction formatting", () => {
 describe("confidence display callers", () => {
   it("shows API fractions, zero, missing and invalid confidence in event list rows", () => {
     render(<EventsContentLive />)
+
     for (const [index, label] of ["95%", "0%", "Unavailable", "Invalid"].entries()) {
       const row = screen.getByRole("link", { name: `203.0.113.${index + 10}` }).closest("tr")!
       expect(within(row).getByText(label)).toBeInTheDocument()
@@ -104,15 +112,18 @@ describe("confidence display callers", () => {
     const scrollIntoView = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView")
     Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() })
     vi.stubGlobal("ResizeObserver", observer)
+
     try {
       render(<CommandPalette open onOpenChange={vi.fn()} />)
       fireEvent.change(screen.getByPlaceholderText("Search mitigations, events, pages…"), { target: { value: "203.0.113" } })
+
       for (const label of ["95%", "0%", "Unavailable", "Invalid"]) {
         expect(await screen.findByText(label)).toBeInTheDocument()
       }
     } finally {
       cleanup()
       vi.unstubAllGlobals()
+
       if (scrollIntoView) Object.defineProperty(Element.prototype, "scrollIntoView", scrollIntoView)
       else Reflect.deleteProperty(Element.prototype, "scrollIntoView")
     }
@@ -121,6 +132,7 @@ describe("confidence display callers", () => {
   it("uses the same confidence states in IP history", () => {
     mock.history.mockReturnValue({ data: { events, mitigations: [], customer: null, service: null } })
     render(<IpHistoryPage />)
+
     for (const label of ["95%", "0%", "Unavailable", "Invalid"]) {
       expect(screen.getByText(`Confidence: ${label}`)).toBeInTheDocument()
     }
@@ -136,6 +148,7 @@ describe("confidence display callers", () => {
       })),
     } })
     render(<CacheTab />)
+
     for (const label of ["95%", "0%", "Unavailable", "Invalid"]) {
       expect(screen.getByText(label)).toBeInTheDocument()
     }

@@ -4,16 +4,20 @@ import { Sidebar } from "@/components/dashboard/sidebar"
 import { Dialog } from "@/components/ui/dialog"
 
 const mock = vi.hoisted(() => ({ mitigations: 0, groups: 0 }))
+
 vi.mock("next/navigation", () => ({ usePathname: () => "/" }))
+
 vi.mock("@/hooks/use-permissions", () => ({
   usePermissions: () => ({ isAdmin: false, authDisabled: false }),
 }))
+
 vi.mock("@/hooks/use-api", () => ({
   useStats: () => ({ data: { total_active: mock.mitigations } }),
   useOpenSignalGroupCount: () => mock.groups,
 }))
 
 afterEach(cleanup)
+
 beforeEach(() => { mock.mitigations = 0; mock.groups = 0 })
 
 describe("sidebar accessible counts", () => {

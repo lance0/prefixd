@@ -17,7 +17,9 @@ import { AlertTriangle, CheckCircle2, Info } from "lucide-react"
 
 function statusLabel(status: string, corroborated: boolean) {
   if (status === "resolved") return "Resolved"
+
   if (status === "expired") return "Expired"
+
   return corroborated ? "Corroborated" : "Open"
 }
 
@@ -71,19 +73,23 @@ export default function SignalGroupDetailPage({
   // missing ingest time at the end rather than sorting them as epoch 0.
   const ingestTs = (t: string | null | undefined) =>
     t ? new Date(t).getTime() : Number.POSITIVE_INFINITY
+
   const sortedEvents = [...group.events].sort(
     (a, b) => ingestTs(a.ingested_at) - ingestTs(b.ingested_at),
   )
 
   // Confidence breakdown calculations
   const totalWeight = sortedEvents.reduce((sum, e) => sum + e.source_weight, 0)
+
   const confidenceRows = sortedEvents.map((e) => {
     const rawConfidence = e.confidence
+
     const weightedContribution = rawConfidence == null
       ? rawConfidence
       : isConfidence(rawConfidence)
         ? totalWeight === 0 ? 0 : (rawConfidence * e.source_weight) / totalWeight
         : NaN
+
     return {
       source: e.source,
       event_id: e.event_id,

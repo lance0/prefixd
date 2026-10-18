@@ -38,6 +38,7 @@ export default function IpHistoryPage() {
     if (!activeIp) return
     setShowReportDialog(true)
     setReportLoading(true)
+
     try {
       const md = await getIncidentReport({ ip: activeIp })
       setReportMarkdown(md)
@@ -51,6 +52,7 @@ export default function IpHistoryPage() {
   function handleSearch(e: React.FormEvent) {
     e.preventDefault()
     const trimmed = searchInput.trim()
+
     if (trimmed) {
       setActiveIp(trimmed)
       router.replace(`/ip-history?ip=${encodeURIComponent(trimmed)}`)
@@ -58,6 +60,7 @@ export default function IpHistoryPage() {
   }
 
   const timeline: TimelineEntry[] = []
+
   if (data) {
     for (const ev of data.events) {
       timeline.push({
@@ -73,6 +76,7 @@ export default function IpHistoryPage() {
         },
       })
     }
+
     for (const m of data.mitigations) {
       timeline.push({
         type: "mitigation",
@@ -89,6 +93,7 @@ export default function IpHistoryPage() {
         },
       })
     }
+
     timeline.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
   }
 

@@ -59,6 +59,7 @@ export function MitigationActivityChart() {
     return Array.from(bucketMap.values())
       .sort((a, b) => new Date(a.bucket).getTime() - new Date(b.bucket).getTime())
   }, [mitigationData, eventData])
+
   const multiDay = selectedRange.range === "7d"
 
   const isLoading = !mitigationData || !eventData

@@ -60,6 +60,7 @@ export function ActivityFeedLive() {
                         entry.actor_type === "system" ? "system" : "mitigation"
       
       let description = entry.action.replace(/_/g, " ")
+
       if (entry.target_id) {
         const shortId = entry.target_id.length > 8 ? entry.target_id.slice(0, 8) : entry.target_id
         description = `${description} (${shortId}…)`

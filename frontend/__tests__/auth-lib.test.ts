@@ -10,7 +10,9 @@ function mockFetch(body: unknown, status: number) {
     json: async () => body,
     text: async () => JSON.stringify(body),
   }))
+
   globalThis.fetch = fetchMock as unknown as typeof fetch
+
   return fetchMock
 }
 

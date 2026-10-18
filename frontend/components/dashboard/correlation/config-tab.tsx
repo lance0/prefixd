@@ -75,12 +75,15 @@ function CorrelationSettingsEditor() {
   const handleSave = useCallback(async () => {
     if (!formState) return
     const errors = validateConfig(formState)
+
     if (errors.length > 0) {
       setValidationErrors(errors)
+
       return
     }
 
     setSaving(true)
+
     try {
       await updateCorrelationConfig(formState)
       await mutate()
@@ -239,6 +242,7 @@ function SignalSourceCards() {
     setDeleting(true)
     const updated = { ...config, sources: { ...config.sources } }
     delete updated.sources[name]
+
     try {
       await updateCorrelationConfig(updated)
       await mutate()
@@ -253,10 +257,12 @@ function SignalSourceCards() {
 
   const handleSaveSource = async (name: string, sourceConfig: SourceConfig, isNew: boolean) => {
     if (!config) return
+
     const updated = {
       ...config,
       sources: { ...config.sources, [name]: sourceConfig },
     }
+
     try {
       await updateCorrelationConfig(updated)
       await mutate()
@@ -424,9 +430,11 @@ function SourceDialog({
   const [weight, setWeight] = useState(initialConfig?.weight?.toString() || "1.0")
   const [type, setType] = useState(initialConfig?.type || "detector")
   const [mode, setMode] = useState<SourceMode>(initialConfig?.mode ?? "primary")
+
   const [matchDims, setMatchDims] = useState<MatchDimension[]>(
     initialConfig?.match_dimensions ?? []
   )
+
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
@@ -460,15 +468,21 @@ function SourceDialog({
   const handleSave = async () => {
     if (!name.trim()) return
     setFormError(null)
+
     if (mode === "corroborating" && matchDims.length === 0) {
       setFormError("Select at least one match dimension for corroborating sources")
+
       return
     }
+
     if (mode === "primary" && matchDims.length > 0) {
       setFormError("Match dimensions are only valid for corroborating sources")
+
       return
     }
+
     setSaving(true)
+
     try {
       await onSave(
         name.trim(),
@@ -536,6 +550,7 @@ function SourceDialog({
               onValueChange={(v) => {
                 const nextMode = v as SourceMode
                 setMode(nextMode)
+
                 if (nextMode === "primary") {
                   setMatchDims([])
                 }
@@ -671,6 +686,7 @@ function describeOverride(override: ConfigPlaybook["correlation"]): string {
     override?.confidence_threshold != null ? `confidence ≥ ${override.confidence_threshold}` : null,
     override?.confidence_decay_half_life_seconds != null ? `half-life ${override.confidence_decay_half_life_seconds}s` : null,
   ].filter((part) => part !== null)
+
   return parts.length > 0 ? parts.join(" · ") : "Uses global defaults"
 }
 
@@ -686,31 +702,42 @@ export function validateSourceConfig(
   src: SourceConfig
 ): string[] {
   const errors: string[] = []
+
   if (!name.trim()) errors.push("Source name is required")
+
   if (!Number.isFinite(src.weight) || src.weight < 0) {
     errors.push("Weight must be a non-negative number")
   }
+
   const mode: SourceMode = src.mode ?? "primary"
   const dims = src.match_dimensions ?? []
+
   if (mode === "primary" && dims.length > 0) {
     errors.push(
       "match_dimensions is only valid for mode=corroborating — clear it or switch modes"
     )
   }
+
   if (mode === "corroborating" && dims.length === 0) {
     errors.push(
       "Corroborating sources require at least one match_dimension"
     )
   }
+
   return errors
 }
 
 function validateConfig(config: CorrelationConfig): string[] {
   const errors: string[] = []
+
   if (config.window_seconds < 1) errors.push("Window must be at least 1 second")
+
   if (config.min_sources < 1) errors.push("Min sources must be at least 1")
+
   if (config.confidence_threshold < 0 || config.confidence_threshold > 1)
     errors.push("Confidence threshold must be between 0 and 1")
+
   if (config.default_weight < 0) errors.push("Default weight must be non-negative")
+
   return errors
 }

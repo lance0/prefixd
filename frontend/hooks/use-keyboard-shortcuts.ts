@@ -18,6 +18,7 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onTogg
     (e: KeyboardEvent) => {
       // Ignore if typing in input/textarea
       const target = e.target as HTMLElement
+
       if (
         target.tagName === "INPUT" ||
         target.tagName === "TEXTAREA" ||
@@ -31,6 +32,7 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onTogg
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault()
         onCommandPalette?.()
+
         return
       }
 
@@ -38,12 +40,14 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onTogg
       if ((e.metaKey || e.ctrlKey) && e.key === "b") {
         e.preventDefault()
         onToggleSidebar?.()
+
         return
       }
 
       if (e.key === "?" && !e.metaKey && !e.ctrlKey) {
         e.preventDefault()
         onToggleHelp?.()
+
         return
       }
 
@@ -51,24 +55,29 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onTogg
       if (e.key === "n" && !e.metaKey && !e.ctrlKey) {
         e.preventDefault()
         router.push("/mitigations?mitigate=true")
+
         return
       }
 
       // Two-key navigation: g + letter
       if (e.key === "g" && !e.metaKey && !e.ctrlKey) {
         gPressedRef.current = true
+
         if (gTimeoutRef.current) {
           clearTimeout(gTimeoutRef.current)
         }
+
         gTimeoutRef.current = setTimeout(() => {
           gPressedRef.current = false
           gTimeoutRef.current = null
         }, 1000)
+
         return
       }
 
       if (gPressedRef.current) {
         gPressedRef.current = false
+
         if (gTimeoutRef.current) {
           clearTimeout(gTimeoutRef.current)
           gTimeoutRef.current = null
@@ -115,8 +124,10 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onTogg
 
   useEffect(() => {
     window.addEventListener("keydown", handleKeyDown)
+
     return () => {
       window.removeEventListener("keydown", handleKeyDown)
+
       if (gTimeoutRef.current) {
         clearTimeout(gTimeoutRef.current)
       }

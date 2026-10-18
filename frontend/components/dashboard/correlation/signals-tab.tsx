@@ -115,6 +115,7 @@ function SourceWeightVisualization() {
         >
           {sources.map((source, index) => {
             const pct = totalWeight > 0 ? (source.weight / totalWeight) * 100 : 0
+
             return (
               <div
                 key={source.name}
@@ -198,6 +199,7 @@ function RecentSignalsTable() {
 
 export function SignalGroupStatusBadge({ status, corroborated = false }: { status: string; corroborated?: boolean }) {
   const label = status === "resolved" ? "Resolved" : status === "expired" ? "Expired" : corroborated ? "Corroborated" : "Open"
+
   return <StatusPill tone={signalGroupTone(status, corroborated)}>{label}</StatusPill>
 }
 

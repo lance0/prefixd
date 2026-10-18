@@ -4,5 +4,6 @@ export function isConfidence(value: number | null | undefined): value is number 
 
 export function formatConfidence(value: number | null | undefined): string {
   if (value == null) return "Unavailable"
+
   return isConfidence(value) ? `${Math.round(value * 100)}%` : "Invalid"
 }

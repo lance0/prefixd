@@ -9,6 +9,7 @@ import { getNotificationPreferences, type NotificationPreferences } from "@/lib/
 function getWsBase(): string {
   if (typeof window === "undefined") return "ws://127.0.0.1"
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
+
   return `${proto}//${window.location.host}`
 }
 
@@ -34,15 +35,20 @@ const WS_TO_ALERT_EVENT: Record<string, string> = {
 export function shouldShowToast(wsType: string, prefs: NotificationPreferences | undefined): boolean {
   if (!prefs) return true
   const alertEvent = WS_TO_ALERT_EVENT[wsType]
+
   if (!alertEvent) return true
+
   if (prefs.muted_events.includes(alertEvent)) return false
+
   if (prefs.quiet_hours_start !== null && prefs.quiet_hours_end !== null) {
     const now = new Date().getUTCHours()
     const start = prefs.quiet_hours_start
     const end = prefs.quiet_hours_end
     const inQuiet = start <= end ? (now >= start && now < end) : (now >= start || now < end)
+
     if (inQuiet && !CRITICAL_EVENTS.has(alertEvent)) return false
   }
+
   return true
 }
 
@@ -58,11 +64,13 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
   const reconnectAttemptsRef = useRef(0)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const { mutate } = useSWRConfig()
+
   const { data: notifPrefs } = useSWR<NotificationPreferences>(
     "notification-preferences",
     getNotificationPreferences,
     { refreshInterval: 0, revalidateOnFocus: false }
   )
+
   const notifPrefsRef = useRef(notifPrefs)
   useEffect(() => { notifPrefsRef.current = notifPrefs }, [notifPrefs])
 
@@ -98,6 +106,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                 : Array.isArray(key) && typeof key[0] === "string"
                   ? key[0] as string
                   : null
+
               return k !== null && (
                 k.startsWith("mitigations") ||
                 k.startsWith("events") ||
@@ -106,6 +115,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                 k.startsWith("signal-groups")
               )
             })
+
             if (showToast) toast.info("Refreshing live data after missed updates")
           }
 
@@ -179,6 +189,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
       clearTimeout(reconnectTimeoutRef.current)
       reconnectTimeoutRef.current = null
     }
+
     reconnectAttemptsRef.current = maxReconnectAttempts // Prevent auto-reconnect
     wsRef.current?.close()
     wsRef.current = null
@@ -188,6 +199,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
   // Auto-connect on mount
   useEffect(() => {
     connect()
+
     return () => {
       disconnect()
     }
@@ -200,7 +212,9 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         connect()
       }
     }
+
     document.addEventListener("visibilitychange", handleVisibility)
+
     return () => document.removeEventListener("visibilitychange", handleVisibility)
   }, [connect])
 
@@ -220,8 +234,10 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
 
 export function useWebSocketContext() {
   const context = useContext(WebSocketContext)
+
   if (!context) {
     throw new Error("useWebSocketContext must be used within a WebSocketProvider")
   }
+
   return context
 }

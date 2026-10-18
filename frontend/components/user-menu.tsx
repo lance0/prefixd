@@ -33,6 +33,7 @@ export function UserMenu() {
 
   const handleLogout = async () => {
     setIsLoggingOut(true)
+
     try {
       await logout()
       router.push("/login")

@@ -14,9 +14,11 @@ afterEach(() => {
 describe("GET request cache", () => {
   it("shares a pending success and refetches immediately after settlement", async () => {
     let respond!: (response: Response) => void
+
     const fetchMock = vi.fn().mockImplementationOnce(() => new Promise<Response>((resolve) => {
       respond = resolve
     }))
+
     vi.stubGlobal("fetch", fetchMock)
     const { getHealth } = await import("@/lib/api")
 
@@ -36,18 +38,22 @@ describe("GET request cache", () => {
 
   it.each([401, 403, 500, 503, "offline"])("returns handled %s failures to every caller and permits retry", async (failure) => {
     const fetchMock = vi.fn()
+
     if (failure === "offline") {
       fetchMock.mockRejectedValueOnce(new TypeError("network offline"))
     } else {
       fetchMock.mockResolvedValueOnce(new Response("denied", { status: failure as number }))
     }
+
     vi.stubGlobal("fetch", fetchMock)
     const { getHealth } = await import("@/lib/api")
 
     const results = await Promise.allSettled([getHealth(), getHealth()])
     expect(fetchMock).toHaveBeenCalledTimes(1)
+
     for (const result of results) {
       expect(result.status).toBe("rejected")
+
       if (result.status === "rejected") {
         expect(result.reason.message).toContain(failure === "offline" ? "network offline" : `API error ${failure}`)
       }

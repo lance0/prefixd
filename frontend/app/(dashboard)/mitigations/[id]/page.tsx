@@ -37,6 +37,7 @@ import { ConfidenceBar } from "@/components/dashboard/confidence-bar"
 
 function protocolName(proto: number | null): string {
   if (proto === null) return "any"
+
   switch (proto) {
     case 1: return "ICMP"
     case 6: return "TCP"
@@ -51,11 +52,13 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const interval = setInterval(() => setNow(Date.now()), 15_000)
+
     return () => clearInterval(interval)
   }, [])
 
   const { data: mitigation, error: mitigationError, isLoading, mutate } = useMitigation(id)
   const { data: inventory } = useConfigInventory()
+
   const { data: signalGroupDetail, error: signalGroupError, isLoading: isSignalGroupLoading, mutate: mutateSignalGroup } = useSignalGroupDetail(
     mitigation?.correlation?.signal_group_id ?? null
   )
@@ -76,8 +79,10 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
   const copyToClipboard = async (text: string, field: string) => {
     if (!(await copyText(text))) {
       toast.error("Copy failed — clipboard unavailable")
+
       return
     }
+
     setCopied(field)
     setTimeout(() => setCopied(null), 2000)
   }
@@ -87,6 +92,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
     withdrawInFlight.current = true
     setIsWithdrawing(true)
     setWithdrawError(null)
+
     try {
       await withdrawMitigation(mitigation.mitigation_id, withdrawReason || "Manual withdrawal", "dashboard")
       withdrawCompleted.current = true
@@ -105,6 +111,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
     if (!mitigation) return
     setShowReportDialog(true)
     setReportLoading(true)
+
     try {
       const md = await getIncidentReport({ mitigation_id: mitigation.mitigation_id })
       setReportMarkdown(md)

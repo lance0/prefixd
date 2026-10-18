@@ -12,35 +12,43 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn(), back: vi.fn() }) }))
+
 vi.mock("next/link", () => ({
   default: ({ children, href, ...props }: { children: ReactNode; href: string }) => (
     <a href={href} {...props}>{children}</a>
   ),
 }))
+
 vi.mock("@/hooks/use-api", () => ({
   useMitigations: mocks.useMitigations,
   useMitigation: mocks.useMitigation,
   useConfigInventory: () => ({ data: null }),
   useSignalGroupDetail: () => ({ data: null, isLoading: false }),
 }))
+
 vi.mock("@/hooks/use-permissions", () => ({
   usePermissions: () => ({ settled: true, canWithdraw: true }),
 }))
+
 vi.mock("@/lib/api", () => ({
   withdrawMitigation: mocks.withdraw,
   bulkWithdrawMitigations: mocks.bulkWithdraw,
   getIncidentReport: vi.fn(),
 }))
+
 vi.mock("@/components/dashboard/dashboard-layout", () => ({
   DashboardLayout: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }))
+
 vi.mock("@/components/dashboard/mitigate-now-dialog", () => ({ MitigateNowDialog: () => null }))
+
 vi.mock("@/components/dashboard/incident-report-dialog", () => ({ IncidentReportDialog: () => null }))
 
 import MitigationDetailPage from "@/app/(dashboard)/mitigations/[id]/page"
 import { MitigationsContentLive } from "@/components/dashboard/mitigations-content-live"
 
 const createdAt = new Date(Date.now() - 60_000).toISOString()
+
 const targets: Mitigation[] = [10, 11].map((suffix) => ({
   mitigation_id: `00000000-0000-4000-8000-0000000000${suffix}`,
   scope_hash: `scope-${suffix}`,
@@ -70,20 +78,24 @@ function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason: Error) => void
   const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+
   return { promise, resolve, reject }
 }
 
 async function renderView(view: "list" | "detail") {
   const params = Promise.resolve({ id: targets[0].mitigation_id })
+
   const content = () => view === "list" ? <MitigationsContentLive /> : (
     <Suspense fallback={<p>Loading...</p>}>
       <MitigationDetailPage params={params} />
     </Suspense>
   )
+
   let rendered!: ReturnType<typeof render>
   await act(async () => {
     rendered = render(content())
   })
+
   return () => rendered.rerender(content())
 }
 
@@ -91,9 +103,11 @@ async function openSingle(view: "list" | "detail") {
   const trigger = view === "list"
     ? (await screen.findAllByRole("button", { name: "Withdraw mitigation" }))[0]
     : await screen.findByRole("button", { name: "Withdraw" })
+
   act(() => trigger.focus())
   fireEvent.click(trigger)
   const dialog = await screen.findByRole("alertdialog", { name: "Withdraw Mitigation" })
+
   return { trigger, dialog }
 }
 
@@ -103,6 +117,7 @@ async function openBulk() {
   act(() => trigger.focus())
   fireEvent.click(trigger)
   const dialog = await screen.findByRole("alertdialog", { name: "Bulk Withdraw Mitigations" })
+
   return { trigger, dialog }
 }
 
@@ -161,9 +176,11 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     expect(dialog).toBeVisible()
     await act(async () => pending.resolve())
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+
     const stableTarget = view === "list"
       ? screen.getByPlaceholderText("Search IP, vector or ID…")
       : screen.getByRole("link", { name: targets[0].victim_ip })
+
     await waitFor(() => expect(stableTarget).toHaveFocus())
     expect(mocks.mutate).toHaveBeenCalledTimes(1)
   })
@@ -196,6 +213,7 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     const { trigger, dialog } = await openSingle(view)
     await waitFor(() => expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus())
     fireEvent.change(within(dialog).getByLabelText("Reason (optional)"), { target: { value: "cancelled reason" } })
+
     if (action === "Cancel") fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }))
     else fireEvent.keyDown(dialog, { key: "Escape" })
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
@@ -216,9 +234,11 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     await act(async () => pending.resolve())
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
     expect(trigger).not.toBeInTheDocument()
+
     const fallback = view === "list"
       ? screen.getByPlaceholderText("Search IP, vector or ID…")
       : screen.getByRole("link", { name: targets[0].victim_ip })
+
     await waitFor(() => expect(fallback).toHaveFocus())
   })
 
@@ -238,9 +258,11 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
     expect(trigger).toBeInTheDocument()
     expect(mocks.mutate).toHaveBeenCalledTimes(1)
+
     const stableTarget = view === "list"
       ? screen.getByPlaceholderText("Search IP, vector or ID…")
       : screen.getByRole("link", { name: targets[0].victim_ip })
+
     await waitFor(() => expect([trigger, stableTarget]).toContain(document.activeElement))
     await act(async () => refresh.resolve())
     expect(trigger).not.toBeInTheDocument()
@@ -314,6 +336,7 @@ describe("bulk withdrawal confirmation", () => {
     await renderView("list")
     const { trigger, dialog } = await openBulk()
     await waitFor(() => expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus())
+
     if (action === "Cancel") fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }))
     else fireEvent.keyDown(dialog, { key: "Escape" })
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())

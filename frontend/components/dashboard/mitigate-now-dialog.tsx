@@ -33,9 +33,12 @@ const VECTORS = [
 
 function isValidIPv4(ip: string): boolean {
   const parts = ip.split(".")
+
   if (parts.length !== 4) return false
+
   return parts.every((p) => {
     const n = Number(p)
+
     return /^\d{1,3}$/.test(p) && n >= 0 && n <= 255
   })
 }
@@ -44,8 +47,11 @@ function parsePorts(input: string): number[] | null {
   if (!input.trim()) return []
   const parts = input.split(",").map((s) => s.trim())
   const parsed = parts.map(Number)
+
   if (parsed.some((n) => isNaN(n) || n < 1 || n > 65535)) return null
+
   if (parsed.length > 8) return null
+
   return parsed
 }
 
@@ -113,6 +119,7 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
             description: `${victimIp} — ${vector.replace(/_/g, " ")}`,
           })
         }
+
         reset()
         onOpenChange(false)
         router.push(`/mitigations/${result.mitigation_id}`)
@@ -131,7 +138,16 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
   }
 
   return (
-    <Dialog open={open} onOpenChange={(v) => { if (!isSubmitting) { onOpenChange(v); if (!v) reset() } }}>
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        if (!isSubmitting) {
+          onOpenChange(v);
+
+          if (!v) reset()
+        }
+      }}
+    >
       <DialogContent className="sm:max-w-lg bg-card border-border">
         <DialogHeader>
           <DialogTitle className="text-sm flex items-center gap-2">

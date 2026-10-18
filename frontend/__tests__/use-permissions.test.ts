@@ -4,6 +4,7 @@ const mockUseAuth = vi.fn()
 const mockUseHealth = vi.fn()
 
 vi.mock("@/hooks/use-auth", () => ({ useAuth: () => mockUseAuth() }))
+
 vi.mock("@/hooks/use-api", () => ({ useHealth: () => mockUseHealth() }))
 
 import { usePermissions } from "@/hooks/use-permissions"
