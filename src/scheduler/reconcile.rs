@@ -504,17 +504,23 @@ impl ReconciliationLoop {
             ) && pop.is_none_or(|pop| mitigation.pop == pop)
         });
 
-        crate::observability::metrics::RECONCILIATION_ACTIVE_COUNT
-            .with_label_values(&["local"])
-            .set(active.len() as f64);
-
         {
             use std::collections::HashMap;
             let mut counts: HashMap<(String, String), f64> = HashMap::new();
+            // A scoped loop always reports its POP, including zero; an
+            // unscoped loop reports each mitigation POP it saw.
+            let mut by_pop: HashMap<&str, f64> = pop.map(|pop| (pop, 0.0)).into_iter().collect();
             for m in &active {
                 *counts
                     .entry((m.action_type.to_string(), m.pop.clone()))
                     .or_default() += 1.0;
+                *by_pop.entry(m.pop.as_str()).or_default() += 1.0;
+            }
+            crate::observability::metrics::RECONCILIATION_ACTIVE_COUNT.reset();
+            for (pop, count) in &by_pop {
+                crate::observability::metrics::RECONCILIATION_ACTIVE_COUNT
+                    .with_label_values(&[pop])
+                    .set(*count);
             }
             crate::observability::metrics::MITIGATIONS_ACTIVE.reset();
             for ((action_type, pop), count) in &counts {
@@ -953,7 +959,7 @@ mod tests {
         );
         assert_eq!(
             crate::observability::metrics::RECONCILIATION_ACTIVE_COUNT
-                .with_label_values(&["local"])
+                .with_label_values(&["test"])
                 .get(),
             1.0
         );
@@ -1601,6 +1607,14 @@ mod tests {
             .unwrap();
         assert_eq!(speaker.announcements.load(SeqCst), 0);
         assert_eq!(success.get(), before);
+        let active_count = |pop: &str| {
+            crate::observability::metrics::RECONCILIATION_ACTIVE_COUNT
+                .with_label_values(&[pop])
+                .get()
+        };
+        assert_eq!(active_count(&state.settings.pop), 1.0);
+        assert_eq!(active_count("another-target"), 0.0);
+        assert_eq!(active_count("local"), 0.0);
         ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
             .with_app_state(state)
             .sync_announcements()
