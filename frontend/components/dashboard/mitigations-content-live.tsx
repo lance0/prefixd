@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation"
 import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, XCircle, Plus, Download, Trash2 } from "lucide-react"
 import { Checkbox } from "@/components/ui/checkbox"
 import { StatusBadge } from "@/components/dashboard/status-badge"
+import { OriginTag } from "@/components/dashboard/status-pill"
 import { ActionBadge } from "@/components/dashboard/action-badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -539,7 +540,10 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                         </span>
                       </TableCell>
                       <TableCell className="order-2 justify-self-end p-0 md:px-3 md:py-2">
-                        <StatusBadge status={mitigation.status} />
+                        <span className="flex flex-wrap items-center justify-end gap-1 md:justify-start">
+                          <StatusBadge status={mitigation.status} />
+                          <OriginTag origin={mitigation.origin_mode} />
+                        </span>
                       </TableCell>
                       <TableCell className="order-3 p-0 md:px-3 md:py-2">
                         <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} />

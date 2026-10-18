@@ -10,7 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Check, Copy, FileText, AlertTriangle, Terminal, CheckCircle2, Info } from "lucide-react"
 import { PageHeader } from "@/components/dashboard/page-header"
-import { StatusPill, Tag } from "@/components/dashboard/status-pill"
+import { OriginTag, StatusPill, Tag } from "@/components/dashboard/status-pill"
 import { Field, FieldList } from "@/components/dashboard/field"
 import { ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -180,6 +180,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
           meta={
             <>
               <StatusBadge status={mitigation.status} />
+              <OriginTag origin={mitigation.origin_mode} showUnknown />
               <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} />
               <Tag>{mitigation.vector.replace(/_/g, " ")}</Tag>
               <span className="text-muted-foreground">POP <span className="font-mono text-foreground">{mitigation.pop}</span></span>

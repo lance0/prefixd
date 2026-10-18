@@ -111,3 +111,15 @@ export function Tag({ children, className }: { children: ReactNode; className?: 
     </span>
   )
 }
+
+/**
+ * Admitting mode as neutral metadata, never status colour. Enforced renders
+ * nothing; anything else that is not dry-run is unknown and shown only when asked.
+ */
+export function OriginTag({ origin, showUnknown = false }: { origin?: string | null; showUnknown?: boolean }) {
+  if (origin === "enforced") return null
+
+  if (origin === "dry-run") return <Tag>Simulation</Tag>
+
+  return showUnknown ? <Tag>Origin unknown</Tag> : null
+}

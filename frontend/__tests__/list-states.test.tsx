@@ -89,6 +89,30 @@ describe("list states", () => {
     expect(deadline.closest("td")?.querySelector("time")).toHaveAttribute("dateTime", expiresAt)
   })
 
+  it("tags only dry-run-origin rows as simulations", () => {
+    const now = new Date().toISOString()
+
+    const base: Mitigation = {
+      mitigation_id: "m-1", scope_hash: "scope-1", status: "active", customer_id: null, service_id: null, pop: "iad1",
+      victim_ip: "203.0.113.1", vector: "udp_flood", action_type: "discard", rate_bps: null,
+      dst_prefix: "203.0.113.1/32", protocol: 17, dst_ports: [53], created_at: now, updated_at: now,
+      expires_at: new Date(Date.now() + 600_000).toISOString(), withdrawn_at: null, triggering_event_id: "e-1",
+      last_event_id: "e-1", reason: "udp flood", acknowledged_at: null, acknowledged_by: null, origin_mode: "dry-run",
+    }
+
+    mocks.useMitigations.mockReturnValue(loaded([
+      base,
+      { ...base, mitigation_id: "m-2", victim_ip: "203.0.113.2", origin_mode: "enforced" },
+      { ...base, mitigation_id: "m-3", victim_ip: "203.0.113.3", origin_mode: null },
+    ]))
+    render(<MitigationsContentLive />)
+    const rowFor = (ip: string) => screen.getByRole("link", { name: ip }).closest("tr")
+
+    expect(rowFor("203.0.113.1")).toHaveTextContent("Simulation")
+    expect(rowFor("203.0.113.2")).not.toHaveTextContent("Simulation")
+    expect(rowFor("203.0.113.3")).not.toHaveTextContent(/Simulation|Origin unknown/)
+  })
+
   it("shows a failed events fetch as an error rather than an empty list", () => {
     mocks.useEvents.mockReturnValue({ data: undefined, error: new Error("HTTP 500"), isLoading: false, mutate: mocks.mutate })
     render(<EventsContentLive />)

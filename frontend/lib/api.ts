@@ -52,6 +52,8 @@ export interface Mitigation {
   reason: string
   acknowledged_at: string | null
   acknowledged_by: string | null
+  /** Mode that admitted this row; null (or absent from older controllers) is unknown, not enforced. */
+  origin_mode?: "dry-run" | "enforced" | null
   /** Correlation context (present when mitigation was created via corroboration) */
   correlation?: CorrelationContext | null
 }

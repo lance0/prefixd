@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import Link from "next/link"
 import { ArrowRight } from "lucide-react"
 import { ActionBadge } from "./action-badge"
+import { OriginTag } from "./status-pill"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import type { Mitigation } from "@/lib/api"
 import { formatConfidence } from "@/lib/confidence"
@@ -80,7 +81,7 @@ export function ActiveMitigationsMini({ mitigations, limit = 8, loading, error, 
                 <tr key={m.mitigation_id} className="grid grid-cols-2 gap-y-3 py-4 hover:bg-muted/30 xl:table-row xl:py-0">
                   <td className="col-span-2 px-4 align-top xl:w-1/5 xl:py-4">
                     <Link href={`/mitigations/${m.mitigation_id}`} className="break-all rounded-sm font-mono font-medium hover:underline">{m.dst_prefix}</Link>
-                    <div className="mt-1 text-xs text-muted-foreground">{m.pop} · {m.status}</div>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">{m.pop} · {m.status}<OriginTag origin={m.origin_mode} /></div>
                   </td>
                   <td className="px-4 align-top xl:py-4"><span className="mb-1 block text-xs text-muted-foreground xl:hidden">Action</span><ActionBadge actionType={m.action_type} rateBps={m.rate_bps} /></td>
                   <td className="col-span-2 row-start-2 px-4 align-top xl:w-1/3 xl:py-4">
