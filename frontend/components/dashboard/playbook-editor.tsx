@@ -28,7 +28,8 @@ type DraftStep = ConfigPlaybook["steps"][0] & { _id: string }
 type DraftPlaybook = Omit<ConfigPlaybook, "steps"> & { _id: string; steps: DraftStep[] }
 
 function createId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+  // randomUUID is exposed only in secure contexts; plain-HTTP dashboards fall back.
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID()
   }
 
@@ -60,9 +61,7 @@ function toDraft(playbooks: ConfigPlaybook[]): DraftPlaybook[] {
 
 // null and an absent key mean the same thing to the API; compare them as equal.
 function samePlaybooks(a: ConfigPlaybook[], b: ConfigPlaybook[]): boolean {
-  const normalise = (_key: string, value: unknown) => value ?? undefined
-
-  return JSON.stringify(a, normalise) === JSON.stringify(b, normalise)
+  return JSON.stringify(a, (_key, value) => value ?? undefined) === JSON.stringify(b, (_key, value) => value ?? undefined)
 }
 
 function toApiPlaybooks(playbooks: DraftPlaybook[]): ConfigPlaybook[] {
@@ -96,7 +95,7 @@ function validatePlaybooks(playbooks: ConfigPlaybook[]): string[] {
 
     names.add(pb.name)
 
-    if (!VECTORS.includes(pb.match.vector as typeof VECTORS[number])) {
+    if (!VECTORS.some((vector) => vector === pb.match.vector)) {
       errors.push(`${ctx}: vector must be one of ${VECTORS.join(", ")}`)
     }
 
@@ -115,7 +114,7 @@ function validatePlaybooks(playbooks: ConfigPlaybook[]): string[] {
       const step = pb.steps[j]
       const sctx = `${ctx} step ${j + 1}`
 
-      if (!ACTIONS.includes(step.action as typeof ACTIONS[number])) {
+      if (!ACTIONS.includes(step.action)) {
         errors.push(`${sctx}: action must be one of ${ACTIONS.join(", ")}`)
       }
 
@@ -191,7 +190,7 @@ function StepEditor({
 
       <div className="space-y-1">
         <Label className="text-muted-foreground">Action</Label>
-        <Select value={step.action} onValueChange={(v) => onChange({ ...step, action: v as "police" | "discard", rate_bps: v === "discard" ? undefined : (step.rate_bps ?? 5_000_000) })}>
+        <Select value={step.action} onValueChange={(v) => { if (v === "police" || v === "discard") onChange({ ...step, action: v, rate_bps: v === "discard" ? undefined : (step.rate_bps ?? 5_000_000) }) }}>
           <SelectTrigger className="w-24 h-8">
             <SelectValue />
           </SelectTrigger>

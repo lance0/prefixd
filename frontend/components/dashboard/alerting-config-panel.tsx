@@ -41,7 +41,7 @@ const DEST_LABELS: Record<DestType, string> = {
 }
 
 // Third-party brand colours identify each destination as a small swatch beside its name.
-const DEST_COLORS: Record<string, string> = {
+const DEST_COLORS: Record<DestType, string> = {
   slack: "bg-[#4A154B]",
   discord: "bg-[#5865F2]",
   teams: "bg-[#6264A7]",
@@ -270,7 +270,7 @@ function ReadOnlyDestCard({ dest, testResult }: { dest: AlertingDestination; tes
       <div className="flex items-center gap-3">
         <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-sm", DEST_COLORS[dest.type] || DEST_COLORS.generic)} />
         <div className="flex-1 min-w-0">
-          <span className="text-xs font-medium">{DEST_LABELS[dest.type as DestType] ?? dest.type}</span>
+          <span className="text-xs font-medium">{DEST_LABELS[dest.type] ?? dest.type}</span>
           {summary ? <span className="text-xs font-mono text-muted-foreground ml-2">{summary}</span> : null}
         </div>
         {testResult && (
@@ -503,7 +503,13 @@ export function AlertingConfigPanel() {
           ) : (
             <>
               {addingType === null ? (
-                <Select onValueChange={(v) => addDest(v as DestType)}>
+                <Select
+                  onValueChange={(v) => {
+                    const type = DEST_TYPES.find((t) => t === v)
+
+                    if (type) addDest(type)
+                  }}
+                >
                   <SelectTrigger className="w-44 h-8">
                     <Plus className="h-3.5 w-3.5 mr-1" />
                     <span>Add destination</span>
@@ -563,7 +569,7 @@ export function AlertingConfigPanel() {
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-sm", DEST_COLORS[dest.type] || DEST_COLORS.generic)} />
-                          <span className="text-xs font-medium">{DEST_LABELS[dest.type as DestType]}</span>
+                          <span className="text-xs font-medium">{DEST_LABELS[dest.type]}</span>
                         </div>
                         <div className="flex items-center gap-1">
                           <Button variant="ghost" size="sm" className="h-7" onClick={() => setEditingIndex(null)}>Done</Button>
@@ -582,7 +588,7 @@ export function AlertingConfigPanel() {
                 <div key={dest._id} className="flex items-center gap-3 bg-secondary/50 px-3 py-2.5">
                   <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-sm", DEST_COLORS[dest.type] || DEST_COLORS.generic)} />
                   <div className="flex-1 min-w-0">
-                    <span className="text-xs font-medium">{DEST_LABELS[dest.type as DestType] ?? dest.type}</span>
+                    <span className="text-xs font-medium">{DEST_LABELS[dest.type] ?? dest.type}</span>
                     {destSummary(dest) ? <span className="text-xs font-mono text-muted-foreground ml-2">{destSummary(dest)}</span> : null}
                   </div>
                   {isEditing ? (

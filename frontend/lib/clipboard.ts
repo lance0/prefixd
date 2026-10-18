@@ -19,6 +19,8 @@ export async function copyText(text: string): Promise<boolean> {
   // dashboards) while still reporting a successful legacy copy, which is how
   // "nothing was copied" used to look like a working button.
   try {
+    // SAFETY: Chromium accepts "clipboard-write" although lib.dom omits it from PermissionName;
+    // browsers that reject the name throw, and the catch below attempts the copy anyway.
     const status = await navigator.permissions.query({ name: "clipboard-write" as PermissionName })
 
     if (status.state === "denied") {

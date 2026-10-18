@@ -337,6 +337,7 @@ function AdapterDialog({
   const isNew = !existingNames.includes(form.name)
   const errors = validateAdapter(form, existingNames, isNew)
   const canSave = errors.length === 0
+  const auth = form.auth
 
   const handleSave = async () => {
     if (!canSave) return
@@ -404,7 +405,9 @@ function AdapterDialog({
             <div className="text-xs font-medium mb-2">Authentication</div>
             <Select
               value={form.auth.type}
-              onValueChange={(v) => setForm({ ...form, auth: defaultAuth(v as WebhookAuth["type"]) })}
+              onValueChange={(v) => {
+                if (v === "hmac" || v === "bearer" || v === "none") setForm({ ...form, auth: defaultAuth(v) })
+              }}
             >
               <SelectTrigger className="h-8">
                 <SelectValue />
@@ -422,26 +425,26 @@ function AdapterDialog({
               </SelectContent>
             </Select>
 
-            {form.auth.type === "hmac" && (
+            {auth.type === "hmac" && (
               <div className="space-y-2 mt-2 pl-2 border-l-2">
                 <Field
                   label="Secret env var"
                   hint="Name of the env var holding the HMAC secret (value never sent)"
-                  value={form.auth.secret_env}
+                  value={auth.secret_env}
                   onChange={(v) =>
                     setForm({
                       ...form,
-                      auth: { ...(form.auth as Extract<WebhookAuth, { type: "hmac" }>), secret_env: v },
+                      auth: { ...auth, secret_env: v },
                     })
                   }
                 />
                 <Field
                   label="Header"
-                  value={form.auth.header}
+                  value={auth.header}
                   onChange={(v) =>
                     setForm({
                       ...form,
-                      auth: { ...(form.auth as Extract<WebhookAuth, { type: "hmac" }>), header: v },
+                      auth: { ...auth, header: v },
                     })
                   }
                 />
@@ -595,18 +598,10 @@ function FieldMapEditor({
           key={key}
           label={key + (required ? " *" : "")}
           hint={hint}
-          value={(value[key] ?? "") as string}
+          value={value[key] ?? ""}
           onChange={(v) => {
-            const next = { ...value }
-
-            if (required) {
-              ;(next as WebhookFieldMap).victim_ip = v
-            } else {
-              ;(next as Record<string, string | null>)[key as string] =
-                v || null
-            }
-
-            onChange(next)
+            // Only victim_ip is required; clearing an optional mapping stores null.
+            onChange(key === "victim_ip" ? { ...value, victim_ip: v } : { ...value, [key]: v || null })
           }}
         />
       ))}
@@ -665,7 +660,7 @@ function vectorMapToText(map: Record<string, string> | undefined): string {
     .join("\n")
 }
 
-function textToVectorMap(text: string): Record<string, string> {
+function textToVectorMap(text: string): NonNullable<WebhookAdapter["vector_map"]> {
   const out: Record<string, string> = {}
 
   for (const line of text.split("\n")) {

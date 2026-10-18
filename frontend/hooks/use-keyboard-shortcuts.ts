@@ -17,13 +17,14 @@ export function useKeyboardShortcuts({ onCommandPalette, onToggleSidebar, onTogg
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       // Ignore if typing in input/textarea
-      const target = e.target as HTMLElement
+      const target = e.target
 
       if (
-        target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA" ||
-        target.tagName === "SELECT" ||
-        target.isContentEditable
+        target instanceof HTMLElement &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable)
       ) {
         return
       }

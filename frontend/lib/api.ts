@@ -14,6 +14,9 @@ function dispatchAuthExpired() {
   window.dispatchEvent(new CustomEvent("prefixd:auth-expired"))
 }
 
+/** A decoded JSON value, for payloads the dashboard displays without interpreting. */
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
+
 export interface CorrelationContext {
   signal_group_id: string
   derived_confidence: number
@@ -159,7 +162,10 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
     const cacheKey = url
     const cached = requestCache.get(cacheKey)
 
-    if (cached) return cached as Promise<T>
+    if (cached) {
+      // SAFETY: the key is the request URL, and every endpoint is read with one response type.
+      return cached as Promise<T>
+    }
     
     const promise = doFetch<T>(url, { ...options, headers }).finally(() => {
       requestCache.delete(cacheKey)
@@ -174,8 +180,8 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
 }
 
 /** True only for a 404 from the API, so a failed request is never shown as "not found". */
-export function isNotFound(error: unknown): boolean {
-  return error instanceof Error && error.message.startsWith("API error 404:")
+export function isNotFound(error: Error): boolean {
+  return error.message.startsWith("API error 404:")
 }
 
 async function doFetch<T>(url: string, options: RequestInit): Promise<T> {
@@ -195,6 +201,8 @@ async function doFetch<T>(url: string, options: RequestInit): Promise<T> {
 
   const text = await res.text()
 
+  // SAFETY: T is the controller's documented response type for this endpoint. The
+  // dashboard trusts its own controller and does not re-validate responses.
   return (text.trim() ? JSON.parse(text) : null) as T
 }
 
@@ -382,8 +390,11 @@ export interface AuditEntry {
   action: string
   target_type: string | null
   target_id: string | null
-  details: Record<string, unknown>
+  details: AuditDetails
 }
+
+/** Action-specific audit context. Fields the dashboard reads are typed; the rest render as JSON. */
+export type AuditDetails = { victim_ip?: string; reason?: string; operation_id?: string } & { [key: string]: JsonValue }
 
 export interface AuditResponse {
   entries: AuditEntry[]
@@ -499,11 +510,9 @@ export async function changePassword(
   newPassword: string,
   currentPassword?: string
 ): Promise<void> {
-  const body: Record<string, string> = { new_password: newPassword }
-
-  if (currentPassword) {
-    body.current_password = currentPassword
-  }
+  const body = currentPassword
+    ? { new_password: newPassword, current_password: currentPassword }
+    : { new_password: newPassword }
 
   await fetchApi(`/v1/operators/${id}/password`, {
     method: "PUT",
@@ -514,7 +523,7 @@ export async function changePassword(
 // Config endpoints (read-only)
 
 export interface ConfigSettingsResponse {
-  settings: Record<string, unknown>
+  settings: { [key: string]: JsonValue }
   loaded_at: string
 }
 

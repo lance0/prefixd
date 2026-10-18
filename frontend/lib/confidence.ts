@@ -1,5 +1,5 @@
 export function isConfidence(value: number | null | undefined): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
+  return value != null && Number.isFinite(value) && value >= 0 && value <= 1
 }
 
 export function formatConfidence(value: number | null | undefined): string {

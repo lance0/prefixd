@@ -65,7 +65,7 @@ function CorrelationSettingsEditor() {
   // Initialize form state from fetched config
   const form = formState ?? config
 
-  const handleFieldChange = (field: keyof CorrelationConfig, value: unknown) => {
+  const handleFieldChange = <K extends keyof CorrelationConfig>(field: K, value: CorrelationConfig[K]) => {
     if (!form) return
     const updated = { ...form, [field]: value }
     setFormState(updated)
@@ -548,10 +548,10 @@ function SourceDialog({
             <Select
               value={mode}
               onValueChange={(v) => {
-                const nextMode = v as SourceMode
-                setMode(nextMode)
+                if (v !== "primary" && v !== "corroborating") return
+                setMode(v)
 
-                if (nextMode === "primary") {
+                if (v === "primary") {
                   setMatchDims([])
                 }
               }}
@@ -577,7 +577,7 @@ function SourceDialog({
             <div className="space-y-1.5">
               <Label>Match dimensions</Label>
               <div className="grid grid-cols-2 gap-1.5">
-                {(["customer_id", "pop", "service_id", "interface"] as MatchDimension[]).map(
+                {(["customer_id", "pop", "service_id", "interface"] satisfies MatchDimension[]).map(
                   (dim) => (
                     <button
                       key={dim}

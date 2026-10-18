@@ -1,6 +1,6 @@
 const CSV_FORMULA_RE = /^[\t\r\n ]*[=+\-@]/
 
-function escapeCsvField(field: string): string {
+function escapeCsvField(field: string | null | undefined): string {
   if (!field) return ""
   let safe = field
 
@@ -15,7 +15,7 @@ function escapeCsvField(field: string): string {
   return safe
 }
 
-export function downloadCsv(filename: string, headers: string[], rows: string[][]) {
+export function downloadCsv(filename: string, headers: string[], rows: (string | null | undefined)[][]) {
   const headerLine = headers.map(escapeCsvField).join(",")
   const dataLines = rows.map((row) => row.map(escapeCsvField).join(","))
   const csv = [headerLine, ...dataLines].join("\n")

@@ -124,11 +124,10 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   }
 
   const { customers, pops } = useMemo(() => {
-    if (!mitigations) return { customers: [] as string[], pops: [] as string[] }
     const customerSet = new Set<string>()
     const popSet = new Set<string>()
 
-    for (const m of mitigations) {
+    for (const m of mitigations ?? []) {
       if (m.customer_id) customerSet.add(m.customer_id)
 
       if (m.pop) popSet.add(m.pop)

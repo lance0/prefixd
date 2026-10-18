@@ -1,7 +1,7 @@
 "use client"
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from "react"
-import useSWR, { useSWRConfig } from "swr"
+import useSWR, { useSWRConfig, type Arguments } from "swr"
 import { toast } from "sonner"
 import type { WsMessage, ConnectionState } from "@/hooks/use-websocket-types"
 import { getNotificationPreferences, type NotificationPreferences } from "@/lib/api"
@@ -23,18 +23,25 @@ interface WebSocketContextValue {
 
 const CRITICAL_EVENTS = new Set(["mitigation.created", "mitigation.escalated"])
 
-const WS_TO_ALERT_EVENT: Record<string, string> = {
-  mitigation_created: "mitigation.created",
-  mitigation_updated: "mitigation.escalated",
-  mitigation_withdrawn: "mitigation.withdrawn",
-  mitigation_expired: "mitigation.expired",
-  resync_required: "config.reloaded",
-  event_ingested: "mitigation.created",
+const WS_TO_ALERT_EVENT = new Map([
+  ["mitigation_created", "mitigation.created"],
+  ["mitigation_updated", "mitigation.escalated"],
+  ["mitigation_withdrawn", "mitigation.withdrawn"],
+  ["mitigation_expired", "mitigation.expired"],
+  ["resync_required", "config.reloaded"],
+  ["event_ingested", "mitigation.created"],
+])
+
+/** The resource an SWR key names: a string key itself, or the first element of a tuple key. */
+function swrResource(key: Arguments): string | null {
+  const first: Arguments = Array.isArray(key) ? key[0] : key
+
+  return first && !(first instanceof Object) ? String(first) : null
 }
 
 export function shouldShowToast(wsType: string, prefs: NotificationPreferences | undefined): boolean {
   if (!prefs) return true
-  const alertEvent = WS_TO_ALERT_EVENT[wsType]
+  const alertEvent = WS_TO_ALERT_EVENT.get(wsType)
 
   if (!alertEvent) return true
 
@@ -101,11 +108,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
           // Handle resync_required by invalidating SWR caches
           if (message.type === "resync_required") {
             mutate((key) => {
-              const k = typeof key === "string"
-                ? key
-                : Array.isArray(key) && typeof key[0] === "string"
-                  ? key[0] as string
-                  : null
+              const k = swrResource(key)
 
               return k !== null && (
                 k.startsWith("mitigations") ||
@@ -149,12 +152,12 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             }
 
             // Invalidate all mitigation-related keys (including those with params)
-            mutate((key) => typeof key === "string" && key.startsWith("mitigations") || Array.isArray(key) && key[0] === "mitigations")
+            mutate((key) => swrResource(key)?.startsWith("mitigations") ?? false)
             mutate("stats")
           }
 
           if (message.type === "event_ingested") {
-            mutate((key) => typeof key === "string" && key.startsWith("events") || Array.isArray(key) && key[0] === "events")
+            mutate((key) => swrResource(key)?.startsWith("events") ?? false)
             mutate("stats")
           }
         } catch (e) {

@@ -75,7 +75,7 @@ export function ActivityFeedLive() {
         type: actorType,
         timestamp: entry.timestamp,
         description,
-        ip: entry.details?.victim_ip as string | undefined,
+        ip: entry.details?.victim_ip,
         href,
       })
     }

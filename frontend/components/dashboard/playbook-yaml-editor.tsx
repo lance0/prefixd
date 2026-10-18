@@ -6,7 +6,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { StatusPill } from "@/components/dashboard/status-pill"
 import { AlertCircle, Save, Undo2 } from "lucide-react"
-import type { ConfigPlaybook } from "@/lib/api"
+import type { ConfigPlaybook, JsonValue } from "@/lib/api"
 import { validatePlaybooks } from "@/components/dashboard/playbook-editor"
 
 // Preserve merge keys accepted by the editor while keeping YAML 1.2 core types.
@@ -29,18 +29,14 @@ function playbooksToYaml(playbooks: ConfigPlaybook[]): string {
       },
       // Round-trip per-playbook correlation overrides; omit unset fields.
       correlation: definedFields(p.correlation),
-      steps: p.steps.map((s) => {
-        const step: Record<string, unknown> = { action: s.action }
-
-        if (s.rate_bps != null) step.rate_bps = s.rate_bps
-        step.ttl_seconds = s.ttl_seconds
-
-        if (s.require_confidence_at_least != null) step.require_confidence_at_least = s.require_confidence_at_least
-
-        if (s.require_persistence_seconds != null) step.require_persistence_seconds = s.require_persistence_seconds
-
-        return step
-      }),
+      // undefined keys are omitted by yaml.dump's skipInvalid.
+      steps: p.steps.map((s) => ({
+        action: s.action,
+        rate_bps: s.rate_bps ?? undefined,
+        ttl_seconds: s.ttl_seconds,
+        require_confidence_at_least: s.require_confidence_at_least ?? undefined,
+        require_persistence_seconds: s.require_persistence_seconds ?? undefined,
+      })),
     })),
   }
 
@@ -53,42 +49,82 @@ function definedFields(value: ConfigPlaybook["correlation"]): ConfigPlaybook["co
   return entries.length > 0 ? Object.fromEntries(entries) : undefined
 }
 
-function parseYaml(text: string): { playbooks?: ConfigPlaybook[]; error?: string } {
+interface ParsedPlaybooks {
+  playbooks?: ConfigPlaybook[]
+  error?: string
+}
+
+type YamlMapping = { [key: string]: JsonValue }
+
+function asMapping(value: JsonValue | undefined): YamlMapping {
+  return value instanceof Object && !Array.isArray(value) ? value : {}
+}
+
+function asList(value: JsonValue | undefined): JsonValue[] {
+  return Array.isArray(value) ? value : []
+}
+
+function optionalNumber(value: JsonValue | undefined): number | undefined {
+  return value != null ? Number(value) : undefined
+}
+
+function parseYaml(text: string): ParsedPlaybooks {
+  let document: JsonValue | undefined
+
   try {
-    const parsed = yaml.load(text, { schema: PLAYBOOK_YAML_SCHEMA }) as { playbooks?: unknown[] }
-
-    if (!parsed || !Array.isArray(parsed.playbooks)) {
-      return { error: "YAML must contain a top-level 'playbooks' array" }
-    }
-
-    // Coerce to ConfigPlaybook shape for validation
-    const playbooks: ConfigPlaybook[] = parsed.playbooks.map((p: unknown) => {
-      const pb = p as Record<string, unknown>
-      const match = pb.match as Record<string, unknown> | undefined
-      const steps = (pb.steps as Record<string, unknown>[]) || []
-
-      return {
-        name: String(pb.name ?? ""),
-        match: {
-          vector: String(match?.vector ?? "unknown"),
-          require_top_ports: match?.require_top_ports === true,
-        },
-        // Passed through as written; the controller validates the override on save.
-        correlation: (pb.correlation ?? undefined) as ConfigPlaybook["correlation"],
-        steps: steps.map((s) => ({
-          action: (String(s.action ?? "police")) as "police" | "discard",
-          rate_bps: s.rate_bps != null ? Number(s.rate_bps) : undefined,
-          ttl_seconds: Number(s.ttl_seconds ?? 0),
-          require_confidence_at_least: s.require_confidence_at_least != null ? Number(s.require_confidence_at_least) : undefined,
-          require_persistence_seconds: s.require_persistence_seconds != null ? Number(s.require_persistence_seconds) : undefined,
-        })),
-      }
-    })
-
-    return { playbooks }
+    // SAFETY: CORE_SCHEMA constructs only null, booleans, numbers, strings, sequences and
+    // mappings (merge keys only combine mappings); an empty document loads as undefined.
+    document = yaml.load(text, { schema: PLAYBOOK_YAML_SCHEMA }) as JsonValue | undefined
   } catch (e) {
     return { error: `YAML parse error: ${e instanceof Error ? e.message : String(e)}` }
   }
+
+  const entries = asMapping(document).playbooks
+
+  if (!Array.isArray(entries)) {
+    return { error: "YAML must contain a top-level 'playbooks' array" }
+  }
+
+  // Coerce to ConfigPlaybook shape for validation
+  const playbooks: ConfigPlaybook[] = []
+
+  for (const [i, entry] of entries.entries()) {
+    const pb = asMapping(entry)
+    const match = asMapping(pb.match)
+    const name = String(pb.name ?? "")
+    const steps: ConfigPlaybook["steps"] = []
+
+    for (const [j, rawStep] of asList(pb.steps).entries()) {
+      const s = asMapping(rawStep)
+      const action = String(s.action ?? "police")
+
+      if (action !== "police" && action !== "discard") {
+        return { error: `Playbook "${name || `#${i + 1}`}" step ${j + 1}: action must be one of police, discard` }
+      }
+
+      steps.push({
+        action,
+        rate_bps: optionalNumber(s.rate_bps),
+        ttl_seconds: Number(s.ttl_seconds ?? 0),
+        require_confidence_at_least: optionalNumber(s.require_confidence_at_least),
+        require_persistence_seconds: optionalNumber(s.require_persistence_seconds),
+      })
+    }
+
+    playbooks.push({
+      name,
+      match: {
+        vector: String(match.vector ?? "unknown"),
+        require_top_ports: match.require_top_ports === true,
+      },
+      // SAFETY: the override is sent as written; nothing here reads it, and the controller,
+      // which owns its schema, rejects an invalid override when the playbooks are saved.
+      correlation: (pb.correlation ?? undefined) as ConfigPlaybook["correlation"],
+      steps,
+    })
+  }
+
+  return { playbooks }
 }
 
 export function PlaybookYamlEditor({ playbooks: initialPlaybooks, onSave, saving }: PlaybookYamlEditorProps) {

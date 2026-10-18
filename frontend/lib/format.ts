@@ -7,7 +7,7 @@ const NBSP = "\u00a0"
 const oneDecimal = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 })
 
 function isReported(value: number | null | undefined): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0
+  return value != null && Number.isFinite(value) && value >= 0
 }
 
 // Units ascend; use the first whose rounded value stays below 1000, so
