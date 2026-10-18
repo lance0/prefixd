@@ -382,6 +382,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real fetch path instead of module mocks. The playbook YAML editor now reports
   an unknown step action as a parse error.
 
+- `prefixd_reconciliation_active_count` now carries the controller's
+  configured POP as its `pop` label instead of a hard-coded `pop="local"`.
+  Update any queries that select `pop="local"`.
+
 - Development and CI: add a sequential `just gate` verification bar and focused
   recipes, with optional non-mutating commit and push hooks; check Rust 1.89
   and locked Linux builds for production binaries with rustbgpd, all
@@ -618,6 +622,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The local development guide notes that the dashboard dev server can't serve
   the live feed; use the nginx origin to test it.
+
+- `prefixdctl mitigations list` help and the CLI reference now say it lists
+  every status, newest first, unless `--status` is given. The dry-run cookbook
+  covers both no-mitigation cases: an event for an address no customer owns
+  returns `202` `accepted_no_mitigation`, and an owned, safelisted address
+  returns `422`.
 
 ## [0.19.1] - 2026-08-06
 
