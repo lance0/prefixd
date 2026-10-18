@@ -1,4 +1,4 @@
-# FlowSpec-only adaptation of rustbgpd v0.77.0 examples/ddos-mitigation/config.toml.
+# FlowSpec-only adaptation of rustbgpd v0.78.0 examples/ddos-mitigation/config.toml.
 # Replace documentation peer addresses with your edge routers before deployment.
 config_epoch = 2
 

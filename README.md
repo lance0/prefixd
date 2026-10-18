@@ -183,8 +183,8 @@ owns the BGP sessions. The two meet at a narrow, tested boundary:
   state, and the next reconciliation poll (every 30 seconds in the shipped
   config) re-adds missing rules.
 - **Qualified versions:** v0.76.0 is the minimum controller contract and
-  v0.77.0 is the Compose pin. CI runs the lifecycle, TTL and restart suite
-  against both immutable images.
+  v0.78.0 is the Compose pin. CI runs the lifecycle, TTL and restart suite
+  against the v0.76.0, v0.77.0 and v0.78.0 immutable images.
 
 This qualifies the controller-to-speaker boundary on Linux amd64. It says
 nothing about router enforcement.

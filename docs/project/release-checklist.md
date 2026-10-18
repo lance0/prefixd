@@ -22,12 +22,13 @@ Check these on the release candidate before opening the release PR:
 - [ ] `just gate` passes. It runs formatting, both Clippy and test feature sets,
       MSRV, the release build, the dashboard checks, advisories, cargo-deny and
       the speaker fixtures. Record the command and its result in the release PR.
-- [ ] Both rustbgpd fixture pins pass. `just gate` runs them through
+- [ ] All rustbgpd fixture pins pass. `just gate` runs them through
       `just speakers`. To rerun them alone:
 
       ```bash
       PREFIXD_RUSTBGPD_TEST_VERSION=0.76.0 scripts/test-rustbgpd.sh
       PREFIXD_RUSTBGPD_TEST_VERSION=0.77.0 scripts/test-rustbgpd.sh
+      PREFIXD_RUSTBGPD_TEST_VERSION=0.78.0 scripts/test-rustbgpd.sh
       ```
 
       Use the pins in ci.yml's `rustbgpd` matrix if they have moved.

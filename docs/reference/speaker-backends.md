@@ -211,14 +211,15 @@ Initial network connections and TLS handshakes have a ten-second budget;
 complete RPC attempts are bounded separately.
 
 The relevant vendored controller message fields were checked against rustbgpd
-`v0.77.0`. This is a protocol baseline, not proof that an arbitrary binary
+`v0.78.0`. This is a protocol baseline, not proof that an arbitrary binary
 reporting that version has passed the deployment or router tests.
 
 ## Released controller qualification
 
 The scoped controller promotion is released: v0.76.0 is the minimum controller
-contract version, and v0.77.0 is the current qualification pin. CI runs the
-lifecycle, TTL and restart suite against both immutable image references in
+contract version, and v0.78.0 is the current qualification pin. CI runs the
+lifecycle, TTL and restart suite against the v0.76.0, v0.77.0 and v0.78.0
+immutable image references in
 [releases.json](../../tests/fixtures/rustbgpd/releases.json). Image OCI source
 revisions match the dereferenced release-tag commits. This qualifies the local
 controller boundary on Linux amd64, independently of router interoperability.

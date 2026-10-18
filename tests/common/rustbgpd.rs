@@ -48,7 +48,7 @@ impl Speaker {
         network: Option<&str>,
     ) -> Self {
         let bridged = network.is_some();
-        let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.77.0".into());
+        let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.78.0".into());
         let releases: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/rustbgpd/releases.json")).unwrap();
         let release = &releases[&version];

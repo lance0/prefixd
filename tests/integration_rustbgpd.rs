@@ -42,7 +42,7 @@ async fn live_rustbgpd_controller_roundtrip() {
     let speaker = fixture.connect().await;
     contract::run_readable_contract(&speaker).await.unwrap();
     let health = speaker.daemon_health().await.unwrap();
-    let expected = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.77.0".into());
+    let expected = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.78.0".into());
     assert_eq!(health.version.as_deref(), Some(expected.as_str()));
     assert!(health.ready);
 }

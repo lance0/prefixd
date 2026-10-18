@@ -74,7 +74,7 @@ Run `just gate` before opening a PR with substantive code changes. It runs
 formatting, both locked Rust test
 and Clippy feature combinations, minimum-compiler checks, the release build,
 frozen dashboard install/types/tests/build, advisory checks and the owned GoBGP
-and rustbgpd 0.76.0/0.77.0 fixtures, sequentially. It needs Docker and the tools
+and rustbgpd 0.76.0/0.77.0/0.78.0 fixtures, sequentially. It needs Docker and the tools
 listed above; it does not install missing tools or Rust toolchains.
 Prose-only changes need affected-link checks and `git diff --check`.
 

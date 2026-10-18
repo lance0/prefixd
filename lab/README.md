@@ -16,7 +16,7 @@ prefixd ── loopback gRPC ── speaker (AS 65010, 10.0.0.1) ── eBGP ─
 
 | Leg | Topology | Speaker image |
 |-----|----------|---------------|
-| rustbgpd | `interop/frr-rustbgpd.clab.yml` | `ghcr.io/lance0/rustbgpd:0.77.0`, digest-pinned |
+| rustbgpd | `interop/frr-rustbgpd.clab.yml` | `ghcr.io/lance0/rustbgpd:0.78.0`, digest-pinned |
 | GoBGP | `interop/frr-gobgp.clab.yml` | `jauderho/gobgp` digest that CI pins as 4.10.0 |
 
 The speaker negotiates only IPv4 and IPv6 FlowSpec with FRR. After each step,
@@ -70,7 +70,7 @@ names and the management subnets 172.31.231.0/24 and 172.31.232.0/24.
 ## Nokia
 
 **SR Linux.** `interop/srlinux-probe.clab.yml` peers SR Linux 25.10.1 with
-rustbgpd 0.77.0. It is a manual probe, not a CI leg. SR Linux does not support
+rustbgpd 0.78.0. It is a manual probe, not a CI leg. SR Linux does not support
 BGP FlowSpec. The [vendor matrix](../docs/reference/vendors.md#nokia-sr-linux--not-supported)
 records the commands and output.
 

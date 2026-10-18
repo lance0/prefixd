@@ -161,6 +161,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discard/policing support.
 
 ### Changed
+- Qualify rustbgpd 0.78.0: Compose and the interop lab pin it; CI tests 0.76.0
+  (minimum), 0.77.0 and 0.78.0.
+
+- rustbgpd 0.78.0 changes for operators: `bgp_outbound_route_drops_total` now
+  counts FlowSpec writer-channel deferrals, a new
+  `bgp_outbound_commit_refusals_total` metric exists, the
+  `BgpOutboundRouteDrops` alert drops from critical to warning, and rustls
+  0.23.46 security fixes cover its gRPC TLS listener.
+
 - Enforce the vendored anti-slop Oxlint rules on the dashboard: `bun run lint`
   now runs in `just frontend`, and so in `just gate` and the CI Frontend job.
   Dashboard tests drive components through a scripted controller behind the
