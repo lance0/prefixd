@@ -229,6 +229,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Enforce the documented `quotas.max_new_per_minute` limit, which was parsed
+  but never applied. Admission now rejects a new mitigation with `422` when the
+  POP already has that many mitigations created in the trailing 60 seconds,
+  checked in the same serialised transaction as the active quotas, so
+  controllers sharing the database cannot both take the last slot. A rejected
+  request saves nothing, announces nothing and uses no quota slot, and
+  increments `prefixd_guardrail_rejections_total{reason="NewMitigationRateExceeded"}`.
+  Dry-run creations count; TTL extensions by repeat events do not. `0` admits no
+  new mitigations, as for the active quotas. The shipped configs set 30, so a
+  burst above 30 new mitigations a minute at one POP is now rejected; raise the
+  limit before upgrading if you rely on larger bursts.
+
 - Stop the Playbooks form showing "Unsaved changes" on load. The form dropped
   each playbook's `correlation` field, so it never matched the loaded playbooks,
   and saving from either playbook editor erased per-playbook correlation

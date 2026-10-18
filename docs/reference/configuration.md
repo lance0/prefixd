@@ -198,7 +198,7 @@ quotas:
   # Max active mitigations globally
   max_active_global: 500
   
-  # Max new mitigations created per minute (rate limiting)
+  # Max new mitigations created at this POP in any trailing 60 seconds
   max_new_per_minute: 30
   
   # Max active FlowSpec announcements per BGP peer
@@ -216,8 +216,23 @@ Failure returns an error before this request sends an announcement. A connection
 while awaiting COMMIT can leave committed intent for later reconciliation to announce.
 A controller holds its local lifecycle mutex during this
 wait, so local lifecycle operations can wait behind admission. Other controllers'
-withdrawals do not acquire the admission lock. The rate and per-peer settings above
-are separate from these active-mitigation limits.
+withdrawals do not acquire the admission lock. The per-peer setting above is
+separate from these admission limits.
+
+The same admission transaction then enforces `max_new_per_minute` per POP,
+under the admission lock and inside the deadline, before the insert. It counts
+every mitigation created at the configured `pop` in the trailing 60
+seconds, whatever its status now, so a withdrawn or expired mitigation still
+counts until its creation leaves the window. Dry-run creations count the same
+way. TTL extensions of an existing mitigation by repeat events are not new
+creations and are never limited. Over the limit, the request returns `422` with
+`new mitigation rate exceeded: 30 created at this POP in the last 60s
+(max_new_per_minute=30)`, saves nothing, announces nothing and uses no quota
+slot. The rejection increments
+`prefixd_guardrail_rejections_total{reason="NewMitigationRateExceeded"}`. A
+value of `0` admits no new mitigations, as `0` does for the active quotas. The
+window uses the controller's clock, which also stamps each mitigation's creation
+time.
 
 ### Timers
 

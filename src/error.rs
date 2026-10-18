@@ -108,6 +108,11 @@ pub enum GuardrailError {
         max: u32,
     },
 
+    #[error(
+        "new mitigation rate exceeded: {current} created at this POP in the last 60s (max_new_per_minute={max})"
+    )]
+    NewMitigationRateExceeded { current: u32, max: u32 },
+
     #[error("source prefix matching not allowed")]
     SrcPrefixNotAllowed,
 

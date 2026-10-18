@@ -130,6 +130,7 @@ The other limits in the shipped configuration reject requests the same way:
 | TTL | Required, 30 to 1800 seconds | `TTL 7200s out of bounds (min=30, max=1800)` |
 | Ports | At most 8 destination ports | `too many ports: 9 (max=8)` |
 | Active quotas | 5 per customer, 200 per POP, 500 global | `quota exceeded: customer (5/5)` |
+| New mitigation rate | 30 per POP in any 60 seconds; TTL extensions don't count | `new mitigation rate exceeded: 30 created at this POP in the last 60s (max_new_per_minute=30)` |
 | Destination | IPv4 `/32` and IPv6 `/128` host routes only | Intent is always built as a host route |
 
 Two more rules protect routing state:

@@ -4455,10 +4455,28 @@ async fn quota_state(
     std::sync::Arc<prefixd::AppState>,
     std::sync::Arc<CreationSpeaker>,
 ) {
+    quota_state_in(
+        context,
+        pop,
+        quotas,
+        prefixd::config::OperationMode::Enforced,
+    )
+    .await
+}
+
+async fn quota_state_in(
+    context: &TestContext,
+    pop: &str,
+    quotas: prefixd::config::QuotasConfig,
+    mode: prefixd::config::OperationMode,
+) -> (
+    std::sync::Arc<prefixd::AppState>,
+    std::sync::Arc<CreationSpeaker>,
+) {
     let mut settings = context.state.settings.clone();
     settings.pop = pop.into();
     settings.quotas = quotas;
-    settings.mode = prefixd::config::OperationMode::Enforced;
+    settings.mode = mode;
     settings.bgp.mode = prefixd::config::BgpMode::Gobgp;
     settings.bgp.gobgp_grpc = format!("http://{pop}.example:50051");
     let binding = context
@@ -4817,6 +4835,241 @@ async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
         repo.admit_mitigation(&candidate, &quotas).await.unwrap();
         assert_eq!(repo.count_active_global().await.unwrap(), 3);
     }
+}
+
+fn assert_rate_error(result: prefixd::error::Result<()>, current: u32, max: u32) {
+    match result.unwrap_err() {
+        error @ prefixd::error::PrefixdError::GuardrailViolation(
+            prefixd::error::GuardrailError::NewMitigationRateExceeded {
+                current: observed,
+                max: limit,
+            },
+        ) => {
+            assert_eq!((observed, limit), (current, max));
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("max_new_per_minute={max}"))
+            );
+        }
+        error => panic!("expected new mitigation rate error, got {error}"),
+    }
+}
+
+#[tokio::test]
+async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
+    use MitigationStatus::{Active, Withdrawn};
+    use chrono::{Duration, Utc};
+    let context = TestContext::new().await;
+    let mock: std::sync::Arc<dyn prefixd::db::RepositoryTrait> =
+        std::sync::Arc::new(prefixd::db::MockRepository::new());
+    for repo in [&context.repo, &mock] {
+        let mut quotas = common::test_settings().quotas;
+        quotas.max_new_per_minute = 2;
+        let now = Utc::now();
+        for (prefix, pop, age, status) in [
+            ("203.0.113.1/32", "rate-a", 61, Active), // outside the window
+            ("203.0.113.2/32", "rate-b", 0, Active),  // another POP
+            ("203.0.113.3/32", "rate-a", 50, Withdrawn), // counted after withdrawal
+        ] {
+            let fixture = inventory_mitigation(prefix, pop, now - Duration::seconds(age), status);
+            repo.insert_mitigation(&fixture).await.unwrap();
+        }
+        let candidate = |prefix: &str, pop: &str| {
+            inventory_mitigation(prefix, pop, Utc::now(), MitigationStatus::Active)
+        };
+        // Under the limit: one counted row, so the second creation is admitted.
+        repo.admit_mitigation(&candidate("203.0.113.10/32", "rate-a"), &quotas)
+            .await
+            .unwrap();
+        // At the limit, then over it: rejected without persisting or using quota.
+        let active = repo.count_active_by_pop("rate-a").await.unwrap();
+        for prefix in ["203.0.113.11/32", "203.0.113.12/32"] {
+            let rejected = candidate(prefix, "rate-a");
+            assert_rate_error(repo.admit_mitigation(&rejected, &quotas).await, 2, 2);
+            assert!(
+                repo.get_mitigation(rejected.mitigation_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(repo.count_active_by_pop("rate-a").await.unwrap(), active);
+        // Each POP has its own window.
+        repo.admit_mitigation(&candidate("203.0.113.13/32", "rate-b"), &quotas)
+            .await
+            .unwrap();
+        // Zero admits no new mitigation, like the active quotas.
+        quotas.max_new_per_minute = 0;
+        assert_rate_error(
+            repo.admit_mitigation(&candidate("203.0.113.14/32", "rate-c"), &quotas)
+                .await,
+            0,
+            0,
+        );
+    }
+    // Window expiry: the same rows stop counting once they are older than 60 seconds.
+    let mut quotas = common::test_settings().quotas;
+    quotas.max_new_per_minute = 2;
+    sqlx::query("UPDATE mitigations SET created_at = created_at - interval '61 seconds'")
+        .execute(&context.pool)
+        .await
+        .unwrap();
+    for prefix in ["203.0.113.11/32", "203.0.113.12/32"] {
+        let admitted = inventory_mitigation(prefix, "rate-a", Utc::now(), MitigationStatus::Active);
+        context
+            .repo
+            .admit_mitigation(&admitted, &quotas)
+            .await
+            .unwrap();
+    }
+    assert_rate_error(
+        context
+            .repo
+            .admit_mitigation(
+                &inventory_mitigation("203.0.113.15/32", "rate-a", Utc::now(), Active),
+                &quotas,
+            )
+            .await,
+        2,
+        2,
+    );
+}
+
+#[tokio::test]
+async fn test_new_mitigation_rate_concurrent_controllers_cannot_share_last_slot() {
+    use prefixd::db::RepositoryTrait;
+    let context = TestContext::new().await;
+    let mut quotas = common::test_settings().quotas;
+    quotas.max_new_per_minute = 1;
+    // Hold the first admission inside its INSERT, after its rate count, under the lock.
+    sqlx::raw_sql("CREATE FUNCTION gate_rate_insert() RETURNS trigger AS $$ BEGIN PERFORM pg_advisory_xact_lock(7355, 2362); RETURN NEW; END; $$ LANGUAGE plpgsql; CREATE TRIGGER gate_rate_insert BEFORE INSERT ON mitigations FOR EACH ROW EXECUTE FUNCTION gate_rate_insert();")
+        .execute(&context.pool).await.unwrap();
+    let mut gate = context.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(7355, 2362)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let mut tasks = Vec::new();
+    for (index, prefix) in ["203.0.113.10/32", "203.0.113.11/32"]
+        .into_iter()
+        .enumerate()
+    {
+        // Separate pools stand in for two controllers sharing the database.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&context.state.settings.storage.connection_string)
+            .await
+            .unwrap();
+        let repository = prefixd::db::Repository::new(pool);
+        let candidate = inventory_mitigation(
+            prefix,
+            "rate-a",
+            chrono::Utc::now(),
+            MitigationStatus::Active,
+        );
+        let quotas = quotas.clone();
+        tasks.push(tokio::spawn(async move {
+            repository.admit_mitigation(&candidate, &quotas).await
+        }));
+        if index == 0 {
+            wait_quota_lock(&context.pool, false, 1).await;
+        }
+    }
+    wait_quota_lock(&context.pool, true, 1).await;
+    gate.commit().await.unwrap();
+    let second = tasks.pop().unwrap().await.unwrap();
+    tasks.pop().unwrap().await.unwrap().unwrap();
+    assert_rate_error(second, 1, 1);
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations")
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[tokio::test]
+async fn test_new_mitigation_rate_http_rejects_without_announcing() {
+    use prefixd::config::OperationMode;
+    use prefixd::observability::metrics::{EVENTS_REJECTED, GUARDRAIL_REJECTIONS};
+    use std::sync::atomic::Ordering::SeqCst;
+    let Some(completion) =
+        quota_metrics_child("test_new_mitigation_rate_http_rejects_without_announcing").await
+    else {
+        return;
+    };
+    let rate = GUARDRAIL_REJECTIONS.with_label_values(&["NewMitigationRateExceeded"]);
+    let quota = GUARDRAIL_REJECTIONS.with_label_values(&["QuotaExceeded"]);
+    let rejected_events = EVENTS_REJECTED.with_label_values(&["creation-test", "guardrail"]);
+    for mode in [OperationMode::Enforced, OperationMode::DryRun] {
+        let before = (rate.get(), quota.get(), rejected_events.get());
+        let context = TestContext::new().await;
+        let mut quotas = common::test_settings().quotas;
+        quotas.max_new_per_minute = 2;
+        let (state, speaker) = quota_state_in(&context, "rate-a", quotas, mode).await;
+        let app = prefixd::api::create_test_router(state);
+        let send = |kind: &'static str, ip: &'static str, id: &'static str| {
+            app.clone().oneshot(creation_request(kind, ip, id))
+        };
+        let created = send("detector", "203.0.113.10", "first").await.unwrap();
+        assert!(created.status().is_success(), "{mode:?}");
+        assert!(!creation_json(created).await["mitigation_id"].is_null());
+        assert!(
+            send("manual", "203.0.113.11", "")
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        for (kind, ip, id) in [
+            ("detector", "203.0.113.12", "over"),
+            ("manual", "203.0.113.13", ""),
+        ] {
+            let response = send(kind, ip, id).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let body = creation_json(response).await;
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("max_new_per_minute=2"),
+                "{body}"
+            );
+        }
+        // A repeat event extends its mitigation; extensions are not new creations.
+        let extended = send("detector", "203.0.113.10", "repeat").await.unwrap();
+        assert_eq!(extended.status(), StatusCode::ACCEPTED);
+        assert_eq!(creation_json(extended).await["status"], "extended");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations")
+            .fetch_one(&context.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 2);
+        let announced = if mode == OperationMode::Enforced {
+            2
+        } else {
+            0
+        };
+        assert_eq!(speaker.adds.load(SeqCst), announced);
+        assert_eq!(
+            (rate.get(), quota.get(), rejected_events.get()),
+            (before.0 + 2.0, before.1, before.2 + 1.0),
+            "both rejections count; only the detector one is a rejected event"
+        );
+        // Once the window passes, creation is admitted again.
+        sqlx::query("UPDATE mitigations SET created_at = created_at - interval '61 seconds'")
+            .execute(&context.pool)
+            .await
+            .unwrap();
+        assert!(
+            send("manual", "203.0.113.13", "")
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+    }
+    println!("\n{completion}");
 }
 
 #[tokio::test]

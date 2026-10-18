@@ -30,6 +30,18 @@ pub(super) fn check_active_quota(quota_type: &str, current: u32, max: u32) -> Re
     Ok(())
 }
 
+/// Window for `max_new_per_minute`: rows created at the POP, whatever their status now.
+pub(super) const NEW_MITIGATION_WINDOW: chrono::TimeDelta = chrono::TimeDelta::seconds(60);
+
+pub(super) fn check_new_mitigation_rate(current: u32, max: u32) -> Result<()> {
+    if current >= max {
+        return Err(PrefixdError::GuardrailViolation(
+            GuardrailError::NewMitigationRateExceeded { current, max },
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, FromRow)]
 struct AuditRow {
     audit_id: Uuid,
@@ -138,6 +150,23 @@ impl Repository {
         .execute(connection)
         .await?;
         Ok(())
+    }
+
+    /// Runs under the admission lock. Uses this controller's clock, which also stamped
+    /// `created_at` on every row at its POP (one controller per POP).
+    async fn check_new_mitigation_rate_on(
+        connection: &mut PgConnection,
+        pop: &str,
+        max: u32,
+    ) -> Result<()> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mitigations WHERE pop = $1 AND created_at > $2",
+        )
+        .bind(pop)
+        .bind(Utc::now() - NEW_MITIGATION_WINDOW)
+        .fetch_one(connection)
+        .await?;
+        check_new_mitigation_rate(u32::try_from(count).unwrap_or(u32::MAX), max)
     }
 }
 
@@ -515,6 +544,7 @@ impl RepositoryTrait for Repository {
             let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE status IN ('pending', 'active', 'escalated')")
                 .fetch_one(&mut *tx).await?;
             check_active_quota("global", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_global)?;
+            Self::check_new_mitigation_rate_on(&mut tx, &m.pop, quotas.max_new_per_minute).await?;
             Self::insert_mitigation_on(&mut tx, m).await?;
             Ok::<_, PrefixdError>(tx)
         }).await.map_err(|_| PrefixdError::Internal("mitigation admission timed out".into()))??;

@@ -49,9 +49,9 @@ escalation steps.
 ### Bounded mitigation intent
 
 Automatic policy emits IPv4 `/32` or IPv6 `/128` destinations. Guardrails validate
-configured prefix limits, TTL bounds, port counts, safelist protection and quotas
-before creating new intent. The manual API has its own input validators and uses
-the shared guardrails. See [configuration](../reference/configuration.md#guardrails)
+configured prefix limits, TTL bounds, port counts, safelist protection, quotas and
+the new mitigation rate before creating new intent. The manual API has its own
+input validators and uses the shared guardrails. See [configuration](../reference/configuration.md#guardrails)
 for the limits and [API reference](../reference/api.md#create-mitigation) for
 manual input.
 

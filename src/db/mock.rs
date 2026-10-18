@@ -400,6 +400,15 @@ impl RepositoryTrait for MockRepository {
             u32::try_from(count).unwrap_or(u32::MAX),
             quotas.max_active_global,
         )?;
+        let since = Utc::now() - super::repository::NEW_MITIGATION_WINDOW;
+        let count = mitigations
+            .iter()
+            .filter(|existing| existing.pop == m.pop && existing.created_at > since)
+            .count();
+        super::repository::check_new_mitigation_rate(
+            u32::try_from(count).unwrap_or(u32::MAX),
+            quotas.max_new_per_minute,
+        )?;
         mitigations.push(m.clone());
         Ok(())
     }

@@ -169,7 +169,7 @@ Common status values:
 | 400 | Invalid request body |
 | 401 | Authentication required |
 | 409 | Duplicate event, or in enforced mode the rule is owned by a dry-run mitigation (the event is not stored) |
-| 422 | Guardrail rejection (safelist, quotas, prefix length, etc.) |
+| 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length, etc.) |
 | 429 | Rate limited |
 
 ### Batch Ingest Events
@@ -492,7 +492,7 @@ TTL while the controller is stopped.
 | 400 | Invalid request (bad IP, invalid protocol or protocol/address-family mismatch, missing/zero/inexact police rate, discard with a rate, etc.) |
 | 401 | Authentication required |
 | 409 | Scope already has an active canonical owner or pending withdrawal |
-| 422 | Guardrail rejection (safelist, quotas, prefix length, etc.) |
+| 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length, etc.) |
 
 Canonical ownership ignores equivalent IPv6 spelling and duplicate destination
 ports. A duplicate manual request is rejected before speaker mutation, preserving
@@ -996,7 +996,7 @@ The response uses the same `EventResponse` shape as `POST /v1/events` for compat
 |--------|--------|
 | 400 | Malformed payload (invalid JSON, missing `ip` or `action`, invalid IP) |
 | 401 | Authentication required |
-| 422 | Guardrail rejection (safelist, quotas, prefix length) |
+| 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length) |
 
 **FastNetMon Configuration Snippet:**
 

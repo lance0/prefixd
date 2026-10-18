@@ -138,7 +138,8 @@ pub trait RepositoryTrait: Send + Sync {
     /// Raw persistence for fixtures/imports; bypasses quota admission.
     /// Production creation must use `admit_mitigation`.
     async fn insert_mitigation(&self, m: &Mitigation) -> Result<()>;
-    /// Atomically check customer, POP, then global active quotas and persist new intent.
+    /// Atomically check customer, POP, then global active quotas, then the POP's
+    /// `max_new_per_minute` rate, and persist new intent.
     async fn admit_mitigation(
         &self,
         m: &Mitigation,

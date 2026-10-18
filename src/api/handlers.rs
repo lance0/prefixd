@@ -488,14 +488,20 @@ async fn persist_new_mitigation(
         .admit_mitigation(mitigation, &state.settings.quotas)
         .await
         .inspect_err(|error| {
-            if matches!(
-                error,
-                PrefixdError::GuardrailViolation(GuardrailError::QuotaExceeded { .. })
-            ) {
-                crate::observability::metrics::GUARDRAIL_REJECTIONS
-                    .with_label_values(&["QuotaExceeded"])
-                    .inc();
-            }
+            let reason = match error {
+                PrefixdError::GuardrailViolation(GuardrailError::QuotaExceeded { .. }) => {
+                    "QuotaExceeded"
+                }
+                PrefixdError::GuardrailViolation(GuardrailError::NewMitigationRateExceeded {
+                    ..
+                }) => "NewMitigationRateExceeded",
+                _ => return,
+            };
+            crate::observability::metrics::GUARDRAIL_REJECTIONS
+                .with_label_values(&[reason])
+                .inc();
+            tracing::warn!(error = %error, pop = %mitigation.pop, reason,
+                "admission rejected new mitigation");
         })?;
     if state.is_dry_run() {
         return Ok(None);
@@ -1221,7 +1227,10 @@ async fn handle_ban(
         .inspect_err(|error| {
             if matches!(
                 error,
-                PrefixdError::GuardrailViolation(GuardrailError::QuotaExceeded { .. })
+                PrefixdError::GuardrailViolation(
+                    GuardrailError::QuotaExceeded { .. }
+                        | GuardrailError::NewMitigationRateExceeded { .. }
+                )
             ) {
                 crate::observability::metrics::EVENTS_REJECTED
                     .with_label_values(&[event.source.as_str(), "guardrail"])

@@ -80,6 +80,7 @@ prefixdctl safelist list
 | `prefix too broad` | Not a /32 | Detector must send specific IPs |
 | `TTL too short/long` | Outside bounds | Check `guardrails.min_ttl_seconds` |
 | `quota exceeded` | Too many mitigations | Increase quota or wait for expiry |
+| `new mitigation rate exceeded` | `quotas.max_new_per_minute` mitigations already created at this POP in the last 60 seconds | Wait for the window to pass or raise the limit |
 | `too many ports` | >8 ports | Reduce ports in event |
 
 ---
