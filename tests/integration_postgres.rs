@@ -4942,6 +4942,55 @@ async fn test_shared_quota_pool_wait_uses_whole_deadline() {
 }
 
 #[tokio::test]
+async fn test_shared_quota_deadline_does_not_fail_a_slow_commit() {
+    use prefixd::db::RepositoryTrait;
+    let context = TestContext::new().await;
+    // A deferred trigger runs inside COMMIT, so this commit takes 4s of server work.
+    sqlx::raw_sql(
+        "CREATE FUNCTION slow_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(4); RETURN NULL; END $$;
+         CREATE CONSTRAINT TRIGGER slow_commit AFTER INSERT ON mitigations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION slow_commit();",
+    )
+    .execute(&context.pool)
+    .await
+    .unwrap();
+    let repository = prefixd::db::Repository::new(context.pool.clone());
+    let candidate = inventory_mitigation(
+        "203.0.113.10/32",
+        "quota-a",
+        chrono::Utc::now(),
+        MitigationStatus::Active,
+    );
+    let id = candidate.mitigation_id;
+    // Spend 2s of the 5s admission deadline waiting for the lock, so the deadline
+    // passes while COMMIT is already running on the server.
+    let mut gate = context.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(1886545528, 1903522164)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let quotas = common::test_settings().quotas;
+    let admission =
+        tokio::spawn(async move { repository.admit_mitigation(&candidate, &quotas).await });
+    wait_quota_lock(&context.pool, true, 1).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    gate.commit().await.unwrap();
+    let result = admission.await.unwrap();
+    // The row is committed either way; the caller must not be told it failed.
+    // Wait for the admission transaction to end before reading its outcome.
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let locks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_locks WHERE locktype = 'advisory' AND classid::bigint = 1886545528 AND objid::bigint = 1903522164")
+                .fetch_one(&context.pool).await.unwrap();
+            if locks == 0 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("admission transaction must finish");
+    let stored = context.repo.get_mitigation(id).await.unwrap();
+    assert_eq!(stored.map(|m| m.status), Some(MitigationStatus::Active));
+    result.expect("a committed admission must not be reported as failed");
+}
+
+#[tokio::test]
 async fn test_shared_quota_lock_wait_times_out_without_rpc_or_blocking_other_pop_withdrawal() {
     use prefixd::observability::metrics::{EVENTS_REJECTED, GUARDRAIL_REJECTIONS};
     use std::sync::atomic::Ordering::SeqCst;

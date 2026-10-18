@@ -210,8 +210,9 @@ PostgreSQL across controllers sharing the database. Pending, active and escalate
 rows count, including active rows whose TTL has passed but whose lifecycle has not
 yet completed. A mitigation without a customer skips the customer quota. Existing
 owner extensions do not consume a new slot. Admission has a fixed five-second
-admission deadline covering connection acquisition through commit, after preflight
-checks. Failure returns an error before this request sends an announcement. A timeout
+admission deadline covering connection acquisition through the insert, after preflight
+checks. COMMIT runs outside the deadline, so a slow COMMIT is not reported as failure.
+Failure returns an error before this request sends an announcement. A connection lost
 while awaiting COMMIT can leave committed intent for later reconciliation to announce.
 A controller holds its local lifecycle mutex during this
 wait, so local lifecycle operations can wait behind admission. Other controllers'

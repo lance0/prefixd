@@ -491,9 +491,10 @@ impl RepositoryTrait for Repository {
     }
 
     async fn admit_mitigation(&self, m: &Mitigation, quotas: &QuotasConfig) -> Result<()> {
-        // Bound the complete admission, including pool acquisition. The server bounds also
-        // limit residual work while SQLx drives rollback after cancellation.
-        tokio::time::timeout(Duration::from_secs(5), async {
+        // Bound pool acquisition, lock wait, quota checks and insert. The server bounds also
+        // limit residual work while SQLx drives rollback after cancellation. COMMIT stays
+        // outside the deadline: once sent, cancelling it cannot prove the row was not kept.
+        let tx = tokio::time::timeout(Duration::from_secs(5), async {
             // Explicit isolation is required: a session default of REPEATABLE READ could
             // otherwise keep the snapshot taken before waiting for the admission lock.
             let mut tx = self.pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED").await?;
@@ -515,9 +516,10 @@ impl RepositoryTrait for Repository {
                 .fetch_one(&mut *tx).await?;
             check_active_quota("global", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_global)?;
             Self::insert_mitigation_on(&mut tx, m).await?;
-            tx.commit().await?;
-            Ok(())
-        }).await.map_err(|_| PrefixdError::Internal("mitigation admission timed out".into()))?
+            Ok::<_, PrefixdError>(tx)
+        }).await.map_err(|_| PrefixdError::Internal("mitigation admission timed out".into()))??;
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn update_mitigation(&self, m: &Mitigation) -> Result<()> {
