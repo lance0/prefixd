@@ -1,31 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, renderHook } from "@testing-library/react"
+import { act, renderHook, screen, waitFor } from "@testing-library/react"
 import type { ReactNode } from "react"
-
-const mocks = vi.hoisted(() => ({
-  mutate: vi.fn<(key: string | ((key: unknown) => boolean)) => void>(),
-  preferences: {
-    muted_events: [] as string[],
-    quiet_hours_start: null as number | null,
-    quiet_hours_end: null as number | null,
-  },
-  toast: { error: vi.fn(), warning: vi.fn(), success: vi.fn(), info: vi.fn() },
-}))
-
-vi.mock("swr", () => ({
-  default: () => ({ data: mocks.preferences }),
-  useSWRConfig: () => ({ mutate: mocks.mutate }),
-}))
-
-vi.mock("sonner", () => ({ toast: mocks.toast }))
-
-vi.mock("@/lib/api", () => ({ getNotificationPreferences: vi.fn() }))
-
+import useSWR, { type Key } from "swr"
 import { WebSocketProvider, useWebSocketContext } from "@/components/websocket-provider"
+import type { WsMessage } from "@/hooks/use-websocket-types"
+import type { NotificationPreferences } from "@/lib/api"
+import { appWrapper, json, settle, useFakeController } from "./support/fake-controller"
 
-class MockWebSocket {
+const controller = useFakeController()
+
+class FakeWebSocket {
   static OPEN = 1
-  static instances: MockWebSocket[] = []
+  static instances: FakeWebSocket[] = []
   readyState = 0
   onopen: (() => void) | null = null
   onmessage: ((event: MessageEvent<string>) => void) | null = null
@@ -33,15 +19,15 @@ class MockWebSocket {
   onerror: (() => void) | null = null
 
   constructor(readonly url: string) {
-    MockWebSocket.instances.push(this)
+    FakeWebSocket.instances.push(this)
   }
 
   open() {
-    this.readyState = MockWebSocket.OPEN
+    this.readyState = FakeWebSocket.OPEN
     this.onopen?.()
   }
 
-  receive(frame: unknown) {
+  receive(frame: WsMessage) {
     this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(frame) }))
   }
 
@@ -64,7 +50,8 @@ const mitigation = {
   scope_hash: "test-scope",
 }
 
-const cacheKeys = [
+/** Cache keys shaped like the dashboard hooks' keys; the provider's own preferences key is fetched from the API. */
+const cacheKeys: Key[] = [
   "mitigations",
   ["mitigations", { status: "active" }],
   "events",
@@ -76,39 +63,71 @@ const cacheKeys = [
   "settings",
 ]
 
-function invalidatedKeys() {
-  return cacheKeys.filter((key) => mocks.mutate.mock.calls.some(([selector]) =>
-    typeof selector === "function" ? selector(key) : selector === key
-  ))
+/** The provider's own hook fetches "notification-preferences"; probing it too would replace its fetcher. */
+const probedKeys = cacheKeys.filter((key) => key !== "notification-preferences")
+
+let preferences: NotificationPreferences
+const fetches = new Map<string, number>()
+
+function CacheProbe({ swrKey }: { swrKey: Key }) {
+  const name = JSON.stringify(swrKey)
+
+  useSWR(swrKey, () => {
+    fetches.set(name, (fetches.get(name) ?? 0) + 1)
+
+    return name
+  })
+
+  return null
 }
 
-function mountProvider() {
+/** Keys refetched since the frame was sent. The provider owns "notification-preferences", so its refetch goes to the API. */
+function invalidatedKeys(preferenceReads: number) {
+  return cacheKeys.filter((key) => key === "notification-preferences"
+    ? controller.calls("GET", "/v1/preferences").length > preferenceReads
+    : (fetches.get(JSON.stringify(key)) ?? 0) > 0)
+}
+
+async function mountProvider() {
+  const app = appWrapper({ withoutAuth: true })
+
   const hook = renderHook(() => useWebSocketContext(), {
     wrapper: ({ children }: { children: ReactNode }) => (
-      <WebSocketProvider>{children}</WebSocketProvider>
+      <app.wrapper>
+        <WebSocketProvider>
+          {probedKeys.map((key) => <CacheProbe key={JSON.stringify(key)} swrKey={key} />)}
+          {children}
+        </WebSocketProvider>
+      </app.wrapper>
     ),
   })
 
-  const socket = MockWebSocket.instances[0]
+  const socket = FakeWebSocket.instances[0]
 
   if (!socket) throw new Error("provider did not open a WebSocket")
   act(() => socket.open())
+  await waitFor(() => expect(controller.calls("GET", "/v1/preferences")).toHaveLength(1))
+  await waitFor(() => expect(fetches.size).toBe(probedKeys.length))
+  await settle()
+  fetches.clear()
 
-  return { ...hook, socket }
+  return { ...hook, socket, preferenceReads: controller.calls("GET", "/v1/preferences").length }
+}
+
+function toasts() {
+  return [...document.querySelectorAll("[data-sonner-toast]")]
 }
 
 describe("WebSocketProvider server frames", () => {
   beforeEach(() => {
-    vi.clearAllMocks()
-    MockWebSocket.instances = []
-    mocks.preferences.muted_events = []
-    mocks.preferences.quiet_hours_start = null
-    mocks.preferences.quiet_hours_end = null
-    vi.stubGlobal("WebSocket", MockWebSocket)
+    FakeWebSocket.instances = []
+    fetches.clear()
+    preferences = { muted_events: [], quiet_hours_start: null, quiet_hours_end: null }
+    controller.route("GET", "/v1/preferences", () => json(preferences))
+    vi.stubGlobal("WebSocket", FakeWebSocket)
   })
 
   afterEach(() => {
-    cleanup()
     vi.unstubAllGlobals()
   })
 
@@ -117,19 +136,23 @@ describe("WebSocketProvider server frames", () => {
     ["mitigation_updated", { mitigation }, "warning", "Mitigation Updated: 203.0.113.10"],
     ["mitigation_expired", { mitigation_id: mitigation.mitigation_id }, "info", "Mitigation Expired"],
     ["mitigation_withdrawn", { mitigation_id: mitigation.mitigation_id }, "success", "Mitigation Withdrawn"],
-  ] as const)("refreshes mitigation caches for %s", (type, payload, toastKind, title) => {
-    const { socket, result } = mountProvider()
+  ] as const)("refreshes mitigation caches for %s", async (type, payload, toastKind, title) => {
+    const { socket, result, preferenceReads } = await mountProvider()
     const frame = { type, ...payload }
     act(() => socket.receive(frame))
+    await settle()
 
     expect(result.current.lastMessage).toEqual(frame)
-    expect(invalidatedKeys()).toEqual([cacheKeys[0], cacheKeys[1], "stats"])
-    expect(mocks.toast[toastKind]).toHaveBeenCalledWith(title, expect.any(Object))
+    expect(invalidatedKeys(preferenceReads)).toEqual([cacheKeys[0], cacheKeys[1], "stats"])
+    const toast = await screen.findByText(title)
+    expect(toast.closest("[data-sonner-toast]")).toHaveAttribute("data-type", toastKind)
   })
 
-  it("refreshes event caches for the backend EventResponse frame", () => {
-    const { socket } = mountProvider()
-    act(() => socket.receive({
+  it("refreshes event caches for the backend EventResponse frame", async () => {
+    const { socket, preferenceReads } = await mountProvider()
+
+    // The backend frame carries fields the dashboard does not read.
+    const frame = {
       type: "event_ingested",
       event: {
         event_id: "2f585b3f-6878-4bde-a908-37739846b4a3",
@@ -137,30 +160,35 @@ describe("WebSocketProvider server frames", () => {
         status: "accepted",
         mitigation_id: mitigation.mitigation_id,
       },
-    }))
+    } as const
 
-    expect(invalidatedKeys()).toEqual([cacheKeys[2], cacheKeys[3], "stats"])
+    act(() => socket.receive(frame))
+    await settle()
+
+    expect(invalidatedKeys(preferenceReads)).toEqual([cacheKeys[2], cacheKeys[3], "stats"])
   })
 
-  it("refreshes live caches after a payload-free resync frame", () => {
-    const { socket } = mountProvider()
+  it("refreshes live caches after a payload-free resync frame", async () => {
+    const { socket, preferenceReads } = await mountProvider()
     act(() => socket.receive({ type: "resync_required" }))
+    await settle()
 
-    expect(invalidatedKeys()).toEqual(cacheKeys.slice(0, 7))
-    expect(mocks.toast.info).toHaveBeenCalledWith("Refreshing live data after missed updates")
+    expect(invalidatedKeys(preferenceReads)).toEqual(cacheKeys.slice(0, 7))
+    const toast = await screen.findByText("Refreshing live data after missed updates")
+    expect(toast.closest("[data-sonner-toast]")).toHaveAttribute("data-type", "info")
   })
 
   it.each([
     [{ type: "mitigation_created", mitigation }, "mitigation.created"],
     [{ type: "mitigation_expired", mitigation_id: mitigation.mitigation_id }, "mitigation.expired"],
     [{ type: "resync_required" }, "config.reloaded"],
-  ] as const)("keeps refresh active when notifications are muted: %j", (frame, mutedEvent) => {
-    mocks.preferences.muted_events = [mutedEvent]
-    const { socket } = mountProvider()
+  ] as const)("keeps refresh active when notifications are muted: %j", async (frame, mutedEvent) => {
+    preferences = { ...preferences, muted_events: [mutedEvent] }
+    const { socket, preferenceReads } = await mountProvider()
     act(() => socket.receive(frame))
+    await settle()
 
-    expect(mocks.mutate).toHaveBeenCalled()
-
-    for (const show of Object.values(mocks.toast)) expect(show).not.toHaveBeenCalled()
+    expect(invalidatedKeys(preferenceReads).length).toBeGreaterThan(0)
+    expect(toasts()).toEqual([])
   })
 })

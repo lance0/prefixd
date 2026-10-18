@@ -1,40 +1,36 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { describe, expect, it } from "vitest"
+import { fireEvent, screen, waitFor } from "@testing-library/react"
 import { MitigationActivityChart } from "@/components/dashboard/mitigation-activity-chart"
+import { deferred, failure, json, renderApp, useFakeController } from "./support/fake-controller"
 
-const mock = vi.hoisted(() => ({
-  data: undefined as { buckets: { bucket: string; count: number }[] } | undefined,
-  error: undefined as Error | undefined,
-  retry: vi.fn(),
-}))
+const controller = useFakeController()
 
-vi.mock("@/hooks/use-api", () => ({
-  useTimeseries: () => ({ data: mock.data, error: mock.error, mutate: mock.retry }),
-}))
-
-afterEach(cleanup)
-
-beforeEach(() => { mock.data = undefined; mock.error = undefined; mock.retry.mockReset() })
+const render = () => renderApp(<MitigationActivityChart />, { withoutAuth: true })
 
 describe("overview activity states", () => {
-  it("reports initial loading without claiming the range is empty", () => {
-    render(<MitigationActivityChart />)
-    expect(screen.getByRole("status")).toHaveTextContent("Loading activity")
+  it("reports initial loading without claiming the range is empty", async () => {
+    controller.route("GET", "/v1/stats/timeseries", () => deferred<Response>().promise)
+    render()
+    await waitFor(() => expect(controller.calls("GET", "/v1/stats/timeseries")).toHaveLength(2))
+    expect(screen.getByRole("status", { name: "Loading activity" })).toHaveTextContent("Loading activity")
     expect(screen.queryByText(/No activity in the last/)).not.toBeInTheDocument()
   })
 
-  it("reports a failed initial request rather than loading forever", () => {
-    mock.error = new Error("offline")
-    render(<MitigationActivityChart />)
-    expect(screen.getByRole("alert")).toHaveTextContent("Unable to load activity chart")
+  it("reports a failed initial request rather than loading forever", async () => {
+    controller.route("GET", "/v1/stats/timeseries", () => failure(503, "offline"))
+    render()
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unable to load activity chart")
     expect(screen.queryByText(/Loading activity/)).not.toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "Retry activity" })).toBeInTheDocument()
+    const retry = screen.getByRole("button", { name: "Retry activity" })
+    const before = controller.calls("GET", "/v1/stats/timeseries").length
+    fireEvent.click(retry)
+    await waitFor(() => expect(controller.calls("GET", "/v1/stats/timeseries").length).toBe(before + 2))
   })
 
-  it("provides a next action only after a successful empty result", () => {
-    mock.data = { buckets: [] }
-    render(<MitigationActivityChart />)
-    expect(screen.getByText("No activity in the last 24h")).toBeInTheDocument()
+  it("provides a next action only after a successful empty result", async () => {
+    controller.route("GET", "/v1/stats/timeseries", () => json({ buckets: [] }))
+    render()
+    expect(await screen.findByText("No activity in the last 24h")).toBeInTheDocument()
     expect(screen.getByRole("link", { name: "Review events" })).toHaveAttribute("href", "/events")
     expect(screen.queryByRole("alert")).not.toBeInTheDocument()
   })

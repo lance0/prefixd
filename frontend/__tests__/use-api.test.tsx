@@ -1,54 +1,48 @@
-import React, { type ReactNode } from "react"
 import { act, renderHook, waitFor } from "@testing-library/react"
-import { SWRConfig } from "swr"
-import { beforeEach, describe, expect, it, vi } from "vitest"
-import * as api from "@/lib/api"
+import { describe, expect, it } from "vitest"
 import { useEvents, useMitigation, useMitigations, useSignalGroupDetail, useSignalGroupsPaginated } from "@/hooks/use-api"
+import { appWrapper, json, settle, useFakeController } from "./support/fake-controller"
 
-vi.mock("@/lib/api", () => ({
-  getMitigations: vi.fn(), getEvents: vi.fn(), getMitigation: vi.fn(),
-  getSignalGroupDetail: vi.fn(), getSignalGroups: vi.fn(),
-}))
+const controller = useFakeController()
 
-function wrapper({ children }: { children: ReactNode }) {
-  return <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0, shouldRetryOnError: false }}>{children}</SWRConfig>
+const wrapper = () => appWrapper({ withoutAuth: true })
+
+function query(method: string, path: string) {
+  return controller.calls(method, path).map((request) => Object.fromEntries(request.query))
 }
-
-beforeEach(() => vi.clearAllMocks())
 
 describe("real API hooks", () => {
   it("forwards mitigation filters to the API", async () => {
-    vi.mocked(api.getMitigations).mockResolvedValue({ mitigations: [], count: 0, next_cursor: null, has_more: false })
+    controller.route("GET", "/v1/mitigations", () => json({ mitigations: [], count: 0, next_cursor: null, has_more: false }))
     const filters = { status: ["active"], customer_id: "customer-a", limit: 10 }
-    renderHook(() => useMitigations(filters), { wrapper })
-    await waitFor(() => expect(api.getMitigations).toHaveBeenCalledWith(filters))
+    renderHook(() => useMitigations(filters), wrapper())
+    await waitFor(() => expect(query("GET", "/v1/mitigations")).toEqual([{ status: "active", customer_id: "customer-a", limit: "10" }]))
   })
 
   it("forwards event filters to the API", async () => {
-    vi.mocked(api.getEvents).mockResolvedValue({ events: [], count: 0, next_cursor: null, has_more: false })
+    controller.route("GET", "/v1/events", () => json({ events: [], count: 0, next_cursor: null, has_more: false }))
     const filters = { limit: 10, cursor: "event-cursor" }
-    renderHook(() => useEvents(filters), { wrapper })
-    await waitFor(() => expect(api.getEvents).toHaveBeenCalledWith(filters))
+    renderHook(() => useEvents(filters), wrapper())
+    await waitFor(() => expect(query("GET", "/v1/events")).toEqual([{ limit: "10", cursor: "event-cursor" }]))
   })
 
   it("does not fetch detail records without an identifier", async () => {
-    const { result } = renderHook(() => ({ mitigation: useMitigation(null), group: useSignalGroupDetail(null) }), { wrapper })
-    await act(async () => {})
+    const { result } = renderHook(() => ({ mitigation: useMitigation(null), group: useSignalGroupDetail(null) }), wrapper())
+    await settle()
     expect(result.current.mitigation.isLoading).toBe(false)
     expect(result.current.group.isLoading).toBe(false)
-    expect(api.getMitigation).not.toHaveBeenCalled()
-    expect(api.getSignalGroupDetail).not.toHaveBeenCalled()
+    expect(controller.requests).toEqual([])
   })
 
   it("carries the returned cursor into the next signal-group request", async () => {
-    vi.mocked(api.getSignalGroups).mockImplementation(async (params) => ({
-      groups: [], count: 0, next_cursor: params?.cursor ? null : "next-page", has_more: !params?.cursor,
+    controller.route("GET", "/v1/signal-groups", ({ query: params }) => json({
+      groups: [], count: 0, next_cursor: params.get("cursor") ? null : "next-page", has_more: !params.get("cursor"),
     }))
-    const { result } = renderHook(() => useSignalGroupsPaginated({ status: "open", limit: 2 }), { wrapper })
+    const { result } = renderHook(() => useSignalGroupsPaginated({ status: "open", limit: 2 }), wrapper())
     await waitFor(() => expect(result.current.data?.length).toBe(1))
     await act(async () => { await result.current.setSize(2) })
     await waitFor(() => expect(result.current.data?.length).toBe(2))
-    expect(api.getSignalGroups).toHaveBeenCalledWith({ status: "open", limit: 2, cursor: "next-page" })
+    expect(query("GET", "/v1/signal-groups")).toContainEqual({ status: "open", limit: "2", cursor: "next-page" })
     await act(async () => { await result.current.setSize(3) })
     expect(result.current.data?.length).toBe(2)
   })

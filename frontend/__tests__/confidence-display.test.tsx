@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { formatConfidence } from "@/lib/confidence"
 import { ConfidenceBar } from "@/components/dashboard/confidence-bar"
 import { EventDetailPanel } from "@/components/dashboard/event-detail-panel"
@@ -8,28 +8,9 @@ import { CommandPalette } from "@/components/dashboard/command-palette"
 import IpHistoryPage from "@/app/(dashboard)/ip-history/page"
 import { CacheTab } from "@/components/dashboard/correlation/cache-tab"
 import type { Event } from "@/lib/api"
+import { json, renderApp, settle, useFakeController } from "./support/fake-controller"
 
-const mock = vi.hoisted(() => ({ events: vi.fn(), history: vi.fn(), cache: vi.fn() }))
-
-vi.mock("@/hooks/use-api", () => ({
-  useEvents: () => mock.events(),
-  useMitigations: () => ({ data: { mitigations: [] } }),
-  useIpHistory: () => mock.history(),
-  useCachedCorroborators: () => mock.cache(),
-}))
-
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
-  useSearchParams: () => new URLSearchParams("ip=203.0.113.10"),
-}))
-
-vi.mock("@/hooks/use-reduced-motion", () => ({ useReducedMotion: () => true }))
-
-vi.mock("@/components/dashboard/dashboard-layout", () => ({
-  DashboardLayout: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-}))
-
-vi.mock("@/components/dashboard/incident-report-dialog", () => ({ IncidentReportDialog: () => null }))
+const controller = useFakeController()
 
 const event: Event = {
   event_id: "event-1", external_event_id: null, source: "fastnetmon",
@@ -38,7 +19,8 @@ const event: Event = {
   bps: null, pps: null, top_dst_ports_json: "[53]", confidence: 0.95,
 }
 
-const events = [0.95, 0, null, NaN].map((confidence, index) => ({
+// JSON cannot carry NaN, so the API's invalid confidence is an out-of-range fraction.
+const events = [0.95, 0, null, 1.5].map((confidence, index) => ({
   ...event, confidence, event_id: `event-${index}`, victim_ip: `203.0.113.${index + 10}`,
 }))
 
@@ -49,7 +31,8 @@ beforeEach(() => {
   vi.stubGlobal("matchMedia", vi.fn((media: string) => ({
     media, matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn(),
   })))
-  mock.events.mockReturnValue({ data: { events }, isLoading: false, mutate: vi.fn() })
+  controller.route("GET", "/v1/events", () => json({ events, count: events.length, next_cursor: null, has_more: false }))
+  controller.route("GET", "/v1/mitigations", () => json({ mitigations: [], count: 0, next_cursor: null, has_more: false }))
 })
 
 describe("confidence fraction formatting", () => {
@@ -81,8 +64,9 @@ describe("confidence fraction formatting", () => {
 })
 
 describe("confidence display callers", () => {
-  it("shows API fractions, zero, missing and invalid confidence in event list rows", () => {
-    render(<EventsContentLive />)
+  it("shows API fractions, zero, missing and invalid confidence in event list rows", async () => {
+    renderApp(<EventsContentLive />, { withoutAuth: true })
+    await screen.findByRole("link", { name: "203.0.113.10" })
 
     for (const [index, label] of ["95%", "0%", "Unavailable", "Invalid"].entries()) {
       const row = screen.getByRole("link", { name: `203.0.113.${index + 10}` }).closest("tr")!
@@ -114,7 +98,10 @@ describe("confidence display callers", () => {
     vi.stubGlobal("ResizeObserver", observer)
 
     try {
-      render(<CommandPalette open onOpenChange={vi.fn()} />)
+      renderApp(<CommandPalette open onOpenChange={vi.fn()} />, { withoutAuth: true })
+      // Search once results have loaded, as an operator would.
+      await waitFor(() => expect(controller.calls("GET", "/v1/events")).toHaveLength(1))
+      await settle()
       fireEvent.change(screen.getByPlaceholderText("Search mitigations, events, pages…"), { target: { value: "203.0.113" } })
 
       for (const label of ["95%", "0%", "Unavailable", "Invalid"]) {
@@ -129,28 +116,28 @@ describe("confidence display callers", () => {
     }
   })
 
-  it("uses the same confidence states in IP history", () => {
-    mock.history.mockReturnValue({ data: { events, mitigations: [], customer: null, service: null } })
-    render(<IpHistoryPage />)
+  it("uses the same confidence states in IP history", async () => {
+    controller.route("GET", "/v1/ip/203.0.113.10/history", () => json({ ip: "203.0.113.10", events, mitigations: [], customer: null, service: null }))
+    renderApp(<IpHistoryPage />, { url: "/ip-history?ip=203.0.113.10", withoutAuth: true })
 
     for (const label of ["95%", "0%", "Unavailable", "Invalid"]) {
-      expect(screen.getByText(`Confidence: ${label}`)).toBeInTheDocument()
+      expect(await screen.findByText(`Confidence: ${label}`)).toBeInTheDocument()
     }
   })
 
-  it("uses percentages and explicit missing confidence in the corroborator cache", () => {
-    mock.cache.mockReturnValue({ data: {
+  it("uses percentages and explicit missing confidence in the corroborator cache", async () => {
+    controller.route("GET", "/v1/signals/corroborator/cache", () => json({
       total: events.length, by_source: [],
       signals: events.map(e => ({
         signal_id: e.event_id, source: e.source, vector: e.vector, confidence: e.confidence,
         customer_id: null, service_id: null, pop: null, interface: null,
         ingested_at: e.ingested_at, expires_at: "2026-10-18T13:00:00Z",
       })),
-    } })
-    render(<CacheTab />)
+    }))
+    renderApp(<CacheTab />, { withoutAuth: true })
 
     for (const label of ["95%", "0%", "Unavailable", "Invalid"]) {
-      expect(screen.getByText(label)).toBeInTheDocument()
+      expect(await screen.findByText(label)).toBeInTheDocument()
     }
   })
 })

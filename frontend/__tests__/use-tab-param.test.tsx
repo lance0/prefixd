@@ -1,14 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, screen } from "@testing-library/react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useTabParam } from "@/hooks/use-tab-param"
+import { renderApp } from "./support/fake-controller"
 
-const nav = vi.hoisted(() => ({ params: new URLSearchParams() }))
-
-vi.mock("next/navigation", () => ({
-  usePathname: () => "/config",
-  useSearchParams: () => nav.params,
-}))
+const renderAt = (url: string) => renderApp(<Harness />, { url, withoutAuth: true })
 
 const TABS = ["settings", "playbooks", "alerting"] as const
 
@@ -33,20 +29,17 @@ afterEach(cleanup)
 
 describe("useTabParam", () => {
   it("opens the tab named in the URL", () => {
-    nav.params = new URLSearchParams("tab=playbooks&ip=203.0.113.10")
-    render(<Harness />)
+    renderAt("/config?tab=playbooks&ip=203.0.113.10")
     expect(screen.getByRole("tab", { name: "playbooks" })).toHaveAttribute("aria-selected", "true")
   })
 
   it("falls back to the first tab for a missing or unknown value", () => {
-    nav.params = new URLSearchParams("tab=nope")
-    render(<Harness />)
+    renderAt("/config?tab=nope")
     expect(screen.getByRole("tab", { name: "settings" })).toHaveAttribute("aria-selected", "true")
   })
 
   it("writes the selection to the URL, keeps other params, and drops the default", () => {
-    nav.params = new URLSearchParams("tab=playbooks&ip=203.0.113.10")
-    render(<Harness />)
+    renderAt("/config?tab=playbooks&ip=203.0.113.10")
     // Radix tabs activate on mousedown (and on arrow-key focus).
     fireEvent.mouseDown(screen.getByRole("tab", { name: "alerting" }), { button: 0 })
     expect(replaceState).toHaveBeenLastCalledWith(null, "", "/config?tab=alerting&ip=203.0.113.10")
