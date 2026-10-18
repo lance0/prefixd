@@ -204,6 +204,13 @@ export PREFIXD_API=http://localhost:8080
 bun run dev
 ```
 
+The dev server does not serve the live feed. The browser opens
+`ws://localhost:3000/v1/ws/feed`, which Next.js cannot upgrade, so the top bar
+shows the connection as disconnected. Mitigations, events and stats still
+refresh by polling every 5 seconds. To test the live feed, open the Compose
+stack through nginx at `http://localhost` (port 80), which proxies
+`/v1/ws/feed` to the controller.
+
 ---
 
 ## Signal Adapters (Detector Integration)
