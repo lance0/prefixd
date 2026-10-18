@@ -27,8 +27,8 @@ control-plane evidence.
 | **Destination port matching** | Verified | Verified | Expected | Expected | Verified |
 | **Protocol matching** | Verified | Verified | Expected | Expected | Verified |
 
-The FRR column is control-plane receipt only. It holds for both rustbgpd 0.77.0
-and GoBGP 4.10.0 with FRR 10.7.1 (see [FRR](#frr--verified-control-plane)).
+The FRR column is control-plane receipt only. It holds for rustbgpd 0.77.0 and
+0.78.0 and for GoBGP 4.10.0 with FRR 10.7.1 (see [FRR](#frr--verified-control-plane)).
 The Nokia column is SR OS, which is untested. SR Linux does not support FlowSpec
 (see [SR Linux](#nokia-sr-linux--not-supported)).
 
@@ -115,6 +115,7 @@ Receipts, attributed per speaker:
 |---|---|---|---|---|
 | 2026-10-18 | rustbgpd 0.77.0 (released image, digest-pinned) | 0.19.1, commit `dfaa4e08e0ed` | Local run, Linux 7.0.0-30 | Pass, 8/8 steps |
 | 2026-10-18 | GoBGP 4.10.0 (`jauderho/gobgp` digest pinned by CI) | 0.19.1, commit `dfaa4e08e0ed` | Local run, Linux 7.0.0-30 | Pass, 8/8 steps |
+| 2026-10-18 | rustbgpd 0.78.0 (released image, digest-pinned) | 0.19.1, commit `c3d86201e341` | Local run, Linux 7.0.0-30 | Pass, 8/8 steps |
 | 2026-10-18 | rustbgpd 0.77.0 | 0.19.1, PR merge commit `1810bdb595e6` | [Interop run 39161305632](https://github.com/lance0/prefixd/actions/runs/39161305632), ubuntu-latest, Linux 6.17.0-1022-azure | Pass, 8/8 steps |
 | 2026-10-18 | GoBGP 4.10.0 | 0.19.1, PR merge commit `1810bdb595e6` | [Interop run 39161305632](https://github.com/lance0/prefixd/actions/runs/39161305632), ubuntu-latest, Linux 6.17.0-1022-azure | Pass, 8/8 steps |
 
