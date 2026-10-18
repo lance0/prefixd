@@ -141,25 +141,55 @@ fn default_burst() -> u32 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "BgpConfigInput")]
 pub struct BgpConfig {
-    #[serde(
-        default = "default_bgp_mode",
-        rename(deserialize = "backend"),
-        alias = "mode"
-    )]
     pub mode: BgpMode,
-    #[serde(default)]
     pub gobgp_grpc: String,
-    #[serde(default)]
     pub rustbgpd: Option<RustBgpdConfig>,
     pub local_asn: u32,
     pub router_id: String,
-    #[serde(default)]
     pub neighbors: Vec<BgpNeighbor>,
 }
 
-fn default_bgp_mode() -> BgpMode {
-    BgpMode::Rustbgpd
+#[derive(Deserialize)]
+struct BgpConfigInput {
+    #[serde(default, rename = "backend", alias = "mode")]
+    mode: Option<BgpMode>,
+    #[serde(default)]
+    gobgp_grpc: String,
+    #[serde(default)]
+    rustbgpd: Option<RustBgpdConfig>,
+    local_asn: u32,
+    router_id: String,
+    #[serde(default)]
+    neighbors: Vec<BgpNeighbor>,
+}
+
+impl TryFrom<BgpConfigInput> for BgpConfig {
+    type Error = &'static str;
+
+    /// An unset backend never moves a configured speaker. v0.19.1 defaulted to
+    /// GoBGP and required `gobgp_grpc`, so that endpoint alone keeps GoBGP.
+    fn try_from(input: BgpConfigInput) -> std::result::Result<Self, Self::Error> {
+        let mode = match (input.mode, !input.gobgp_grpc.is_empty(), &input.rustbgpd) {
+            (Some(mode), _, _) => mode,
+            (None, true, Some(_)) => {
+                return Err(
+                    "bgp.backend is required when both bgp.gobgp_grpc and bgp.rustbgpd are set",
+                );
+            }
+            (None, true, None) => BgpMode::Gobgp,
+            (None, false, _) => BgpMode::Rustbgpd,
+        };
+        Ok(Self {
+            mode,
+            gobgp_grpc: input.gobgp_grpc,
+            rustbgpd: input.rustbgpd,
+            local_asn: input.local_asn,
+            router_id: input.router_id,
+            neighbors: input.neighbors,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,12 +368,33 @@ pub struct StorageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "ObservabilityInput")]
 pub struct ObservabilityConfig {
-    #[serde(default = "default_log_format")]
     pub log_format: LogFormat,
-    #[serde(default = "default_log_level")]
     pub log_level: String,
+}
+
+/// Strict input that accepts and drops the removed keys listed in `REMOVED_KEYS`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObservabilityInput {
+    #[serde(default = "default_log_format")]
+    log_format: LogFormat,
+    #[serde(default = "default_log_level")]
+    log_level: String,
+    #[serde(default, rename = "audit_log_path")]
+    _audit_log_path: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "metrics_listen")]
+    _metrics_listen: Option<serde::de::IgnoredAny>,
+}
+
+impl From<ObservabilityInput> for ObservabilityConfig {
+    fn from(input: ObservabilityInput) -> Self {
+        Self {
+            log_format: input.log_format,
+            log_level: input.log_level,
+        }
+    }
 }
 
 fn default_log_format() -> LogFormat {
@@ -367,10 +418,27 @@ pub struct SafelistConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "ShutdownInput")]
 pub struct ShutdownConfig {
-    #[serde(default = "default_drain_timeout")]
     pub drain_timeout_seconds: u32,
+}
+
+/// Strict input that accepts and drops the removed key listed in `REMOVED_KEYS`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShutdownInput {
+    #[serde(default = "default_drain_timeout")]
+    drain_timeout_seconds: u32,
+    #[serde(default, rename = "preserve_announcements")]
+    _preserve_announcements: Option<serde::de::IgnoredAny>,
+}
+
+impl From<ShutdownInput> for ShutdownConfig {
+    fn from(input: ShutdownInput) -> Self {
+        Self {
+            drain_timeout_seconds: input.drain_timeout_seconds,
+        }
+    }
 }
 
 impl Default for ShutdownConfig {
@@ -385,10 +453,39 @@ fn default_drain_timeout() -> u32 {
     30
 }
 
+/// Keys v0.19.1 shipped or documented that this release no longer uses. Each
+/// loads, is ignored and is reported once; `DEPRECATED_CONFIG_REJECTED_IN` rejects
+/// them. Any other unknown key keeps its section's existing behavior.
+pub const REMOVED_KEYS: &[&str] = &[
+    "escalation",
+    "http.auth.ldap",
+    "http.auth.radius",
+    "timers.correlation_window_seconds",
+    "observability.audit_log_path",
+    "observability.metrics_listen",
+    "shutdown.preserve_announcements",
+];
+pub const DEPRECATED_CONFIG_REJECTED_IN: &str = "0.21.0";
+
+/// A legacy configuration form accepted by a compatibility rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigDeprecation {
+    pub key: &'static str,
+    pub message: &'static str,
+}
+
 impl Settings {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Ok(Self::load_with_deprecations(path)?.0)
+    }
+
+    /// Loads settings and reports legacy forms, so startup can log them once.
+    pub fn load_with_deprecations<P: AsRef<Path>>(
+        path: P,
+    ) -> Result<(Self, Vec<ConfigDeprecation>)> {
         let content = std::fs::read_to_string(path)?;
         let settings: Settings = crate::config::parse_yaml(&content)?;
+        let deprecations = settings.deprecations(&content);
         settings.http.validate_auth_transport()?;
         let correlation_errors = settings.correlation.validate();
         if !correlation_errors.is_empty() {
@@ -397,7 +494,33 @@ impl Settings {
                 correlation_errors.join("; ")
             ));
         }
-        Ok(settings)
+        Ok((settings, deprecations))
+    }
+
+    /// Typed parsing has already accepted `content`; this untyped view only
+    /// finds legacy keys.
+    fn deprecations(&self, content: &str) -> Vec<ConfigDeprecation> {
+        let document: serde_json::Value = crate::config::parse_yaml(content).unwrap_or_default();
+        let present = |key: &str| {
+            document
+                .pointer(&format!("/{}", key.replace('.', "/")))
+                .is_some()
+        };
+        let mut found: Vec<_> = REMOVED_KEYS
+            .iter()
+            .filter(|key| present(key))
+            .map(|&key| ConfigDeprecation {
+                key,
+                message: "removed configuration key is ignored; delete it",
+            })
+            .collect();
+        if self.bgp.mode == BgpMode::Gobgp && !present("bgp.backend") && !present("bgp.mode") {
+            found.push(ConfigDeprecation {
+                key: "bgp.backend",
+                message: "bgp.backend is unset; keeping GoBGP because bgp.gobgp_grpc is set; add bgp.backend: gobgp",
+            });
+        }
+        found
     }
 }
 
@@ -451,8 +574,11 @@ mod tests {
                 BgpMode::Gobgp,
             ),
         ] {
-            let settings: Settings = crate::config::parse_yaml(yaml).unwrap();
+            let (settings, deprecations) = load_yaml(yaml).unwrap();
             assert_eq!(settings.bgp.mode, expected);
+            // Shipped files pin the backend instead of relying on resolution.
+            assert!(yaml.contains("\nbgp:\n") && yaml.contains("\n  backend: "));
+            assert!(deprecations.is_empty(), "{deprecations:?}");
             assert_eq!(settings.http.auth.mode, AuthMode::Credentials);
             assert_eq!(
                 serde_json::to_value(settings.shutdown).unwrap(),
@@ -518,7 +644,7 @@ observability:
     fn settings_reject_unknown_observability_keys_without_values() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("prefixd.yaml");
-        for key in ["metrics_listen", "audit_log_path", "log_levle"] {
+        for key in ["log_levle", "audit_log_paths", "metrics"] {
             let secret = "private-observability-value-must-not-appear";
             std::fs::write(&path, format!("{MINIMAL_SETTINGS_YAML}  {key}: {secret}\n")).unwrap();
             let error = Settings::load(&path).unwrap_err().to_string();
@@ -553,13 +679,12 @@ observability:
     }
 
     #[test]
-    fn settings_reject_removed_and_unknown_shutdown_keys() {
+    fn settings_reject_unknown_shutdown_keys() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("prefixd.yaml");
         for (key, value) in [
-            ("preserve_announcements", "false"),
-            ("preserve_announcements", "true"),
             ("drain_timeot_seconds", "17"),
+            ("preserve_announcement", "true"),
         ] {
             std::fs::write(
                 &path,
@@ -569,6 +694,145 @@ observability:
             let error = Settings::load(&path).unwrap_err().to_string();
             assert!(error.contains("unknown field"), "{key}: {error}");
             assert!(error.contains(key), "{key}: {error}");
+        }
+    }
+
+    fn load_yaml(yaml: &str) -> Result<(Settings, Vec<ConfigDeprecation>)> {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("prefixd.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        Settings::load_with_deprecations(&path)
+    }
+
+    fn keys(deprecations: &[ConfigDeprecation]) -> Vec<&'static str> {
+        deprecations.iter().map(|d| d.key).collect()
+    }
+
+    #[test]
+    fn removed_keys_load_ignored_with_one_deprecation_each() {
+        for (key, anchor, replacement) in [
+            (
+                "escalation",
+                "storage:\n",
+                "escalation:\n  enabled: true\n  min_confidence: 0.7\nstorage:\n",
+            ),
+            (
+                "http.auth.ldap",
+                "    mode: none\n",
+                "    mode: none\n    ldap: {url: 'ldaps://ldap.invalid'}\n",
+            ),
+            (
+                "http.auth.radius",
+                "    mode: none\n",
+                "    mode: none\n    radius: {server: 'radius.invalid:1812'}\n",
+            ),
+            (
+                "timers.correlation_window_seconds",
+                "  reconciliation_interval_seconds: 30\n",
+                "  reconciliation_interval_seconds: 30\n  correlation_window_seconds: 300\n",
+            ),
+            (
+                "observability.audit_log_path",
+                "  log_level: info\n",
+                "  log_level: info\n  audit_log_path: ./data/audit.jsonl\n",
+            ),
+            (
+                "observability.metrics_listen",
+                "  log_level: info\n",
+                "  log_level: info\n  metrics_listen: 0.0.0.0:9090\n",
+            ),
+            (
+                "shutdown.preserve_announcements",
+                "storage:\n",
+                "shutdown:\n  drain_timeout_seconds: 7\n  preserve_announcements: false\nstorage:\n",
+            ),
+        ] {
+            assert!(MINIMAL_SETTINGS_YAML.contains(anchor), "{key}");
+            let yaml = MINIMAL_SETTINGS_YAML.replacen(anchor, replacement, 1);
+            let (settings, deprecations) = load_yaml(&yaml).unwrap();
+            assert_eq!(keys(&deprecations), [key]);
+            assert!(REMOVED_KEYS.contains(&key));
+            let leaf = key.rsplit('.').next().unwrap();
+            let json = serde_json::to_string(&settings).unwrap();
+            assert!(!json.contains(leaf), "{key} must not round-trip: {json}");
+        }
+        assert!(load_yaml(MINIMAL_SETTINGS_YAML).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn v0_19_1_shipped_config_loads_on_gobgp_with_deprecations() {
+        let shipped = include_str!("testdata/v0.19.1-prefixd.yaml");
+        let removed = [
+            "escalation",
+            "timers.correlation_window_seconds",
+            "observability.audit_log_path",
+            "observability.metrics_listen",
+            "shutdown.preserve_announcements",
+        ];
+        let (settings, deprecations) = load_yaml(shipped).unwrap();
+        assert_eq!(settings.bgp.mode, BgpMode::Sidecar);
+        assert_eq!(keys(&deprecations), removed);
+        let target = crate::domain::SpeakerTarget::from_config(&settings.bgp).unwrap();
+        assert_eq!(target.backend, "gobgp");
+        assert_eq!(target.endpoint, "http://gobgp:50051/");
+
+        // v0.19.1 defaulted an omitted bgp.mode to GoBGP; that must not change.
+        let implicit = shipped.replacen("  mode: sidecar\n", "", 1);
+        let (settings, deprecations) = load_yaml(&implicit).unwrap();
+        assert_eq!(settings.bgp.mode, BgpMode::Gobgp);
+        assert_eq!(
+            keys(&deprecations),
+            [&removed[..], &["bgp.backend"]].concat()
+        );
+        let target = crate::domain::SpeakerTarget::from_config(&settings.bgp).unwrap();
+        assert_eq!(target.backend, "gobgp");
+    }
+
+    #[test]
+    fn backend_resolution_never_switches_a_configured_speaker() {
+        let gobgp = "  gobgp_grpc: 127.0.0.1:50051\n";
+        let rustbgpd = "  rustbgpd: {endpoint: 'unix:///run/rustbgpd/grpc.sock'}\n";
+        let original = "  mode: mock\n  gobgp_grpc: \"localhost:50051\"\n";
+        assert!(MINIMAL_SETTINGS_YAML.contains(original));
+        for (selector, expected, warned) in [
+            (String::new(), Some(BgpMode::Rustbgpd), false),
+            (rustbgpd.to_owned(), Some(BgpMode::Rustbgpd), false),
+            (gobgp.to_owned(), Some(BgpMode::Gobgp), true),
+            (format!("{gobgp}{rustbgpd}"), None, false),
+            (
+                format!("  mode: sidecar\n{gobgp}"),
+                Some(BgpMode::Sidecar),
+                false,
+            ),
+            (
+                format!("  backend: gobgp\n{gobgp}"),
+                Some(BgpMode::Gobgp),
+                false,
+            ),
+            (
+                format!("  backend: rustbgpd\n{gobgp}{rustbgpd}"),
+                Some(BgpMode::Rustbgpd),
+                false,
+            ),
+            (
+                format!("  backend: gobgp\n{gobgp}{rustbgpd}"),
+                Some(BgpMode::Gobgp),
+                false,
+            ),
+        ] {
+            let yaml = MINIMAL_SETTINGS_YAML.replacen(original, &selector, 1);
+            match (load_yaml(&yaml), expected) {
+                (Ok((settings, deprecations)), Some(expected)) => {
+                    assert_eq!(settings.bgp.mode, expected, "{selector}");
+                    let expected_keys: &[&str] = if warned { &["bgp.backend"] } else { &[] };
+                    assert_eq!(keys(&deprecations), expected_keys, "{selector}");
+                }
+                (Err(error), None) => assert!(
+                    error.to_string().contains("bgp.backend is required"),
+                    "{error}"
+                ),
+                (result, _) => panic!("{selector}: unexpected {result:?}"),
+            }
         }
     }
 

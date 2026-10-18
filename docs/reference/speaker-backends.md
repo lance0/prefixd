@@ -48,7 +48,7 @@ unsupported observation, observation errors, and a successful empty peer list.
 
 | Backend | Runtime selection | Read-back / peers | Status |
 |---------|-------------------|-------------------|--------|
-| rustbgpd | `backend: rustbgpd` (default) | Retained local intent / neighbor states | Primary profile; released controller qualification below |
+| rustbgpd | `backend: rustbgpd` (default without `gobgp_grpc`) | Retained local intent / neighbor states | Primary profile; released controller qualification below |
 | GoBGP | `backend: gobgp` | Accepted local RIB / neighbor states | Selectable profile |
 | Mock | `mock` | In-memory / synthetic | Automated testing only |
 | Generic HTTP shim | Planned | Capability-dependent | Requires durable announcement ledger |

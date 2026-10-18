@@ -29,11 +29,14 @@ pub struct AppConfig {
     pub settings: Settings,
     pub inventory: Inventory,
     pub playbooks: Playbooks,
+    /// Legacy `prefixd.yaml` forms to log once tracing is initialized.
+    pub deprecations: Vec<ConfigDeprecation>,
 }
 
 impl AppConfig {
     pub fn load(config_dir: &Path) -> Result<Self> {
-        let mut settings = Settings::load(config_dir.join("prefixd.yaml"))?;
+        let (mut settings, deprecations) =
+            Settings::load_with_deprecations(config_dir.join("prefixd.yaml"))?;
         match crate::correlation::CorrelationConfig::load(config_dir.join("correlation.yaml")) {
             Ok(correlation) => settings.correlation = correlation,
             Err(error)
@@ -49,6 +52,7 @@ impl AppConfig {
             settings,
             inventory,
             playbooks,
+            deprecations,
         })
     }
 }
