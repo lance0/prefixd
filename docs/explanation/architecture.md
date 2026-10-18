@@ -116,7 +116,10 @@ same durable deletion path:
    the persisted request remains retryable.
 
 Enforced-mode requests remain pending in dry-run; changing modes does not supply
-remote deletion acknowledgement. Unknown or foreign-POP rules are never removed
+remote deletion acknowledgement. Each mitigation records the mode that admitted
+it. A dry-run mitigation's withdrawal never requires real deletion, and
+reconciliation never announces it; enforced startup refuses unexpired dry-run
+intent until it is retired locally. Unknown or foreign-POP rules are never removed
 as a substitute for ownership checks. See the
 [withdrawal implementation](../../src/domain/withdrawal.rs) and
 [recovery semantics](../reference/speaker-backends.md#withdrawal-recovery).

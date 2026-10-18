@@ -8,9 +8,12 @@ want to see which mitigations prefixd would create before any rule reaches the
 speaker. Dry-run is global: it applies to every source and playbook.
 
 **Proven by:** the controller integration suite runs in dry-run by default, and
-a reconciliation unit test checks that dry-run sends no speaker call. Switching
-modes is a restart with the steps below; the dated profile qualification ran in
-enforced mode and does not cover the switch.
+a reconciliation unit test checks that dry-run sends no speaker call.
+Integration tests check that enforced reconciliation never announces a dry-run
+mitigation. Against PostgreSQL and the real binary, they check that enforced
+startup refuses rehearsal intent until the retirement flag clears it without
+contacting the speaker. The dated profile qualification ran in enforced mode
+and does not cover the switch.
 
 ## 1. Start in dry-run
 
@@ -87,13 +90,10 @@ expect, and repeat this step.
 
 ## 4. Clear the rehearsal before enforcing
 
-Once enforcement starts, reconciliation treats every unexpired active
-mitigation as desired state and announces any that are missing from the
-speaker. Rehearsal mitigations would be announced within one reconciliation
-interval (30 seconds in the shipped config).
-
-Withdraw them first, or wait until their TTLs expire, then confirm that none
-remain:
+Each mitigation records the mode that created it. Rehearsal mitigations are
+never announced, even after you switch modes, and enforced startup refuses to
+run while any are still unexpired. To clear them, withdraw them in dry-run or
+wait until their TTLs expire, then confirm that none remain:
 
 ```bash
 curl -sS -b cookies.txt \
@@ -101,7 +101,8 @@ curl -sS -b cookies.txt \
 ```
 
 The count must be `0`. Withdrawals made in dry-run stay local simulations and
-never reach the speaker.
+never reach the speaker. You can skip this step and use the retirement flag in
+step 5 instead.
 
 ## 5. Switch to enforced
 
@@ -111,6 +112,19 @@ mode as in step 1:
 ```bash
 docker compose --profile rustbgpd restart prefixd-rustbgpd
 curl -sS -b cookies.txt http://localhost/v1/config/settings | jq .settings.mode
+```
+
+If rehearsal mitigations remain, the controller exits instead. Its log names the
+count and `--retire-dry-run-intent`. Run the flag once with the same
+configuration. It withdraws each rehearsal mitigation locally, with an audit
+entry, and exits without contacting the speaker. Then start the controller
+again:
+
+```bash
+docker compose --profile rustbgpd logs --tail 20 prefixd-rustbgpd
+docker compose --profile rustbgpd run --rm --no-deps prefixd-rustbgpd \
+  --config /etc/prefixd --retire-dry-run-intent
+docker compose --profile rustbgpd up -d prefixd-rustbgpd
 ```
 
 Sessions are stored in PostgreSQL, so your cookie survives the restart. From

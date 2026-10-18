@@ -168,7 +168,7 @@ Common status values:
 |--------|--------|
 | 400 | Invalid request body |
 | 401 | Authentication required |
-| 409 | Duplicate event |
+| 409 | Duplicate event, or in enforced mode the rule is owned by a dry-run mitigation (the event is not stored) |
 | 422 | Guardrail rejection (safelist, quotas, prefix length, etc.) |
 | 429 | Rate limited |
 

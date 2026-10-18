@@ -10,6 +10,9 @@
   after restart; stored Active status does not prove router enforcement.
 - The independent speaker can retain rules while prefixd is stopped. Application
   TTL cleanup pauses until the controller resumes.
+- **Upgrade without changing `mode`.** Start the upgraded binary in the mode the
+  old one ran, and switch modes only in a later restart; see
+  [mitigation origin mode](#mitigation-origin-mode).
 - **Always back up the database** before upgrading.
 
 ## Speaker ownership upgrade
@@ -187,9 +190,9 @@ An older binary ignores the queue and could reannounce a requested deletion;
 a different target cannot confirm cleanup on the original speaker.
 
 Before switching an enforced deployment to dry-run, withdraw its active rules
-and drain pending cleanup on the original speaker. Older active mitigation rows
-do not record whether they were announced in enforced mode; dry-run cannot infer
-or remove that speaker state. Verify the original speaker's local intent before
+and drain pending cleanup on the original speaker. A mitigation records the mode
+that admitted it, not whether the speaker accepted it; dry-run cannot infer or
+remove that speaker state. Verify the original speaker's local intent before
 changing modes.
 
 Legacy rows can share a canonical rule despite different IPv6 spelling. A live
@@ -197,6 +200,52 @@ owner prevents deletion by an expired sibling. Once all owners have expired,
 ordinary idempotent TTL cleanup retires each row. New manual creation rejects
 an owned canonical scope before RPC; detector events extend exactly one owner
 and reject ambiguous ownership without consuming their external event ID.
+
+## Mitigation origin mode
+
+Migration 015 adds `origin_mode` to mitigations. Each new mitigation records the
+mode that admitted it, `dry-run` or `enforced`. The value describes intent, not
+speaker acceptance, and the migration writes no announcement records.
+
+Rows created before the migration have no recorded origin. On the first start
+after it, prefixd tags this POP's pending, active and escalated rows with the
+configured `mode` and writes one system `tag_origin_mode` audit entry with the
+count. Withdrawn, expired and rejected rows keep an unknown origin, and tagging
+doesn't change a row's revision, so pending withdrawals still complete. The tag
+assumes those rows were created in the mode you start with. That's why you
+upgrade without changing `mode`. If you can't, withdraw live rehearsal
+mitigations with the old binary first.
+
+A dry-run mitigation is never desired speaker state:
+
+- Reconciliation never announces it, in either mode.
+- Its withdrawal or TTL expiry completes locally, with no speaker deletion.
+- In enforced mode, a detector event for its rule returns `409` instead of
+  extending the simulation. The event isn't stored, so the detector can retry it.
+
+Enforced startup refuses to run while this POP has an unexpired dry-run
+mitigation without a pending withdrawal. The error names the count and the flag.
+Keep the configuration, stop the controller and run the new binary once:
+
+```bash
+prefixd --config /etc/prefixd --retire-dry-run-intent
+```
+
+The one-shot command applies migrations, then saves and completes a local-only
+withdrawal for each such mitigation, with the system actor
+`retire-dry-run-intent` and a fixed reason. Each one writes the usual `withdraw`
+audit entry. It exits without connecting to the speaker or starting the API or
+reconciliation loop. Repeating it retires nothing new. Then start normally.
+Expired dry-run rows and pending dry-run withdrawals don't block startup; the
+scheduler completes them locally.
+
+prefixd reads `mode` only at startup. `POST /v1/config/reload` doesn't change
+it, so every mode switch passes through this check.
+
+Downgrading below this release removes the protection: an older binary ignores
+`origin_mode`, and in enforced mode its reconciliation announces unexpired
+dry-run mitigations. Retire dry-run intent before you downgrade. Rows an older
+binary creates have no origin and are tagged at the next start.
 
 This queue covers withdrawals. Durable create/replace intent and target/process
 generation fencing remain separate work; it is not a complete announcement

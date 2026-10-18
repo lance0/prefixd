@@ -130,8 +130,9 @@ The other limits in the shipped configuration reject requests the same way:
 Two more rules protect routing state:
 
 - **Dry-run:** `mode: dry-run` runs the full pipeline and records mitigations,
-  metrics and audit entries, but never calls the speaker. The shipped config
-  sets `mode: enforced`; a config that omits `mode` runs in dry-run.
+  metrics and audit entries, but never calls the speaker. Those mitigations stay
+  simulations after a switch to enforced. The shipped config sets
+  `mode: enforced`; a config that omits `mode` runs in dry-run.
 - **Immutable withdrawal intent:** an operator withdrawal, detector unban or
   TTL expiry saves its rule, actor and reason before the speaker call. A failed
   or uncertain delete stays pending and retries against the same speaker; it

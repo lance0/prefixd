@@ -10,7 +10,7 @@ installed or enforced a rule.
 | Recipe | When this is you | Proven by |
 |--------|------------------|-----------|
 | [Manual mitigation and withdrawal](manual-mitigation.md) | You need to mitigate one target by hand, then withdraw it with a reason the audit log keeps | Both profiles in the [dated profile qualification](../reference/qualification/speaker-profiles-2026-10-18.md): exact local rules, withdrawal, original actor and reason, rule absence |
-| [Dry-run rollout](dry-run-rollout.md) | You want to watch policy decisions on real signals before prefixd announces anything | The controller test suite runs in dry-run by default; a reconciliation unit test checks that dry-run sends no speaker call. The mode switch itself is not in a dated qualification. |
+| [Dry-run rollout](dry-run-rollout.md) | You want to watch policy decisions on real signals before prefixd announces anything | The controller test suite runs in dry-run by default; a reconciliation unit test checks that dry-run sends no speaker call. Integration tests check that dry-run mitigations are never announced after the switch and that enforced startup refuses them until they are retired. The mode switch itself is not in a dated qualification. |
 
 ## Flows without a recipe yet
 

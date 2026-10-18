@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Keep dry-run mitigations local after a switch to `mode: enforced`. Before
+  this fix, the first enforced reconciliation after a restart announced every
+  unexpired dry-run mitigation. Migration 015 records each mitigation's
+  admitting mode. Reconciliation never announces a dry-run mitigation, and its
+  withdrawal or TTL expiry never deletes speaker state. In enforced mode, a
+  detector event no longer extends one; it returns `409` without storing the
+  event. Enforced startup now refuses to run while the POP has unexpired dry-run
+  mitigations. The new one-shot `prefixd --retire-dry-run-intent` withdraws
+  them locally, writes an audit entry for each and exits without contacting the
+  speaker. On first start, live rows from before the migration take the
+  configured mode, with one system audit entry, so upgrade without changing
+  `mode`. Downgrading removes this protection; retire dry-run intent first.
+
 - Reject ban events from `mode: corroborating` sources on `/v1/events/batch`
   and the Alertmanager, FastNetMon and generic webhook adapters, as single
   `/v1/events` already did, so such a source can no longer create a mitigation

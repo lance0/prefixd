@@ -25,6 +25,13 @@ pop: iad1
 mode: enforced  # enforced (announce FlowSpec) or dry-run (log only)
 ```
 
+prefixd reads `mode` at startup only; config reload doesn't change it. Each
+mitigation records the mode that admitted it, and a dry-run mitigation is never
+announced, even after a switch to `enforced`. Enforced startup refuses to run
+while unexpired dry-run mitigations exist for the POP until
+`prefixd --retire-dry-run-intent` retires them locally. See
+[mitigation origin mode](../how-to/upgrading.md#mitigation-origin-mode).
+
 ### HTTP Server
 
 ```yaml

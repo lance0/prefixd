@@ -47,7 +47,7 @@ session-capable client such as curl.
 
 ---
 
-## Daemon startup option
+## Daemon startup options
 
 The daemon, `prefixd`, accepts `--adopt-legacy-speaker` with `--config PATH`.
 This one-shot command adopts existing database history onto its verified original
@@ -56,6 +56,13 @@ speaker or starting the API. It cannot force a different target or replace an
 existing assignment. Follow the backup and stop procedure in the
 [speaker ownership upgrade guide](../how-to/upgrading.md#speaker-ownership-upgrade)
 before using it. This is not a `prefixdctl` command.
+
+`prefixd --retire-dry-run-intent` is the other one-shot option. It retires this
+POP's unexpired dry-run mitigations through audited, local-only withdrawals and
+exits before connecting to the speaker or starting the API. Enforced startup
+refuses to run until it does. It can't be combined with
+`--adopt-legacy-speaker`; see
+[mitigation origin mode](../how-to/upgrading.md#mitigation-origin-mode).
 
 ## Commands
 
