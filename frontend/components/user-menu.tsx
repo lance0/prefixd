@@ -78,7 +78,7 @@ export function UserMenu() {
       <Dialog open={showPrefs} onOpenChange={setShowPrefs}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle className="text-sm font-mono">Notification Preferences</DialogTitle>
+            <DialogTitle className="text-sm">Notification preferences</DialogTitle>
           </DialogHeader>
           <NotificationPreferencesPanel />
         </DialogContent>

@@ -1,6 +1,8 @@
 "use client"
 
 import { formatConfidence } from "@/lib/confidence"
+import { MISSING } from "@/lib/format"
+import { StatusPill, mitigationTone } from "@/components/dashboard/status-pill"
 import { useCallback, useState } from "react"
 import { useRouter } from "next/navigation"
 import {
@@ -14,9 +16,8 @@ import {
   CommandSeparator,
   CommandShortcut,
 } from "@/components/ui/command"
-import { LayoutDashboard, Shield, ShieldAlert, Activity, FileText, Settings, Zap, Clock, XCircle, Database, FileCode, History, Waypoints } from "lucide-react"
+import { LayoutDashboard, Shield, ShieldAlert, Activity, FileText, Settings, Zap, Database, FileCode, History, Waypoints } from "lucide-react"
 import { useMitigations, useEvents } from "@/hooks/use-api"
-import type { Mitigation } from "@/lib/api"
 
 interface CommandPaletteProps {
   open: boolean
@@ -59,72 +60,57 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     )
     .slice(0, 5)
 
-  const getStatusIcon = (status: Mitigation["status"]) => {
-    switch (status) {
-      case "active":
-        return <span className="h-1.5 w-1.5 bg-primary" />
-      case "escalated":
-        return <span className="h-1.5 w-1.5 bg-destructive" />
-      case "expired":
-        return <Clock className="h-3 w-3 text-muted-foreground" />
-      case "withdrawn":
-        return <XCircle className="h-3 w-3 text-muted-foreground" />
-      default:
-        return <span className="h-1.5 w-1.5 bg-muted-foreground" />
-    }
-  }
-
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange}>
       <Command className="border border-border bg-popover shadow-2xl">
         <CommandInput
-          placeholder="Search mitigations, events, pages..."
+          placeholder="Search mitigations, events, pages…"
           value={search}
           onValueChange={setSearch}
-          className="border-b border-border font-mono text-sm"
+          className="border-b border-border text-sm"
         />
         <CommandList className="max-h-[400px]">
-          <CommandEmpty className="py-6 text-center text-xs font-mono text-muted-foreground">
+          <CommandEmpty className="py-6 text-center text-xs text-muted-foreground">
             No results found.
           </CommandEmpty>
 
           <CommandGroup heading="Pages">
-            <CommandItem onSelect={() => runCommand(() => router.push("/"))} className="font-mono text-xs">
+            <CommandItem onSelect={() => runCommand(() => router.push("/"))} className="text-sm">
               <LayoutDashboard className="mr-2 h-3 w-3 opacity-60" />
               <span>Overview</span>
               <CommandShortcut className="font-mono">g o</CommandShortcut>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => router.push("/mitigations"))} className="font-mono text-xs">
+            <CommandItem onSelect={() => runCommand(() => router.push("/mitigations"))} className="text-sm">
               <Shield className="mr-2 h-3 w-3 opacity-60" />
               <span>Mitigations</span>
               <CommandShortcut className="font-mono">g m</CommandShortcut>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => router.push("/events"))} className="font-mono text-xs">
+            <CommandItem onSelect={() => runCommand(() => router.push("/events"))} className="text-sm">
               <Activity className="mr-2 h-3 w-3 opacity-60" />
               <span>Events</span>
               <CommandShortcut className="font-mono">g e</CommandShortcut>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => router.push("/correlation"))} className="font-mono text-xs">
+            <CommandItem onSelect={() => runCommand(() => router.push("/correlation"))} className="text-sm">
               <Waypoints className="mr-2 h-3 w-3 opacity-60" />
               <span>Correlation</span>
               <CommandShortcut className="font-mono">g r</CommandShortcut>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => router.push("/inventory"))} className="font-mono text-xs">
+            <CommandItem onSelect={() => runCommand(() => router.push("/inventory"))} className="text-sm">
               <Database className="mr-2 h-3 w-3 opacity-60" />
               <span>Inventory</span>
               <CommandShortcut className="font-mono">g i</CommandShortcut>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => router.push("/ip-history"))} className="font-mono text-xs">
+            <CommandItem onSelect={() => runCommand(() => router.push("/ip-history"))} className="text-sm">
               <History className="mr-2 h-3 w-3 opacity-60" />
               <span>IP History</span>
               <CommandShortcut className="font-mono">g h</CommandShortcut>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => router.push("/audit-log"))} className="font-mono text-xs">
+            <CommandItem onSelect={() => runCommand(() => router.push("/audit-log"))} className="text-sm">
               <FileText className="mr-2 h-3 w-3 opacity-60" />
-              <span>Audit Log</span>
+              <span>Audit log</span>
               <CommandShortcut className="font-mono">g a</CommandShortcut>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => router.push("/config"))} className="font-mono text-xs">
+            <CommandItem onSelect={() => runCommand(() => router.push("/config"))} className="text-sm">
               <FileCode className="mr-2 h-3 w-3 opacity-60" />
               <span>Config</span>
               <CommandShortcut className="font-mono">g c</CommandShortcut>
@@ -139,12 +125,12 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                   <CommandItem
                     key={m.mitigation_id}
                     onSelect={() => runCommand(() => router.push(`/mitigations/${m.mitigation_id}`))}
-                    className="flex items-center gap-3 font-mono text-xs"
+                    className="flex items-center gap-3 text-sm"
                   >
-                    {getStatusIcon(m.status)}
-                    <span>{m.victim_ip}</span>
+                    <StatusPill tone={mitigationTone(m.status)}>{m.status}</StatusPill>
+                    <span className="font-mono">{m.victim_ip}</span>
                     <span className="text-muted-foreground">{m.vector.replace(/_/g, " ")}</span>
-                    <span className="ml-auto text-muted-foreground">{m.customer_id || "N/A"}</span>
+                    <span className="ml-auto text-muted-foreground">{m.customer_id || MISSING}</span>
                   </CommandItem>
                 ))}
               </CommandGroup>
@@ -161,10 +147,10 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                     onSelect={() =>
                       runCommand(() => router.push(`/events?id=${encodeURIComponent(e.event_id)}`))
                     }
-                    className="flex items-center gap-3 font-mono text-xs"
+                    className="flex items-center gap-3 text-sm"
                   >
-                    <span className="h-1.5 w-1.5 bg-muted-foreground" />
-                    <span>{e.victim_ip}</span>
+                    <span className="size-1.5 rounded-full bg-muted-foreground" aria-hidden="true" />
+                    <span className="font-mono">{e.victim_ip}</span>
                     <span className="text-muted-foreground">{e.vector.replace(/_/g, " ")}</span>
                     <span className="ml-auto text-muted-foreground tabular-nums">
                       {formatConfidence(e.confidence)}
@@ -176,31 +162,31 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
           )}
 
           <CommandSeparator />
-          <CommandGroup heading="Quick Actions">
+          <CommandGroup heading="Quick actions">
             <CommandItem
               onSelect={() => runCommand(() => router.push("/mitigations?mitigate=true"))}
-              className="font-mono text-xs"
+              className="text-sm"
             >
-              <ShieldAlert className="mr-2 h-3 w-3 text-primary" />
-              <span>Mitigate Now</span>
+              <ShieldAlert className="mr-2 h-3 w-3 text-muted-foreground" />
+              <span>Mitigate now</span>
             </CommandItem>
             <CommandItem
               onSelect={() => runCommand(() => router.push("/mitigations?status=active"))}
-              className="font-mono text-xs"
+              className="text-sm"
             >
-              <Zap className="mr-2 h-3 w-3 text-primary" />
-              <span>View Active Mitigations</span>
+              <Zap className="mr-2 h-3 w-3 text-muted-foreground" />
+              <span>View active mitigations</span>
             </CommandItem>
             <CommandItem
               onSelect={() => runCommand(() => router.push("/mitigations?status=escalated"))}
-              className="font-mono text-xs"
+              className="text-sm"
             >
               <span className="mr-2 h-1.5 w-1.5 bg-destructive" />
-              <span>View Escalated Mitigations</span>
+              <span>View escalated mitigations</span>
             </CommandItem>
           </CommandGroup>
         </CommandList>
-        <div className="flex items-center justify-between border-t border-border px-3 py-2 text-[10px] font-mono text-muted-foreground">
+        <div className="flex items-center justify-between border-t border-border px-3 py-2 text-xs text-muted-foreground">
           <div className="flex items-center gap-4">
             <span>
               <kbd className="kbd">↑↓</kbd> navigate

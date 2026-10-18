@@ -47,7 +47,7 @@ describe("operator menu authentication mode", () => {
     const view = render(<UserMenu />)
     fireEvent.keyDown(screen.getByRole("button", { name: "Operator menu for alice" }), { key: "Enter" })
     fireEvent.click(await screen.findByRole("menuitem", { name: "Notifications" }))
-    expect(await screen.findByRole("dialog", { name: "Notification Preferences" })).toBeInTheDocument()
+    expect(await screen.findByRole("dialog", { name: "Notification preferences" })).toBeInTheDocument()
     expect(screen.getByText("Preferences editor")).toBeInTheDocument()
     mock.health = { auth_mode: "none" }
     view.rerender(<UserMenu />)

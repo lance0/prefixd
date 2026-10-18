@@ -3,7 +3,7 @@
 import { useState } from "react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
-import { Radio, Layers, Settings, Database } from "lucide-react"
+import { PageHeader } from "@/components/dashboard/page-header"
 import { useOpenSignalGroupCount } from "@/hooks/use-api"
 import { SignalsTab } from "@/components/dashboard/correlation/signals-tab"
 import { GroupsTab } from "@/components/dashboard/correlation/groups-tab"
@@ -15,59 +15,41 @@ export default function CorrelationPage() {
   const openGroupCount = useOpenSignalGroupCount()
 
   return (
-    <>
-      <div className="flex-1 overflow-auto">
-        <div className="p-4 sm:p-6 space-y-4">
-          <div>
-            <h1 className="text-lg font-mono font-medium">Correlation</h1>
-            <p className="text-xs text-muted-foreground font-mono mt-0.5">
-              Multi-signal correlation engine — combine signals from multiple sources
-            </p>
-          </div>
+    <div className="space-y-6">
+      <PageHeader
+        title="Correlation"
+        description="Combine signals from several detectors before mitigating, and review how each group reached its confidence."
+      />
 
-          <Tabs value={activeTab} onValueChange={setActiveTab}>
-            <TabsList className="font-mono">
-              <TabsTrigger value="signals" className="text-xs">
-                <Radio className="h-3 w-3 mr-1.5" />
-                Signals
-              </TabsTrigger>
-              <TabsTrigger value="groups" className="text-xs">
-                <Layers className="h-3 w-3 mr-1.5" />
-                Groups
-                {openGroupCount > 0 && (
-                  <Badge variant="secondary" className="ml-1.5 text-[10px] px-1 py-0">
-                    {openGroupCount}
-                  </Badge>
-                )}
-              </TabsTrigger>
-              <TabsTrigger value="cache" className="text-xs">
-                <Database className="h-3 w-3 mr-1.5" />
-                Cache
-              </TabsTrigger>
-              <TabsTrigger value="config" className="text-xs">
-                <Settings className="h-3 w-3 mr-1.5" />
-                Config
-              </TabsTrigger>
-            </TabsList>
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
+        <TabsList>
+          <TabsTrigger value="signals">Signals</TabsTrigger>
+          <TabsTrigger value="groups">
+            Groups
+            {openGroupCount > 0 && (
+              <Badge variant="secondary" aria-label={`${openGroupCount} open`}>{openGroupCount}</Badge>
+            )}
+          </TabsTrigger>
+          <TabsTrigger value="cache">Cache</TabsTrigger>
+          <TabsTrigger value="config">Configuration</TabsTrigger>
+        </TabsList>
 
-            <TabsContent value="signals" className="mt-4">
-              <SignalsTab />
-            </TabsContent>
+        <TabsContent value="signals" className="mt-4">
+          <SignalsTab />
+        </TabsContent>
 
-            <TabsContent value="groups" className="mt-4">
-              <GroupsTab />
-            </TabsContent>
+        <TabsContent value="groups" className="mt-4">
+          <GroupsTab />
+        </TabsContent>
 
-            <TabsContent value="cache" className="mt-4">
-              <CacheTab />
-            </TabsContent>
+        <TabsContent value="cache" className="mt-4">
+          <CacheTab />
+        </TabsContent>
 
-            <TabsContent value="config" className="mt-4">
-              <ConfigTab />
-            </TabsContent>
-          </Tabs>
-        </div>
-      </div>
-    </>
+        <TabsContent value="config" className="mt-4">
+          <ConfigTab />
+        </TabsContent>
+      </Tabs>
+    </div>
   )
 }

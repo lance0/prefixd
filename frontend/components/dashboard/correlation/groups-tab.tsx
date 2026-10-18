@@ -3,14 +3,14 @@
 import { useState, useCallback } from "react"
 import { useSearchParams, useRouter } from "next/navigation"
 import Link from "next/link"
-import { Card, CardContent } from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Skeleton } from "@/components/ui/skeleton"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { useSignalGroupsPaginated } from "@/hooks/use-api"
-import { Layers, AlertCircle, Loader2, XCircle } from "lucide-react"
-import { SignalGroupStatusBadge, formatRelativeTime } from "./signals-tab"
+import { Loader2 } from "lucide-react"
+import { SignalGroupStatusBadge } from "./signals-tab"
+import { MISSING, formatRelative, formatUtc } from "@/lib/format"
 import { formatConfidence, isConfidence } from "@/lib/confidence"
 
 const STATUS_OPTIONS = [
@@ -22,13 +22,13 @@ const STATUS_OPTIONS = [
 
 const VECTOR_OPTIONS = [
   { value: "all", label: "All vectors" },
-  { value: "udp_flood", label: "UDP Flood" },
-  { value: "syn_flood", label: "SYN Flood" },
-  { value: "ntp_amplification", label: "NTP Amplification" },
-  { value: "dns_amplification", label: "DNS Amplification" },
-  { value: "memcached_amplification", label: "Memcached Amplification" },
-  { value: "ssdp_amplification", label: "SSDP Amplification" },
-  { value: "icmp_flood", label: "ICMP Flood" },
+  { value: "udp_flood", label: "UDP flood" },
+  { value: "syn_flood", label: "SYN flood" },
+  { value: "ntp_amplification", label: "NTP amplification" },
+  { value: "dns_amplification", label: "DNS amplification" },
+  { value: "memcached_amplification", label: "Memcached amplification" },
+  { value: "ssdp_amplification", label: "SSDP amplification" },
+  { value: "icmp_flood", label: "ICMP flood" },
 ]
 
 export function GroupsTab() {
@@ -82,16 +82,15 @@ export function GroupsTab() {
   const isLoadingMore = isValidating && size > 1
 
   return (
-    <div className="space-y-4">
-      {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3">
+    <section aria-label="Signal groups" className="overflow-hidden rounded-md border bg-card">
+      <div className="flex flex-wrap items-center gap-2 border-b p-3">
         <Select value={status} onValueChange={handleStatusChange}>
-          <SelectTrigger className="w-[140px] h-8 text-xs font-mono">
+          <SelectTrigger className="h-9 w-full sm:w-40" aria-label="Status">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             {STATUS_OPTIONS.map((opt) => (
-              <SelectItem key={opt.value} value={opt.value} className="text-xs font-mono">
+              <SelectItem key={opt.value} value={opt.value}>
                 {opt.label}
               </SelectItem>
             ))}
@@ -99,12 +98,12 @@ export function GroupsTab() {
         </Select>
 
         <Select value={vector} onValueChange={handleVectorChange}>
-          <SelectTrigger className="w-[180px] h-8 text-xs font-mono">
+          <SelectTrigger className="h-9 w-full sm:w-52" aria-label="Vector">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             {VECTOR_OPTIONS.map((opt) => (
-              <SelectItem key={opt.value} value={opt.value} className="text-xs font-mono">
+              <SelectItem key={opt.value} value={opt.value}>
                 {opt.label}
               </SelectItem>
             ))}
@@ -112,142 +111,98 @@ export function GroupsTab() {
         </Select>
 
         {hasActiveFilters && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={clearFilters}
-            className="h-8 text-xs font-mono text-muted-foreground hover:text-foreground"
-          >
-            <XCircle className="h-3 w-3 mr-1" />
+          <Button variant="ghost" size="sm" onClick={clearFilters} className="text-muted-foreground">
             Clear filters
           </Button>
         )}
       </div>
 
-      {/* Content */}
       {isLoading ? (
-        <Card>
-          <CardContent className="p-4">
-            {[1, 2, 3, 4, 5].map((i) => (
-              <Skeleton key={i} className="h-10 w-full mb-2" />
-            ))}
-          </CardContent>
-        </Card>
+        <LoadingRows label="Loading signal groups" rows={5} />
       ) : error ? (
-        <Card>
-          <CardContent className="p-4 flex items-center gap-2 text-destructive">
-            <AlertCircle className="h-4 w-4" />
-            <span className="text-sm font-mono">Failed to load signal groups</span>
-          </CardContent>
-        </Card>
+        <ErrorState title="Failed to load signal groups" detail="Signal groups could not be refreshed." />
       ) : groups.length === 0 ? (
-        <Card>
-          <CardContent className="p-8 text-center">
-            <Layers className="h-10 w-10 mx-auto mb-3 text-muted-foreground" />
-            <p className="text-sm font-mono text-muted-foreground">No signal groups found</p>
-            <p className="text-xs text-muted-foreground mt-1">
-              {hasActiveFilters
-                ? "Try adjusting your filters"
-                : "Signal groups will appear here when events are correlated"}
-            </p>
-            {hasActiveFilters && (
+        <EmptyState
+          title="No signal groups found"
+          description={hasActiveFilters ? "Try adjusting your filters." : "Signal groups will appear here when events are correlated."}
+          action={hasActiveFilters ? <Button variant="outline" size="sm" onClick={clearFilters}>Clear filters</Button> : undefined}
+        />
+      ) : (
+        <>
+          <Table>
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead>Status</TableHead>
+                <TableHead>Victim IP</TableHead>
+                <TableHead>Vector</TableHead>
+                <TableHead className="text-right">Confidence</TableHead>
+                <TableHead className="text-right">Sources</TableHead>
+                <TableHead className="text-right">Created</TableHead>
+                <TableHead className="text-right">Window</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {groups.map((group) => (
+                <TableRow key={group.group_id}>
+                  <TableCell>
+                    <SignalGroupStatusBadge status={group.status} corroborated={group.corroboration_met} />
+                  </TableCell>
+                  <TableCell>
+                    <Link href={`/correlation/groups/${group.group_id}`} className="rounded-sm font-mono hover:underline">
+                      {group.victim_ip}
+                    </Link>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">{group.vector.replace(/_/g, " ")}</TableCell>
+                  <TableCell numeric>
+                    <ConfidenceDisplay confidence={group.derived_confidence} />
+                  </TableCell>
+                  <TableCell numeric>{group.source_count}</TableCell>
+                  <TableCell numeric className="text-muted-foreground">
+                    <time dateTime={group.created_at} title={formatUtc(group.created_at)}>{formatRelative(group.created_at)}</time>
+                  </TableCell>
+                  <TableCell numeric className="text-muted-foreground">
+                    {group.status === "open"
+                      ? <time dateTime={group.window_expires_at} title={formatUtc(group.window_expires_at)}>{formatRelative(group.window_expires_at)}</time>
+                      : MISSING}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+
+          {hasMore && (
+            <div className="border-t p-3">
               <Button
                 variant="outline"
                 size="sm"
-                onClick={clearFilters}
-                className="mt-3 text-xs font-mono"
+                onClick={() => setSize(size + 1)}
+                disabled={isLoadingMore}
+                className="w-full"
               >
-                Clear filters
+                {isLoadingMore ? (
+                  <>
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                    Loading…
+                  </>
+                ) : (
+                  "Load more"
+                )}
               </Button>
-            )}
-          </CardContent>
-        </Card>
-      ) : (
-        <Card>
-          <CardContent className="p-0">
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs font-mono">
-                <thead>
-                  <tr className="border-b border-border text-left text-muted-foreground">
-                    <th className="p-3 font-medium">Status</th>
-                    <th className="p-3 font-medium">Victim IP</th>
-                    <th className="p-3 font-medium">Vector</th>
-                    <th className="p-3 font-medium text-right">Confidence</th>
-                    <th className="p-3 font-medium text-right">Sources</th>
-                    <th className="p-3 font-medium text-right">Created</th>
-                    <th className="p-3 font-medium text-right">Window</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {groups.map((group) => (
-                    <tr
-                      key={group.group_id}
-                      className="border-b border-border/50 last:border-0 hover:bg-muted/50 transition-colors"
-                    >
-                      <td className="p-3">
-                        <SignalGroupStatusBadge status={group.status} corroborated={group.corroboration_met} />
-                      </td>
-                      <td className="p-3">
-                        <Link
-                          href={`/correlation/groups/${group.group_id}`}
-                          className="text-foreground hover:text-primary transition-colors"
-                        >
-                          {group.victim_ip}
-                        </Link>
-                      </td>
-                      <td className="p-3 text-muted-foreground">{group.vector.replace(/_/g, " ")}</td>
-                      <td className="p-3 text-right tabular-nums">
-                        <ConfidenceDisplay confidence={group.derived_confidence} />
-                      </td>
-                      <td className="p-3 text-right tabular-nums">{group.source_count}</td>
-                      <td className="p-3 text-right text-muted-foreground">
-                        {formatRelativeTime(group.created_at)}
-                      </td>
-                      <td className="p-3 text-right text-muted-foreground">
-                        {group.status === "open"
-                          ? formatRelativeTime(group.window_expires_at)
-                          : "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
             </div>
-
-            {/* Pagination */}
-            {hasMore && (
-              <div className="p-3 border-t border-border">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setSize(size + 1)}
-                  disabled={isLoadingMore}
-                  className="w-full text-xs font-mono"
-                >
-                  {isLoadingMore ? (
-                    <>
-                      <Loader2 className="h-3 w-3 mr-1.5 animate-spin" />
-                      Loading...
-                    </>
-                  ) : (
-                    "Load More"
-                  )}
-                </Button>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+          )}
+        </>
       )}
-    </div>
+    </section>
   )
 }
 
+/** Below 50% reads as a warning; 80% and above is emphasised. Confidence is evidence, not status. */
 function ConfidenceDisplay({ confidence }: { confidence: number }) {
   let colorClass = "text-muted-foreground"
   if (isConfidence(confidence)) {
-    if (confidence >= 0.8) colorClass = "text-green-600 dark:text-green-400"
-    else if (confidence >= 0.5) colorClass = "text-yellow-600 dark:text-yellow-400"
-    else colorClass = "text-red-600 dark:text-red-400"
+    if (confidence >= 0.8) colorClass = "font-medium text-foreground"
+    else if (confidence >= 0.5) colorClass = "text-foreground"
+    else colorClass = "text-warning"
   }
 
   return <span className={colorClass}>{formatConfidence(confidence)}</span>

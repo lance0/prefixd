@@ -35,6 +35,7 @@ export function mitigationTone(status: Mitigation["status"] | string): StatusTon
 export function healthTone(state: string): StatusTone {
   switch (state.toLowerCase()) {
     case "ok":
+    case "up":
     case "healthy":
     case "connected":
     case "established":
@@ -62,7 +63,15 @@ export function healthTone(state: string): StatusTone {
 
 export function signalGroupTone(status: SignalGroup["status"] | string, corroborated = false): StatusTone {
   if (status !== "open") return "neutral"
+
   return corroborated ? "success" : "info"
+}
+
+/** Audit actions: only rejections and escalations need attention; the rest stay neutral. */
+export function auditActionTone(action: string): StatusTone {
+  const normalized = action.toLowerCase()
+
+  return normalized === "reject" || normalized === "escalate" ? "danger" : "neutral"
 }
 
 interface StatusPillProps {

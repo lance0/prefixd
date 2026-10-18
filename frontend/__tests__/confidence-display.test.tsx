@@ -89,7 +89,7 @@ describe("confidence display callers", () => {
     [1, "100%", "High"], [null, "Unavailable", null], [NaN, "Invalid", null],
   ])("shows detail confidence %s with raw fraction classification", (confidence, label, level) => {
     render(<EventDetailPanel event={{ ...event, confidence }} onClose={vi.fn()} />)
-    const confidenceCard = screen.getByText("Confidence Score").closest<HTMLElement>('[data-slot="card"]')!
+    const confidenceCard = screen.getByText("Confidence").closest<HTMLElement>('[data-slot="card"]')!
     expect(within(confidenceCard).getByText(label)).toBeInTheDocument()
     expect(within(confidenceCard).queryByText("N/A")).not.toBeInTheDocument()
     expect(within(confidenceCard).queryByText("0.95%")).not.toBeInTheDocument()
@@ -106,7 +106,7 @@ describe("confidence display callers", () => {
     vi.stubGlobal("ResizeObserver", observer)
     try {
       render(<CommandPalette open onOpenChange={vi.fn()} />)
-      fireEvent.change(screen.getByPlaceholderText("Search mitigations, events, pages..."), { target: { value: "203.0.113" } })
+      fireEvent.change(screen.getByPlaceholderText("Search mitigations, events, pages…"), { target: { value: "203.0.113" } })
       for (const label of ["95%", "0%", "Unavailable", "Invalid"]) {
         expect(await screen.findByText(label)).toBeInTheDocument()
       }

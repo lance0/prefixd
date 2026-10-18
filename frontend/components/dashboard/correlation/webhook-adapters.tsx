@@ -5,6 +5,7 @@ import { toast } from "sonner"
 import { copyText } from "@/lib/clipboard"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { StatusPill } from "@/components/dashboard/status-pill"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -110,8 +111,8 @@ export function WebhookAdaptersEditor() {
     return (
       <Card>
         <CardHeader>
-          <CardTitle className="text-sm font-mono flex items-center gap-2">
-            <Webhook className="h-4 w-4" /> Webhook Adapters
+          <CardTitle className="flex items-center gap-2">
+            Webhook adapters
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -125,12 +126,12 @@ export function WebhookAdaptersEditor() {
     return (
       <Card>
         <CardHeader>
-          <CardTitle className="text-sm font-mono flex items-center gap-2">
-            <Webhook className="h-4 w-4" /> Webhook Adapters
+          <CardTitle className="flex items-center gap-2">
+            Webhook adapters
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex items-center gap-2 text-xs font-mono text-destructive">
+          <div className="flex items-center gap-2 text-xs text-destructive">
             <AlertCircle className="h-4 w-4" />
             Failed to load configuration
           </div>
@@ -142,9 +143,9 @@ export function WebhookAdaptersEditor() {
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
-        <CardTitle className="text-sm font-mono flex items-center gap-2">
-          <Webhook className="h-4 w-4" /> Webhook Adapters
-          <Badge variant="secondary" className="ml-1 text-[10px]">
+        <CardTitle className="flex items-center gap-2">
+          Webhook adapters
+          <Badge variant="secondary" className="ml-1">
             {adapters.length}
           </Badge>
         </CardTitle>
@@ -152,18 +153,17 @@ export function WebhookAdaptersEditor() {
           <Button
             size="sm"
             variant="outline"
-            className="font-mono text-xs"
             onClick={() => {
               setEditing(newAdapter())
               setDialogOpen(true)
             }}
           >
-            <Plus className="h-3 w-3 mr-1" /> Add Adapter
+            <Plus className="h-3 w-3 mr-1" /> Add adapter
           </Button>
         )}
       </CardHeader>
       <CardContent className="space-y-2">
-        <p className="text-xs font-mono text-muted-foreground">
+        <p className="text-xs text-muted-foreground">
           Generic webhook endpoints at{" "}
           <code className="px-1 py-0.5 bg-muted rounded">
             POST /v1/signals/webhook/&#123;name&#125;
@@ -172,7 +172,7 @@ export function WebhookAdaptersEditor() {
         </p>
 
         {adapters.length === 0 ? (
-          <div className="text-xs font-mono text-muted-foreground py-4 text-center border border-dashed rounded">
+          <div className="text-xs text-muted-foreground py-4 text-center border border-dashed rounded">
             No webhook adapters configured
           </div>
         ) : (
@@ -243,28 +243,25 @@ function AdapterRow({
       <div className="flex-1 min-w-0 space-y-1.5">
         <div className="flex items-center gap-2">
           <code className="text-xs font-mono font-medium">{adapter.name}</code>
-          <Badge
-            variant={adapter.enabled ? "default" : "secondary"}
-            className="text-[10px] px-1 py-0"
-          >
+          <StatusPill tone={adapter.enabled ? "success" : "neutral"}>
             {adapter.enabled ? "enabled" : "disabled"}
-          </Badge>
-          <Badge variant="outline" className="text-[10px] px-1 py-0">
+          </StatusPill>
+          <Badge variant="outline" >
             auth: {adapter.auth.type}
           </Badge>
           {adapter.root_path && (
-            <Badge variant="outline" className="text-[10px] px-1 py-0">
+            <Badge variant="outline" >
               batched
             </Badge>
           )}
         </div>
         {adapter.description && (
-          <div className="text-xs font-mono text-muted-foreground">
+          <div className="text-xs text-muted-foreground">
             {adapter.description}
           </div>
         )}
         <div className="flex items-center gap-2">
-          <code className="text-[11px] font-mono bg-muted px-1.5 py-0.5 rounded flex-1 truncate">
+          <code className="text-xs font-mono bg-muted px-1.5 py-0.5 rounded flex-1 truncate">
             POST {endpoint}
           </code>
           <button
@@ -355,14 +352,14 @@ function AdapterDialog({
     >
       <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle className="font-mono text-sm">
+          <DialogTitle className="text-sm">
             {initial && existingNames.includes(initial.name)
               ? `Edit ${initial.name}`
               : "New webhook adapter"}
           </DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-4 text-xs font-mono">
+        <div className="space-y-4 text-xs">
           <Field
             label="Name"
             hint="URL path segment, [a-z0-9-]{1,64}"
@@ -388,28 +385,28 @@ function AdapterDialog({
               onChange={(e) => setForm({ ...form, enabled: e.target.checked })}
               className="h-3 w-3"
             />
-            <Label htmlFor="adapter-enabled" className="text-xs font-mono">
+            <Label htmlFor="adapter-enabled">
               Enabled
             </Label>
           </div>
 
           <div className="border-t pt-3">
-            <div className="text-xs font-mono font-medium mb-2">Authentication</div>
+            <div className="text-xs font-medium mb-2">Authentication</div>
             <Select
               value={form.auth.type}
               onValueChange={(v) => setForm({ ...form, auth: defaultAuth(v as WebhookAuth["type"]) })}
             >
-              <SelectTrigger className="h-8 text-xs font-mono">
+              <SelectTrigger className="h-8">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="hmac" className="text-xs font-mono">
+                <SelectItem value="hmac">
                   HMAC-SHA256
                 </SelectItem>
-                <SelectItem value="bearer" className="text-xs font-mono">
+                <SelectItem value="bearer">
                   Bearer token
                 </SelectItem>
-                <SelectItem value="none" className="text-xs font-mono">
+                <SelectItem value="none">
                   None (insecure)
                 </SelectItem>
               </SelectContent>
@@ -443,7 +440,7 @@ function AdapterDialog({
           </div>
 
           <div className="border-t pt-3">
-            <div className="text-xs font-mono font-medium mb-2">Field Mappings (JSONPath)</div>
+            <div className="text-xs font-medium mb-2">Field mappings (JSONPath)</div>
             <FieldMapEditor
               value={form.fields}
               onChange={(fields) => setForm({ ...form, fields })}
@@ -451,7 +448,7 @@ function AdapterDialog({
           </div>
 
           <div className="border-t pt-3">
-            <div className="text-xs font-mono font-medium mb-2">Advanced</div>
+            <div className="text-xs font-medium mb-2">Advanced</div>
             <Field
               label="root_path"
               hint='Optional; iterate a JSON array (e.g. "$.alerts[*]")'
@@ -481,7 +478,7 @@ function AdapterDialog({
             />
 
             <div className="mt-3">
-              <Label className="text-xs font-mono">
+              <Label>
                 vector_map <span className="text-muted-foreground">(one per line, raw=prefixd)</span>
               </Label>
               <Textarea
@@ -496,7 +493,7 @@ function AdapterDialog({
           </div>
 
           {errors.length > 0 && (
-            <div className="rounded border border-destructive/30 bg-destructive/5 p-2 text-xs font-mono text-destructive space-y-0.5">
+            <div className="rounded border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive space-y-0.5">
               {errors.map((e) => (
                 <div key={e}>{e}</div>
               ))}
@@ -516,7 +513,6 @@ function AdapterDialog({
             size="sm"
             onClick={handleSave}
             disabled={!canSave || saving}
-            className="font-mono"
           >
             {saving ? (
               <Loader2 className="h-3 w-3 mr-1 animate-spin" />
@@ -548,16 +544,16 @@ function Field({
 }) {
   return (
     <div className="space-y-1">
-      <Label className="text-xs font-mono">{label}</Label>
+      <Label>{label}</Label>
       <Input
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
         className="h-8 text-xs font-mono"
       />
-      {error && <div className="text-[11px] text-destructive">{error}</div>}
+      {error && <div className="text-xs text-destructive">{error}</div>}
       {hint && !error && (
-        <div className="text-[11px] text-muted-foreground">{hint}</div>
+        <div className="text-xs text-muted-foreground">{hint}</div>
       )}
     </div>
   )

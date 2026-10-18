@@ -153,11 +153,11 @@ describe("SignalGroupDetailPage", () => {
       isLoading: true,
     })
 
-    const { container } = await renderPage("grp-1")
+    await renderPage("grp-1")
 
-    // Should show a spinner
-    const spinner = container.querySelector(".animate-spin")
-    expect(spinner).toBeTruthy()
+    // A structural skeleton inside the page, not a full-page spinner
+    expect(screen.getByRole("status", { name: "Loading signal group" })).toBeInTheDocument()
+    expect(screen.getByRole("heading", { level: 1, name: "Signal group" })).toBeInTheDocument()
   })
 
   it("renders not-found state for unknown group ID", async () => {
@@ -169,13 +169,13 @@ describe("SignalGroupDetailPage", () => {
 
     await renderPage("unknown-id")
 
-    expect(screen.getByText("Signal Group Not Found")).toBeInTheDocument()
+    expect(screen.getByText("Signal group not found")).toBeInTheDocument()
     expect(
       screen.getByText(
         "The requested signal group ID does not exist or has been removed.",
       ),
     ).toBeInTheDocument()
-    expect(screen.getByText("Back to Correlation")).toBeInTheDocument()
+    expect(screen.getByText("Correlation")).toBeInTheDocument()
   })
 
   it("renders resolved group with all sections", async () => {
@@ -200,7 +200,7 @@ describe("SignalGroupDetailPage", () => {
     expect(screen.getByText("2 sources")).toBeInTheDocument()
 
     // Contributing events section
-    expect(screen.getByText("Contributing Events")).toBeInTheDocument()
+    expect(screen.getByText("Contributing events")).toBeInTheDocument()
     expect(screen.getByText("2 events")).toBeInTheDocument()
 
     // Events in timeline with source badges (appear in both timeline and confidence table)
@@ -208,16 +208,16 @@ describe("SignalGroupDetailPage", () => {
     expect(screen.getAllByText("alertmanager").length).toBeGreaterThanOrEqual(1)
 
     // Confidence breakdown section
-    expect(screen.getByText("Confidence Breakdown")).toBeInTheDocument()
-    expect(screen.getByText("Raw Confidence")).toBeInTheDocument()
-    expect(screen.getByText("Weighted Contribution")).toBeInTheDocument()
-    expect(screen.getByText("Derived Total")).toBeInTheDocument()
+    expect(screen.getByText("Confidence breakdown")).toBeInTheDocument()
+    expect(screen.getByText("Raw confidence")).toBeInTheDocument()
+    expect(screen.getByText("Weighted contribution")).toBeInTheDocument()
+    expect(screen.getByText("Derived total")).toBeInTheDocument()
 
     // Corroboration section — should show "Corroborated"
     expect(screen.getByText("Corroborated")).toBeInTheDocument()
 
     // Linked mitigation card
-    expect(screen.getByText("Linked Mitigation")).toBeInTheDocument()
+    expect(screen.getByText("Linked mitigation")).toBeInTheDocument()
     const mitigationLink = screen.getByText("mit-001-…")
     expect(mitigationLink.closest("a")).toHaveAttribute(
       "href",
@@ -240,7 +240,7 @@ describe("SignalGroupDetailPage", () => {
     expect(screen.getByText("Open")).toBeInTheDocument()
 
     // Pending corroboration badge
-    expect(screen.getByText("Pending Corroboration 1/2")).toBeInTheDocument()
+    expect(screen.getByText("Pending corroboration 1/2")).toBeInTheDocument()
     expect(
       screen.getByText("1 more distinct source needed"),
     ).toBeInTheDocument()
@@ -265,7 +265,7 @@ describe("SignalGroupDetailPage", () => {
     expect(screen.getByText("Expired")).toBeInTheDocument()
 
     // Pending corroboration
-    expect(screen.getByText("Pending Corroboration 1/2")).toBeInTheDocument()
+    expect(screen.getByText("Pending corroboration 1/2")).toBeInTheDocument()
 
     // No mitigation - expired explanation
     expect(screen.getByText("No mitigation created")).toBeInTheDocument()
@@ -307,7 +307,7 @@ describe("SignalGroupDetailPage", () => {
     expect(cells[1]).toHaveTextContent(label)
     expect(cells[3]).toHaveTextContent(label)
     expect(screen.getByRole("meter", { name: "Confidence" })).toHaveAttribute("aria-valuenow", "0")
-    expect(screen.getByText("Confidence Threshold").nextElementSibling).toHaveTextContent("0%")
+    expect(screen.getByText("Confidence threshold").nextElementSibling).toHaveTextContent("0%")
   })
 
   it("matches the backend's zero contribution for valid signals with zero total weight", async () => {
@@ -345,7 +345,7 @@ describe("SignalGroupDetailPage", () => {
     await renderPage("grp-1")
 
     // Back link
-    expect(screen.getByText("Back to Correlation")).toBeInTheDocument()
+    expect(screen.getByText("Correlation")).toBeInTheDocument()
 
     // Mitigation link
     const mitigationLink = screen.getByText("mit-001-…").closest("a")

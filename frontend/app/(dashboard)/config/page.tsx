@@ -4,6 +4,9 @@ import { useCallback, useState } from "react"
 import { useSWRConfig } from "swr"
 import { toast } from "sonner"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { PageHeader } from "@/components/dashboard/page-header"
+import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
+import { formatUtc } from "@/lib/format"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -11,7 +14,7 @@ import { useConfigSettings, useConfigPlaybooks } from "@/hooks/use-api"
 import { reloadConfig, updatePlaybooks, type ConfigPlaybook } from "@/lib/api"
 import { usePermissions } from "@/hooks/use-permissions"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { RefreshCw, Loader2, FileCode, Zap, Bell, Code } from "lucide-react"
+import { RefreshCw, Loader2 } from "lucide-react"
 import { AlertingConfigPanel } from "@/components/dashboard/alerting-config-panel"
 import { PlaybookEditor, ReadOnlyPlaybookCard } from "@/components/dashboard/playbook-editor"
 import { PlaybookYamlEditor } from "@/components/dashboard/playbook-yaml-editor"
@@ -57,178 +60,134 @@ export default function ConfigPage() {
   }, [mutatePlaybooks])
 
   return (
-    <>
-      <div className="flex-1 overflow-auto">
-        <div className="p-4 sm:p-6 space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-lg font-mono font-medium">Configuration</h1>
-              <p className="text-xs text-muted-foreground font-mono mt-0.5">
-                {canEditPlaybooks ? "Manage daemon configuration" : "Running daemon configuration (read-only)"}
-              </p>
+    <div className="space-y-6">
+      <PageHeader
+        title="Configuration"
+        description={canEditPlaybooks ? "Settings, playbooks and alerting for this controller." : "Running controller configuration (read-only)."}
+        actions={
+          <>
+            {reloadResult && (
+              <span role="status" className={`text-sm ${reloadResult.includes("failed") ? "text-destructive" : "text-muted-foreground"}`}>
+                {reloadResult}
+              </span>
+            )}
+            {canReloadConfig && (
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="outline" size="sm" onClick={handleReload} disabled={reloading}>
+                      {reloading ? (
+                        <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                      ) : (
+                        <RefreshCw className="size-4" aria-hidden="true" />
+                      )}
+                      Reload
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Hot-reload inventory and playbooks from disk</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
+          </>
+        }
+      />
+
+      <Tabs defaultValue="settings">
+        <TabsList>
+          <TabsTrigger value="settings">Settings</TabsTrigger>
+          <TabsTrigger value="playbooks">
+            Playbooks
+            {playbooksData ? (
+              <Badge variant="secondary">{playbooksData.total_playbooks}</Badge>
+            ) : null}
+          </TabsTrigger>
+          <TabsTrigger value="alerting">Alerting</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="settings" className="mt-4">
+          {settingsError ? (
+            <div className="rounded-md border bg-card">
+              <ErrorState title="Unable to load settings" detail={settingsError.message} />
             </div>
-            <div className="flex items-center gap-3">
-              {reloadResult && (
-                <span className={`text-xs font-mono ${reloadResult.includes("failed") ? "text-destructive" : "text-success"}`}>
-                  {reloadResult}
+          ) : !settingsData ? (
+            <div className="rounded-md border bg-card"><LoadingRows label="Loading settings" /></div>
+          ) : (
+            <Card>
+              <CardHeader className="flex flex-wrap items-center justify-between gap-2">
+                <CardTitle className="font-mono">prefixd.yaml</CardTitle>
+                <span className="text-xs text-muted-foreground tabular-nums">
+                  Loaded {formatUtc(settingsData.loaded_at)}
                 </span>
-              )}
-              {canReloadConfig && (
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={handleReload}
-                        disabled={reloading}
-                        className="font-mono text-xs hover:text-foreground"
-                      >
-                        {reloading ? (
-                          <Loader2 className="h-3 w-3 mr-1.5 animate-spin" />
-                        ) : (
-                          <RefreshCw className="h-3 w-3 mr-1.5" />
-                        )}
-                        Reload
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent className="font-mono text-xs">
-                      Hot-reload inventory and playbooks from disk
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              )}
+              </CardHeader>
+              <CardContent>
+                <pre className="max-h-[600px] overflow-auto whitespace-pre-wrap rounded-md bg-muted/50 p-4 font-mono text-xs">
+                  {JSON.stringify(settingsData.settings, null, 2)}
+                </pre>
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
+        <TabsContent value="playbooks" className="mt-4 space-y-3">
+          {playbooksError ? (
+            <div className="rounded-md border bg-card">
+              <ErrorState title="Unable to load playbooks" detail={playbooksError.message} />
             </div>
-          </div>
-
-          <Tabs defaultValue="settings">
-            <TabsList className="font-mono">
-              <TabsTrigger value="settings" className="text-xs">
-                <FileCode className="h-3 w-3 mr-1.5" />
-                Settings
-              </TabsTrigger>
-              <TabsTrigger value="playbooks" className="text-xs">
-                <Zap className="h-3 w-3 mr-1.5" />
-                Playbooks
-                {playbooksData ? (
-                  <Badge variant="secondary" className="ml-1.5 text-[10px] px-1 py-0">
-                    {playbooksData.total_playbooks}
-                  </Badge>
-                ) : null}
-              </TabsTrigger>
-              <TabsTrigger value="alerting" className="text-xs">
-                <Bell className="h-3 w-3 mr-1.5" />
-                Alerting
-              </TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="settings" className="mt-4">
-              {settingsError ? (
-                <Card>
-                  <CardContent className="p-4 text-sm text-destructive font-mono">
-                    Failed to load settings: {settingsError.message}
-                  </CardContent>
-                </Card>
-              ) : !settingsData ? (
-                <Card>
-                  <CardContent className="p-4 flex items-center gap-2 text-muted-foreground">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    <span className="text-sm font-mono">Loading settings...</span>
-                  </CardContent>
-                </Card>
+          ) : !playbooksData ? (
+            <div className="rounded-md border bg-card"><LoadingRows label="Loading playbooks" /></div>
+          ) : canEditPlaybooks ? (
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs text-muted-foreground tabular-nums">
+                  Loaded {formatUtc(playbooksData.loaded_at)}
+                </span>
+                <div role="group" aria-label="Playbook editor view" className="flex items-center gap-1 rounded-md border p-0.5">
+                  {(["form", "yaml"] as const).map((view) => (
+                    <button
+                      key={view}
+                      type="button"
+                      aria-pressed={playbookView === view}
+                      onClick={() => setPlaybookView(view)}
+                      className={`min-h-8 rounded-sm px-2.5 text-sm ${playbookView === view ? "bg-secondary font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                    >
+                      {view === "form" ? "Form" : "YAML"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {playbookView === "form" ? (
+                <PlaybookEditor
+                  key={playbooksData.loaded_at}
+                  playbooks={playbooksData.playbooks}
+                  onSave={handleSavePlaybooks}
+                  saving={saving}
+                />
               ) : (
-                <Card>
-                  <CardHeader className="pb-2">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-sm font-mono">prefixd.yaml</CardTitle>
-                      <span className="text-[10px] font-mono text-muted-foreground">
-                        Loaded: {new Date(settingsData.loaded_at).toLocaleString()}
-                      </span>
-                    </div>
-                  </CardHeader>
-                  <CardContent>
-                    <pre className="text-xs font-mono bg-secondary/50 p-4 overflow-auto max-h-[600px] whitespace-pre-wrap">
-                      {JSON.stringify(settingsData.settings, null, 2)}
-                    </pre>
-                  </CardContent>
-                </Card>
+                <PlaybookYamlEditor
+                  key={playbooksData.loaded_at}
+                  playbooks={playbooksData.playbooks}
+                  onSave={handleSavePlaybooks}
+                  saving={saving}
+                />
               )}
-            </TabsContent>
+            </>
+          ) : (
+            playbooksData.playbooks.length === 0 ? (
+              <div className="rounded-md border bg-card">
+                <EmptyState title="No playbooks configured" description="Without playbooks, events are recorded but no mitigation is proposed." />
+              </div>
+            ) : (
+              playbooksData.playbooks.map((playbook) => (
+                <ReadOnlyPlaybookCard key={playbook.name} playbook={playbook} />
+              ))
+            )
+          )}
+        </TabsContent>
 
-            <TabsContent value="playbooks" className="mt-4 space-y-3">
-              {playbooksError ? (
-                <Card>
-                  <CardContent className="p-4 text-sm text-destructive font-mono">
-                    Failed to load playbooks: {playbooksError.message}
-                  </CardContent>
-                </Card>
-              ) : !playbooksData ? (
-                <Card>
-                  <CardContent className="p-4 flex items-center gap-2 text-muted-foreground">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    <span className="text-sm font-mono">Loading playbooks...</span>
-                  </CardContent>
-                </Card>
-              ) : canEditPlaybooks ? (
-                <>
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-mono text-muted-foreground">
-                      Loaded: {new Date(playbooksData.loaded_at).toLocaleString()}
-                    </span>
-                    <div className="flex items-center gap-1 border border-border rounded-md p-0.5">
-                      <button
-                        onClick={() => setPlaybookView("form")}
-                        className={`px-2 py-1 text-[10px] font-mono rounded-sm transition-colors ${playbookView === "form" ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-                      >
-                        <Zap className="h-3 w-3 inline mr-1" />
-                        Form
-                      </button>
-                      <button
-                        onClick={() => setPlaybookView("yaml")}
-                        className={`px-2 py-1 text-[10px] font-mono rounded-sm transition-colors ${playbookView === "yaml" ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-                      >
-                        <Code className="h-3 w-3 inline mr-1" />
-                        YAML
-                      </button>
-                    </div>
-                  </div>
-                  {playbookView === "form" ? (
-                    <PlaybookEditor
-                      key={playbooksData.loaded_at}
-                      playbooks={playbooksData.playbooks}
-                      onSave={handleSavePlaybooks}
-                      saving={saving}
-                    />
-                  ) : (
-                    <PlaybookYamlEditor
-                      key={playbooksData.loaded_at}
-                      playbooks={playbooksData.playbooks}
-                      onSave={handleSavePlaybooks}
-                      saving={saving}
-                    />
-                  )}
-                </>
-              ) : (
-                playbooksData.playbooks.length === 0 ? (
-                  <Card>
-                    <CardContent className="p-4 text-sm text-muted-foreground font-mono">
-                      No playbooks configured
-                    </CardContent>
-                  </Card>
-                ) : (
-                  playbooksData.playbooks.map((playbook) => (
-                    <ReadOnlyPlaybookCard key={playbook.name} playbook={playbook} />
-                  ))
-                )
-              )}
-            </TabsContent>
-
-            <TabsContent value="alerting" className="mt-4">
-              <AlertingConfigPanel />
-            </TabsContent>
-          </Tabs>
-        </div>
-      </div>
-    </>
+        <TabsContent value="alerting" className="mt-4">
+          <AlertingConfigPanel />
+        </TabsContent>
+      </Tabs>
+    </div>
   )
 }

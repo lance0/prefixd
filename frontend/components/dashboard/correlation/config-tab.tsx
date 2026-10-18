@@ -4,6 +4,7 @@ import { useState, useCallback, useEffect } from "react"
 import { toast } from "sonner"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { StatusPill } from "@/components/dashboard/status-pill"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -35,7 +36,7 @@ import type {
   SourceConfig,
   SourceMode,
 } from "@/lib/api"
-import { Settings, Plus, Pencil, Trash2, Save, Loader2, AlertCircle, Link as LinkIcon } from "lucide-react"
+import { Plus, Pencil, Trash2, Save, Loader2, AlertCircle, Link as LinkIcon } from "lucide-react"
 import Link from "next/link"
 
 import { WebhookAdaptersEditor } from "./webhook-adapters"
@@ -94,7 +95,7 @@ function CorrelationSettingsEditor() {
   if (isLoading) {
     return (
       <Card>
-        <CardContent className="p-4">
+        <CardContent>
           <Skeleton className="h-4 w-32 mb-4" />
           <Skeleton className="h-8 w-full mb-3" />
           <Skeleton className="h-8 w-full mb-3" />
@@ -107,9 +108,9 @@ function CorrelationSettingsEditor() {
   if (error) {
     return (
       <Card>
-        <CardContent className="p-4 flex items-center gap-2 text-destructive">
+        <CardContent className="flex items-center gap-2 text-destructive">
           <AlertCircle className="h-4 w-4" />
-          <span className="text-sm font-mono">Failed to load correlation config</span>
+          <span className="text-sm">Failed to load correlation config</span>
         </CardContent>
       </Card>
     )
@@ -122,52 +123,49 @@ function CorrelationSettingsEditor() {
 
   return (
     <Card>
-      <CardHeader className="pb-3">
+      <CardHeader>
         <div className="flex items-center justify-between">
-          <CardTitle className="text-xs font-mono text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
-            <Settings className="h-3 w-3" />
-            Correlation Settings
-          </CardTitle>
-          <Badge variant={form.enabled ? "default" : "secondary"} className="text-[10px]">
+          <CardTitle>Correlation settings</CardTitle>
+          <StatusPill tone={form.enabled ? "success" : "neutral"}>
             {form.enabled ? "Enabled" : "Disabled"}
-          </Badge>
+          </StatusPill>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="space-y-1.5">
-            <Label htmlFor="corr-window" className="text-xs font-mono">Window (seconds)</Label>
+            <Label htmlFor="corr-window">Window (seconds)</Label>
             <Input
               id="corr-window"
               type="number"
               value={form.window_seconds}
               onChange={(e) => handleFieldChange("window_seconds", parseInt(e.target.value) || 0)}
               disabled={readOnly}
-              className="h-8 text-xs font-mono"
+              className="h-8 text-xs"
               min={1}
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="corr-min-sources" className="text-xs font-mono">Min Sources</Label>
+            <Label htmlFor="corr-min-sources">Min sources</Label>
             <Input
               id="corr-min-sources"
               type="number"
               value={form.min_sources}
               onChange={(e) => handleFieldChange("min_sources", parseInt(e.target.value) || 0)}
               disabled={readOnly}
-              className="h-8 text-xs font-mono"
+              className="h-8 text-xs"
               min={1}
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="corr-threshold" className="text-xs font-mono">Confidence Threshold</Label>
+            <Label htmlFor="corr-threshold">Confidence threshold</Label>
             <Input
               id="corr-threshold"
               type="number"
               value={form.confidence_threshold}
               onChange={(e) => handleFieldChange("confidence_threshold", parseFloat(e.target.value) || 0)}
               disabled={readOnly}
-              className="h-8 text-xs font-mono"
+              className="h-8 text-xs"
               min={0}
               max={1}
               step={0.1}
@@ -178,7 +176,7 @@ function CorrelationSettingsEditor() {
         {validationErrors.length > 0 && (
           <div className="bg-destructive/10 border border-destructive/20 rounded-md p-3">
             {validationErrors.map((err, i) => (
-              <p key={i} className="text-xs font-mono text-destructive">{err}</p>
+              <p key={i} className="text-xs text-destructive">{err}</p>
             ))}
           </div>
         )}
@@ -189,7 +187,7 @@ function CorrelationSettingsEditor() {
               variant="ghost"
               size="sm"
               onClick={() => { setFormState(null); setValidationErrors([]) }}
-              className="text-xs font-mono"
+              className="text-xs"
             >
               Cancel
             </Button>
@@ -197,7 +195,7 @@ function CorrelationSettingsEditor() {
               size="sm"
               onClick={handleSave}
               disabled={saving || validationErrors.length > 0}
-              className="text-xs font-mono"
+              className="text-xs"
             >
               {saving ? (
                 <Loader2 className="h-3 w-3 mr-1.5 animate-spin" />
@@ -210,7 +208,7 @@ function CorrelationSettingsEditor() {
         )}
 
         {readOnly && (
-          <p className="text-[10px] font-mono text-muted-foreground">
+          <p className="text-xs text-muted-foreground">
             Admin access required to edit settings
           </p>
         )}
@@ -269,27 +267,27 @@ function SignalSourceCards() {
 
   return (
     <Card>
-      <CardHeader className="pb-3">
+      <CardHeader>
         <div className="flex items-center justify-between">
-          <CardTitle className="text-xs font-mono text-muted-foreground uppercase tracking-wider">
-            Signal Sources
+          <CardTitle>
+            Signal sources
           </CardTitle>
           {isAdmin && (
             <Button
               variant="outline"
               size="sm"
               onClick={() => setAddingSource(true)}
-              className="h-7 text-xs font-mono"
+              className="h-7 text-xs"
             >
               <Plus className="h-3 w-3 mr-1" />
-              Add Source
+              Add source
             </Button>
           )}
         </div>
       </CardHeader>
       <CardContent>
         {sources.length === 0 ? (
-          <p className="text-xs font-mono text-muted-foreground text-center py-4">
+          <p className="text-xs text-muted-foreground text-center py-4">
             No signal sources configured
           </p>
         ) : (
@@ -301,19 +299,19 @@ function SignalSourceCards() {
                   <div className="flex gap-1 shrink-0">
                     {src.mode === "corroborating" && (
                       <Badge
-                        variant="secondary"
-                        className="text-[10px] font-mono bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30"
+                        variant="outline"
+                        className="text-muted-foreground"
                         title="Corroborating-only source: cannot trigger mitigations on its own"
                       >
                         corroborating
                       </Badge>
                     )}
-                    <Badge variant="outline" className="text-[10px] font-mono">
+                    <Badge variant="outline">
                       {src.type || "unknown"}
                     </Badge>
                   </div>
                 </div>
-                <div className="text-xs font-mono text-muted-foreground space-y-0.5">
+                <div className="text-xs text-muted-foreground space-y-0.5">
                   <div className="flex justify-between">
                     <span>Weight</span>
                     <span className="text-foreground">{src.weight.toFixed(1)}</span>
@@ -341,7 +339,7 @@ function SignalSourceCards() {
                       variant="ghost"
                       size="sm"
                       onClick={() => setEditingSource({ name, config: src })}
-                      className="h-6 text-[10px] font-mono px-2"
+                      className="h-6 text-xs px-2"
                     >
                       <Pencil className="h-2.5 w-2.5 mr-1" />
                       Edit
@@ -350,7 +348,7 @@ function SignalSourceCards() {
                       variant="ghost"
                       size="sm"
                       onClick={() => setDeleteConfirm(name)}
-                      className="h-6 text-[10px] font-mono px-2 text-destructive hover:text-destructive"
+                      className="h-6 text-xs px-2 text-destructive hover:text-destructive"
                     >
                       <Trash2 className="h-2.5 w-2.5 mr-1" />
                       Remove
@@ -377,7 +375,7 @@ function SignalSourceCards() {
       <AlertDialog open={deleteConfirm != null} onOpenChange={(open) => { if (!open) setDeleteConfirm(null) }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove Signal Source</AlertDialogTitle>
+            <AlertDialogTitle>Remove signal source</AlertDialogTitle>
             <AlertDialogDescription>
               This will remove the signal source{" "}
               <span className="font-mono font-semibold">{deleteConfirm}</span>{" "}
@@ -392,7 +390,7 @@ function SignalSourceCards() {
               disabled={deleting}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              {deleting ? "Removing..." : "Remove"}
+              {deleting ? "Removing…" : "Remove"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -486,13 +484,13 @@ function SourceDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle className="text-sm font-mono">
-            {isNew ? "Add Signal Source" : `Edit Source: ${initialName}`}
+          <DialogTitle className="text-sm">
+            {isNew ? "Add signal source" : `Edit source: ${initialName}`}
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-4 py-2">
           <div className="space-y-1.5">
-            <Label className="text-xs font-mono">Name</Label>
+            <Label>Name</Label>
             <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -502,31 +500,31 @@ function SourceDialog({
             />
           </div>
           <div className="space-y-1.5">
-            <Label className="text-xs font-mono">Type</Label>
+            <Label>Type</Label>
             <Select value={type} onValueChange={setType}>
-              <SelectTrigger className="h-8 text-xs font-mono">
+              <SelectTrigger className="h-8">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="detector" className="text-xs font-mono">Detector</SelectItem>
-                <SelectItem value="telemetry" className="text-xs font-mono">Telemetry</SelectItem>
-                <SelectItem value="manual" className="text-xs font-mono">Manual</SelectItem>
+                <SelectItem value="detector">Detector</SelectItem>
+                <SelectItem value="telemetry">Telemetry</SelectItem>
+                <SelectItem value="manual">Manual</SelectItem>
               </SelectContent>
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label className="text-xs font-mono">Weight</Label>
+            <Label>Weight</Label>
             <Input
               type="number"
               value={weight}
               onChange={(e) => setWeight(e.target.value)}
-              className="h-8 text-xs font-mono"
+              className="h-8 text-xs"
               min={0}
               step={0.1}
             />
           </div>
           <div className="space-y-1.5">
-            <Label className="text-xs font-mono">Mode</Label>
+            <Label>Mode</Label>
             <Select
               value={mode}
               onValueChange={(v) => {
@@ -537,26 +535,26 @@ function SourceDialog({
                 }
               }}
             >
-              <SelectTrigger className="h-8 text-xs font-mono">
+              <SelectTrigger className="h-8">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="primary" className="text-xs font-mono">
+                <SelectItem value="primary">
                   Primary (can trigger mitigations)
                 </SelectItem>
-                <SelectItem value="corroborating" className="text-xs font-mono">
+                <SelectItem value="corroborating">
                   Corroborating (strengthens other sources only)
                 </SelectItem>
               </SelectContent>
             </Select>
-            <p className="text-[10px] font-mono text-muted-foreground">
+            <p className="text-xs text-muted-foreground">
               Corroborating sources post to /v1/signals/corroborator and never
               fire mitigations on their own (ADR 021).
             </p>
           </div>
           {mode === "corroborating" && (
             <div className="space-y-1.5">
-              <Label className="text-xs font-mono">Match dimensions</Label>
+              <Label>Match dimensions</Label>
               <div className="grid grid-cols-2 gap-1.5">
                 {(["customer_id", "pop", "service_id", "interface"] as MatchDimension[]).map(
                   (dim) => (
@@ -564,9 +562,10 @@ function SourceDialog({
                       key={dim}
                       type="button"
                       onClick={() => toggleDimension(dim)}
-                      className={`h-7 text-[11px] font-mono rounded border px-2 ${
+                      aria-pressed={matchDims.includes(dim)}
+                      className={`h-8 rounded-md border px-2 font-mono text-xs ${
                         matchDims.includes(dim)
-                          ? "bg-primary/10 border-primary/40 text-primary"
+                          ? "border-foreground/30 bg-secondary font-medium text-foreground"
                           : "border-border text-muted-foreground hover:bg-muted/40"
                       }`}
                     >
@@ -575,25 +574,24 @@ function SourceDialog({
                   )
                 )}
               </div>
-              <p className="text-[10px] font-mono text-muted-foreground">
+              <p className="text-xs text-muted-foreground">
                 Signals from this source must populate at least one of these
                 fields; the matcher uses OR across dimensions.
               </p>
             </div>
           )}
           {formError && (
-            <p className="text-xs font-mono text-destructive">{formError}</p>
+            <p className="text-xs text-destructive">{formError}</p>
           )}
         </div>
         <DialogFooter>
-          <Button variant="ghost" size="sm" onClick={onClose} className="text-xs font-mono">
+          <Button variant="ghost" size="sm" onClick={onClose}>
             Cancel
           </Button>
           <Button
             size="sm"
             onClick={handleSave}
             disabled={saving || !name.trim()}
-            className="text-xs font-mono"
           >
             {saving ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Save className="h-3 w-3 mr-1" />}
             {isNew ? "Add" : "Save"}
@@ -618,20 +616,20 @@ function PlaybookOverrides() {
 
   return (
     <Card>
-      <CardHeader className="pb-3">
+      <CardHeader>
         <div className="flex items-center justify-between">
-          <CardTitle className="text-xs font-mono text-muted-foreground uppercase tracking-wider">
-            Per-Playbook Overrides
+          <CardTitle>
+            Per-playbook overrides
           </CardTitle>
-          <Link href="/config" className="text-xs font-mono text-primary hover:underline flex items-center gap-1">
+          <Link href="/config" className="text-xs text-primary hover:underline flex items-center gap-1">
             <LinkIcon className="h-3 w-3" />
-            Edit in Playbooks
+            Edit in playbooks
           </Link>
         </div>
       </CardHeader>
       <CardContent>
         {playbooks.length === 0 ? (
-          <p className="text-xs font-mono text-muted-foreground text-center py-4">
+          <p className="text-xs text-muted-foreground text-center py-4">
             No playbooks configured.{" "}
             <Link href="/config" className="text-primary hover:underline">
               Configure playbooks
@@ -646,11 +644,11 @@ function PlaybookOverrides() {
               >
                 <div>
                   <span className="text-xs font-mono font-medium">{playbook.name}</span>
-                  <span className="text-[10px] font-mono text-muted-foreground ml-2">
+                  <span className="text-xs text-muted-foreground ml-2">
                     {playbook.match.vector.replace(/_/g, " ")}
                   </span>
                 </div>
-                <Badge variant="outline" className="text-[10px] font-mono">
+                <Badge variant="outline">
                   Uses global defaults
                 </Badge>
               </div>

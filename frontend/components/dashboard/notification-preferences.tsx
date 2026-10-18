@@ -12,12 +12,12 @@ import { updateNotificationPreferences, type NotificationPreferences } from "@/l
 import { toast } from "sonner"
 
 const EVENT_TYPES = [
-  { value: "mitigation.created", label: "Mitigation Created", critical: true },
-  { value: "mitigation.escalated", label: "Mitigation Escalated", critical: true },
-  { value: "mitigation.withdrawn", label: "Mitigation Withdrawn", critical: false },
-  { value: "mitigation.expired", label: "Mitigation Expired", critical: false },
-  { value: "config.reloaded", label: "Config Reloaded", critical: false },
-  { value: "guardrail.rejected", label: "Guardrail Rejected", critical: false },
+  { value: "mitigation.created", label: "Mitigation created", critical: true },
+  { value: "mitigation.escalated", label: "Mitigation escalated", critical: true },
+  { value: "mitigation.withdrawn", label: "Mitigation withdrawn", critical: false },
+  { value: "mitigation.expired", label: "Mitigation expired", critical: false },
+  { value: "config.reloaded", label: "Configuration reloaded", critical: false },
+  { value: "guardrail.rejected", label: "Guardrail rejected", critical: false },
 ] as const
 
 const HOURS = Array.from({ length: 24 }, (_, i) => i)
@@ -69,7 +69,7 @@ export function NotificationPreferencesPanel() {
     return (
       <div className="flex items-center gap-2 p-4 text-muted-foreground">
         <Loader2 className="h-4 w-4 animate-spin" />
-        <span className="text-sm font-mono">Loading preferences...</span>
+        <span className="text-sm">Loading preferences…</span>
       </div>
     )
   }
@@ -77,9 +77,9 @@ export function NotificationPreferencesPanel() {
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-mono">Toast Notifications</CardTitle>
-          <p className="text-[10px] text-muted-foreground font-mono">
+        <CardHeader>
+          <CardTitle>Toast notifications</CardTitle>
+          <p className="text-xs text-muted-foreground">
             Muted events will not show toast notifications. SWR cache updates still happen.
           </p>
         </CardHeader>
@@ -94,9 +94,9 @@ export function NotificationPreferencesPanel() {
                     onCheckedChange={() => toggleMuted(evt.value)}
                     id={`notif-${evt.value}`}
                   />
-                  <Label htmlFor={`notif-${evt.value}`} className="text-xs font-mono cursor-pointer">
+                  <Label htmlFor={`notif-${evt.value}`} className="cursor-pointer">
                     {evt.label}
-                    {evt.critical && <span className="text-[9px] text-muted-foreground ml-1">(critical)</span>}
+                    {evt.critical && <span className="text-xs text-muted-foreground ml-1">(critical)</span>}
                   </Label>
                 </div>
               )
@@ -106,9 +106,9 @@ export function NotificationPreferencesPanel() {
       </Card>
 
       <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-mono">Quiet Hours (UTC)</CardTitle>
-          <p className="text-[10px] text-muted-foreground font-mono">
+        <CardHeader>
+          <CardTitle>Quiet hours (UTC)</CardTitle>
+          <p className="text-xs text-muted-foreground">
             During quiet hours, only critical events (created, escalated) show toasts.
           </p>
         </CardHeader>
@@ -127,7 +127,7 @@ export function NotificationPreferencesPanel() {
                 setDirty(true)
               }}
             >
-              <SelectTrigger className="w-28 h-8 text-xs font-mono">
+              <SelectTrigger className="w-28 h-8">
                 <SelectValue placeholder="Start" />
               </SelectTrigger>
               <SelectContent>
@@ -139,7 +139,7 @@ export function NotificationPreferencesPanel() {
             </Select>
             {quietStart !== null && (
               <>
-                <span className="text-xs text-muted-foreground font-mono">to</span>
+                <span className="text-xs text-muted-foreground">to</span>
                 <Select
                   value={quietEnd !== null ? String(quietEnd) : "8"}
                   onValueChange={(v) => {
@@ -147,7 +147,7 @@ export function NotificationPreferencesPanel() {
                     setDirty(true)
                   }}
                 >
-                  <SelectTrigger className="w-28 h-8 text-xs font-mono">
+                  <SelectTrigger className="w-28 h-8">
                     <SelectValue placeholder="End" />
                   </SelectTrigger>
                   <SelectContent>
@@ -156,7 +156,7 @@ export function NotificationPreferencesPanel() {
                     ))}
                   </SelectContent>
                 </Select>
-                <span className="text-[10px] text-muted-foreground font-mono">UTC</span>
+                <span className="text-xs text-muted-foreground">UTC</span>
               </>
             )}
           </div>
@@ -164,9 +164,9 @@ export function NotificationPreferencesPanel() {
       </Card>
 
       <div className="flex justify-end">
-        <Button size="sm" onClick={handleSave} disabled={!dirty || saving} className="text-xs font-mono">
+        <Button size="sm" onClick={handleSave} disabled={!dirty || saving}>
           <Save className="h-3.5 w-3.5 mr-1.5" />
-          {saving ? "Saving..." : "Save Preferences"}
+          {saving ? "Saving…" : "Save preferences"}
         </Button>
       </div>
     </div>

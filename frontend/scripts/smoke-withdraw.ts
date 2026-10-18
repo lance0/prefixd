@@ -194,7 +194,7 @@ async function run() {
 
   stage = "verify rendered audit row"
   await page.goto(`${origin}/audit-log`)
-  await main.getByPlaceholder("Search...", { exact: true }).fill(mitigationId)
+  await main.getByPlaceholder("Search target or details…", { exact: true }).fill(mitigationId)
   const row = main.locator("tr").filter({ has: page.locator(`a[href="${detailPath}"]`) }).filter({ has: page.getByText("withdraw", { exact: true }) })
   await row.waitFor()
   assert.equal(await row.count(), 1)

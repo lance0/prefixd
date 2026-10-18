@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, AlertCircle, XCircle, Plus, Download, Trash2 } from "lucide-react"
+import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, XCircle, Plus, Download, Trash2 } from "lucide-react"
 import { Checkbox } from "@/components/ui/checkbox"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 import { ActionBadge } from "@/components/dashboard/action-badge"
@@ -31,48 +31,16 @@ import { withdrawMitigation, bulkWithdrawMitigations, type BulkWithdrawResult, t
 import { cn } from "@/lib/utils"
 import { downloadCsv } from "@/lib/csv"
 import { MitigateNowDialog } from "@/components/dashboard/mitigate-now-dialog"
-import { SeverityBadge, deriveSeverity } from "@/components/dashboard/severity-badge"
+import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { formatRelative, formatTimeRemaining, formatUtc } from "@/lib/format"
 
 type SortField = "status" | "victim_ip" | "vector" | "customer_id" | "created_at" | "expires_at"
 type SortDirection = "asc" | "desc"
 
-function formatRelativeTime(dateStr: string): string {
-  const date = new Date(dateStr)
-  const now = new Date()
-  const diffMs = now.getTime() - date.getTime()
-  const diffSecs = Math.floor(diffMs / 1000)
-  const diffMins = Math.floor(diffSecs / 60)
-  const diffHours = Math.floor(diffMins / 60)
-
-  if (diffSecs < 60) return `${diffSecs}s ago`
-  if (diffMins < 60) return `${diffMins}m ago`
-  if (diffHours < 24) return `${diffHours}h ago`
-  return date.toLocaleDateString()
-}
-
-function formatTimeRemaining(dateStr: string): { text: string; isWarning: boolean } {
-  const date = new Date(dateStr)
-  const now = new Date()
-  const diffMs = date.getTime() - now.getTime()
-
-  if (diffMs <= 0) return { text: "Expired", isWarning: true }
-
-  const diffSecs = Math.floor(diffMs / 1000)
-  const diffMins = Math.floor(diffSecs / 60)
-  const remainingSecs = diffSecs % 60
-
-  if (diffMins < 1) return { text: `in ${diffSecs}s`, isWarning: true }
-  if (diffMins < 2) return { text: `in ${diffMins}m ${remainingSecs}s`, isWarning: true }
-  return { text: `in ${diffMins}m`, isWarning: false }
-}
-
-function formatBps(bps: number | null): string {
-  if (!bps) return "N/A"
-  if (bps >= 1_000_000_000) return `${(bps / 1_000_000_000).toFixed(1)} Gbps`
-  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`
-  if (bps >= 1_000) return `${(bps / 1_000).toFixed(1)} Kbps`
-  return `${bps} bps`
-}
+const STATUS_FILTERS = ["active", "escalated", "pending", "expired", "withdrawn"] as const
+// A countdown under this many minutes reads as a warning.
+const EXPIRY_WARNING_MS = 5 * 60_000
 
 interface MitigationsContentLiveProps {
   initialSearch?: string | null
@@ -281,153 +249,34 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return null
     return sortDirection === "asc" ? (
-      <ChevronUp className="h-3 w-3 ml-1" />
+      <ChevronUp className="size-3" aria-hidden="true" />
     ) : (
-      <ChevronDown className="h-3 w-3 ml-1" />
+      <ChevronDown className="size-3" aria-hidden="true" />
     )
   }
 
-  if (error) {
-    return (
-      <div className="bg-destructive/10 border border-destructive/50 rounded-lg p-6 text-center">
-        <AlertCircle className="h-8 w-8 mx-auto mb-2 text-destructive" />
-        <p className="text-destructive font-medium">Failed to load mitigations</p>
-        <p className="text-sm text-muted-foreground mt-1">{error.message}</p>
-        <Button variant="outline" className="mt-4" onClick={() => mutate()}>
-          <RefreshCw className="h-4 w-4 mr-2" />
-          Retry
-        </Button>
-      </div>
-    )
+  const sortHeader = (field: SortField, label: string) => (
+    <TableHead aria-sort={sortField === field ? (sortDirection === "asc" ? "ascending" : "descending") : undefined}>
+      <button type="button" onClick={() => handleSort(field)} className="inline-flex items-center gap-1 rounded-sm hover:text-foreground">
+        {label}
+        <SortIcon field={field} />
+      </button>
+    </TableHead>
+  )
+
+  const filtersActive = searchQuery !== "" || customerFilter !== "All" || popFilter !== "All"
+  const clearFilters = () => {
+    setSearchQuery("")
+    setCustomerFilter("All")
+    setPopFilter("All")
   }
+  const now = Date.now()
 
   return (
     <div className="space-y-4">
-      <div className="bg-card border border-border rounded-lg overflow-hidden">
-        <div className="flex items-center gap-2 p-3 sm:p-4">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input
-              ref={searchInput}
-              placeholder="Search IP..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 h-10 bg-secondary border-border text-base font-mono"
-            />
-          </div>
-          {permissions.canWithdraw && (
-            <Button
-              variant="default"
-              size="sm"
-              className="h-10 shrink-0"
-              onClick={() => setMitigateNowOpen(true)}
-            >
-              <Plus className="h-4 w-4 mr-1.5" />
-              <span className="hidden sm:inline">Mitigate Now</span>
-            </Button>
-          )}
-          <Button
-            variant="outline"
-            size="icon"
-            className="h-10 w-10 shrink-0"
-            onClick={() => {
-              const headers = ["mitigation_id", "status", "victim_ip", "vector", "action_type", "customer_id", "created_at", "expires_at"]
-              const rows = filteredMitigations.map((m) => [
-                m.mitigation_id, m.status, m.victim_ip, m.vector, m.action_type,
-                m.customer_id ?? "", m.created_at, m.expires_at,
-              ])
-              downloadCsv(`mitigations-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
-            }}
-            disabled={filteredMitigations.length === 0}
-            aria-label="Export CSV"
-          >
-            <Download className="h-4 w-4" />
-          </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            className="h-10 w-10 shrink-0"
-            onClick={() => mutate()}
-            disabled={isLoading}
-            aria-label="Refresh mitigations"
-          >
-            <RefreshCw className={cn("h-4 w-4", isLoading && "animate-spin")} />
-          </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            className="h-10 w-10 lg:hidden shrink-0"
-            onClick={() => setShowFilters(!showFilters)}
-            aria-label="Toggle filters"
-          >
-            <Filter className="h-4 w-4" />
-          </Button>
-        </div>
-
-        <div
-          className={cn(
-            "border-t border-border p-3 sm:p-4 space-y-3",
-            "lg:flex lg:flex-wrap lg:items-center lg:gap-3 lg:space-y-0",
-            showFilters ? "block" : "hidden lg:flex"
-          )}
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <Select
-              value={customerFilter}
-              onValueChange={(v) => { setCustomerFilter(v); setCurrentPage(1) }}
-            >
-              <SelectTrigger className="w-full sm:w-36 h-9 bg-secondary border-border text-xs font-mono">
-                <SelectValue placeholder="Customer" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="All">All Customers</SelectItem>
-                {customers.map((c) => (
-                  <SelectItem key={c} value={c}>{c}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              value={popFilter}
-              onValueChange={(v) => { setPopFilter(v); setCurrentPage(1) }}
-            >
-              <SelectTrigger className="w-full sm:w-28 h-9 bg-secondary border-border text-xs font-mono">
-                <SelectValue placeholder="POP" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="All">All POPs</SelectItem>
-                {pops.map((p) => (
-                  <SelectItem key={p} value={p}>{p}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {(["active", "escalated", "expired", "withdrawn", "pending"] as const).map((status) => (
-              <button
-                key={status}
-                onClick={() => toggleStatusFilter(status)}
-                className={cn(
-                  "px-3 py-2 rounded-full text-xs font-medium transition-colors capitalize min-h-[36px]",
-                  statusFilters.includes(status)
-                    ? status === "active"
-                      ? "bg-success/20 text-success border border-success/50"
-                      : status === "escalated"
-                        ? "bg-destructive/20 text-destructive border border-destructive/50"
-                        : "bg-secondary text-foreground border border-border"
-                    : "bg-secondary/50 text-muted-foreground border border-transparent hover:border-border"
-                )}
-              >
-                {status}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
       {permissions.canWithdraw && selectedIds.size > 0 && (
-        <div className="flex items-center gap-3 px-4 py-2 bg-destructive/10 border border-destructive/30 rounded-lg">
-          <span className="text-sm font-medium">
+        <div className="flex items-center gap-3 rounded-md border bg-card px-4 py-2">
+          <span className="text-sm font-medium tabular-nums">
             {selectedIds.size} selected
           </span>
           <Button
@@ -441,8 +290,8 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
               setBulkWithdrawOpen(true)
             }}
           >
-            <Trash2 className="h-4 w-4 mr-1.5" />
-            Withdraw All
+            <Trash2 className="size-4" aria-hidden="true" />
+            Withdraw all
           </Button>
           <Button
             variant="ghost"
@@ -454,236 +303,312 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
         </div>
       )}
 
-      {isLoading && !mitigations ? (
-        <div className="bg-card border border-border rounded-lg p-8 text-center">
-          <RefreshCw className="h-8 w-8 mx-auto mb-2 animate-spin text-muted-foreground" />
-          <p className="text-muted-foreground">Loading mitigations...</p>
+      <section aria-label="Mitigations" className="overflow-hidden rounded-md border bg-card">
+        <div className="flex items-center gap-2 border-b p-3">
+          <div className="relative min-w-0 flex-1">
+            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+            <Input
+              ref={searchInput}
+              placeholder="Search IP, vector or ID…"
+              aria-label="Search mitigations"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="h-9 pl-9 text-base sm:text-sm"
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </div>
+          {permissions.canWithdraw && (
+            <Button
+              size="sm"
+              className="h-9 shrink-0"
+              onClick={() => setMitigateNowOpen(true)}
+              aria-label="Mitigate now"
+            >
+              <Plus className="size-4" aria-hidden="true" />
+              <span className="hidden sm:inline">Mitigate now</span>
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-9 shrink-0"
+            onClick={() => {
+              const headers = ["mitigation_id", "status", "victim_ip", "vector", "action_type", "customer_id", "created_at", "expires_at"]
+              const rows = filteredMitigations.map((m) => [
+                m.mitigation_id, m.status, m.victim_ip, m.vector, m.action_type,
+                m.customer_id ?? "", m.created_at, m.expires_at,
+              ])
+              downloadCsv(`mitigations-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
+            }}
+            disabled={filteredMitigations.length === 0}
+            aria-label="Export CSV"
+          >
+            <Download className="size-4" aria-hidden="true" />
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-9 shrink-0"
+            onClick={() => mutate()}
+            disabled={isLoading}
+            aria-label="Refresh mitigations"
+          >
+            <RefreshCw className={cn("size-4", isLoading && "animate-spin")} aria-hidden="true" />
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-9 shrink-0 lg:hidden"
+            onClick={() => setShowFilters(!showFilters)}
+            aria-label="Toggle filters"
+            aria-expanded={showFilters}
+          >
+            <Filter className="size-4" aria-hidden="true" />
+          </Button>
         </div>
-      ) : (
-        <div className="bg-card border border-border rounded-lg overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-secondary">
-                <tr className="border-b border-border">
+
+        <div
+          className={cn(
+            "flex-wrap items-center gap-2 border-b p-3",
+            showFilters ? "flex" : "hidden lg:flex"
+          )}
+        >
+          <Select
+            value={customerFilter}
+            onValueChange={(v) => { setCustomerFilter(v); setCurrentPage(1) }}
+          >
+            <SelectTrigger className="h-9 w-full sm:w-40" aria-label="Customer">
+              <SelectValue placeholder="Customer" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="All">All customers</SelectItem>
+              {customers.map((c) => (
+                <SelectItem key={c} value={c}>{c}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select
+            value={popFilter}
+            onValueChange={(v) => { setPopFilter(v); setCurrentPage(1) }}
+          >
+            <SelectTrigger className="h-9 w-full sm:w-32" aria-label="POP">
+              <SelectValue placeholder="POP" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="All">All POPs</SelectItem>
+              {pops.map((p) => (
+                <SelectItem key={p} value={p}>{p}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div role="group" aria-label="Status" className="flex flex-wrap items-center gap-1.5">
+            {STATUS_FILTERS.map((status) => {
+              const pressed = statusFilters.includes(status)
+              return (
+                <button
+                  key={status}
+                  type="button"
+                  aria-pressed={pressed}
+                  onClick={() => toggleStatusFilter(status)}
+                  className={cn(
+                    "min-h-9 rounded-md border px-3 text-sm capitalize",
+                    pressed
+                      ? "border-foreground/30 bg-secondary font-medium text-foreground"
+                      : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"
+                  )}
+                >
+                  {status}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
+        {error ? (
+          <ErrorState
+            title="Unable to load mitigations"
+            detail={`${error.message}. Rules may still be active; this list could not be refreshed.`}
+            onRetry={() => { void mutate() }}
+            retryLabel="Retry mitigations"
+          />
+        ) : isLoading && !mitigations ? (
+          <LoadingRows label="Loading mitigations" rows={5} />
+        ) : paginatedMitigations.length === 0 ? (
+          filtersActive ? (
+            <EmptyState
+              title="No matching mitigations"
+              description="Nothing matches this search or filter."
+              action={<Button variant="outline" size="sm" onClick={clearFilters}>Clear search and filters</Button>}
+            />
+          ) : (
+            <EmptyState
+              title={statusFilters.length > 0 ? "No mitigations with these statuses" : "No mitigations yet"}
+              description={statusFilters.length > 0 ? "Choose other statuses above, or review incoming events." : "Mitigation intent will appear here when a detector or operator requests it."}
+              action={<Link href="/events" className="rounded-sm text-sm text-primary hover:underline">Review events</Link>}
+            />
+          )
+        ) : (
+          <>
+            <Table>
+              <TableHeader className="sr-only md:not-sr-only md:table-header-group">
+                <TableRow className="hover:bg-transparent">
                   {permissions.canWithdraw && (
-                    <th className="px-3 py-3 w-10">
+                    <TableHead className="w-10">
                       <Checkbox
                         checked={selectableIds.size > 0 && selectedIds.size === selectableIds.size}
                         onCheckedChange={toggleSelectAll}
                         aria-label="Select all active mitigations"
                         disabled={selectableIds.size === 0}
                       />
-                    </th>
+                    </TableHead>
                   )}
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("status")}
-                  >
-                    <span className="flex items-center">
-                      Status
-                      <SortIcon field="status" />
-                    </span>
-                  </th>
-                  <th className="text-left px-4 py-3 font-medium text-muted-foreground">
-                    Severity
-                  </th>
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("victim_ip")}
-                  >
-                    <span className="flex items-center">
-                      Victim IP
-                      <SortIcon field="victim_ip" />
-                    </span>
-                  </th>
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("vector")}
-                  >
-                    <span className="flex items-center">
-                      Vector
-                      <SortIcon field="vector" />
-                    </span>
-                  </th>
-                  <th className="text-left px-4 py-3 font-medium text-muted-foreground">Action</th>
-                  <th className="text-left px-4 py-3 font-medium text-muted-foreground">Ports</th>
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("created_at")}
-                  >
-                    <span className="flex items-center">
-                      Created
-                      <SortIcon field="created_at" />
-                    </span>
-                  </th>
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("expires_at")}
-                  >
-                    <span className="flex items-center">
-                      Expires
-                      <SortIcon field="expires_at" />
-                    </span>
-                  </th>
-                  <th className="text-center px-4 py-3 font-medium text-muted-foreground">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {paginatedMitigations.length === 0 ? (
-                  <tr>
-                    <td colSpan={permissions.canWithdraw ? 10 : 9} className="px-4 py-8 text-center text-muted-foreground">
-                      No mitigations found
-                    </td>
-                  </tr>
-                ) : (
-                  paginatedMitigations.map((mitigation, index) => {
-                    const expiresInfo = formatTimeRemaining(mitigation.expires_at)
-                    const isSelectable = mitigation.status === "active" || mitigation.status === "escalated"
-                    return (
-                      <tr
-                        key={mitigation.mitigation_id}
-                        className={cn(
-                          "border-b border-border/50 hover:bg-secondary/50 transition-colors cursor-pointer",
-                          index % 2 === 1 && "bg-secondary/20",
-                          selectedIds.has(mitigation.mitigation_id) && "bg-primary/5"
-                        )}
-                        onClick={() => router.push(`/mitigations/${mitigation.mitigation_id}`)}
-                      >
-                        {permissions.canWithdraw && (
-                          <td className="px-3 py-3" onClick={(e) => e.stopPropagation()}>
-                            {isSelectable ? (
-                              <Checkbox
-                                checked={selectedIds.has(mitigation.mitigation_id)}
-                                onCheckedChange={() => toggleSelect(mitigation.mitigation_id)}
-                                aria-label={`Select mitigation ${mitigation.victim_ip}`}
-                              />
-                            ) : (
-                              <div className="h-4 w-4" />
-                            )}
-                          </td>
-                        )}
-                        <td className="px-4 py-3">
-                          <StatusBadge status={mitigation.status} />
-                        </td>
-                        <td className="px-4 py-3">
-                          <SeverityBadge severity={deriveSeverity(mitigation.status, mitigation.action_type)} size="sm" />
-                        </td>
-                        <td className="px-4 py-3 font-mono text-foreground">
-                          <Link
-                            href={`/ip-history?ip=${encodeURIComponent(mitigation.victim_ip)}`}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                            }}
-                            className="hover:underline text-primary"
-                          >
-                            {mitigation.victim_ip}
-                          </Link>
-                        </td>
-                        <td className="px-4 py-3 text-muted-foreground">
-                          {mitigation.vector.replace(/_/g, " ")}
-                        </td>
-                        <td className="px-4 py-3">
-                          <ActionBadge
-                            actionType={mitigation.action_type}
-                            rateBps={mitigation.rate_bps}
-                          />
-                        </td>
-                        <td className="px-4 py-3 font-mono text-muted-foreground">
-                          {mitigation.dst_ports.length > 0
-                            ? mitigation.dst_ports.join(", ")
-                            : "any"}
-                        </td>
-                        <td className="px-4 py-3 text-muted-foreground">
-                          {formatRelativeTime(mitigation.created_at)}
-                        </td>
-                        <td
-                          className={cn(
-                            "px-4 py-3 font-mono",
-                            expiresInfo.isWarning ? "text-warning" : "text-muted-foreground"
-                          )}
+                  {sortHeader("victim_ip", "Target")}
+                  {sortHeader("status", "Status")}
+                  <TableHead>Action</TableHead>
+                  {sortHeader("vector", "Vector")}
+                  <TableHead>Ports</TableHead>
+                  {sortHeader("created_at", "Created")}
+                  {sortHeader("expires_at", "Expires")}
+                  <TableHead><span className="sr-only">Row actions</span></TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {paginatedMitigations.map((mitigation) => {
+                  const live = mitigation.status === "active" || mitigation.status === "escalated" || mitigation.status === "pending"
+                  const remaining = Date.parse(mitigation.expires_at) - now
+                  const vector = mitigation.vector.replace(/_/g, " ")
+                  const ports = mitigation.dst_ports.length > 0 ? mitigation.dst_ports.join(", ") : "any"
+                  const isSelectable = mitigation.status === "active" || mitigation.status === "escalated"
+                  return (
+                    <TableRow
+                      key={mitigation.mitigation_id}
+                      data-state={selectedIds.has(mitigation.mitigation_id) ? "selected" : undefined}
+                      className="grid cursor-pointer grid-cols-[1fr_auto] gap-x-3 gap-y-2 px-3 py-3 md:table-row md:p-0"
+                      onClick={() => router.push(`/mitigations/${mitigation.mitigation_id}`)}
+                    >
+                      {permissions.canWithdraw && (
+                        <TableCell className="order-5 self-center p-0 md:p-2 md:px-3" onClick={(e) => e.stopPropagation()}>
+                          {isSelectable ? (
+                            <Checkbox
+                              checked={selectedIds.has(mitigation.mitigation_id)}
+                              onCheckedChange={() => toggleSelect(mitigation.mitigation_id)}
+                              aria-label={`Select mitigation ${mitigation.victim_ip}`}
+                            />
+                          ) : null}
+                        </TableCell>
+                      )}
+                      <TableCell className="order-1 min-w-0 p-0 md:px-3 md:py-2">
+                        <Link
+                          href={`/ip-history?ip=${encodeURIComponent(mitigation.victim_ip)}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="break-all rounded-sm font-mono font-medium hover:underline"
                         >
-                          {expiresInfo.text}
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <div className="flex items-center justify-center gap-1">
+                          {mitigation.victim_ip}
+                        </Link>
+                        <span className="mt-0.5 block text-xs text-muted-foreground md:hidden">
+                          {vector} · ports {ports} · created {formatRelative(mitigation.created_at, now)}
+                        </span>
+                      </TableCell>
+                      <TableCell className="order-2 justify-self-end p-0 md:px-3 md:py-2">
+                        <StatusBadge status={mitigation.status} />
+                      </TableCell>
+                      <TableCell className="order-3 p-0 md:px-3 md:py-2">
+                        <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} />
+                      </TableCell>
+                      <TableCell className="hidden text-muted-foreground md:table-cell">{vector}</TableCell>
+                      <TableCell className="hidden font-mono text-muted-foreground md:table-cell">{ports}</TableCell>
+                      <TableCell className="hidden text-muted-foreground tabular-nums md:table-cell">
+                        <time dateTime={mitigation.created_at} title={formatUtc(mitigation.created_at, now)}>
+                          {formatRelative(mitigation.created_at, now)}
+                        </time>
+                      </TableCell>
+                      <TableCell className="order-4 justify-self-end p-0 tabular-nums md:px-3 md:py-2">
+                        <time
+                          dateTime={mitigation.expires_at}
+                          title={formatUtc(mitigation.expires_at, now)}
+                          className={cn(live && remaining < EXPIRY_WARNING_MS ? "text-warning" : live ? "text-foreground" : "text-muted-foreground")}
+                        >
+                          {live ? <><span className="md:hidden">Expires in </span>{formatTimeRemaining(mitigation.expires_at, now)}</> : formatRelative(mitigation.expires_at, now)}
+                        </time>
+                      </TableCell>
+                      <TableCell className="order-6 col-start-2 justify-self-end p-0 md:px-3 md:py-1">
+                        <div className="flex items-center justify-end gap-1">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="size-9 md:size-8"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  router.push(`/mitigations/${mitigation.mitigation_id}`)
+                                }}
+                                aria-label="View mitigation details"
+                              >
+                                <Eye className="size-4" aria-hidden="true" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>View details</TooltipContent>
+                          </Tooltip>
+                          {permissions.canWithdraw && isSelectable && (
                             <Tooltip>
                               <TooltipTrigger asChild>
                                 <Button
                                   variant="ghost"
                                   size="icon"
-                                  className="h-8 w-8"
+                                  className="size-9 text-destructive hover:bg-destructive/10 hover:text-destructive md:size-8"
                                   onClick={(e) => {
                                     e.stopPropagation()
-                                    router.push(`/mitigations/${mitigation.mitigation_id}`)
+                                    withdrawTrigger.current = e.currentTarget
+                                    withdrawCompleted.current = false
+                                    setWithdrawTarget(mitigation)
                                   }}
-                                  aria-label="View mitigation details"
+                                  aria-label="Withdraw mitigation"
                                 >
-                                  <Eye className="h-4 w-4" />
+                                  <XCircle className="size-4" aria-hidden="true" />
                                 </Button>
                               </TooltipTrigger>
-                              <TooltipContent>View details</TooltipContent>
+                              <TooltipContent>Withdraw</TooltipContent>
                             </Tooltip>
-                            {permissions.canWithdraw && (mitigation.status === "active" || mitigation.status === "escalated") && (
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10"
-                                    onClick={(e) => {
-                                      e.stopPropagation()
-                                      withdrawTrigger.current = e.currentTarget
-                                      withdrawCompleted.current = false
-                                      setWithdrawTarget(mitigation)
-                                    }}
-                                    aria-label="Withdraw mitigation"
-                                  >
-                                    <XCircle className="h-4 w-4" />
-                                  </Button>
-                                </TooltipTrigger>
-                                <TooltipContent>Withdraw</TooltipContent>
-                              </Tooltip>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    )
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+                          )}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
 
-          <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-secondary">
-            <span className="text-sm text-muted-foreground">
-              Showing {filteredMitigations.length > 0 ? (currentPage - 1) * itemsPerPage + 1 : 0} to{" "}
-              {Math.min(currentPage * itemsPerPage, filteredMitigations.length)} of{" "}
-              {filteredMitigations.length} mitigations
-            </span>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                disabled={currentPage === 1}
-              >
-                Previous
-              </Button>
-              <span className="text-sm text-muted-foreground">
-                Page {currentPage} of {totalPages || 1}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-3 text-sm text-muted-foreground">
+              <span className="tabular-nums">
+                Showing {(currentPage - 1) * itemsPerPage + 1}–{Math.min(currentPage * itemsPerPage, filteredMitigations.length)} of {filteredMitigations.length} loaded
               </span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                disabled={currentPage === totalPages || totalPages === 0}
-              >
-                Next
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                >
+                  Previous
+                </Button>
+                <span className="tabular-nums">
+                  Page {currentPage} of {totalPages || 1}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages || totalPages === 0}
+                >
+                  Next
+                </Button>
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </section>
 
       {/* Inline Withdraw Dialog */}
       <AlertDialog open={!!withdrawTarget} onOpenChange={(open) => {

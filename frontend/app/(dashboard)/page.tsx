@@ -11,25 +11,23 @@ export default function OverviewPage() {
   const { data, error, isLoading, mutate } = useMitigations({ status: ["active", "escalated"], limit: 50 })
 
   return (
-    <>
-      <div className="mx-auto max-w-7xl space-y-6">
-        <PageHeader title="Mitigation workspace" description="Review active intent, its signals and remaining lifetime." />
+    <div className="space-y-6">
+      <PageHeader title="Mitigation workspace" description="Review active intent, its signals and remaining lifetime." />
 
-        <BgpSessionStatus />
+      <BgpSessionStatus />
 
-        <ActiveMitigationsMini
-          mitigations={data?.mitigations ?? []}
-          loading={isLoading}
-          error={Boolean(error)}
-          hasMore={data?.has_more}
-          onRetry={() => { void mutate() }}
-        />
+      <ActiveMitigationsMini
+        mitigations={data?.mitigations ?? []}
+        loading={isLoading}
+        error={Boolean(error)}
+        hasMore={data?.has_more}
+        onRetry={() => { void mutate() }}
+      />
 
-        <section aria-label="History" className="grid gap-6 xl:grid-cols-2">
-          <MitigationActivityChart />
-          <ActivityFeedLive />
-        </section>
-      </div>
-    </>
+      <section aria-label="History" className="grid gap-6 xl:grid-cols-2">
+        <MitigationActivityChart />
+        <ActivityFeedLive />
+      </section>
+    </div>
   )
 }

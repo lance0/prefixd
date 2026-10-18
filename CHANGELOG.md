@@ -172,6 +172,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Adopt a neutral graphite palette: zinc grey surfaces and text with a single
   blue accent for actions, focus and links, replacing the teal accent.
 
+- Remove the Severity column from the mitigations list; it was derived from
+  status and action and repeated them. Every dashboard page now has one titled
+  header, shared tables, status pills and empty, loading and error states, with
+  sentence-case labels, UTC timestamps and monospace only for identifiers. On
+  narrow screens, mitigation and event rows stack so target, action, expiry and
+  Withdraw stay visible. The audit log search placeholder is now "Search target
+  or details…".
+
 - Refresh the security support policy, authentication and audit guidance, and
   release checklist to match the maintained release series and CI artifacts.
 

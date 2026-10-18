@@ -4,7 +4,7 @@ import { useCallback, useMemo, useState } from "react"
 import * as yaml from "js-yaml"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
+import { StatusPill } from "@/components/dashboard/status-pill"
 import { AlertCircle, Save, Undo2 } from "lucide-react"
 import type { ConfigPlaybook } from "@/lib/api"
 import { validatePlaybooks } from "@/components/dashboard/playbook-editor"
@@ -100,29 +100,27 @@ export function PlaybookYamlEditor({ playbooks: initialPlaybooks, onSave, saving
       {/* Action bar */}
       <div className="flex items-center justify-end gap-2">
         {hasChanges && (
-          <Badge variant="secondary" className="text-[10px] bg-yellow-500/10 text-yellow-600 border-yellow-500/30">
-            Unsaved changes
-          </Badge>
+          <StatusPill tone="warning">Unsaved changes</StatusPill>
         )}
-        <Button variant="ghost" size="sm" onClick={handleDiscard} disabled={!hasChanges || saving} className="text-xs font-mono">
+        <Button variant="ghost" size="sm" onClick={handleDiscard} disabled={!hasChanges || saving}>
           <Undo2 className="h-3.5 w-3.5 mr-1.5" />
           Discard
         </Button>
-        <Button size="sm" onClick={handleSave} disabled={!hasChanges || allErrors.length > 0 || saving} className="text-xs font-mono">
+        <Button size="sm" onClick={handleSave} disabled={!hasChanges || allErrors.length > 0 || saving} className="text-xs">
           <Save className="h-3.5 w-3.5 mr-1.5" />
-          {saving ? "Applying..." : "Apply"}
+          {saving ? "Applying…" : "Apply"}
         </Button>
       </div>
 
       {/* Errors */}
       {allErrors.length > 0 && hasChanges && (
         <Card className="border-destructive/50 bg-destructive/5">
-          <CardContent className="p-3">
+          <CardContent>
             <div className="flex items-start gap-2">
               <AlertCircle className="h-4 w-4 text-destructive shrink-0 mt-0.5" />
               <div className="space-y-1">
                 {allErrors.map((err, i) => (
-                  <p key={i} className="text-xs text-destructive font-mono">{err}</p>
+                  <p key={i} className="text-xs text-destructive">{err}</p>
                 ))}
               </div>
             </div>

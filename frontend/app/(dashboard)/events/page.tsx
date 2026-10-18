@@ -3,26 +3,19 @@
 import { Suspense } from "react"
 import { useSearchParams } from "next/navigation"
 import { EventsContentLive } from "@/components/dashboard/events-content-live"
-import { RefreshCw } from "lucide-react"
-
-function LoadingState() {
-  return (
-    <div className="bg-card border border-border rounded-lg p-8 text-center">
-      <RefreshCw className="h-8 w-8 mx-auto mb-2 animate-spin text-muted-foreground" />
-      <p className="text-muted-foreground">Loading events...</p>
-    </div>
-  )
-}
+import { PageHeader } from "@/components/dashboard/page-header"
+import { LoadingRows } from "@/components/dashboard/states"
 
 export default function EventsPage() {
   const searchParams = useSearchParams()
   const eventId = searchParams.get("id")
 
   return (
-    <>
-      <Suspense fallback={<LoadingState />}>
+    <div className="space-y-6">
+      <PageHeader title="Events" description="Attack signals received from detectors and operators, newest first." />
+      <Suspense fallback={<div className="rounded-md border bg-card"><LoadingRows label="Loading events" rows={5} /></div>}>
         <EventsContentLive initialEventId={eventId} />
       </Suspense>
-    </>
+    </div>
   )
 }

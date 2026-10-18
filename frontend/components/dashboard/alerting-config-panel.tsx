@@ -3,12 +3,13 @@
 import { useCallback, useMemo, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { StatusPill } from "@/components/dashboard/status-pill"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Loader2, Bell, Send, CheckCircle2, XCircle, AlertCircle, Plus, Trash2, Pencil, Save, Undo2 } from "lucide-react"
+import { Loader2, Send, CheckCircle2, XCircle, AlertCircle, Plus, Trash2, Pencil, Save, Undo2 } from "lucide-react"
 import { useAlertingConfig } from "@/hooks/use-api"
 import { usePermissions } from "@/hooks/use-permissions"
 import { testAlerting, updateAlertingConfig, type AlertingDestination, type AlertingTestResult } from "@/lib/api"
@@ -34,27 +35,18 @@ const DEST_LABELS: Record<DestType, string> = {
   telegram: "Telegram",
   pagerduty: "PagerDuty",
   opsgenie: "OpsGenie",
-  generic: "Generic Webhook",
+  generic: "Generic webhook",
 }
 
+// Third-party brand colours identify each destination as a small swatch beside its name.
 const DEST_COLORS: Record<string, string> = {
-  slack: "bg-[#4A154B] text-white",
-  discord: "bg-[#5865F2] text-white",
-  teams: "bg-[#6264A7] text-white",
-  telegram: "bg-[#0088CC] text-white",
-  pagerduty: "bg-[#06AC38] text-white",
-  opsgenie: "bg-[#2684FF] text-white",
-  generic: "bg-secondary text-foreground",
-}
-
-const DEST_ICONS: Record<string, string> = {
-  slack: "#",
-  discord: "D",
-  teams: "T",
-  telegram: "TG",
-  pagerduty: "PD",
-  opsgenie: "OG",
-  generic: "W",
+  slack: "bg-[#4A154B]",
+  discord: "bg-[#5865F2]",
+  teams: "bg-[#6264A7]",
+  telegram: "bg-[#0088CC]",
+  pagerduty: "bg-[#06AC38]",
+  opsgenie: "bg-[#2684FF]",
+  generic: "bg-muted-foreground",
 }
 
 interface DraftDestination extends AlertingDestination {
@@ -108,8 +100,8 @@ function DestinationEventsFilter({ dest, onChange }: { dest: DraftDestination; o
   }
   return (
     <div className="mt-3 pt-3 border-t border-border/50">
-      <Label className="text-[10px] text-muted-foreground">Per-Destination Events</Label>
-      <p className="text-[10px] text-muted-foreground mb-1.5">Override global filters for this destination. Empty = uses global.</p>
+      <Label className="text-muted-foreground">Per-Destination Events</Label>
+      <p className="text-xs text-muted-foreground mb-1.5">Override global filters for this destination. Empty = uses global.</p>
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
         {EVENT_TYPES.map((event) => (
           <div key={event} className="flex items-center gap-1.5">
@@ -118,12 +110,12 @@ function DestinationEventsFilter({ dest, onChange }: { dest: DraftDestination; o
               onCheckedChange={() => toggleDestEvent(event)}
               id={`dest-event-${dest._id}-${event}`}
             />
-            <Label htmlFor={`dest-event-${dest._id}-${event}`} className="text-[10px] font-mono cursor-pointer">{event}</Label>
+            <Label htmlFor={`dest-event-${dest._id}-${event}`} className="cursor-pointer">{event}</Label>
           </div>
         ))}
       </div>
       {destEvents.length === 0 && (
-        <p className="text-[10px] text-muted-foreground/60 font-mono mt-1">Using global events</p>
+        <p className="text-xs text-muted-foreground/60 mt-1">Using global events</p>
       )}
     </div>
   )
@@ -137,41 +129,41 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
       {dest.type === "slack" && (
         <>
           <div className="space-y-1 sm:col-span-2">
-            <Label className="text-[10px] text-muted-foreground">Webhook URL</Label>
+            <Label className="text-muted-foreground">Webhook URL</Label>
             <Input
               type={dest.webhook_url === "***" ? "password" : "text"}
               value={dest.webhook_url ?? ""}
               onChange={(e) => update("webhook_url", e.target.value)}
-              placeholder={dest.webhook_url === "***" ? "Leave as *** to keep existing" : "https://hooks.slack.com/services/..."}
+              placeholder={dest.webhook_url === "***" ? "Leave as *** to keep existing" : "https://hooks.slack.com/services/…"}
               className="h-8 text-xs font-mono"
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-[10px] text-muted-foreground">Channel (optional)</Label>
+            <Label className="text-muted-foreground">Channel (optional)</Label>
             <Input value={dest.channel ?? ""} onChange={(e) => update("channel", e.target.value)} placeholder="#ddos-alerts" className="h-8 text-xs font-mono" />
           </div>
         </>
       )}
       {dest.type === "discord" && (
         <div className="space-y-1 sm:col-span-2">
-          <Label className="text-[10px] text-muted-foreground">Webhook URL</Label>
+          <Label className="text-muted-foreground">Webhook URL</Label>
           <Input
             type={dest.webhook_url === "***" ? "password" : "text"}
             value={dest.webhook_url ?? ""}
             onChange={(e) => update("webhook_url", e.target.value)}
-            placeholder="https://discord.com/api/webhooks/..."
+            placeholder="https://discord.com/api/webhooks/…"
             className="h-8 text-xs font-mono"
           />
         </div>
       )}
       {dest.type === "teams" && (
         <div className="space-y-1 sm:col-span-2">
-          <Label className="text-[10px] text-muted-foreground">Webhook URL</Label>
+          <Label className="text-muted-foreground">Webhook URL</Label>
           <Input
             type={dest.webhook_url === "***" ? "password" : "text"}
             value={dest.webhook_url ?? ""}
             onChange={(e) => update("webhook_url", e.target.value)}
-            placeholder="https://prod-XX.westus.logic.azure.com/..."
+            placeholder="https://prod-XX.westus.logic.azure.com/…"
             className="h-8 text-xs font-mono"
           />
         </div>
@@ -179,17 +171,17 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
       {dest.type === "telegram" && (
         <>
           <div className="space-y-1">
-            <Label className="text-[10px] text-muted-foreground">Bot Token</Label>
+            <Label className="text-muted-foreground">Bot token</Label>
             <Input
               type={dest.bot_token === "***" ? "password" : "text"}
               value={dest.bot_token ?? ""}
               onChange={(e) => update("bot_token", e.target.value)}
-              placeholder={dest.bot_token === "***" ? "Leave as *** to keep existing" : "123456:ABC-DEF..."}
+              placeholder={dest.bot_token === "***" ? "Leave as *** to keep existing" : "123456:ABC-DEF…"}
               className="h-8 text-xs font-mono"
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-[10px] text-muted-foreground">Chat ID</Label>
+            <Label className="text-muted-foreground">Chat ID</Label>
             <Input value={dest.chat_id ?? ""} onChange={(e) => update("chat_id", e.target.value)} placeholder="-100123456789" className="h-8 text-xs font-mono" />
           </div>
         </>
@@ -197,7 +189,7 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
       {dest.type === "pagerduty" && (
         <>
           <div className="space-y-1">
-            <Label className="text-[10px] text-muted-foreground">Routing Key</Label>
+            <Label className="text-muted-foreground">Routing key</Label>
             <Input
               type={dest.routing_key === "***" ? "password" : "text"}
               value={dest.routing_key ?? ""}
@@ -207,7 +199,7 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-[10px] text-muted-foreground">Events URL</Label>
+            <Label className="text-muted-foreground">Events URL</Label>
             <Input value={dest.events_url ?? ""} onChange={(e) => update("events_url", e.target.value)} className="h-8 text-xs font-mono" />
           </div>
         </>
@@ -215,7 +207,7 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
       {dest.type === "opsgenie" && (
         <>
           <div className="space-y-1">
-            <Label className="text-[10px] text-muted-foreground">API Key</Label>
+            <Label className="text-muted-foreground">API Key</Label>
             <Input
               type={dest.api_key === "***" ? "password" : "text"}
               value={dest.api_key ?? ""}
@@ -225,9 +217,9 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-[10px] text-muted-foreground">Region</Label>
+            <Label className="text-muted-foreground">Region</Label>
             <Select value={dest.region ?? "us"} onValueChange={(v) => update("region", v)}>
-              <SelectTrigger className="h-8 text-xs font-mono">
+              <SelectTrigger className="h-8">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -241,11 +233,11 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
       {dest.type === "generic" && (
         <>
           <div className="space-y-1 sm:col-span-2">
-            <Label className="text-[10px] text-muted-foreground">URL</Label>
+            <Label className="text-muted-foreground">URL</Label>
             <Input value={dest.url ?? ""} onChange={(e) => update("url", e.target.value)} placeholder="https://example.com/webhook" className="h-8 text-xs font-mono" />
           </div>
           <div className="space-y-1">
-            <Label className="text-[10px] text-muted-foreground">HMAC Secret (optional)</Label>
+            <Label className="text-muted-foreground">HMAC Secret (optional)</Label>
             <Input
               type={dest.secret === "***" ? "password" : "text"}
               value={dest.secret ?? ""}
@@ -268,11 +260,9 @@ function ReadOnlyDestCard({ dest, testResult }: { dest: AlertingDestination; tes
   return (
     <div className="bg-secondary/50 px-3 py-2.5">
       <div className="flex items-center gap-3">
-        <span className={cn("shrink-0 flex items-center justify-center h-6 w-8 text-[10px] font-bold font-mono", DEST_COLORS[dest.type] || DEST_COLORS.generic)}>
-          {DEST_ICONS[dest.type] || "?"}
-        </span>
+        <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-sm", DEST_COLORS[dest.type] || DEST_COLORS.generic)} />
         <div className="flex-1 min-w-0">
-          <span className="text-xs font-mono font-medium">{DEST_LABELS[dest.type as DestType] ?? dest.type}</span>
+          <span className="text-xs font-medium">{DEST_LABELS[dest.type as DestType] ?? dest.type}</span>
           {summary ? <span className="text-xs font-mono text-muted-foreground ml-2">{summary}</span> : null}
         </div>
         {testResult && (
@@ -281,7 +271,7 @@ function ReadOnlyDestCard({ dest, testResult }: { dest: AlertingDestination; tes
           ) : (
             <div className="flex items-center gap-1 shrink-0">
               <XCircle className="h-4 w-4 text-destructive" />
-              {testResult.error ? <span className="text-[10px] text-destructive font-mono max-w-[150px] truncate">{testResult.error}</span> : null}
+              {testResult.error ? <span className="text-xs text-destructive max-w-[150px] truncate">{testResult.error}</span> : null}
             </div>
           )
         )}
@@ -289,7 +279,7 @@ function ReadOnlyDestCard({ dest, testResult }: { dest: AlertingDestination; tes
       {dest.events && dest.events.length > 0 && (
         <div className="flex flex-wrap gap-1 mt-1.5 ml-11">
           {dest.events.map((e) => (
-            <Badge key={e} variant="outline" className="text-[9px] font-mono py-0">{e}</Badge>
+            <Badge key={e} variant="outline" className="py-0">{e}</Badge>
           ))}
         </div>
       )}
@@ -403,9 +393,9 @@ export function AlertingConfigPanel() {
   if (isLoading) {
     return (
       <Card>
-        <CardContent className="p-4 flex items-center gap-2 text-muted-foreground">
+        <CardContent className="flex items-center gap-2 text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
-          <span className="text-sm font-mono">Loading alerting config...</span>
+          <span className="text-sm">Loading alerting config…</span>
         </CardContent>
       </Card>
     )
@@ -414,7 +404,7 @@ export function AlertingConfigPanel() {
   if (error) {
     return (
       <Card>
-        <CardContent className="p-4 text-sm text-destructive font-mono">
+        <CardContent className="text-sm text-destructive">
           Failed to load alerting config: {error.message}
         </CardContent>
       </Card>
@@ -428,23 +418,20 @@ export function AlertingConfigPanel() {
     return (
       <div className="space-y-3">
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader>
             <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-mono">Alert Destinations</CardTitle>
+              <CardTitle>Alert destinations</CardTitle>
               {canReloadConfig ? (
-                <Button variant="outline" size="sm" onClick={handleTest} disabled={testing} className="font-mono text-xs">
+                <Button variant="outline" size="sm" onClick={handleTest} disabled={testing}>
                   {testing ? <Loader2 className="h-3 w-3 mr-1.5 animate-spin" /> : <Send className="h-3 w-3 mr-1.5" />}
-                  Send Test Alert
+                  Send test alert
                 </Button>
               ) : null}
             </div>
           </CardHeader>
           <CardContent className="space-y-2">
             {data.destinations.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-6 text-center">
-                <Bell className="h-8 w-8 text-muted-foreground mb-2" />
-                <p className="text-sm text-muted-foreground font-mono">No alert destinations configured</p>
-              </div>
+              <p className="text-sm text-muted-foreground">No alert destinations configured. Alerts are not being delivered anywhere.</p>
             ) : (
               data.destinations.map((dest, i) => (
                 <ReadOnlyDestCard key={`${dest.type}-${i}`} dest={dest} testResult={testResults?.[i]} />
@@ -454,13 +441,13 @@ export function AlertingConfigPanel() {
         </Card>
         {data.events.length > 0 && (
           <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-mono">Event Filters</CardTitle>
+            <CardHeader>
+              <CardTitle>Event filters</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="flex flex-wrap gap-1.5">
                 {data.events.map((event) => (
-                  <Badge key={event} variant="outline" className="text-[10px] font-mono">{event}</Badge>
+                  <Badge key={event} variant="outline">{event}</Badge>
                 ))}
               </div>
             </CardContent>
@@ -469,7 +456,7 @@ export function AlertingConfigPanel() {
         {testError && (
           <div className="flex items-center gap-2 p-3 bg-destructive/10 border border-destructive/50 text-sm">
             <AlertCircle className="h-4 w-4 text-destructive shrink-0" />
-            <span className="text-destructive font-mono text-xs">{testError}</span>
+            <span className="text-destructive text-xs">{testError}</span>
           </div>
         )}
       </div>
@@ -486,7 +473,7 @@ export function AlertingConfigPanel() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           {!isEditing ? (
-            <Button variant="outline" size="sm" onClick={initDraft} className="text-xs font-mono">
+            <Button variant="outline" size="sm" onClick={initDraft}>
               <Pencil className="h-3.5 w-3.5 mr-1.5" />
               Edit
             </Button>
@@ -494,9 +481,9 @@ export function AlertingConfigPanel() {
             <>
               {addingType === null ? (
                 <Select onValueChange={(v) => addDest(v as DestType)}>
-                  <SelectTrigger className="w-44 h-8 text-xs font-mono">
+                  <SelectTrigger className="w-44 h-8">
                     <Plus className="h-3.5 w-3.5 mr-1" />
-                    <span>Add Destination</span>
+                    <span>Add destination</span>
                   </SelectTrigger>
                   <SelectContent>
                     {DEST_TYPES.map((t) => (
@@ -507,7 +494,7 @@ export function AlertingConfigPanel() {
               ) : null}
             </>
           )}
-          <Button variant="outline" size="sm" onClick={handleTest} disabled={testing} className="font-mono text-xs">
+          <Button variant="outline" size="sm" onClick={handleTest} disabled={testing}>
             {testing ? <Loader2 className="h-3 w-3 mr-1.5 animate-spin" /> : <Send className="h-3 w-3 mr-1.5" />}
             Test
           </Button>
@@ -515,17 +502,15 @@ export function AlertingConfigPanel() {
         {isEditing && (
           <div className="flex items-center gap-2">
             {hasChanges && (
-              <Badge variant="secondary" className="text-[10px] bg-yellow-500/10 text-yellow-600 border-yellow-500/30">
-                Unsaved changes
-              </Badge>
+              <StatusPill tone="warning">Unsaved changes</StatusPill>
             )}
-            <Button variant="ghost" size="sm" onClick={discardDraft} disabled={saving} className="text-xs font-mono">
+            <Button variant="ghost" size="sm" onClick={discardDraft} disabled={saving}>
               <Undo2 className="h-3.5 w-3.5 mr-1.5" />
               Discard
             </Button>
-            <Button size="sm" onClick={handleSave} disabled={!hasChanges || saving} className="text-xs font-mono">
+            <Button size="sm" onClick={handleSave} disabled={!hasChanges || saving}>
               <Save className="h-3.5 w-3.5 mr-1.5" />
-              {saving ? "Saving..." : "Save"}
+              {saving ? "Saving…" : "Save"}
             </Button>
           </div>
         )}
@@ -533,18 +518,17 @@ export function AlertingConfigPanel() {
 
       {/* Destinations */}
       <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-mono">Alert Destinations</CardTitle>
+        <CardHeader>
+          <CardTitle>Alert destinations</CardTitle>
         </CardHeader>
         <CardContent className="space-y-2">
           {destinations.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-6 text-center">
-              <Bell className="h-8 w-8 text-muted-foreground mb-2" />
-              <p className="text-sm text-muted-foreground font-mono">
-                {isEditing ? "No destinations. Use \"Add Destination\" above." : "No alert destinations configured"}
+            <div className="space-y-1 text-sm">
+              <p className="text-muted-foreground">
+                {isEditing ? "No destinations. Use “Add destination” above." : "No alert destinations configured. Alerts are not being delivered anywhere."}
               </p>
               {!isEditing && (
-                <p className="text-xs text-muted-foreground mt-1">Click Edit to add destinations</p>
+                <p className="text-xs text-muted-foreground">Choose Edit to add a destination.</p>
               )}
             </div>
           ) : (
@@ -554,16 +538,14 @@ export function AlertingConfigPanel() {
               if (isEditingThis) {
                 return (
                   <Card key={dest._id} className="border-primary/30 ring-1 ring-primary/10">
-                    <CardContent className="p-3">
+                    <CardContent>
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
-                          <span className={cn("shrink-0 flex items-center justify-center h-6 w-8 text-[10px] font-bold font-mono", DEST_COLORS[dest.type])}>
-                            {DEST_ICONS[dest.type]}
-                          </span>
-                          <span className="text-xs font-mono font-medium">{DEST_LABELS[dest.type as DestType]}</span>
+                          <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-sm", DEST_COLORS[dest.type] || DEST_COLORS.generic)} />
+                          <span className="text-xs font-medium">{DEST_LABELS[dest.type as DestType]}</span>
                         </div>
                         <div className="flex items-center gap-1">
-                          <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setEditingIndex(null)}>Done</Button>
+                          <Button variant="ghost" size="sm" className="h-7" onClick={() => setEditingIndex(null)}>Done</Button>
                           <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive" onClick={() => removeDest(i)}>
                             <Trash2 className="h-3.5 w-3.5" />
                           </Button>
@@ -577,11 +559,9 @@ export function AlertingConfigPanel() {
 
               return (
                 <div key={dest._id} className="flex items-center gap-3 bg-secondary/50 px-3 py-2.5">
-                  <span className={cn("shrink-0 flex items-center justify-center h-6 w-8 text-[10px] font-bold font-mono", DEST_COLORS[dest.type] || DEST_COLORS.generic)}>
-                    {DEST_ICONS[dest.type] || "?"}
-                  </span>
+                  <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-sm", DEST_COLORS[dest.type] || DEST_COLORS.generic)} />
                   <div className="flex-1 min-w-0">
-                    <span className="text-xs font-mono font-medium">{DEST_LABELS[dest.type as DestType] ?? dest.type}</span>
+                    <span className="text-xs font-medium">{DEST_LABELS[dest.type as DestType] ?? dest.type}</span>
                     {destSummary(dest) ? <span className="text-xs font-mono text-muted-foreground ml-2">{destSummary(dest)}</span> : null}
                   </div>
                   {isEditing ? (
@@ -601,7 +581,7 @@ export function AlertingConfigPanel() {
                         <div className="flex items-center gap-1 shrink-0">
                           <XCircle className="h-4 w-4 text-destructive" />
                           {testResults[i]!.error ? (
-                            <span className="text-[10px] text-destructive font-mono max-w-[150px] truncate">
+                            <span className="text-xs text-destructive max-w-[150px] truncate">
                               {testResults[i]!.error}
                             </span>
                           ) : null}
@@ -618,9 +598,9 @@ export function AlertingConfigPanel() {
 
       {/* Event filters */}
       <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-mono">Event Filters</CardTitle>
-          <p className="text-[10px] text-muted-foreground font-mono mt-0.5">
+        <CardHeader>
+          <CardTitle>Event filters</CardTitle>
+          <p className="text-xs text-muted-foreground mt-0.5">
             {isEditing ? "Select which events trigger alerts (empty = all events)" : "Events that trigger alerts (empty = all)"}
           </p>
         </CardHeader>
@@ -634,18 +614,18 @@ export function AlertingConfigPanel() {
                     onCheckedChange={() => toggleEvent(event)}
                     id={`event-${event}`}
                   />
-                  <Label htmlFor={`event-${event}`} className="text-xs font-mono cursor-pointer">{event}</Label>
+                  <Label htmlFor={`event-${event}`} className="cursor-pointer">{event}</Label>
                 </div>
               ))}
             </div>
           ) : events.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
               {events.map((event) => (
-                <Badge key={event} variant="outline" className="text-[10px] font-mono">{event}</Badge>
+                <Badge key={event} variant="outline">{event}</Badge>
               ))}
             </div>
           ) : (
-            <p className="text-xs text-muted-foreground font-mono">All events (no filter)</p>
+            <p className="text-xs text-muted-foreground">All events (no filter)</p>
           )}
         </CardContent>
       </Card>
@@ -653,7 +633,7 @@ export function AlertingConfigPanel() {
       {testError && (
         <div className="flex items-center gap-2 p-3 bg-destructive/10 border border-destructive/50 text-sm">
           <AlertCircle className="h-4 w-4 text-destructive shrink-0" />
-          <span className="text-destructive font-mono text-xs">{testError}</span>
+          <span className="text-destructive text-xs">{testError}</span>
         </div>
       )}
     </div>

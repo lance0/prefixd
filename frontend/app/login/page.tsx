@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { AlertCircle, Loader2, Shield } from "lucide-react"
+import { AlertCircle, Loader2 } from "lucide-react"
 
 export default function LoginPage() {
   const [username, setUsername] = useState("")
@@ -45,16 +45,17 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-dvh flex items-center justify-center bg-background p-4">
-      <Card className="w-full max-w-md">
-        <CardHeader className="space-y-1 text-center">
-          <div className="flex justify-center mb-4">
-            <div className="p-3 rounded-full bg-primary/10">
-              <Shield className="h-8 w-8 text-primary" />
-            </div>
+      <Card className="w-full max-w-sm">
+        <CardHeader>
+          <div className="mb-2 flex items-center gap-2.5">
+            <span className="flex size-7 items-center justify-center rounded-md bg-primary font-mono text-xs font-semibold text-primary-foreground" aria-hidden="true">P</span>
+            <span className="font-semibold">prefixd</span>
           </div>
-          <CardTitle className="text-2xl font-bold">prefixd</CardTitle>
+          <CardTitle>
+            <h1 className="text-xl font-semibold">Sign in</h1>
+          </CardTitle>
           <CardDescription>
-            Sign in to access the DDoS mitigation dashboard
+            Use your operator account to manage mitigations.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -79,7 +80,6 @@ export default function LoginPage() {
                 <Input
                   id="username"
                   type="text"
-                  placeholder="admin"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   disabled={isLoading}
@@ -104,7 +104,7 @@ export default function LoginPage() {
                 {isLoading ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Signing in...
+                    Signing in…
                   </>
                 ) : (
                   "Sign in"

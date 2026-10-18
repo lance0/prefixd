@@ -57,9 +57,9 @@ export function IncidentReportDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl max-h-[80vh] bg-card border-border">
         <DialogHeader>
-          <DialogTitle className="text-sm font-mono uppercase tracking-wide flex items-center gap-2">
-            <FileText className="h-4 w-4 text-primary" />
-            Incident Report
+          <DialogTitle className="text-sm flex items-center gap-2">
+            <FileText className="h-4 w-4 text-muted-foreground" />
+            Incident report
           </DialogTitle>
           <DialogDescription className="text-xs text-muted-foreground">
             Markdown report for sharing in Slack, email, or Jira.

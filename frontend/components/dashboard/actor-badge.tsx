@@ -1,4 +1,3 @@
-import { cn } from "@/lib/utils"
 import { Bot, User } from "lucide-react"
 
 interface ActorBadgeProps {
@@ -7,19 +6,12 @@ interface ActorBadgeProps {
 }
 
 export function ActorBadge({ type, name }: ActorBadgeProps) {
-  const isSystemLike = type === "system" || type === "detector"
+  const Icon = type === "operator" ? User : Bot
 
   return (
-    <div className="flex items-center gap-2">
-      <span
-        className={cn(
-          "flex items-center justify-center h-5 w-5",
-          isSystemLike ? "bg-secondary text-muted-foreground" : "bg-primary/10 text-primary",
-        )}
-      >
-        {isSystemLike ? <Bot className="h-3 w-3" /> : <User className="h-3 w-3" />}
-      </span>
-      <span className="text-xs font-mono text-foreground">{name}</span>
-    </div>
+    <span className="inline-flex items-center gap-1.5 text-sm">
+      <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+      {name}
+    </span>
   )
 }

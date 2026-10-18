@@ -5,27 +5,22 @@ import { useState } from "react"
 import { useSearchParams, useRouter } from "next/navigation"
 import Link from "next/link"
 import { useIpHistory } from "@/hooks/use-api"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Search, AlertTriangle, Shield, ArrowRight, User, Server, FileText } from "lucide-react"
+import { Search, AlertTriangle, Shield, FileText } from "lucide-react"
+import { PageHeader } from "@/components/dashboard/page-header"
+import { StatusBadge } from "@/components/dashboard/status-badge"
+import { ActionBadge } from "@/components/dashboard/action-badge"
+import { Tag } from "@/components/dashboard/status-pill"
+import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
+import { formatBps, formatUtc } from "@/lib/format"
+import type { Mitigation } from "@/lib/api"
 import { IncidentReportDialog } from "@/components/dashboard/incident-report-dialog"
 import { getIncidentReport } from "@/lib/api"
 
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleString()
-}
-
-function formatBps(bps: number | null) {
-  if (!bps) return null
-  if (bps >= 1e9) return `${(bps / 1e9).toFixed(1)} Gbps`
-  if (bps >= 1e6) return `${(bps / 1e6).toFixed(1)} Mbps`
-  return `${(bps / 1e3).toFixed(0)} Kbps`
-}
-
 type TimelineEntry =
   | { type: "event"; timestamp: string; data: { event_id: string; source: string; vector: string; bps: number | null; pps: number | null; confidence: number | null } }
-  | { type: "mitigation"; timestamp: string; data: { mitigation_id: string; status: string; action_type: string; vector: string; created_at: string; withdrawn_at: string | null; expires_at: string } }
+  | { type: "mitigation"; timestamp: string; data: { mitigation_id: string; status: Mitigation["status"]; action_type: string; rate_bps: number | null; vector: string; created_at: string; withdrawn_at: string | null; expires_at: string } }
 
 export default function IpHistoryPage() {
   const searchParams = useSearchParams()
@@ -86,6 +81,7 @@ export default function IpHistoryPage() {
           mitigation_id: m.mitigation_id,
           status: m.status,
           action_type: m.action_type,
+          rate_bps: m.rate_bps,
           vector: m.vector,
           created_at: m.created_at,
           withdrawn_at: m.withdrawn_at,
@@ -96,165 +92,128 @@ export default function IpHistoryPage() {
     timeline.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
   }
 
-  const statusColors: Record<string, string> = {
-    active: "bg-green-500/10 text-green-500 border-green-500/20",
-    escalated: "bg-yellow-500/10 text-yellow-500 border-yellow-500/20",
-    withdrawn: "bg-muted text-muted-foreground border-border",
-    expired: "bg-muted text-muted-foreground border-border",
-  }
-
   return (
     <>
-      <div className="space-y-4">
-        <div>
-          <h1 className="text-lg font-semibold">IP History</h1>
-          <p className="text-sm text-muted-foreground">
-            View all events and mitigations for an IP address
-          </p>
-        </div>
-
-        <form onSubmit={handleSearch} className="flex gap-2 max-w-md">
-          <div className="relative flex-1">
-            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder="Enter IP address..."
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              className="pl-9"
-            />
-          </div>
-          <Button type="submit" size="default">
-            Lookup
-          </Button>
-          {activeIp ? (
-            <Button variant="outline" size="default" onClick={handleGenerateReport}>
-              <FileText className="h-4 w-4 mr-2" />
+      <div className="space-y-6">
+        <PageHeader
+          title="IP history"
+          description="Every event and mitigation recorded for one address, newest first."
+          actions={activeIp ? (
+            <Button variant="outline" size="sm" onClick={handleGenerateReport}>
+              <FileText className="size-4" aria-hidden="true" />
               Report
             </Button>
           ) : null}
+        />
+
+        <form onSubmit={handleSearch} className="flex max-w-md gap-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+            <Input
+              placeholder="203.0.113.10"
+              aria-label="IP address"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              className="h-9 pl-9 font-mono text-base sm:text-sm"
+              spellCheck={false}
+              autoComplete="off"
+              inputMode="text"
+            />
+          </div>
+          <Button type="submit" size="sm" className="h-9">
+            Look up
+          </Button>
         </form>
 
         {!activeIp && (
-          <div className="border border-border bg-card rounded-lg p-8 text-center text-muted-foreground text-sm">
-            Enter an IP address above to view its history
+          <div className="rounded-md border bg-card">
+            <EmptyState title="No address selected" description="Enter an IP address above, or open one from a mitigation or event." />
           </div>
         )}
 
         {activeIp && isLoading && (
-          <div className="border border-border bg-card rounded-lg p-8 text-center text-muted-foreground text-sm">
-            Loading history for {activeIp}...
-          </div>
+          <div className="rounded-md border bg-card"><LoadingRows label={`Loading history for ${activeIp}`} /></div>
         )}
 
         {activeIp && error && !isLoading && (
-          <div className="border border-border bg-card rounded-lg p-8 text-center text-sm">
-            <p className="text-destructive font-medium mb-1">Unable to load history for {activeIp}</p>
-            <p className="text-muted-foreground">
-              {error instanceof Error && error.message.includes("400")
+          <div className="rounded-md border bg-card">
+            <ErrorState
+              title={`Unable to load history for ${activeIp}`}
+              detail={error instanceof Error && error.message.includes("400")
                 ? "Enter a valid IP address and try again."
-                : "Please retry or check API connectivity."}
-            </p>
+                : "Retry, or check that the controller API is reachable."}
+            />
           </div>
         )}
 
         {data && (
-          <>
+          <section aria-label={`History for ${activeIp}`} className="overflow-hidden rounded-md border bg-card">
             {(data.customer || data.service) && (
-              <div className="border border-border bg-card rounded-lg p-4 flex flex-wrap gap-4">
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b px-4 py-3 text-sm">
                 {data.customer && (
-                  <div className="flex items-center gap-2">
-                    <User className="h-4 w-4 text-muted-foreground" />
-                    <span className="text-sm font-medium">{data.customer.name}</span>
-                    <Badge variant="outline" className="text-[10px]">
-                      {data.customer.policy_profile}
-                    </Badge>
-                  </div>
+                  <span className="flex items-center gap-2">
+                    <span className="text-muted-foreground">Customer</span>
+                    <span className="font-medium">{data.customer.name}</span>
+                    <Tag>{data.customer.policy_profile}</Tag>
+                  </span>
                 )}
                 {data.service && (
-                  <div className="flex items-center gap-2">
-                    <Server className="h-4 w-4 text-muted-foreground" />
-                    <span className="text-sm">{data.service.name}</span>
-                  </div>
+                  <span className="flex items-center gap-2">
+                    <span className="text-muted-foreground">Service</span>
+                    <span className="font-medium">{data.service.name}</span>
+                  </span>
                 )}
               </div>
             )}
 
             {timeline.length === 0 ? (
-              <div className="border border-border bg-card rounded-lg p-8 text-center text-muted-foreground text-sm">
-                No events or mitigations found for {activeIp}
-              </div>
+              <EmptyState title="No history" description={`No events or mitigations are recorded for ${activeIp}.`} />
             ) : (
-              <div className="relative border-l-2 border-border ml-4 space-y-0">
+              <ol className="divide-y">
                 {timeline.map((entry, i) => (
-                  <div key={i} className="relative pl-6 pb-4">
-                    <div className="absolute -left-[9px] top-1.5 size-4 rounded-full border-2 border-background flex items-center justify-center"
-                      style={{
-                        backgroundColor: entry.type === "event"
-                          ? "var(--color-chart-2)"
-                          : "var(--color-chart-1)",
-                      }}
-                    />
-                    <div className="border border-border bg-card rounded-lg p-3">
-                      <div className="flex items-center justify-between mb-1">
-                        <div className="flex items-center gap-2">
-                          {entry.type === "event" ? (
-                            <>
-                              <AlertTriangle className="h-3.5 w-3.5 text-chart-2" />
-                              <span className="text-xs font-medium">Event</span>
-                              <Badge variant="outline" className="text-[10px]">
-                                {entry.data.vector.replace(/_/g, " ")}
-                              </Badge>
-                            </>
-                          ) : (
-                            <>
-                              <Shield className="h-3.5 w-3.5 text-chart-1" />
-                              <span className="text-xs font-medium">Mitigation</span>
-                              <Badge variant="outline" className={`text-[10px] ${statusColors[entry.data.status] || ""}`}>
-                                {entry.data.status}
-                              </Badge>
-                              <Badge variant="outline" className="text-[10px]">
-                                {entry.data.action_type}
-                              </Badge>
-                            </>
-                          )}
-                        </div>
-                        <span className="text-[10px] text-muted-foreground">
-                          {formatDate(entry.timestamp)}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center justify-between">
-                        <div className="text-xs text-muted-foreground space-x-3">
-                          {entry.type === "event" ? (
-                            <>
-                              <span>src: {entry.data.source}</span>
-                              {entry.data.bps && <span>{formatBps(entry.data.bps)}</span>}
-                              <span className="tabular-nums">Confidence: {formatConfidence(entry.data.confidence)}</span>
-                            </>
-                          ) : (
-                            <>
-                              <span>{entry.data.vector.replace(/_/g, " ")}</span>
-                              {entry.data.withdrawn_at && (
-                                <span>withdrawn {formatDate(entry.data.withdrawn_at)}</span>
-                              )}
-                            </>
-                          )}
-                        </div>
-                        {entry.type === "mitigation" && (
-                          <Link
-                            href={`/mitigations/${entry.data.mitigation_id}`}
-                            className="text-xs text-primary hover:underline flex items-center gap-1"
-                          >
-                            Detail <ArrowRight className="h-3 w-3" />
-                          </Link>
+                  <li key={i} className="flex flex-col gap-1 px-4 py-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {entry.type === "event" ? (
+                          <>
+                            <AlertTriangle className="size-3.5 text-muted-foreground" aria-hidden="true" />
+                            <span className="text-sm font-medium">Event</span>
+                            <Tag>{entry.data.vector.replace(/_/g, " ")}</Tag>
+                          </>
+                        ) : (
+                          <>
+                            <Shield className="size-3.5 text-muted-foreground" aria-hidden="true" />
+                            <Link href={`/mitigations/${entry.data.mitigation_id}`} className="rounded-sm text-sm font-medium hover:underline">
+                              Mitigation
+                            </Link>
+                            <StatusBadge status={entry.data.status} />
+                            <ActionBadge actionType={entry.data.action_type} rateBps={entry.data.rate_bps} />
+                          </>
                         )}
                       </div>
+                      <p className="text-xs text-muted-foreground tabular-nums">
+                        {entry.type === "event" ? (
+                          <>
+                            {entry.data.source}
+                            {entry.data.bps ? <> · {formatBps(entry.data.bps)}</> : null}
+                            {" · "}<span>Confidence: {formatConfidence(entry.data.confidence)}</span>
+                          </>
+                        ) : (
+                          <>
+                            {entry.data.vector.replace(/_/g, " ")}
+                            {entry.data.withdrawn_at && <> · withdrawn {formatUtc(entry.data.withdrawn_at)}</>}
+                          </>
+                        )}
+                      </p>
                     </div>
-                  </div>
+                    <time dateTime={entry.timestamp} className="shrink-0 text-xs text-muted-foreground tabular-nums">
+                      {formatUtc(entry.timestamp)}
+                    </time>
+                  </li>
                 ))}
-              </div>
+              </ol>
             )}
-          </>
+          </section>
         )}
       </div>
 

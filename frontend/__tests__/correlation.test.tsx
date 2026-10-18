@@ -258,13 +258,13 @@ describe("GroupsTab", () => {
   })
 
   it.each([
-    [0, "0%", "text-red-600"],
-    [0.499, "50%", "text-red-600"],
-    [0.5, "50%", "text-yellow-600"],
-    [0.799, "80%", "text-yellow-600"],
-    [0.8, "80%", "text-green-600"],
-    [0.95, "95%", "text-green-600"],
-    [1, "100%", "text-green-600"],
+    [0, "0%", "text-warning"],
+    [0.499, "50%", "text-warning"],
+    [0.5, "50%", "text-foreground"],
+    [0.799, "80%", "text-foreground"],
+    [0.8, "80%", "font-medium"],
+    [0.95, "95%", "font-medium"],
+    [1, "100%", "font-medium"],
     [null, "Unavailable", "text-muted-foreground"],
     [NaN, "Invalid", "text-muted-foreground"],
   ])("classifies confidence %s before rounding its label", (confidence, label, color) => {
@@ -334,7 +334,7 @@ describe("GroupsTab", () => {
 
     render(<GroupsTab />)
 
-    expect(screen.getByText("Load More")).toBeInTheDocument()
+    expect(screen.getByText("Load more")).toBeInTheDocument()
   })
 })
 
@@ -351,17 +351,17 @@ describe("ConfigTab", () => {
     render(<ConfigTab />)
 
     // Settings section
-    expect(screen.getByText("Correlation Settings")).toBeInTheDocument()
+    expect(screen.getByText("Correlation settings")).toBeInTheDocument()
     expect(screen.getByText("Enabled")).toBeInTheDocument()
 
     // Form fields
     expect(screen.getByLabelText("Window (seconds)")).toBeInTheDocument()
-    expect(screen.getByLabelText("Min Sources")).toBeInTheDocument()
-    expect(screen.getByLabelText("Confidence Threshold")).toBeInTheDocument()
+    expect(screen.getByLabelText("Min sources")).toBeInTheDocument()
+    expect(screen.getByLabelText("Confidence threshold")).toBeInTheDocument()
 
     // Signal sources section
-    expect(screen.getByText("Signal Sources")).toBeInTheDocument()
-    expect(screen.getByText("Add Source")).toBeInTheDocument()
+    expect(screen.getByText("Signal sources")).toBeInTheDocument()
+    expect(screen.getByText("Add source")).toBeInTheDocument()
   })
 
   it("shows read-only message for non-admin", () => {
@@ -392,7 +392,7 @@ describe("ConfigTab", () => {
 
     expect(screen.getByText("Admin access required to edit settings")).toBeInTheDocument()
     // Add Source button should not be present for non-admin
-    expect(screen.queryByText("Add Source")).not.toBeInTheDocument()
+    expect(screen.queryByText("Add source")).not.toBeInTheDocument()
   })
 
   it("renders per-playbook overrides with link to Playbooks tab", () => {
@@ -406,9 +406,9 @@ describe("ConfigTab", () => {
 
     render(<ConfigTab />)
 
-    expect(screen.getByText("Per-Playbook Overrides")).toBeInTheDocument()
+    expect(screen.getByText("Per-playbook overrides")).toBeInTheDocument()
     expect(screen.getByText("udp_flood_default")).toBeInTheDocument()
-    expect(screen.getByText("Edit in Playbooks")).toBeInTheDocument()
+    expect(screen.getByText("Edit in playbooks")).toBeInTheDocument()
   })
 
   it("renders source CRUD cards for admin", () => {

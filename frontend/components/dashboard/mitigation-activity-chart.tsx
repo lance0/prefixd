@@ -73,11 +73,11 @@ export function MitigationActivityChart() {
   return (
     <section aria-label="Activity chart" className="min-w-0">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="font-medium text-balance">Activity <span className="text-muted-foreground">({selectedRange.label})</span></h2>
+        <h2 className="text-sm font-semibold text-balance">Activity <span className="text-muted-foreground">({selectedRange.label})</span></h2>
         <div className="flex rounded-md bg-muted p-0.5" aria-label="Activity range">
           {RANGE_OPTIONS.map((opt, i) => (
             <button key={opt.label} onClick={() => setRangeIdx(i)} aria-pressed={i === rangeIdx}
-              className={cn("min-h-8 rounded-sm px-2.5 font-mono text-xs", i === rangeIdx ? "bg-background text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground")}>
+              className={cn("min-h-8 rounded-sm px-2.5 text-xs tabular-nums", i === rangeIdx ? "bg-background text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground")}>
               {opt.label}
             </button>
           ))}

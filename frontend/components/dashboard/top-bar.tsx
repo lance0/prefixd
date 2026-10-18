@@ -41,7 +41,7 @@ export function TopBar({ onSearchClick }: TopBarProps) {
       </div>
       <div className="flex shrink-0 items-center gap-1.5 sm:gap-4">
         <ConnectionStatus state={connectionState} />
-        <time className="hidden font-mono text-xs text-muted-foreground tabular-nums xl:block">{time}</time>
+        <time className="hidden text-xs text-muted-foreground tabular-nums xl:block">{time}</time>
         {mounted ? <Button variant="ghost" className="size-11 p-0 sm:size-9" onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")} aria-label={`Switch to ${resolvedTheme === "dark" ? "light" : "dark"} mode`}>
           {resolvedTheme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
         </Button> : null}

@@ -8,7 +8,8 @@ function protocolName(proto: number | null): string {
   }
 }
 
-function formatBps(bps: number | null): string {
+// Rule syntax for copy/paste, not display: keep plain ASCII and a fixed decimal.
+function ruleRate(bps: number | null): string {
   if (!bps) return ""
   if (bps >= 1_000_000_000) return `${(bps / 1_000_000_000).toFixed(1)} Gbps`
   if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`
@@ -39,7 +40,7 @@ export function formatFlowSpecRule(fields: FlowSpecFields): string {
   if (fields.action_type === "discard") {
     parts.push("then discard")
   } else {
-    parts.push("then rate-limit", formatBps(fields.rate_bps))
+    parts.push("then rate-limit", ruleRate(fields.rate_bps))
   }
 
   return parts.join(" ")

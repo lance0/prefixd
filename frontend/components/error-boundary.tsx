@@ -45,7 +45,7 @@ export class ErrorBoundary extends Component<Props, State> {
             onClick={() => this.setState({ hasError: false, error: null })}
           >
             <RefreshCw className="h-4 w-4 mr-2" />
-            Try Again
+            Try again
           </Button>
         </div>
       )

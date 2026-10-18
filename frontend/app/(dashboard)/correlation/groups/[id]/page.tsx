@@ -2,76 +2,25 @@
 
 import { use } from "react"
 import Link from "next/link"
-import { useRouter } from "next/navigation"
 import { useSignalGroupDetail, useCorrelationConfig } from "@/hooks/use-api"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import { ConfidenceBar } from "@/components/dashboard/confidence-bar"
+import { PageHeader } from "@/components/dashboard/page-header"
+import { StatusPill, Tag, signalGroupTone } from "@/components/dashboard/status-pill"
+import { Field, FieldList } from "@/components/dashboard/field"
+import { LoadingRows } from "@/components/dashboard/states"
+import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatConfidence, isConfidence } from "@/lib/confidence"
-import {
-  ArrowLeft,
-  Layers,
-  RefreshCw,
-  ShieldAlert,
-  Clock,
-  BarChart3,
-  CheckCircle2,
-  AlertTriangle,
-  Link2,
-  Info,
-} from "lucide-react"
+import { formatUtc } from "@/lib/format"
+import { AlertTriangle, CheckCircle2, Info } from "lucide-react"
 
-// ── Helpers ──────────────────────────────────────────────
-
-function formatTimestamp(dateStr: string): string {
-  return (
-    new Date(dateStr).toLocaleString("en-US", {
-      timeZone: "UTC",
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    }) + " UTC"
-  )
+function statusLabel(status: string, corroborated: boolean) {
+  if (status === "resolved") return "Resolved"
+  if (status === "expired") return "Expired"
+  return corroborated ? "Corroborated" : "Open"
 }
 
-function statusBadge(status: string, corroborated: boolean) {
-  if (status === "resolved") {
-    return (
-      <Badge variant="default" className="bg-green-600 hover:bg-green-600 text-xs">
-        Resolved
-      </Badge>
-    )
-  }
-  if (status === "expired") {
-    return (
-      <Badge variant="secondary" className="text-xs">
-        Expired
-      </Badge>
-    )
-  }
-  return (
-    <Badge variant={corroborated ? "default" : "outline"} className="text-xs">
-      {corroborated ? "Corroborated" : "Open"}
-    </Badge>
-  )
-}
-
-const SOURCE_COLORS: Record<string, string> = {
-  fastnetmon: "bg-blue-500",
-  alertmanager: "bg-orange-500",
-  dashboard: "bg-purple-500",
-}
-
-function sourceColor(source: string): string {
-  return SOURCE_COLORS[source] ?? "bg-gray-500"
-}
-
-// ── Page Component ───────────────────────────────────────
+const back = { href: "/correlation", label: "Correlation" }
 
 export default function SignalGroupDetailPage({
   params,
@@ -79,40 +28,26 @@ export default function SignalGroupDetailPage({
   params: Promise<{ id: string }>
 }) {
   const { id } = use(params)
-  const router = useRouter()
 
   const { data: group, isLoading, error } = useSignalGroupDetail(id)
   const { data: correlationConfig } = useCorrelationConfig()
 
-  // Loading state
   if (isLoading) {
     return (
-      <>
-        <div className="flex h-[50vh] items-center justify-center">
-          <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
-      </>
+      <div className="space-y-6">
+        <PageHeader back={back} title="Signal group" />
+        <div className="rounded-md border bg-card"><LoadingRows label="Loading signal group" /></div>
+      </div>
     )
   }
 
-  // 404 / error state
   if (error || !group) {
     return (
-      <>
-        <div className="flex flex-col items-center justify-center h-[50vh] space-y-4">
-          <ShieldAlert className="h-12 w-12 text-muted-foreground" />
-          <h2 className="text-xl font-semibold">Signal Group Not Found</h2>
-          <p className="text-muted-foreground text-sm">
-            The requested signal group ID does not exist or has been removed.
-          </p>
-          <Button
-            variant="outline"
-            onClick={() => router.push("/correlation")}
-          >
-            <ArrowLeft className="mr-2 h-4 w-4" /> Back to Correlation
-          </Button>
-        </div>
-      </>
+      <PageHeader
+        back={back}
+        title="Signal group not found"
+        description="The requested signal group ID does not exist or has been removed."
+      />
     )
   }
 
@@ -147,346 +82,210 @@ export default function SignalGroupDetailPage({
   const minSources = correlationConfig?.min_sources ?? 1
 
   return (
-    <>
-      <div className="space-y-6">
-        {/* ── Header ────────────────────────────────────────── */}
-        <div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => router.push("/correlation")}
-            className="-ml-3 mb-2 text-muted-foreground"
+    <div className="space-y-6">
+      <PageHeader
+        back={back}
+        title={
+          <Link
+            href={`/ip-history?ip=${encodeURIComponent(group.victim_ip)}`}
+            className="break-all rounded-sm font-mono hover:underline"
           >
-            <ArrowLeft className="mr-2 h-4 w-4" /> Back to Correlation
-          </Button>
+            {group.victim_ip}
+          </Link>
+        }
+        meta={
+          <>
+            <StatusPill tone={signalGroupTone(group.status, group.corroboration_met)}>
+              {statusLabel(group.status, group.corroboration_met)}
+            </StatusPill>
+            <Tag>{group.vector.replace(/_/g, " ")}</Tag>
+            <span className="text-muted-foreground tabular-nums">
+              {group.source_count} source{group.source_count !== 1 ? "s" : ""}
+            </span>
+            <span className="text-muted-foreground tabular-nums">
+              Created <time dateTime={group.created_at}>{formatUtc(group.created_at)}</time>
+            </span>
+            <span className="text-muted-foreground tabular-nums">
+              Window {group.status === "open" ? "expires" : group.status === "expired" ? "expired" : "closed"}{" "}
+              <time dateTime={group.window_expires_at}>{formatUtc(group.window_expires_at)}</time>
+            </span>
+          </>
+        }
+      />
 
-          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-3 mt-1">
-                {statusBadge(group.status, group.corroboration_met)}
-                <Link
-                  href={`/ip-history?ip=${encodeURIComponent(group.victim_ip)}`}
-                  className="text-2xl font-bold font-mono tracking-tight text-primary hover:underline"
-                >
-                  {group.victim_ip}
-                </Link>
-              </div>
-              <div className="flex items-center gap-2 mt-2">
-                <Badge
-                  variant="outline"
-                  className="font-mono text-muted-foreground"
-                >
-                  {group.vector.replace(/_/g, " ")}
-                </Badge>
-                <span className="text-xs text-muted-foreground font-mono">
-                  {group.source_count} source{group.source_count !== 1 ? "s" : ""}
-                </span>
-              </div>
-            </div>
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+        <div className="space-y-6 lg:col-span-2">
+          <Card>
+            <CardHeader className="flex items-center justify-between gap-2">
+              <CardTitle>Contributing events</CardTitle>
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {sortedEvents.length} event{sortedEvents.length !== 1 ? "s" : ""}
+              </span>
+            </CardHeader>
+            <CardContent>
+              {sortedEvents.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No contributing events recorded.</p>
+              ) : (
+                <ol className="relative space-y-5 border-l pl-4">
+                  {sortedEvents.map((event) => (
+                    <li key={event.event_id} className="relative">
+                      <span aria-hidden="true" className="absolute -left-[21px] top-1.5 size-2.5 rounded-full bg-muted-foreground" />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Tag className="text-foreground">{event.source}</Tag>
+                        {event.is_corroborating && (
+                          <Tag>
+                            <span title="Corroborating signal — strengthened the group but cannot trigger mitigations alone">corroborating</span>
+                          </Tag>
+                        )}
+                        <span className="text-xs text-muted-foreground tabular-nums">
+                          Confidence: {formatConfidence(event.confidence)}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground tabular-nums">
+                        {event.ingested_at ? formatUtc(event.ingested_at) : "Unknown ingest time"}
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Event{" "}
+                        <Link
+                          href={`/events?id=${encodeURIComponent(event.event_id)}`}
+                          className="rounded-sm font-mono text-foreground hover:underline"
+                        >
+                          {event.event_id.slice(0, 8)}
+                        </Link>
+                        <span className="ml-2 tabular-nums">weight {event.source_weight.toFixed(1)}</span>
+                      </p>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </CardContent>
+          </Card>
 
-            <div className="text-right text-xs font-mono text-muted-foreground space-y-1">
-              <div>Created: {formatTimestamp(group.created_at)}</div>
-              <div>
-                Window:{" "}
-                {group.status === "open"
-                  ? `Expires ${formatTimestamp(group.window_expires_at)}`
-                  : group.status === "expired"
-                    ? `Expired ${formatTimestamp(group.window_expires_at)}`
-                    : `Closed ${formatTimestamp(group.window_expires_at)}`}
+          <Card>
+            <CardHeader>
+              <CardTitle>Confidence breakdown</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="overflow-hidden rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead>Source</TableHead>
+                      <TableHead className="text-right">Raw confidence</TableHead>
+                      <TableHead className="text-right">Weight</TableHead>
+                      <TableHead className="text-right">Weighted contribution</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {confidenceRows.map((row) => (
+                      <TableRow key={row.event_id}>
+                        <TableCell>{row.source}</TableCell>
+                        <TableCell numeric>{formatConfidence(row.rawConfidence)}</TableCell>
+                        <TableCell numeric>{row.weight.toFixed(1)}</TableCell>
+                        <TableCell numeric>{formatConfidence(row.weightedContribution)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                  <TableFooter>
+                    <TableRow className="hover:bg-transparent">
+                      <TableCell className="font-medium">Derived total</TableCell>
+                      <TableCell />
+                      <TableCell numeric className="font-medium">{totalWeight.toFixed(1)}</TableCell>
+                      <TableCell numeric className="font-medium">{formatConfidence(group.derived_confidence)}</TableCell>
+                    </TableRow>
+                  </TableFooter>
+                </Table>
               </div>
-              <div className="text-[10px] break-all">ID: {group.group_id}</div>
-            </div>
-          </div>
+            </CardContent>
+          </Card>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* ── Main Column ─────────────────────────────────── */}
-          <div className="lg:col-span-2 space-y-6">
-            {/* Contributing Events Timeline */}
-            <Card className="border-border shadow-sm">
-              <CardHeader className="pb-4">
-                <div className="flex items-center gap-2">
-                  <Clock className="h-5 w-5 text-muted-foreground" />
-                  <CardTitle className="text-base font-semibold">
-                    Contributing Events
-                  </CardTitle>
-                  <Badge variant="secondary" className="text-[10px] ml-auto">
-                    {sortedEvents.length} event{sortedEvents.length !== 1 ? "s" : ""}
-                  </Badge>
-                </div>
-              </CardHeader>
-              <CardContent>
-                {sortedEvents.length === 0 ? (
-                  <p className="text-sm text-muted-foreground italic">
-                    No contributing events recorded.
+        <div className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Corroboration</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {group.corroboration_met ? (
+                <div className="space-y-1">
+                  <StatusPill tone="success" icon={<CheckCircle2 aria-hidden="true" />}>Corroborated</StatusPill>
+                  <p className="text-xs text-muted-foreground tabular-nums">
+                    {distinctSources} of {minSources} required source{minSources !== 1 ? "s" : ""} confirmed
                   </p>
-                ) : (
-                  <div className="space-y-6 pl-4 border-l-2 border-muted relative">
-                    {sortedEvents.map((event, idx) => (
-                      <div key={event.event_id} className="relative">
-                        <div
-                          className={`absolute -left-[21px] top-1 h-3 w-3 rounded-full ${sourceColor(event.source)}`}
-                        />
-                        <div>
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <Badge
-                              variant="outline"
-                              className="text-[10px] font-mono"
-                            >
-                              {event.source}
-                            </Badge>
-                            {event.is_corroborating && (
-                              <Badge
-                                variant="secondary"
-                                className="text-[10px] font-mono bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30"
-                                title="Corroborating signal — strengthened the group but cannot trigger mitigations alone"
-                              >
-                                corroborating
-                              </Badge>
-                            )}
-                            <span className="text-xs text-muted-foreground tabular-nums">
-                              Confidence:{" "}
-                              {formatConfidence(event.confidence)}
-                            </span>
-                          </div>
-                          <p className="text-xs text-muted-foreground font-mono mt-1">
-                            {event.ingested_at ? formatTimestamp(event.ingested_at) : "Unknown ingest time"}
-                          </p>
-                          <p className="text-xs text-muted-foreground mt-1">
-                            Event{" "}
-                            <Link
-                              href={`/events?id=${encodeURIComponent(event.event_id)}`}
-                              className="font-mono text-primary hover:underline"
-                            >
-                              {event.event_id.slice(0, 8)}
-                            </Link>
-                            <span className="text-muted-foreground/60 ml-2">
-                              weight: {event.source_weight.toFixed(1)}
-                            </span>
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Confidence Breakdown */}
-            <Card className="border-border shadow-sm">
-              <CardHeader className="pb-4">
-                <div className="flex items-center gap-2">
-                  <BarChart3 className="h-5 w-5 text-muted-foreground" />
-                  <CardTitle className="text-base font-semibold">
-                    Confidence Breakdown
-                  </CardTitle>
                 </div>
-              </CardHeader>
-              <CardContent>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs font-mono">
-                    <thead>
-                      <tr className="border-b border-border text-left text-muted-foreground">
-                        <th className="pb-2 pr-3 font-medium">Source</th>
-                        <th className="pb-2 pr-3 font-medium text-right">
-                          Raw Confidence
-                        </th>
-                        <th className="pb-2 pr-3 font-medium text-right">
-                          Weight
-                        </th>
-                        <th className="pb-2 font-medium text-right">
-                          Weighted Contribution
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {confidenceRows.map((row) => (
-                        <tr
-                          key={row.event_id}
-                          className="border-b border-border/50 last:border-0"
-                        >
-                          <td className="py-2 pr-3">
-                            <div className="flex items-center gap-2">
-                              <div
-                                className={`h-2 w-2 rounded-full ${sourceColor(row.source)}`}
-                              />
-                              {row.source}
-                            </div>
-                          </td>
-                          <td className="py-2 pr-3 text-right tabular-nums">
-                            {formatConfidence(row.rawConfidence)}
-                          </td>
-                          <td className="py-2 pr-3 text-right tabular-nums">
-                            {row.weight.toFixed(1)}
-                          </td>
-                          <td className="py-2 text-right tabular-nums">
-                            {formatConfidence(row.weightedContribution)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                    <tfoot>
-                      <tr className="border-t border-border font-semibold">
-                        <td className="pt-2 pr-3">Derived Total</td>
-                        <td className="pt-2 pr-3 text-right" />
-                        <td className="pt-2 pr-3 text-right tabular-nums">
-                          {totalWeight.toFixed(1)}
-                        </td>
-                        <td className="pt-2 text-right tabular-nums">
-                          {formatConfidence(group.derived_confidence)}
-                        </td>
-                      </tr>
-                    </tfoot>
-                  </table>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* ── Sidebar Column ──────────────────────────────── */}
-          <div className="space-y-6">
-            {/* Corroboration Badge */}
-            <Card className="border-border shadow-sm">
-              <CardHeader className="pb-3">
-                <div className="flex items-center gap-2">
-                  <Layers className="h-5 w-5 text-muted-foreground" />
-                  <CardTitle className="text-base font-semibold">
-                    Corroboration
-                  </CardTitle>
-                </div>
-              </CardHeader>
-              <CardContent>
-                {group.corroboration_met ? (
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400" />
-                    <div>
-                      <p className="text-sm font-medium text-green-700 dark:text-green-400">
-                        Corroborated
-                      </p>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        {distinctSources} of {minSources} required source{minSources !== 1 ? "s" : ""} confirmed
-                      </p>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2">
-                    <AlertTriangle className="h-5 w-5 text-amber-500 dark:text-amber-400" />
-                    <div>
-                      <p className="text-sm font-medium text-amber-600 dark:text-amber-400">
-                        Pending Corroboration {distinctSources}/{minSources}
-                      </p>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        {minSources - distinctSources} more distinct source{(minSources - distinctSources) !== 1 ? "s" : ""} needed
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Linked Mitigation */}
-            <Card className="border-border shadow-sm">
-              <CardHeader className="pb-3">
-                <div className="flex items-center gap-2">
-                  <Link2 className="h-5 w-5 text-muted-foreground" />
-                  <CardTitle className="text-base font-semibold">
-                    Linked Mitigation
-                  </CardTitle>
-                </div>
-              </CardHeader>
-              <CardContent>
-                {group.mitigation_id ? (
-                  <div className="space-y-2">
-                    <Link
-                      href={`/mitigations/${group.mitigation_id}`}
-                      className="block p-3 rounded-md border border-border hover:bg-muted/50 transition-colors"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-mono text-primary">
-                          {group.mitigation_id.slice(0, 8)}…
-                        </span>
-                        <Badge
-                          variant="default"
-                          className="text-[10px] bg-green-600 hover:bg-green-600"
-                        >
-                          Active
-                        </Badge>
-                      </div>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Mitigation created from this signal group
-                      </p>
-                    </Link>
-                  </div>
-                ) : (
-                  <div className="flex items-start gap-2">
-                    <Info className="h-4 w-4 text-muted-foreground mt-0.5 flex-shrink-0" />
-                    <div>
-                      <p className="text-sm text-muted-foreground">
-                        No mitigation created
-                      </p>
-                      <p className="text-xs text-muted-foreground/70 mt-1">
-                        {group.status === "open"
-                          ? "Corroboration threshold has not been met yet. A mitigation will be created when enough distinct sources confirm this attack."
-                          : group.status === "expired"
-                            ? "The correlation window expired before corroboration was achieved. No mitigation was triggered."
-                            : "No linked mitigation is available for this signal group."}
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Confidence Summary */}
-            <Card className="border-border shadow-sm bg-secondary/10">
-              <CardHeader className="pb-3">
-                <div className="flex items-center gap-2">
-                  <BarChart3 className="h-5 w-5 text-muted-foreground" />
-                  <CardTitle className="text-base font-semibold">
-                    Summary
-                  </CardTitle>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <div>
-                  <p className="text-xs text-muted-foreground mb-1">
-                    Derived Confidence
-                    {correlationConfig &&
-                    correlationConfig.confidence_decay_half_life_seconds &&
-                    correlationConfig.confidence_decay_half_life_seconds > 0 ? (
-                      <span className="ml-1 text-muted-foreground/70">
-                        (decayed, half-life{" "}
-                        {correlationConfig.confidence_decay_half_life_seconds}s)
-                      </span>
-                    ) : null}
+              ) : (
+                <div className="space-y-1">
+                  <StatusPill tone="warning" icon={<AlertTriangle aria-hidden="true" />}>
+                    Pending corroboration {distinctSources}/{minSources}
+                  </StatusPill>
+                  <p className="text-xs text-muted-foreground tabular-nums">
+                    {minSources - distinctSources} more distinct source{(minSources - distinctSources) !== 1 ? "s" : ""} needed
                   </p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Linked mitigation</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {group.mitigation_id ? (
+                <Link
+                  href={`/mitigations/${group.mitigation_id}`}
+                  className="block rounded-md border p-3 hover:bg-muted/40"
+                >
+                  <span className="font-mono text-sm">{group.mitigation_id.slice(0, 8)}…</span>
+                  <span className="mt-1 block text-xs text-muted-foreground">
+                    Mitigation created from this signal group. Open it for current status.
+                  </span>
+                </Link>
+              ) : (
+                <div className="flex items-start gap-2">
+                  <Info className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  <div>
+                    <p className="text-sm">No mitigation created</p>
+                    <p className="mt-1 text-xs text-muted-foreground text-pretty">
+                      {group.status === "open"
+                        ? "Corroboration threshold has not been met yet. A mitigation will be created when enough distinct sources confirm this attack."
+                        : group.status === "expired"
+                          ? "The correlation window expired before corroboration was achieved. No mitigation was triggered."
+                          : "No linked mitigation is available for this signal group."}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Summary</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <FieldList className="sm:grid-cols-1">
+                <Field
+                  label={
+                    <>
+                      Derived confidence
+                      {correlationConfig?.confidence_decay_half_life_seconds && correlationConfig.confidence_decay_half_life_seconds > 0 ? (
+                        <span className="ml-1">(decayed, half-life {correlationConfig.confidence_decay_half_life_seconds}s)</span>
+                      ) : null}
+                    </>
+                  }
+                >
                   <ConfidenceBar value={group.derived_confidence} />
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground mb-1">
-                    Distinct Sources
-                  </p>
-                  <p className="text-sm font-mono">{distinctSources}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground mb-1">
-                    Confidence Threshold
-                  </p>
-                  <p className="text-sm font-mono">
-                    {formatConfidence(correlationConfig?.confidence_threshold)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground mb-1">
-                    Min Sources Required
-                  </p>
-                  <p className="text-sm font-mono">{minSources}</p>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
+                </Field>
+                <Field label="Distinct sources"><span className="tabular-nums">{distinctSources}</span></Field>
+                <Field label="Confidence threshold"><span className="tabular-nums">{formatConfidence(correlationConfig?.confidence_threshold)}</span></Field>
+                <Field label="Min sources required"><span className="tabular-nums">{minSources}</span></Field>
+                <Field label="Group ID"><span className="break-all font-mono text-xs">{group.group_id}</span></Field>
+              </FieldList>
+            </CardContent>
+          </Card>
         </div>
       </div>
-    </>
+    </div>
   )
 }

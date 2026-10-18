@@ -134,9 +134,9 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
     <Dialog open={open} onOpenChange={(v) => { if (!isSubmitting) { onOpenChange(v); if (!v) reset() } }}>
       <DialogContent className="sm:max-w-lg bg-card border-border">
         <DialogHeader>
-          <DialogTitle className="text-sm font-mono uppercase tracking-wide flex items-center gap-2">
-            <ShieldAlert className="h-4 w-4 text-primary" />
-            Mitigate Now
+          <DialogTitle className="text-sm flex items-center gap-2">
+            <ShieldAlert className="h-4 w-4 text-muted-foreground" />
+            Mitigate now
           </DialogTitle>
           <DialogDescription className="text-xs text-muted-foreground">
             Submit a manual attack event. The policy engine will evaluate playbooks and announce a FlowSpec rule if appropriate.
@@ -145,7 +145,7 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
 
         <div className="space-y-4 py-2">
           <div className="space-y-1.5">
-            <Label htmlFor="mn-ip" className="text-xs">
+            <Label htmlFor="mn-ip">
               Destination IP <span className="text-destructive">*</span>
             </Label>
             <Input
@@ -156,17 +156,17 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
               className="font-mono h-9"
             />
             {victimIp && !isValidIPv4(victimIp) && (
-              <p className="text-[10px] text-destructive">Invalid IPv4 address</p>
+              <p className="text-xs text-destructive">Invalid IPv4 address</p>
             )}
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="mn-vector" className="text-xs">
+            <Label htmlFor="mn-vector">
               Attack Vector <span className="text-destructive">*</span>
             </Label>
             <Select value={vector} onValueChange={setVector}>
               <SelectTrigger id="mn-vector" className="h-9">
-                <SelectValue placeholder="Select vector..." />
+                <SelectValue placeholder="Select vector…" />
               </SelectTrigger>
               <SelectContent>
                 {VECTORS.map((v) => (
@@ -180,7 +180,7 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label htmlFor="mn-bps" className="text-xs">Traffic (bps)</Label>
+              <Label htmlFor="mn-bps">Traffic (bps)</Label>
               <Input
                 id="mn-bps"
                 type="number"
@@ -191,7 +191,7 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="mn-pps" className="text-xs">Packets (pps)</Label>
+              <Label htmlFor="mn-pps">Packets (pps)</Label>
               <Input
                 id="mn-pps"
                 type="number"
@@ -204,7 +204,7 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="mn-ports" className="text-xs">Destination Ports</Label>
+            <Label htmlFor="mn-ports">Destination ports</Label>
             <Input
               id="mn-ports"
               placeholder="80, 443, 53"
@@ -213,14 +213,14 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
               className="font-mono h-9"
             />
             {ports && parsePorts(ports) === null && (
-              <p className="text-[10px] text-destructive">
+              <p className="text-xs text-destructive">
                 Invalid ports. Comma-separated 1-65535, max 8.
               </p>
             )}
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="mn-confidence" className="text-xs">
+            <Label htmlFor="mn-confidence">
               Confidence ({confidence})
             </Label>
             <Input
@@ -233,7 +233,7 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
               onChange={(e) => setConfidence(e.target.value)}
               className="accent-primary"
             />
-            <div className="flex justify-between text-[10px] text-muted-foreground font-mono">
+            <div className="flex justify-between text-xs text-muted-foreground">
               <span>0.0</span>
               <span>1.0</span>
             </div>

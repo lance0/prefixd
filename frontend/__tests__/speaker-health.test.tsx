@@ -36,11 +36,11 @@ function health(status: string, peers: Record<string, string> = {}): HealthDetai
 
 describe("speaker observation UI", () => {
   it.each([
-    ["unsupported", {}, "UNSUPPORTED", "BGP peer observation is unsupported by this speaker"],
-    ["error", {}, "ERROR", "BGP peer observation failed"],
-    ["connected", {}, "NO PEERS", "No BGP peers configured"],
-    ["connected", { router: "established" }, "UP", "router"],
-    ["connected", { router: "idle" }, "DOWN", "router"],
+    ["unsupported", {}, "unsupported", "BGP peer observation is unsupported by this speaker"],
+    ["error", {}, "error", "BGP peer observation failed"],
+    ["connected", {}, "no peers", "No BGP peers configured"],
+    ["connected", { router: "established" }, "up", "router"],
+    ["connected", { router: "idle" }, "down", "router"],
   ])("renders %s with %j peers distinctly in both views", (status, peers, badge, detail) => {
     // Older servers omit additive speaker metadata.
     mock.health = health(status as string, peers as Record<string, string>)
@@ -73,8 +73,8 @@ describe("speaker observation UI", () => {
     render(<BgpSessionStatus />)
     const strip = screen.getByLabelText("Speaker and controller health")
     expect(screen.getByText("rustbgpd")).toBeInTheDocument()
-    expect(screen.getByText("DOWN")).toBeInTheDocument()
-    expect(strip).toHaveTextContent("Peers DOWN")
+    expect(screen.getByText("down")).toBeInTheDocument()
+    expect(strip).toHaveTextContent("Peers down")
     expect(strip).toHaveTextContent("1/2 established")
     expect(strip).toHaveTextContent("Controller v0.22.0 · up 1h 1m")
     expect(strip).not.toHaveTextContent(/installed|speaker version|speaker uptime/i)
@@ -82,16 +82,16 @@ describe("speaker observation UI", () => {
 
   it("keeps an initial health fetch separate from successful empty peers", () => {
     render(<BgpSessionStatus />)
-    expect(screen.getByText("LOADING")).toBeInTheDocument()
-    expect(screen.queryByText("NO PEERS")).not.toBeInTheDocument()
+    expect(screen.getByText("loading")).toBeInTheDocument()
+    expect(screen.queryByText("no peers")).not.toBeInTheDocument()
   })
 
   it("shows a fetch error instead of stale successful peer state", () => {
     mock.health = health("connected", { router: "established" })
     mock.error = new Error("offline")
     render(<BgpSessionStatus />)
-    expect(screen.getByText("ERROR")).toBeInTheDocument()
-    expect(screen.queryByText("UP")).not.toBeInTheDocument()
+    expect(screen.getByText("error")).toBeInTheDocument()
+    expect(screen.queryByText("up")).not.toBeInTheDocument()
   })
   it.each([0, 3660])("shows observed daemon metadata independently of controller uptime (%s)", (uptime) => {
     mock.health = health("connected", { router: "established" })
@@ -128,8 +128,8 @@ describe("speaker observation UI", () => {
       daemon: { status: "observed", version: "old-version", uptime_seconds: 123, ready: true, observed_at: new Date(Date.now() - 20000).toISOString() } }
     mock.health.receivedAt = performance.now() - 20000
     render(<BgpSessionStatus />)
-    expect(screen.getByText("STALE")).toBeInTheDocument()
-    expect(screen.queryByText("UP")).not.toBeInTheDocument()
+    expect(screen.getByText("stale")).toBeInTheDocument()
+    expect(screen.queryByText("up")).not.toBeInTheDocument()
     expect(screen.queryByText("old-version")).not.toBeInTheDocument()
     expect(screen.getByText("Health observation is stale. Retrying automatically.")).toBeInTheDocument()
     expect(screen.queryByText("connected")).not.toBeInTheDocument()
@@ -142,7 +142,7 @@ describe("speaker observation UI", () => {
     mock.error = new Error("offline")
     render(<BgpSessionStatus />)
     expect(screen.queryByText("cached-version")).not.toBeInTheDocument()
-    expect(screen.getByText("ERROR")).toBeInTheDocument()
+    expect(screen.getByText("error")).toBeInTheDocument()
   })
 
   it("uses only local receipt time, independent of server clock skew", () => {
@@ -155,7 +155,7 @@ describe("speaker observation UI", () => {
     mock.health.speaker = { backend: "rustbgpd", capabilities: { rule_reader: true, peer_observer: true },
       daemon: { status: "observed", version: "real-version", uptime_seconds: 0, ready: true, observed_at: "2099-01-01T00:00:00Z" } }
     render(<BgpSessionStatus />)
-    expect(screen.getByText("UP")).toBeInTheDocument()
+    expect(screen.getByText("up")).toBeInTheDocument()
     expect(screen.getByLabelText("Speaker and controller health")).toHaveTextContent("real-version")
   })
 
@@ -165,8 +165,8 @@ describe("speaker observation UI", () => {
       daemon: { status: "unsupported", version: null, uptime_seconds: null, ready: null, observed_at: null } }
     mock.health.receivedAt = performance.now() - 20000
     render(<BgpSessionStatus />)
-    expect(screen.getByText("STALE")).toBeInTheDocument()
-    expect(screen.queryByText("UP")).not.toBeInTheDocument()
+    expect(screen.getByText("stale")).toBeInTheDocument()
+    expect(screen.queryByText("up")).not.toBeInTheDocument()
     expect(screen.getByLabelText("Speaker and controller health")).toHaveTextContent("Daemon unsupported")
   })
 
@@ -176,15 +176,15 @@ describe("speaker observation UI", () => {
     vi.spyOn(performance, "now").mockImplementation(() => monotonic)
     mock.health = health("connected", { router: "established" })
     render(<BgpSessionStatus />)
-    expect(screen.getByText("UP")).toBeInTheDocument()
+    expect(screen.getByText("up")).toBeInTheDocument()
     monotonic += 20000
     act(() => vi.advanceTimersByTime(20000))
-    expect(screen.getByText("STALE")).toBeInTheDocument()
-    expect(screen.queryByText("UP")).not.toBeInTheDocument()
+    expect(screen.getByText("stale")).toBeInTheDocument()
+    expect(screen.queryByText("up")).not.toBeInTheDocument()
     expect(screen.queryByText("connected")).not.toBeInTheDocument()
     vi.setSystemTime(new Date("2000-01-01T00:00:00Z"))
     act(() => vi.advanceTimersByTime(5000))
-    expect(screen.getByText("STALE")).toBeInTheDocument()
+    expect(screen.getByText("stale")).toBeInTheDocument()
   })
 
   it.each(["stale", "error"])("hides Admin established badges for %s cached health", (state) => {

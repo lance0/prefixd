@@ -99,7 +99,7 @@ async function openSingle(view: "list" | "detail") {
 
 async function openBulk() {
   fireEvent.click(screen.getByRole("checkbox", { name: "Select all active mitigations" }))
-  const trigger = screen.getByRole("button", { name: "Withdraw All" })
+  const trigger = screen.getByRole("button", { name: "Withdraw all" })
   act(() => trigger.focus())
   fireEvent.click(trigger)
   const dialog = await screen.findByRole("alertdialog", { name: "Bulk Withdraw Mitigations" })
@@ -162,7 +162,7 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     await act(async () => pending.resolve())
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
     const stableTarget = view === "list"
-      ? screen.getByPlaceholderText("Search IP...")
+      ? screen.getByPlaceholderText("Search IP, vector or ID…")
       : screen.getByRole("link", { name: targets[0].victim_ip })
     await waitFor(() => expect(stableTarget).toHaveFocus())
     expect(mocks.mutate).toHaveBeenCalledTimes(1)
@@ -217,7 +217,7 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
     expect(trigger).not.toBeInTheDocument()
     const fallback = view === "list"
-      ? screen.getByPlaceholderText("Search IP...")
+      ? screen.getByPlaceholderText("Search IP, vector or ID…")
       : screen.getByRole("link", { name: targets[0].victim_ip })
     await waitFor(() => expect(fallback).toHaveFocus())
   })
@@ -239,7 +239,7 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     expect(trigger).toBeInTheDocument()
     expect(mocks.mutate).toHaveBeenCalledTimes(1)
     const stableTarget = view === "list"
-      ? screen.getByPlaceholderText("Search IP...")
+      ? screen.getByPlaceholderText("Search IP, vector or ID…")
       : screen.getByRole("link", { name: targets[0].victim_ip })
     await waitFor(() => expect([trigger, stableTarget]).toContain(document.activeElement))
     await act(async () => refresh.resolve())
@@ -288,7 +288,7 @@ describe("bulk withdrawal confirmation", () => {
       [[targets[1].mitigation_id], "incident resolved", "dashboard"],
     ])
     expect(mocks.mutate).toHaveBeenCalledTimes(2)
-    await waitFor(() => expect(screen.getByPlaceholderText("Search IP...")).toHaveFocus())
+    await waitFor(() => expect(screen.getByPlaceholderText("Search IP, vector or ID…")).toHaveFocus())
   })
 
   it("keeps all selected targets and the reason after a rejected request", async () => {

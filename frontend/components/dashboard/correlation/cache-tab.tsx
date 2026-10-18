@@ -3,10 +3,10 @@
 import { formatConfidence } from "@/lib/confidence"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Skeleton } from "@/components/ui/skeleton"
-import { Database, AlertCircle } from "lucide-react"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { useCachedCorroborators } from "@/hooks/use-api"
-import { formatDistanceToNow } from "date-fns"
+import { MISSING, formatRelative, formatUtc } from "@/lib/format"
 
 function dimsLabel(s: {
   customer_id: string | null
@@ -19,131 +19,90 @@ function dimsLabel(s: {
   if (s.pop) parts.push(`pop=${s.pop}`)
   if (s.service_id) parts.push(`service=${s.service_id}`)
   if (s.interface) parts.push(`iface=${s.interface}`)
-  return parts.length > 0 ? parts.join(" ") : "—"
+  return parts.length > 0 ? parts.join(" ") : MISSING
 }
 
 export function CacheTab() {
   const { data, error, isLoading } = useCachedCorroborators({ limit: 200 })
 
   if (isLoading) {
-    return (
-      <div className="space-y-3">
-        <Skeleton className="h-24 w-full" />
-        <Skeleton className="h-48 w-full" />
-      </div>
-    )
+    return <div className="rounded-md border bg-card"><LoadingRows label="Loading corroborator cache" /></div>
   }
 
   if (error) {
     return (
-      <Card>
-        <CardContent className="p-4 flex items-center gap-2 text-destructive">
-          <AlertCircle className="h-4 w-4" />
-          <span className="text-sm font-mono">Failed to load corroborator cache</span>
-        </CardContent>
-      </Card>
+      <div className="rounded-md border bg-card">
+        <ErrorState title="Failed to load corroborator cache" detail="Cached signals could not be refreshed." />
+      </div>
     )
   }
 
   if (!data || data.total === 0) {
     return (
-      <Card>
-        <CardContent className="p-6 text-center">
-          <Database className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
-          <p className="text-sm font-mono text-muted-foreground">
-            No corroborator signals are currently cached.
-          </p>
-          <p className="text-xs text-muted-foreground mt-1">
-            Cached signals appear here when a corroborating-only source posts before
-            any matching primary event lands.
-          </p>
-        </CardContent>
-      </Card>
+      <div className="rounded-md border bg-card">
+        <EmptyState
+          title="No corroborator signals are currently cached."
+          description="Cached signals appear here when a corroborating-only source posts before any matching primary event lands."
+        />
+      </div>
     )
   }
 
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-mono flex items-center gap-2">
-            <Database className="h-4 w-4" />
-            Cache size by source
-          </CardTitle>
+        <CardHeader>
+          <CardTitle>Cache size by source</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="flex flex-wrap gap-2">
             {data.by_source.map((b) => (
-              <Badge
-                key={b.source}
-                variant="secondary"
-                className="font-mono text-xs"
-              >
+              <Badge key={b.source} variant="secondary">
                 {b.source}: {b.count}
               </Badge>
             ))}
           </div>
-          <p className="text-[11px] text-muted-foreground font-mono mt-3">
+          <p className="mt-3 text-xs text-muted-foreground text-pretty">
             Total cached, unattached, unexpired: {data.total}. Watch the
-            <span className="mx-1 inline-block px-1 rounded bg-muted">prefixd_corroborator_cache_size</span>
+            <code className="mx-1 rounded-sm bg-muted px-1 font-mono">prefixd_corroborator_cache_size</code>
             gauge to alert on caches growing without bound.
           </p>
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-mono">Cached signals</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs font-mono">
-              <thead>
-                <tr className="border-b">
-                  <th className="text-left py-1.5 pr-3">Source</th>
-                  <th className="text-left py-1.5 pr-3">Vector</th>
-                  <th className="text-left py-1.5 pr-3">Dimensions</th>
-                  <th className="text-left py-1.5 pr-3">Confidence</th>
-                  <th className="text-left py-1.5 pr-3">Ingested</th>
-                  <th className="text-left py-1.5">Expires</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.signals.map((s) => (
-                  <tr key={s.signal_id} className="border-b last:border-0">
-                    <td className="py-1.5 pr-3">{s.source}</td>
-                    <td className="py-1.5 pr-3 text-muted-foreground">
-                      {s.vector ?? "—"}
-                    </td>
-                    <td className="py-1.5 pr-3 text-muted-foreground">
-                      {dimsLabel(s)}
-                    </td>
-                    <td className="py-1.5 pr-3 tabular-nums">
-                      {formatConfidence(s.confidence)}
-                    </td>
-                    <td
-                      className="py-1.5 pr-3 text-muted-foreground"
-                      title={s.ingested_at}
-                    >
-                      {formatDistanceToNow(new Date(s.ingested_at), {
-                        addSuffix: true,
-                      })}
-                    </td>
-                    <td
-                      className="py-1.5 text-muted-foreground"
-                      title={s.expires_at}
-                    >
-                      {formatDistanceToNow(new Date(s.expires_at), {
-                        addSuffix: true,
-                      })}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
+      <section aria-labelledby="cached-signals" className="overflow-hidden rounded-md border bg-card">
+        <div className="border-b px-4 py-3">
+          <h2 id="cached-signals" className="text-sm font-semibold">Cached signals</h2>
+        </div>
+        <Table>
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <TableHead>Source</TableHead>
+              <TableHead>Vector</TableHead>
+              <TableHead>Dimensions</TableHead>
+              <TableHead className="text-right">Confidence</TableHead>
+              <TableHead>Ingested</TableHead>
+              <TableHead>Expires</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {data.signals.map((s) => (
+              <TableRow key={s.signal_id}>
+                <TableCell>{s.source}</TableCell>
+                <TableCell className="text-muted-foreground">{s.vector ?? MISSING}</TableCell>
+                <TableCell className="font-mono text-xs text-muted-foreground">{dimsLabel(s)}</TableCell>
+                <TableCell numeric>{formatConfidence(s.confidence)}</TableCell>
+                <TableCell className="text-muted-foreground tabular-nums">
+                  <time dateTime={s.ingested_at} title={formatUtc(s.ingested_at)}>{formatRelative(s.ingested_at)}</time>
+                </TableCell>
+                <TableCell className="text-muted-foreground tabular-nums">
+                  <time dateTime={s.expires_at} title={formatUtc(s.expires_at)}>{formatRelative(s.expires_at)}</time>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </section>
     </div>
   )
 }

@@ -47,7 +47,7 @@ export function Sidebar({ onClose, isCollapsed = false, onToggleCollapse }: Side
             className={cn("relative flex min-h-10 items-center gap-3 rounded-md px-3 text-sm", collapsed && "justify-center px-0", isActive ? "bg-sidebar-accent font-medium text-primary" : "text-muted-foreground hover:bg-sidebar-accent hover:text-foreground")}>
             <item.icon className="size-4 shrink-0" aria-hidden="true" />
             {!collapsed ? <span className="flex-1">{item.label}</span> : null}
-            {count > 0 ? <span className={cn("rounded-sm bg-muted px-1.5 font-mono text-xs text-foreground", collapsed && "absolute -right-1 -top-1")}>{displayCount}</span> : null}
+            {count > 0 ? <span className={cn("rounded-sm bg-muted px-1.5 text-xs text-foreground", collapsed && "absolute -right-1 -top-1")}>{displayCount}</span> : null}
           </Link>
         )
         return collapsed ? <Tooltip key={item.href}><TooltipTrigger asChild>{link}</TooltipTrigger><TooltipContent side="right">{accessibleLabel}</TooltipContent></Tooltip> : <div key={item.href}>{link}</div>

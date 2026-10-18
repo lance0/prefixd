@@ -2,9 +2,12 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
-import { Search, ChevronDown, ChevronUp, RefreshCw, AlertCircle, Download } from "lucide-react"
-import { ActionTypeBadge } from "@/components/dashboard/action-type-badge"
+import { Search, ChevronDown, ChevronUp, RefreshCw, Download } from "lucide-react"
 import { ActorBadge } from "@/components/dashboard/actor-badge"
+import { StatusPill, Tag, auditActionTone } from "@/components/dashboard/status-pill"
+import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { MISSING, formatUtc } from "@/lib/format"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -16,80 +19,75 @@ import { downloadCsv } from "@/lib/csv"
 type SortField = "timestamp" | "actor" | "action" | "target"
 type SortDirection = "asc" | "desc"
 
-function formatTimestamp(dateStr: string): string {
-  const date = new Date(dateStr)
-  return date.toLocaleTimeString("en-US", {
-    timeZone: "UTC",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }) + " UTC"
-}
-
-function AuditRow({ entry, index, isExpanded, onToggle }: {
+function AuditRow({ entry, isExpanded, onToggle }: {
   entry: AuditEntry
-  index: number
   isExpanded: boolean
   onToggle: () => void
 }) {
   const detailsStr = JSON.stringify(entry.details)
   const isTruncated = detailsStr.length > 50
+  const tone = auditActionTone(entry.action)
 
   return (
     <Fragment>
-      <tr
-        className={cn(
-          "border-b border-border/50 hover:bg-secondary/50 transition-colors",
-          isExpanded && "bg-secondary/30",
-          index % 2 === 1 && !isExpanded && "bg-secondary/20",
-          isTruncated && "cursor-pointer",
-        )}
+      <TableRow
+        data-state={isExpanded ? "selected" : undefined}
+        className={cn(isTruncated && "cursor-pointer")}
         onClick={onToggle}
       >
-        <td className="px-4 py-3 font-mono text-muted-foreground whitespace-nowrap">
-          {formatTimestamp(entry.timestamp)}
-        </td>
-        <td className="px-4 py-3">
+        <TableCell className="whitespace-nowrap text-muted-foreground tabular-nums">
+          <time dateTime={entry.timestamp}>{formatUtc(entry.timestamp)}</time>
+        </TableCell>
+        <TableCell>
           <ActorBadge type={entry.actor_type} name={entry.actor_id || "system"} />
-        </td>
-        <td className="px-4 py-3">
-          <ActionTypeBadge action={entry.action} />
-        </td>
-        <td className="px-4 py-3 font-mono text-foreground">
+        </TableCell>
+        <TableCell>
+          {tone === "neutral" ? <Tag>{entry.action}</Tag> : <StatusPill tone={tone}>{entry.action}</StatusPill>}
+        </TableCell>
+        <TableCell className="font-mono">
           {entry.target_id ? (
             entry.target_type === "mitigation" ? (
               <Link
                 href={`/mitigations/${entry.target_id}`}
-                className="truncate max-w-[200px] inline-block text-primary hover:underline"
+                className="inline-block max-w-[200px] truncate rounded-sm hover:underline"
                 onClick={(e) => e.stopPropagation()}
               >
                 {entry.target_id.slice(0, 8)}
               </Link>
             ) : (
-              <span className="truncate max-w-[200px] inline-block">
-                {entry.target_id.length > 20 ? `${entry.target_id.slice(0, 20)}...` : entry.target_id}
+              <span className="inline-block max-w-[200px] truncate" title={entry.target_id}>
+                {entry.target_id.length > 20 ? `${entry.target_id.slice(0, 20)}…` : entry.target_id}
               </span>
             )
           ) : (
-            <span className="text-muted-foreground">-</span>
+            <span className="text-muted-foreground">{MISSING}</span>
           )}
-        </td>
-        <td className="px-4 py-3 text-muted-foreground max-w-[300px]">
-          <span className="truncate block text-xs font-mono">
-            {detailsStr.slice(0, 50)}
-            {isTruncated && (isExpanded ? " \u25B2" : "... \u25BC")}
+        </TableCell>
+        <TableCell className="max-w-[300px] text-muted-foreground">
+          <span className="flex items-center gap-1">
+            <span className="truncate font-mono text-xs">{detailsStr}</span>
+            {isTruncated ? (
+              <button
+                type="button"
+                aria-expanded={isExpanded}
+                aria-label={isExpanded ? "Hide details" : "Show details"}
+                className="shrink-0 rounded-sm p-1 hover:bg-muted hover:text-foreground"
+                onClick={(e) => { e.stopPropagation(); onToggle() }}
+              >
+                {isExpanded ? <ChevronUp className="size-3.5" aria-hidden="true" /> : <ChevronDown className="size-3.5" aria-hidden="true" />}
+              </button>
+            ) : null}
           </span>
-        </td>
-      </tr>
+        </TableCell>
+      </TableRow>
       {isExpanded && (
-        <tr className="border-b border-border/50 bg-secondary/20">
-          <td colSpan={5} className="px-4 py-3">
-            <pre className="text-xs font-mono bg-secondary/50 p-3 overflow-auto max-h-[300px] whitespace-pre-wrap">
+        <TableRow className="hover:bg-transparent">
+          <TableCell colSpan={5} className="py-3">
+            <pre className="max-h-[300px] overflow-auto whitespace-pre-wrap rounded-md bg-muted/50 p-3 font-mono text-xs">
               {JSON.stringify(entry.details, null, 2)}
             </pre>
-          </td>
-        </tr>
+          </TableCell>
+        </TableRow>
       )}
     </Fragment>
   )
@@ -175,178 +173,145 @@ export function AuditLogContentLive() {
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return null
     return sortDirection === "asc" ? (
-      <ChevronUp className="h-3 w-3 ml-1" />
+      <ChevronUp className="size-3" aria-hidden="true" />
     ) : (
-      <ChevronDown className="h-3 w-3 ml-1" />
+      <ChevronDown className="size-3" aria-hidden="true" />
     )
   }
 
-  if (error) {
-    return (
-      <div className="bg-destructive/10 border border-destructive/50 rounded-lg p-6 text-center">
-        <AlertCircle className="h-8 w-8 mx-auto mb-2 text-destructive" />
-        <p className="text-destructive font-medium">Failed to load audit log</p>
-        <p className="text-sm text-muted-foreground mt-1">{error.message}</p>
-        <Button variant="outline" className="mt-4" onClick={() => mutate()}>
-          <RefreshCw className="h-4 w-4 mr-2" />
-          Retry
-        </Button>
-      </div>
-    )
-  }
+  const sortHeader = (field: SortField, label: string) => (
+    <TableHead aria-sort={sortField === field ? (sortDirection === "asc" ? "ascending" : "descending") : undefined}>
+      <button type="button" onClick={() => handleSort(field)} className="inline-flex items-center gap-1 rounded-sm hover:text-foreground">
+        {label}
+        <SortIcon field={field} />
+      </button>
+    </TableHead>
+  )
+
+  const filtersActive = searchQuery !== "" || actionFilter !== "All" || actorFilter !== "All"
 
   return (
-    <div className="space-y-4">
-      <div className="bg-card border border-border rounded-lg overflow-hidden">
-        <div className="flex items-center gap-2 p-3 sm:p-4">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder="Search..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 h-10 bg-secondary border-border text-base"
-            />
-          </div>
-          <Button
-            variant="outline"
-            size="icon"
-            className="h-10 w-10 shrink-0"
-            onClick={() => {
-              const headers = ["timestamp", "actor_type", "actor_id", "action", "target_type", "target_id"]
-              const rows = filteredLogs.map((e) => [
-                e.timestamp, e.actor_type ?? "", e.actor_id ?? "", e.action,
-                e.target_type ?? "", e.target_id ?? "",
-              ])
-              downloadCsv(`audit-log-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
-            }}
-            disabled={filteredLogs.length === 0}
-            aria-label="Export CSV"
-          >
-            <Download className="h-4 w-4" />
-          </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            className="h-10 w-10 shrink-0"
-            onClick={() => mutate()}
-            disabled={isLoading}
-            aria-label="Refresh audit log"
-          >
-            <RefreshCw className={cn("h-4 w-4", isLoading && "animate-spin")} />
-          </Button>
+    <section aria-label="Audit entries" className="overflow-hidden rounded-md border bg-card">
+      <div className="flex items-center gap-2 border-b p-3">
+        <div className="relative min-w-0 flex-1">
+          <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+          <Input
+            placeholder="Search target or details…"
+            aria-label="Search audit log"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="h-9 pl-9 text-base sm:text-sm"
+            spellCheck={false}
+            autoComplete="off"
+          />
         </div>
-
-        <div className="border-t border-border p-3 sm:p-4 flex flex-wrap gap-3">
-          <Select value={actionFilter} onValueChange={setActionFilter}>
-            <SelectTrigger className="w-full sm:w-40 h-10 bg-secondary border-border text-sm">
-              <SelectValue placeholder="Action" />
-            </SelectTrigger>
-            <SelectContent>
-              {actions.map((a) => (
-                <SelectItem key={a} value={a}>
-                  {a === "All" ? "All Actions" : a}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-
-          <Select value={actorFilter} onValueChange={setActorFilter}>
-            <SelectTrigger className="w-full sm:w-36 h-10 bg-secondary border-border text-sm">
-              <SelectValue placeholder="Actor" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="All">All Actors</SelectItem>
-              <SelectItem value="system">System</SelectItem>
-              <SelectItem value="operator">Operator</SelectItem>
-              <SelectItem value="detector">Detector</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+        <Button
+          variant="outline"
+          size="icon"
+          className="size-9 shrink-0"
+          onClick={() => {
+            const headers = ["timestamp", "actor_type", "actor_id", "action", "target_type", "target_id"]
+            const rows = filteredLogs.map((e) => [
+              e.timestamp, e.actor_type ?? "", e.actor_id ?? "", e.action,
+              e.target_type ?? "", e.target_id ?? "",
+            ])
+            downloadCsv(`audit-log-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
+          }}
+          disabled={filteredLogs.length === 0}
+          aria-label="Export CSV"
+        >
+          <Download className="size-4" aria-hidden="true" />
+        </Button>
+        <Button
+          variant="outline"
+          size="icon"
+          className="size-9 shrink-0"
+          onClick={() => mutate()}
+          disabled={isLoading}
+          aria-label="Refresh audit log"
+        >
+          <RefreshCw className={cn("size-4", isLoading && "animate-spin")} aria-hidden="true" />
+        </Button>
       </div>
 
-      {isLoading && !entries ? (
-        <div className="bg-card border border-border rounded-lg p-8 text-center">
-          <RefreshCw className="h-8 w-8 mx-auto mb-2 animate-spin text-muted-foreground" />
-          <p className="text-muted-foreground">Loading audit log...</p>
-        </div>
-      ) : (
-        <div className="bg-card border border-border rounded-lg overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-secondary">
-                <tr className="border-b border-border">
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("timestamp")}
-                  >
-                    <span className="flex items-center">
-                      Timestamp
-                      <SortIcon field="timestamp" />
-                    </span>
-                  </th>
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("actor")}
-                  >
-                    <span className="flex items-center">
-                      Actor
-                      <SortIcon field="actor" />
-                    </span>
-                  </th>
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("action")}
-                  >
-                    <span className="flex items-center">
-                      Action
-                      <SortIcon field="action" />
-                    </span>
-                  </th>
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("target")}
-                  >
-                    <span className="flex items-center">
-                      Target
-                      <SortIcon field="target" />
-                    </span>
-                  </th>
-                  <th className="text-left px-4 py-3 font-medium text-muted-foreground">Details</th>
-                </tr>
-              </thead>
-              <tbody>
-                {paginatedLogs.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="px-4 py-8 text-center text-muted-foreground">
-                      No audit log entries found
-                    </td>
-                  </tr>
-                ) : (
-                  paginatedLogs.map((entry, index) => (
-                    <AuditRow
-                      key={entry.audit_id}
-                      entry={entry}
-                      index={index}
-                      isExpanded={expandedId === entry.audit_id}
-                      onToggle={() => {
-                        const detailsStr = JSON.stringify(entry.details)
-                        if (detailsStr.length > 50) {
-                          setExpandedId(expandedId === entry.audit_id ? null : entry.audit_id)
-                        }
-                      }}
-                    />
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+      <div className="flex flex-wrap gap-2 border-b p-3">
+        <Select value={actionFilter} onValueChange={setActionFilter}>
+          <SelectTrigger className="h-9 w-full sm:w-44" aria-label="Action">
+            <SelectValue placeholder="Action" />
+          </SelectTrigger>
+          <SelectContent>
+            {actions.map((a) => (
+              <SelectItem key={a} value={a}>
+                {a === "All" ? "All actions" : a}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
 
-          <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-secondary">
-            <span className="text-sm text-muted-foreground">
-              Showing {filteredLogs.length > 0 ? (currentPage - 1) * itemsPerPage + 1 : 0} to{" "}
-              {Math.min(currentPage * itemsPerPage, filteredLogs.length)} of{" "}
-              {filteredLogs.length} entries
+        <Select value={actorFilter} onValueChange={setActorFilter}>
+          <SelectTrigger className="h-9 w-full sm:w-40" aria-label="Actor">
+            <SelectValue placeholder="Actor" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="All">All actors</SelectItem>
+            <SelectItem value="system">System</SelectItem>
+            <SelectItem value="operator">Operator</SelectItem>
+            <SelectItem value="detector">Detector</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      {error ? (
+        <ErrorState
+          title="Unable to load the audit log"
+          detail={`${error.message}. Recorded entries are not lost; this view could not be refreshed.`}
+          onRetry={() => { void mutate() }}
+          retryLabel="Retry audit log"
+        />
+      ) : isLoading && !entries ? (
+        <LoadingRows label="Loading audit log" rows={5} />
+      ) : paginatedLogs.length === 0 ? (
+        filtersActive ? (
+          <EmptyState
+            title="No matching entries"
+            description="Nothing matches this search or filter."
+            action={<Button variant="outline" size="sm" onClick={() => { setSearchQuery(""); setActionFilter("All"); setActorFilter("All") }}>Clear search and filters</Button>}
+          />
+        ) : (
+          <EmptyState title="No audit entries yet" description="Withdrawals, safelist changes and configuration reloads will be recorded here." />
+        )
+      ) : (
+        <>
+          <Table>
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                {sortHeader("timestamp", "Time (UTC)")}
+                {sortHeader("actor", "Actor")}
+                {sortHeader("action", "Action")}
+                {sortHeader("target", "Target")}
+                <TableHead>Details</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {paginatedLogs.map((entry) => (
+                <AuditRow
+                  key={entry.audit_id}
+                  entry={entry}
+                  isExpanded={expandedId === entry.audit_id}
+                  onToggle={() => {
+                    const detailsStr = JSON.stringify(entry.details)
+                    if (detailsStr.length > 50) {
+                      setExpandedId(expandedId === entry.audit_id ? null : entry.audit_id)
+                    }
+                  }}
+                />
+              ))}
+            </TableBody>
+          </Table>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-3 text-sm text-muted-foreground">
+            <span className="tabular-nums">
+              Showing {(currentPage - 1) * itemsPerPage + 1}–{Math.min(currentPage * itemsPerPage, filteredLogs.length)} of {filteredLogs.length} loaded
             </span>
             <div className="flex items-center gap-2">
               <Button
@@ -357,7 +322,7 @@ export function AuditLogContentLive() {
               >
                 Previous
               </Button>
-              <span className="text-sm text-muted-foreground">
+              <span className="tabular-nums">
                 Page {currentPage} of {totalPages || 1}
               </span>
               <Button
@@ -370,8 +335,8 @@ export function AuditLogContentLive() {
               </Button>
             </div>
           </div>
-        </div>
+        </>
       )}
-    </div>
+    </section>
   )
 }

@@ -24,7 +24,7 @@ const shortcuts = [
   {
     category: "Actions",
     items: [
-      { keys: ["n"], description: "Mitigate Now" },
+      { keys: ["n"], description: "Mitigate now" },
       { keys: ["⌘", "K"], description: "Open command palette" },
       { keys: ["⌘", "B"], description: "Toggle sidebar" },
       { keys: ["?"], description: "Toggle keyboard shortcuts" },
@@ -38,14 +38,14 @@ export function KeyboardShortcutsModal({ open, onOpenChange }: KeyboardShortcuts
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md bg-card border-border">
         <DialogHeader>
-          <DialogTitle className="text-sm font-mono uppercase tracking-wide text-foreground">
-            Keyboard Shortcuts
+          <DialogTitle className="text-sm text-foreground">
+            Keyboard shortcuts
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-6 py-2">
           {shortcuts.map((section) => (
             <div key={section.category}>
-              <h3 className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground mb-3">
+              <h3 className="text-xs text-muted-foreground mb-3">
                 {section.category}
               </h3>
               <div className="space-y-1">
@@ -54,13 +54,13 @@ export function KeyboardShortcutsModal({ open, onOpenChange }: KeyboardShortcuts
                     key={shortcut.description}
                     className="flex items-center justify-between py-1.5 border-b border-border/50 last:border-0"
                   >
-                    <span className="text-xs font-mono text-foreground">{shortcut.description}</span>
+                    <span className="text-xs text-foreground">{shortcut.description}</span>
                     <div className="flex items-center gap-1">
                       {shortcut.keys.map((key, i) => (
                         <span key={i} className="flex items-center">
                           <kbd className="kbd">{key}</kbd>
                           {i < shortcut.keys.length - 1 && (
-                            <span className="text-muted-foreground mx-1 text-[10px] font-mono">then</span>
+                            <span className="text-muted-foreground mx-1 text-xs">then</span>
                           )}
                         </span>
                       ))}
@@ -72,7 +72,7 @@ export function KeyboardShortcutsModal({ open, onOpenChange }: KeyboardShortcuts
           ))}
         </div>
         <div className="pt-2 border-t border-border">
-          <p className="text-[10px] font-mono text-muted-foreground text-center">
+          <p className="text-xs text-muted-foreground text-center">
             Press <kbd className="kbd">?</kbd> anytime to show this help
           </p>
         </div>

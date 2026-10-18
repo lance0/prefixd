@@ -2,8 +2,11 @@
 
 import { useState, useMemo } from "react"
 import Link from "next/link"
-import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, AlertCircle, Download } from "lucide-react"
-import { SourceBadge } from "@/components/dashboard/source-badge"
+import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, Download } from "lucide-react"
+import { Tag } from "@/components/dashboard/status-pill"
+import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { formatBps, formatPps, formatRelative, formatUtc } from "@/lib/format"
 import { ConfidenceBar } from "@/components/dashboard/confidence-bar"
 import { EventDetailPanel } from "@/components/dashboard/event-detail-panel"
 import { Button } from "@/components/ui/button"
@@ -16,32 +19,6 @@ import { downloadCsv } from "@/lib/csv"
 
 type SortField = "timestamp" | "source" | "victim_ip" | "vector" | "bps" | "confidence"
 type SortDirection = "asc" | "desc"
-
-function formatTimestamp(dateStr: string): string {
-  const date = new Date(dateStr)
-  return date.toLocaleTimeString("en-US", {
-    timeZone: "UTC",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }) + " UTC"
-}
-
-function formatBps(bps: number | null): string {
-  if (!bps) return "N/A"
-  if (bps >= 1_000_000_000) return `${(bps / 1_000_000_000).toFixed(1)} Gbps`
-  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`
-  if (bps >= 1_000) return `${(bps / 1_000).toFixed(1)} Kbps`
-  return `${bps} bps`
-}
-
-function formatPps(pps: number | null): string {
-  if (!pps) return "N/A"
-  if (pps >= 1_000_000) return `${(pps / 1_000_000).toFixed(1)}M pps`
-  if (pps >= 1_000) return `${(pps / 1_000).toFixed(0)}K pps`
-  return `${pps} pps`
-}
 
 interface EventsContentLiveProps {
   initialEventId?: string | null
@@ -126,43 +103,44 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return null
     return sortDirection === "asc" ? (
-      <ChevronUp className="h-3 w-3 ml-1" />
+      <ChevronUp className="size-3" aria-hidden="true" />
     ) : (
-      <ChevronDown className="h-3 w-3 ml-1" />
+      <ChevronDown className="size-3" aria-hidden="true" />
     )
   }
 
-  if (error) {
-    return (
-      <div className="bg-destructive/10 border border-destructive/50 rounded-lg p-6 text-center">
-        <AlertCircle className="h-8 w-8 mx-auto mb-2 text-destructive" />
-        <p className="text-destructive font-medium">Failed to load events</p>
-        <p className="text-sm text-muted-foreground mt-1">{error.message}</p>
-        <Button variant="outline" className="mt-4" onClick={() => mutate()}>
-          <RefreshCw className="h-4 w-4 mr-2" />
-          Retry
-        </Button>
-      </div>
-    )
-  }
+  const sortHeader = (field: SortField, label: string, className?: string) => (
+    <TableHead className={className} aria-sort={sortField === field ? (sortDirection === "asc" ? "ascending" : "descending") : undefined}>
+      <button type="button" onClick={() => handleSort(field)} className="inline-flex items-center gap-1 rounded-sm hover:text-foreground">
+        {label}
+        <SortIcon field={field} />
+      </button>
+    </TableHead>
+  )
+
+  const filtersActive = searchQuery !== "" || sourceFilter !== "All" || vectorFilter !== "All"
+  const now = Date.now()
 
   return (
     <div className="space-y-4">
-      <div className="bg-card border border-border rounded-lg overflow-hidden">
-        <div className="flex items-center gap-2 p-3 sm:p-4">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+      <section aria-label="Events" className="overflow-hidden rounded-md border bg-card">
+        <div className="flex items-center gap-2 border-b p-3">
+          <div className="relative min-w-0 flex-1">
+            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
             <Input
-              placeholder="Search IP..."
+              placeholder="Search IP…"
+              aria-label="Search events by IP"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 h-10 bg-secondary border-border text-base font-mono"
+              className="h-9 pl-9 text-base sm:text-sm"
+              spellCheck={false}
+              autoComplete="off"
             />
           </div>
           <Button
             variant="outline"
             size="icon"
-            className="h-10 w-10 shrink-0"
+            className="size-9 shrink-0"
             onClick={() => {
               const headers = ["event_id", "event_timestamp", "ingested_at", "source", "victim_ip", "vector", "bps", "pps", "confidence"]
               const rows = filteredEvents.map((e) => [
@@ -174,229 +152,177 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
             disabled={filteredEvents.length === 0}
             aria-label="Export CSV"
           >
-            <Download className="h-4 w-4" />
+            <Download className="size-4" aria-hidden="true" />
           </Button>
           <Button
             variant="outline"
             size="icon"
-            className="h-10 w-10 shrink-0"
+            className="size-9 shrink-0"
             onClick={() => mutate()}
             disabled={isLoading}
             aria-label="Refresh events"
           >
-            <RefreshCw className={cn("h-4 w-4", isLoading && "animate-spin")} />
+            <RefreshCw className={cn("size-4", isLoading && "animate-spin")} aria-hidden="true" />
           </Button>
           <Button
             variant="outline"
             size="icon"
-            className="h-10 w-10 lg:hidden shrink-0"
+            className="size-9 shrink-0 lg:hidden"
             onClick={() => setShowFilters(!showFilters)}
             aria-label="Toggle filters"
+            aria-expanded={showFilters}
           >
-            <Filter className="h-4 w-4" />
+            <Filter className="size-4" aria-hidden="true" />
           </Button>
         </div>
 
-        <div
-          className={cn(
-            "border-t border-border p-3 sm:p-4 space-y-3",
-            "lg:flex lg:flex-wrap lg:items-center lg:gap-3 lg:space-y-0",
-            showFilters ? "block" : "hidden lg:flex"
-          )}
-        >
+        <div className={cn("flex-wrap items-center gap-2 border-b p-3", showFilters ? "flex" : "hidden lg:flex")}>
           <Select value={sourceFilter} onValueChange={setSourceFilter}>
-            <SelectTrigger className="w-full sm:w-36 h-10 bg-secondary border-border text-sm">
+            <SelectTrigger className="h-9 w-full sm:w-40" aria-label="Source">
               <SelectValue placeholder="Source" />
             </SelectTrigger>
             <SelectContent>
               {sources.map((s) => (
                 <SelectItem key={s} value={s}>
-                  {s === "All" ? "All Sources" : s}
+                  {s === "All" ? "All sources" : s}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
 
           <Select value={vectorFilter} onValueChange={setVectorFilter}>
-            <SelectTrigger className="w-full sm:w-40 h-10 bg-secondary border-border text-sm">
+            <SelectTrigger className="h-9 w-full sm:w-40" aria-label="Vector">
               <SelectValue placeholder="Vector" />
             </SelectTrigger>
             <SelectContent>
               {vectors.map((v) => (
                 <SelectItem key={v} value={v}>
-                  {v === "All" ? "All Vectors" : v.replace(/_/g, " ")}
+                  {v === "All" ? "All vectors" : v.replace(/_/g, " ")}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
-      </div>
 
-      {isLoading && !events ? (
-        <div className="bg-card border border-border rounded-lg p-8 text-center">
-          <RefreshCw className="h-8 w-8 mx-auto mb-2 animate-spin text-muted-foreground" />
-          <p className="text-muted-foreground">Loading events...</p>
-        </div>
-      ) : (
-        <div className="bg-card border border-border rounded-lg overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-secondary">
-                <tr className="border-b border-border">
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("timestamp")}
-                  >
-                    <span className="flex items-center">
-                      Timestamp
-                      <SortIcon field="timestamp" />
-                    </span>
-                  </th>
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("source")}
-                  >
-                    <span className="flex items-center">
-                      Source
-                      <SortIcon field="source" />
-                    </span>
-                  </th>
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("victim_ip")}
-                  >
-                    <span className="flex items-center">
-                      Victim IP
-                      <SortIcon field="victim_ip" />
-                    </span>
-                  </th>
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("vector")}
-                  >
-                    <span className="flex items-center">
-                      Vector
-                      <SortIcon field="vector" />
-                    </span>
-                  </th>
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("bps")}
-                  >
-                    <span className="flex items-center">
-                      Traffic
-                      <SortIcon field="bps" />
-                    </span>
-                  </th>
-                  <th
-                    className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                    onClick={() => handleSort("confidence")}
-                  >
-                    <span className="flex items-center">
-                      Confidence
-                      <SortIcon field="confidence" />
-                    </span>
-                  </th>
-                  <th className="text-center px-4 py-3 font-medium text-muted-foreground">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {paginatedEvents.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">
-                      No events found
-                    </td>
-                  </tr>
-                ) : (
-                  paginatedEvents.map((event, index) => (
-                    <tr
+        {error ? (
+          <ErrorState
+            title="Unable to load events"
+            detail={`${error.message}. Detectors may still be sending signals; this list could not be refreshed.`}
+            onRetry={() => { void mutate() }}
+            retryLabel="Retry events"
+          />
+        ) : isLoading && !events ? (
+          <LoadingRows label="Loading events" rows={5} />
+        ) : paginatedEvents.length === 0 ? (
+          filtersActive ? (
+            <EmptyState
+              title="No matching events"
+              description="Nothing matches this search or filter."
+              action={<Button variant="outline" size="sm" onClick={() => { setSearchQuery(""); setSourceFilter("All"); setVectorFilter("All") }}>Clear search and filters</Button>}
+            />
+          ) : (
+            <EmptyState title="No events yet" description="Signals from detectors and operators will appear here as they arrive." />
+          )
+        ) : (
+          <>
+            <Table>
+              <TableHeader className="sr-only md:not-sr-only md:table-header-group">
+                <TableRow className="hover:bg-transparent">
+                  {sortHeader("timestamp", "Received")}
+                  {sortHeader("victim_ip", "Target")}
+                  {sortHeader("source", "Source")}
+                  {sortHeader("vector", "Vector")}
+                  {sortHeader("bps", "Traffic", "text-right")}
+                  {sortHeader("confidence", "Confidence")}
+                  <TableHead><span className="sr-only">Row actions</span></TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {paginatedEvents.map((event) => {
+                  const vector = event.vector.replace(/_/g, " ")
+                  return (
+                    <TableRow
                       key={event.event_id}
-                      className={cn(
-                        "border-b border-border/50 hover:bg-secondary/50 transition-colors cursor-pointer",
-                        index % 2 === 1 && "bg-secondary/20"
-                      )}
+                      className="grid cursor-pointer grid-cols-[1fr_auto] gap-x-3 gap-y-2 px-3 py-3 md:table-row md:p-0"
                       onClick={() => setSelectedId(event.event_id)}
                     >
-                      <td className="px-4 py-3 font-mono text-muted-foreground whitespace-nowrap">
-                        {formatTimestamp(event.event_timestamp)}
-                      </td>
-                      <td className="px-4 py-3">
-                        <SourceBadge source={event.source} />
-                      </td>
-                      <td className="px-4 py-3 font-mono text-foreground">
+                      <TableCell className="hidden whitespace-nowrap text-muted-foreground tabular-nums md:table-cell">
+                        <time dateTime={event.event_timestamp} title={formatUtc(event.event_timestamp, now)}>
+                          {formatRelative(event.event_timestamp, now)}
+                        </time>
+                      </TableCell>
+                      <TableCell className="min-w-0 p-0 md:px-3 md:py-2">
                         <Link
                           href={`/ip-history?ip=${encodeURIComponent(event.victim_ip)}`}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                          }}
-                          className="hover:underline text-primary"
+                          onClick={(e) => e.stopPropagation()}
+                          className="break-all rounded-sm font-mono font-medium hover:underline"
                         >
                           {event.victim_ip}
                         </Link>
-                      </td>
-                      <td className="px-4 py-3 text-muted-foreground">
-                        {event.vector.replace(/_/g, " ")}
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex flex-col">
-                          <span className="font-mono text-foreground">{formatBps(event.bps)}</span>
-                          <span className="text-xs text-muted-foreground">{formatPps(event.pps)}</span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
+                        <span className="mt-0.5 block text-xs text-muted-foreground md:hidden">
+                          {vector} · {event.source} · {formatRelative(event.event_timestamp, now)}
+                        </span>
+                      </TableCell>
+                      <TableCell className="hidden md:table-cell">
+                        <Tag>{event.source}</Tag>
+                      </TableCell>
+                      <TableCell className="hidden text-muted-foreground md:table-cell">{vector}</TableCell>
+                      <TableCell numeric className="p-0 md:px-3 md:py-2">
+                        <span className="block whitespace-nowrap">{formatBps(event.bps)}</span>
+                        <span className="block whitespace-nowrap text-xs text-muted-foreground">{formatPps(event.pps)}</span>
+                      </TableCell>
+                      <TableCell className="self-center p-0 md:px-3 md:py-2">
                         <ConfidenceBar value={event.confidence} />
-                      </td>
-                      <td className="px-4 py-3 text-center">
+                      </TableCell>
+                      <TableCell className="justify-self-end p-0 md:px-3 md:py-1">
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="h-8 w-8"
+                          className="size-9 md:size-8"
                           onClick={(e) => {
                             e.stopPropagation()
                             setSelectedId(event.event_id)
                           }}
                           aria-label="View event details"
                         >
-                          <Eye className="h-4 w-4" />
+                          <Eye className="size-4" aria-hidden="true" />
                         </Button>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
 
-          <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-secondary">
-            <span className="text-sm text-muted-foreground">
-              Showing {filteredEvents.length > 0 ? (currentPage - 1) * itemsPerPage + 1 : 0} to{" "}
-              {Math.min(currentPage * itemsPerPage, filteredEvents.length)} of{" "}
-              {filteredEvents.length} events
-            </span>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                disabled={currentPage === 1}
-              >
-                Previous
-              </Button>
-              <span className="text-sm text-muted-foreground">
-                Page {currentPage} of {totalPages || 1}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-3 text-sm text-muted-foreground">
+              <span className="tabular-nums">
+                Showing {(currentPage - 1) * itemsPerPage + 1}–{Math.min(currentPage * itemsPerPage, filteredEvents.length)} of {filteredEvents.length} loaded
               </span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                disabled={currentPage === totalPages || totalPages === 0}
-              >
-                Next
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                >
+                  Previous
+                </Button>
+                <span className="tabular-nums">
+                  Page {currentPage} of {totalPages || 1}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages || totalPages === 0}
+                >
+                  Next
+                </Button>
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </section>
 
       {/* Detail Panel */}
       {selectedId && (

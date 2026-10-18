@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react"
 import { describe, expect, it } from "vitest"
-import { StatusPill, healthTone, mitigationTone, signalGroupTone } from "@/components/dashboard/status-pill"
+import { StatusPill, auditActionTone, healthTone, mitigationTone, signalGroupTone } from "@/components/dashboard/status-pill"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 
 describe("status tones", () => {
@@ -20,6 +20,10 @@ describe("status tones", () => {
     ["healthy", "success"],
     ["ok", "success"],
     ["established", "success"],
+    ["up", "success"],
+    ["stale", "warning"],
+    ["down", "danger"],
+    ["no peers", "neutral"],
     ["degraded", "warning"],
     ["connecting", "warning"],
     ["error", "danger"],
@@ -38,6 +42,15 @@ describe("status tones", () => {
     expect(signalGroupTone("open", true)).toBe("success")
     expect(signalGroupTone("resolved", true)).toBe("neutral")
     expect(signalGroupTone("expired")).toBe("neutral")
+  })
+})
+
+describe("audit action tones", () => {
+  it("flags only rejections and escalations", () => {
+    expect(auditActionTone("reject")).toBe("danger")
+    expect(auditActionTone("ESCALATE")).toBe("danger")
+    expect(auditActionTone("withdraw")).toBe("neutral")
+    expect(auditActionTone("safelist_add")).toBe("neutral")
   })
 })
 

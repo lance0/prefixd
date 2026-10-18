@@ -257,7 +257,7 @@ describe("Mitigation Detail – Correlation Section", () => {
     await renderPage()
 
     // Table headers
-    expect(screen.getByText("Contributing Sources")).toBeTruthy()
+    expect(screen.getByText("Contributing sources")).toBeTruthy()
     expect(screen.getByText("Confidence")).toBeTruthy()
     expect(screen.getByText("Weight")).toBeTruthy()
 

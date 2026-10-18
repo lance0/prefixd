@@ -50,7 +50,7 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
         />
         <div className={cn(sidebarCollapsed ? "lg:pl-16" : "lg:pl-56")}>
           <TopBar onSearchClick={() => setCommandPaletteOpen(true)} />
-          <main id="main-content" tabIndex={-1} className="min-w-0 p-4 sm:p-6 lg:p-8">{children}</main>
+          <main id="main-content" tabIndex={-1} className="min-w-0 p-4 sm:p-6 lg:p-8"><div className="mx-auto max-w-7xl">{children}</div></main>
         </div>
 
         {/* Command palette */}
