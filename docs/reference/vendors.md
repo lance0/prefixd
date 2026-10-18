@@ -2,18 +2,20 @@
 
 FlowSpec support varies significantly across router vendors, platforms, and software versions. This page documents what has been tested with prefixd and known limitations.
 
-The recorded environments below used **GoBGP**, not rustbgpd. Selecting the new
-rustbgpd default does not extend these historical reports to that speaker or
-prove forwarding-plane enforcement. Requalify your exact speaker, router version,
-address family and action; retain dated command and result receipts. FRR RIB
-receipt alone is control-plane evidence.
+The Juniper and Arista reports below used **GoBGP**, not rustbgpd. Selecting
+the rustbgpd default does not extend these historical reports to that speaker or
+prove forwarding-plane enforcement. FRR has dated receipts for each speaker from
+the [FlowSpec interop lab](../../lab/README.md#flowspec-interop-lab-maintained).
+Requalify your exact speaker, router version, address family and action, and
+retain dated command and result receipts. FRR RIB receipt alone is
+control-plane evidence.
 
 ## Support Matrix
 
 | Capability | Juniper (Junos/Evolved) | Arista (EOS) | Cisco (IOS-XR) | Nokia (SR OS) | FRR |
 |---|---|---|---|---|---|
 | **BGP FlowSpec IPv4** | Verified | Verified | Expected | Expected | Verified |
-| **BGP FlowSpec IPv6** | Verified | Expected | Expected | Not supported (SR Linux) | Verified |
+| **BGP FlowSpec IPv6** | Verified | Expected | Expected | Expected | Verified |
 | **Discard action** | Verified | Verified | Expected | Expected | Verified |
 | **Rate-limit (police) action** | Verified | Not working (under investigation) | Expected | Expected | Verified |
 | **Redirect-to-VRF** | Supported (untested) | Supported (untested) | Supported (untested) | Supported (untested) | Not supported |
@@ -24,6 +26,11 @@ receipt alone is control-plane evidence.
 | **Multiple FlowSpec rules** | Verified | Expected | Expected | Expected | Verified |
 | **Destination port matching** | Verified | Verified | Expected | Expected | Verified |
 | **Protocol matching** | Verified | Verified | Expected | Expected | Verified |
+
+The FRR column is control-plane receipt only. It holds for both rustbgpd 0.77.0
+and GoBGP 4.10.0 with FRR 10.7.1 (see [FRR](#frr--verified-control-plane)).
+The Nokia column is SR OS, which is untested. SR Linux does not support FlowSpec
+(see [SR Linux](#nokia-sr-linux--not-supported)).
 
 **Legend:**
 - **Verified** — Tested end-to-end with prefixd in a lab or production environment
@@ -93,19 +100,34 @@ router bgp 65000
     neighbor 10.10.1.10 activate
 ```
 
-### FRR — Verified
+### FRR — Verified (control plane)
 
 | Detail | Value |
 |---|---|
-| Platform | Container (native Linux) |
-| Software | FRR 10.x |
-| Lab method | Containerlab |
-| BGP session | eBGP with GoBGP |
+| Platform | Container (native Linux), `quay.io/frrouting/frr:10.7.1`, digest-pinned |
+| Lab method | Containerlab 0.74.3, [`lab/interop/`](../../lab/interop/) |
+| BGP session | eBGP, speaker AS 65010 ↔ FRR AS 65002; IPv4 and IPv6 FlowSpec only |
+| Driver | prefixd's HTTP API (bearer auth); FRR `show bgp ipv4\|ipv6 flowspec [detail] json` |
 
-**Verified operations:** FlowSpec announce, discard, withdraw, reconciliation.
+Receipts, attributed per speaker:
+
+| Date (UTC) | Speaker | prefixd | Where | Result |
+|---|---|---|---|---|
+| 2026-10-18 | rustbgpd 0.77.0 (released image, digest-pinned) | 0.19.1, commit `dfaa4e08e0ed` | Local run, Linux 7.0.0-30 | Pass, 8/8 steps |
+| 2026-10-18 | GoBGP 4.10.0 (`jauderho/gobgp` digest pinned by CI) | 0.19.1, commit `dfaa4e08e0ed` | Local run, Linux 7.0.0-30 | Pass, 8/8 steps |
+
+Each run asserted the exact FRR rule set (destination, protocol, destination
+port and `FS:rate` traffic-rate action) after each step: manual discard, manual
+police (8 Mbit/s as `FS:rate 1000000.000000`), a detector `udp_flood` event
+policed by playbook (`FS:rate 625000.000000`), operator withdrawal, 15 s TTL
+expiry, a speaker stop and start restored by prefixd reconciliation (two
+repairs counted), an IPv6 `/128` discard, and a final withdrawal of everything.
+CI repeats both legs in the [Interop workflow](../../.github/workflows/interop.yml)
+and keeps each run's receipt as an artifact.
 
 **Known quirks:**
-- FRR FlowSpec support is control-plane only by default — it receives and installs routes in the BGP table but does not program iptables/nftables rules without additional configuration.
+- FRR FlowSpec support is control-plane only by default — it receives and installs routes in the BGP table but does not program iptables/nftables rules without additional configuration. The lab output shows `not installed in PBR`.
+- FRR renders discard as `FS:rate 0.000000` and IPv6 destinations with an offset, for example `2001:db8:113::10/128/off 0`.
 - Useful for protocol-level testing but not for dataplane enforcement without extra setup.
 
 ### Cisco IOS-XR — Not Yet Tested
@@ -129,18 +151,50 @@ router bgp 65000
 - `hw-module profile tcam` adjustments may be needed on NCS platforms.
 - Rate-limit actions use QoS policy maps internally.
 
-### Nokia SR OS — Not Yet Tested
+### Nokia SR OS — Expected (untested)
 
 | Detail | Value |
 |---|---|
 | Target platforms | 7750 SR |
 | Expected software | SR OS 19+ |
 
-**Important:** Nokia SR Linux (7220 IXR, 7250 IXR) does **not** support BGP FlowSpec. Only classic SR OS on 7750 SR supports it.
+Untested: a lab run needs a licensed SR-SIM image from Nokia, which this
+project does not have.
 
 **Known considerations (from vendor docs):**
 - FlowSpec is configured under `configure router bgp group <name> family flow-ipv4`.
 - Rate-limit actions are supported via filter policies.
+
+### Nokia SR Linux — Not supported
+
+SR Linux 25.10.1 has no BGP FlowSpec address family. This was probed on
+2026-10-18 with [`lab/interop/srlinux-probe.clab.yml`](../../lab/interop/srlinux-probe.clab.yml):
+SR Linux `ghcr.io/nokia/srlinux:25.10.1` (7220 IXR-D2L) peered over eBGP with
+released rustbgpd 0.77.0. rustbgpd offered `ipv4_unicast`, `ipv4_flowspec` and
+`ipv6_flowspec`.
+
+- The CLI rejects FlowSpec families at the BGP and group level:
+
+  ```text
+  # set / network-instance default protocols bgp afi-safi ipv4-flowspec admin-state enable
+  Error: Failed to parse value 'ipv4-flowspec' for key 'afi-safi-name' (node 'afi-safi') - Invalid value "ipv4-flowspec": Must be ipv4-unicast|ipv6-unicast|evpn|route-target
+  # set / network-instance default protocols bgp group prefixd afi-safi ipv6-flowspec admin-state enable
+  Error: Failed to parse value 'ipv6-flowspec' for key 'afi-safi-name' (node 'afi-safi') - Invalid value "ipv6-flowspec": Must be ipv4-unicast|ipv6-unicast|evpn|route-target
+  ```
+
+- The YANG base `srl_nokia-comm:bgp-address-family` in the image defines only
+  `ipv4-unicast`, `ipv6-unicast`, `l3vpn-ipv4-unicast`, `l3vpn-ipv6-unicast`,
+  `ipv4-labeled-unicast`, `ipv6-labeled-unicast`, `evpn`, `ipv4-mvpn`,
+  `ipv6-mvpn`, `route-target`, `srte-policy-ipv4`, `srte-policy-ipv6` and
+  `link-state`.
+- Capability negotiation: the session established, and rustbgpd reported
+  `Negotiated Families: ipv4_unicast`. SR Linux listed
+  `Cap Sent/Recv: ROUTE_REFRESH 4-OCTET_ASN MP_BGP GRACEFUL_RESTART`.
+- With a discard rule for 203.0.113.10/32 UDP/53 in rustbgpd's local FlowSpec
+  table, `rbgp flowspec advertised 10.0.0.2 -a ipv4_flowspec` returned
+  `No FlowSpec routes`. SR Linux reported 0 received BGP routes.
+
+The probe is not a CI leg because there is nothing to install.
 
 ## Testing Your Router
 
@@ -180,8 +234,12 @@ Cisco:   show bgp ipv4 flowspec
 FRR:     show bgp ipv4 flowspec
 ```
 
-The [legacy Containerlab examples](../../lab/README.md) remain GoBGP-specific;
-their helper script needs repair before it can provide current qualification.
+For FRR, `just interop-frr` runs the maintained
+[FlowSpec interop lab](../../lab/README.md#flowspec-interop-lab-maintained)
+for both speakers and writes a dated receipt. The
+[legacy Containerlab examples](../../lab/README.md#legacy-topologies) remain
+GoBGP-specific; their helper script needs repair before it can provide current
+qualification.
 
 ## Contributing Test Results
 

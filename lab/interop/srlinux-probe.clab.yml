@@ -1,0 +1,42 @@
+# SR Linux 25.10.1 FlowSpec probe against released rustbgpd (manual, not CI).
+#
+# The image pin matches rustbgpd's SR Linux EVPN interop labs. The probe asks
+# whether SR Linux negotiates and installs BGP FlowSpec; see lab/README.md for
+# the commands and docs/reference/vendors.md for the recorded result.
+#
+#   containerlab deploy -t lab/interop/srlinux-probe.clab.yml
+#   containerlab destroy -t lab/interop/srlinux-probe.clab.yml --cleanup
+name: prefixd-srl-probe
+
+mgmt:
+  network: prefixd-srl-probe
+  ipv4-subnet: 172.31.233.0/24
+
+topology:
+  nodes:
+    # Owns the network namespace and its eth1 link; the release rustbgpd
+    # image has no iproute2, so the speaker joins this namespace.
+    netns:
+      kind: linux
+      image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+      entrypoint: sleep
+      cmd: infinity
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+
+    rustbgpd:
+      kind: linux
+      image: ghcr.io/lance0/rustbgpd:0.77.0@sha256:6dbfa42c47aa1d063f119f3eff9524aac4585665c0a9c79167ec8d20244bc6c2
+      network-mode: container:netns
+      cmd: rustbgpd /etc/rustbgpd/config.toml
+      binds:
+        - configs/rustbgpd-srlinux-probe.toml:/etc/rustbgpd/config.toml:ro
+
+    srl:
+      kind: nokia_srlinux
+      image: ghcr.io/nokia/srlinux:25.10.1@sha256:bc8112667b5a87bee5039ade65b504ac2ef35511210d0675db6c7b0754e8cc4c
+      startup-config: configs/srlinux-probe.cli
+
+  links:
+    - endpoints: ["srl:e1-1", "netns:eth1"]

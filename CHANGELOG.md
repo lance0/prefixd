@@ -67,6 +67,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add an FRR FlowSpec interop workflow and `just interop-frr`. Each leg drives
+  prefixd's HTTP API with rustbgpd 0.77.0 or GoBGP 4.10.0 peered to FRR 10.7.1
+  in containerlab. It asserts the exact rules in FRR's received IPv4 and IPv6
+  FlowSpec tables through discard, police, detector, withdrawal, TTL expiry
+  and speaker-restart steps, and uploads a dated receipt. This is control-plane
+  evidence only. An SR Linux 25.10.1 probe found no FlowSpec support there.
+
 - Add `origin_mode` (`dry-run`, `enforced` or `null` when unknown) to
   mitigation API responses and WebSocket mitigation messages. The dashboard
   marks dry-run-origin mitigations with a neutral "Simulation" tag on the

@@ -429,5 +429,8 @@ lost local and peer receipt, then checks exact dual-family recovery, a quiet
 subsequent poll and durable withdrawal cleanup.
 
 These tests observe local acceptance and daemon-to-daemon BGP receipt. They do
-not establish router enforcement or vendor forwarding. ExaBGP and other
+not establish router enforcement or vendor forwarding. Receipt in a real
+router's FlowSpec table is checked separately for each speaker against FRR by
+the [FlowSpec interop lab](../../lab/README.md#flowspec-interop-lab-maintained);
+that is also control-plane evidence only. ExaBGP and other
 write-only backends are not qualified by this readable suite.

@@ -2,7 +2,85 @@
 
 Containerlab topologies for testing FlowSpec with routers.
 
-These legacy topologies use the explicit **GoBGP compatibility profile**. They
+## FlowSpec interop lab (maintained)
+
+`interop/` holds the lab that CI runs in the
+[Interop workflow](../.github/workflows/interop.yml). It drives prefixd's
+HTTP API and checks the exact rules FRR receives. Its layout follows
+rustbgpd's M22 FlowSpec lab.
+
+```
+prefixd ── loopback gRPC ── speaker (AS 65010, 10.0.0.1) ── eBGP ── FRR 10.7.1 (AS 65002, 10.0.0.2)
+   └── loopback ── PostgreSQL           (one network namespace)
+```
+
+| Leg | Topology | Speaker image |
+|-----|----------|---------------|
+| rustbgpd | `interop/frr-rustbgpd.clab.yml` | `ghcr.io/lance0/rustbgpd:0.77.0`, digest-pinned |
+| GoBGP | `interop/frr-gobgp.clab.yml` | `jauderho/gobgp` digest that CI pins as 4.10.0 |
+
+The speaker negotiates only IPv4 and IPv6 FlowSpec with FRR. After each step,
+`interop/flowspec_frr.py` waits up to 60 s for FRR's IPv4 and IPv6 tables to
+hold exactly the expected rules. It reads `show bgp <family> flowspec json`
+and `... detail json`. A rule matches on destination, protocol, destination
+port and traffic-rate action (`FS:rate <bytes/s>`, where 0 is discard). Each
+path must be FRR's valid best path from the speaker. The steps are:
+
+1. Manual discard: UDP/53 to 203.0.113.10.
+2. Manual police at 8 Mbit/s: TCP/80 to 203.0.113.20, shown as `FS:rate 1000000.000000`.
+3. Detector event: a `udp_flood` event for 203.0.113.30 with UDP/123. The lab
+   playbook polices it at 5 Mbit/s (`FS:rate 625000.000000`).
+4. Operator withdrawal of the discard. The rule leaves FRR and the API reports `withdrawn`.
+5. TTL expiry: a 15 s discard appears, then leaves FRR, and the API reports `expired`.
+6. Speaker restart: `docker stop` empties FRR. After `docker start`, prefixd's
+   reconciliation restores both active rules, and its
+   `prefixd_reconciliation_repairs_total{status="success"}` counter rises by at least two.
+7. IPv6 discard: UDP/53 to 2001:db8:113::10/128.
+8. Withdraw everything. Both tables end empty.
+
+On a mismatch, the step fails and prints a unified diff of the expected and
+observed rules. Run it locally with Docker and containerlab:
+
+```bash
+just interop-frr            # both legs; or: just interop-frr gobgp
+CLAB="sudo containerlab" just interop-frr   # if you are not in clab_admins
+```
+
+The recipe builds `prefixd:interop` from the working tree and runs the oracle's
+negative controls (`lab/interop/test_flowspec_frr.py`). It then runs
+`lab/interop/run-frr.sh` for each leg. The script destroys any leftover lab,
+writes per-run secrets under `lab/interop/.run/`, deploys, tests, collects logs
+and always destroys the lab. It deletes the secrets afterwards and fails the run,
+deleting the receipt, if a secret reached it. The receipt lands in `target/interop/frr-<speaker>-<UTC stamp>/`:
+
+| File | Contents |
+|------|----------|
+| `receipt.json` | Result, date, versions (prefixd, commit, speaker, FRR, containerlab, kernel), image references and per-step expectations |
+| `summary.md` | Step table; CI appends it to the job summary |
+| `commands.log` | Every API request and docker command, without credentials |
+| `frr/` | Raw FRR JSON before and after every step |
+| `logs/` | prefixd, speaker, FRR and PostgreSQL logs |
+
+This is control-plane evidence: FRR stores the rules in its BGP table and does
+not program a dataplane here. Recorded results are in the
+[vendor matrix](../docs/reference/vendors.md#frr--verified-control-plane).
+The lab does not touch the Compose stack or other labs. It uses its own lab
+names and the management subnets 172.31.231.0/24 and 172.31.232.0/24.
+
+## Nokia
+
+**SR Linux.** `interop/srlinux-probe.clab.yml` peers SR Linux 25.10.1 with
+rustbgpd 0.77.0. It is a manual probe, not a CI leg. SR Linux does not support
+BGP FlowSpec. The [vendor matrix](../docs/reference/vendors.md#nokia-sr-linux--not-supported)
+records the commands and output.
+
+**SR OS.** No lab is provided. The containerised SR OS (SR-SIM) needs an image
+and licence from Nokia, and none is available to this project. SR OS stays
+untested.
+
+## Legacy topologies
+
+The topologies below use the explicit **GoBGP compatibility profile**. They
 do not qualify rustbgpd or prove dataplane enforcement. For the primary stack,
 use the [rustbgpd quickstart](../docs/tutorials/quickstart.md). Use the startup
 commands below only for a fresh, isolated lab; changing an existing deployment's
@@ -147,6 +225,7 @@ Setting an endpoint alone does not repair this flow or authenticate it against
 the default credentials-mode deployment. Repair these checks before relying on
 its announce/withdraw result.
 
+For router receipt, use the [FlowSpec interop lab](#flowspec-interop-lab-maintained).
 For maintained controller tests, use the owned fixtures in
 [`scripts/test-gobgp.sh`](../scripts/test-gobgp.sh) and
 [`scripts/test-rustbgpd.sh`](../scripts/test-rustbgpd.sh). They create separate
