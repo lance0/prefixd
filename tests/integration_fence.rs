@@ -299,6 +299,7 @@ async fn dropping_the_fence_connection_forces_standby_then_reacquires() {
             dst_prefix: "203.0.113.10/32".into(),
             protocol: Some(6),
             dst_ports: vec![80],
+            ..Default::default()
         },
         prefixd::domain::FlowSpecAction::discard(),
     );

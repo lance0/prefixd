@@ -272,6 +272,7 @@ mod tests {
                 dst_prefix: "192.0.2.1/32".into(),
                 protocol: Some(17),
                 dst_ports: vec![53],
+                ..Default::default()
             },
             crate::domain::FlowSpecAction::discard(),
         );
