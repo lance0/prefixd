@@ -4748,24 +4748,39 @@ async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
             quotas.max_active_global = 1;
             if status.is_active() {
                 assert_quota_error(
-                    repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
-                        .await,
+                    repo.admit_mitigation(
+                        &candidate,
+                        &quotas,
+                        &Default::default(),
+                        &fixture_actor(),
+                    )
+                    .await,
                     "customer",
                     1,
                     1,
                 );
                 candidate.customer_id = None;
                 assert_quota_error(
-                    repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
-                        .await,
+                    repo.admit_mitigation(
+                        &candidate,
+                        &quotas,
+                        &Default::default(),
+                        &fixture_actor(),
+                    )
+                    .await,
                     "pop",
                     1,
                     1,
                 );
                 candidate.pop = "quota-b".into();
                 assert_quota_error(
-                    repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
-                        .await,
+                    repo.admit_mitigation(
+                        &candidate,
+                        &quotas,
+                        &Default::default(),
+                        &fixture_actor(),
+                    )
+                    .await,
                     "global",
                     1,
                     1,
@@ -4777,8 +4792,13 @@ async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
                 repo.insert_mitigation(&existing).await.unwrap();
                 candidate.customer_id = Some("customer-a".into());
                 assert_quota_error(
-                    repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
-                        .await,
+                    repo.admit_mitigation(
+                        &candidate,
+                        &quotas,
+                        &Default::default(),
+                        &fixture_actor(),
+                    )
+                    .await,
                     "customer",
                     2,
                     1,
@@ -4786,22 +4806,32 @@ async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
                 candidate.customer_id = None;
                 candidate.pop = "quota-a".into();
                 assert_quota_error(
-                    repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
-                        .await,
+                    repo.admit_mitigation(
+                        &candidate,
+                        &quotas,
+                        &Default::default(),
+                        &fixture_actor(),
+                    )
+                    .await,
                     "pop",
                     2,
                     1,
                 );
                 candidate.pop = "quota-b".into();
                 assert_quota_error(
-                    repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
-                        .await,
+                    repo.admit_mitigation(
+                        &candidate,
+                        &quotas,
+                        &Default::default(),
+                        &fixture_actor(),
+                    )
+                    .await,
                     "global",
                     2,
                     1,
                 );
             } else {
-                repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+                repo.admit_mitigation(&candidate, &quotas, &Default::default(), &fixture_actor())
                     .await
                     .unwrap();
             }
@@ -4824,7 +4854,7 @@ async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
         let mut quotas = common::test_settings().quotas;
         quotas.max_active_per_customer = 0;
         assert_quota_error(
-            repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+            repo.admit_mitigation(&candidate, &quotas, &Default::default(), &fixture_actor())
                 .await,
             "customer",
             0,
@@ -4833,7 +4863,7 @@ async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
         candidate.customer_id = None;
         quotas.max_active_per_pop = 0;
         assert_quota_error(
-            repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+            repo.admit_mitigation(&candidate, &quotas, &Default::default(), &fixture_actor())
                 .await,
             "pop",
             0,
@@ -4842,27 +4872,27 @@ async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
         quotas.max_active_per_pop = 1;
         quotas.max_active_global = 0;
         assert_quota_error(
-            repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+            repo.admit_mitigation(&candidate, &quotas, &Default::default(), &fixture_actor())
                 .await,
             "global",
             0,
             0,
         );
         quotas.max_active_global = 10;
-        repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+        repo.admit_mitigation(&candidate, &quotas, &Default::default(), &fixture_actor())
             .await
             .unwrap(); // None skips customer zero.
         candidate.mitigation_id = uuid::Uuid::new_v4();
         candidate.pop = "quota-b".into();
         candidate.customer_id = Some("customer-b".into());
         quotas.max_active_per_customer = 1;
-        repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+        repo.admit_mitigation(&candidate, &quotas, &Default::default(), &fixture_actor())
             .await
             .unwrap(); // independent POP and customer.
         candidate.mitigation_id = uuid::Uuid::new_v4();
         candidate.customer_id = Some("customer-c".into());
         candidate.pop = "quota-c".into();
-        repo.admit_mitigation(&candidate, &quotas, &fixture_actor())
+        repo.admit_mitigation(&candidate, &quotas, &Default::default(), &fixture_actor())
             .await
             .unwrap();
         assert_eq!(repo.count_active_global().await.unwrap(), 3);
@@ -4914,6 +4944,7 @@ async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
         repo.admit_mitigation(
             &candidate("203.0.113.10/32", "rate-a"),
             &quotas,
+            &Default::default(),
             &fixture_actor(),
         )
         .await
@@ -4923,7 +4954,7 @@ async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
         for prefix in ["203.0.113.11/32", "203.0.113.12/32"] {
             let rejected = candidate(prefix, "rate-a");
             assert_rate_error(
-                repo.admit_mitigation(&rejected, &quotas, &fixture_actor())
+                repo.admit_mitigation(&rejected, &quotas, &Default::default(), &fixture_actor())
                     .await,
                 2,
                 2,
@@ -4940,6 +4971,7 @@ async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
         repo.admit_mitigation(
             &candidate("203.0.113.13/32", "rate-b"),
             &quotas,
+            &Default::default(),
             &fixture_actor(),
         )
         .await
@@ -4950,6 +4982,7 @@ async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
             repo.admit_mitigation(
                 &candidate("203.0.113.14/32", "rate-c"),
                 &quotas,
+                &Default::default(),
                 &fixture_actor(),
             )
             .await,
@@ -4968,7 +5001,7 @@ async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
         let admitted = inventory_mitigation(prefix, "rate-a", Utc::now(), MitigationStatus::Active);
         context
             .repo
-            .admit_mitigation(&admitted, &quotas, &fixture_actor())
+            .admit_mitigation(&admitted, &quotas, &Default::default(), &fixture_actor())
             .await
             .unwrap();
     }
@@ -4978,6 +5011,7 @@ async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
             .admit_mitigation(
                 &inventory_mitigation("203.0.113.15/32", "rate-a", Utc::now(), Active),
                 &quotas,
+                &Default::default(),
                 &fixture_actor(),
             )
             .await,
@@ -5021,7 +5055,7 @@ async fn test_new_mitigation_rate_concurrent_controllers_cannot_share_last_slot(
         let quotas = quotas.clone();
         tasks.push(tokio::spawn(async move {
             repository
-                .admit_mitigation(&candidate, &quotas, &fixture_actor())
+                .admit_mitigation(&candidate, &quotas, &Default::default(), &fixture_actor())
                 .await
         }));
         if index == 0 {
@@ -5038,6 +5072,333 @@ async fn test_new_mitigation_rate_concurrent_controllers_cannot_share_last_slot(
         .await
         .unwrap();
     assert_eq!(rows, 1);
+}
+
+fn blackhole_candidate(prefix: &str, pop: &str) -> prefixd::domain::Mitigation {
+    use prefixd::domain::ActionType;
+    let mut mitigation =
+        inventory_mitigation(prefix, pop, chrono::Utc::now(), MitigationStatus::Active);
+    mitigation.action_type = ActionType::Blackhole;
+    mitigation.match_criteria.protocol = None;
+    mitigation.match_criteria.dst_ports.clear();
+    mitigation.scope_hash = mitigation
+        .match_criteria
+        .scope_hash_for(ActionType::Blackhole);
+    mitigation
+}
+
+#[tokio::test]
+async fn test_blackhole_quota_postgres_mock_parity_counts_only_live_blackholes() {
+    let context = TestContext::new().await;
+    let quotas = common::test_settings().quotas;
+    for (quota_type, per_pop, global) in [("blackhole_pop", 1, 5), ("blackhole_global", 5, 1)] {
+        let blackhole = prefixd::config::BlackholeConfig {
+            max_active_per_pop: per_pop,
+            max_active_global: global,
+            ..Default::default()
+        };
+        sqlx::query("DELETE FROM mitigations")
+            .execute(&context.pool)
+            .await
+            .unwrap();
+        let mock: std::sync::Arc<dyn prefixd::db::RepositoryTrait> =
+            std::sync::Arc::new(prefixd::db::MockRepository::new());
+        for repo in [&context.repo, &mock] {
+            // Neither FlowSpec rows nor finished blackholes use a blackhole slot.
+            repo.admit_mitigation(
+                &inventory_mitigation(
+                    "203.0.113.9/32",
+                    "bh-a",
+                    chrono::Utc::now(),
+                    MitigationStatus::Active,
+                ),
+                &quotas,
+                &blackhole,
+                &fixture_actor(),
+            )
+            .await
+            .unwrap();
+            for status in [MitigationStatus::Withdrawn, MitigationStatus::Expired] {
+                let mut finished = blackhole_candidate("203.0.113.8/32", "bh-a");
+                finished.mitigation_id = uuid::Uuid::new_v4();
+                finished.status = status;
+                repo.insert_mitigation(&finished).await.unwrap();
+            }
+            repo.admit_mitigation(
+                &blackhole_candidate("203.0.113.10/32", "bh-a"),
+                &quotas,
+                &blackhole,
+                &fixture_actor(),
+            )
+            .await
+            .unwrap();
+            // Another POP has its own per-POP slot but shares the global one.
+            let other_pop = repo
+                .admit_mitigation(
+                    &blackhole_candidate("203.0.113.11/32", "bh-b"),
+                    &quotas,
+                    &blackhole,
+                    &fixture_actor(),
+                )
+                .await;
+            assert_eq!(other_pop.is_ok(), quota_type == "blackhole_pop");
+            assert_quota_error(
+                repo.admit_mitigation(
+                    &blackhole_candidate("203.0.113.12/32", "bh-a"),
+                    &quotas,
+                    &blackhole,
+                    &fixture_actor(),
+                )
+                .await,
+                quota_type,
+                1,
+                1,
+            );
+            // Negative control: a FlowSpec admission is not held by the blackhole quota.
+            repo.admit_mitigation(
+                &inventory_mitigation(
+                    "203.0.113.12/32",
+                    "bh-a",
+                    chrono::Utc::now(),
+                    MitigationStatus::Active,
+                ),
+                &quotas,
+                &blackhole,
+                &fixture_actor(),
+            )
+            .await
+            .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_blackhole_quota_concurrent_controllers_cannot_overshoot() {
+    use prefixd::db::RepositoryTrait;
+    // max 1 shows the second admission refused; max 2 is the negative control.
+    for max in [1, 2] {
+        let context = TestContext::new().await;
+        let quotas = common::test_settings().quotas;
+        let blackhole = prefixd::config::BlackholeConfig {
+            max_active_per_pop: max,
+            ..Default::default()
+        };
+        // Hold the first admission inside its INSERT, after its blackhole count, under the lock.
+        sqlx::raw_sql("CREATE FUNCTION gate_blackhole_insert() RETURNS trigger AS $$ BEGIN PERFORM pg_advisory_xact_lock(7355, 2362); RETURN NEW; END; $$ LANGUAGE plpgsql; CREATE TRIGGER gate_blackhole_insert BEFORE INSERT ON mitigations FOR EACH ROW EXECUTE FUNCTION gate_blackhole_insert();")
+            .execute(&context.pool).await.unwrap();
+        let mut gate = context.pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(7355, 2362)")
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+        let mut tasks = Vec::new();
+        for (index, prefix) in ["203.0.113.10/32", "203.0.113.11/32"]
+            .into_iter()
+            .enumerate()
+        {
+            // Separate pools stand in for two controllers sharing the database.
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&context.state.settings.storage.connection_string)
+                .await
+                .unwrap();
+            let repository = prefixd::db::Repository::new(pool);
+            let candidate = blackhole_candidate(prefix, "bh-a");
+            let (quotas, blackhole) = (quotas.clone(), blackhole.clone());
+            tasks.push(tokio::spawn(async move {
+                repository
+                    .admit_mitigation(&candidate, &quotas, &blackhole, &fixture_actor())
+                    .await
+            }));
+            if index == 0 {
+                wait_quota_lock(&context.pool, false, 1).await;
+            }
+        }
+        wait_quota_lock(&context.pool, true, 1).await;
+        gate.commit().await.unwrap();
+        let second = tasks.pop().unwrap().await.unwrap();
+        tasks.pop().unwrap().await.unwrap().unwrap();
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE action_type = 'blackhole'")
+                .fetch_one(&context.pool)
+                .await
+                .unwrap();
+        if max == 1 {
+            assert_quota_error(second, "blackhole_pop", 1, 1);
+            assert_eq!(rows, 1);
+        } else {
+            second.unwrap();
+            assert_eq!(rows, 2);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_blackhole_dry_run_admission_persists_without_rpc() {
+    use prefixd::bgp::FlowSpecAnnouncer;
+    let context = TestContext::new().await;
+    let mut settings = context.state.settings.clone();
+    settings.blackhole = prefixd::config::BlackholeConfig {
+        enabled: true,
+        next_hop_ipv4: Some("192.0.2.66".parse().unwrap()),
+        ..Default::default()
+    };
+    let speaker = prefixd::bgp::MockAnnouncer::new();
+    context
+        .repo
+        .insert_safelist("10.0.0.0/8", "config", None)
+        .await
+        .unwrap();
+    prefixd::guardrails::check_blackhole_startup(
+        &settings.blackhole,
+        &speaker,
+        context.repo.as_ref(),
+    )
+    .await
+    .unwrap();
+    let inventory = context.state.inventory.read().await.clone();
+    let pop = settings.pop.clone();
+    let intent = |prefix: &str| prefixd::domain::MitigationIntent {
+        event_id: uuid::Uuid::new_v4(),
+        customer_id: None,
+        service_id: None,
+        pop: pop.clone(),
+        match_criteria: prefixd::domain::MatchCriteria {
+            dst_prefix: prefix.into(),
+            protocol: None,
+            dst_ports: vec![],
+        },
+        action_type: prefixd::domain::ActionType::Blackhole,
+        action_params: prefixd::domain::ActionParams { rate_bps: None },
+        ttl_seconds: 600,
+        reason: "manual blackhole".into(),
+    };
+    let admitted = prefixd::guardrails::admit_blackhole(
+        context.repo.as_ref(),
+        &settings,
+        &inventory,
+        intent("203.0.113.10/32"),
+        &fixture_actor(),
+    )
+    .await
+    .unwrap();
+    let stored = context
+        .repo
+        .get_mitigation(admitted.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.action_type, prefixd::domain::ActionType::Blackhole);
+    assert_eq!(stored.status, MitigationStatus::Active);
+    assert_eq!(
+        stored.origin_mode,
+        Some(prefixd::config::OperationMode::DryRun)
+    );
+    let audit: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log WHERE action = 'create' AND target_id = $1",
+    )
+    .bind(stored.mitigation_id.to_string())
+    .fetch_one(&context.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit, 1);
+    let speaker: &dyn FlowSpecAnnouncer = &speaker;
+    let blackholes = speaker
+        .blackhole()
+        .unwrap()
+        .list_blackholes()
+        .await
+        .unwrap();
+    assert!(blackholes.routes.is_empty());
+    assert_eq!(
+        speaker.reader().unwrap().list_active().await.unwrap().len(),
+        0
+    );
+    // Negative control: enforced mode refuses before persistence.
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    let error = prefixd::guardrails::admit_blackhole(
+        context.repo.as_ref(),
+        &settings,
+        &inventory,
+        intent("203.0.113.11/32"),
+        &fixture_actor(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("enforced"), "{error}");
+    assert_eq!(context.repo.count_active_global().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_blackhole_startup_refuses_an_empty_safelist_in_the_binary() {
+    use std::time::Duration;
+    let context = TestContext::new().await;
+    let directory = tempfile::tempdir().unwrap();
+    let listen = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap()
+    };
+    let mut settings = common::test_settings();
+    settings.http.listen = listen.to_string();
+    settings.blackhole.enabled = true;
+    settings.blackhole.next_hop_ipv4 = Some("192.0.2.66".parse().unwrap());
+    for (name, value) in [
+        (
+            "inventory.yaml",
+            serde_saphyr::to_string(&common::test_inventory()),
+        ),
+        (
+            "playbooks.yaml",
+            serde_saphyr::to_string(&common::test_playbooks()),
+        ),
+    ] {
+        common::write_yaml(directory.path(), name, &value.unwrap());
+    }
+    let command = |settings: &prefixd::config::Settings| {
+        common::write_yaml(
+            directory.path(),
+            "prefixd.yaml",
+            &serde_saphyr::to_string(settings).unwrap(),
+        );
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixd"));
+        command
+            .arg("--config")
+            .arg(directory.path())
+            .env(
+                "DATABASE_URL",
+                &context.state.settings.storage.connection_string,
+            )
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        command
+    };
+    let output = tokio::time::timeout(Duration::from_secs(15), command(&settings).output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("blackhole.enabled requires a nonempty safelist"),
+        "{stderr}"
+    );
+    assert!(std::net::TcpStream::connect(listen).is_err());
+
+    // Negative control: a configured safelist lets the same controller serve.
+    settings.safelist.prefixes = vec!["10.0.0.0/8".into()];
+    let mut child = command(&settings)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while tokio::net::TcpStream::connect(listen).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("controller with a safelist starts serving");
+    child.kill().await.unwrap();
 }
 
 #[tokio::test]
@@ -5306,7 +5667,7 @@ async fn test_shared_quota_one_connection_overrides_repeatable_read() {
         .unwrap();
     let admission = tokio::spawn(async move {
         repository
-            .admit_mitigation(&candidate, &quotas, &fixture_actor())
+            .admit_mitigation(&candidate, &quotas, &Default::default(), &fixture_actor())
             .await
     });
     wait_quota_lock(&context.pool, true, 1).await;
@@ -5336,6 +5697,7 @@ async fn test_shared_quota_one_connection_overrides_repeatable_read() {
                 MitigationStatus::Active,
             ),
             &common::test_settings().quotas,
+            &Default::default(),
             &fixture_actor(),
         )
         .await
@@ -5386,6 +5748,7 @@ async fn test_shared_quota_pool_wait_uses_whole_deadline() {
                 MitigationStatus::Active,
             ),
             &common::test_settings().quotas,
+            &Default::default(),
             &fixture_actor(),
         )
         .await
@@ -5430,7 +5793,7 @@ async fn test_shared_quota_deadline_does_not_fail_a_slow_commit() {
     let quotas = common::test_settings().quotas;
     let admission = tokio::spawn(async move {
         repository
-            .admit_mitigation(&candidate, &quotas, &fixture_actor())
+            .admit_mitigation(&candidate, &quotas, &Default::default(), &fixture_actor())
             .await
     });
     wait_quota_lock(&context.pool, true, 1).await;

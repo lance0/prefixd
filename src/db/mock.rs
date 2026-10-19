@@ -367,6 +367,7 @@ impl RepositoryTrait for MockRepository {
         &self,
         m: &Mitigation,
         quotas: &crate::config::QuotasConfig,
+        blackhole: &crate::config::BlackholeConfig,
         actor: &crate::observability::CreationActor,
     ) -> Result<()> {
         let mut mitigations = self.mitigations.lock().unwrap();
@@ -401,6 +402,34 @@ impl RepositoryTrait for MockRepository {
             u32::try_from(count).unwrap_or(u32::MAX),
             quotas.max_active_global,
         )?;
+        if m.action_type == crate::domain::ActionType::Blackhole {
+            let blackholes = || {
+                mitigations.iter().filter(|existing| {
+                    existing.is_active()
+                        && existing.action_type == crate::domain::ActionType::Blackhole
+                })
+            };
+            for (quota_type, count, max) in [
+                (
+                    "blackhole_pop",
+                    blackholes()
+                        .filter(|existing| existing.pop == m.pop)
+                        .count(),
+                    blackhole.max_active_per_pop,
+                ),
+                (
+                    "blackhole_global",
+                    blackholes().count(),
+                    blackhole.max_active_global,
+                ),
+            ] {
+                super::repository::check_active_quota(
+                    quota_type,
+                    u32::try_from(count).unwrap_or(u32::MAX),
+                    max,
+                )?;
+            }
+        }
         let since = Utc::now() - super::repository::NEW_MITIGATION_WINDOW;
         let count = mitigations
             .iter()

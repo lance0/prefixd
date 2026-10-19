@@ -1,3 +1,7 @@
+mod blackhole;
+
+pub use blackhole::{admit_blackhole, check_blackhole_startup, extend_blackhole};
+
 use std::net::IpAddr;
 
 use crate::config::{GuardrailsConfig, QuotasConfig, TimersConfig};

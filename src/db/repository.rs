@@ -6,12 +6,12 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use super::{ListParams, MitigationListParams, NotificationPreferences, RepositoryTrait};
-use crate::config::QuotasConfig;
+use crate::config::{BlackholeConfig, QuotasConfig};
 use crate::correlation::engine::{
     CorroboratingSignal, EventDimensions, SignalGroup, SignalGroupEvent, SignalGroupFilter,
 };
 use crate::domain::{
-    AttackEvent, Mitigation, MitigationRow, MitigationStatus, Operator, OperatorRole,
+    ActionType, AttackEvent, Mitigation, MitigationRow, MitigationStatus, Operator, OperatorRole,
     WithdrawalRequest,
 };
 use crate::error::{GuardrailError, PrefixdError, Result};
@@ -529,6 +529,7 @@ impl RepositoryTrait for Repository {
         &self,
         m: &Mitigation,
         quotas: &QuotasConfig,
+        blackhole: &BlackholeConfig,
         actor: &CreationActor,
     ) -> Result<()> {
         // Bound pool acquisition, lock wait, quota checks and insert. The server bounds also
@@ -555,6 +556,14 @@ impl RepositoryTrait for Repository {
             let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE status IN ('pending', 'active', 'escalated')")
                 .fetch_one(&mut *tx).await?;
             check_active_quota("global", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_global)?;
+            if m.action_type == ActionType::Blackhole {
+                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE action_type = 'blackhole' AND pop = $1 AND status IN ('pending', 'active', 'escalated')")
+                    .bind(&m.pop).fetch_one(&mut *tx).await?;
+                check_active_quota("blackhole_pop", u32::try_from(count).unwrap_or(u32::MAX), blackhole.max_active_per_pop)?;
+                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE action_type = 'blackhole' AND status IN ('pending', 'active', 'escalated')")
+                    .fetch_one(&mut *tx).await?;
+                check_active_quota("blackhole_global", u32::try_from(count).unwrap_or(u32::MAX), blackhole.max_active_global)?;
+            }
             Self::check_new_mitigation_rate_on(&mut tx, &m.pop, quotas.max_new_per_minute).await?;
             // Same transaction as the row: never an entry without a row, or a row without one.
             Self::insert_audit_on(&mut tx, &AuditEntry::mitigation_created(m, actor)).await?;

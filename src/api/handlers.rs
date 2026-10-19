@@ -489,7 +489,12 @@ async fn persist_new_mitigation(
     mitigation.origin_mode = Some(state.settings.mode);
     state
         .repo
-        .admit_mitigation(mitigation, &state.settings.quotas, actor)
+        .admit_mitigation(
+            mitigation,
+            &state.settings.quotas,
+            &state.settings.blackhole,
+            actor,
+        )
         .await
         .inspect_err(|error| {
             let reason = match error {

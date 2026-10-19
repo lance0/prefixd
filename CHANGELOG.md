@@ -14,6 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `speaker.capabilities.blackhole` and `blackhole_lease`. GoBGP reports the
   capability as unsupported, and `blackhole_lease` is false for every backend.
   Nothing creates a blackhole yet.
+- An optional `blackhole` block in `prefixd.yaml` configures RTBH host routes
+  (ADR 027): `enabled` (default `false`), `next_hop_ipv4`, `next_hop_ipv6`,
+  `communities`, `large_communities`, `max_ttl_seconds` (default 3600),
+  `max_active_per_pop` (default 10) and `max_active_global` (default 50).
+  Every key is validated at load. Wrong-family or non-unicast next hops,
+  malformed communities, `NO_EXPORT`, `NO_ADVERTISE` and unknown keys are
+  refused. Startup refuses `enabled: true` when the speaker backend lacks the
+  blackhole capability (GoBGP) or the safelist is empty, in dry-run and
+  enforced modes. No API, playbook or detector path creates a blackhole yet,
+  so the block changes no behavior; omitting it keeps every existing
+  configuration valid. Older binaries ignore the block.
 
 ### Changed
 

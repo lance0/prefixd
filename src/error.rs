@@ -118,6 +118,12 @@ pub enum GuardrailError {
 
     #[error("no allowed ports for service")]
     NoAllowedPorts,
+
+    #[error("blackhole mitigations are disabled (blackhole.enabled=false)")]
+    BlackholeDisabled,
+
+    #[error("blackhole refused: {reason}")]
+    InvalidBlackhole { reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, PrefixdError>;

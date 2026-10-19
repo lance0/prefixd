@@ -138,12 +138,14 @@ pub trait RepositoryTrait: Send + Sync {
     /// Raw persistence for fixtures/imports; bypasses quota admission and audit.
     /// Production creation must use `admit_mitigation`.
     async fn insert_mitigation(&self, m: &Mitigation) -> Result<()>;
-    /// Atomically check customer, POP, then global active quotas, then the POP's
+    /// Atomically check customer, POP, then global active quotas, then for a
+    /// blackhole its POP and global blackhole quotas, then the POP's
     /// `max_new_per_minute` rate, and persist new intent with its `create` audit entry.
     async fn admit_mitigation(
         &self,
         m: &Mitigation,
         quotas: &crate::config::QuotasConfig,
+        blackhole: &crate::config::BlackholeConfig,
         actor: &crate::observability::CreationActor,
     ) -> Result<()>;
     async fn update_mitigation(&self, m: &Mitigation) -> Result<()>;

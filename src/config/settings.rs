@@ -22,6 +22,8 @@ pub struct Settings {
     pub alerting: crate::alerting::AlertingConfig,
     #[serde(default)]
     pub correlation: crate::correlation::CorrelationConfig,
+    #[serde(default)]
+    pub blackhole: BlackholeConfig,
 }
 
 fn default_mode() -> OperationMode {
@@ -417,6 +419,159 @@ pub struct SafelistConfig {
     pub prefixes: Vec<String>,
 }
 
+/// Remotely triggered blackhole host routes (ADR 027). Off by default; every
+/// key is validated at load whether or not the feature is enabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BlackholeConfig {
+    pub enabled: bool,
+    /// Discard next hop for IPv4 victims.
+    pub next_hop_ipv4: Option<std::net::IpAddr>,
+    /// Discard next hop for IPv6 victims.
+    pub next_hop_ipv6: Option<std::net::IpAddr>,
+    /// Standard communities (`ASN:value`) added to BLACKHOLE (65535:666).
+    pub communities: Vec<String>,
+    /// Large communities (`global:local1:local2`).
+    pub large_communities: Vec<String>,
+    /// Bounds manual requests and extensions; a nonzero TTL is always required.
+    pub max_ttl_seconds: u32,
+    /// Active blackholes at this POP, in addition to the general quotas.
+    pub max_active_per_pop: u32,
+    /// Active blackholes across all POPs sharing the database.
+    pub max_active_global: u32,
+}
+
+impl Default for BlackholeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            next_hop_ipv4: None,
+            next_hop_ipv6: None,
+            communities: Vec::new(),
+            large_communities: Vec::new(),
+            max_ttl_seconds: 3600,
+            max_active_per_pop: 10,
+            max_active_global: 50,
+        }
+    }
+}
+
+/// RFC 1997 communities that can stop the route from reaching the router.
+const REJECTED_BLACKHOLE_COMMUNITIES: [(u32, &str); 2] =
+    [(0xFFFF_FF01, "NO_EXPORT"), (0xFFFF_FF02, "NO_ADVERTISE")];
+
+impl BlackholeConfig {
+    /// Configured standard communities; BLACKHOLE is added by `BlackholeRoute`.
+    pub fn parsed_communities(&self) -> crate::error::Result<Vec<u32>> {
+        self.communities
+            .iter()
+            .map(|text| {
+                let value = match parse_community_parts::<u16, 2>(text) {
+                    Some([high, low]) => (u32::from(high) << 16) | u32::from(low),
+                    None => {
+                        return Err(blackhole_config_error(format!(
+                            "communities entry {text:?} must be ASN:value with each part 0-65535"
+                        )));
+                    }
+                };
+                match REJECTED_BLACKHOLE_COMMUNITIES
+                    .iter()
+                    .find(|(rejected, _)| *rejected == value)
+                {
+                    Some((_, name)) => Err(blackhole_config_error(format!(
+                        "communities must not include {name} ({text}); scope the route in router import or speaker export policy"
+                    ))),
+                    None => Ok(value),
+                }
+            })
+            .collect()
+    }
+
+    pub fn parsed_large_communities(&self) -> crate::error::Result<Vec<[u32; 3]>> {
+        self.large_communities
+            .iter()
+            .map(|text| {
+                parse_community_parts::<u32, 3>(text).ok_or_else(|| {
+                    blackhole_config_error(format!(
+                        "large_communities entry {text:?} must be global:local1:local2 with each part 0-4294967295"
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    /// The configured discard next hop for the victim's family.
+    pub fn next_hop_for(&self, victim: std::net::IpAddr) -> Option<std::net::IpAddr> {
+        if victim.is_ipv4() {
+            self.next_hop_ipv4
+        } else {
+            self.next_hop_ipv6
+        }
+    }
+
+    /// Static checks; the speaker capability and safelist are checked at startup
+    /// by `guardrails::check_blackhole_startup`.
+    pub fn validate(&self) -> crate::error::Result<()> {
+        let communities = self.parsed_communities()?;
+        let large_communities = self.parsed_large_communities()?;
+        for (key, next_hop, ipv4) in [
+            ("next_hop_ipv4", self.next_hop_ipv4, true),
+            ("next_hop_ipv6", self.next_hop_ipv6, false),
+        ] {
+            let Some(next_hop) = next_hop else { continue };
+            if next_hop.is_ipv4() != ipv4 {
+                return Err(blackhole_config_error(format!(
+                    "{key} must be an IPv{} address, got {next_hop}",
+                    if ipv4 { 4 } else { 6 }
+                )));
+            }
+            // The route constructor is the single definition of a usable next hop.
+            crate::bgp::BlackholeRoute::new(
+                ipnet::IpNet::from(next_hop),
+                next_hop,
+                communities.clone(),
+                large_communities.clone(),
+            )
+            .map_err(|_| {
+                blackhole_config_error(format!(
+                    "{key} must be a nonzero unicast address, got {next_hop}"
+                ))
+            })?;
+        }
+        if self.max_ttl_seconds == 0 {
+            return Err(blackhole_config_error(
+                "max_ttl_seconds must be nonzero".into(),
+            ));
+        }
+        if self.enabled && self.next_hop_ipv4.is_none() && self.next_hop_ipv6.is_none() {
+            return Err(blackhole_config_error(
+                "enabled requires next_hop_ipv4 or next_hop_ipv6".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn blackhole_config_error(message: String) -> crate::error::PrefixdError {
+    crate::error::PrefixdError::Config(format!("blackhole.{message}"))
+}
+
+/// Exactly `N` colon-separated decimal parts, each parsed as `T`.
+fn parse_community_parts<T: std::str::FromStr + Copy + Default, const N: usize>(
+    text: &str,
+) -> Option<[T; N]> {
+    let mut parts = [T::default(); N];
+    let mut fields = text.split(':');
+    for part in &mut parts {
+        let field = fields.next()?;
+        if field.is_empty() || !field.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        *part = field.parse().ok()?;
+    }
+    fields.next().is_none().then_some(parts)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "ShutdownInput")]
 pub struct ShutdownConfig {
@@ -487,6 +642,7 @@ impl Settings {
         let settings: Settings = crate::config::parse_yaml(&content)?;
         let deprecations = settings.deprecations(&content);
         settings.http.validate_auth_transport()?;
+        settings.blackhole.validate()?;
         let correlation_errors = settings.correlation.validate();
         if !correlation_errors.is_empty() {
             return Err(anyhow::anyhow!(
@@ -834,6 +990,145 @@ observability:
                 (result, _) => panic!("{selector}: unexpected {result:?}"),
             }
         }
+    }
+
+    const BLACKHOLE_YAML: &str = "blackhole:\n  enabled: true\n  next_hop_ipv4: 192.0.2.66\n  next_hop_ipv6: '2001:db8::66'\n  communities: ['64496:666', '65535:666']\n  large_communities: ['64496:1:666']\n";
+
+    #[test]
+    fn blackhole_is_off_by_default_with_the_decided_caps() {
+        let (settings, deprecations) = load_yaml(MINIMAL_SETTINGS_YAML).unwrap();
+        assert!(deprecations.is_empty());
+        assert_eq!(
+            serde_json::to_value(&settings.blackhole).unwrap(),
+            serde_json::json!({
+                "enabled": false,
+                "next_hop_ipv4": null,
+                "next_hop_ipv6": null,
+                "communities": [],
+                "large_communities": [],
+                "max_ttl_seconds": 3600,
+                "max_active_per_pop": 10,
+                "max_active_global": 50,
+            })
+        );
+        let (settings, _) = load_yaml(&format!("{MINIMAL_SETTINGS_YAML}{BLACKHOLE_YAML}")).unwrap();
+        let config = settings.blackhole;
+        assert!(config.enabled);
+        assert_eq!(
+            config.parsed_communities().unwrap(),
+            [(64496 << 16) | 666, crate::bgp::BLACKHOLE_COMMUNITY]
+        );
+        assert_eq!(
+            config.parsed_large_communities().unwrap(),
+            [[64496, 1, 666]]
+        );
+        assert_eq!(
+            config.next_hop_for("203.0.113.10".parse().unwrap()),
+            Some("192.0.2.66".parse().unwrap())
+        );
+        assert_eq!(
+            config.next_hop_for("2001:db8::10".parse().unwrap()),
+            Some("2001:db8::66".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn blackhole_settings_refuse_unsafe_or_malformed_values() {
+        let valid = format!("{MINIMAL_SETTINGS_YAML}{BLACKHOLE_YAML}");
+        // Negative control: the unmodified block loads.
+        load_yaml(&valid).unwrap();
+        for (from, to, expected) in [
+            (
+                "next_hop_ipv4: 192.0.2.66",
+                "next_hop_ipv4: '2001:db8::1'",
+                "blackhole.next_hop_ipv4 must be an IPv4 address",
+            ),
+            (
+                "next_hop_ipv6: '2001:db8::66'",
+                "next_hop_ipv6: 192.0.2.1",
+                "blackhole.next_hop_ipv6 must be an IPv6 address",
+            ),
+            (
+                "next_hop_ipv4: 192.0.2.66",
+                "next_hop_ipv4: 0.0.0.0",
+                "nonzero unicast",
+            ),
+            (
+                "next_hop_ipv4: 192.0.2.66",
+                "next_hop_ipv4: 255.255.255.255",
+                "nonzero unicast",
+            ),
+            (
+                "next_hop_ipv4: 192.0.2.66",
+                "next_hop_ipv4: 224.0.0.1",
+                "nonzero unicast",
+            ),
+            (
+                "next_hop_ipv6: '2001:db8::66'",
+                "next_hop_ipv6: '::'",
+                "nonzero unicast",
+            ),
+            (
+                "next_hop_ipv6: '2001:db8::66'",
+                "next_hop_ipv6: 'ff02::1'",
+                "nonzero unicast",
+            ),
+            ("'64496:666'", "'65535:65281'", "must not include NO_EXPORT"),
+            (
+                "'64496:666'",
+                "'65535:65282'",
+                "must not include NO_ADVERTISE",
+            ),
+            ("'64496:666'", "'65536:1'", "communities entry"),
+            ("'64496:666'", "'64496:666:1'", "communities entry"),
+            ("'64496:666'", "'64496'", "communities entry"),
+            ("'64496:666'", "'+1:2'", "communities entry"),
+            ("'64496:666'", "'no-export'", "communities entry"),
+            ("'64496:666'", "''", "communities entry"),
+            ("'64496:1:666'", "'64496:666'", "large_communities entry"),
+            (
+                "'64496:1:666'",
+                "'4294967296:1:1'",
+                "large_communities entry",
+            ),
+            ("'64496:1:666'", "'1:2:3:4'", "large_communities entry"),
+            (
+                "  enabled: true\n",
+                "  enabled: true\n  max_ttl_seconds: 0\n",
+                "blackhole.max_ttl_seconds must be nonzero",
+            ),
+            (
+                "  enabled: true\n",
+                "  enabled: true\n  leased: true\n",
+                "unknown field",
+            ),
+        ] {
+            assert!(valid.contains(from), "{from}");
+            let error = load_yaml(&valid.replacen(from, to, 1))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{to}: {error}");
+        }
+        // Enablement needs a next hop; with one family configured it loads.
+        let neither = valid
+            .replacen("  next_hop_ipv4: 192.0.2.66\n", "", 1)
+            .replacen("  next_hop_ipv6: '2001:db8::66'\n", "", 1);
+        let error = load_yaml(&neither).unwrap_err().to_string();
+        assert!(
+            error.contains("blackhole.enabled requires next_hop_ipv4 or next_hop_ipv6"),
+            "{error}"
+        );
+        load_yaml(&valid.replacen("  next_hop_ipv6: '2001:db8::66'\n", "", 1)).unwrap();
+        // Disabled still validates every key, but needs no next hop.
+        load_yaml(&neither.replacen("enabled: true", "enabled: false", 1)).unwrap();
+        let error = load_yaml(
+            &valid
+                .replacen("enabled: true", "enabled: false", 1)
+                .replacen("'64496:666'", "'65535:65281'", 1),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("NO_EXPORT"), "{error}");
     }
 
     #[test]

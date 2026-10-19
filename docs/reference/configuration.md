@@ -578,6 +578,63 @@ to run; rules can remain while prefixd is stopped.
 Only `drain_timeout_seconds` is accepted in `shutdown`; unknown fields cause a
 configuration error, except the removed `preserve_announcements` key below.
 
+### Blackhole
+
+Remotely triggered blackhole (RTBH) host routes, a second mitigation kind
+([ADR 027](../adr/027-blackhole-mitigations.md)). The block is off by default
+and optional. No API, playbook or detector path creates a blackhole yet, so
+these settings change no behavior on their own.
+
+```yaml
+blackhole:
+  # Off by default. Startup refuses enabled: true unless the speaker backend
+  # has the blackhole capability (rustbgpd) and the safelist is not empty.
+  enabled: false
+
+  # Discard next hop per family. Enabling needs at least one; a victim whose
+  # family has none is refused.
+  next_hop_ipv4: 192.0.2.66
+  next_hop_ipv6: "2001:db8::66"
+
+  # Added to BLACKHOLE (65535:666), which every blackhole carries.
+  communities: ["64496:666"]          # ASN:value, each 0-65535
+  large_communities: ["64496:0:666"]  # global:local1:local2
+
+  # A nonzero TTL is required and capped here, on creation and on extension.
+  max_ttl_seconds: 3600
+
+  # Active blackholes, on top of the quotas section's limits.
+  max_active_per_pop: 10
+  max_active_global: 50
+```
+
+| Key | Default | Validation |
+| --- | --- | --- |
+| `enabled` | `false` | Startup also refuses it without the speaker's blackhole capability or with an empty safelist, in dry-run and enforced modes |
+| `next_hop_ipv4` | unset | An IPv4 nonzero unicast address |
+| `next_hop_ipv6` | unset | An IPv6 nonzero unicast address |
+| `communities` | `[]` | `ASN:value`; `65535:65281` (`NO_EXPORT`) and `65535:65282` (`NO_ADVERTISE`) are refused because they can stop the route reaching the router |
+| `large_communities` | `[]` | Three colon-separated 32-bit values |
+| `max_ttl_seconds` | `3600` | Nonzero |
+| `max_active_per_pop` | `10` | Counted at the configured `pop` |
+| `max_active_global` | `50` | Counted across every POP sharing the database |
+
+prefixd validates every key at load, even when `enabled` is false, and
+unknown keys in `blackhole` fail configuration loading. Scope routes in the
+receiving router's import policy or the speaker's export policy, not with
+`NO_EXPORT` at injection. Each POP's controller sets its own block. A
+configuration change affects only new blackholes.
+
+Blackhole guardrails are stricter than FlowSpec's and do not use the
+`guardrails` prefix bounds or the `timers` TTL bounds. A blackhole is an IPv4
+`/32` or IPv6 `/128` with no protocol, ports or rate. Its victim must be
+owned in inventory, even for a manual request, and must not be safelisted,
+unspecified, loopback, multicast, link-local, IPv4 broadcast, IPv4-mapped
+IPv6 or a configured next hop. The blackhole quotas are checked in the same
+locked admission transaction as the [quotas](#quotas), so concurrent
+admissions cannot exceed them; the general quotas and `max_new_per_minute`
+still apply. A quota rejection names `blackhole_pop` or `blackhole_global`.
+
 ### Removed keys
 
 These v0.19.1 keys have no effect. This release still loads them, ignores them
@@ -593,8 +650,8 @@ From 0.21.0 they are unknown keys. Delete them:
 | `observability.metrics_listen` | Metrics are served on `http.listen` |
 | `shutdown.preserve_announcements` | Shutdown always leaves speaker rules in place |
 
-Other unknown keys keep their existing handling: `observability` and `shutdown`
-reject them, and other sections ignore them.
+Other unknown keys keep their existing handling: `observability`, `shutdown`
+and `blackhole` reject them, and other sections ignore them.
 
 ---
 

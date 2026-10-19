@@ -1103,6 +1103,7 @@ fn test_settings() -> Settings {
         shutdown: ShutdownConfig::default(),
         alerting: Default::default(),
         correlation: Default::default(),
+        blackhole: Default::default(),
     }
 }
 

@@ -119,6 +119,12 @@ async fn main() -> anyhow::Result<()> {
         repo.insert_safelist(prefix, "config", Some("from prefixd.yaml"))
             .await?;
     }
+    prefixd::guardrails::check_blackhole_startup(
+        &config.settings.blackhole,
+        announcer.as_ref(),
+        repo.as_ref(),
+    )
+    .await?;
 
     // Load alerting config from alerting.yaml if present, falling back to prefixd.yaml
     let alerting_path = cli.config.join("alerting.yaml");
