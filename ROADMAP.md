@@ -27,13 +27,30 @@ exclusive administration of its physical speaker target.
 
 These controller and peer results do not establish vendor forwarding. TTL expiry
 requires the running controller; a separate speaker can continue advertising
-after prefixd stops.
+after prefixd stops. For leased routes, the planned rustbgpd injection lease is
+the remedy: the speaker would remove them when the controller stops renewing.
 
 ## Near-term work
 
+- Add blackhole (RTBH) host routes as a second mitigation kind, as decided in
+  [ADR 027](docs/adr/027-blackhole-mitigations.md). The design is accepted and
+  kind-aware identity and schema have merged; blackholes are not supported yet.
+  Manual blackholes come first, unleased, behind stricter guardrails than
+  FlowSpec. Detector-driven blackholes wait for the rustbgpd owner-scoped
+  injection lease, so a stopped controller cannot leave a victim blackholed
+  indefinitely. Qualification is at FRR in the containerlab harness. FastNetMon
+  Community users mostly mitigate with blackholes.
+- Fence duplicate controllers with a PostgreSQL advisory lock keyed on the
+  controller's owner. When controllers share a database, one is active per
+  owner and the others wait in standby to take over. The fence protects
+  FlowSpec as well as blackholes. Controllers with separate databases are
+  outside the lock.
 - Add stronger announcement acknowledgements and a complete desired/acknowledged
   ledger. Shared targets also need ownership evidence that distinguishes another
-  controller's local rule with the same match.
+  controller's local rule with the same match. That evidence is planned to
+  arrive through the owner-scoped injection lease proposed upstream as rustbgpd
+  ADR-0141. The controller fence covers duplicate controllers on one database;
+  it does not make shared targets supported.
 - Qualify router receipt and traffic enforcement separately for each tested
   backend, vendor, software version and topology. Preserve historical GoBGP
   results; qualify rustbgpd against FRR/Juniper and Arista/Cisco independently.
@@ -53,12 +70,19 @@ cannot stand in for unavailable observation. Additional integrations, match or
 action types, telemetry and distributed coordination need a concrete operator
 requirement and their own qualification.
 
+Diverting attack traffic to an external scrubber is later work. prefixd would
+orchestrate BGP diversion routes or FlowSpec redirect so the victim stays
+reachable while traffic is scrubbed elsewhere. It depends on the blackhole
+unicast contract, the injection lease and the controller fence, and needs its
+own design, including scrubber health and leak prevention.
+
 [ADR 026](docs/adr/026-facelift-framework-scope.md) defers framework adoption.
 Loco or an ORM migration is not a prerequisite for these changes.
 
 prefixd remains a control-plane policy controller: packet scrubbing, detection
-algorithms and L7/WAF analysis belong to other systems. Default guardrails reject
-broad match-everything rules.
+algorithms and L7/WAF analysis belong to other systems. Diversion would be
+control-plane orchestration; the scrubbing itself, the return path and detection
+stay external. Default guardrails reject broad match-everything rules.
 
 See [contributing](CONTRIBUTING.md) and the
 [public issues](https://github.com/lance0/prefixd/issues) for ways to help.
