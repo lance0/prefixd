@@ -894,6 +894,49 @@ mod tests {
         );
     }
 
+    /// Speakers read source ports back ascending, so a rule built from an unsorted
+    /// list with duplicates must still match its read-back and be stored canonically.
+    #[test]
+    fn source_ports_are_stored_canonically_and_match_ascending_read_back() {
+        let writer = MockAnnouncer::new();
+        let mut criteria = amplification_criteria("192.0.2.10/32");
+        criteria.src_ports = vec![389, 123, 123];
+        let rule = MitigationRoute::new(
+            ActionType::Discard,
+            &criteria,
+            &ActionParams { rate_bps: None },
+        )
+        .into_flowspec()
+        .unwrap();
+        let read_back = FlowSpecNlri {
+            src_ports: vec![123, 389],
+            ..FlowSpecNlri::from(&amplification_criteria("192.0.2.10/32"))
+        };
+        assert_eq!(rule.nlri_hash(), read_back.compute_hash());
+        assert!(writer.matches_nlri(&rule.nlri, &read_back).unwrap());
+        assert!(writer.matches_nlri(&read_back, &rule.nlri).unwrap());
+        let mut raw = read_back.clone();
+        raw.src_ports = vec![389, 123, 123];
+        assert!(writer.matches_nlri(&raw, &read_back).unwrap());
+
+        let stored = serde_json::to_string(&criteria).unwrap();
+        assert_eq!(
+            stored,
+            r#"{"dst_prefix":"192.0.2.10/32","protocol":17,"dst_ports":[],"src_ports":[123,389]}"#
+        );
+        assert!(
+            serde_json::to_string(&rule)
+                .unwrap()
+                .contains(r#""src_ports":[123,389]"#)
+        );
+        let parsed: MatchCriteria = serde_json::from_str(
+            r#"{"dst_prefix":"192.0.2.10/32","protocol":17,"dst_ports":[],"src_ports":[389,123,123]}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.src_ports, [123, 389]);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), stored);
+    }
+
     /// Legacy rows written by earlier releases; none has a new key.
     #[test]
     fn legacy_rows_round_trip_byte_for_byte_and_unknown_keys_fail_closed() {

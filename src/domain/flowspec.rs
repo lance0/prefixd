@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{ActionType, FragmentMatch, MatchCriteria, PacketLengthRange};
+use super::{ActionType, FragmentMatch, MatchCriteria, PacketLengthRange, canonical_ports};
 
 /// IP version for FlowSpec rules
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,8 +17,13 @@ pub struct FlowSpecNlri {
     pub dst_prefix: String,
     pub protocol: Option<u8>,
     pub dst_ports: Vec<u16>,
-    /// UDP source ports (RFC 8955 type 6). Empty means absent.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// UDP source ports (RFC 8955 type 6), an equality set stored sorted and
+    /// deduplicated. Empty means absent.
+    #[serde(
+        default,
+        with = "super::mitigation::canonical_src_ports",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub src_ports: Vec<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<FragmentMatch>,
@@ -108,9 +113,7 @@ impl FlowSpecNlri {
         }
         // Port fields are [type, count as u32, ports as u16], all big-endian.
         for (component, ports) in [(5u8, &self.dst_ports), (6, &self.src_ports)] {
-            let mut ports = ports.clone();
-            ports.sort_unstable();
-            ports.dedup();
+            let ports = canonical_ports(ports);
             if !ports.is_empty() {
                 hasher.update([component]);
                 hasher.update((ports.len() as u32).to_be_bytes());
@@ -157,7 +160,7 @@ impl From<&MatchCriteria> for FlowSpecNlri {
             dst_prefix: criteria.dst_prefix.clone(),
             protocol: criteria.protocol,
             dst_ports: criteria.dst_ports.clone(),
-            src_ports: criteria.src_ports.clone(),
+            src_ports: canonical_ports(&criteria.src_ports),
             fragment: criteria.fragment,
             packet_length: criteria.packet_length,
         }

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::domain::{FlowSpecNlri, FlowSpecRule};
+use crate::domain::{FlowSpecNlri, FlowSpecRule, canonical_ports};
 use crate::error::Result;
 
 #[derive(Debug, Clone)]
@@ -57,7 +57,8 @@ pub trait FlowSpecWriter: Send + Sync {
         Ok(prefix(left)? == prefix(right)?
             && left.protocol == right.protocol
             && left.dst_ports == right.dst_ports
-            && left.src_ports == right.src_ports
+            // Source ports are an equality set; speakers read them back ascending.
+            && canonical_ports(&left.src_ports) == canonical_ports(&right.src_ports)
             && left.fragment == right.fragment
             && left.packet_length == right.packet_length)
     }

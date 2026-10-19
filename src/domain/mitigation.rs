@@ -105,13 +105,39 @@ pub struct MatchCriteria {
     pub dst_prefix: String,
     pub protocol: Option<u8>,
     pub dst_ports: Vec<u16>,
-    /// UDP source ports (RFC 8955 type 6). Empty means absent.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// UDP source ports (RFC 8955 type 6), an equality set stored sorted and
+    /// deduplicated. Empty means absent.
+    #[serde(
+        default,
+        with = "canonical_src_ports",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub src_ports: Vec<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<FragmentMatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packet_length: Option<PacketLengthRange>,
+}
+
+/// Sorted, deduplicated ports: the one form source ports are stored, compared and hashed in.
+pub fn canonical_ports(ports: &[u16]) -> Vec<u16> {
+    let mut ports = ports.to_vec();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+/// Serde adapter: source ports are canonical whenever they are read or written.
+pub(super) mod canonical_src_ports {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(ports: &[u16], serializer: S) -> Result<S::Ok, S::Error> {
+        super::canonical_ports(ports).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u16>, D::Error> {
+        Ok(super::canonical_ports(&Vec::deserialize(deserializer)?))
+    }
 }
 
 /// Fragment match (RFC 8955 type 12). Only non-first fragments (IsF) are matched.
