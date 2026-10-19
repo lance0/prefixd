@@ -105,6 +105,11 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
             "mitigation_origin_mode",
             include_str!("../../migrations/015_mitigation_origin_mode.sql"),
         ),
+        (
+            16,
+            "withdrawal_rule_kind",
+            include_str!("../../migrations/016_withdrawal_rule_kind.sql"),
+        ),
     ];
 
     // Bootstrap: run all migrations first (they use IF NOT EXISTS)

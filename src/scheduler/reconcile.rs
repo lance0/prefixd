@@ -7,8 +7,8 @@ use crate::bgp::FlowSpecAnnouncer;
 use crate::correlation::{CorrelationEngine, SignalGroupStatus};
 use crate::db::RepositoryTrait;
 use crate::domain::{
-    FlowSpecAction, FlowSpecNlri, FlowSpecRule, MitigationStatus, execute_withdrawal,
-    ownership_key, request_withdrawal,
+    FlowSpecRule, MitigationRoute, MitigationStatus, execute_withdrawal, ownership_key,
+    request_withdrawal,
 };
 use crate::state::AppState;
 use crate::ws::WsMessage;
@@ -32,7 +32,7 @@ fn pending_ownership_keys(
     requests
         .iter()
         .map(|request| {
-            let rule: FlowSpecRule = serde_json::from_str(&request.rule_json)?;
+            let rule = request.flowspec_rule()?;
             anyhow::ensure!(
                 rule.nlri_hash() == request.nlri_hash,
                 "withdrawal rule identity does not match persisted intent"
@@ -494,7 +494,7 @@ impl ReconciliationLoop {
         let mut owner_counts = HashMap::<String, usize>::new();
         for mitigation in &active {
             *owner_counts
-                .entry(ownership_key(&self.build_flowspec_rule(mitigation)))
+                .entry(MitigationRoute::of(mitigation).ownership_key())
                 .or_default() += 1;
         }
         active.retain(|mitigation| {
@@ -535,7 +535,7 @@ impl ReconciliationLoop {
         active.retain(|mitigation| {
             !mitigation.is_dry_run_origin()
                 && mitigation.expires_at > now
-                && !pending_keys.contains(&ownership_key(&self.build_flowspec_rule(mitigation)))
+                && !pending_keys.contains(&MitigationRoute::of(mitigation).ownership_key())
         });
 
         let Some(reader) = self.announcer.reader() else {
@@ -561,7 +561,14 @@ impl ReconciliationLoop {
         // Upsert only uniquely owned missing or differing-action intent.
         let mut repair_error = None;
         for candidate in &active {
-            let candidate_rule = self.build_flowspec_rule(candidate);
+            // A non-FlowSpec row fails its own repair; other rows still repair.
+            let candidate_rule = match self.build_flowspec_rule(candidate) {
+                Ok(rule) => rule,
+                Err(error) => {
+                    repair_error = Some(error);
+                    continue;
+                }
+            };
             let key = ownership_key(&candidate_rule);
             let nlri_hash = candidate_rule.nlri_hash();
             if owner_counts[&key] != 1 {
@@ -623,7 +630,13 @@ impl ReconciliationLoop {
                     continue;
                 }
             };
-            let rule = self.build_flowspec_rule(&mitigation);
+            let rule = match self.build_flowspec_rule(&mitigation) {
+                Ok(rule) => rule,
+                Err(error) => {
+                    repair_error = Some(error);
+                    continue;
+                }
+            };
             if rule.nlri_hash() != nlri_hash {
                 continue;
             }
@@ -694,7 +707,8 @@ impl ReconciliationLoop {
         // Alert on unknown routes (routes in BGP not tracked by us)
         let desired_hashes: HashSet<_> = active
             .iter()
-            .map(|m| self.build_flowspec_rule(m).nlri_hash())
+            .filter_map(|m| self.build_flowspec_rule(m).ok())
+            .map(|rule| rule.nlri_hash())
             .collect();
 
         for rule in &announced {
@@ -736,10 +750,11 @@ impl ReconciliationLoop {
         }
     }
 
-    fn build_flowspec_rule(&self, m: &crate::domain::Mitigation) -> FlowSpecRule {
-        let nlri = FlowSpecNlri::from(&m.match_criteria);
-        let action = FlowSpecAction::from((m.action_type, &m.action_params));
-        FlowSpecRule::new(nlri, action)
+    fn build_flowspec_rule(
+        &self,
+        m: &crate::domain::Mitigation,
+    ) -> crate::error::Result<FlowSpecRule> {
+        crate::domain::mitigation_rule(m)
     }
 }
 
@@ -750,7 +765,8 @@ mod tests {
         bgp::{FlowSpecReader, FlowSpecWriter, MockAnnouncer, PeerObserver, PeerStatus},
         db::MockRepository,
         domain::{
-            ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
+            ActionParams, ActionType, AttackVector, FlowSpecAction, MatchCriteria, Mitigation,
+            MitigationIntent,
         },
         error::{PrefixdError, Result},
     };
@@ -1108,7 +1124,12 @@ mod tests {
                 .iter()
                 .map(|rule| rule.nlri_hash())
                 .collect::<Vec<_>>(),
-            vec![reconciler.build_flowspec_rule(&escalated).nlri_hash()]
+            vec![
+                reconciler
+                    .build_flowspec_rule(&escalated)
+                    .unwrap()
+                    .nlri_hash()
+            ]
         );
         reconciler.sync_announcements().await.unwrap();
         assert_eq!(
@@ -1130,7 +1151,7 @@ mod tests {
             mitigation.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
             repo.insert_mitigation(&mitigation).await.unwrap();
             speaker
-                .announce(&reconciler.build_flowspec_rule(&mitigation))
+                .announce(&reconciler.build_flowspec_rule(&mitigation).unwrap())
                 .await
                 .unwrap();
         }
@@ -1158,7 +1179,7 @@ mod tests {
             repo.insert_mitigation(mitigation).await.unwrap();
         }
         speaker
-            .announce(&reconciler.build_flowspec_rule(&first))
+            .announce(&reconciler.build_flowspec_rule(&first).unwrap())
             .await
             .unwrap();
         assert!(reconciler.reconcile().await.is_err());
@@ -1232,7 +1253,7 @@ mod tests {
                 repo.insert_mitigation(mitigation).await.unwrap();
                 speaker
                     .inner
-                    .announce(&reconciler.build_flowspec_rule(mitigation))
+                    .announce(&reconciler.build_flowspec_rule(mitigation).unwrap())
                     .await
                     .unwrap();
             }
@@ -1406,7 +1427,7 @@ mod tests {
                 let mut mitigation = action_mitigation(prefix, wanted.clone());
                 mitigation.match_criteria.dst_ports = vec![53, 443];
                 repo.insert_mitigation(&mitigation).await.unwrap();
-                let rule = reconciler.build_flowspec_rule(&mitigation);
+                let rule = reconciler.build_flowspec_rule(&mitigation).unwrap();
                 let mut drifted = rule.clone();
                 if prefix.contains(':') {
                     drifted.nlri.dst_prefix = "2001:db8::1/128".into();
@@ -1464,7 +1485,7 @@ mod tests {
                 let mut owner = action_mitigation(prefix, FlowSpecAction::discard());
                 owner.match_criteria.dst_ports = vec![443, 53];
                 repo.insert_mitigation(&owner).await.unwrap();
-                let mut alias = reconciler.build_flowspec_rule(&owner);
+                let mut alias = reconciler.build_flowspec_rule(&owner).unwrap();
                 alias.nlri.dst_ports.reverse();
                 alias.actions = vec![observed_action.clone()];
                 speaker.inner.announce(&alias).await.unwrap();
@@ -1508,7 +1529,7 @@ mod tests {
                     let mut owner = action_mitigation(prefix, FlowSpecAction::discard());
                     owner.match_criteria.dst_ports = wanted_ports.clone();
                     repo.insert_mitigation(&owner).await.unwrap();
-                    let desired = reconciler.build_flowspec_rule(&owner);
+                    let desired = reconciler.build_flowspec_rule(&owner).unwrap();
                     let mut unknown = desired.clone();
                     unknown.nlri.dst_ports = unknown_ports.clone();
                     unknown.actions = vec![unknown_action.clone()];
@@ -1562,7 +1583,7 @@ mod tests {
             repo.insert_mitigation(&blocked).await.unwrap();
             let healthy = action_mitigation("192.0.2.2/32", FlowSpecAction::police(9));
             repo.insert_mitigation(&healthy).await.unwrap();
-            let mut observed = reconciler.build_flowspec_rule(&blocked);
+            let mut observed = reconciler.build_flowspec_rule(&blocked).unwrap();
             observed.actions = vec![FlowSpecAction::police(7)];
             speaker.inner.announce(&observed).await.unwrap();
             assert!(reconciler.sync_announcements().await.is_err(), "{sibling}");
@@ -1594,7 +1615,7 @@ mod tests {
             repo.insert_mitigation(owner).await.unwrap();
         }
         let state = action_state(repo.clone(), speaker.clone());
-        let mut observed = crate::domain::mitigation_rule(&local);
+        let mut observed = crate::domain::mitigation_rule(&local).unwrap();
         observed.actions = vec![FlowSpecAction::discard()];
         speaker.inner.announce(&observed).await.unwrap();
         let success =
@@ -1623,7 +1644,7 @@ mod tests {
         assert_eq!(speaker.announcements.load(SeqCst), 1);
         assert_eq!(
             wire_action(&speaker.inner.list_active().await.unwrap()[0]).unwrap(),
-            wire_action(&crate::domain::mitigation_rule(&local)).unwrap()
+            wire_action(&crate::domain::mitigation_rule(&local).unwrap()).unwrap()
         );
         assert_eq!(
             repo.get_mitigation(foreign.mitigation_id)
@@ -1644,7 +1665,7 @@ mod tests {
             let speaker = action_speaker(mode);
             let owner = action_mitigation("192.0.2.1/32", FlowSpecAction::discard());
             repo.insert_mitigation(&owner).await.unwrap();
-            let mut drifted = crate::domain::mitigation_rule(&owner);
+            let mut drifted = crate::domain::mitigation_rule(&owner).unwrap();
             drifted.actions = vec![FlowSpecAction::police(7)];
             speaker.inner.announce(&drifted).await.unwrap();
             let reconciler = ReconciliationLoop::new(repo, speaker.clone(), 30, false);
@@ -1692,7 +1713,7 @@ mod tests {
                 pending.rule_json = "{".into();
             }
             repo.begin_withdrawal(&pending).await.unwrap();
-            let mut observed = crate::domain::mitigation_rule(&owner);
+            let mut observed = crate::domain::mitigation_rule(&owner).unwrap();
             observed.actions = vec![FlowSpecAction::police(7)];
             speaker.inner.announce(&observed).await.unwrap();
             let reconciler = ReconciliationLoop::new(repo, speaker.clone(), 30, false);
@@ -1714,7 +1735,7 @@ mod tests {
             for prefix in ["192.0.2.2/32", "192.0.2.1/32"] {
                 let owner = action_mitigation(prefix, FlowSpecAction::police(9));
                 repo.insert_mitigation(&owner).await.unwrap();
-                let mut drifted = crate::domain::mitigation_rule(&owner);
+                let mut drifted = crate::domain::mitigation_rule(&owner).unwrap();
                 drifted.actions = vec![FlowSpecAction::discard()];
                 speaker.inner.announce(&drifted).await.unwrap();
             }
@@ -1803,7 +1824,7 @@ mod tests {
             let mut owner = action_mitigation("192.0.2.1/32", FlowSpecAction::discard());
             owner.match_criteria.dst_ports = vec![443, 53];
             repo.insert_mitigation(&owner).await.unwrap();
-            let mut observed = crate::domain::mitigation_rule(&owner);
+            let mut observed = crate::domain::mitigation_rule(&owner).unwrap();
             observed.actions = vec![FlowSpecAction::police(1)];
             inner.inner.announce(&observed).await.unwrap();
             let state = action_state(repo.clone(), speaker.clone());
@@ -1856,7 +1877,7 @@ mod tests {
                 repo.insert_mitigation(&replacement).await.unwrap();
                 inner
                     .inner
-                    .announce(&crate::domain::mitigation_rule(&replacement))
+                    .announce(&crate::domain::mitigation_rule(&replacement).unwrap())
                     .await
                     .unwrap();
             }
@@ -1913,5 +1934,83 @@ mod tests {
         assert_eq!(speaker.inventories.load(SeqCst), 2);
         shutdown.send(()).unwrap();
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn blackhole_rows_fail_closed_in_reconciliation_without_rpc() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FailingWithdrawal {
+            inner: MockAnnouncer::new(),
+            mode: AtomicUsize::new(0),
+            announcements: AtomicUsize::new(0),
+            inventories: AtomicUsize::new(0),
+        });
+        let blackhole = |ip| {
+            let mut mitigation = expired_mitigation(ip);
+            mitigation.action_type = ActionType::Blackhole;
+            mitigation.match_criteria.protocol = None;
+            mitigation.match_criteria.dst_ports.clear();
+            mitigation.scope_hash = mitigation
+                .match_criteria
+                .scope_hash_for(ActionType::Blackhole);
+            mitigation
+        };
+        let expired = blackhole("192.0.2.1");
+        let mut live = blackhole("192.0.2.2");
+        live.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+        let mut flowspec = expired_mitigation("192.0.2.3");
+        flowspec.expires_at = live.expires_at;
+        for mitigation in [&expired, &live, &flowspec] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+        // Expiry and repair fail for the blackhole rows; the FlowSpec row still repairs.
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(speaker.announcements.load(SeqCst), 1);
+        let announced = speaker.inner.list_active().await.unwrap();
+        assert_eq!(announced.len(), 1);
+        assert_eq!(announced[0].nlri.dst_prefix, "192.0.2.3/32");
+        assert!(
+            repo.get_mitigation(expired.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active()
+        );
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+        assert!(reconciler.build_flowspec_rule(&live).is_err());
+        let coerced = FlowSpecRule::new(
+            crate::domain::FlowSpecNlri::from(&live.match_criteria),
+            FlowSpecAction {
+                action_type: ActionType::Blackhole,
+                rate_bps: None,
+            },
+        );
+        assert!(wire_action(&coerced).is_err());
+
+        // Pending blackhole intent stops cleanup and repair before any RPC.
+        let mut request = crate::domain::WithdrawalRequest::new(
+            &flowspec,
+            false,
+            "operator",
+            "test",
+            "test".into(),
+            true,
+        )
+        .unwrap();
+        request.rule_kind = "blackhole".into();
+        repo.begin_withdrawal(&request).await.unwrap();
+        speaker.inner.withdraw(&announced[0]).await.unwrap();
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(speaker.announcements.load(SeqCst), 1);
+        assert_eq!(speaker.inner.announced_count().await, 0);
+        assert!(
+            repo.get_mitigation(flowspec.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active()
+        );
     }
 }

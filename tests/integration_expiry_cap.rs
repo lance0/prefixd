@@ -281,7 +281,7 @@ async fn repair_rechecks_expiry_after_pending_cleanup_read() {
         let cap = deadline_after(2);
         mitigation.expires_at = cap;
         state.repo.update_mitigation(&mitigation).await.unwrap();
-        let mut rule = prefixd::domain::mitigation_rule(&mitigation);
+        let mut rule = prefixd::domain::mitigation_rule(&mitigation).unwrap();
         if action_drift {
             rule.actions = vec![prefixd::domain::FlowSpecAction::police(9)];
             speaker.inner.announce(&rule).await.unwrap();

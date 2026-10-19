@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{ActionParams, ActionType, MatchCriteria};
+use super::{ActionType, MatchCriteria};
 
 /// IP version for FlowSpec rules
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +74,8 @@ pub enum FlowSpecActionError {
     InexactPoliceRate(u64),
     #[error("action 'discard' must not include rate_bps")]
     UnexpectedDiscardRate,
+    #[error("action 'blackhole' is not a FlowSpec action")]
+    NotFlowSpec,
 }
 
 impl FlowSpecAction {
@@ -84,6 +86,7 @@ impl FlowSpecAction {
             (ActionType::Discard, Some(_)) => Err(FlowSpecActionError::UnexpectedDiscardRate),
             (ActionType::Police, None) => Err(FlowSpecActionError::MissingPoliceRate),
             (ActionType::Police, Some(0)) => Err(FlowSpecActionError::ZeroPoliceRate),
+            (ActionType::Blackhole, _) => Err(FlowSpecActionError::NotFlowSpec),
             (ActionType::Police, Some(bps)) => {
                 // Fractional bytes are valid; integer division would turn 1–7 bps into discard.
                 let rate = (bps as f64 / 8.0) as f32;
@@ -107,15 +110,6 @@ impl FlowSpecAction {
         Self {
             action_type: ActionType::Discard,
             rate_bps: None,
-        }
-    }
-}
-
-impl From<(ActionType, &ActionParams)> for FlowSpecAction {
-    fn from((action_type, params): (ActionType, &ActionParams)) -> Self {
-        Self {
-            action_type,
-            rate_bps: params.rate_bps,
         }
     }
 }
@@ -225,6 +219,13 @@ mod tests {
                     rate_bps: Some(8),
                 },
                 FlowSpecActionError::UnexpectedDiscardRate,
+            ),
+            (
+                FlowSpecAction {
+                    action_type: ActionType::Blackhole,
+                    rate_bps: None,
+                },
+                FlowSpecActionError::NotFlowSpec,
             ),
         ] {
             assert_eq!(action.traffic_rate_bytes_per_second(), Err(error));

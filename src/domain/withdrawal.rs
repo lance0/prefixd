@@ -6,7 +6,75 @@ use crate::bgp::FlowSpecAnnouncer;
 use crate::db::RepositoryTrait;
 use crate::error::{PrefixdError, Result};
 
-use super::{FlowSpecAction, FlowSpecNlri, FlowSpecRule, Mitigation, MitigationStatus};
+use super::{
+    ActionParams, ActionType, FlowSpecAction, FlowSpecNlri, FlowSpecRule, MatchCriteria,
+    Mitigation, MitigationStatus,
+};
+
+/// The speaker route a mitigation describes. FlowSpec-only paths match on the kind and
+/// fail closed on a blackhole; it is never coerced into an any-protocol FlowSpec discard.
+#[derive(Debug, Clone)]
+pub enum MitigationRoute {
+    FlowSpec(FlowSpecRule),
+    /// Unicast host route. Its match holds only the host prefix.
+    Blackhole {
+        prefix: String,
+    },
+}
+
+impl MitigationRoute {
+    pub fn new(action_type: ActionType, criteria: &MatchCriteria, params: &ActionParams) -> Self {
+        match action_type {
+            ActionType::Police | ActionType::Discard => Self::FlowSpec(FlowSpecRule::new(
+                FlowSpecNlri::from(criteria),
+                FlowSpecAction {
+                    action_type,
+                    rate_bps: params.rate_bps,
+                },
+            )),
+            ActionType::Blackhole => Self::Blackhole {
+                prefix: criteria.dst_prefix.clone(),
+            },
+        }
+    }
+
+    pub fn of(mitigation: &Mitigation) -> Self {
+        Self::new(
+            mitigation.action_type,
+            &mitigation.match_criteria,
+            &mitigation.action_params,
+        )
+    }
+
+    /// The `withdrawal_requests.rule_kind` value for this route.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::FlowSpec(_) => FLOWSPEC_KIND,
+            Self::Blackhole { .. } => "blackhole",
+        }
+    }
+
+    /// Kind-discriminated: a blackhole never shares a key with a FlowSpec rule.
+    pub fn ownership_key(&self) -> String {
+        match self {
+            Self::FlowSpec(rule) => ownership_key(rule),
+            Self::Blackhole { prefix } => super::blackhole_identity(prefix),
+        }
+    }
+
+    pub fn into_flowspec(self) -> Result<FlowSpecRule> {
+        match self {
+            Self::FlowSpec(rule) => Ok(rule),
+            Self::Blackhole { .. } => Err(not_flowspec(self.kind())),
+        }
+    }
+}
+
+const FLOWSPEC_KIND: &str = "flowspec";
+
+fn not_flowspec(kind: &str) -> PrefixdError {
+    PrefixdError::Internal(format!("{kind} route cannot use a FlowSpec path"))
+}
 
 /// Immutable deletion intent; an uncertain RPC must never turn it back into an announcement.
 #[derive(Debug, Clone, FromRow)]
@@ -15,6 +83,8 @@ pub struct WithdrawalRequest {
     pub mitigation_id: Uuid,
     pub pop: String,
     pub nlri_hash: String,
+    /// Route kind `rule_json` describes; rows from before migration 016 are FlowSpec.
+    pub rule_kind: String,
     pub rule_json: String,
     #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     pub mitigation_updated_at: DateTime<Utc>,
@@ -40,12 +110,13 @@ impl WithdrawalRequest {
         reason: String,
         speaker_delete_required: bool,
     ) -> Result<Self> {
-        let rule = mitigation_rule(mitigation);
+        let rule = mitigation_rule(mitigation)?;
         Ok(Self {
             operation_id: Uuid::new_v4(),
             mitigation_id: mitigation.mitigation_id,
             pop: mitigation.pop.clone(),
             nlri_hash: rule.nlri_hash(),
+            rule_kind: FLOWSPEC_KIND.into(),
             rule_json: serde_json::to_string(&rule)?,
             mitigation_updated_at: mitigation.updated_at,
             terminal_status: if expired { "expired" } else { "withdrawn" }.into(),
@@ -83,13 +154,19 @@ impl WithdrawalRequest {
     pub fn is_expiry(&self) -> bool {
         self.terminal_status == "expired"
     }
+
+    /// The persisted FlowSpec rule; any other kind fails closed before parsing.
+    pub fn flowspec_rule(&self) -> Result<FlowSpecRule> {
+        if self.rule_kind != FLOWSPEC_KIND {
+            return Err(not_flowspec(&self.rule_kind));
+        }
+        Ok(serde_json::from_str(&self.rule_json)?)
+    }
 }
 
-pub fn mitigation_rule(mitigation: &Mitigation) -> FlowSpecRule {
-    FlowSpecRule::new(
-        FlowSpecNlri::from(&mitigation.match_criteria),
-        FlowSpecAction::from((mitigation.action_type, &mitigation.action_params)),
-    )
+/// The FlowSpec rule for a mitigation; a blackhole is an error, never a FlowSpec discard.
+pub fn mitigation_rule(mitigation: &Mitigation) -> Result<FlowSpecRule> {
+    MitigationRoute::of(mitigation).into_flowspec()
 }
 
 /// Caller holds the controller's lifecycle mutex through preparation, RPC and finalization.
@@ -135,9 +212,12 @@ pub(crate) fn ownership_key(rule: &FlowSpecRule) -> String {
 pub async fn find_mitigation_owner(
     repo: &dyn RepositoryTrait,
     pop: &str,
-    rule: &FlowSpecRule,
+    route: &MitigationRoute,
     scope_hash: &str,
 ) -> Result<Option<Mitigation>> {
+    let MitigationRoute::FlowSpec(rule) = route else {
+        return Err(not_flowspec(route.kind()));
+    };
     let pending = repo.pending_withdrawals(Some(pop)).await?;
     let key = ownership_key(rule);
     let owners: Vec<_> = repo
@@ -146,12 +226,12 @@ pub async fn find_mitigation_owner(
         .into_iter()
         .filter(|owner| {
             owner.scope_hash == scope_hash
-                || owner.match_criteria.compute_scope_hash() == scope_hash
-                || ownership_key(&mitigation_rule(owner)) == key
+                || owner.match_criteria.scope_hash_for(owner.action_type) == scope_hash
+                || MitigationRoute::of(owner).ownership_key() == key
         })
         .collect();
     for request in pending {
-        let pending_rule: FlowSpecRule = serde_json::from_str(&request.rule_json)?;
+        let pending_rule = request.flowspec_rule()?;
         if ownership_key(&pending_rule) == key
             || owners
                 .iter()
@@ -181,13 +261,13 @@ async fn check_withdrawal_owner(
     if !current.is_active()
         || current.pop != request.pop
         || current.updated_at != request.mitigation_updated_at
-        || mitigation_rule(&current).nlri_hash() != request.nlri_hash
+        || mitigation_rule(&current)?.nlri_hash() != request.nlri_hash
     {
         return Err(PrefixdError::Conflict(
             "withdrawal intent no longer matches mitigation".into(),
         ));
     }
-    let key = ownership_key(&mitigation_rule(&current));
+    let key = MitigationRoute::of(&current).ownership_key();
     let now = Utc::now();
     if repo
         .active_mitigations_for_pop(&request.pop)
@@ -196,7 +276,7 @@ async fn check_withdrawal_owner(
         .any(|owner| {
             owner.mitigation_id != request.mitigation_id
                 && owner.expires_at > now
-                && ownership_key(&mitigation_rule(owner)) == key
+                && MitigationRoute::of(owner).ownership_key() == key
         })
     {
         return Err(PrefixdError::Conflict(
@@ -271,7 +351,7 @@ async fn finish_withdrawal_request(
         ));
     }
     check_withdrawal_owner(repo, &request).await?;
-    let rule: FlowSpecRule = serde_json::from_str(&request.rule_json)?;
+    let rule = request.flowspec_rule()?;
     if rule.nlri_hash() != request.nlri_hash {
         return Err(PrefixdError::Internal(
             "withdrawal rule identity does not match persisted intent".into(),
@@ -398,8 +478,8 @@ mod tests {
         repo.insert_mitigation(&first).await.unwrap();
         repo.insert_mitigation(&second).await.unwrap();
         assert_eq!(
-            mitigation_rule(&first).nlri_hash(),
-            mitigation_rule(&second).nlri_hash()
+            mitigation_rule(&first).unwrap().nlri_hash(),
+            mitigation_rule(&second).unwrap().nlri_hash()
         );
         assert!(matches!(
             request_withdrawal(
@@ -440,14 +520,14 @@ mod tests {
         let candidate = mitigation("192.0.2.1/32");
         assert_eq!(candidate.scope_hash, original.scope_hash);
         assert_ne!(
-            mitigation_rule(&candidate).nlri_hash(),
-            mitigation_rule(&original).nlri_hash()
+            mitigation_rule(&candidate).unwrap().nlri_hash(),
+            mitigation_rule(&original).unwrap().nlri_hash()
         );
         assert!(matches!(
             find_mitigation_owner(
                 &repo,
                 "test",
-                &mitigation_rule(&candidate),
+                &MitigationRoute::of(&candidate),
                 &candidate.scope_hash
             )
             .await,
@@ -461,7 +541,10 @@ mod tests {
         let speaker = MockAnnouncer::new();
         let enforced = mitigation("192.0.2.1/32");
         repo.insert_mitigation(&enforced).await.unwrap();
-        speaker.announce(&mitigation_rule(&enforced)).await.unwrap();
+        speaker
+            .announce(&mitigation_rule(&enforced).unwrap())
+            .await
+            .unwrap();
         let request = request_withdrawal(
             &repo,
             &enforced,
@@ -538,7 +621,7 @@ mod tests {
         let mut mitigation = mitigation("192.0.2.1/32");
         repo.insert_mitigation(&mitigation).await.unwrap();
         speaker
-            .announce(&mitigation_rule(&mitigation))
+            .announce(&mitigation_rule(&mitigation).unwrap())
             .await
             .unwrap();
         let request = request_withdrawal(
@@ -595,5 +678,161 @@ mod tests {
                 .is_active()
         );
         assert_eq!(repo.pending_withdrawals(None).await.unwrap().len(), 1);
+    }
+
+    fn blackhole(prefix: &str) -> Mitigation {
+        let mut mitigation = mitigation(prefix);
+        mitigation.action_type = ActionType::Blackhole;
+        mitigation.match_criteria.protocol = None;
+        mitigation.match_criteria.dst_ports.clear();
+        mitigation.scope_hash = mitigation
+            .match_criteria
+            .scope_hash_for(ActionType::Blackhole);
+        mitigation
+    }
+
+    fn any_protocol_discard(prefix: &str) -> Mitigation {
+        let mut mitigation = mitigation(prefix);
+        mitigation.match_criteria.protocol = None;
+        mitigation.match_criteria.dst_ports.clear();
+        mitigation.scope_hash = mitigation.match_criteria.compute_scope_hash();
+        mitigation
+    }
+
+    /// Values pinned from the code before blackhole identity existed.
+    #[test]
+    fn flowspec_identity_is_byte_for_byte_unchanged() {
+        for (prefix, protocol, dst_ports, scope, nlri, owner) in [
+            (
+                "192.0.2.10/32",
+                None,
+                vec![],
+                "250a508578343f3683dadb14d6628aea",
+                "250a508578343f3683dadb14d6628aea",
+                "250a508578343f3683dadb14d6628aea",
+            ),
+            (
+                "192.0.2.10/32",
+                Some(17),
+                vec![53, 123, 53],
+                "0bf2a7856b8bdde92b116d455c87a056",
+                "edf46fc6feb21187a71009851eff316a",
+                "0bf2a7856b8bdde92b116d455c87a056",
+            ),
+            (
+                "2001:0DB8::1/128",
+                Some(6),
+                vec![443, 80],
+                "ea4b2b7f532256876f8827f175cd396c",
+                "70d05698072c9beb0755432f7483fc7a",
+                "70d05698072c9beb0755432f7483fc7a",
+            ),
+        ] {
+            let criteria = MatchCriteria {
+                dst_prefix: prefix.into(),
+                protocol,
+                dst_ports,
+            };
+            assert_eq!(criteria.compute_scope_hash(), scope);
+            for (action_type, rate_bps) in
+                [(ActionType::Discard, None), (ActionType::Police, Some(8))]
+            {
+                assert_eq!(criteria.scope_hash_for(action_type), scope);
+                let route =
+                    MitigationRoute::new(action_type, &criteria, &ActionParams { rate_bps });
+                assert_eq!(route.kind(), "flowspec");
+                assert_eq!(route.ownership_key(), owner);
+                let rule = route.into_flowspec().unwrap();
+                assert_eq!(rule.nlri_hash(), nlri);
+                assert_eq!(ownership_key(&rule), owner);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn blackhole_and_any_protocol_flowspec_on_one_host_have_distinct_identities() {
+        let repo = MockRepository::new();
+        assert_eq!(
+            MitigationRoute::of(&blackhole("2001:0DB8::1/128")).ownership_key(),
+            MitigationRoute::of(&blackhole("2001:db8::1/128")).ownership_key(),
+        );
+        let flowspec = any_protocol_discard("192.0.2.1/32");
+        let host_route = blackhole("192.0.2.1/32");
+        assert_ne!(flowspec.scope_hash, host_route.scope_hash);
+        assert_ne!(
+            MitigationRoute::of(&flowspec).ownership_key(),
+            MitigationRoute::of(&host_route).ownership_key()
+        );
+        // The blackhole row does not own, or block, the FlowSpec rule on its host.
+        repo.insert_mitigation(&host_route).await.unwrap();
+        assert!(
+            find_mitigation_owner(
+                &repo,
+                "test",
+                &MitigationRoute::of(&flowspec),
+                &flowspec.scope_hash
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn blackhole_rows_fail_closed_on_flowspec_paths_without_rpc() {
+        let repo = MockRepository::new();
+        let speaker = MockAnnouncer::new();
+        // The FlowSpec rule a coerced blackhole would become is live on the speaker.
+        let flowspec = any_protocol_discard("192.0.2.1/32");
+        repo.insert_mitigation(&flowspec).await.unwrap();
+        speaker
+            .announce(&mitigation_rule(&flowspec).unwrap())
+            .await
+            .unwrap();
+        let blackhole = blackhole("192.0.2.1/32");
+        repo.insert_mitigation(&blackhole).await.unwrap();
+
+        assert!(mitigation_rule(&blackhole).is_err());
+        assert!(
+            find_mitigation_owner(
+                &repo,
+                "test",
+                &MitigationRoute::of(&blackhole),
+                &blackhole.scope_hash
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            request_withdrawal(
+                &repo,
+                &blackhole,
+                false,
+                "operator",
+                "alice",
+                "test".into(),
+                true,
+                None
+            )
+            .await
+            .is_err()
+        );
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+
+        // Persisted blackhole intent never reaches the FlowSpec deletion RPC.
+        let mut request =
+            WithdrawalRequest::new(&flowspec, false, "operator", "alice", "test".into(), true)
+                .unwrap();
+        request.rule_kind = "blackhole".into();
+        let request = repo.begin_withdrawal(&request).await.unwrap();
+        assert!(
+            execute_withdrawal(&repo, &speaker, false, &request, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(speaker.announced_count().await, 1);
+        for id in [flowspec.mitigation_id, blackhole.mitigation_id] {
+            assert!(repo.get_mitigation(id).await.unwrap().unwrap().is_active());
+        }
     }
 }

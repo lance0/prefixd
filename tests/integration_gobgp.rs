@@ -117,7 +117,7 @@ async fn action_reconciliation_rejects_port_order_alias_without_mutation() {
             );
             owner.activate();
             repo.insert_mitigation(&owner).await.unwrap();
-            let desired = mitigation_rule(&owner);
+            let desired = mitigation_rule(&owner).unwrap();
             let mut alias = desired.clone();
             alias.nlri.dst_ports.reverse();
             alias.actions = vec![observed_action.clone()];

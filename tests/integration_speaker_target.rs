@@ -1399,11 +1399,98 @@ async fn unknown_origin_tagging_is_audited_once_and_survives_migration_replay() 
     assert!(pending_after[0].speaker_delete_required);
     let speaker = MockAnnouncer::new();
     speaker
-        .announce(&prefixd::domain::mitigation_rule(&legacy))
+        .announce(&prefixd::domain::mitigation_rule(&legacy).unwrap())
         .await
         .unwrap();
     let done = execute_withdrawal(ctx.repo.as_ref(), &speaker, false, &pending, None)
         .await
         .unwrap();
     assert_eq!(done.status, MitigationStatus::Withdrawn);
+}
+
+#[tokio::test]
+async fn withdrawal_rule_kind_replay_keeps_every_request_flowspec() {
+    let ctx = common::TestContext::new().await;
+    let pending = mitigation("kind", "203.0.113.20");
+    let completed = mitigation("kind", "203.0.113.21");
+    let speaker = MockAnnouncer::new();
+    let mut requests = Vec::new();
+    for row in [&pending, &completed] {
+        ctx.repo.insert_mitigation(row).await.unwrap();
+        speaker
+            .announce(&prefixd::domain::mitigation_rule(row).unwrap())
+            .await
+            .unwrap();
+        requests.push(
+            request_withdrawal(
+                ctx.repo.as_ref(),
+                row,
+                false,
+                "operator",
+                "kind-test",
+                "written before migration 016".into(),
+                true,
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    execute_withdrawal(ctx.repo.as_ref(), &speaker, false, &requests[1], None)
+        .await
+        .unwrap();
+    // Simulate a database from before migration 016.
+    sqlx::query("ALTER TABLE withdrawal_requests DROP COLUMN rule_kind")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    let snapshot = || {
+        let pool = ctx.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Value>(
+                "SELECT jsonb_build_array(
+                    (SELECT jsonb_agg(to_jsonb(m) ORDER BY mitigation_id) FROM mitigations m),
+                    (SELECT jsonb_agg(to_jsonb(w) - 'rule_kind' ORDER BY operation_id)
+                       FROM withdrawal_requests w),
+                    (SELECT count(*) FROM flowspec_announcements),
+                    (SELECT count(*) FROM audit_log))",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let before = snapshot().await;
+
+    // Replay is repeatable and only adds the column.
+    for _ in 0..2 {
+        init_postgres_pool(&ctx.state.settings.storage.connection_string)
+            .await
+            .unwrap();
+    }
+    assert_eq!(snapshot().await, before);
+    let kinds: Vec<String> =
+        sqlx::query_scalar("SELECT rule_kind FROM withdrawal_requests ORDER BY operation_id")
+            .fetch_all(&ctx.pool)
+            .await
+            .unwrap();
+    assert_eq!(kinds, ["flowspec", "flowspec"]);
+    assert!(
+        sqlx::query("UPDATE withdrawal_requests SET rule_kind = 'unicast'")
+            .execute(&ctx.pool)
+            .await
+            .is_err(),
+        "only known route kinds are stored"
+    );
+
+    // The replayed pending request still completes through the FlowSpec path.
+    let pending_after = ctx.repo.pending_withdrawals(Some("kind")).await.unwrap();
+    assert_eq!(pending_after.len(), 1);
+    assert_eq!(pending_after[0].operation_id, requests[0].operation_id);
+    assert_eq!(pending_after[0].rule_kind, "flowspec");
+    let done = execute_withdrawal(ctx.repo.as_ref(), &speaker, false, &pending_after[0], None)
+        .await
+        .unwrap();
+    assert_eq!(done.status, MitigationStatus::Withdrawn);
+    assert_eq!(speaker.announced_count().await, 0);
 }

@@ -420,8 +420,9 @@ impl RepositoryTrait for Repository {
         sqlx::query(
             r#"INSERT INTO withdrawal_requests (
                 operation_id, mitigation_id, pop, nlri_hash, rule_json, mitigation_updated_at,
-                terminal_status, actor_type, actor, reason, requested_at, speaker_delete_required, target_id
-            ) SELECT $1, mitigation_id, pop, $4, $5, updated_at, $7, $8, $9, $10, $11, $12, $13
+                terminal_status, actor_type, actor, reason, requested_at, speaker_delete_required, target_id,
+                rule_kind
+            ) SELECT $1, mitigation_id, pop, $4, $5, updated_at, $7, $8, $9, $10, $11, $12, $13, $14
               FROM mitigations WHERE mitigation_id = $2 AND pop = $3 AND updated_at = $6
                 AND status IN ('pending', 'active', 'escalated')
                 AND (($13::uuid IS NULL AND NOT EXISTS (SELECT 1 FROM speaker_pop_bindings WHERE pop = $3))
@@ -441,6 +442,7 @@ impl RepositoryTrait for Repository {
         .bind(request.requested_at)
         .bind(request.speaker_delete_required)
         .bind(request.target_id)
+        .bind(&request.rule_kind)
         .execute(&self.pool)
         .await?;
         sqlx::query_as::<_, WithdrawalRequest>(
@@ -2020,7 +2022,7 @@ mod checked_timestamp_rows {
         );
         check_row!(
             WithdrawalRequest,
-            "gen_random_uuid() AS operation_id, gen_random_uuid() AS mitigation_id, 'test'::text AS pop, 'hash'::text AS nlri_hash, '{}'::text AS rule_json, 'withdrawn'::text AS terminal_status, true AS speaker_delete_required, 'system'::text AS actor_type, 'test'::text AS actor, 'test'::text AS reason, NULL::uuid AS target_id",
+            "gen_random_uuid() AS operation_id, gen_random_uuid() AS mitigation_id, 'test'::text AS pop, 'hash'::text AS nlri_hash, 'flowspec'::text AS rule_kind, '{}'::text AS rule_json, 'withdrawn'::text AS terminal_status, true AS speaker_delete_required, 'system'::text AS actor_type, 'test'::text AS actor, 'test'::text AS reason, NULL::uuid AS target_id",
             [mitigation_updated_at, requested_at],
             [completed_at]
         );

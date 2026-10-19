@@ -62,11 +62,12 @@ impl Guardrails {
         repo: &dyn RepositoryTrait,
         is_safelisted: bool,
     ) -> Result<()> {
-        FlowSpecAction::from((intent.action_type, &intent.action_params))
-            .traffic_rate_bytes_per_second()
-            .map_err(|error| {
-                PrefixdError::GuardrailViolation(GuardrailError::InvalidAction(error))
-            })?;
+        (FlowSpecAction {
+            action_type: intent.action_type,
+            rate_bps: intent.action_params.rate_bps,
+        })
+        .traffic_rate_bytes_per_second()
+        .map_err(|error| PrefixdError::GuardrailViolation(GuardrailError::InvalidAction(error)))?;
 
         // Check safelist
         if is_safelisted {

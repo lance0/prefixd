@@ -438,13 +438,13 @@ async fn test_authenticated_withdrawal_audit_success_and_failure_boundaries() {
     }
     let speaker = Arc::new(Speaker {
         inner: MockAnnouncer::new(),
-        failing_hash: mitigation_rule(&targets[3]).nlri_hash(),
+        failing_hash: mitigation_rule(&targets[3]).unwrap().nlri_hash(),
         fail: AtomicBool::new(true),
         deletes: AtomicUsize::new(0),
     });
     for mitigation in &targets {
         speaker
-            .announce(&mitigation_rule(mitigation))
+            .announce(&mitigation_rule(mitigation).unwrap())
             .await
             .unwrap();
     }
@@ -1737,7 +1737,7 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
     repo.insert_mitigation(&mitigation).await.unwrap();
     speaker
         .inner
-        .announce(&mitigation_rule(&mitigation))
+        .announce(&mitigation_rule(&mitigation).unwrap())
         .await
         .unwrap();
     let mut settings = common::test_settings();
@@ -1774,7 +1774,7 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
     repo.insert_mitigation(&expanded).await.unwrap();
     speaker
         .inner
-        .announce(&mitigation_rule(&expanded))
+        .announce(&mitigation_rule(&expanded).unwrap())
         .await
         .unwrap();
     for (original, requested_ip) in [(&mitigation, "203.0.113.10"), (&expanded, "2001:db8::1")] {
@@ -1820,7 +1820,7 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
     // Remove only this alias fixture so later assertions still describe one pending deletion.
     speaker
         .inner
-        .withdraw(&mitigation_rule(&expanded))
+        .withdraw(&mitigation_rule(&expanded).unwrap())
         .await
         .unwrap();
     sqlx::query("DELETE FROM mitigations WHERE mitigation_id = $1")
@@ -2140,7 +2140,7 @@ async fn test_legacy_canonical_owners_finish_ttl_cleanup_after_last_live_owner()
     context
         .state
         .announcer
-        .announce(&mitigation_rule(&first))
+        .announce(&mitigation_rule(&first).unwrap())
         .await
         .unwrap();
     let reconciler = ReconciliationLoop::new(
@@ -2322,7 +2322,7 @@ async fn test_documented_retention_preserves_live_intent_and_referenced_history(
         mitigation.updated_at = mitigation.created_at;
         mitigation.expires_at = mitigation.created_at + chrono::Duration::seconds(60);
         context.repo.insert_mitigation(&mitigation).await.unwrap();
-        let rule = mitigation_rule(&mitigation);
+        let rule = mitigation_rule(&mitigation).unwrap();
         if !matches!(request, Missing) {
             let completed_at = match request {
                 Completed(days) => Some(now - chrono::Duration::days(days)),
@@ -2839,7 +2839,7 @@ async fn test_reconciliation_recovers_every_tied_timestamp_once() {
             MitigationStatus::Active
         };
         let mitigation = inventory_mitigation(&prefix, "test-pop", created_at, status);
-        local_keys.insert(mitigation_rule(&mitigation).nlri_hash());
+        local_keys.insert(mitigation_rule(&mitigation).unwrap().nlri_hash());
         context.repo.insert_mitigation(&mitigation).await.unwrap();
     }
     let foreign = inventory_mitigation(
@@ -2877,7 +2877,7 @@ async fn test_reconciliation_recovers_every_tied_timestamp_once() {
         speaker.inner.announce(&unknown).await.unwrap();
         let mut expected = local_keys.clone();
         if !scoped {
-            expected.insert(mitigation_rule(&foreign).nlri_hash());
+            expected.insert(mitigation_rule(&foreign).unwrap().nlri_hash());
         }
         let mut reconciler =
             ReconciliationLoop::new(context.repo.clone(), speaker.clone(), 30, false);
@@ -2983,11 +2983,11 @@ async fn test_reconciliation_inventory_excludes_ineligible_owners() {
     for scoped in [true, false] {
         let speaker = Arc::new(InventorySpeaker::new(true));
         let mut expected = BTreeSet::from([
-            mitigation_rule(&active).nlri_hash(),
-            mitigation_rule(&escalated).nlri_hash(),
+            mitigation_rule(&active).unwrap().nlri_hash(),
+            mitigation_rule(&escalated).unwrap().nlri_hash(),
         ]);
         if !scoped {
-            expected.insert(mitigation_rule(&foreign).nlri_hash());
+            expected.insert(mitigation_rule(&foreign).unwrap().nlri_hash());
         }
         let mut reconciler =
             ReconciliationLoop::new(context.repo.clone(), speaker.clone(), 30, false);
@@ -3020,8 +3020,8 @@ async fn test_reconciliation_inventory_excludes_ineligible_owners() {
         assert_eq!(
             withdrawn,
             BTreeSet::from([
-                mitigation_rule(&expired).nlri_hash(),
-                mitigation_rule(&deleting).nlri_hash()
+                mitigation_rule(&expired).unwrap().nlri_hash(),
+                mitigation_rule(&deleting).unwrap().nlri_hash()
             ])
         );
         assert_eq!(
@@ -3313,7 +3313,7 @@ async fn test_expiry_inventory_scopes_before_decoding_and_expires_owned_rows() {
     for mitigation in [&owned, &escalated, &foreign, &future] {
         speaker
             .inner
-            .announce(&mitigation_rule(mitigation))
+            .announce(&mitigation_rule(mitigation).unwrap())
             .await
             .unwrap();
     }
@@ -3334,8 +3334,8 @@ async fn test_expiry_inventory_scopes_before_decoding_and_expires_owned_rows() {
     assert_eq!(
         withdrawals.into_iter().collect::<BTreeSet<_>>(),
         BTreeSet::from([
-            mitigation_rule(&owned).nlri_hash(),
-            mitigation_rule(&escalated).nlri_hash()
+            mitigation_rule(&owned).unwrap().nlri_hash(),
+            mitigation_rule(&escalated).unwrap().nlri_hash()
         ])
     );
     for mitigation in [&owned, &escalated] {
@@ -3376,8 +3376,8 @@ async fn test_expiry_inventory_scopes_before_decoding_and_expires_owned_rows() {
             .map(|rule| rule.nlri_hash())
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([
-            mitigation_rule(&foreign).nlri_hash(),
-            mitigation_rule(&future).nlri_hash()
+            mitigation_rule(&foreign).unwrap().nlri_hash(),
+            mitigation_rule(&future).unwrap().nlri_hash()
         ])
     );
     reconciler.reconcile().await.unwrap();
@@ -3439,7 +3439,7 @@ async fn test_expiry_failure_keeps_pending_cleanup_and_peer_refresh() {
     for mitigation in [&pending, &corrupt] {
         speaker
             .inner
-            .announce(&mitigation_rule(mitigation))
+            .announce(&mitigation_rule(mitigation).unwrap())
             .await
             .unwrap();
     }
@@ -3479,7 +3479,7 @@ async fn test_expiry_failure_keeps_pending_cleanup_and_peer_refresh() {
     );
     assert_eq!(
         *speaker.withdrawals.lock().unwrap(),
-        vec![mitigation_rule(&pending).nlri_hash()]
+        vec![mitigation_rule(&pending).unwrap().nlri_hash()]
     );
     assert_eq!(
         speaker
@@ -3489,7 +3489,7 @@ async fn test_expiry_failure_keeps_pending_cleanup_and_peer_refresh() {
             .iter()
             .map(|rule| rule.nlri_hash())
             .collect::<Vec<_>>(),
-        vec![mitigation_rule(&corrupt).nlri_hash()]
+        vec![mitigation_rule(&corrupt).unwrap().nlri_hash()]
     );
     assert!(speaker.announcements.lock().unwrap().is_empty());
     assert_eq!(speaker.session_reads.load(Relaxed), 1);
@@ -3551,7 +3551,9 @@ impl FlowSpecWriter for CreationSpeaker {
             .active_mitigations_for_pop(&self.pop)
             .await?
             .into_iter()
-            .filter(|owner| prefixd::domain::mitigation_rule(owner).nlri_hash() == rule.nlri_hash())
+            .filter(|owner| {
+                prefixd::domain::mitigation_rule(owner).unwrap().nlri_hash() == rule.nlri_hash()
+            })
             .map(|owner| owner.mitigation_id)
             .collect();
         self.owners_at_rpc.lock().unwrap().push(owners);
@@ -5466,7 +5468,7 @@ async fn test_shared_quota_lock_wait_times_out_without_rpc_or_blocking_other_pop
     );
     context.repo.insert_mitigation(&existing).await.unwrap();
     speaker_b
-        .announce(&prefixd::domain::mitigation_rule(&existing))
+        .announce(&prefixd::domain::mitigation_rule(&existing).unwrap())
         .await
         .unwrap();
     let mut gate = context.pool.begin().await.unwrap();
@@ -5712,7 +5714,7 @@ async fn checked_timestamp_scoped_reconciliation_returns_errors_and_recovers() {
     let speaker = std::sync::Arc::new(InventorySpeaker::new(false));
     speaker
         .inner
-        .announce(&mitigation_rule(&pending))
+        .announce(&mitigation_rule(&pending).unwrap())
         .await
         .unwrap();
     let mut settings = common::test_settings();
@@ -5736,7 +5738,7 @@ async fn checked_timestamp_scoped_reconciliation_returns_errors_and_recovers() {
     ctx.repo.insert_mitigation(&corrupt).await.unwrap();
     speaker
         .inner
-        .announce(&mitigation_rule(&corrupt))
+        .announce(&mitigation_rule(&corrupt).unwrap())
         .await
         .unwrap();
     let pending = ctx
@@ -5831,8 +5833,8 @@ async fn checked_timestamp_scoped_reconciliation_returns_errors_and_recovers() {
     assert!(speaker.announcements.lock().unwrap().is_empty());
     let deletes = speaker.withdrawals.lock().unwrap().clone();
     assert_eq!(deletes.len(), 2);
-    assert!(deletes.contains(&mitigation_rule(&pending).nlri_hash()));
-    assert!(deletes.contains(&mitigation_rule(&corrupt).nlri_hash()));
+    assert!(deletes.contains(&mitigation_rule(&pending).unwrap().nlri_hash()));
+    assert!(deletes.contains(&mitigation_rule(&corrupt).unwrap().nlri_hash()));
     let completed: Vec<(uuid::Uuid, bool)> = sqlx::query_as(
         "SELECT operation_id, completed_at IS NOT NULL FROM withdrawal_requests WHERE mitigation_id IN ($1, $2)")
         .bind(pending.mitigation_id).bind(corrupt.mitigation_id).fetch_all(&ctx.pool).await.unwrap();

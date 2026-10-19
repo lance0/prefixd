@@ -496,9 +496,12 @@ async fn test_authenticated_single_and_bulk_withdrawals_record_session_actor() {
         );
         mitigation.activate();
         repo.insert_mitigation(&mitigation).await.unwrap();
-        prefixd::bgp::FlowSpecWriter::announce(speaker.as_ref(), &mitigation_rule(&mitigation))
-            .await
-            .unwrap();
+        prefixd::bgp::FlowSpecWriter::announce(
+            speaker.as_ref(),
+            &mitigation_rule(&mitigation).unwrap(),
+        )
+        .await
+        .unwrap();
         targets.push(mitigation);
     }
     let mut settings = test_settings();
@@ -654,7 +657,10 @@ async fn test_foreign_pop_cannot_delete_local_rule_or_receive_local_repair() {
     );
     local.activate();
     repo.insert_mitigation(&local).await.unwrap();
-    speaker.announce(&mitigation_rule(&local)).await.unwrap();
+    speaker
+        .announce(&mitigation_rule(&local).unwrap())
+        .await
+        .unwrap();
     let mut foreign = local.clone();
     foreign.mitigation_id = uuid::Uuid::new_v4();
     foreign.pop = "other-pop".into();
@@ -934,7 +940,10 @@ async fn test_canonical_owner_preflight_preserves_existing_rule_and_reuses_detec
     existing.activate();
     existing.scope_hash = "historical raw scope hash".into();
     repo.insert_mitigation(&existing).await.unwrap();
-    speaker.announce(&mitigation_rule(&existing)).await.unwrap();
+    speaker
+        .announce(&mitigation_rule(&existing).unwrap())
+        .await
+        .unwrap();
     let mut settings = test_settings();
     settings.mode = prefixd::config::OperationMode::Enforced;
     let state = AppState::new(
@@ -9944,7 +9953,7 @@ mod manual_protocol {
                 assert_eq!(speaker.mutations.load(SeqCst), 1);
                 assert_eq!(
                     serde_json::to_value(speaker.inner.list_active().await.unwrap()).unwrap(),
-                    serde_json::json!([mitigation_rule(saved)])
+                    serde_json::json!([mitigation_rule(saved).unwrap()])
                 );
             }
         }
@@ -12658,7 +12667,10 @@ mod reason_and_bulk_validation {
                 row.mitigation_id = Uuid::from_u128(id);
                 row.activate();
                 self.repo.insert_mitigation(&row).await.unwrap();
-                self.speaker.announce(&mitigation_rule(&row)).await.unwrap();
+                self.speaker
+                    .announce(&mitigation_rule(&row).unwrap())
+                    .await
+                    .unwrap();
                 targets.push(row);
             }
             targets
@@ -12844,7 +12856,7 @@ mod reason_and_bulk_validation {
                         assert_eq!(audit[0].action, "withdraw");
                         assert_eq!(
                             rules_value(fixture.speaker.list_active().await.unwrap()),
-                            rules_value(vec![mitigation_rule(&targets[1])])
+                            rules_value(vec![mitigation_rule(&targets[1]).unwrap()])
                         );
                     }
                     "safelist" => {
@@ -12986,7 +12998,7 @@ mod reason_and_bulk_validation {
                         targets
                             .iter()
                             .skip(remaining)
-                            .map(mitigation_rule)
+                            .map(|target| mitigation_rule(target).unwrap())
                             .collect()
                     )
                 );
@@ -14101,7 +14113,7 @@ async fn test_enforced_expiry_of_dry_run_row_never_deletes_speaker_state() {
     repo.insert_mitigation(&simulated).await.unwrap();
     // A rule with the same NLRI that prefixd never announced must survive the expiry.
     speaker
-        .announce(&mitigation_rule(&simulated))
+        .announce(&mitigation_rule(&simulated).unwrap())
         .await
         .unwrap();
     let state = enforced_state(repo.clone(), speaker.clone());

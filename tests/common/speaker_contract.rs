@@ -337,12 +337,12 @@ pub async fn run_action_reconciliation_contract(
         foreign_owner.action_type = prefixd::domain::ActionType::Police;
         foreign_owner.action_params.rate_bps = Some(8_000_000);
         repo.insert_mitigation(&foreign_owner).await?;
-        let mut control = mitigation_rule(&owner);
+        let mut control = mitigation_rule(&owner).unwrap();
         control.nlri.dst_ports = vec![54];
         control.actions = vec![FlowSpecAction::police(1)];
         speaker.announce(&control).await?;
         unknown.push(control);
-        let mut duplicate_term_control = mitigation_rule(&owner);
+        let mut duplicate_term_control = mitigation_rule(&owner).unwrap();
         duplicate_term_control.nlri.dst_ports = vec![443, 53, 53];
         duplicate_term_control.actions = vec![FlowSpecAction::police(7)];
         speaker.announce(&duplicate_term_control).await?;
@@ -362,7 +362,7 @@ pub async fn run_action_reconciliation_contract(
             owner.action_type = wanted.action_type;
             owner.action_params.rate_bps = wanted.rate_bps;
             repo.update_mitigation(owner).await?;
-            let rule = mitigation_rule(owner);
+            let rule = mitigation_rule(owner).unwrap();
             let mut changed = rule.clone();
             changed.actions = vec![drifted_action.clone()];
             speaker.announce(&changed).await?;
@@ -395,7 +395,7 @@ pub async fn run_action_reconciliation_contract(
     }
     let mut remaining: Vec<_> = owners
         .iter()
-        .map(mitigation_rule)
+        .map(|owner| mitigation_rule(owner).unwrap())
         .chain(unknown.iter().cloned())
         .collect();
     for owner in &owners {
@@ -423,7 +423,7 @@ pub async fn run_action_reconciliation_contract(
             Some(&binding),
         )
         .await?;
-        remaining.retain(|rule| rule.nlri_hash() != mitigation_rule(owner).nlri_hash());
+        remaining.retain(|rule| rule.nlri_hash() != mitigation_rule(owner).unwrap().nlri_hash());
         wait_inventory(speaker.as_ref(), &remaining)
             .await
             .context("original saved intent deletes repaired rule")?;

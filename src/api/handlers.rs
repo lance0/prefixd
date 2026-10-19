@@ -72,9 +72,9 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::db::{ListCursor, ListParams, MitigationCursor, MitigationListParams};
 use crate::domain::{
-    ActionParams, ActionType, AttackEvent, AttackEventInput, FlowSpecAction, FlowSpecNlri,
-    FlowSpecRule, MatchCriteria, Mitigation, MitigationIntent, MitigationStatus,
-    execute_withdrawal, find_mitigation_owner, request_withdrawal, validate_confidence,
+    ActionParams, ActionType, AttackEvent, AttackEventInput, FlowSpecAction, MatchCriteria,
+    Mitigation, MitigationIntent, MitigationRoute, MitigationStatus, execute_withdrawal,
+    find_mitigation_owner, mitigation_rule, request_withdrawal, validate_confidence,
 };
 use crate::error::{GuardrailError, PrefixdError};
 use crate::guardrails::Guardrails;
@@ -483,6 +483,8 @@ async fn persist_new_mitigation(
     mitigation: &mut Mitigation,
     actor: &CreationActor,
 ) -> crate::error::Result<Option<AnnouncementOutcome>> {
+    // Fail closed before persistence: only a FlowSpec rule can be announced here.
+    let rule = mitigation_rule(mitigation)?;
     mitigation.activate();
     mitigation.origin_mode = Some(state.settings.mode);
     state
@@ -508,10 +510,6 @@ async fn persist_new_mitigation(
     if state.is_dry_run() {
         return Ok(None);
     }
-    let rule = FlowSpecRule::new(
-        FlowSpecNlri::from(&mitigation.match_criteria),
-        FlowSpecAction::from((mitigation.action_type, &mitigation.action_params)),
-    );
     let start = std::time::Instant::now();
     if mitigation.expires_at <= Utc::now() {
         tracing::warn!(mitigation_id = %mitigation.mitigation_id,
@@ -798,15 +796,15 @@ async fn handle_ban(
     let mut existing_owner = None;
     // Reject before storing the detector ID so the same event remains retryable.
     if let Ok(intent) = &candidate_intent {
-        let rule = FlowSpecRule::new(
-            FlowSpecNlri::from(&intent.match_criteria),
-            FlowSpecAction::from((intent.action_type, &intent.action_params)),
-        );
         existing_owner = find_mitigation_owner(
             state.repo.as_ref(),
             &state.settings.pop,
-            &rule,
-            &intent.match_criteria.compute_scope_hash(),
+            &MitigationRoute::new(
+                intent.action_type,
+                &intent.match_criteria,
+                &intent.action_params,
+            ),
+            &intent.match_criteria.scope_hash_for(intent.action_type),
         )
         .await
         .map_err(AppError)?;
@@ -818,13 +816,16 @@ async fn handle_ban(
                     crate::domain::RETIRE_DRY_RUN_FLAG
                 ))));
             }
-            FlowSpecAction::from((owner.action_type, &owner.action_params))
-                .traffic_rate_bytes_per_second()
-                .map_err(|error| {
-                    AppError(PrefixdError::GuardrailViolation(
-                        GuardrailError::InvalidAction(error),
-                    ))
-                })?;
+            (FlowSpecAction {
+                action_type: owner.action_type,
+                rate_bps: owner.action_params.rate_bps,
+            })
+            .traffic_rate_bytes_per_second()
+            .map_err(|error| {
+                AppError(PrefixdError::GuardrailViolation(
+                    GuardrailError::InvalidAction(error),
+                ))
+            })?;
         }
     }
 
@@ -1705,15 +1706,15 @@ pub async fn create_mitigation(
         reason: req.reason,
     };
 
-    let rule = FlowSpecRule::new(
-        FlowSpecNlri::from(&intent.match_criteria),
-        FlowSpecAction::from((intent.action_type, &intent.action_params)),
-    );
     match find_mitigation_owner(
         state.repo.as_ref(),
         &state.settings.pop,
-        &rule,
-        &intent.match_criteria.compute_scope_hash(),
+        &MitigationRoute::new(
+            intent.action_type,
+            &intent.match_criteria,
+            &intent.action_params,
+        ),
+        &intent.match_criteria.scope_hash_for(intent.action_type),
     )
     .await
     {

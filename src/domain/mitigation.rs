@@ -65,6 +65,8 @@ impl std::str::FromStr for MitigationStatus {
 pub enum ActionType {
     Police,
     Discard,
+    /// Unicast host route, not a FlowSpec action (ADR 027). Nothing creates one yet.
+    Blackhole,
 }
 
 impl ActionType {
@@ -72,6 +74,7 @@ impl ActionType {
         match self {
             Self::Police => "police",
             Self::Discard => "discard",
+            Self::Blackhole => "blackhole",
         }
     }
 }
@@ -89,6 +92,7 @@ impl std::str::FromStr for ActionType {
         match s {
             "police" => Ok(Self::Police),
             "discard" => Ok(Self::Discard),
+            "blackhole" => Ok(Self::Blackhole),
             _ => Err(format!("unknown action: {}", s)),
         }
     }
@@ -116,6 +120,27 @@ impl MatchCriteria {
         }
         hex::encode(&hasher.finalize()[..16])
     }
+
+    /// Scope hash for `action_type`. FlowSpec keeps `compute_scope_hash` byte for byte;
+    /// a blackhole is domain-separated so it never shares a FlowSpec scope.
+    pub fn scope_hash_for(&self, action_type: ActionType) -> String {
+        match action_type {
+            ActionType::Police | ActionType::Discard => self.compute_scope_hash(),
+            ActionType::Blackhole => blackhole_identity(&self.dst_prefix),
+        }
+    }
+}
+
+/// Identity of a blackhole host route: a kind tag plus the canonical prefix. Valid
+/// prefixes never contain the tag, so no FlowSpec scope or NLRI hash input matches it.
+pub(crate) fn blackhole_identity(prefix: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"prefixd:blackhole\0");
+    match prefix.parse::<ipnet::IpNet>() {
+        Ok(prefix) => hasher.update(prefix.to_string().as_bytes()),
+        Err(_) => hasher.update(prefix.as_bytes()),
+    }
+    hex::encode(&hasher.finalize()[..16])
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,7 +235,7 @@ pub struct Mitigation {
 impl Mitigation {
     pub fn from_intent(intent: MitigationIntent, victim_ip: String, vector: AttackVector) -> Self {
         let now = Utc::now();
-        let scope_hash = intent.match_criteria.compute_scope_hash();
+        let scope_hash = intent.match_criteria.scope_hash_for(intent.action_type);
         let expires_at = now + Duration::seconds(intent.ttl_seconds as i64);
 
         Self {
