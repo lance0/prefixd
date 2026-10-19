@@ -2572,6 +2572,10 @@ mod tests {
 
     #[tokio::test]
     async fn admission_refuses_unencodable_components_in_both_modes_before_any_rpc() {
+        // Enforced persistence moves process-global announcement series.
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
         use crate::bgp::MockAnnouncer;
         use crate::config::{BgpMode, Inventory, OperationMode, Playbooks, Settings};
         use crate::db::{MockRepository, RepositoryTrait};
@@ -2648,6 +2652,10 @@ mod tests {
 
     #[tokio::test]
     async fn match_opt_ins_refuse_alike_in_both_modes_and_dry_run_persists_without_rpc() {
+        // Enforced persistence moves process-global announcement series.
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
         use crate::bgp::MockAnnouncer;
         use crate::config::{BgpMode, Inventory, OperationMode, Playbooks, Settings};
         use crate::db::{MockRepository, RepositoryTrait};
