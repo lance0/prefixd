@@ -3246,6 +3246,10 @@ playbooks:
 
     #[tokio::test]
     async fn library_intersection_per_rule_admission_refresh_and_changed_set() {
+        // Enforced admissions move process-global announcement series.
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
         use RuleOutcome::{Created, Extended};
         let f = fixture(OperationMode::Enforced, |_, _| {});
         // 4444 is not a reflector port: it is dropped, never matched.
@@ -3300,6 +3304,10 @@ playbooks:
 
     #[tokio::test]
     async fn library_ports_split_into_stable_chunks_of_max_ports() {
+        // Enforced admissions move process-global announcement series.
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
         use RuleOutcome::{Created, Extended};
         let f = fixture(OperationMode::Enforced, |_, _| {});
         let library: Vec<u16> = DEFAULT_REFLECTOR_PORTS.iter().map(|(p, _)| *p).collect();
@@ -3336,6 +3344,10 @@ playbooks:
 
     #[tokio::test]
     async fn partial_admission_reports_each_rule_and_none_admitted_returns_first_error() {
+        // Enforced admissions move process-global announcement series.
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
         // The quota admits one rule: the second is rejected and reported.
         let f = fixture(OperationMode::Enforced, |settings, _| {
             settings.quotas.max_active_per_pop = 1;
@@ -3373,6 +3385,10 @@ playbooks:
 
     #[tokio::test]
     async fn dry_run_persists_every_rule_and_sends_no_rpc() {
+        // Enforced admissions move process-global announcement series.
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
         let f = fixture(OperationMode::DryRun, |_, _| {});
         let response = ban(&f, event("d1", "udp_amplification", Some(&[123, 389])))
             .await
@@ -3390,6 +3406,10 @@ playbooks:
 
     #[tokio::test]
     async fn no_usable_source_ports_or_playbook_falls_back_to_udp_flood() {
+        // Enforced admissions move process-global announcement series.
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
         let empty_library = |settings: &mut Settings, _: &mut Playbooks| {
             settings.amplification.reflector_ports = Some(Vec::new());
         };
@@ -3464,6 +3484,10 @@ playbooks:
 
     #[tokio::test]
     async fn detector_unban_withdraws_every_rule_the_ban_created() {
+        // Enforced admissions move process-global announcement series.
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
         let f = fixture(OperationMode::Enforced, |_, _| {});
         let banned = ban(&f, event("u1", "udp_amplification", Some(&[123])))
             .await
@@ -3483,6 +3507,10 @@ playbooks:
 
     #[tokio::test]
     async fn oversized_top_src_ports_is_refused_before_any_state() {
+        // Enforced admissions move process-global announcement series.
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
         let f = fixture(OperationMode::Enforced, |_, _| {});
         let too_many: Vec<u16> = (1..=65).collect();
         let error = ban(&f, event("big", "udp_amplification", Some(&too_many)))
