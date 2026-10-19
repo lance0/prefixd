@@ -152,23 +152,7 @@ pub async fn announce_blackhole(
         .is_safelisted(&route.prefix().addr().to_string())
         .await?
     {
-        let request = request_withdrawal(
-            repo,
-            mitigation,
-            false,
-            "system",
-            "safelist-recheck",
-            SAFELISTED_AFTER_ADMISSION.into(),
-            true,
-            binding,
-        )
-        .await?;
-        tracing::warn!(mitigation_id = %mitigation.mitigation_id, operation_id = %request.operation_id,
-            "victim safelisted after admission; withdrawing instead of announcing");
-        let withdrawn = execute_withdrawal(repo, announcer, false, &request, binding).await?;
-        crate::observability::metrics::MITIGATIONS_WITHDRAWN
-            .with_label_values(&["blackhole", &withdrawn.pop, "safelisted"])
-            .inc();
+        let withdrawn = withdraw_safelisted(repo, announcer, false, mitigation, binding).await?;
         return Ok(BlackholeAnnouncement::Withdrawn(Box::new(withdrawn)));
     }
     let start = std::time::Instant::now();
@@ -178,6 +162,62 @@ pub async fn announce_blackhole(
         .inc();
     crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(start.elapsed().as_secs_f64());
     Ok(BlackholeAnnouncement::Announced)
+}
+
+/// Caller holds the lifecycle mutex. Audited system withdrawal of a blackhole
+/// whose victim is now safelisted, through the immutable withdrawal path. A
+/// simulation, or any row in dry-run, is retired locally without an RPC.
+pub async fn withdraw_safelisted(
+    repo: &dyn RepositoryTrait,
+    announcer: &dyn FlowSpecAnnouncer,
+    dry_run: bool,
+    mitigation: &Mitigation,
+    binding: Option<&VerifiedSpeakerBinding>,
+) -> Result<Mitigation> {
+    let request = request_withdrawal(
+        repo,
+        mitigation,
+        false,
+        "system",
+        "safelist-recheck",
+        SAFELISTED_AFTER_ADMISSION.into(),
+        !dry_run,
+        binding,
+    )
+    .await?;
+    tracing::warn!(mitigation_id = %mitigation.mitigation_id, operation_id = %request.operation_id,
+        "blackhole victim safelisted after admission; withdrawing");
+    let withdrawn = execute_withdrawal(repo, announcer, dry_run, &request, binding).await?;
+    crate::observability::metrics::MITIGATIONS_WITHDRAWN
+        .with_label_values(&["blackhole", &withdrawn.pop, "safelisted"])
+        .inc();
+    Ok(withdrawn)
+}
+
+/// Live blackholes at `pop` whose victim lies inside `prefix`, without a
+/// pending withdrawal. A failed read is an error, never an empty result.
+pub async fn covered_blackholes(
+    repo: &dyn RepositoryTrait,
+    pop: &str,
+    prefix: ipnet::IpNet,
+) -> Result<Vec<Mitigation>> {
+    let pending = repo.pending_withdrawals(Some(pop)).await?;
+    let now = chrono::Utc::now();
+    Ok(repo
+        .active_mitigations_for_pop(pop)
+        .await?
+        .into_iter()
+        .filter(|m| {
+            m.action_type == ActionType::Blackhole
+                && m.pop == pop
+                && m.expires_at > now
+                && !pending.iter().any(|r| r.mitigation_id == m.mitigation_id)
+                && m.match_criteria
+                    .dst_prefix
+                    .parse::<ipnet::IpNet>()
+                    .is_ok_and(|victim| prefix.contains(&victim))
+        })
+        .collect())
 }
 
 #[cfg(test)]

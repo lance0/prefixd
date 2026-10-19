@@ -111,6 +111,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `POST /v1/safelist` now withdraws every live blackhole on this POP whose
+  victim falls inside the new entry, under the lifecycle mutex, with the
+  audited system reason `safelisted after admission`. Dry-run blackholes are
+  retired locally without a speaker call, and foreign-POP rows are untouched.
+  The `201` response gains a JSON body listing `withdrawn_mitigation_ids`,
+  plus `withdrawal_error` when the covered blackholes could not be found or
+  withdrawn; the entry is stored either way. Each reconciliation pass also
+  withdraws present, owned, live blackholes that the safelist now covers, so
+  entries seeded from configuration or written to the database converge. A
+  failed safelist lookup withdraws nothing. FlowSpec rules are unchanged.
+
 - Guardrails enforce the ADR 028 match settings before a rule is saved, in
   dry-run and enforced modes. `guardrails.allow_fragment_match` and
   `guardrails.allow_packet_length_match` now admit or refuse rules with a

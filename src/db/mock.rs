@@ -34,6 +34,9 @@ pub struct MockRepository {
     /// Every safelist lookup fails, as an unavailable database does.
     #[cfg(test)]
     pub fail_safelist: std::sync::atomic::AtomicBool,
+    /// Every active-mitigation inventory read fails.
+    #[cfg(test)]
+    pub fail_active_reads: std::sync::atomic::AtomicBool,
     mitigations: Mutex<Vec<Mitigation>>,
     withdrawals: Mutex<Vec<WithdrawalRequest>>,
     safelist: Mutex<Vec<SafelistEntry>>,
@@ -78,6 +81,8 @@ impl MockRepository {
             pending_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             fail_safelist: Default::default(),
+            #[cfg(test)]
+            fail_active_reads: Default::default(),
             mitigations: Mutex::new(Vec::new()),
             withdrawals: Mutex::new(Vec::new()),
             safelist: Mutex::new(Vec::new()),
@@ -284,6 +289,15 @@ impl RepositoryTrait for MockRepository {
     }
 
     async fn active_mitigation_inventory(&self, pop: Option<&str>) -> Result<Vec<Mitigation>> {
+        #[cfg(test)]
+        if self
+            .fail_active_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::error::PrefixdError::Internal(
+                "mitigation inventory unavailable".into(),
+            ));
+        }
         Ok(self
             .mitigations
             .lock()

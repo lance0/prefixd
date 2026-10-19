@@ -173,7 +173,9 @@ new mitigations, never live routes.
   reconciliation repair. If the lookup fails, nothing is sent. If the victim is
   now safelisted, prefixd sends nothing and records a system withdrawal with
   the reason `safelisted after admission` through the normal immutable
-  withdrawal path. FlowSpec repair behavior is unchanged by this ADR.
+  withdrawal path. Adding a safelist entry, and each reconciliation pass for
+  routes already present, withdraws covered live blackholes the same way.
+  FlowSpec repair behavior is unchanged by this ADR.
 - **First action or escalation.** Allow blackhole as a playbook's first step,
   since that is the FastNetMon Community workflow and escalation is unreachable
   today. Restrict blackhole steps to events whose `source` is listed in

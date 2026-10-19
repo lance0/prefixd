@@ -1,16 +1,17 @@
 use utoipa::OpenApi;
 
 use super::handlers::{
-    AddSafelistRequest, AlertmanagerAlert, AlertmanagerAlertResult, AlertmanagerWebhookPayload,
-    AlertmanagerWebhookResponse, AnnouncementOutcome, AuditListResponse, BatchEventRequest,
-    BatchEventResponse, BatchEventResult, BlackholeRouteResponse, BulkAcknowledgeRequest,
-    BulkAcknowledgeResponse, BulkAcknowledgeResult, BulkWithdrawRequest, BulkWithdrawResponse,
-    BulkWithdrawResult, ChangePasswordRequest, CorrelationContext, CreateMitigationRequest,
-    CreateOperatorRequest, ErrorResponse, EventResponse, EventsListResponse,
-    FastNetMonAttackDetails, FastNetMonPayload, HealthResponse, IpHistoryResponse, LoginRequest,
-    LoginResponse, MitigationResponse, MitigationsListResponse, OperatorInfo, OperatorListResponse,
-    PublicHealthResponse, ReloadResponse, SignalGroupDetailResponse, SignalGroupsListResponse,
-    TimeseriesResponse, WebhookEventResult, WebhookResponse,
+    AddSafelistRequest, AddSafelistResponse, AlertmanagerAlert, AlertmanagerAlertResult,
+    AlertmanagerWebhookPayload, AlertmanagerWebhookResponse, AnnouncementOutcome,
+    AuditListResponse, BatchEventRequest, BatchEventResponse, BatchEventResult,
+    BlackholeRouteResponse, BulkAcknowledgeRequest, BulkAcknowledgeResponse, BulkAcknowledgeResult,
+    BulkWithdrawRequest, BulkWithdrawResponse, BulkWithdrawResult, ChangePasswordRequest,
+    CorrelationContext, CreateMitigationRequest, CreateOperatorRequest, ErrorResponse,
+    EventResponse, EventsListResponse, FastNetMonAttackDetails, FastNetMonPayload, HealthResponse,
+    IpHistoryResponse, LoginRequest, LoginResponse, MitigationResponse, MitigationsListResponse,
+    OperatorInfo, OperatorListResponse, PublicHealthResponse, ReloadResponse,
+    SignalGroupDetailResponse, SignalGroupsListResponse, TimeseriesResponse, WebhookEventResult,
+    WebhookResponse,
 };
 use crate::correlation::config::{CorrelationConfig, SourceConfig};
 use crate::correlation::engine::{
@@ -99,6 +100,7 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
             PopInfo,
             SafelistEntry,
             AddSafelistRequest,
+            AddSafelistResponse,
             LoginRequest,
             LoginResponse,
             CreateOperatorRequest,

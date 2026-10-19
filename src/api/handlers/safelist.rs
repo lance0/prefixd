@@ -4,10 +4,11 @@ use axum::{
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     response::IntoResponse,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::sync::Arc;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 use crate::AppState;
 use crate::api::auth::{require_auth, require_role};
@@ -16,17 +17,11 @@ use crate::error::PrefixdError;
 
 use super::{MAX_STRING_LEN, MAX_USERNAME_LEN, validate_string_len};
 
-fn validate_cidr(prefix: &str) -> Result<(), PrefixdError> {
-    if prefix.contains('/') {
-        prefix
-            .parse::<ipnet::IpNet>()
-            .map_err(|_| PrefixdError::InvalidRequest(format!("invalid prefix: '{}'", prefix)))?;
-    } else {
-        prefix
-            .parse::<IpAddr>()
-            .map_err(|_| PrefixdError::InvalidRequest(format!("invalid prefix: '{}'", prefix)))?;
-    }
-    Ok(())
+fn validate_cidr(prefix: &str) -> Result<ipnet::IpNet, PrefixdError> {
+    prefix
+        .parse::<ipnet::IpNet>()
+        .or_else(|_| prefix.parse::<IpAddr>().map(ipnet::IpNet::from))
+        .map_err(|_| PrefixdError::InvalidRequest(format!("invalid prefix: '{}'", prefix)))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -40,6 +35,82 @@ pub struct AddSafelistRequest {
     prefix: String,
     #[serde(default)]
     reason: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct AddSafelistResponse {
+    /// Live blackholes on this POP inside the new prefix that this request
+    /// withdrew with the system reason `safelisted after admission`.
+    withdrawn_mitigation_ids: Vec<Uuid>,
+    /// Present when covered blackholes could not be found or withdrawn. The
+    /// entry is stored either way; reconciliation retries enforced routes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    withdrawal_error: Option<String>,
+}
+
+/// Caller holds the lifecycle mutex and has stored the entry. Withdraws every
+/// live blackhole on this POP inside `prefix`; a failed lookup withdraws nothing.
+async fn withdraw_covered_blackholes(
+    state: &AppState,
+    prefix: ipnet::IpNet,
+) -> AddSafelistResponse {
+    let mut response = AddSafelistResponse {
+        withdrawn_mitigation_ids: Vec::new(),
+        withdrawal_error: None,
+    };
+    let found = async {
+        let binding = state.verified_speaker_binding()?;
+        let covered =
+            crate::domain::covered_blackholes(state.repo.as_ref(), &state.settings.pop, prefix)
+                .await?;
+        Ok::<_, PrefixdError>((binding, covered))
+    }
+    .await;
+    let (binding, covered) = match found {
+        Ok(found) => found,
+        Err(error) => {
+            tracing::error!(target: "prefixd::api::handlers", %prefix, error = %error,
+                "covered blackhole lookup failed after safelist add; nothing withdrawn");
+            response.withdrawal_error =
+                Some("covered blackhole lookup failed; nothing was withdrawn".into());
+            return response;
+        }
+    };
+    for mitigation in covered {
+        match crate::domain::withdraw_safelisted(
+            state.repo.as_ref(),
+            state.announcer.as_ref(),
+            state.is_dry_run(),
+            &mitigation,
+            binding,
+        )
+        .await
+        {
+            Ok(withdrawn) => {
+                let _ = state
+                    .ws_broadcast
+                    .send(crate::ws::WsMessage::MitigationWithdrawn {
+                        mitigation_id: withdrawn.mitigation_id.to_string(),
+                    });
+                state
+                    .alerting
+                    .read()
+                    .await
+                    .notify(crate::alerting::Alert::mitigation_withdrawn(&withdrawn));
+                response
+                    .withdrawn_mitigation_ids
+                    .push(withdrawn.mitigation_id);
+            }
+            Err(error) => {
+                tracing::error!(target: "prefixd::api::handlers", %prefix,
+                    mitigation_id = %mitigation.mitigation_id, error = %error,
+                    "failed to withdraw safelisted blackhole");
+                response.withdrawal_error =
+                    Some("a covered blackhole was not withdrawn; reconciliation retries it".into());
+            }
+        }
+    }
+    response
 }
 
 pub async fn list_safelist(
@@ -65,7 +136,7 @@ pub async fn list_safelist(
     tag = "safelist",
     request_body = AddSafelistRequest,
     responses(
-        (status = 201, description = "Safelist entry created"),
+        (status = 201, description = "Safelist entry created; lists covered blackholes withdrawn", body = AddSafelistResponse),
         (status = 400, description = "Invalid prefix"),
         (status = 401, description = "Not authenticated"),
         (status = 403, description = "Insufficient permissions")
@@ -82,7 +153,7 @@ pub async fn add_safelist(
     let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
     let operator_id = operator.username;
 
-    validate_cidr(&req.prefix).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let prefix = validate_cidr(&req.prefix).map_err(|_| StatusCode::BAD_REQUEST)?;
     validate_string_len(&operator_id, "operator_id", MAX_USERNAME_LEN)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     if let Some(ref reason) = req.reason {
@@ -90,6 +161,7 @@ pub async fn add_safelist(
             .map_err(|_| StatusCode::BAD_REQUEST)?;
     }
 
+    let _mitigation_guard = state.mitigation_lock.lock().await;
     state
         .repo
         .insert_safelist(&req.prefix, &operator_id, req.reason.as_deref())
@@ -100,7 +172,8 @@ pub async fn add_safelist(
         })?;
 
     tracing::info!(target: "prefixd::api::handlers", prefix = %req.prefix, operator = %operator_id, "safelist entry added");
-    Ok(StatusCode::CREATED)
+    let response = withdraw_covered_blackholes(&state, prefix).await;
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 /// Remove a prefix from the safelist (admin only)
@@ -141,6 +214,347 @@ pub async fn remove_safelist(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    use crate::AppState;
+    use crate::bgp::{BlackholeRoute, BlackholeSpeaker, FaultyBlackholes};
+    use crate::config::{BlackholeConfig, OperationMode};
+    use crate::db::{MockRepository, RepositoryTrait};
+    use crate::domain::{
+        ActionParams, ActionType, AttackVector, BlackholeRule, MatchCriteria, Mitigation,
+        MitigationIntent, MitigationStatus, SAFELISTED_AFTER_ADMISSION,
+    };
+
+    struct Fixture {
+        repo: Arc<MockRepository>,
+        speaker: Arc<FaultyBlackholes>,
+        state: Arc<AppState>,
+    }
+
+    fn config() -> BlackholeConfig {
+        BlackholeConfig {
+            enabled: true,
+            next_hop_ipv4: Some("192.0.2.66".parse().unwrap()),
+            communities: vec!["64512:1".into()],
+            ..Default::default()
+        }
+    }
+
+    fn fixture(mode: OperationMode) -> Fixture {
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let mut settings: crate::config::Settings =
+            crate::config::parse_yaml(include_str!("../../../configs/prefixd.yaml")).unwrap();
+        settings.pop = "test".into();
+        settings.bgp.mode = crate::config::BgpMode::Mock;
+        settings.http.auth.mode = crate::config::AuthMode::None;
+        settings.mode = mode;
+        settings.blackhole = config();
+        let state = AppState::new(
+            settings,
+            crate::config::Inventory::new(vec![]),
+            crate::config::Playbooks { playbooks: vec![] },
+            repo.clone(),
+            speaker.clone(),
+            ".".into(),
+        )
+        .unwrap();
+        Fixture {
+            repo,
+            speaker,
+            state,
+        }
+    }
+
+    /// Live blackhole intent at `pop`, created in `origin` mode.
+    fn blackhole(ip: &str, pop: &str, origin: OperationMode) -> Mitigation {
+        let prefix = ipnet::IpNet::from(ip.parse::<std::net::IpAddr>().unwrap());
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: pop.into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: prefix.to_string(),
+                    ..Default::default()
+                },
+                action_type: ActionType::Blackhole,
+                action_params: ActionParams {
+                    blackhole: Some(BlackholeRule::from_config(&config(), prefix).unwrap()),
+                    ..Default::default()
+                },
+                ttl_seconds: 600,
+                reason: "test".into(),
+            },
+            ip.into(),
+            AttackVector::Unknown,
+        );
+        mitigation.activate();
+        mitigation.origin_mode = Some(origin);
+        mitigation
+    }
+
+    fn route(mitigation: &Mitigation) -> BlackholeRoute {
+        crate::domain::blackhole_rule(mitigation)
+            .unwrap()
+            .route()
+            .unwrap()
+    }
+
+    impl Fixture {
+        /// Persist `mitigation`; an enforced row's route is also on the speaker.
+        async fn live(&self, mitigation: &Mitigation) {
+            self.repo.insert_mitigation(mitigation).await.unwrap();
+            if !mitigation.is_dry_run_origin() && mitigation.pop == "test" {
+                self.speaker
+                    .inner
+                    .announce_blackhole(&route(mitigation))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        async fn safelist(&self, prefix: &str) -> (StatusCode, serde_json::Value) {
+            let response = crate::api::create_test_router(self.state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/safelist")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"prefix": prefix, "reason": "resolver"}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+            )
+        }
+
+        async fn status(&self, mitigation: &Mitigation) -> MitigationStatus {
+            self.repo
+                .get_mitigation(mitigation.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+        }
+
+        async fn audit(&self, mitigation: &Mitigation) -> crate::observability::AuditEntry {
+            self.repo
+                .list_audit(&crate::db::ListParams {
+                    limit: 100,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|entry| {
+                    entry.action == "withdraw"
+                        && entry.target_id.as_deref() == Some(&mitigation.mitigation_id.to_string())
+                })
+                .unwrap()
+        }
+    }
+
+    fn ids(body: &serde_json::Value) -> Vec<String> {
+        let mut ids: Vec<String> = body["withdrawn_mitigation_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    #[tokio::test]
+    async fn safelisting_a_host_withdraws_its_live_blackhole() {
+        let fx = fixture(OperationMode::Enforced);
+        let victim = blackhole("203.0.113.10", "test", OperationMode::Enforced);
+        fx.live(&victim).await;
+        let (status, body) = fx.safelist("203.0.113.10/32").await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(ids(&body), [victim.mitigation_id.to_string()]);
+        assert!(body.get("withdrawal_error").is_none());
+        assert_eq!(fx.status(&victim).await, MitigationStatus::Withdrawn);
+        assert_eq!(fx.speaker.deletes.load(SeqCst), 1);
+        assert!(fx.speaker.routes().await.is_empty());
+        // Audited as a system withdrawal with its reason and operation ID.
+        let entry = fx.audit(&victim).await;
+        assert!(matches!(
+            entry.actor_type,
+            crate::observability::ActorType::System
+        ));
+        assert_eq!(entry.details["reason"], SAFELISTED_AFTER_ADMISSION);
+        assert!(entry.details["operation_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn covering_prefix_withdraws_every_blackhole_inside_and_nothing_outside() {
+        let fx = fixture(OperationMode::Enforced);
+        let first = blackhole("203.0.113.1", "test", OperationMode::Enforced);
+        let second = blackhole("203.0.113.254", "test", OperationMode::Enforced);
+        let outside = blackhole("198.51.100.1", "test", OperationMode::Enforced);
+        for mitigation in [&first, &second, &outside] {
+            fx.live(mitigation).await;
+        }
+        let (status, body) = fx.safelist("203.0.113.0/24").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let mut expected = vec![
+            first.mitigation_id.to_string(),
+            second.mitigation_id.to_string(),
+        ];
+        expected.sort();
+        assert_eq!(ids(&body), expected);
+        assert!(fx.status(&outside).await.is_active());
+        assert_eq!(fx.speaker.routes().await, [route(&outside)]);
+        assert_eq!(fx.speaker.deletes.load(SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn foreign_pop_blackhole_is_untouched() {
+        let fx = fixture(OperationMode::Enforced);
+        let foreign = blackhole("203.0.113.10", "other-pop", OperationMode::Enforced);
+        fx.live(&foreign).await;
+        let (status, body) = fx.safelist("203.0.113.0/24").await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(ids(&body).is_empty());
+        assert!(fx.status(&foreign).await.is_active());
+        assert!(fx.repo.pending_withdrawals(None).await.unwrap().is_empty());
+        assert_eq!(fx.speaker.deletes.load(SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn lookup_failure_stores_the_entry_and_withdraws_nothing() {
+        let fx = fixture(OperationMode::Enforced);
+        let victim = blackhole("203.0.113.10", "test", OperationMode::Enforced);
+        fx.live(&victim).await;
+        fx.repo.fail_active_reads.store(true, SeqCst);
+        let (status, body) = fx.safelist("203.0.113.10/32").await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(ids(&body).is_empty());
+        assert!(
+            body["withdrawal_error"]
+                .as_str()
+                .unwrap()
+                .contains("nothing was withdrawn")
+        );
+        assert!(fx.repo.is_safelisted("203.0.113.10").await.unwrap());
+        fx.repo.fail_active_reads.store(false, SeqCst);
+        assert!(fx.status(&victim).await.is_active());
+        assert!(fx.repo.pending_withdrawals(None).await.unwrap().is_empty());
+        assert_eq!(fx.speaker.deletes.load(SeqCst), 0);
+        assert_eq!(fx.speaker.routes().await, [route(&victim)]);
+    }
+
+    #[tokio::test]
+    async fn dry_run_blackholes_are_retired_without_an_rpc() {
+        // A simulation under an enforced controller, and any row in dry-run mode.
+        for mode in [OperationMode::Enforced, OperationMode::DryRun] {
+            let fx = fixture(mode);
+            let simulated = blackhole("203.0.113.10", "test", OperationMode::DryRun);
+            fx.live(&simulated).await;
+            let (status, body) = fx.safelist("203.0.113.10").await;
+            assert_eq!(status, StatusCode::CREATED);
+            assert_eq!(ids(&body), [simulated.mitigation_id.to_string()]);
+            assert_eq!(fx.status(&simulated).await, MitigationStatus::Withdrawn);
+            assert_eq!(fx.speaker.deletes.load(SeqCst), 0);
+            assert_eq!(
+                fx.audit(&simulated).await.details["reason"],
+                SAFELISTED_AFTER_ADMISSION
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_delete_keeps_immutable_intent_and_is_never_reannounced() {
+        let fx = fixture(OperationMode::Enforced);
+        let victim = blackhole("203.0.113.10", "test", OperationMode::Enforced);
+        fx.live(&victim).await;
+        fx.speaker.withdraw_fault.store(1, SeqCst);
+        let (status, body) = fx.safelist("203.0.113.10/32").await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(ids(&body).is_empty());
+        assert!(body["withdrawal_error"].is_string());
+        let [request] = fx
+            .repo
+            .pending_withdrawals(None)
+            .await
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(request.mitigation_id, victim.mitigation_id);
+        assert_eq!(
+            (request.actor_type.as_str(), request.actor.as_str()),
+            ("system", "safelist-recheck")
+        );
+        assert_eq!(request.reason, SAFELISTED_AFTER_ADMISSION);
+        let reconciler = crate::scheduler::ReconciliationLoop::new(
+            fx.state.repo.clone(),
+            fx.state.announcer.clone(),
+            30,
+            false,
+        )
+        .with_app_state(fx.state.clone());
+        // While the delete keeps failing, the same intent stays pending and nothing is added.
+        let _ = reconciler.reconcile().await;
+        let [retained] = fx
+            .repo
+            .pending_withdrawals(None)
+            .await
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(retained.operation_id, request.operation_id);
+        assert_eq!(retained.reason, request.reason);
+        assert_eq!(fx.speaker.adds.load(SeqCst), 0);
+        // The retry completes the original operation.
+        fx.speaker.withdraw_fault.store(0, SeqCst);
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(fx.status(&victim).await, MitigationStatus::Withdrawn);
+        assert!(fx.speaker.routes().await.is_empty());
+        assert_eq!(fx.speaker.adds.load(SeqCst), 0);
+        let entry = fx.audit(&victim).await;
+        assert_eq!(
+            entry.details["operation_id"],
+            request.operation_id.to_string()
+        );
+        assert_eq!(entry.details["reason"], SAFELISTED_AFTER_ADMISSION);
+    }
+
+    #[tokio::test]
+    async fn standby_refuses_safelist_add_and_withdraws_nothing() {
+        let fx = fixture(OperationMode::Enforced);
+        let victim = blackhole("203.0.113.10", "test", OperationMode::Enforced);
+        fx.live(&victim).await;
+        let fx = Fixture {
+            state: fx
+                .state
+                .with_fence(Arc::new(crate::fence::ControllerFence::new(false)))
+                .unwrap(),
+            ..fx
+        };
+        let (status, _) = fx.safelist("203.0.113.10/32").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!fx.repo.is_safelisted("203.0.113.10").await.unwrap());
+        assert!(fx.status(&victim).await.is_active());
+        assert_eq!(fx.speaker.deletes.load(SeqCst), 0);
+    }
+
     #[test]
     fn test_validate_cidr_accepts_valid_values() {
         assert!(super::validate_cidr("203.0.113.0/24").is_ok());

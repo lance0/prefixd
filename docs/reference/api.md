@@ -1351,7 +1351,30 @@ Content-Type: application/json
 }
 ```
 
-**Response (201 Created):** No body
+**Response (201 Created):**
+
+```json
+{
+  "withdrawn_mitigation_ids": ["550e8400-e29b-41d4-a716-446655440000"]
+}
+```
+
+Adding an entry also withdraws every live blackhole on this POP whose victim
+falls inside the prefix, under the lifecycle mutex, with the system reason
+`safelisted after admission` (ADR 027). `withdrawn_mitigation_ids` lists them
+and is empty when none were covered. Dry-run blackholes are retired without a
+speaker call. FlowSpec rules are not withdrawn.
+
+When the covered blackholes could not be found or withdrawn, the entry is still
+stored and the response adds `withdrawal_error`. A failed lookup withdraws
+nothing; reconciliation withdraws covered enforced routes on its next pass.
+
+```json
+{
+  "withdrawn_mitigation_ids": [],
+  "withdrawal_error": "covered blackhole lookup failed; nothing was withdrawn"
+}
+```
 
 ### Remove from Safelist
 

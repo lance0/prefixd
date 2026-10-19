@@ -30,8 +30,8 @@ pub use observations::{
 
 mod safelist;
 pub use safelist::{
-    __path_add_safelist, __path_remove_safelist, AddSafelistRequest, add_safelist, list_safelist,
-    remove_safelist,
+    __path_add_safelist, __path_remove_safelist, AddSafelistRequest, AddSafelistResponse,
+    add_safelist, list_safelist, remove_safelist,
 };
 
 mod signals;

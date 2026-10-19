@@ -850,8 +850,23 @@ impl ReconciliationLoop {
                 )));
                 continue;
             }
-            if inventory.routes.contains(&wanted) {
-                continue;
+            // A present route is withdrawn once its victim is safelisted, for
+            // entries seeded from configuration or written to the database
+            // directly. A failed lookup takes no action.
+            let present = inventory.routes.contains(&wanted);
+            if present {
+                match self
+                    .repo
+                    .is_safelisted(&rule.prefix.addr().to_string())
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        repair_error = Some(error);
+                        continue;
+                    }
+                }
             }
             let _guard = match &self.state {
                 Some(state) => Some(state.mitigation_lock.lock().await),
@@ -889,6 +904,28 @@ impl ReconciliationLoop {
                 continue;
             }
             self.verified_speaker_binding()?;
+            if present {
+                if self.dry_run {
+                    continue;
+                }
+                match crate::domain::withdraw_safelisted(
+                    self.repo.as_ref(),
+                    self.announcer.as_ref(),
+                    false,
+                    &mitigation,
+                    binding,
+                )
+                .await
+                {
+                    Ok(withdrawn) => self.notify_withdrawn(&withdrawn).await,
+                    Err(error) => {
+                        tracing::error!(mitigation_id = %mitigation.mitigation_id, error = %error,
+                            "failed to withdraw safelisted blackhole route");
+                        repair_error = Some(error);
+                    }
+                }
+                continue;
+            }
             tracing::warn!(
                 mitigation_id = %mitigation.mitigation_id,
                 prefix = %rule.prefix,
@@ -912,17 +949,7 @@ impl ReconciliationLoop {
                         .inc();
                 }
                 Ok(crate::domain::BlackholeAnnouncement::Withdrawn(withdrawn)) => {
-                    if let Some(tx) = &self.ws_broadcast {
-                        let _ = tx.send(WsMessage::MitigationWithdrawn {
-                            mitigation_id: withdrawn.mitigation_id.to_string(),
-                        });
-                    }
-                    if let Some(alerting) = &self.alerting {
-                        alerting
-                            .read()
-                            .await
-                            .notify(crate::alerting::Alert::mitigation_withdrawn(&withdrawn));
-                    }
+                    self.notify_withdrawn(&withdrawn).await
                 }
                 Err(error) => {
                     crate::observability::metrics::RECONCILIATION_REPAIRS
@@ -937,6 +964,20 @@ impl ReconciliationLoop {
         match repair_error {
             Some(error) => Err(error.into()),
             None => Ok(()),
+        }
+    }
+
+    async fn notify_withdrawn(&self, withdrawn: &crate::domain::Mitigation) {
+        if let Some(tx) = &self.ws_broadcast {
+            let _ = tx.send(WsMessage::MitigationWithdrawn {
+                mitigation_id: withdrawn.mitigation_id.to_string(),
+            });
+        }
+        if let Some(alerting) = &self.alerting {
+            alerting
+                .read()
+                .await
+                .notify(crate::alerting::Alert::mitigation_withdrawn(withdrawn));
         }
     }
 
@@ -2674,6 +2715,66 @@ mod tests {
         repo.fail_safelist.store(false, SeqCst);
         reconciler.reconcile().await.unwrap();
         assert_eq!(speaker.routes().await, [frozen(&missing)]);
+    }
+
+    #[tokio::test]
+    async fn present_blackhole_safelisted_in_the_database_converges_to_withdrawn() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let reconciler = blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), false);
+        let covered = blackhole_row("192.0.2.1");
+        let outside = blackhole_row("192.0.2.9");
+        for mitigation in [&covered, &outside] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+            speaker
+                .inner
+                .announce_blackhole(&frozen(mitigation))
+                .await
+                .unwrap();
+        }
+        // Written straight to the database, as config seeding does; no API call.
+        repo.insert_safelist("192.0.2.0/30", "config", None)
+            .await
+            .unwrap();
+        // A failed safelist lookup takes no action.
+        repo.fail_safelist.store(true, SeqCst);
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(speaker.deletes.load(SeqCst), 0);
+        assert!(status(&repo, &covered).await.is_active());
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+        // Dry-run reports and sends nothing.
+        repo.fail_safelist.store(false, SeqCst);
+        blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), true)
+            .reconcile()
+            .await
+            .unwrap();
+        assert_eq!(speaker.deletes.load(SeqCst), 0);
+        assert!(status(&repo, &covered).await.is_active());
+        // The next enforced pass withdraws only the covered route, once.
+        for _ in 0..2 {
+            reconciler.reconcile().await.unwrap();
+            assert_eq!(speaker.deletes.load(SeqCst), 1);
+            assert_eq!(speaker.adds.load(SeqCst), 0);
+            assert_eq!(speaker.routes().await, [frozen(&outside)]);
+        }
+        assert_eq!(status(&repo, &covered).await, MitigationStatus::Withdrawn);
+        assert!(status(&repo, &outside).await.is_active());
+        let audit = repo
+            .list_audit(&crate::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let entry = audit
+            .iter()
+            .find(|entry| entry.target_id.as_deref() == Some(&covered.mitigation_id.to_string()))
+            .unwrap();
+        assert_eq!(
+            entry.details["reason"],
+            crate::domain::SAFELISTED_AFTER_ADMISSION
+        );
     }
 
     #[tokio::test]
