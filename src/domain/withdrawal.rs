@@ -443,7 +443,10 @@ mod tests {
     use crate::{
         bgp::{FlowSpecWriter, MockAnnouncer},
         db::MockRepository,
-        domain::{ActionParams, ActionType, AttackVector, MatchCriteria, MitigationIntent},
+        domain::{
+            ActionParams, ActionType, AttackVector, FragmentMatch, MatchCriteria, MitigationIntent,
+            PacketLengthRange,
+        },
     };
 
     fn mitigation(prefix: &str) -> Mitigation {
@@ -457,6 +460,7 @@ mod tests {
                     dst_prefix: prefix.into(),
                     protocol: Some(17),
                     dst_ports: vec![53],
+                    ..Default::default()
                 },
                 action_type: ActionType::Discard,
                 action_params: ActionParams { rate_bps: None },
@@ -732,6 +736,7 @@ mod tests {
                 dst_prefix: prefix.into(),
                 protocol,
                 dst_ports,
+                ..Default::default()
             };
             assert_eq!(criteria.compute_scope_hash(), scope);
             for (action_type, rate_bps) in
@@ -747,6 +752,205 @@ mod tests {
                 assert_eq!(ownership_key(&rule), owner);
             }
         }
+    }
+
+    fn amplification_criteria(prefix: &str) -> MatchCriteria {
+        MatchCriteria {
+            dst_prefix: prefix.into(),
+            protocol: Some(17),
+            ..Default::default()
+        }
+    }
+
+    /// ADR 028 v2 values, computed independently from the documented hash input.
+    #[test]
+    fn extended_identity_is_pinned_and_never_a_legacy_hash() {
+        let mut ports_with_length = amplification_criteria("192.0.2.10/32");
+        ports_with_length.src_ports = vec![389, 123, 123];
+        ports_with_length.packet_length = Some(PacketLengthRange {
+            min: 468,
+            max: 65535,
+        });
+        let mut fragment_v4 = amplification_criteria("192.0.2.10/32");
+        fragment_v4.fragment = Some(FragmentMatch::NonFirst);
+        let mut ports_v6 = amplification_criteria("2001:0DB8::1/128");
+        ports_v6.src_ports = vec![11211];
+        let mut fragment_v6 = amplification_criteria("2001:db8::1/128");
+        fragment_v6.fragment = Some(FragmentMatch::NonFirst);
+        for (criteria, pinned) in [
+            (ports_with_length, "35be0c818e90f714347cb59dbe167ec1"),
+            (fragment_v4, "6d4099d2295355f93fbe0841a3d938e7"),
+            (ports_v6, "aca47a8c2dfe411679447f3f014f817d"),
+            (fragment_v6, "44b585350db1ad20225d9b7e98a9c383"),
+        ] {
+            FlowSpecNlri::from(&criteria).validate().unwrap();
+            assert_eq!(criteria.compute_scope_hash(), pinned);
+            for (action_type, rate_bps) in
+                [(ActionType::Discard, None), (ActionType::Police, Some(8))]
+            {
+                assert_eq!(criteria.scope_hash_for(action_type), pinned);
+                let route =
+                    MitigationRoute::new(action_type, &criteria, &ActionParams { rate_bps });
+                assert_eq!(route.ownership_key(), pinned);
+                assert_eq!(route.into_flowspec().unwrap().nlri_hash(), pinned);
+            }
+            // The same rule without its new components keeps its legacy identity.
+            let legacy = MatchCriteria {
+                dst_prefix: criteria.dst_prefix.clone(),
+                protocol: criteria.protocol,
+                dst_ports: criteria.dst_ports.clone(),
+                ..Default::default()
+            };
+            let legacy_rule = FlowSpecNlri::from(&legacy);
+            for hash in [
+                legacy.compute_scope_hash(),
+                legacy_rule.compute_hash(),
+                legacy.scope_hash_for(ActionType::Blackhole),
+            ] {
+                assert_ne!(hash, pinned);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn source_port_sets_are_canonical_and_distinct_in_every_identity() {
+        let writer = MockAnnouncer::new();
+        let mut criteria = amplification_criteria("192.0.2.10/32");
+        criteria.src_ports = vec![123, 389];
+        let mut reordered = criteria.clone();
+        reordered.src_ports = vec![389, 123, 389];
+        let mut other = criteria.clone();
+        other.src_ports = vec![123, 53];
+        let identities = |criteria: &MatchCriteria| {
+            let route = MitigationRoute::new(
+                ActionType::Discard,
+                criteria,
+                &ActionParams { rate_bps: None },
+            );
+            [
+                criteria.compute_scope_hash(),
+                route.ownership_key(),
+                route.into_flowspec().unwrap().nlri_hash(),
+            ]
+        };
+        assert_eq!(identities(&reordered), identities(&criteria));
+        let (rule, other_rule) = (FlowSpecNlri::from(&criteria), FlowSpecNlri::from(&other));
+        assert!(writer.matches_nlri(&rule, &rule).unwrap());
+        for (left, right) in identities(&criteria).iter().zip(&identities(&other)) {
+            assert_ne!(left, right);
+        }
+        assert!(!writer.matches_nlri(&rule, &other_rule).unwrap());
+        assert!(!writer.matches_nlri(&other_rule, &rule).unwrap());
+
+        // Differing only in fragment or packet length also never compares equal.
+        let mut fragment = amplification_criteria("192.0.2.10/32");
+        fragment.fragment = Some(FragmentMatch::NonFirst);
+        let mut longer = criteria.clone();
+        longer.packet_length = Some(PacketLengthRange {
+            min: 468,
+            max: 65535,
+        });
+        let plain = FlowSpecNlri::from(&amplification_criteria("192.0.2.10/32"));
+        for (left, right) in [
+            (FlowSpecNlri::from(&fragment), plain.clone()),
+            (FlowSpecNlri::from(&longer), rule.clone()),
+        ] {
+            assert_ne!(left.compute_hash(), right.compute_hash());
+            assert!(!writer.matches_nlri(&left, &right).unwrap());
+            assert!(!writer.matches_nlri(&right, &left).unwrap());
+        }
+
+        // A live owner of one source-port set neither owns nor blocks another set.
+        let repo = MockRepository::new();
+        let mut owner = mitigation("192.0.2.10/32");
+        owner.match_criteria = criteria;
+        owner.scope_hash = owner.match_criteria.compute_scope_hash();
+        repo.insert_mitigation(&owner).await.unwrap();
+        let mut candidate = owner.clone();
+        candidate.match_criteria = other;
+        candidate.scope_hash = candidate.match_criteria.compute_scope_hash();
+        assert!(
+            find_mitigation_owner(
+                &repo,
+                "test",
+                &MitigationRoute::of(&candidate),
+                &candidate.scope_hash
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            find_mitigation_owner(
+                &repo,
+                "test",
+                &MitigationRoute::of(&owner),
+                &owner.scope_hash
+            )
+            .await
+            .unwrap()
+            .map(|found| found.mitigation_id),
+            Some(owner.mitigation_id)
+        );
+    }
+
+    /// Legacy rows written by earlier releases; none has a new key.
+    #[test]
+    fn legacy_rows_round_trip_byte_for_byte_and_unknown_keys_fail_closed() {
+        for json in [
+            r#"{"dst_prefix":"192.0.2.10/32","protocol":17,"dst_ports":[53,123]}"#,
+            r#"{"dst_prefix":"2001:db8::1/128","protocol":null,"dst_ports":[]}"#,
+        ] {
+            let criteria: MatchCriteria = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_string(&criteria).unwrap(), json);
+        }
+        for json in [
+            r#"{"nlri":{"dst_prefix":"192.0.2.10/32","protocol":17,"dst_ports":[53]},"actions":[{"action_type":"discard"}]}"#,
+            r#"{"nlri":{"dst_prefix":"2001:db8::1/128","protocol":6,"dst_ports":[443,80]},"actions":[{"action_type":"police","rate_bps":8000000}]}"#,
+        ] {
+            let mut request = WithdrawalRequest::new(
+                &mitigation("192.0.2.10/32"),
+                false,
+                "operator",
+                "alice",
+                "test".into(),
+                true,
+            )
+            .unwrap();
+            request.rule_json = json.into();
+            let rule = request.flowspec_rule().unwrap();
+            assert_eq!(serde_json::to_string(&rule).unwrap(), json);
+        }
+        // Extended rules round-trip in their canonical form.
+        for json in [
+            r#"{"dst_prefix":"192.0.2.10/32","protocol":17,"dst_ports":[],"src_ports":[123,389],"packet_length":{"min":468,"max":65535}}"#,
+            r#"{"dst_prefix":"192.0.2.10/32","protocol":17,"dst_ports":[],"fragment":"non_first"}"#,
+        ] {
+            let criteria: MatchCriteria = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_string(&criteria).unwrap(), json);
+            let nlri: FlowSpecNlri = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_string(&nlri).unwrap(), json);
+        }
+        // An unknown key would widen the rule if ignored.
+        for json in [
+            r#"{"dst_prefix":"192.0.2.10/32","protocol":17,"dst_ports":[],"tcp_flags":2}"#,
+            r#"{"dst_prefix":"192.0.2.10/32","protocol":17,"dst_ports":[],"src_ports":[123],"packet_length":{"min":468,"max":65535,"step":1}}"#,
+            r#"{"dst_prefix":"192.0.2.10/32","protocol":17,"dst_ports":[],"fragment":"first"}"#,
+        ] {
+            assert!(serde_json::from_str::<MatchCriteria>(json).is_err());
+            assert!(serde_json::from_str::<FlowSpecNlri>(json).is_err());
+        }
+        let mut request = WithdrawalRequest::new(
+            &mitigation("192.0.2.10/32"),
+            false,
+            "operator",
+            "alice",
+            "test".into(),
+            true,
+        )
+        .unwrap();
+        request.rule_json = r#"{"nlri":{"dst_prefix":"192.0.2.10/32","protocol":17,"dst_ports":[53],"src_ports_v3":[123]},"actions":[{"action_type":"discard"}]}"#.into();
+        assert!(request.flowspec_rule().is_err());
     }
 
     #[tokio::test]

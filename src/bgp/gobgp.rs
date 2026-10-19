@@ -202,6 +202,7 @@ impl GoBgpAnnouncer {
     }
 
     fn build_flowspec_nlri_v4(&self, nlri: &FlowSpecNlri) -> Result<ProtoFlowSpecNlri> {
+        refuse_unencoded_components(nlri)?;
         let (prefix_u32, prefix_len) = self.parse_prefix_v4(&nlri.dst_prefix)?;
 
         // Build FlowSpec NLRI components per RFC 5575 using typed FlowSpecRule
@@ -271,6 +272,7 @@ impl GoBgpAnnouncer {
     }
 
     fn build_flowspec_nlri_v6(&self, nlri: &FlowSpecNlri) -> Result<ProtoFlowSpecNlri> {
+        refuse_unencoded_components(nlri)?;
         let (addr, prefix_len) = self.parse_prefix_v6(&nlri.dst_prefix)?;
 
         // Build FlowSpec NLRI components for IPv6 per RFC 8956
@@ -381,6 +383,16 @@ impl GoBgpAnnouncer {
         })?;
         Ok((ip, len))
     }
+}
+
+/// Dropping a component would widen the rule, so refuse it before any RPC.
+fn refuse_unencoded_components(nlri: &FlowSpecNlri) -> Result<()> {
+    if nlri.is_extended() {
+        return Err(PrefixdError::Internal(
+            "GoBGP: source port, fragment and packet length matches are not supported".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl FlowSpecAnnouncer for GoBgpAnnouncer {
@@ -743,6 +755,7 @@ impl GoBgpAnnouncer {
             dst_prefix,
             protocol,
             dst_ports,
+            ..Default::default()
         })
     }
 
@@ -939,6 +952,7 @@ mod tests {
             dst_prefix: "192.168.1.1/32".to_string(),
             protocol: Some(17), // UDP
             dst_ports: vec![53],
+            ..Default::default()
         };
 
         let result = announcer.build_flowspec_nlri_v4(&nlri);
@@ -958,6 +972,7 @@ mod tests {
             dst_prefix: "10.0.0.1/32".to_string(),
             protocol: Some(6), // TCP
             dst_ports: vec![80, 443, 8080, 8443],
+            ..Default::default()
         };
 
         let result = announcer.build_flowspec_nlri_v4(&nlri);
@@ -972,6 +987,7 @@ mod tests {
             dst_prefix: "192.168.1.1/32".to_string(),
             protocol: Some(1), // ICMP
             dst_ports: vec![],
+            ..Default::default()
         };
 
         let result = announcer.build_flowspec_nlri_v4(&nlri);
@@ -986,6 +1002,7 @@ mod tests {
             dst_prefix: "2001:db8::1/128".to_string(),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         };
 
         let result = announcer.build_flowspec_nlri_v6(&nlri);
@@ -1052,6 +1069,7 @@ mod tests {
                     dst_prefix: prefix.into(),
                     protocol: Some(17),
                     dst_ports: vec![53],
+                    ..Default::default()
                 },
                 FlowSpecAction::discard(),
             );
@@ -1098,6 +1116,7 @@ mod tests {
                 dst_prefix: "192.168.1.1/32".to_string(),
                 protocol: Some(17),
                 dst_ports: vec![53],
+                ..Default::default()
             },
             FlowSpecAction {
                 action_type: ActionType::Discard,
@@ -1126,6 +1145,7 @@ mod tests {
                 dst_prefix: "2001:db8::1/128".to_string(),
                 protocol: Some(17),
                 dst_ports: vec![53],
+                ..Default::default()
             },
             FlowSpecAction {
                 action_type: ActionType::Police,
@@ -1169,6 +1189,7 @@ mod tests {
                 dst_prefix: "192.168.1.100/32".to_string(),
                 protocol: Some(17), // UDP
                 dst_ports: vec![53, 5353],
+                ..Default::default()
             },
             FlowSpecAction {
                 action_type: ActionType::Discard,
@@ -1204,6 +1225,7 @@ mod tests {
                 dst_prefix: "10.0.0.50/32".to_string(),
                 protocol: Some(6), // TCP
                 dst_ports: vec![80, 443, 8080],
+                ..Default::default()
             },
             FlowSpecAction {
                 action_type: ActionType::Police,
@@ -1233,6 +1255,7 @@ mod tests {
                 dst_prefix: "2001:db8::1/128".to_string(),
                 protocol: Some(17),
                 dst_ports: vec![53],
+                ..Default::default()
             },
             FlowSpecAction {
                 action_type: ActionType::Police,
@@ -1259,6 +1282,7 @@ mod tests {
                 dst_prefix: "203.0.113.50/32".to_string(),
                 protocol: None,
                 dst_ports: vec![],
+                ..Default::default()
             },
             FlowSpecAction {
                 action_type: ActionType::Discard,
@@ -1354,6 +1378,7 @@ mod proptests {
                 dst_prefix,
                 protocol,
                 dst_ports,
+                ..Default::default()
             })
     }
 
@@ -1368,6 +1393,7 @@ mod proptests {
                 dst_prefix,
                 protocol,
                 dst_ports,
+                ..Default::default()
             })
     }
 

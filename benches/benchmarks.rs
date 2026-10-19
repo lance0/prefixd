@@ -49,6 +49,7 @@ fn make_mitigation(i: usize) -> Mitigation {
             dst_prefix: format!("203.0.{}.{}/32", i / 256, i % 256),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         },
         action_type: ActionType::Discard,
         action_params: ActionParams { rate_bps: None },
@@ -96,6 +97,7 @@ fn bench_scope_hash(c: &mut Criterion) {
         dst_prefix: "203.0.1.10/32".to_string(),
         protocol: Some(17),
         dst_ports: vec![53, 80, 443],
+        ..Default::default()
     };
 
     c.bench_function("scope_hash_compute", |b| {
@@ -225,12 +227,14 @@ fn bench_match_criteria(c: &mut Criterion) {
         dst_prefix: "203.0.1.10/32".to_string(),
         protocol: Some(17),
         dst_ports: vec![53, 80, 443, 8080],
+        ..Default::default()
     };
 
     let criteria2 = MatchCriteria {
         dst_prefix: "203.0.1.10/32".to_string(),
         protocol: Some(17),
         dst_ports: vec![53, 443],
+        ..Default::default()
     };
 
     c.bench_function("match_criteria_clone", |b| {

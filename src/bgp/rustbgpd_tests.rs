@@ -10,6 +10,7 @@ struct Fake {
     rules: Arc<Mutex<Vec<pb::AddFlowSpecRequest>>>,
     mode: Arc<AtomicUsize>,
     attempts: Arc<AtomicUsize>,
+    deletes: Arc<AtomicUsize>,
     health_calls: Arc<AtomicUsize>,
     families: Arc<Mutex<Vec<i32>>>,
 }
@@ -155,6 +156,7 @@ impl pb::injection_service_server::InjectionService for Fake {
         &self,
         request: Request<pb::DeleteFlowSpecRequest>,
     ) -> std::result::Result<Response<pb::DeleteFlowSpecResponse>, Status> {
+        self.deletes.fetch_add(1, SeqCst);
         auth(&request)?;
         let request = request.into_inner();
         assert!(request.allow_missing);
@@ -272,6 +274,7 @@ fn rule(prefix: &str, rate: u64) -> FlowSpecRule {
             dst_prefix: prefix.into(),
             protocol: Some(6),
             dst_ports: vec![443, 80, 80],
+            ..Default::default()
         },
         if rate == 0 {
             FlowSpecAction::discard()
@@ -1155,5 +1158,66 @@ async fn blackhole_delete_not_found_is_absent_and_other_codes_are_errors() {
             .is_err()
     );
     assert_eq!(speaker.list_blackholes().await.unwrap().routes.len(), 4);
+    server.abort();
+}
+
+#[tokio::test]
+async fn amplification_components_fail_closed_before_any_rpc() {
+    use crate::domain::{FragmentMatch, PacketLengthRange};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fake = Fake::default();
+    let incoming = futures_util::stream::unfold(listener, |listener| async {
+        Some((listener.accept().await.map(|(stream, _)| stream), listener))
+    });
+    let server = tokio::spawn(
+        tonic::transport::Server::builder()
+            .add_service(pb::injection_service_server::InjectionServiceServer::new(
+                fake.clone(),
+            ))
+            .serve_with_incoming(incoming),
+    );
+    let config = RustBgpdConfig {
+        endpoint: format!("http://{address}"),
+        bearer_token_env: "unused".into(),
+        ..Default::default()
+    };
+    let speaker = RustBgpdAnnouncer::connect_with_token(&config, "test-secret")
+        .await
+        .unwrap();
+    for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
+        let mut control = rule(prefix, 0);
+        control.nlri.protocol = Some(17);
+        let mut ports = control.clone();
+        ports.nlri.src_ports = vec![123];
+        let mut fragment = control.clone();
+        fragment.nlri.fragment = Some(FragmentMatch::NonFirst);
+        let mut length = ports.clone();
+        length.nlri.packet_length = Some(PacketLengthRange {
+            min: 468,
+            max: 65535,
+        });
+        for extended in [ports, fragment, length] {
+            for result in [
+                speaker.announce(&extended).await,
+                speaker.withdraw(&extended).await,
+                speaker
+                    .matches_nlri(&extended.nlri, &extended.nlri)
+                    .map(|_| ()),
+            ] {
+                assert!(matches!(
+                    result,
+                    Err(PrefixdError::Internal(message)) if message.contains("not supported")
+                ));
+            }
+        }
+        assert_eq!(fake.attempts.load(SeqCst), 0);
+        assert_eq!(fake.deletes.load(SeqCst), 0);
+        // Control: the same connection carries the rule without new components.
+        speaker.announce(&control).await.unwrap();
+        speaker.withdraw(&control).await.unwrap();
+        assert_eq!(fake.attempts.swap(0, SeqCst), 1);
+        assert_eq!(fake.deletes.swap(0, SeqCst), 1);
+    }
     server.abort();
 }

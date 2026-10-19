@@ -374,6 +374,7 @@ async fn test_repair_yields_to_operator_and_rechecks_stale_candidate() {
                     dst_prefix: format!("203.0.113.{suffix}/32"),
                     protocol: Some(17),
                     dst_ports: vec![53],
+                    ..Default::default()
                 },
                 action_type: ActionType::Discard,
                 action_params: ActionParams { rate_bps: None },
@@ -485,6 +486,7 @@ async fn test_authenticated_single_and_bulk_withdrawals_record_session_actor() {
                     dst_prefix: format!("203.0.113.{suffix}/32"),
                     protocol: Some(17),
                     dst_ports: vec![53],
+                    ..Default::default()
                 },
                 action_type: ActionType::Discard,
                 action_params: ActionParams { rate_bps: None },
@@ -646,6 +648,7 @@ async fn test_foreign_pop_cannot_delete_local_rule_or_receive_local_repair() {
                 dst_prefix: "203.0.113.10/32".into(),
                 protocol: Some(17),
                 dst_ports: vec![53],
+                ..Default::default()
             },
             action_type: ActionType::Discard,
             action_params: ActionParams { rate_bps: None },
@@ -827,6 +830,7 @@ async fn test_disjoint_detector_ports_reject_without_mutating_mitigations_or_spe
                                     6
                                 }),
                                 dst_ports: ports,
+                                ..Default::default()
                             },
                             action_type: ActionType::Discard,
                             action_params: ActionParams { rate_bps: None },
@@ -928,6 +932,7 @@ async fn test_canonical_owner_preflight_preserves_existing_rule_and_reuses_detec
                 dst_prefix: "203.0.113.10/32".into(),
                 protocol: Some(17),
                 dst_ports: vec![53],
+                ..Default::default()
             },
             action_type: ActionType::Discard,
             action_params: ActionParams { rate_bps: None },
@@ -2665,6 +2670,7 @@ async fn test_mitigation_cursor_preserves_ties_and_nanosecond_positions() {
                     dst_prefix: "203.0.113.10/32".into(),
                     protocol: Some(17),
                     dst_ports: vec![1000 + u16::try_from(id).unwrap()],
+                    ..Default::default()
                 },
                 action_type: ActionType::Discard,
                 action_params: ActionParams { rate_bps: None },
@@ -11975,6 +11981,7 @@ mod list_filter_validation {
                     dst_prefix: format!("{ip}/32"),
                     protocol: Some(17),
                     dst_ports: vec![53],
+                    ..Default::default()
                 },
                 action_type: ActionType::Discard,
                 action_params: ActionParams { rate_bps: None },
@@ -12655,6 +12662,7 @@ mod reason_and_bulk_validation {
                             dst_prefix: format!("{ip}/32"),
                             protocol: Some(17),
                             dst_ports: vec![53],
+                            ..Default::default()
                         },
                         action_type: ActionType::Discard,
                         action_params: ActionParams { rate_bps: None },
@@ -13193,6 +13201,7 @@ mod query_router_validator_boundaries {
                         dst_prefix: "203.0.113.10/32".into(),
                         protocol: Some(17),
                         dst_ports: vec![u16::try_from(id).unwrap()],
+                        ..Default::default()
                     },
                     action_type: ActionType::Discard,
                     action_params: ActionParams { rate_bps: None },
@@ -14075,6 +14084,7 @@ fn dry_run_row(ttl_seconds: u32) -> prefixd::domain::Mitigation {
                 dst_prefix: "203.0.113.10/32".into(),
                 protocol: Some(17),
                 dst_ports: vec![53],
+                ..Default::default()
             },
             action_type: ActionType::Discard,
             action_params: ActionParams { rate_bps: None },

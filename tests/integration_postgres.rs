@@ -423,6 +423,7 @@ async fn test_authenticated_withdrawal_audit_success_and_failure_boundaries() {
                     dst_prefix: format!("203.0.113.{suffix}/32"),
                     protocol: Some(17),
                     dst_ports: vec![53],
+                    ..Default::default()
                 },
                 action_type: ActionType::Discard,
                 action_params: ActionParams { rate_bps: None },
@@ -990,6 +991,7 @@ async fn test_timeseries_non_hour_bucket_alignment() {
         dst_prefix: "203.0.113.200/32".to_string(),
         protocol: Some(17),
         dst_ports: vec![53],
+        ..Default::default()
     };
 
     let mitigation = Mitigation {
@@ -1079,6 +1081,7 @@ async fn test_ttl_expiry() {
             dst_prefix: "203.0.113.99/32".to_string(),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         },
         FlowSpecAction::police(10_000_000),
     );
@@ -1105,6 +1108,7 @@ async fn test_ttl_expiry() {
             dst_prefix: "203.0.113.99/32".to_string(),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         },
         action_type: ActionType::Police,
         action_params: ActionParams {
@@ -1724,6 +1728,7 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
                 dst_prefix: "203.0.113.10/32".into(),
                 protocol: Some(17),
                 dst_ports: vec![53],
+                ..Default::default()
             },
             action_type: ActionType::Discard,
             action_params: ActionParams { rate_bps: None },
@@ -2117,6 +2122,7 @@ async fn test_legacy_canonical_owners_finish_ttl_cleanup_after_last_live_owner()
                 dst_prefix: "2001:db8::1/128".into(),
                 protocol: Some(17),
                 dst_ports: vec![53],
+                ..Default::default()
             },
             action_type: ActionType::Discard,
             action_params: ActionParams { rate_bps: None },
@@ -2307,6 +2313,7 @@ async fn test_documented_retention_preserves_live_intent_and_referenced_history(
                     dst_prefix: "203.0.113.10/32".into(),
                     protocol: Some(17),
                     dst_ports: vec![53],
+                    ..Default::default()
                 },
                 action_type: ActionType::Discard,
                 action_params: ActionParams { rate_bps: None },
@@ -2602,6 +2609,7 @@ fn inventory_mitigation(
                 dst_prefix: prefix.into(),
                 protocol: Some(17),
                 dst_ports: vec![53],
+                ..Default::default()
             },
             action_type: ActionType::Discard,
             action_params: ActionParams { rate_bps: None },
@@ -2871,6 +2879,7 @@ async fn test_reconciliation_recovers_every_tied_timestamp_once() {
                 dst_prefix: "203.0.113.253/32".into(),
                 protocol: None,
                 dst_ports: vec![],
+                ..Default::default()
             },
             FlowSpecAction::discard(),
         );

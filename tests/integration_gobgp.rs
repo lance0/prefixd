@@ -106,6 +106,7 @@ async fn action_reconciliation_rejects_port_order_alias_without_mutation() {
                         dst_prefix: prefix.into(),
                         protocol: Some(17),
                         dst_ports: vec![443, 53],
+                        ..Default::default()
                     },
                     action_type: ActionType::Discard,
                     action_params: ActionParams { rate_bps: None },
@@ -174,6 +175,7 @@ async fn test_local_provenance_and_unsupported_local_rule() {
             dst_prefix: "198.51.100.211/32".into(),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         },
         FlowSpecAction::discard(),
     );
@@ -279,6 +281,7 @@ async fn restart_recovers_through_the_same_client_and_reconciler() {
                     dst_prefix: rule.nlri.dst_prefix.clone(),
                     protocol: rule.nlri.protocol,
                     dst_ports: rule.nlri.dst_ports.clone(),
+                    ..Default::default()
                 },
                 action_type: rule.actions[0].action_type,
                 action_params: ActionParams {

@@ -31,6 +31,7 @@ pub fn contract_rules() -> Vec<FlowSpecRule> {
                 dst_prefix: prefix.into(),
                 protocol,
                 dst_ports,
+                ..Default::default()
             },
             if index % 2 == 0 {
                 FlowSpecAction::discard()
@@ -147,6 +148,7 @@ pub async fn run_action_contract(speaker: &dyn FlowSpecAnnouncer) -> Result<()> 
                     dst_prefix: prefix.into(),
                     protocol: Some(17),
                     dst_ports: vec![53],
+                    ..Default::default()
                 },
                 FlowSpecAction::police(1_000_000),
             )
@@ -320,6 +322,7 @@ pub async fn run_action_reconciliation_contract(
                     dst_prefix: prefix.into(),
                     protocol: Some(17),
                     dst_ports: vec![443, 53],
+                    ..Default::default()
                 },
                 action_type: prefixd::domain::ActionType::Discard,
                 action_params: ActionParams { rate_bps: None },

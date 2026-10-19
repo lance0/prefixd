@@ -133,6 +133,7 @@ mod tests {
                 dst_prefix: "203.0.113.10/32".to_string(),
                 protocol: Some(17),
                 dst_ports: vec![53],
+                ..Default::default()
             },
             FlowSpecAction::police(5_000_000),
         );

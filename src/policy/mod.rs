@@ -60,6 +60,7 @@ impl PolicyEngine {
             dst_prefix: format!("{victim_ip}/{prefix_len}"),
             protocol: vector.to_protocol_for(victim_ip),
             dst_ports,
+            ..Default::default()
         };
 
         // Build action

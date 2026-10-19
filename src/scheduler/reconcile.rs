@@ -874,6 +874,7 @@ mod tests {
                     dst_prefix: format!("{ip}/32"),
                     protocol: Some(17),
                     dst_ports: vec![53],
+                    ..Default::default()
                 },
                 action_type: ActionType::Discard,
                 action_params: ActionParams { rate_bps: None },

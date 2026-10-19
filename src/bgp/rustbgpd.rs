@@ -235,6 +235,12 @@ async fn connect_owner_socket(path: &std::path::Path) -> std::io::Result<tokio::
 }
 
 fn encode_match(nlri: &FlowSpecNlri) -> Result<(i32, Vec<pb::FlowSpecComponent>)> {
+    // Dropping a component would widen the rule, so refuse it before any RPC.
+    if nlri.is_extended() {
+        return Err(invalid(
+            "source port, fragment and packet length matches are not supported",
+        ));
+    }
     let prefix: ipnet::IpNet = nlri
         .dst_prefix
         .parse()
@@ -324,6 +330,7 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
         dst_prefix: String::new(),
         protocol: None,
         dst_ports: vec![],
+        ..Default::default()
     };
     let mut previous = 0;
     for component in &route.components {
@@ -752,6 +759,7 @@ mod tests {
                 dst_prefix: prefix.into(),
                 protocol: Some(17),
                 dst_ports: vec![443, 53],
+                ..Default::default()
             };
             let mut right = left.clone();
             right.dst_ports.reverse();
@@ -778,6 +786,7 @@ mod tests {
                     dst_prefix: prefix.into(),
                     protocol: Some(17),
                     dst_ports: vec![53],
+                    ..Default::default()
                 },
                 FlowSpecAction::discard(),
             );
@@ -835,6 +844,7 @@ mod tests {
                 dst_prefix: "192.0.2.1/32".into(),
                 protocol: Some(6),
                 dst_ports: vec![443, 80],
+                ..Default::default()
             },
             FlowSpecAction::police(8000),
         );

@@ -34,6 +34,7 @@ fn rules() -> Vec<FlowSpecRule> {
                 dst_prefix: prefix.into(),
                 protocol: Some(if index < 2 { 6 } else { 17 }),
                 dst_ports: vec![80, 443],
+                ..Default::default()
             },
             if index % 2 == 0 {
                 FlowSpecAction::discard()
@@ -65,6 +66,7 @@ async fn released_peers_receive_exact_routes_and_retain_nonselected_local_intent
             dst_prefix: "198.51.100.250/32".into(),
             protocol: Some(1),
             dst_ports: vec![],
+            ..Default::default()
         },
         FlowSpecAction::discard(),
     );
@@ -191,6 +193,7 @@ async fn released_peer_restart_reconciles_original_desired_state_without_extra_r
                     dst_prefix: rule.nlri.dst_prefix.clone(),
                     protocol: rule.nlri.protocol,
                     dst_ports: rule.nlri.dst_ports.clone(),
+                    ..Default::default()
                 },
                 action_type: action.action_type,
                 action_params: ActionParams {

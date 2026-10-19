@@ -30,6 +30,7 @@ fn rule() -> FlowSpecRule {
             dst_prefix: "192.0.2.231/32".into(),
             protocol: Some(6),
             dst_ports: vec![443, 80],
+            ..Default::default()
         },
         FlowSpecAction::discard(),
     )
@@ -227,6 +228,7 @@ async fn live_rustbgpd_ttl_reconciliation() {
                     dst_prefix: format!("{ip}/{length}"),
                     protocol: Some(17),
                     dst_ports: vec![53],
+                    ..Default::default()
                 },
                 action_type: ActionType::Discard,
                 action_params: ActionParams { rate_bps: None },
@@ -363,6 +365,7 @@ async fn live_rustbgpd_restart_recovers_with_the_same_client_and_desired_state()
                     dst_prefix: format!("{ip}/{length}"),
                     protocol: Some(17),
                     dst_ports: vec![53],
+                    ..Default::default()
                 },
                 action_type,
                 action_params: ActionParams { rate_bps },

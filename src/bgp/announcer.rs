@@ -56,7 +56,10 @@ pub trait FlowSpecWriter: Send + Sync {
         };
         Ok(prefix(left)? == prefix(right)?
             && left.protocol == right.protocol
-            && left.dst_ports == right.dst_ports)
+            && left.dst_ports == right.dst_ports
+            && left.src_ports == right.src_ports
+            && left.fragment == right.fragment
+            && left.packet_length == right.packet_length)
     }
 
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()>;
@@ -311,6 +314,7 @@ mod tests {
                 dst_prefix: prefix.into(),
                 protocol: Some(17),
                 dst_ports: vec![443, 53],
+                ..Default::default()
             };
             assert!(writer.matches_nlri(&left, &left).unwrap());
             let mut right = left.clone();

@@ -1697,6 +1697,7 @@ pub async fn create_mitigation(
             dst_prefix: format!("{}/{}", req.victim_ip, prefix_len),
             protocol,
             dst_ports: req.dst_ports,
+            ..Default::default()
         },
         action_type,
         action_params: ActionParams {

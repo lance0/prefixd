@@ -23,6 +23,7 @@ fn rule(prefix: &str) -> FlowSpecRule {
             dst_prefix: prefix.into(),
             protocol: Some(17),
             dst_ports: vec![53, 443, 65535],
+            ..Default::default()
         },
         FlowSpecAction::police(1_000_000),
     )
@@ -756,4 +757,43 @@ async fn list_path_deadline_is_shared_across_both_families() {
             .contains("observation deadline exceeded")
     );
     tokio::time::resume();
+}
+
+#[tokio::test]
+async fn amplification_components_fail_closed_before_any_rpc() {
+    use crate::domain::{FragmentMatch, PacketLengthRange};
+    let fake = Fake::default();
+    let adds = fake.adds.clone();
+    let deletes = fake.deletes.clone();
+    let (speaker, _server) = serve(fake).await;
+    for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
+        let control = rule(prefix);
+        let mut ports = control.clone();
+        ports.nlri.src_ports = vec![123];
+        let mut fragment = control.clone();
+        fragment.nlri.fragment = Some(FragmentMatch::NonFirst);
+        let mut length = ports.clone();
+        length.nlri.packet_length = Some(PacketLengthRange {
+            min: 468,
+            max: 65535,
+        });
+        for extended in [ports, fragment, length] {
+            for result in [
+                speaker.announce(&extended).await,
+                speaker.withdraw(&extended).await,
+            ] {
+                assert!(matches!(
+                    result,
+                    Err(PrefixdError::Internal(message)) if message.contains("not supported")
+                ));
+            }
+        }
+        assert!(adds.lock().unwrap().is_empty());
+        assert!(deletes.lock().unwrap().is_empty());
+        // Control: the same connection carries the rule without new components.
+        speaker.announce(&control).await.unwrap();
+        speaker.withdraw(&control).await.unwrap();
+        assert_eq!(adds.lock().unwrap().drain(..).count(), 1);
+        assert_eq!(deletes.lock().unwrap().drain(..).count(), 1);
+    }
 }

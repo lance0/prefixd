@@ -251,6 +251,7 @@ mod tests {
                 dst_prefix: "192.0.2.1/32".into(),
                 protocol: None,
                 dst_ports: vec![],
+                ..Default::default()
             },
             action_type: ActionType::Police,
             action_params: ActionParams { rate_bps: None },
@@ -473,6 +474,7 @@ mod tests {
             dst_prefix: "203.0.113.10/32".to_string(),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         };
         assert!(guardrails.validate_prefix_length(&valid).is_ok());
     }
@@ -486,6 +488,7 @@ mod tests {
             dst_prefix: "203.0.113.0/24".to_string(),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         };
         let result = guardrails.validate_prefix_length(&invalid);
         assert!(result.is_err());
@@ -513,6 +516,7 @@ mod tests {
             dst_prefix: "203.0.113.0/24".to_string(),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         };
         assert!(guardrails.validate_prefix_length(&valid_24).is_ok());
 
@@ -521,6 +525,7 @@ mod tests {
             dst_prefix: "203.0.113.10/32".to_string(),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         };
         assert!(guardrails.validate_prefix_length(&valid_32).is_ok());
 
@@ -529,6 +534,7 @@ mod tests {
             dst_prefix: "203.0.0.0/16".to_string(),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         };
         assert!(guardrails.validate_prefix_length(&invalid).is_err());
     }
@@ -543,6 +549,7 @@ mod tests {
             dst_prefix: "2001:db8::1/128".to_string(),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         };
         assert!(guardrails.validate_prefix_length(&valid).is_ok());
 
@@ -550,6 +557,7 @@ mod tests {
             dst_prefix: "2001:db8::/64".to_string(),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         };
         assert!(guardrails.validate_prefix_length(&invalid).is_err());
     }
@@ -564,6 +572,7 @@ mod tests {
             dst_prefix: "2001:db8::/64".to_string(),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         };
         assert!(guardrails.validate_prefix_length(&valid_64).is_ok());
 
@@ -572,6 +581,7 @@ mod tests {
             dst_prefix: "2001:db8::1/128".to_string(),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         };
         assert!(guardrails.validate_prefix_length(&valid_128).is_ok());
 
@@ -580,6 +590,7 @@ mod tests {
             dst_prefix: "2001:db8::/48".to_string(),
             protocol: Some(17),
             dst_ports: vec![53],
+            ..Default::default()
         };
         assert!(guardrails.validate_prefix_length(&invalid).is_err());
     }
@@ -597,6 +608,7 @@ mod tests {
             dst_prefix: "203.0.113.10/32".to_string(),
             protocol: Some(17),
             dst_ports: vec![53, 80, 443, 8080],
+            ..Default::default()
         };
         assert!(guardrails.validate_port_count(&valid).is_ok());
     }
@@ -610,6 +622,7 @@ mod tests {
             dst_prefix: "203.0.113.10/32".to_string(),
             protocol: Some(17),
             dst_ports: vec![1, 2, 3, 4, 5, 6, 7, 8], // exactly 8
+            ..Default::default()
         };
         assert!(guardrails.validate_port_count(&valid).is_ok());
     }
@@ -623,6 +636,7 @@ mod tests {
             dst_prefix: "203.0.113.10/32".to_string(),
             protocol: Some(17),
             dst_ports: vec![1, 2, 3, 4, 5, 6, 7, 8, 9], // 9 ports
+            ..Default::default()
         };
         let result = guardrails.validate_port_count(&invalid);
         assert!(result.is_err());
@@ -644,6 +658,7 @@ mod tests {
             dst_prefix: "203.0.113.10/32".to_string(),
             protocol: Some(17),
             dst_ports: vec![],
+            ..Default::default()
         };
         assert!(guardrails.validate_port_count(&valid).is_ok());
     }
@@ -657,6 +672,7 @@ mod tests {
             dst_prefix: "203.0.113.10/32".to_string(),
             protocol: Some(17),
             dst_ports: (1..=16).collect(), // 16 ports
+            ..Default::default()
         };
         assert!(guardrails.validate_port_count(&valid).is_ok());
 
@@ -664,6 +680,7 @@ mod tests {
             dst_prefix: "203.0.113.10/32".to_string(),
             protocol: Some(17),
             dst_ports: (1..=17).collect(), // 17 ports
+            ..Default::default()
         };
         assert!(guardrails.validate_port_count(&invalid).is_err());
     }

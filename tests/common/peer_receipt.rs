@@ -32,6 +32,7 @@ fn go_received(path: &go::Path, afi: i32, peer: &str) -> FlowSpecRule {
         dst_prefix: String::new(),
         protocol: None,
         dst_ports: vec![],
+        ..Default::default()
     };
     let mut previous = 0;
     for rule in &nlri.rules {
@@ -129,6 +130,7 @@ fn rust_received(route: &rust::FlowSpecRouteEntry, family: i32, peer: &str) -> F
         dst_prefix: String::new(),
         protocol: None,
         dst_ports: vec![],
+        ..Default::default()
     };
     let mut previous = 0;
     for component in &route.components {
