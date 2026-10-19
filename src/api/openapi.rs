@@ -34,6 +34,7 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
     paths(
         super::handlers::health,
         super::handlers::health_detail,
+        super::handlers::ready,
         super::handlers::ingest_event,
         super::handlers::ingest_events_batch,
         super::handlers::list_mitigations,
@@ -86,6 +87,7 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
             MitigationsListResponse,
             PublicHealthResponse,
             HealthResponse,
+            super::handlers::ReadinessResponse,
             super::handlers::SpeakerHealth,
             super::handlers::DaemonHealthObservation,
             ErrorResponse,

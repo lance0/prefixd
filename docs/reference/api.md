@@ -1523,6 +1523,21 @@ running controller's package version; `auth_mode` reflects its configured mode.
 | `version` | Controller (prefixd) version |
 | `auth_mode` | Authentication mode: `none`, `bearer`, `credentials`, `mtls` |
 
+### Readiness (Public)
+
+```http
+GET /v1/ready
+```
+
+Public readiness for load balancers and detector routing. No authentication is
+required, and it does not query the database or speaker. It returns `200` with
+`{"status": "ready"}` while this controller holds its POP's fence
+([ADR 027](../adr/027-blackhole-mitigations.md)), and `503` with
+`{"status": "standby"}` while another controller holds it. A standby controller
+refuses state-changing requests, so route detector events and operator writes
+only to a ready controller. `GET /v1/health` stays liveness: it returns `200`
+for a standby controller too.
+
 ### Health Detail (Authenticated)
 
 ```http
@@ -2276,8 +2291,9 @@ validation:
 }
 ```
 
-`GET` requests, login, logout, `GET /v1/health` and `/metrics` keep working, and
-`GET /v1/health/detail` reports `"status": "standby"`. A withdrawal admitted
+`GET` requests, login, logout, `GET /v1/health` and `/metrics` keep working,
+`GET /v1/ready` returns `503` and `GET /v1/health/detail` reports
+`"status": "standby"`. A withdrawal admitted
 just before the controller lost its fence can also return `503`; its persisted
 withdrawal intent stays pending for the active controller. A creation admitted
 then reports an unconfirmed announcement. Retry against the active controller.

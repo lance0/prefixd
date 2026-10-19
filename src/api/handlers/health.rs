@@ -188,6 +188,34 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     })
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct ReadinessResponse {
+    /// ready or standby
+    status: &'static str,
+}
+
+/// Public readiness: route detectors and load balancers only to the controller
+/// holding this POP's fence (ADR 027). Liveness stays on `/v1/health`.
+#[utoipa::path(
+    get,
+    path = "/v1/ready",
+    tag = "health",
+    responses(
+        (status = 200, description = "This controller holds its POP's fence and accepts mutations", body = ReadinessResponse),
+        (status = 503, description = "Standby: another controller holds this POP's fence", body = ReadinessResponse)
+    )
+)]
+pub async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if state.fence.is_active() {
+        (StatusCode::OK, Json(ReadinessResponse { status: "ready" }))
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ReadinessResponse { status: "standby" }),
+        )
+    }
+}
+
 /// Authenticated health detail: full operational status
 #[utoipa::path(
     get,

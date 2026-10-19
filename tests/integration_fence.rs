@@ -92,6 +92,23 @@ impl Instance {
             .status()
     }
 
+    async fn readiness(&self) -> (StatusCode, serde_json::Value) {
+        let response = prefixd::api::create_test_router(self.state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
     async fn wait_until(&self, active: bool, limit: Duration) -> Duration {
         let start = Instant::now();
         tokio::time::timeout(limit, self.fence.subscribe().wait_for(|a| *a == active))
@@ -191,6 +208,18 @@ async fn exactly_one_controller_is_active_and_the_standby_sends_no_mutation() {
     assert!(!standby.fence.is_active());
     let owner = binding(&ctx).await.owner();
     assert!(fence_holder(&ctx, &owner).await.is_some());
+    // Load balancers and detectors route by readiness, not liveness.
+    assert_eq!(
+        active.readiness().await,
+        (StatusCode::OK, serde_json::json!({"status": "ready"}))
+    );
+    assert_eq!(
+        standby.readiness().await,
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({"status": "standby"})
+        )
+    );
 
     let (first, second) = exercise(&active, &standby).await;
     assert_eq!(first, StatusCode::ACCEPTED);
@@ -239,6 +268,7 @@ async fn standby_takes_over_within_the_poll_interval_when_the_active_instance_di
     );
     assert_eq!(standby.ingest().await, StatusCode::ACCEPTED);
     assert!(standby.mutations() > 0);
+    assert_eq!(standby.readiness().await.0, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -351,6 +381,10 @@ async fn standby_refuses_mutation_requests_with_503_and_reports_standby() {
     assert_eq!(
         send("GET", "/v1/health", "").await.unwrap().status(),
         StatusCode::OK
+    );
+    assert_eq!(
+        send("GET", "/v1/ready", "").await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
     );
     let detail = send("GET", "/v1/health/detail", "").await.unwrap();
     assert_eq!(detail.status(), StatusCode::OK);

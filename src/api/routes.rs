@@ -26,6 +26,7 @@ fn public_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/health", get(handlers::health))
         .route("/v1/health/detail", get(handlers::health_detail))
+        .route("/v1/ready", get(handlers::ready))
         .route("/v1/auth/login", post(handlers::login))
         .route("/metrics", get(handlers::metrics))
         .route("/openapi.json", get(openapi_json))
