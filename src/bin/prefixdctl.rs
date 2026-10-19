@@ -237,12 +237,69 @@ struct MitigationResponse {
     vector: String,
     action_type: String,
     rate_bps: Option<u64>,
+    #[serde(default)]
+    protocol: Option<u8>,
+    #[serde(default)]
+    dst_ports: Vec<u16>,
+    /// ADR 028 match fields; absent from controllers that predate them.
+    #[serde(default)]
+    src_ports: Vec<u16>,
+    #[serde(default)]
+    fragment: Option<String>,
+    #[serde(default)]
+    packet_length: Option<PacketLength>,
     created_at: String,
     expires_at: String,
     scope_hash: String,
     /// Present only for a blackhole, which drops all traffic to the victim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     blackhole: Option<BlackholeRoute>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PacketLength {
+    min: u16,
+    max: u16,
+}
+
+impl MitigationResponse {
+    /// One-line match, for example `udp src 123,389` or `udp non-first fragments`.
+    fn match_summary(&self) -> String {
+        if self.blackhole.is_some() || self.action_type == "blackhole" {
+            return "all traffic".into();
+        }
+        let join = |ports: &[u16]| {
+            ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let mut parts = vec![match self.protocol {
+            None => "any".to_string(),
+            Some(1) => "icmp".into(),
+            Some(6) => "tcp".into(),
+            Some(17) => "udp".into(),
+            Some(58) => "icmpv6".into(),
+            Some(other) => other.to_string(),
+        }];
+        if !self.src_ports.is_empty() {
+            parts.push(format!("src {}", join(&self.src_ports)));
+        }
+        if !self.dst_ports.is_empty() {
+            parts.push(format!("dst {}", join(&self.dst_ports)));
+        }
+        if let Some(fragment) = &self.fragment {
+            parts.push(match fragment.as_str() {
+                "non_first" => "non-first fragments".into(),
+                other => format!("fragment {other}"),
+            });
+        }
+        if let Some(length) = &self.packet_length {
+            parts.push(format!("len {}-{}", length.min, length.max));
+        }
+        parts.join(" ")
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -542,21 +599,22 @@ async fn cmd_mitigations(
                     }
 
                     println!(
-                        "{:<36}  {:<10}  {:<15}  {:<10}  {:<9}  EXPIRES",
-                        "ID", "STATUS", "VICTIM_IP", "VECTOR", "ACTION"
+                        "{:<36}  {:<10}  {:<15}  {:<10}  {:<9}  {:<19}  MATCH",
+                        "ID", "STATUS", "VICTIM_IP", "VECTOR", "ACTION", "EXPIRES"
                     );
-                    println!("{}", "-".repeat(101));
+                    println!("{}", "-".repeat(120));
 
                     for m in &resp.mitigations {
                         let expires = &m.expires_at[..19]; // Trim to datetime
                         println!(
-                            "{:<36}  {:<10}  {:<15}  {:<10}  {:<9}  {}",
+                            "{:<36}  {:<10}  {:<15}  {:<10}  {:<9}  {:<19}  {}",
                             m.mitigation_id,
                             m.status,
                             m.victim_ip,
                             m.vector,
                             m.action_type,
-                            expires
+                            expires,
+                            m.match_summary()
                         );
                     }
 
@@ -580,6 +638,7 @@ async fn cmd_mitigations(
                     println!("Victim IP:      {}", m.victim_ip);
                     println!("Vector:         {}", m.vector);
                     println!("Action:         {}", m.action_type);
+                    println!("Match:          {}", m.match_summary());
                     if let Some(rate) = m.rate_bps {
                         println!("Rate (bps):     {}", rate);
                     }
@@ -1019,6 +1078,48 @@ async fn cmd_migrations(format: OutputFormat) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mitigation_match_summary_shows_amplification_fields() {
+        let base = serde_json::json!({
+            "mitigation_id": "m", "status": "active", "customer_id": null,
+            "victim_ip": "203.0.113.10", "vector": "udp_amplification",
+            "action_type": "discard", "rate_bps": null, "created_at": "",
+            "expires_at": "", "scope_hash": "s"
+        });
+        let summary = |extra: serde_json::Value| {
+            let mut value = base.clone();
+            for (key, field) in extra.as_object().unwrap() {
+                value[key] = field.clone();
+            }
+            serde_json::from_value::<MitigationResponse>(value)
+                .unwrap()
+                .match_summary()
+        };
+        // An older controller sends none of the match fields.
+        assert_eq!(summary(serde_json::json!({})), "any");
+        assert_eq!(
+            summary(
+                serde_json::json!({ "protocol": 17, "dst_ports": [], "src_ports": [123, 389] })
+            ),
+            "udp src 123,389"
+        );
+        assert_eq!(
+            summary(serde_json::json!({ "protocol": 17, "fragment": "non_first" })),
+            "udp non-first fragments"
+        );
+        assert_eq!(
+            summary(serde_json::json!({
+                "protocol": 17, "src_ports": [11211],
+                "packet_length": { "min": 1000, "max": 65535 }
+            })),
+            "udp src 11211 len 1000-65535"
+        );
+        assert_eq!(
+            summary(serde_json::json!({ "protocol": 6, "dst_ports": [80, 443] })),
+            "tcp dst 80,443"
+        );
+    }
 
     #[test]
     fn peer_commands_distinguish_observation_results_and_accept_older_health() {

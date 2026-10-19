@@ -26,6 +26,19 @@ control-plane evidence.
 | **Multiple FlowSpec rules** | Verified | Expected | Expected | Expected | Verified |
 | **Destination port matching** | Verified | Verified | Expected | Expected | Verified |
 | **Protocol matching** | Verified | Verified | Expected | Expected | Verified |
+| **Source port matching** | Expected | Expected | Expected | Expected | Expected |
+| **Packet length matching** | Expected | Expected (needs a TCAM length field) | Expected | Expected | Expected |
+| **Non-first fragment matching** | Expected (enhanced-ip MPCs) | Expected (IPv4 only) | Expected (IPv4 only) | Expected | Expected |
+
+The last three rows are the [ADR 028](../adr/028-amplification-matches.md)
+amplification components. They come from vendor documentation, summarized in
+[ADR 028 section 7](../adr/028-amplification-matches.md#7-router-reality); no
+router has a prefixd receipt for them yet, and the FRR receipt is planned.
+prefixd keeps source-port and fragment matches in separate rules, which EOS
+requires, and matches only IsF (non-first fragments), the one fragment bit every
+documented platform supports for IPv4. Expect IOS-XR and EOS to reject or
+ignore the IPv6 fragment rule. FRR installs filters only for discard and
+redirect actions.
 
 The FRR column is control-plane receipt only. It holds for rustbgpd 0.77.0 and
 0.78.0 and for GoBGP 4.10.0 with FRR 10.7.1 (see [FRR](#frr--verified-control-plane)).

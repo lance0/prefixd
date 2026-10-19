@@ -30,8 +30,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every `udp_amplification` mitigation; earlier releases also refuse rows with
   that vector. The shipped `configs/playbooks.yaml` carries the new playbooks
   as commented examples only.
+- Before downgrading to 0.20.0 or earlier, withdraw every rule with a
+  source-port, fragment or packet-length match and drain its withdrawals.
+  Those releases ignore the new keys and would withdraw with the wider rule,
+  orphaning the real one on the speaker. See
+  [amplification matches and downgrade](docs/how-to/upgrading.md#amplification-matches-and-downgrade).
+- A `PUT /v1/config/playbooks` body that does not decode now returns `400`
+  with `{"errors": [reason]}` instead of an empty body.
 
 ### Added
+
+- `POST /v1/mitigations` accepts optional `src_ports`, `fragment` and
+  `packet_length` for discard and police rules (ADR 028). They pass the same
+  invariants, `max_ports`, `allow_fragment_match` and
+  `allow_packet_length_match` guardrails and speaker capability check as
+  playbook rules. Refusals return `422` with the reason, or `400` when the
+  speaker cannot encode a component. Every mitigation response and WebSocket
+  message now includes `src_ports` (`[]` when absent), `fragment` and
+  `packet_length` (`null` when absent), in canonical form.
+- The dashboard shows source ports, non-first fragments and packet length in
+  the mitigation list, detail page and FlowSpec rule preview, lists the other
+  rules one event produced, and shows an event's top source ports. A new Rule
+  form creates a manual FlowSpec rule with these fields; its checks mirror the
+  controller's and name the guardrail.
+- The playbook editors support `udp_amplification` playbooks, `rules` steps
+  and `blackhole` steps. The YAML view round-trips every field, including keys
+  it does not know. The form shows `rules` read-only and keeps them unchanged.
+  Both views show the controller's validation errors verbatim.
+- `prefixdctl mitigations list` adds a `MATCH` column and `get` adds a
+  `Match:` line with the protocol, source and destination ports, fragment and
+  packet length. JSON output adds `protocol`, `dst_ports`, `src_ports`,
+  `fragment` and `packet_length`.
 
 - The rustbgpd adapter can inject, delete and read back unicast blackhole
   host routes (ADR 027), and health detail reports

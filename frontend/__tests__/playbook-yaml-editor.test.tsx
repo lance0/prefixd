@@ -88,7 +88,7 @@ playbooks:
 
     await waitFor(() => expect(onSave).toHaveBeenCalledWith([{
       name: "merged-policy",
-      match: { vector: "udp_flood", require_top_ports: false },
+      match: { vector: "udp_flood" },
       steps: [{ action: "discard", ttl_seconds: 75, rate_bps: 8000000 }],
     }]))
   })
@@ -115,7 +115,7 @@ playbooks:
     edit(yamlText().replace("action: discard", "action: drop"))
 
     expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled()
-    expect(screen.getByText('Playbook "udp-policy" step 2: action must be one of police, discard')).toBeVisible()
+    expect(screen.getByText('Playbook "udp-policy" step 2: action must be one of police, discard, blackhole')).toBeVisible()
     fireEvent.click(screen.getByRole("button", { name: "Apply" }))
     expect(onSave).not.toHaveBeenCalled()
   })

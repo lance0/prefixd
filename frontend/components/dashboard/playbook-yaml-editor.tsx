@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { StatusPill } from "@/components/dashboard/status-pill"
 import { AlertCircle, Save, Undo2 } from "lucide-react"
 import type { ConfigPlaybook, JsonValue } from "@/lib/api"
-import { validatePlaybooks } from "@/components/dashboard/playbook-editor"
+import { SaveErrors, serverErrors, validatePlaybooks } from "@/components/dashboard/playbook-editor"
 
 // Preserve merge keys accepted by the editor while keeping YAML 1.2 core types.
 const PLAYBOOK_YAML_SCHEMA = yaml.CORE_SCHEMA.withTags(yaml.mergeTag)
@@ -18,35 +18,19 @@ interface PlaybookYamlEditorProps {
   saving: boolean
 }
 
-function playbooksToYaml(playbooks: ConfigPlaybook[]): string {
-  const obj = {
-    playbooks: playbooks.map((p) => ({
-      name: p.name,
-      match: {
-        vector: p.match.vector,
-        // undefined keys are omitted by yaml.dump's skipInvalid.
-        require_top_ports: p.match.require_top_ports ? true : undefined,
-      },
-      // Round-trip per-playbook correlation overrides; omit unset fields.
-      correlation: definedFields(p.correlation),
-      // undefined keys are omitted by yaml.dump's skipInvalid.
-      steps: p.steps.map((s) => ({
-        action: s.action,
-        rate_bps: s.rate_bps ?? undefined,
-        ttl_seconds: s.ttl_seconds,
-        require_confidence_at_least: s.require_confidence_at_least ?? undefined,
-        require_persistence_seconds: s.require_persistence_seconds ?? undefined,
-      })),
-    })),
-  }
+type YamlMapping = { [key: string]: JsonValue }
 
-  return yaml.dump(obj, { lineWidth: 120, noRefs: true, skipInvalid: true })
+function isMapping(value: JsonValue | undefined): value is YamlMapping {
+  return value instanceof Object && !Array.isArray(value)
 }
 
-function definedFields(value: ConfigPlaybook["correlation"]): ConfigPlaybook["correlation"] | undefined {
-  const entries = Object.entries(value ?? {}).filter(([, v]) => v != null)
+// Every field the API sent is written out, including `rules` steps and keys this editor
+// does not know, so applying an untouched or edited document never drops one. Null
+// fields, which the API sends for unset options, are left out.
+function playbooksToYaml(playbooks: ConfigPlaybook[]): string {
+  const document = JSON.parse(JSON.stringify({ playbooks }, (_key, value) => value ?? undefined))
 
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined
+  return yaml.dump(document, { lineWidth: 120, noRefs: true })
 }
 
 interface ParsedPlaybooks {
@@ -54,20 +38,10 @@ interface ParsedPlaybooks {
   error?: string
 }
 
-type YamlMapping = { [key: string]: JsonValue }
-
-function asMapping(value: JsonValue | undefined): YamlMapping {
-  return value instanceof Object && !Array.isArray(value) ? value : {}
-}
-
-function asList(value: JsonValue | undefined): JsonValue[] {
-  return Array.isArray(value) ? value : []
-}
-
-function optionalNumber(value: JsonValue | undefined): number | undefined {
-  return value != null ? Number(value) : undefined
-}
-
+/**
+ * Checks only what the form validation reads; every other field is sent as written, and the
+ * controller, which owns the schema, refuses an invalid one with its reason.
+ */
 function parseYaml(text: string): ParsedPlaybooks {
   let document: JsonValue | undefined
 
@@ -79,50 +53,28 @@ function parseYaml(text: string): ParsedPlaybooks {
     return { error: `YAML parse error: ${e instanceof Error ? e.message : String(e)}` }
   }
 
-  const entries = asMapping(document).playbooks
+  const entries = isMapping(document) ? document.playbooks : undefined
 
   if (!Array.isArray(entries)) {
     return { error: "YAML must contain a top-level 'playbooks' array" }
   }
 
-  // Coerce to ConfigPlaybook shape for validation
-  const playbooks: ConfigPlaybook[] = []
-
   for (const [i, entry] of entries.entries()) {
-    const pb = asMapping(entry)
-    const match = asMapping(pb.match)
-    const name = String(pb.name ?? "")
-    const steps: ConfigPlaybook["steps"] = []
+    const ctx = `Playbook #${i + 1}`
 
-    for (const [j, rawStep] of asList(pb.steps).entries()) {
-      const s = asMapping(rawStep)
-      const action = String(s.action ?? "police")
+    if (!isMapping(entry)) return { error: `${ctx} must be a mapping` }
 
-      if (action !== "police" && action !== "discard") {
-        return { error: `Playbook "${name || `#${i + 1}`}" step ${j + 1}: action must be one of police, discard` }
-      }
+    if (!isMapping(entry.match)) return { error: `${ctx}: match must be a mapping` }
 
-      steps.push({
-        action,
-        rate_bps: optionalNumber(s.rate_bps),
-        ttl_seconds: Number(s.ttl_seconds ?? 0),
-        require_confidence_at_least: optionalNumber(s.require_confidence_at_least),
-        require_persistence_seconds: optionalNumber(s.require_persistence_seconds),
-      })
+    if (!Array.isArray(entry.steps) || !entry.steps.every((step) => isMapping(step))) {
+      return { error: `${ctx}: steps must be a list of mappings` }
     }
-
-    playbooks.push({
-      name,
-      match: {
-        vector: String(match.vector ?? "unknown"),
-        require_top_ports: match.require_top_ports === true,
-      },
-      // SAFETY: the override is sent as written; nothing here reads it, and the controller,
-      // which owns its schema, rejects an invalid override when the playbooks are saved.
-      correlation: (pb.correlation ?? undefined) as ConfigPlaybook["correlation"],
-      steps,
-    })
   }
+
+  // Each entry was checked above for the fields the form validation reads. A JSON copy
+  // passes the rest through unchanged (CORE_SCHEMA values are all JSON values), and the
+  // controller validates it on save.
+  const playbooks: ConfigPlaybook[] = JSON.parse(JSON.stringify(entries))
 
   return { playbooks }
 }
@@ -130,6 +82,7 @@ function parseYaml(text: string): ParsedPlaybooks {
 export function PlaybookYamlEditor({ playbooks: initialPlaybooks, onSave, saving }: PlaybookYamlEditorProps) {
   const initialYaml = useMemo(() => playbooksToYaml(initialPlaybooks), [initialPlaybooks])
   const [text, setText] = useState(initialYaml)
+  const [saveErrors, setSaveErrors] = useState<string[]>([])
 
   const hasChanges = text !== initialYaml
 
@@ -146,11 +99,18 @@ export function PlaybookYamlEditor({ playbooks: initialPlaybooks, onSave, saving
 
   const handleDiscard = useCallback(() => {
     setText(initialYaml)
+    setSaveErrors([])
   }, [initialYaml])
 
   const handleSave = useCallback(async () => {
     if (!parsed) return
-    await onSave(parsed)
+    setSaveErrors([])
+
+    try {
+      await onSave(parsed)
+    } catch (e) {
+      setSaveErrors(serverErrors(e instanceof Error ? e.message : String(e)))
+    }
   }, [parsed, onSave])
 
   return (
@@ -169,6 +129,8 @@ export function PlaybookYamlEditor({ playbooks: initialPlaybooks, onSave, saving
           {saving ? "Applying…" : "Apply"}
         </Button>
       </div>
+
+      <SaveErrors errors={saveErrors} />
 
       {/* Errors */}
       {allErrors.length > 0 && hasChanges && (
@@ -191,6 +153,7 @@ export function PlaybookYamlEditor({ playbooks: initialPlaybooks, onSave, saving
         value={text}
         onChange={(e) => setText(e.target.value)}
         spellCheck={false}
+        aria-label="Playbooks YAML"
         className={
           "w-full min-h-[400px] bg-secondary/50 border border-border rounded-md p-4 " +
           "text-xs font-mono text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-primary"

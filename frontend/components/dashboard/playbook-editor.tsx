@@ -12,10 +12,10 @@ import { EmptyState } from "@/components/dashboard/states"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Pencil, Trash2, Plus, GripVertical, Save, Undo2, AlertCircle } from "lucide-react"
-import type { ConfigPlaybook } from "@/lib/api"
+import type { ConfigPlaybook, JsonValue, PlaybookRule, PlaybookStep } from "@/lib/api"
 
-const VECTORS = ["udp_flood", "syn_flood", "ack_flood", "icmp_flood", "unknown"] as const
-const ACTIONS = ["police", "discard"] as const
+const VECTORS = ["udp_flood", "udp_amplification", "syn_flood", "ack_flood", "icmp_flood", "unknown"] as const
+const ACTIONS = ["police", "discard", "blackhole"] as const
 
 interface PlaybookEditorProps {
   playbooks: ConfigPlaybook[]
@@ -23,7 +23,7 @@ interface PlaybookEditorProps {
   saving: boolean
 }
 
-type DraftStep = ConfigPlaybook["steps"][0] & { _id: string }
+type DraftStep = PlaybookStep & { _id: string }
 
 type DraftPlaybook = Omit<ConfigPlaybook, "steps"> & { _id: string; steps: DraftStep[] }
 
@@ -83,17 +83,19 @@ function validatePlaybooks(playbooks: ConfigPlaybook[]): string[] {
 
   for (let i = 0; i < playbooks.length; i++) {
     const pb = playbooks[i]
-    const ctx = `Playbook "${pb.name || `#${i + 1}`}"`
+    // A YAML draft may carry any scalar here; the controller refuses a non-string name.
+    const name = pb.name == null ? "" : String(pb.name)
+    const ctx = `Playbook "${name || `#${i + 1}`}"`
 
-    if (!pb.name.trim()) {
+    if (!name.trim()) {
       errors.push(`${ctx}: name is required`)
-    } else if (new TextEncoder().encode(pb.name).length > 128) {
+    } else if (new TextEncoder().encode(name).length > 128) {
       errors.push(`${ctx}: name exceeds 128 bytes`)
-    } else if (names.has(pb.name)) {
+    } else if (names.has(name)) {
       errors.push(`${ctx}: duplicate name`)
     }
 
-    names.add(pb.name)
+    names.add(name)
 
     if (!VECTORS.some((vector) => vector === pb.match.vector)) {
       errors.push(`${ctx}: vector must be one of ${VECTORS.join(", ")}`)
@@ -113,9 +115,21 @@ function validatePlaybooks(playbooks: ConfigPlaybook[]): string[] {
     for (let j = 0; j < pb.steps.length; j++) {
       const step = pb.steps[j]
       const sctx = `${ctx} step ${j + 1}`
+      const hasRules = Array.isArray(step.rules) && step.rules.length > 0
 
-      if (!ACTIONS.includes(step.action)) {
+      // Rule details (ports, fragment, length, opt-ins) are left to the controller.
+      if (hasRules) {
+        if (step.action != null) errors.push(`${sctx}: a step has an action or rules, not both`)
+
+        if (pb.match.vector !== "udp_amplification") errors.push(`${sctx}: rules are valid only in udp_amplification playbooks`)
+      } else if (step.action == null) {
+        errors.push(`${sctx}: a step needs an action or rules`)
+      } else if (!ACTIONS.some((action) => action === step.action)) {
         errors.push(`${sctx}: action must be one of ${ACTIONS.join(", ")}`)
+      } else if (step.action === "blackhole") {
+        if (pb.match.vector === "udp_amplification") errors.push(`${sctx}: a blackhole step is not valid in udp_amplification playbooks`)
+
+        if (step.rate_bps != null) errors.push(`${sctx}: a blackhole step takes no rate`)
       }
 
       if (!Number.isFinite(step.ttl_seconds) || step.ttl_seconds < 1 || step.ttl_seconds > 86400) {
@@ -160,6 +174,87 @@ function formatRate(bps: number): string {
   return `${bps} bps`
 }
 
+/** One rule of a `rules` step, for example "UDP src from event → discard". */
+function describeRule(rule: PlaybookRule): string {
+  const match = rule.match ?? {}
+  const parts = ["UDP"]
+
+  if (match.src_ports === "from_event") parts.push("src from event")
+  else if (Array.isArray(match.src_ports)) parts.push(`src ${match.src_ports.join(", ")}`)
+
+  if (match.fragment === "non_first") parts.push("non-first fragments")
+
+  if (match.packet_length) parts.push(`length ${match.packet_length.min}–${match.packet_length.max} B`)
+
+  const action = rule.action === "police" && rule.rate_bps ? `police ${formatRate(rule.rate_bps)}` : rule.action
+
+  return `${parts.join(" ")} → ${action}`
+}
+
+/** Read-only `rules` list: the form keeps them as sent, and the YAML view edits them. */
+function RulesSummary({ rules }: { rules: PlaybookRule[] }) {
+  return (
+    <ul className="space-y-0.5">
+      {rules.map((rule, index) => (
+        <li key={index} className="break-words font-mono">{describeRule(rule)}</li>
+      ))}
+    </ul>
+  )
+}
+
+/** One step in the card views: its action and rate, or its rules. */
+function StepSummary({ step, index }: { step: PlaybookStep; index: number }) {
+  return (
+    <div className="flex flex-wrap items-start gap-x-3 gap-y-1 rounded-sm bg-muted/40 px-3 py-2 text-xs">
+      <span className="text-muted-foreground w-4">{index + 1}.</span>
+      {step.rules?.length ? (
+        <div className="min-w-0 flex-1 basis-56">
+          <span className="text-muted-foreground">{step.rules.length} rules, each its own mitigation</span>
+          <RulesSummary rules={step.rules} />
+        </div>
+      ) : (
+        <>
+          <ActionBadge actionType={step.action ?? "unknown"} />
+          {step.rate_bps ? <span className="text-muted-foreground">{formatRate(step.rate_bps)}</span> : null}
+        </>
+      )}
+      <span className="text-muted-foreground">TTL {formatTtl(step.ttl_seconds)}</span>
+      {step.require_confidence_at_least != null ? (
+        <span className="text-muted-foreground">confidence ≥ {step.require_confidence_at_least}</span>
+      ) : null}
+      {step.require_persistence_seconds != null ? (
+        <span className="text-muted-foreground">persist {formatTtl(step.require_persistence_seconds)}</span>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * The controller's reasons from a failed save, verbatim: the `errors` list a playbook PUT
+ * returns, an `error` message, or the raw failure text.
+ */
+export function serverErrors(message: string): string[] {
+  const body = message.replace(/^API error \d+: /, "")
+  let parsed: JsonValue
+
+  try {
+    // SAFETY: JSON.parse yields only JSON values; each field is checked before use.
+    parsed = JSON.parse(body) as JsonValue
+  } catch {
+    return [message]
+  }
+
+  if (parsed instanceof Object && !Array.isArray(parsed)) {
+    const list = parsed.errors
+
+    if (Array.isArray(list) && list.length > 0) return list.map(String)
+
+    if (parsed.error != null) return [String(parsed.error)]
+  }
+
+  return [message]
+}
+
 function formatTtl(seconds: number): string {
   if (seconds >= 3600) return `${(seconds / 3600).toFixed(1)}h`
 
@@ -188,19 +283,34 @@ function StepEditor({
         <span className="text-xs w-4">{index + 1}.</span>
       </div>
 
-      <div className="space-y-1">
-        <Label className="text-muted-foreground">Action</Label>
-        <Select value={step.action} onValueChange={(v) => { if (v === "police" || v === "discard") onChange({ ...step, action: v, rate_bps: v === "discard" ? undefined : (step.rate_bps ?? 5_000_000) }) }}>
-          <SelectTrigger className="w-24 h-8">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {ACTIONS.map((a) => (
-              <SelectItem key={a} value={a}>{a}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+      {step.rules?.length ? (
+        <div className="min-w-0 flex-1 basis-full space-y-1 text-xs sm:basis-64">
+          <span className="text-muted-foreground">Rules ({step.rules.length}, each its own mitigation)</span>
+          <RulesSummary rules={step.rules} />
+          <p className="text-muted-foreground">Edit rules in the YAML view. This form keeps them unchanged.</p>
+        </div>
+      ) : (
+        <div className="space-y-1">
+          <Label className="text-muted-foreground">Action</Label>
+          <Select
+            value={step.action ?? undefined}
+            onValueChange={(v) => {
+              if (v === "police") onChange({ ...step, action: v, rate_bps: step.rate_bps ?? 5_000_000 })
+
+              if (v === "discard" || v === "blackhole") onChange({ ...step, action: v, rate_bps: undefined })
+            }}
+          >
+            <SelectTrigger className="w-28 h-8" aria-label={`Step ${index + 1} action`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {ACTIONS.map((a) => (
+                <SelectItem key={a} value={a}>{a}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
 
       {step.action === "police" && (
         <div className="space-y-1">
@@ -223,6 +333,7 @@ function StepEditor({
           max={86400}
           value={step.ttl_seconds}
           onChange={(e) => onChange({ ...step, ttl_seconds: Number(e.target.value) || 0 })}
+          aria-label={`Step ${index + 1} TTL (seconds)`}
           className="w-24 h-8 text-xs"
         />
       </div>
@@ -281,18 +392,7 @@ function ReadOnlyPlaybookCard({ playbook }: { playbook: ConfigPlaybook }) {
       <CardContent>
         <div className="space-y-1.5">
           {playbook.steps.map((step, i) => (
-            <div key={i} className="flex items-center gap-3 rounded-sm bg-muted/40 px-3 py-2 text-xs">
-              <span className="text-muted-foreground w-4">{i + 1}.</span>
-              <ActionBadge actionType={step.action} />
-              {step.rate_bps ? <span className="text-muted-foreground">{formatRate(step.rate_bps)}</span> : null}
-              <span className="text-muted-foreground">TTL {formatTtl(step.ttl_seconds)}</span>
-              {step.require_confidence_at_least != null ? (
-                <span className="text-muted-foreground">confidence ≥ {step.require_confidence_at_least}</span>
-              ) : null}
-              {step.require_persistence_seconds != null ? (
-                <span className="text-muted-foreground">persist {formatTtl(step.require_persistence_seconds)}</span>
-              ) : null}
-            </div>
+            <StepSummary key={i} step={step} index={i} />
           ))}
         </div>
       </CardContent>
@@ -328,9 +428,17 @@ export function PlaybookEditor({ playbooks: initialPlaybooks, onSave, saving }: 
     setEditingIndex(null)
   }, [initialPlaybooks])
 
+  const [saveErrors, setSaveErrors] = useState<string[]>([])
+
   const handleSave = useCallback(async () => {
-    await onSave(apiDraft)
-    setEditingIndex(null)
+    setSaveErrors([])
+
+    try {
+      await onSave(apiDraft)
+      setEditingIndex(null)
+    } catch (e) {
+      setSaveErrors(serverErrors(e instanceof Error ? e.message : String(e)))
+    }
   }, [apiDraft, onSave])
 
   return (
@@ -355,6 +463,8 @@ export function PlaybookEditor({ playbooks: initialPlaybooks, onSave, saving }: 
           </Button>
         </div>
       </div>
+
+      <SaveErrors errors={saveErrors} />
 
       {/* Validation errors */}
       {errors.length > 0 && hasChanges && (
@@ -409,18 +519,7 @@ export function PlaybookEditor({ playbooks: initialPlaybooks, onSave, saving }: 
                 <CardContent>
                   <div className="space-y-1.5">
                     {playbook.steps.map((step, i) => (
-                      <div key={step._id} className="flex items-center gap-3 rounded-sm bg-muted/40 px-3 py-2 text-xs">
-                        <span className="text-muted-foreground w-4">{i + 1}.</span>
-                        <ActionBadge actionType={step.action} />
-                        {step.rate_bps ? <span className="text-muted-foreground">{formatRate(step.rate_bps)}</span> : null}
-                        <span className="text-muted-foreground">TTL {formatTtl(step.ttl_seconds)}</span>
-                        {step.require_confidence_at_least != null ? (
-                          <span className="text-muted-foreground">confidence ≥ {step.require_confidence_at_least}</span>
-                        ) : null}
-                        {step.require_persistence_seconds != null ? (
-                          <span className="text-muted-foreground">persist {formatTtl(step.require_persistence_seconds)}</span>
-                        ) : null}
-                      </div>
+                      <StepSummary key={step._id} step={step} index={i} />
                     ))}
                   </div>
                 </CardContent>
@@ -506,6 +605,27 @@ export function PlaybookEditor({ playbooks: initialPlaybooks, onSave, saving }: 
         })
       )}
     </div>
+  )
+}
+
+/** The controller's refusal of the last save, shown as sent. */
+export function SaveErrors({ errors }: { errors: string[] }) {
+  if (errors.length === 0) return null
+
+  return (
+    <Card role="alert" className="border-destructive/50 bg-destructive/5">
+      <CardContent>
+        <div className="flex items-start gap-2">
+          <AlertCircle className="h-4 w-4 text-destructive shrink-0 mt-0.5" aria-hidden="true" />
+          <div className="min-w-0 space-y-1">
+            <p className="text-xs font-medium text-destructive">The controller refused the save:</p>
+            {errors.map((err, i) => (
+              <p key={`${err}-${i}`} className="break-words font-mono text-xs text-destructive">{err}</p>
+            ))}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 

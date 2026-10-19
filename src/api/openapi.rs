@@ -253,6 +253,27 @@ mod tests {
     }
 
     #[test]
+    fn manual_amplification_match_is_documented() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let schemas = &doc["components"]["schemas"];
+        for schema in ["CreateMitigationRequest", "MitigationResponse"] {
+            for field in ["src_ports", "fragment", "packet_length"] {
+                assert!(
+                    schemas[schema]["properties"][field].is_object(),
+                    "{schema}.{field}"
+                );
+            }
+        }
+        assert_eq!(
+            schemas["FragmentMatch"]["enum"],
+            serde_json::json!(["non_first"])
+        );
+        for bound in ["min", "max"] {
+            assert!(schemas["PacketLengthRange"]["properties"][bound].is_object());
+        }
+    }
+
+    #[test]
     fn info_version_comes_from_cargo() {
         assert_eq!(ApiDoc::openapi().info.version, env!("CARGO_PKG_VERSION"));
     }

@@ -247,7 +247,12 @@ pub async fn update_playbooks(
         Ok(payload) => payload,
         Err(rejection) => {
             tracing::warn!(target: "prefixd::api::handlers", error = %rejection, "invalid playbook update payload");
-            return Err(StatusCode::BAD_REQUEST);
+            // The editors show this verbatim, for example an unknown rule key.
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "errors": [rejection.body_text()] })),
+            )
+                .into_response());
         }
     };
 

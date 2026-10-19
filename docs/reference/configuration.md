@@ -224,9 +224,10 @@ anything is saved, in `dry-run` and `enforced` modes alike. Refusals return
 `422` and increment `prefixd_guardrail_rejections_total` with
 `reason="FragmentMatchNotAllowed"`, `"PacketLengthMatchNotAllowed"`,
 `"InvalidMatch"` or `"TooManySourcePorts"`. Rules without these components
-are checked as before. Only `udp_amplification` playbook
-[rules](#multi-rule-steps-udp-amplification) create these matches; the manual
-API does not yet. A playbook rule that needs a flag left `false`, a static
+are checked as before. `udp_amplification` playbook
+[rules](#multi-rule-steps-udp-amplification) and the manual
+[`POST /v1/mitigations`](api.md#amplification-matches) API create these
+matches, with the same checks. A playbook rule that needs a flag left `false`, a static
 source-port list over `max_ports`, or a component the selected speaker cannot
 encode fails startup, reload and playbook edits, in both modes.
 

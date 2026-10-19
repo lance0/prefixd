@@ -2,7 +2,7 @@
 
 import { use, useEffect, useRef, useState } from "react"
 import Link from "next/link"
-import { useMitigation, useConfigInventory, useSignalGroupDetail } from "@/hooks/use-api"
+import { useMitigation, useMitigations, useConfigInventory, useSignalGroupDetail } from "@/hooks/use-api"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 import { ActionBadge } from "@/components/dashboard/action-badge"
 import { Button } from "@/components/ui/button"
@@ -15,7 +15,7 @@ import { Field, FieldList } from "@/components/dashboard/field"
 import { ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatBps, formatTimeRemaining, formatUtc } from "@/lib/format"
-import { FlowSpecPreview, formatFlowSpecRule } from "@/components/dashboard/flowspec-preview"
+import { FlowSpecPreview, describeMatch, formatFlowSpecRule } from "@/components/dashboard/flowspec-preview"
 import { IncidentReportDialog } from "@/components/dashboard/incident-report-dialog"
 import { withdrawMitigation, getIncidentReport, isNotFound, type Mitigation } from "@/lib/api"
 import { copyText } from "@/lib/clipboard"
@@ -88,6 +88,13 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
 
   const { data: mitigation, error: mitigationError, isLoading, mutate } = useMitigation(id)
   const { data: inventory } = useConfigInventory()
+
+  // Rules one event produced share triggering_event_id (ADR 028); list them as siblings.
+  const { data: victimMitigations } = useMitigations(mitigation ? { victim_ip: mitigation.victim_ip, limit: 100 } : null)
+
+  const siblings = (victimMitigations?.mitigations ?? []).filter(
+    (other) => mitigation && other.triggering_event_id === mitigation.triggering_event_id && other.mitigation_id !== mitigation.mitigation_id,
+  )
 
   const { data: signalGroupDetail, error: signalGroupError, isLoading: isSignalGroupLoading, mutate: mutateSignalGroup } = useSignalGroupDetail(
     mitigation?.correlation?.signal_group_id ?? null
@@ -275,23 +282,56 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
-                <FlowSpecPreview
-                  dst_prefix={mitigation.dst_prefix}
-                  protocol={mitigation.protocol}
-                  dst_ports={mitigation.dst_ports}
-                  action_type={mitigation.action_type}
-                  rate_bps={mitigation.rate_bps}
-                />
+                <FlowSpecPreview {...mitigation} />
+                <p className="text-sm">
+                  <span className="text-muted-foreground">Matches </span>
+                  <span className="font-medium">{describeMatch(mitigation)}</span>
+                  <span className="text-muted-foreground"> → </span>
+                  <span className="font-mono">{mitigation.victim_ip}</span>
+                </p>
                 <FieldList className="grid-cols-2 sm:grid-cols-4">
                   <Field label="Destination prefix"><span className="font-mono">{mitigation.dst_prefix}</span></Field>
                   <Field label="Protocol">{protocolName(mitigation.protocol)}</Field>
                   <Field label="Destination ports"><span className="font-mono">{mitigation.dst_ports.length > 0 ? mitigation.dst_ports.join(", ") : "any"}</span></Field>
+                  {mitigation.src_ports?.length ? (
+                    <Field label="Source ports"><span className="font-mono">{mitigation.src_ports.join(", ")}</span></Field>
+                  ) : null}
+                  {mitigation.fragment === "non_first" ? (
+                    <Field label="Fragments">non-first fragments only</Field>
+                  ) : null}
+                  {mitigation.packet_length ? (
+                    <Field label="Packet length">
+                      <span className="tabular-nums">{mitigation.packet_length.min}–{mitigation.packet_length.max} bytes</span>
+                    </Field>
+                  ) : null}
                   <Field label="Action applied">
                     <span className="font-medium">{mitigation.action_type === "discard" ? "discard" : `rate-limit ${formatBps(mitigation.rate_bps)}`}</span>
                   </Field>
                 </FieldList>
               </CardContent>
             </Card>
+            )}
+
+            {siblings.length > 0 && (
+              <Card data-testid="sibling-rules">
+                <CardHeader>
+                  <CardTitle>Other rules from this event</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <ul className="space-y-2">
+                    {siblings.map((sibling) => (
+                      <li key={sibling.mitigation_id} className="flex flex-wrap items-center gap-2 text-sm">
+                        <StatusBadge status={sibling.status} />
+                        <ActionBadge actionType={sibling.action_type} rateBps={sibling.rate_bps} />
+                        <Link href={`/mitigations/${sibling.mitigation_id}`} className="min-w-0 break-words rounded-sm hover:underline">
+                          {describeMatch(sibling)}
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mt-3 text-xs text-muted-foreground">Each rule is withdrawn on its own.</p>
+                </CardContent>
+              </Card>
             )}
 
             <Card>

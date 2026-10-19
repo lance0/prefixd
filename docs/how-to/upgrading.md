@@ -263,6 +263,54 @@ ordinary idempotent TTL cleanup retires each row. New manual creation rejects
 an owned canonical scope before RPC; detector events extend exactly one owner
 and reject ambiguous ownership without consuming their external event ID.
 
+## Amplification matches and downgrade
+
+Releases after 0.20.0 can install FlowSpec rules with source-port,
+non-first-fragment and packet-length matches
+([ADR 028](../adr/028-amplification-matches.md)), from `udp_amplification`
+playbooks or manual `POST /v1/mitigations` requests. Their saved rule and
+pending withdrawal JSON carries `src_ports`, `fragment` or `packet_length`.
+
+0.20.0 and earlier silently ignore those keys. Such a binary would withdraw a
+pending amplification rule using the wider key without them. The speaker
+answers that the wider rule is absent, the older binary records the withdrawal
+as done, and the real rule stays on the speaker with no owner. Never run 0.20.0
+or earlier while any of these rules or their withdrawals are outstanding.
+
+Before downgrading to 0.20.0 or earlier:
+
+1. Pause detectors and remove `udp_amplification` playbooks and `rules` steps,
+   so no new amplification rule is created.
+2. Withdraw every live amplification rule on the current release. This lists
+   them:
+
+   ```sql
+   SELECT mitigation_id, pop, victim_ip
+   FROM mitigations
+   WHERE status IN ('pending', 'active', 'escalated')
+     AND match_json::jsonb ?| array['src_ports', 'fragment', 'packet_length'];
+   ```
+
+3. Drain their withdrawals on the original speaker target with the current
+   release still running. This must return no rows:
+
+   ```sql
+   SELECT pop, count(*) AS pending
+   FROM withdrawal_requests
+   WHERE completed_at IS NULL
+     AND rule_json::jsonb -> 'nlri' ?| array['src_ports', 'fragment', 'packet_length']
+   GROUP BY pop;
+   ```
+
+4. Verify the speaker's local FlowSpec intent holds no rule with a source
+   port, fragment or packet-length component, then follow the general
+   [rollback](#rollback) steps. Do not delete rows to bypass cleanup.
+
+Withdrawn and expired rows are safe for the speaker. Manual amplification
+rules use the `unknown` vector, which older releases decode, so step 2 selects
+rules by match rather than by vector. Older releases refuse to decode rows with
+the `udp_amplification` vector, so pages that include them fail closed there.
+
 ## Mitigation origin mode
 
 Migration 015 adds `origin_mode` to mitigations. Each new mitigation records the

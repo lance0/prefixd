@@ -2174,6 +2174,17 @@ async fn test_update_playbooks_invalid_json_returns_400() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // The dashboard editors show the decoder's reason verbatim.
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        body["errors"][0]
+            .as_str()
+            .is_some_and(|error| error.contains("invalid type")),
+        "{body}"
+    );
 }
 
 #[tokio::test]
@@ -14551,4 +14562,215 @@ async fn prefixdctl_lists_gets_and_withdraws_a_blackhole() {
             .is_empty()
     );
     server.abort();
+}
+
+/// ADR 028 slice 6: optional source-port, fragment and packet-length fields on
+/// manual FlowSpec creation, through the same guardrails, opt-ins and capability check.
+mod manual_amplification_match {
+    use super::*;
+
+    fn state(
+        allow_fragment: bool,
+        allow_length: bool,
+        speaker: MockAnnouncer,
+    ) -> (Arc<AppState>, Arc<MockRepository>, Arc<MockAnnouncer>) {
+        let mut settings = test_settings();
+        settings.mode = prefixd::config::OperationMode::Enforced;
+        settings.guardrails.allow_fragment_match = allow_fragment;
+        settings.guardrails.allow_packet_length_match = allow_length;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(speaker);
+        let state = AppState::new(
+            settings,
+            test_inventory(),
+            test_playbooks(),
+            repo.clone(),
+            speaker.clone(),
+            ".".into(),
+        )
+        .unwrap();
+        (state, repo, speaker)
+    }
+
+    fn payload(extra: serde_json::Value) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "victim_ip": "203.0.113.10", "protocol": "udp", "action": "discard",
+            "ttl_seconds": 120, "reason": "reflection"
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        body
+    }
+
+    async fn post(
+        state: Arc<AppState>,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = create_test_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/mitigations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn creates_each_component_and_echoes_the_canonical_form() {
+        let null = serde_json::Value::Null;
+        for (extra, src_ports, fragment, packet_length) in [
+            (
+                serde_json::json!({ "src_ports": [389, 123, 123] }),
+                serde_json::json!([123, 389]),
+                null.clone(),
+                null.clone(),
+            ),
+            (
+                serde_json::json!({ "fragment": "non_first", "action": "police", "rate_bps": 20_000_000 }),
+                serde_json::json!([]),
+                serde_json::json!("non_first"),
+                null.clone(),
+            ),
+            (
+                serde_json::json!({ "src_ports": [11211], "packet_length": { "min": 1000, "max": 65535 } }),
+                serde_json::json!([11211]),
+                null.clone(),
+                serde_json::json!({ "min": 1000, "max": 65535 }),
+            ),
+        ] {
+            let (state, repo, speaker) = state(true, true, MockAnnouncer::new());
+            let (status, body) = post(state, payload(extra.clone())).await;
+            assert_eq!(status, StatusCode::CREATED, "{extra}: {body}");
+            assert_eq!(body["src_ports"], src_ports, "{body}");
+            assert_eq!(body["fragment"], fragment, "{body}");
+            assert_eq!(body["packet_length"], packet_length, "{body}");
+            assert_eq!(body["protocol"], 17);
+
+            let saved = repo
+                .get_mitigation(body["mitigation_id"].as_str().unwrap().parse().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(&saved.match_criteria.src_ports).unwrap(),
+                src_ports
+            );
+            // The speaker received every component, not a widened rule.
+            let rules = speaker.list_active().await.unwrap();
+            assert_eq!(rules.len(), 1);
+            let nlri = &rules[0].nlri;
+            assert_eq!(serde_json::to_value(&nlri.src_ports).unwrap(), src_ports);
+            assert_eq!(serde_json::to_value(nlri.fragment).unwrap(), fragment);
+            assert_eq!(
+                serde_json::to_value(nlri.packet_length).unwrap(),
+                packet_length
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn guardrails_refuse_with_422_and_the_reason() {
+        let many: Vec<u16> = (1..=9).collect();
+        for (allow_fragment, allow_length, extra, reason) in [
+            (
+                false,
+                true,
+                serde_json::json!({ "fragment": "non_first" }),
+                "guardrails.allow_fragment_match=false",
+            ),
+            (
+                true,
+                false,
+                serde_json::json!({ "src_ports": [11211], "packet_length": { "min": 1000, "max": 65535 } }),
+                "guardrails.allow_packet_length_match=false",
+            ),
+            (
+                true,
+                true,
+                serde_json::json!({ "protocol": "tcp", "src_ports": [123] }),
+                "require protocol 17 (UDP)",
+            ),
+            (
+                true,
+                true,
+                serde_json::json!({ "src_ports": [123], "fragment": "non_first" }),
+                "source ports and fragment cannot share a rule",
+            ),
+            (
+                true,
+                true,
+                serde_json::json!({ "packet_length": { "min": 1000, "max": 65535 } }),
+                "packet length requires source ports",
+            ),
+            (
+                true,
+                true,
+                serde_json::json!({ "src_ports": [11211], "packet_length": { "min": 28, "max": 65535 } }),
+                "min must exceed 28",
+            ),
+            (
+                true,
+                true,
+                serde_json::json!({ "src_ports": many }),
+                "too many source ports: 9 (max=8)",
+            ),
+        ] {
+            let (state, repo, speaker) = state(allow_fragment, allow_length, MockAnnouncer::new());
+            let (status, body) = post(state, payload(extra.clone())).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{extra}: {body}");
+            assert!(
+                body["error"].as_str().unwrap().contains(reason),
+                "{extra}: {body}"
+            );
+            assert_eq!(repo.count_active_global().await.unwrap(), 0);
+            assert!(speaker.list_active().await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_speaker_without_support_refuses_before_saving() {
+        let (state, repo, _) = state(true, true, MockAnnouncer::without_match_support());
+        let (status, body) = post(state, payload(serde_json::json!({ "src_ports": [123] }))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("cannot encode the source port match"),
+            "{body}"
+        );
+        assert_eq!(repo.count_active_global().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_blackhole_takes_no_match_fields() {
+        for extra in [
+            serde_json::json!({ "src_ports": [123] }),
+            serde_json::json!({ "fragment": "non_first" }),
+            serde_json::json!({ "packet_length": { "min": 1000, "max": 65535 } }),
+        ] {
+            let (state, repo, _) = state(true, true, MockAnnouncer::new());
+            let mut body = payload(extra.clone());
+            body["action"] = "blackhole".into();
+            body["confirm_victim_ip"] = "203.0.113.10".into();
+            body.as_object_mut().unwrap().remove("protocol");
+            let (status, response) = post(state, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{extra}: {response}");
+            assert!(
+                response["error"].as_str().unwrap().contains("src_ports"),
+                "{response}"
+            );
+            assert_eq!(repo.count_active_global().await.unwrap(), 0);
+        }
+    }
 }

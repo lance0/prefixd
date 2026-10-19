@@ -38,6 +38,13 @@ export interface BlackholeRoute {
   large_communities: string[]
 }
 
+export type FragmentMatch = "non_first"
+
+export interface PacketLengthRange {
+  min: number
+  max: number
+}
+
 export interface Mitigation {
   /** This creation request had no successful speaker reply; not persisted status. */
   announcement_outcome?: AnnouncementOutcome
@@ -54,6 +61,12 @@ export interface Mitigation {
   dst_prefix: string
   protocol: number | null
   dst_ports: number[]
+  /** UDP source ports (ADR 028), sorted; absent from controllers that predate them. */
+  src_ports?: number[]
+  /** `non_first` when the rule matches non-first IP fragments. */
+  fragment?: FragmentMatch | null
+  /** Inclusive total IP packet length. */
+  packet_length?: PacketLengthRange | null
   created_at: string
   updated_at: string
   expires_at: string
@@ -90,6 +103,8 @@ export interface Event {
   bps: number | null
   pps: number | null
   top_dst_ports_json: string
+  /** Absent or null when the detector sent no source ports; "[]" when it sent an empty list. */
+  top_src_ports_json?: string | null
   confidence: number | null
 }
 
@@ -244,6 +259,7 @@ export interface MitigationsResponse {
 export async function getMitigations(params?: {
   status?: string[]
   customer_id?: string
+  victim_ip?: string
   pop?: string
   acknowledged?: boolean
   limit?: number
@@ -258,6 +274,8 @@ export async function getMitigations(params?: {
   }
 
   if (params?.customer_id) searchParams.set("customer_id", params.customer_id)
+
+  if (params?.victim_ip) searchParams.set("victim_ip", params.victim_ip)
 
   if (params?.pop) searchParams.set("pop", params.pop)
 
@@ -304,6 +322,28 @@ export async function createBlackhole(request: CreateBlackholeRequest): Promise<
   return fetchApi<Mitigation>("/v1/mitigations", {
     method: "POST",
     body: JSON.stringify({ ...request, action: "blackhole" }),
+  })
+}
+
+export interface CreateFlowSpecRequest {
+  victim_ip: string
+  /** udp, tcp, icmp, icmpv6 or any. Source ports, fragment and packet length need udp. */
+  protocol: string
+  action: "discard" | "police"
+  rate_bps?: number
+  ttl_seconds: number
+  reason: string
+  dst_ports?: number[]
+  src_ports?: number[]
+  fragment?: FragmentMatch
+  packet_length?: PacketLengthRange
+}
+
+/** Manual FlowSpec rule; the controller applies the same guardrails as playbooks. */
+export async function createMitigation(request: CreateFlowSpecRequest): Promise<Mitigation> {
+  return fetchApi<Mitigation>("/v1/mitigations", {
+    method: "POST",
+    body: JSON.stringify(request),
   })
 }
 
@@ -596,13 +636,31 @@ export interface ConfigPlaybook {
     confidence_threshold?: number | null
     confidence_decay_half_life_seconds?: number | null
   } | null
-  steps: {
-    action: "police" | "discard"
-    rate_bps?: number | null
-    ttl_seconds: number
-    require_confidence_at_least?: number | null
-    require_persistence_seconds?: number | null
-  }[]
+  steps: PlaybookStep[]
+}
+
+/**
+ * A step has either one `action` or `rules` (ADR 028, udp_amplification only). Editors keep
+ * keys this type does not name as sent, so saving never drops a field they do not know.
+ */
+export interface PlaybookStep {
+  action?: "police" | "discard" | "blackhole" | null
+  rate_bps?: number | null
+  ttl_seconds: number
+  rules?: PlaybookRule[] | null
+  require_confidence_at_least?: number | null
+  require_persistence_seconds?: number | null
+}
+
+export interface PlaybookRule {
+  match: {
+    /** `from_event`: the event's source ports intersected with the reflector-port library. */
+    src_ports?: "from_event" | number[]
+    fragment?: FragmentMatch
+    packet_length?: PacketLengthRange
+  }
+  action: "police" | "discard"
+  rate_bps?: number | null
 }
 
 export interface ConfigPlaybooksResponse {

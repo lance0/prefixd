@@ -23,12 +23,11 @@ const STATUS_OPTIONS = [
 const VECTOR_OPTIONS = [
   { value: "all", label: "All vectors" },
   { value: "udp_flood", label: "UDP flood" },
+  { value: "udp_amplification", label: "UDP amplification" },
   { value: "syn_flood", label: "SYN flood" },
-  { value: "ntp_amplification", label: "NTP amplification" },
-  { value: "dns_amplification", label: "DNS amplification" },
-  { value: "memcached_amplification", label: "Memcached amplification" },
-  { value: "ssdp_amplification", label: "SSDP amplification" },
+  { value: "ack_flood", label: "ACK flood" },
   { value: "icmp_flood", label: "ICMP flood" },
+  { value: "unknown", label: "Unknown" },
 ]
 
 export function GroupsTab() {

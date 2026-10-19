@@ -65,10 +65,11 @@ export function useStats() {
   )
 }
 
-export function useMitigations(params?: Parameters<typeof api.getMitigations>[0]) {
-  const key = params ? ["mitigations", JSON.stringify(params)] : "mitigations"
-  
-  const fetcher = () => api.getMitigations(params)
+/** `null` fetches nothing, for a query that depends on data still loading. */
+export function useMitigations(params?: Parameters<typeof api.getMitigations>[0] | null) {
+  const key = params === null ? null : params ? ["mitigations", JSON.stringify(params)] : "mitigations"
+
+  const fetcher = () => api.getMitigations(params ?? undefined)
 
   return useSWR(key, fetcher, {
     refreshInterval: REFRESH_INTERVAL,

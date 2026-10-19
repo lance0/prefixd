@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { Ban, Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, XCircle, Plus, Download, Trash2 } from "lucide-react"
+import { Ban, Eye, Search, ShieldPlus, ChevronDown, ChevronUp, Filter, RefreshCw, XCircle, Plus, Download, Trash2 } from "lucide-react"
 import { Checkbox } from "@/components/ui/checkbox"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 import { OriginTag } from "@/components/dashboard/status-pill"
@@ -33,6 +33,8 @@ import { cn } from "@/lib/utils"
 import { downloadCsv } from "@/lib/csv"
 import { MitigateNowDialog } from "@/components/dashboard/mitigate-now-dialog"
 import { BlackholeDialog } from "@/components/dashboard/blackhole-dialog"
+import { FlowSpecRuleDialog } from "@/components/dashboard/flowspec-rule-dialog"
+import { describeMatch } from "@/components/dashboard/flowspec-preview"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatRelative, formatTimeRemaining, formatUtc } from "@/lib/format"
@@ -70,6 +72,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   const searchInput = useRef<HTMLInputElement | null>(null)
   const [mitigateNowOpen, setMitigateNowOpen] = useState(initialMitigateOpen ?? false)
   const [blackholeOpen, setBlackholeOpen] = useState(false)
+  const [ruleOpen, setRuleOpen] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [bulkWithdrawOpen, setBulkWithdrawOpen] = useState(false)
   const [bulkWithdrawReason, setBulkWithdrawReason] = useState("")
@@ -356,6 +359,18 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
               <span className="hidden sm:inline">Mitigate now</span>
             </Button>
           )}
+          {permissions.canWithdraw && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-9 shrink-0"
+              onClick={() => setRuleOpen(true)}
+              aria-label="Create FlowSpec rule"
+            >
+              <ShieldPlus className="size-4" aria-hidden="true" />
+              <span className="hidden sm:inline">Rule</span>
+            </Button>
+          )}
           {permissions.isAdmin && (
             <Button
               variant="outline"
@@ -509,7 +524,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                   {sortHeader("status", "Status")}
                   <TableHead>Action</TableHead>
                   {sortHeader("vector", "Vector")}
-                  <TableHead>Ports</TableHead>
+                  <TableHead>Match</TableHead>
                   {sortHeader("created_at", "Created")}
                   {sortHeader("expires_at", "Expires")}
                   <TableHead><span className="sr-only">Row actions</span></TableHead>
@@ -520,7 +535,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                   const live = mitigation.status === "active" || mitigation.status === "escalated" || mitigation.status === "pending"
                   const remaining = Date.parse(mitigation.expires_at) - now
                   const vector = mitigation.vector.replace(/_/g, " ")
-                  const ports = mitigation.dst_ports.length > 0 ? mitigation.dst_ports.join(", ") : "any"
+                  const match = describeMatch(mitigation)
                   const isSelectable = mitigation.status === "active" || mitigation.status === "escalated"
 
                   return (
@@ -550,7 +565,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                           {mitigation.victim_ip}
                         </Link>
                         <span className="mt-0.5 block text-xs text-muted-foreground md:hidden">
-                          {vector} · ports {ports} · created {formatRelative(mitigation.created_at, now)}
+                          {vector} · {match} · created {formatRelative(mitigation.created_at, now)}
                         </span>
                       </TableCell>
                       <TableCell className="order-2 justify-self-end p-0 md:px-3 md:py-2">
@@ -563,7 +578,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                         <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} />
                       </TableCell>
                       <TableCell className="hidden text-muted-foreground md:table-cell">{vector}</TableCell>
-                      <TableCell className="hidden font-mono text-muted-foreground md:table-cell">{ports}</TableCell>
+                      <TableCell className="hidden max-w-56 whitespace-normal break-words text-muted-foreground md:table-cell">{match}</TableCell>
                       <TableCell className="hidden text-muted-foreground tabular-nums md:table-cell">
                         <time dateTime={mitigation.created_at} title={formatUtc(mitigation.created_at, now)}>
                           {formatRelative(mitigation.created_at, now)}
@@ -772,6 +787,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
       </AlertDialog>
 
       <MitigateNowDialog open={mitigateNowOpen} onOpenChange={setMitigateNowOpen} />
+      {permissions.canWithdraw && <FlowSpecRuleDialog open={ruleOpen} onOpenChange={setRuleOpen} />}
       {permissions.isAdmin && <BlackholeDialog open={blackholeOpen} onOpenChange={setBlackholeOpen} />}
     </div>
   )

@@ -73,10 +73,10 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::db::{ListCursor, ListParams, MitigationCursor, MitigationListParams};
 use crate::domain::{
-    ActionParams, ActionType, AttackEvent, AttackEventInput, FlowSpecAction, MatchCriteria,
-    Mitigation, MitigationIntent, MitigationRoute, MitigationStatus, execute_withdrawal,
-    find_mitigation_owner, mitigation_rule, request_withdrawal, validate_confidence,
-    validate_top_src_ports,
+    ActionParams, ActionType, AttackEvent, AttackEventInput, FlowSpecAction, FragmentMatch,
+    MatchCriteria, Mitigation, MitigationIntent, MitigationRoute, MitigationStatus,
+    PacketLengthRange, execute_withdrawal, find_mitigation_owner, mitigation_rule,
+    request_withdrawal, validate_confidence, validate_top_src_ports,
 };
 use crate::error::{GuardrailError, PrefixdError};
 use crate::guardrails::Guardrails;
@@ -268,6 +268,13 @@ pub struct MitigationResponse {
     pub protocol: Option<u8>,
     /// Destination ports
     pub dst_ports: Vec<u16>,
+    /// UDP source ports (ADR 028), sorted and deduplicated; empty when not matched
+    #[schema(example = json!([123, 389]))]
+    pub src_ports: Vec<u16>,
+    /// `non_first` when the rule matches non-first IP fragments; otherwise null
+    pub fragment: Option<FragmentMatch>,
+    /// Inclusive total IP packet length range; otherwise null
+    pub packet_length: Option<PacketLengthRange>,
     /// When the mitigation was created
     pub created_at: String,
     /// When the mitigation was last updated
@@ -349,6 +356,9 @@ impl From<&Mitigation> for MitigationResponse {
             dst_prefix: m.match_criteria.dst_prefix.clone(),
             protocol: m.match_criteria.protocol,
             dst_ports: m.match_criteria.dst_ports.clone(),
+            src_ports: crate::domain::canonical_ports(&m.match_criteria.src_ports),
+            fragment: m.match_criteria.fragment,
+            packet_length: m.match_criteria.packet_length,
             created_at: m.created_at.to_rfc3339(),
             updated_at: m.updated_at.to_rfc3339(),
             expires_at: m.expires_at.to_rfc3339(),
@@ -493,6 +503,21 @@ pub struct CreateMitigationRequest {
     protocol: Option<String>,
     #[serde(default)]
     dst_ports: Vec<u16>,
+    /// UDP source ports (ADR 028), stored sorted and deduplicated; empty means absent.
+    /// Needs protocol `udp`, never shares a rule with `fragment`, and is capped by
+    /// `guardrails.max_ports` separately from `dst_ports`. Discard and police only.
+    #[schema(example = json!([123, 389]))]
+    #[serde(default)]
+    src_ports: Vec<u16>,
+    /// `non_first` matches non-first IP fragments (IsF). Needs protocol `udp`, no
+    /// `src_ports`, and `guardrails.allow_fragment_match`. Discard and police only.
+    #[serde(default)]
+    fragment: Option<FragmentMatch>,
+    /// Inclusive total IP packet length. Needs `src_ports`, a `min` above the IP plus
+    /// UDP header (28 for IPv4, 48 for IPv6), `min <= max`, and
+    /// `guardrails.allow_packet_length_match`. Discard and police only.
+    #[serde(default)]
+    packet_length: Option<PacketLengthRange>,
     /// discard, police, or blackhole. A blackhole drops all traffic to the victim
     /// and requires the Admin role, a nonempty reason and `confirm_victim_ip`.
     action: String,
@@ -1769,10 +1794,10 @@ pub async fn get_mitigation(
     responses(
         (status = 201, description = "Mitigation intent created", body = MitigationResponse),
         (status = 202, description = "Intent created; announcement unconfirmed for this request", body = MitigationResponse),
-        (status = 400, description = "Invalid input, including an unsupported action/rate, protocol/address-family mismatch, or a blackhole whose confirm_victim_ip differs from victim_ip"),
+        (status = 400, description = "Invalid input, including an unsupported action/rate, protocol/address-family mismatch, a match component the selected speaker cannot encode, or a blackhole whose confirm_victim_ip differs from victim_ip or that carries match fields"),
         (status = 403, description = "A blackhole requires the Admin role; bearer tokens map to Operator"),
         (status = 409, description = "Conflicting owner, pending withdrawal, or an untracked local blackhole route at the prefix"),
-        (status = 422, description = "Guardrail rejection, including disabled blackholes and blackhole victim, TTL and quota checks"),
+        (status = 422, description = "Guardrail rejection, including ADR 028 match invariants, the fragment and packet-length opt-ins, max_ports per port list, disabled blackholes and blackhole victim, TTL and quota checks"),
     )
 )]
 pub async fn create_mitigation(
@@ -1880,7 +1905,9 @@ pub async fn create_mitigation(
             dst_prefix: format!("{}/{}", req.victim_ip, prefix_len),
             protocol,
             dst_ports: req.dst_ports,
-            ..Default::default()
+            src_ports: crate::domain::canonical_ports(&req.src_ports),
+            fragment: req.fragment,
+            packet_length: req.packet_length,
         },
         action_type,
         action_params: ActionParams {
@@ -2032,10 +2059,15 @@ async fn create_blackhole(
         Some("a blackhole requires a reason")
     } else if !matches!(req.protocol.as_deref(), None | Some("" | "any"))
         || !req.dst_ports.is_empty()
+        || !req.src_ports.is_empty()
+        || req.fragment.is_some()
+        || req.packet_length.is_some()
         || req.rate_bps.is_some()
         || req.expires_at_cap.is_some()
     {
-        Some("a blackhole takes no protocol, dst_ports, rate_bps or expires_at_cap")
+        Some(
+            "a blackhole takes no protocol, dst_ports, src_ports, fragment, packet_length, rate_bps or expires_at_cap",
+        )
     } else {
         None
     };

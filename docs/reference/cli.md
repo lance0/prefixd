@@ -150,6 +150,26 @@ prefixdctl mitigations get <id>
 # Created:     2026-01-18T10:30:00Z
 ```
 
+`list` ends each row with a `MATCH` column, and `get` prints the same summary
+on its `Match:` line: the protocol, then any source ports, destination ports,
+non-first fragments and packet length
+([ADR 028](../adr/028-amplification-matches.md)). For example:
+
+```bash
+prefixdctl mitigations list --status active
+
+# Illustrative MATCH values:
+#   udp src 123,389               source ports from a reflection attack
+#   udp non-first fragments       the fragment tail of the same attack
+#   udp src 11211 len 1000-65535  source port with a packet-length range
+#   tcp dst 80,443                destination ports
+#   any                           every protocol
+#   all traffic                   a blackhole
+```
+
+`-f json` output includes `protocol`, `dst_ports`, `src_ports`, `fragment` and
+`packet_length` as the API returns them.
+
 A blackhole ([ADR 027](../adr/027-blackhole-mitigations.md)) shows
 `blackhole` in the `ACTION` column of `list`, and `get` adds its saved route:
 

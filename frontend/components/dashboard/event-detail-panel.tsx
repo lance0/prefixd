@@ -59,6 +59,8 @@ export function EventDetailPanel({ event, onClose }: EventDetailPanelProps) {
   }
 
   const ports = parsePorts(event.top_dst_ports_json)
+  // null: the detector sent no source ports; "[]": it sent an empty list.
+  const srcPorts = event.top_src_ports_json == null ? null : parsePorts(event.top_src_ports_json)
 
   return (
     <motion.div
@@ -136,6 +138,12 @@ export function EventDetailPanel({ event, onClose }: EventDetailPanelProps) {
               <Field label="Top destination ports">
                 <span className="font-mono">{ports.length > 0 ? ports.join(", ") : MISSING}</span>
               </Field>
+              {srcPorts !== null && (
+                <Field label="Top source ports" className="col-span-2">
+                  <span className="font-mono">{srcPorts.length > 0 ? srcPorts.join(", ") : "none reported"}</span>
+                  <span className="block text-xs text-muted-foreground">In detector rank order. Playbook rules with src_ports: from_event keep only reflector-library ports.</span>
+                </Field>
+              )}
             </FieldList>
           </CardContent>
         </Card>

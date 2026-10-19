@@ -2,8 +2,11 @@
 
 ## Status
 
-Accepted 2026-10-19, with the owner decisions recorded below. Nothing in this
-ADR is implemented yet. Extends
+Accepted 2026-10-19, with the owner decisions recorded below. Slices 1 to 6
+are implemented: the match model and identity, speaker encoding and
+capability, guardrails, the vector and multi-rule policy, detector adapters,
+and operator surfaces (manual API fields, dashboard, playbook editors and CLI).
+Slice 7, the FRR qualification receipt, is not done yet. Extends
 [ADR 012](012-playbook-policy-engine.md),
 [ADR 019](019-signal-adapter-architecture.md) and
 [ADR 025](025-pluggable-speaker-backends.md). It follows the identity

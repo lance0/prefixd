@@ -98,13 +98,35 @@ encode a rule such as "UDP except port 53".
 | Vector | Automatic protocol |
 | --- | --- |
 | `udp_flood` | UDP (17) |
-| `udp_amplification` | UDP (17), with reflector source ports from the event |
+| `udp_amplification` | UDP (17), with reflector source ports from the event; playbook `rules` narrow it by source port, fragment and length |
 | `syn_flood`, `ack_flood` | TCP (6) |
 | `icmp_flood` | ICMP (1) for IPv4, ICMPv6 (58) for IPv6 |
 | `unknown` | No protocol constraint |
 
 The selected playbook determines the action; a vector name does not imply a
 built-in response. Detector-specific vector names need adapter normalization.
+
+### Amplification-Aware Matches
+
+[ADR 028](docs/adr/028-amplification-matches.md) narrows a reflection attack
+to the abused service instead of all UDP to the victim:
+
+- **Source ports** - An equality list of UDP source ports, such as 123 (NTP)
+  and 389 (CLDAP). `from_event` takes the detector's ports intersected with a
+  configurable reflector-port library.
+- **Non-first fragments** - The fragment tail that port rules cannot match.
+  Needs `guardrails.allow_fragment_match`.
+- **Packet length** - One inclusive range, only together with source ports.
+  Needs `guardrails.allow_packet_length_match`.
+- **Multi-rule steps** - A `udp_amplification` playbook step emits several
+  single-rule mitigations, each admitted, extended and withdrawn on its own.
+- **Manual rules** - `POST /v1/mitigations` and the dashboard's Rule form take
+  the same fields, with the same invariants and guardrails.
+- **Visibility** - The dashboard, API, WebSocket messages and `prefixdctl`
+  show each rule's source ports, fragment and packet-length matches.
+
+Both bundled speakers encode all three components. Router support varies, and
+no router qualification receipt exists for them yet.
 
 ---
 
@@ -133,8 +155,8 @@ Safety limits that prevent accidental broad impact.
 
 ### Port Limits
 
-- **Max ports per rule** - Default 8 (router memory protection)
-- **Port matching** - Lists of discrete destination-port equalities, not ranges
+- **Max ports per rule** - Default 8 per port list (router memory protection)
+- **Port matching** - Lists of discrete destination- and source-port equalities, not ranges
 
 ### Example Configuration
 
@@ -438,11 +460,12 @@ Real-time visibility into mitigation state:
 - **Overview** - Active mitigations, BGP session status, quota usage, 24h activity chart
 - **Mitigations** - List with filtering, sorting, pagination, inline withdraw, bulk withdraw (multi-select), CSV export
 - **Mitigate Now** - Operator modal (`n` shortcut, command palette action) posts policy-validated ban events
+- **Rule** - Operator form for one manual FlowSpec rule, including source ports, non-first fragments and packet length, with client checks that name the guardrail
 - **Events** - Attack event history with CSV export
 - **IP History** - Unified timeline per IP (events + mitigations + customer context), with incident report generation
 - **Audit Log** - Recorded operation history with actor attribution, CSV export
 - **Incident Reports** - Generate markdown reports from mitigation detail or IP history pages (`GET /v1/reports/incident`). Summary, timeline, peak traffic, audit trail. Copy to clipboard or download .md
-- **Config** - Settings viewer, playbook editor (form + YAML), alerting editor, hot-reload controls
+- **Config** - Settings viewer, playbook editor (form + YAML), alerting editor, hot-reload controls. The YAML view edits `rules` steps losslessly; the form shows them read-only and keeps them unchanged
 - **Inventory** - Searchable customer/service/IP browser
 - **Admin** - User management, safelist CRUD, system health (tabbed layout)
 - **Embedded Charts** - 24h area chart on overview (PostgreSQL-backed timeseries with gap-filling)
@@ -641,6 +664,6 @@ prefixd is focused on FlowSpec policy automation. These are explicitly out of sc
 - **L7/WAF analysis** - Focus is L3/L4 volumetric attacks
 - **Detection algorithms** - Use existing detectors (FastNetMon, etc.)
 - **Tbps-scale scrubbing** - Requires upstream/scrubber integration
-- **Source-based filtering** - Disabled by default (too dangerous)
+- **Source-prefix filtering** - Not supported: spoofed sources would let an attacker choose what is blocked. Amplification rules match UDP source *ports* only
 
 See [ROADMAP](ROADMAP.md) for planned features.

@@ -431,6 +431,9 @@ a corrupt lookahead row; it is never silently omitted or reported as end of hist
       "dst_prefix": "203.0.113.10/32",
       "protocol": 17,
       "dst_ports": [53],
+      "src_ports": [],
+      "fragment": null,
+      "packet_length": null,
       "created_at": "2026-01-18T10:30:00Z",
       "updated_at": "2026-01-18T10:30:00Z",
       "expires_at": "2026-01-18T10:32:00Z",
@@ -453,6 +456,16 @@ a corrupt lookahead row; it is never silently omitted or reported as end of hist
 `action_type` is `discard`, `police` or `blackhole`. A blackhole also carries
 the optional `blackhole` object described under
 [manual blackhole](#manual-blackhole); FlowSpec rows omit it.
+
+`src_ports`, `fragment` and `packet_length` are the
+[ADR 028](../adr/028-amplification-matches.md) match components, in canonical
+form. `src_ports` is a sorted, deduplicated list of UDP source ports (`[]` when
+the rule does not match source ports). `fragment` is `"non_first"` for a rule
+that matches non-first IP fragments, otherwise `null`. `packet_length` is an
+inclusive total IP length range such as `{"min": 1000, "max": 65535}`, otherwise
+`null`. The three fields are present in every mitigation response and WebSocket
+message; controllers before this release omit them, which means none of the
+components.
 
 `origin_mode` records the operation mode that admitted the mitigation:
 `dry-run` for a simulation that prefixd never announced, or `enforced`. It is
@@ -485,8 +498,8 @@ Content-Type: application/json
 ```
 
 Directly create a mitigation with the exact parameters provided, skipping playbook
-evaluation. The dashboard's "Mitigate Now" form instead submits an attack event
-through `POST /v1/events`, which applies playbooks.
+evaluation. The dashboard's "Rule" form posts here. Its "Mitigate Now" form
+instead submits an attack event through `POST /v1/events`, which applies playbooks.
 
 **Request:**
 
@@ -512,6 +525,9 @@ through `POST /v1/events`, which applies playbooks.
 | `victim_ip` | string | yes | IPv4 or IPv6 host address to protect (`/32` or `/128` scope) |
 | `protocol` | string | conditional | Required for `"discard"` and `"police"`: `"udp"`, `"tcp"`, `"icmp"` (IPv4 protocol 1), `"icmpv6"` (IPv6 protocol 58), or `"any"`; `""` also selects any protocol. Omit for `"blackhole"` |
 | `dst_ports` | array | no | Destination ports (default `[]`) |
+| `src_ports` | array | no | UDP source ports (default `[]`, which means not matched). Discard and police only; see [amplification matches](#amplification-matches) |
+| `fragment` | string | no | `"non_first"` matches non-first IP fragments. Discard and police only |
+| `packet_length` | object | no | `{"min": N, "max": M}`, an inclusive total IP packet length. Discard and police only |
 | `action` | string | yes | `"discard"`, `"police"` or `"blackhole"` (Admin only, see [manual blackhole](#manual-blackhole)) |
 | `confirm_victim_ip` | string | conditional | Required for `"blackhole"`: must exactly equal `victim_ip` |
 | `rate_bps` | integer | conditional | Positive, exactly representable traffic rate for `"police"`; omit or use `null` for `"discard"` |
@@ -553,6 +569,47 @@ Remaining time is never rounded upward; the ordinary TTL guardrails still apply.
 The cap applies to initial creation only. Subsequent detector events can extend
 the stored expiry, so pause all creation and extension inputs during maintenance.
 
+#### Amplification matches
+
+`src_ports`, `fragment` and `packet_length` narrow a FlowSpec rule to one part
+of a reflection attack ([ADR 028](../adr/028-amplification-matches.md)). They
+pass the same checks as `udp_amplification` playbook rules, in `dry-run` and
+`enforced` modes alike, before anything is saved:
+
+- All three need `"protocol": "udp"`.
+- `src_ports` and `fragment` never share a rule: port matches never match a
+  non-first fragment.
+- `packet_length` needs `src_ports`, and `min` must be above the IP plus UDP
+  header (28 bytes for IPv4, 48 for IPv6) with `min <= max <= 65535`.
+- `src_ports` is capped by `guardrails.max_ports` separately from `dst_ports`.
+  Duplicate ports count once.
+- `fragment` needs `guardrails.allow_fragment_match: true`, and `packet_length`
+  needs `guardrails.allow_packet_length_match: true`.
+
+A refusal returns `422` with the reason, for example
+`{"error": "guardrail violation: fragment matching not allowed (guardrails.allow_fragment_match=false)"}`,
+and increments `prefixd_guardrail_rejections_total` with `reason`
+`InvalidMatch`, `TooManySourcePorts`, `FragmentMatchNotAllowed` or
+`PacketLengthMatchNotAllowed`. A component the selected speaker cannot encode
+returns `400` (`the selected speaker cannot encode the source port match`).
+Both bundled speakers encode all three; router support varies, so qualify your
+platform ([vendor matrix](vendors.md)). The response echoes the canonical form:
+
+```json
+{
+  "reason": "NTP and CLDAP reflection",
+  "victim_ip": "203.0.113.10",
+  "protocol": "udp",
+  "src_ports": [389, 123, 123],
+  "action": "discard",
+  "ttl_seconds": 300
+}
+```
+
+returns `201` with `"src_ports": [123, 389]`, `"fragment": null` and
+`"packet_length": null`. A blackhole takes none of these fields; sending one
+returns `400`.
+
 **Response (201 Created):**
 
 Returns the full mitigation object (same shape as [Get Mitigation](#get-mitigation)).
@@ -574,11 +631,11 @@ TTL while the controller is stopped.
 
 | Status | Reason |
 |--------|--------|
-| 400 | Invalid request (bad IP, invalid protocol or protocol/address-family mismatch, missing/zero/inexact police rate, discard with a rate, blackhole confirmation mismatch, etc.) |
+| 400 | Invalid request (bad IP, invalid protocol or protocol/address-family mismatch, missing/zero/inexact police rate, discard with a rate, a match component the speaker cannot encode, blackhole confirmation mismatch or match fields, etc.) |
 | 401 | Authentication required |
 | 403 | A blackhole was requested without the Admin role, including every bearer token |
 | 409 | Scope already has an active canonical owner or pending withdrawal, or an untracked local route holds a blackhole's prefix |
-| 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length, blackhole disabled, victim, TTL and quota checks, etc.) |
+| 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length, amplification match invariants and opt-ins, blackhole disabled, victim, TTL and quota checks, etc.) |
 
 Canonical ownership ignores equivalent IPv6 spelling and duplicate destination
 ports. A duplicate manual request is rejected before speaker mutation, preserving
@@ -599,7 +656,8 @@ than FlowSpec:
   character for character, and `reason` must be nonempty. Otherwise the request
   returns `400` without saving a row or audit entry.
 - **Host route only.** Omit `protocol` (or send `"any"` or `""`),
-  `dst_ports`, `rate_bps` and `expires_at_cap`; any of them returns `400`. The
+  `dst_ports`, `src_ports`, `fragment`, `packet_length`, `rate_bps` and
+  `expires_at_cap`; any of them returns `400`. The
   route is the victim's `/32` or `/128`.
 - **Guardrails.** `blackhole.enabled` must be true, the victim must be owned in
   inventory and pass the [blackhole victim checks](configuration.md#blackhole),
@@ -2039,8 +2097,12 @@ Content-Type: application/json
 
 **Validation rules:**
 - Unique playbook names (max 128 UTF-8 bytes)
-- Valid vector (`udp_flood`, `syn_flood`, `ack_flood`, `icmp_flood`, `unknown`)
+- Valid vector (`udp_flood`, `udp_amplification`, `syn_flood`, `ack_flood`, `icmp_flood`, `unknown`)
 - At least one step per playbook
+- Each step has one `action` (`police`, `discard` or `blackhole`) or a `rules`
+  list, never both. `rules` steps are valid only in `udp_amplification`
+  playbooks ([multi-rule steps](configuration.md#multi-rule-steps-udp-amplification));
+  [blackhole steps](configuration.md#blackhole-steps) are not
 - `police` steps require `rate_bps > 0` exactly representable as an `f32` bytes/second traffic rate
 - `discard` steps must omit `rate_bps` or set it to `null`
 - `ttl_seconds` must be 1-86400
@@ -2054,6 +2116,10 @@ Content-Type: application/json
   "errors": ["playbook[0] (\"bad\") step[0]: action 'police' requires rate_bps > 0"]
 }
 ```
+
+A body that does not decode, such as an unknown key in a `rules` entry, also
+returns `400` with the decoder's reason as the only entry in `errors`. The
+dashboard's playbook editors show these entries verbatim.
 
 ### Alerting Config
 
