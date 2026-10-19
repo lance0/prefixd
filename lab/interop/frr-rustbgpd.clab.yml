@@ -14,9 +14,6 @@ mgmt:
   ipv4-subnet: 172.31.231.0/24
 
 topology:
-  # run-frr.sh sets this from its own CPU affinity, so `taskset` pins the lab.
-  defaults:
-    cpu-set: ${PREFIXD_INTEROP_CPU_SET}
   nodes:
     postgres:
       kind: linux

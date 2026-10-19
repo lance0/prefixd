@@ -12,7 +12,7 @@ other router.
 | Item | Value |
 | --- | --- |
 | Run | 2026-10-19T21:25:48Z, local, Linux 7.0.0-30-generic, containerlab 0.74.3, lab nodes pinned to eight CPUs |
-| prefixd | 0.20.0, lab commit `de89d838bc4b`, local image `sha256:7cd08af4c52db22364c99592370d2bf109ccff2e785e69c1873770f6ae7e6d64` built from main `7ee9413` sources |
+| prefixd | 0.20.0, local image `sha256:7cd08af4c52db22364c99592370d2bf109ccff2e785e69c1873770f6ae7e6d64` built from main `7ee9413` sources |
 | Speaker | rustbgpd 0.78.0, `ghcr.io/lance0/rustbgpd:0.78.0@sha256:1082f37a562e8c5b3728b24294a40748559c8d9afa9c68688d4b934a4637d9c7` |
 | Router | FRR 10.7.1, `quay.io/frrouting/frr:10.7.1@sha256:e995beaa50fdc9edb35eadcfefa29b7f062cc06f2b812613789b68fa541554d2` |
 | Topology | [`lab/interop/frr-rustbgpd.clab.yml`](../../../lab/interop/frr-rustbgpd.clab.yml): one eBGP session over IPv4 (speaker AS 65010 at 10.0.0.1, FRR AS 65002 at 10.0.0.2) carrying IPv4/IPv6 FlowSpec and IPv4/IPv6 unicast |
@@ -39,6 +39,9 @@ Anything else is **other**.
 ## Results
 
 All eight steps passed. The lab ran in 86 s, after a 212 s pinned image build.
+A confirmation run at 22:01:53Z, with the same image, the final harness and
+containers pinned by `docker update`, passed all eight steps with the same
+states in 87 s.
 
 | Claim | IPv4 | IPv6 | Evidence |
 | --- | --- | --- | --- |
@@ -64,9 +67,9 @@ anticipates. After `docker start`, the driver recorded each state change:
 Once the new session's End-of-RIB arrived, FRR flushed the stale paths. Until
 prefixd's reconciliation (5 s interval in the lab) re-added the routes, both
 host routes were briefly not installed as discard. The window was under one
-second in this run. An earlier run of the same scenario saw both routes absent
-from 1.3 s to 2.9 s after start. The window depends on when the reconciliation
-tick lands. How long FRR retains stale routes while the speaker stays down is
+second in this run. Two other passing runs of the same scenario saw both
+routes absent for about 1.6 s (from 1.3 s to 2.9 s and from 1.1 s to 2.7 s
+after start). The window depends on when the reconciliation tick lands. How long FRR retains stale routes while the speaker stays down is
 bounded by the Graceful Restart timers and was not measured here.
 
 ### Controller stopped (known gap)

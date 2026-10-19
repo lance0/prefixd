@@ -10,7 +10,7 @@
 # (`just interop-frr` builds it). CLAB selects the containerlab command; CI uses
 # "sudo containerlab". The dated receipt lands in target/interop/ unless
 # PREFIXD_INTEROP_RECEIPTS names another directory. Lab containers are pinned to
-# PREFIXD_INTEROP_CPU_SET, which defaults to this script's own CPU affinity.
+# this script's CPU affinity, so `taskset` limits the whole lab.
 #
 # Lifecycle (destroy, pre-pull with retry, deploy, test, always destroy) is
 # adapted from rustbgpd's .github/actions/run-interop-test, without its retry:
@@ -31,8 +31,6 @@ run="lab/interop/.run/${lab}"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 suffix="${scenario#flowspec}"
 receipt="${PREFIXD_INTEROP_RECEIPTS:-target/interop}/frr-${speaker}${suffix:+-$suffix}-${stamp}"
-PREFIXD_INTEROP_CPU_SET="${PREFIXD_INTEROP_CPU_SET:-$(taskset -pc $$ | sed 's/.*: //')}"
-export PREFIXD_INTEROP_CPU_SET
 node() { echo "clab-${lab}-$1"; }
 
 docker image inspect prefixd:interop >/dev/null \
@@ -105,6 +103,10 @@ for image in $(awk '$1 == "image:" { print $2 }' "$topology" | sort -u); do
 done
 
 $clab deploy -t "$topology"
+# Containers do not inherit this script's affinity, and `sudo containerlab`
+# drops the environment, so pin them here rather than in the topology.
+cpus="$(taskset -pc $$ | sed 's/.*: //')"
+docker ps -q --filter "label=containerlab=${lab}" | xargs docker update --cpuset-cpus "$cpus" >/dev/null
 
 for _ in $(seq 60); do
     docker exec "$(node postgres)" pg_isready -q -h 127.0.0.1 -U prefixd && break
