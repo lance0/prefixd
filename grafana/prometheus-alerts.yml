@@ -29,6 +29,10 @@ groups:
 
       # The blackhole count at the last moment a controller was active, once no
       # controller is up and active. The gauge counts database state, not routes.
+      # The blackhole series vanishes rather than reading 0 when the last one
+      # ends, so a plain `last_over_time(...) > 0` lookback would also fire for
+      # blackholes that ended hours before the outage; comparing timestamps
+      # does not. The 3d lookback outlasts a weekend outage.
       - alert: PrefixdBlackholesWhileDegraded
         expr: |
           (
@@ -49,4 +53,8 @@ groups:
           description: >-
             prefixd had active blackholes when its last active controller
             stopped. They stay announced until prefixd returns or an operator
-            withdraws them on the speaker.
+            withdraws them on the speaker. Restart prefixd: it expires overdue
+            blackholes, and startup reconciliation removes routes left by
+            terminal rows. If you withdraw by hand on the speaker, also
+            withdraw in prefixd once it returns, or reconciliation re-announces
+            blackholes whose TTL has not passed.

@@ -193,6 +193,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `grafana/prometheus-alerts.yml`, loaded by the Compose Prometheus, adds
   `PrefixdDown`, `PrefixdNotReady` and `PrefixdBlackholesWhileDegraded`, with
   promtool unit tests in `grafana/prometheus-alerts.test.yml`.
+  `PrefixdBlackholesWhileDegraded` carries the recovery steps: restart
+  prefixd, or withdraw on the speaker and then in prefixd.
 
 - `scripts/prefixd-fastnetmon.sh` retries a ban `POST /v1/events` with the same
   event ID on a connection error or `503`, up to `BAN_POST_ATTEMPTS` (default 3)

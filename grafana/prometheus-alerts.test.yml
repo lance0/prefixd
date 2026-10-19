@@ -25,7 +25,7 @@ tests:
           - exp_labels: {severity: critical, job: prefixd}
             exp_annotations:
               summary: "Blackholes may outlive an inactive prefixd"
-              description: "prefixd had active blackholes when its last active controller stopped. They stay announced until prefixd returns or an operator withdraws them on the speaker."
+              description: "prefixd had active blackholes when its last active controller stopped. They stay announced until prefixd returns or an operator withdraws them on the speaker. Restart prefixd: it expires overdue blackholes, and startup reconciliation removes routes left by terminal rows. If you withdraw by hand on the speaker, also withdraw in prefixd once it returns, or reconciliation re-announces blackholes whose TTL has not passed."
       - eval_time: 20m
         alertname: PrefixdNotReady
         exp_alerts: []
@@ -65,7 +65,36 @@ tests:
           - exp_labels: {severity: critical, job: prefixd}
             exp_annotations:
               summary: "Blackholes may outlive an inactive prefixd"
-              description: "prefixd had active blackholes when its last active controller stopped. They stay announced until prefixd returns or an operator withdraws them on the speaker."
+              description: "prefixd had active blackholes when its last active controller stopped. They stay announced until prefixd returns or an operator withdraws them on the speaker. Restart prefixd: it expires overdue blackholes, and startup reconciliation removes routes left by terminal rows. If you withdraw by hand on the speaker, also withdraw in prefixd once it returns, or reconciliation re-announces blackholes whose TTL has not passed."
+      - eval_time: 20m
+        alertname: PrefixdDown
+        exp_alerts: []
+  # prefixd goes down while the blackhole gauge reads 0: only PrefixdDown fires.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x10 0x20'
+      - series: 'prefixd_controller_fence_active{job="prefixd",instance="a"}'
+        values: '1x10 stale'
+      - series: 'prefixd_mitigations_active{job="prefixd",instance="a",action_type="blackhole",pop="p"}'
+        values: '0x10 stale'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PrefixdBlackholesWhileDegraded
+        exp_alerts: []
+  # Up and active with blackholes: nothing fires.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x30'
+      - series: 'prefixd_controller_fence_active{job="prefixd",instance="a"}'
+        values: '1x30'
+      - series: 'prefixd_mitigations_active{job="prefixd",instance="a",action_type="blackhole",pop="p"}'
+        values: '2x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PrefixdBlackholesWhileDegraded
+        exp_alerts: []
       - eval_time: 20m
         alertname: PrefixdDown
         exp_alerts: []

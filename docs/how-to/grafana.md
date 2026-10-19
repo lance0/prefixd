@@ -109,7 +109,11 @@ holds its POP's fence, so monitor it independently of BGP health:
 
 The blackhole gauge counts database state, not routes on the speaker. Route
 these alerts to whoever can restart prefixd or withdraw a blackhole on the
-speaker. Check the rules and their unit tests with a pinned Prometheus image:
+speaker. Restarting prefixd expires overdue blackholes, and startup
+reconciliation removes routes left behind by terminal rows. A blackhole
+withdrawn by hand on the speaker must also be withdrawn in prefixd once it
+returns, or reconciliation re-announces it until its TTL passes. Check the
+rules and their unit tests with a pinned Prometheus image:
 
 ```bash
 docker run --rm -v "$PWD/grafana:/rules:ro" --entrypoint promtool \
