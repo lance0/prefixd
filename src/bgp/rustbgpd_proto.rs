@@ -87,6 +87,58 @@ mod tests {
     }
 
     #[test]
+    fn blackhole_contract_is_present() {
+        assert_eq!(pb::AddressFamily::Ipv4Unicast as i32, 1);
+        assert_eq!(pb::AddressFamily::Ipv6Unicast as i32, 2);
+
+        // upsert keyed on (prefix, prefix_length, path_id); the reply has no outcome yet
+        let add = pb::AddPathRequest {
+            prefix: "192.0.2.1".into(),
+            prefix_length: 32,
+            next_hop: "192.0.2.66".into(),
+            as_path: Vec::new(),
+            origin: 0,
+            local_pref: None,
+            med: None,
+            communities: vec![0xFFFF_029A],
+            extended_communities: Vec::new(),
+            large_communities: Vec::new(),
+            path_id: 0,
+        };
+        assert_eq!(add.path_id, 0);
+        let _: pb::AddPathResponse = pb::AddPathResponse {};
+
+        // no allow_missing: a missing path is NOT_FOUND
+        let delete = pb::DeletePathRequest {
+            prefix: add.prefix,
+            prefix_length: 32,
+            path_id: 0,
+        };
+        assert_eq!(delete.prefix_length, 32);
+        let _: pb::DeletePathResponse = pb::DeletePathResponse {};
+
+        // "0.0.0.0" selects retained local injections; the view is paged.
+        let list = pb::ListRoutesRequest {
+            neighbor_address: "0.0.0.0".into(),
+            afi_safi: 1,
+            page_size: 100,
+            page_token: String::new(),
+            ..Default::default()
+        };
+        assert_eq!(list.neighbor_address, "0.0.0.0");
+        let page = pb::ListRoutesResponse {
+            routes: Vec::new(),
+            next_page_token: String::new(),
+            total_count: 0,
+            page_version: Some(pb::RoutePageVersion {
+                epoch: 1,
+                generation: 1,
+            }),
+        };
+        assert!(page.next_page_token.is_empty());
+    }
+
+    #[test]
     fn controller_clients_are_generated() {
         use tonic::transport::Channel;
         fn assert_client<T>(_: fn(Channel) -> T) {}

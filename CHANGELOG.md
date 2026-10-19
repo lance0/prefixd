@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The rustbgpd adapter can inject, delete and read back unicast blackhole
+  host routes (ADR 027), and health detail reports
+  `speaker.capabilities.blackhole` and `blackhole_lease`. GoBGP reports the
+  capability as unsupported, and `blackhole_lease` is false for every backend.
+  Nothing creates a blackhole yet.
+
 ### Changed
 
 - Releases publish themselves. Once `ci.yml` passes on the `main` commit that

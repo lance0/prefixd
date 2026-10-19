@@ -3,7 +3,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::{
-    FlowSpecAnnouncer, FlowSpecReader, FlowSpecWriter, PeerObserver, PeerStatus, SessionState,
+    BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer, FlowSpecReader, FlowSpecWriter,
+    PeerObserver, PeerStatus, SessionState,
 };
 use crate::domain::FlowSpecRule;
 use crate::error::Result;
@@ -12,6 +13,7 @@ use crate::error::Result;
 #[derive(Debug, Default)]
 pub struct MockAnnouncer {
     rules: Arc<RwLock<Vec<FlowSpecRule>>>,
+    blackholes: RwLock<Vec<BlackholeRoute>>,
     peers: Vec<PeerStatus>,
 }
 
@@ -19,6 +21,7 @@ impl MockAnnouncer {
     pub fn new() -> Self {
         Self {
             rules: Arc::new(RwLock::new(Vec::new())),
+            blackholes: RwLock::default(),
             peers: vec![PeerStatus {
                 name: "mock-peer".to_string(),
                 address: "127.0.0.1".to_string(),
@@ -30,6 +33,7 @@ impl MockAnnouncer {
     pub fn with_peers(peers: Vec<PeerStatus>) -> Self {
         Self {
             rules: Arc::new(RwLock::new(Vec::new())),
+            blackholes: RwLock::default(),
             peers,
         }
     }
@@ -47,6 +51,9 @@ impl FlowSpecAnnouncer for MockAnnouncer {
         Some(self)
     }
     fn peer_observer(&self) -> Option<&dyn PeerObserver> {
+        Some(self)
+    }
+    fn blackhole(&self) -> Option<&dyn BlackholeSpeaker> {
         Some(self)
     }
 }
@@ -83,6 +90,26 @@ impl FlowSpecReader for MockAnnouncer {
     }
 }
 #[async_trait]
+impl BlackholeSpeaker for MockAnnouncer {
+    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<()> {
+        let mut routes = self.blackholes.write().await;
+        routes.retain(|r| r.prefix() != route.prefix());
+        routes.push(route.clone());
+        Ok(())
+    }
+    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet) -> Result<()> {
+        super::require_host_route(prefix)?;
+        self.blackholes
+            .write()
+            .await
+            .retain(|r| r.prefix() != *prefix);
+        Ok(())
+    }
+    async fn list_blackholes(&self) -> Result<Vec<BlackholeRoute>> {
+        Ok(self.blackholes.read().await.clone())
+    }
+}
+#[async_trait]
 impl PeerObserver for MockAnnouncer {
     async fn session_status(&self) -> Result<Vec<PeerStatus>> {
         Ok(self.peers.clone())
@@ -111,6 +138,30 @@ mod tests {
         assert_eq!(announcer.announced_count().await, 1);
 
         announcer.withdraw(&rule).await.unwrap();
+        assert_eq!(announcer.announced_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn mock_blackhole_upserts_by_prefix_and_withdraws_idempotently() {
+        let announcer = MockAnnouncer::new();
+        let speaker = announcer.blackhole().unwrap();
+        let prefix: ipnet::IpNet = "2001:db8::1/128".parse().unwrap();
+        let next_hop = "2001:db8::66".parse().unwrap();
+        for extra in [vec![], vec![64512 << 16 | 1]] {
+            let route = BlackholeRoute::new(prefix, next_hop, extra, vec![]).unwrap();
+            speaker.announce_blackhole(&route).await.unwrap();
+            assert_eq!(speaker.list_blackholes().await.unwrap(), [route]);
+        }
+        for _ in 0..2 {
+            speaker.withdraw_blackhole(&prefix).await.unwrap();
+        }
+        assert!(speaker.list_blackholes().await.unwrap().is_empty());
+        assert!(
+            speaker
+                .withdraw_blackhole(&"2001:db8::/64".parse().unwrap())
+                .await
+                .is_err()
+        );
         assert_eq!(announcer.announced_count().await, 0);
     }
 }

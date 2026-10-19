@@ -1,6 +1,6 @@
 use super::{
-    DaemonHealth, DaemonHealthObserver, FlowSpecAnnouncer, FlowSpecReader, FlowSpecWriter,
-    PeerObserver, PeerStatus, SessionState, rustbgpd_pb as pb,
+    BlackholeRoute, BlackholeSpeaker, DaemonHealth, DaemonHealthObserver, FlowSpecAnnouncer,
+    FlowSpecReader, FlowSpecWriter, PeerObserver, PeerStatus, SessionState, rustbgpd_pb as pb,
 };
 use crate::{
     config::RustBgpdConfig,
@@ -380,9 +380,88 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
     Ok(rule)
 }
 
+fn encode_blackhole(route: &BlackholeRoute) -> pb::AddPathRequest {
+    // ORIGIN IGP, empty AS_PATH, no LOCAL_PREF or MED, path_id 0 (ADR 027).
+    pb::AddPathRequest {
+        prefix: route.prefix().addr().to_string(),
+        prefix_length: route.prefix().prefix_len().into(),
+        next_hop: route.next_hop().to_string(),
+        origin: 0,
+        communities: route.communities().to_vec(),
+        large_communities: route
+            .large_communities()
+            .iter()
+            .map(|[global, first, second]| format!("{global}:{first}:{second}"))
+            .collect(),
+        path_id: 0,
+        ..Default::default()
+    }
+}
+
+/// Strict: any attribute prefixd never injects fails the whole read.
+fn decode_blackhole(route: pb::Route, family: i32) -> Result<BlackholeRoute> {
+    if route.peer_address != "0.0.0.0"
+        || route.origin != 0
+        || !route.as_path.is_empty()
+        || route.local_pref_attr.is_some()
+        || route.med_attr.is_some()
+        || route.med != 0
+        || !route.extended_communities.is_empty()
+        || route.path_id != 0
+        || route.stale
+        || route.llgr_stale
+        || route.aggregator.is_some()
+        || route.atomic_aggregate
+    {
+        return Err(invalid("unsupported local route attributes"));
+    }
+    let address: std::net::IpAddr = route
+        .prefix
+        .parse()
+        .map_err(|_| invalid("invalid local route prefix"))?;
+    if address.is_ipv4() != (family == pb::AddressFamily::Ipv4Unicast as i32) {
+        return Err(invalid("local route family mismatch"));
+    }
+    let prefix = u8::try_from(route.prefix_length)
+        .ok()
+        .and_then(|length| ipnet::IpNet::new(address, length).ok())
+        .ok_or_else(|| invalid("invalid local route prefix"))?;
+    let next_hop = route
+        .next_hop
+        .parse()
+        .map_err(|_| invalid("invalid local route next hop"))?;
+    let large = route
+        .large_communities
+        .iter()
+        .map(|value| {
+            let parts = value
+                .split(':')
+                .map(str::parse)
+                .collect::<std::result::Result<Vec<u32>, _>>();
+            parts
+                .ok()
+                .and_then(|parts| <[u32; 3]>::try_from(parts).ok())
+                .ok_or_else(|| invalid("invalid local route large community"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let decoded = BlackholeRoute::new(prefix, next_hop, route.communities.clone(), large.clone())
+        .map_err(|_| invalid("local route is not a blackhole host route"))?;
+    // prefixd injects canonical communities including BLACKHOLE; anything else is foreign.
+    if decoded.communities() != route.communities || decoded.large_communities() != large {
+        return Err(invalid("unsupported local route communities"));
+    }
+    Ok(decoded)
+}
+
+/// Explicit, so a daemon default change cannot alter the walk.
+const ROUTE_PAGE_SIZE: u32 = 100;
+
 impl FlowSpecAnnouncer for RustBgpdAnnouncer {
     fn backend(&self) -> &'static str {
         "rustbgpd"
+    }
+    fn blackhole(&self) -> Option<&dyn BlackholeSpeaker> {
+        Some(self)
     }
     fn reader(&self) -> Option<&dyn FlowSpecReader> {
         Some(self)
@@ -488,6 +567,88 @@ impl FlowSpecReader for RustBgpdAnnouncer {
         Ok(rules)
     }
 }
+#[async_trait]
+impl BlackholeSpeaker for RustBgpdAnnouncer {
+    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<()> {
+        let payload = encode_blackhole(route);
+        // AddPathResponse carries no outcome yet: OK is local Adj-RIB-In acceptance only.
+        self.rpc("AddPath", || async {
+            pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                .add_path(self.request(payload.clone()))
+                .await
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet) -> Result<()> {
+        super::require_host_route(prefix)?;
+        let payload = pb::DeletePathRequest {
+            prefix: prefix.addr().to_string(),
+            prefix_length: prefix.prefix_len().into(),
+            path_id: 0,
+        };
+        self.rpc("DeletePath", || {
+            let mut client =
+                pb::injection_service_client::InjectionServiceClient::new(self.channel.clone());
+            let request = self.request(payload.clone());
+            async move {
+                // DeletePath has no allow_missing; NOT_FOUND is its only "absent" reply.
+                match client.delete_path(request).await {
+                    Err(status) if status.code() == Code::NotFound => {
+                        tracing::debug!("rustbgpd blackhole route already absent");
+                        Ok(tonic::Response::new(pb::DeletePathResponse {}))
+                    }
+                    result => result,
+                }
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn list_blackholes(&self) -> Result<Vec<BlackholeRoute>> {
+        let mut routes = vec![];
+        for family in [
+            pb::AddressFamily::Ipv4Unicast as i32,
+            pb::AddressFamily::Ipv6Unicast as i32,
+        ] {
+            let mut page_token = String::new();
+            let mut version = None;
+            // A mutation mid-walk returns ABORTED, which fails the whole read.
+            loop {
+                let response = self
+                    .rpc("ListReceivedRoutes", || async {
+                        pb::rib_service_client::RibServiceClient::new(self.channel.clone())
+                            .list_received_routes(self.request(pb::ListRoutesRequest {
+                                neighbor_address: "0.0.0.0".into(),
+                                afi_safi: family,
+                                page_size: ROUTE_PAGE_SIZE,
+                                page_token: page_token.clone(),
+                                ..Default::default()
+                            }))
+                            .await
+                    })
+                    .await?;
+                if *version.get_or_insert(response.page_version) != response.page_version {
+                    return Err(invalid("local intent changed during the read"));
+                }
+                for route in response.routes {
+                    routes.push(decode_blackhole(route, family)?);
+                }
+                if response.next_page_token.is_empty() {
+                    break;
+                }
+                if response.next_page_token == page_token {
+                    return Err(invalid("local intent read did not advance"));
+                }
+                page_token = response.next_page_token;
+            }
+        }
+        Ok(routes)
+    }
+}
+
 #[async_trait]
 impl DaemonHealthObserver for RustBgpdAnnouncer {
     async fn daemon_health(&self) -> Result<DaemonHealth> {

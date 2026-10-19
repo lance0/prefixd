@@ -1553,7 +1553,13 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
   },
   "speaker": {
     "backend": "rustbgpd",
-    "capabilities": { "rule_reader": true, "peer_observer": true, "daemon_health": true },
+    "capabilities": {
+      "rule_reader": true,
+      "peer_observer": true,
+      "daemon_health": true,
+      "blackhole": true,
+      "blackhole_lease": false
+    },
     "daemon": {
       "status": "observed",
       "version": "<rustbgpd-version>",
@@ -1573,7 +1579,10 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
 
 `speaker` is additive metadata: backend identity plus observation availability.
 Older daemons may omit it. Capabilities do not report recent read success or
-rule delivery. Health performs no rule inventory probe.
+rule delivery. `blackhole` reports the unicast blackhole adapter and
+`blackhole_lease` its owner-scoped injection lease
+([ADR 027](../adr/027-blackhole-mitigations.md)); both are false when absent.
+No API path creates a blackhole yet. Health performs no rule inventory probe.
 
 Top-level `version` and `uptime_seconds` describe prefixd. `speaker.daemon`
 independently reports authenticated speaker process metadata: `observed`, `error`

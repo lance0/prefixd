@@ -21,8 +21,20 @@ failure fails the pass and increments the run error counter; it never becomes
 an empty inventory. Unsupported peer observation skips peer metric updates;
 a failed observation also retains the last successful metric values.
 
+`blackhole()` optionally exposes `BlackholeSpeaker` for unicast RTBH host routes
+([ADR 027](../adr/027-blackhole-mitigations.md)): upsert, idempotent delete and
+complete read-back of retained local intent for both families. Only rustbgpd
+provides it. It injects with unleased `AddPath` (ORIGIN IGP, empty AS_PATH,
+`path_id` 0, BLACKHOLE `65535:666` plus the route's communities), deletes with
+`DeletePath`, where `NOT_FOUND` means absent, and reads
+`ListReceivedRoutes(neighbor 0.0.0.0)` for each unicast family to the last page.
+`ABORTED` mid-walk, any other error or an unexpected attribute fails the whole
+read. GoBGP returns `None`, which is unsupported rather than empty. Nothing in
+the controller calls the capability yet.
+
 Health detail adds `speaker.backend` and availability booleans under
-`speaker.capabilities`: `rule_reader`, `peer_observer` and `daemon_health`. The legacy `gobgp`
+`speaker.capabilities`: `rule_reader`, `peer_observer`, `daemon_health`,
+`blackhole` and `blackhole_lease`. `blackhole_lease` is false for every backend. The legacy `gobgp`
 component reports `unsupported` without an error when peer observation is absent,
 `error` when it fails, and `connected` when it succeeds (even with zero peers).
 `bgp_sessions` remains the same peer-name/state map. Missing optional observation

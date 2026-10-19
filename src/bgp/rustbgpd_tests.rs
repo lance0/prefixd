@@ -763,3 +763,317 @@ async fn initial_connection_bounds_a_stalled_tls_handshake() {
     );
     assert!(result.unwrap().unwrap().is_err());
 }
+
+/// Retained unicast local intent served one route per page, so a family with
+/// several routes needs a complete token walk.
+#[derive(Clone, Default)]
+struct UnicastFake {
+    paths: Arc<Mutex<Vec<pb::AddPathRequest>>>,
+    mode: Arc<AtomicUsize>,
+    pages: Arc<AtomicUsize>,
+}
+
+const ABORT_SECOND_PAGE: usize = 1;
+const DELETE_NOT_FOUND: usize = 2;
+const DELETE_DENIED: usize = 3;
+const DELETE_INTERNAL: usize = 4;
+const LIST_UNIMPLEMENTED: usize = 5;
+const VERSION_CHANGES: usize = 6;
+const REPEATED_TOKEN: usize = 7;
+const ATTRIBUTE_BASE: usize = 100;
+const UNEXPECTED_ATTRIBUTES: usize = 17;
+
+fn same_key(left: &pb::AddPathRequest, prefix: &str, length: u32) -> bool {
+    left.prefix == prefix && left.prefix_length == length
+}
+
+#[tonic::async_trait]
+impl pb::injection_service_server::InjectionService for UnicastFake {
+    async fn add_path(
+        &self,
+        request: Request<pb::AddPathRequest>,
+    ) -> std::result::Result<Response<pb::AddPathResponse>, Status> {
+        auth(&request)?;
+        let request = request.into_inner();
+        assert_eq!((request.origin, request.path_id), (0, 0));
+        assert!(request.as_path.is_empty() && request.extended_communities.is_empty());
+        assert!(request.local_pref.is_none() && request.med.is_none());
+        assert!(
+            request
+                .communities
+                .contains(&crate::bgp::BLACKHOLE_COMMUNITY)
+        );
+        let mut paths = self.paths.lock().unwrap();
+        paths.retain(|old| !same_key(old, &request.prefix, request.prefix_length));
+        paths.push(request);
+        Ok(Response::new(pb::AddPathResponse {}))
+    }
+
+    async fn delete_path(
+        &self,
+        request: Request<pb::DeletePathRequest>,
+    ) -> std::result::Result<Response<pb::DeletePathResponse>, Status> {
+        auth(&request)?;
+        let request = request.into_inner();
+        assert_eq!(request.path_id, 0);
+        match self.mode.load(SeqCst) {
+            DELETE_NOT_FOUND => return Err(Status::not_found("absent")),
+            DELETE_DENIED => return Err(Status::permission_denied("denied")),
+            DELETE_INTERNAL => return Err(Status::internal("failed")),
+            _ => {}
+        }
+        let mut paths = self.paths.lock().unwrap();
+        let before = paths.len();
+        paths.retain(|old| !same_key(old, &request.prefix, request.prefix_length));
+        if paths.len() == before {
+            // The released daemon has no allow_missing: a missing path is NOT_FOUND.
+            return Err(Status::not_found("no injected path"));
+        }
+        Ok(Response::new(pb::DeletePathResponse {}))
+    }
+}
+
+#[tonic::async_trait]
+impl pb::rib_service_server::RibService for UnicastFake {
+    async fn list_received_routes(
+        &self,
+        request: Request<pb::ListRoutesRequest>,
+    ) -> std::result::Result<Response<pb::ListRoutesResponse>, Status> {
+        auth(&request)?;
+        let request = request.into_inner();
+        assert_eq!(request.neighbor_address, "0.0.0.0");
+        assert!(request.page_size > 0);
+        self.pages.fetch_add(1, SeqCst);
+        let mode = self.mode.load(SeqCst);
+        if mode == LIST_UNIMPLEMENTED {
+            return Err(Status::unimplemented("older daemon"));
+        }
+        let index: usize = if request.page_token.is_empty() {
+            0
+        } else if mode == ABORT_SECOND_PAGE {
+            return Err(Status::aborted("route table changed"));
+        } else {
+            request.page_token[5..].parse().unwrap()
+        };
+        let ipv4 = request.afi_safi == pb::AddressFamily::Ipv4Unicast as i32;
+        let family: Vec<_> = self
+            .paths
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.prefix.contains('.') == ipv4)
+            .cloned()
+            .collect();
+        let routes = family
+            .get(index)
+            .map(|path| {
+                let mut route = pb::Route {
+                    prefix: path.prefix.clone(),
+                    prefix_length: path.prefix_length,
+                    next_hop: path.next_hop.clone(),
+                    peer_address: "0.0.0.0".into(),
+                    local_pref: 100,
+                    communities: path.communities.clone(),
+                    large_communities: path.large_communities.clone(),
+                    validation_state: "not_found".into(),
+                    aspa_state: "unknown".into(),
+                    best: true,
+                    ..Default::default()
+                };
+                if let Some(attribute) = mode.checked_sub(ATTRIBUTE_BASE) {
+                    unexpected_attribute(&mut route, attribute);
+                }
+                route
+            })
+            .into_iter()
+            .collect();
+        let next = index + 1;
+        let next_page_token = match mode {
+            _ if next >= family.len() => String::new(),
+            REPEATED_TOKEN => "page-1".into(),
+            _ => format!("page-{next}"),
+        };
+        Ok(Response::new(pb::ListRoutesResponse {
+            routes,
+            next_page_token,
+            total_count: family.len() as u64,
+            page_version: Some(pb::RoutePageVersion {
+                epoch: 1,
+                generation: if mode == VERSION_CHANGES {
+                    index as u64
+                } else {
+                    7
+                },
+            }),
+        }))
+    }
+}
+
+fn unexpected_attribute(route: &mut pb::Route, attribute: usize) {
+    let ipv4 = route.prefix.contains('.');
+    match attribute {
+        0 => route.peer_address = "192.0.2.9".into(),
+        1 => route.origin = 2,
+        2 => route.as_path = vec![64512],
+        3 => route.local_pref_attr = Some(100),
+        4 => route.med_attr = Some(0),
+        5 => route.med = 10,
+        6 => route.extended_communities = vec![1],
+        7 => route.path_id = 1,
+        8 => route.stale = true,
+        9 => route.llgr_stale = true,
+        10 => route.atomic_aggregate = true,
+        11 => route
+            .communities
+            .retain(|c| *c != crate::bgp::BLACKHOLE_COMMUNITY),
+        12 => route.communities.reverse(),
+        13 => route.large_communities = vec!["1:2".into()],
+        14 => route.prefix_length = 24,
+        15 => route.prefix = if ipv4 { "2001:db8::9" } else { "192.0.2.9" }.into(),
+        16 => route.next_hop = if ipv4 { "2001:db8::66" } else { "192.0.2.66" }.into(),
+        _ => unreachable!(),
+    }
+}
+
+async fn unicast_speaker() -> (RustBgpdAnnouncer, UnicastFake, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fake = UnicastFake::default();
+    let incoming = futures_util::stream::unfold(listener, |listener| async {
+        Some((listener.accept().await.map(|(stream, _)| stream), listener))
+    });
+    let server = tonic::transport::Server::builder()
+        .add_service(pb::injection_service_server::InjectionServiceServer::new(
+            fake.clone(),
+        ))
+        .add_service(pb::rib_service_server::RibServiceServer::new(fake.clone()))
+        .serve_with_incoming(incoming);
+    let server = tokio::spawn(async move { server.await.unwrap() });
+    let config = RustBgpdConfig {
+        endpoint: format!("http://{address}"),
+        bearer_token_env: "unused".into(),
+        ..Default::default()
+    };
+    let speaker = RustBgpdAnnouncer::connect_with_token(&config, "test-secret")
+        .await
+        .unwrap();
+    (speaker, fake, server)
+}
+
+fn blackhole(prefix: &str, next_hop: &str, extra: u32) -> BlackholeRoute {
+    BlackholeRoute::new(
+        prefix.parse().unwrap(),
+        next_hop.parse().unwrap(),
+        vec![64512 << 16 | extra],
+        vec![[64512, 666, 1]],
+    )
+    .unwrap()
+}
+
+/// Two IPv4 and three IPv6 host routes, served one per page.
+async fn seed_blackholes(speaker: &RustBgpdAnnouncer) -> Vec<BlackholeRoute> {
+    let routes = vec![
+        blackhole("192.0.2.1/32", "192.0.2.66", 1),
+        blackhole("192.0.2.2/32", "192.0.2.66", 1),
+        blackhole("2001:db8::1/128", "2001:db8::66", 1),
+        blackhole("2001:db8::2/128", "2001:db8::66", 1),
+        blackhole("2001:db8::3/128", "2001:db8::66", 1),
+    ];
+    for route in &routes {
+        speaker.announce_blackhole(route).await.unwrap();
+    }
+    routes
+}
+
+#[tokio::test]
+async fn blackhole_read_back_pages_to_completion_in_both_families() {
+    let (speaker, fake, server) = unicast_speaker().await;
+    assert!(speaker.blackhole().is_some());
+    let mut expected = seed_blackholes(&speaker).await;
+    assert_eq!(speaker.list_blackholes().await.unwrap(), expected);
+    assert_eq!(fake.pages.load(SeqCst), 5, "one route per page");
+    // Upsert replaces the attributes of the same host key.
+    let replacement = blackhole("192.0.2.1/32", "192.0.2.67", 2);
+    speaker.announce_blackhole(&replacement).await.unwrap();
+    expected.remove(0);
+    expected.insert(1, replacement);
+    assert_eq!(speaker.list_blackholes().await.unwrap(), expected);
+    for mode in [VERSION_CHANGES, REPEATED_TOKEN] {
+        fake.mode.store(mode, SeqCst);
+        assert!(speaker.list_blackholes().await.is_err());
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn blackhole_read_back_aborted_mid_walk_is_an_error() {
+    let (speaker, fake, server) = unicast_speaker().await;
+    seed_blackholes(&speaker).await;
+    fake.mode.store(ABORT_SECOND_PAGE, SeqCst);
+    assert!(speaker.list_blackholes().await.is_err());
+    // The first page succeeded; ABORTED is not retried and nothing partial is returned.
+    assert_eq!(fake.pages.load(SeqCst), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn blackhole_empty_view_is_success_distinct_from_unsupported_and_failed() {
+    let (speaker, fake, server) = unicast_speaker().await;
+    assert!(speaker.list_blackholes().await.unwrap().is_empty());
+    assert_eq!(fake.pages.load(SeqCst), 2, "one empty page per family");
+    fake.mode.store(LIST_UNIMPLEMENTED, SeqCst);
+    assert!(speaker.list_blackholes().await.is_err());
+    let gobgp = crate::bgp::GoBgpAnnouncer::new("http://127.0.0.1:1".into());
+    assert!(gobgp.blackhole().is_none());
+    server.abort();
+}
+
+#[tokio::test]
+async fn blackhole_unexpected_local_attributes_fail_the_whole_read() {
+    let (speaker, fake, server) = unicast_speaker().await;
+    seed_blackholes(&speaker).await;
+    assert_eq!(speaker.list_blackholes().await.unwrap().len(), 5);
+    for attribute in 0..UNEXPECTED_ATTRIBUTES {
+        fake.mode.store(ATTRIBUTE_BASE + attribute, SeqCst);
+        assert!(
+            speaker.list_blackholes().await.is_err(),
+            "attribute case {attribute} was accepted"
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn blackhole_delete_not_found_is_absent_and_other_codes_are_errors() {
+    let (speaker, fake, server) = unicast_speaker().await;
+    let routes = seed_blackholes(&speaker).await;
+    let v4 = routes[0].prefix();
+    speaker.withdraw_blackhole(&v4).await.unwrap();
+    assert!(
+        !speaker
+            .list_blackholes()
+            .await
+            .unwrap()
+            .iter()
+            .any(|route| route.prefix() == v4)
+    );
+    // The daemon now answers NOT_FOUND for the same key.
+    speaker.withdraw_blackhole(&v4).await.unwrap();
+    fake.mode.store(DELETE_NOT_FOUND, SeqCst);
+    speaker.withdraw_blackhole(&v4).await.unwrap();
+    let v6 = routes[2].prefix();
+    for mode in [DELETE_DENIED, DELETE_INTERNAL] {
+        fake.mode.store(mode, SeqCst);
+        assert!(speaker.withdraw_blackhole(&v6).await.is_err());
+    }
+    fake.mode.store(0, SeqCst);
+    assert_eq!(speaker.list_blackholes().await.unwrap().len(), 4);
+    assert!(
+        speaker
+            .withdraw_blackhole(&"2001:db8::/64".parse().unwrap())
+            .await
+            .is_err()
+    );
+    assert_eq!(speaker.list_blackholes().await.unwrap().len(), 4);
+    server.abort();
+}

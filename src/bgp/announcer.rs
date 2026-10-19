@@ -89,6 +89,100 @@ pub trait DaemonHealthObserver: Send + Sync {
     async fn daemon_health(&self) -> Result<DaemonHealth>;
 }
 
+/// RFC 7999 BLACKHOLE, 65535:666. Every blackhole route carries it.
+pub const BLACKHOLE_COMMUNITY: u32 = 0xFFFF_029A;
+
+/// Unicast RTBH host route as the speaker holds it (ADR 027): an IPv4 `/32` or
+/// IPv6 `/128`, a same-family unicast discard next hop and canonical (sorted,
+/// unique) communities that always include BLACKHOLE.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlackholeRoute {
+    prefix: ipnet::IpNet,
+    next_hop: std::net::IpAddr,
+    communities: Vec<u32>,
+    large_communities: Vec<[u32; 3]>,
+}
+
+impl BlackholeRoute {
+    /// Adds BLACKHOLE and canonicalizes the communities.
+    pub fn new(
+        prefix: ipnet::IpNet,
+        next_hop: std::net::IpAddr,
+        mut communities: Vec<u32>,
+        mut large_communities: Vec<[u32; 3]>,
+    ) -> Result<Self> {
+        let rejected = |message: &str| {
+            Err(crate::error::PrefixdError::InvalidRequest(format!(
+                "blackhole route: {message}"
+            )))
+        };
+        require_host_route(&prefix)?;
+        if prefix.addr().is_ipv4() != next_hop.is_ipv4() {
+            return rejected("next hop family must match the prefix");
+        }
+        let unusable = match next_hop {
+            std::net::IpAddr::V4(ip) => {
+                ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast()
+            }
+            std::net::IpAddr::V6(ip) => ip.is_unspecified() || ip.is_multicast(),
+        };
+        if unusable {
+            return rejected("next hop must be a nonzero unicast address");
+        }
+        communities.push(BLACKHOLE_COMMUNITY);
+        communities.sort_unstable();
+        communities.dedup();
+        large_communities.sort_unstable();
+        large_communities.dedup();
+        Ok(Self {
+            prefix,
+            next_hop,
+            communities,
+            large_communities,
+        })
+    }
+
+    pub fn prefix(&self) -> ipnet::IpNet {
+        self.prefix
+    }
+
+    pub fn next_hop(&self) -> std::net::IpAddr {
+        self.next_hop
+    }
+
+    pub fn communities(&self) -> &[u32] {
+        &self.communities
+    }
+
+    pub fn large_communities(&self) -> &[[u32; 3]] {
+        &self.large_communities
+    }
+}
+
+/// Blackholes are exactly IPv4 `/32` or IPv6 `/128` (ADR 027).
+pub fn require_host_route(prefix: &ipnet::IpNet) -> Result<()> {
+    if prefix.prefix_len() != prefix.max_prefix_len() {
+        return Err(crate::error::PrefixdError::InvalidRequest(
+            "blackhole route: prefix must be an IPv4 /32 or IPv6 /128".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Optional unicast blackhole capability (ADR 027). Reading is mandatory: an
+/// unreadable speaker cannot prove absence. Success is the backend's local RPC
+/// acceptance or retained local intent, never export or router enforcement.
+#[async_trait]
+pub trait BlackholeSpeaker: Send + Sync {
+    /// Upsert keyed on the host prefix; retrying after an ambiguous response is safe.
+    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<()>;
+    /// Idempotent: an absent route is success.
+    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet) -> Result<()>;
+    /// Complete retained local intent for both families. A failed or partial
+    /// read is an error, never an empty or truncated inventory.
+    async fn list_blackholes(&self) -> Result<Vec<BlackholeRoute>>;
+}
+
 /// Selected speaker: writing is required, observation is explicitly optional.
 /// A production write-only backend still needs a durable reconciliation ledger.
 pub trait FlowSpecAnnouncer: FlowSpecWriter {
@@ -105,6 +199,10 @@ pub trait FlowSpecAnnouncer: FlowSpecWriter {
     fn peer_observer(&self) -> Option<&dyn PeerObserver> {
         None
     }
+
+    fn blackhole(&self) -> Option<&dyn BlackholeSpeaker> {
+        None
+    }
 }
 
 /// Observation availability, not the success of a recent read or rule delivery.
@@ -116,6 +214,11 @@ pub struct SpeakerCapabilities {
     pub peer_observer: bool,
     #[serde(default)]
     pub daemon_health: bool,
+    #[serde(default)]
+    pub blackhole: bool,
+    /// Owner-scoped injection lease (ADR 027). No adapter supports it yet.
+    #[serde(default)]
+    pub blackhole_lease: bool,
 }
 
 impl dyn FlowSpecAnnouncer + '_ {
@@ -124,6 +227,8 @@ impl dyn FlowSpecAnnouncer + '_ {
             rule_reader: self.reader().is_some(),
             peer_observer: self.peer_observer().is_some(),
             daemon_health: self.daemon_health_observer().is_some(),
+            blackhole: self.blackhole().is_some(),
+            blackhole_lease: false,
         }
     }
 }
@@ -131,6 +236,56 @@ impl dyn FlowSpecAnnouncer + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blackhole_capability_is_reported_only_by_supporting_backends() {
+        let mock = crate::bgp::MockAnnouncer::new();
+        let gobgp = crate::bgp::GoBgpAnnouncer::new("http://127.0.0.1:1".into());
+        let mock: &dyn FlowSpecAnnouncer = &mock;
+        let gobgp: &dyn FlowSpecAnnouncer = &gobgp;
+        assert!(mock.capabilities().blackhole);
+        // GoBGP is unsupported, which is not an empty blackhole inventory.
+        assert!(gobgp.blackhole().is_none());
+        assert!(!gobgp.capabilities().blackhole);
+        for speaker in [mock, gobgp] {
+            assert!(!speaker.capabilities().blackhole_lease);
+        }
+        let older: SpeakerCapabilities =
+            serde_json::from_str(r#"{"rule_reader":true,"peer_observer":true}"#).unwrap();
+        assert!(!older.blackhole && !older.blackhole_lease && !older.daemon_health);
+    }
+
+    #[test]
+    fn blackhole_route_is_a_canonical_host_route_with_blackhole() {
+        let v4: ipnet::IpNet = "192.0.2.1/32".parse().unwrap();
+        let v6: ipnet::IpNet = "2001:db8::1/128".parse().unwrap();
+        let route = BlackholeRoute::new(
+            v4,
+            "192.0.2.66".parse().unwrap(),
+            vec![7, BLACKHOLE_COMMUNITY, 7],
+            vec![[3, 2, 1], [1, 2, 3], [3, 2, 1]],
+        )
+        .unwrap();
+        assert_eq!(route.communities(), [7, BLACKHOLE_COMMUNITY]);
+        assert_eq!(route.large_communities(), [[1, 2, 3], [3, 2, 1]]);
+        for (prefix, next_hop) in [
+            ("192.0.2.0/24", "192.0.2.66"),
+            ("2001:db8::/64", "2001:db8::66"),
+            ("192.0.2.1/32", "2001:db8::66"),
+            ("2001:db8::1/128", "192.0.2.66"),
+            ("192.0.2.1/32", "0.0.0.0"),
+            ("192.0.2.1/32", "255.255.255.255"),
+            ("192.0.2.1/32", "224.0.0.1"),
+            ("2001:db8::1/128", "::"),
+            ("2001:db8::1/128", "ff02::1"),
+        ] {
+            let prefix = prefix.parse().unwrap();
+            assert!(
+                BlackholeRoute::new(prefix, next_hop.parse().unwrap(), vec![], vec![]).is_err()
+            );
+        }
+        assert!(BlackholeRoute::new(v6, "2001:db8::66".parse().unwrap(), vec![], vec![]).is_ok());
+    }
 
     #[test]
     fn default_match_identity_preserves_port_order_and_duplicate_terms() {
