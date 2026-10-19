@@ -58,8 +58,10 @@ not. Config reload continues to leave the running POP, BGP settings and mode
 unchanged. Restarting with a different target fails before any speaker connection.
 
 Run one controller per POP and use each physical speaker target exclusively.
-This database binding does not fence another process, recognize DNS aliases or
-prevent another tool from changing the speaker. Endpoint descriptors stay out of
+The binding does not recognize DNS aliases or prevent another tool from changing
+the speaker. The [controller fence](#controller-fence-and-rolling-deploys) keeps
+a second controller that shares the database in standby, but it cannot see a
+controller using another database. Endpoint descriptors stay out of
 health/settings responses, WebSocket messages and ownership errors.
 
 ### Drained target transfer
@@ -69,7 +71,8 @@ While the original controller and speaker are still available, stop detector
 input, withdraw all active intent and drain pending cleanup. Verify directly on
 the original speaker that no owned rules remain, then **stop the controller**.
 Do not run two controllers during this procedure. The database checks below cannot
-prove remote deletion or fence a controller that is still running.
+prove remote deletion. The controller fence is keyed on the POP and target, so it
+cannot fence a controller still running against the original target.
 
 Inspect the existing binding with an administrative database connection:
 
@@ -161,6 +164,47 @@ External Rust implementations must implement `FlowSpecWriter` and
 facade accessors where supported. Import those traits for concrete adapter calls.
 A production write-only backend remains gated on a durable announcement ledger.
 
+## Controller fence and rolling deploys
+
+Each controller derives a stable owner, `prefixd.<pop>.<hash>`, from its POP and
+registered speaker target, and holds a PostgreSQL session advisory lock keyed on
+it ([ADR 027](../adr/027-blackhole-mitigations.md)). The lock lives on one
+dedicated connection outside the pool, named `prefixd-controller-fence` in
+`pg_stat_activity`. The controller tries it after target registration and before
+connecting to the speaker.
+
+- **Standby.** A controller without the lock runs no scheduler, expiry,
+  reconciliation, announcement or withdrawal. `POST`, `PUT` and `DELETE`
+  requests on authenticated API routes return `503`; reads still work.
+  `GET /v1/health` stays `ok`, `GET /v1/health/detail` reports
+  `"status": "standby"` and `prefixd_controller_fence_active` is `0`. It
+  retries the lock every 5 seconds.
+- **Restarts and rolling deploys.** Process exit closes the fence session and
+  releases the lock; the old process keeps it through its shutdown drain. A
+  replacement started while the old process runs waits in standby, takes over
+  within one poll interval of the old process exiting, and reconciles at once.
+- **Lock loss.** The holder checks its fence session every 2 seconds with a
+  2-second timeout. After a failed check or a PostgreSQL restart it stops
+  starting speaker mutations, enters standby and reacquires on a new
+  connection. An RPC already in flight runs to its own deadline; its result is
+  recorded only if the database write succeeds, otherwise the announcement
+  stays unconfirmed or the withdrawal stays pending with its original rule,
+  actor, reason and operation ID. A process that lost the lock without seeing
+  it can keep issuing RPCs for up to about 4 seconds plus one RPC deadline.
+- **Crashed hosts.** PostgreSQL holds a crashed host's lock until it ends that
+  session. The fence session sets server-side TCP keepalives (10 seconds idle,
+  then three probes 5 seconds apart) to bound the delay; do not block them
+  between the controller and PostgreSQL.
+- **Connection.** The connection must be direct or through a session-mode
+  pooler. See [deployment](deployment.md#controller-fence-connection).
+
+The fence does not replace the one-controller rule. It sees only controllers
+that share one database, it is keyed on the POP and target so changing either
+changes the lock, and it does not stop other tools writing to the speaker. Keep
+one controller per POP and speaker target, and follow the
+[drained target transfer](#drained-target-transfer) before changing the POP or
+target.
+
 ## Pending withdrawals and rollback
 
 Migration 013 adds durable withdrawal requests. A failed or uncertain deletion
@@ -171,9 +215,11 @@ dry-run leaves enforced-mode requests pending; returning to enforced mode retrie
 them. Requests originally made in dry-run remain local simulations. Existing
 queue rows conservatively require a real deletion.
 
-Run one controller per POP/speaker target. The in-process lifecycle mutex does
-not fence multiple controller processes. It releases between scheduler rules so
-operator requests can proceed between repairs.
+Run one controller per POP/speaker target. The in-process lifecycle mutex
+releases between scheduler rules so operator requests can proceed between
+repairs. Across processes, the
+[controller fence](#controller-fence-and-rolling-deploys) keeps a second
+controller that shares the database in standby.
 
 Before changing the POP, backend, speaker endpoint or controller ownership, or
 downgrading to a binary that does not understand this queue, drain pending

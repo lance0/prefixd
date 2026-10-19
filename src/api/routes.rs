@@ -39,8 +39,9 @@ fn session_routes() -> Router<Arc<AppState>> {
         .route("/v1/ws/feed", any(ws::ws_handler))
 }
 
-/// API routes - hybrid auth (session OR bearer) enforced via require_auth()
-fn api_routes() -> Router<Arc<AppState>> {
+/// API routes - hybrid auth (session OR bearer) enforced via require_auth().
+/// State-changing requests return 503 while the controller is in standby.
+fn api_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route(
             "/v1/events",
@@ -136,6 +137,10 @@ fn api_routes() -> Router<Arc<AppState>> {
             "/v1/signals/corroborator/cache",
             axum::routing::get(handlers::list_cached_corroborators_handler),
         )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            handlers::require_active_controller,
+        ))
 }
 
 /// Common layers applied to both production and test routers
@@ -172,7 +177,7 @@ pub fn create_router(
 ) -> Router {
     let router = public_routes()
         .merge(session_routes())
-        .merge(api_routes())
+        .merge(api_routes(&state))
         .layer(auth_layer)
         .with_state(state.clone());
 
@@ -215,7 +220,7 @@ pub fn create_test_router_with_session_store(
 
     let router = public_routes()
         .merge(session_routes())
-        .merge(api_routes())
+        .merge(api_routes(&state))
         .layer(auth_layer)
         .with_state(state.clone());
 

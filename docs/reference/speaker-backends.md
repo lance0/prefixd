@@ -326,7 +326,8 @@ Repairs retain the saved match so its immutable withdrawal intent remains valid.
 
 Action repair assumes one running controller per POP and exclusive administration
 of its physical speaker target. The persistent binding is consistency evidence,
-not a process fence. Neither reader distinguishes an external controller's local
+not a process fence; the advisory-lock controller fence keeps a second
+controller that shares the database in standby. Neither reader distinguishes an external controller's local
 rule with the same match from action drift; such shared-writer protection is not
 provided. Unknown matches and other POPs' desired rows do not authorize writes.
 GoBGP import policy must preserve supported actions for convergence. Successful

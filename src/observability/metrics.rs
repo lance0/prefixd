@@ -1,7 +1,8 @@
 use once_cell::sync::Lazy;
 use prometheus::{
-    Counter, CounterVec, Encoder, GaugeVec, Histogram, HistogramVec, TextEncoder, register_counter,
-    register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
+    Counter, CounterVec, Encoder, Gauge, GaugeVec, Histogram, HistogramVec, TextEncoder,
+    register_counter, register_counter_vec, register_gauge, register_gauge_vec, register_histogram,
+    register_histogram_vec,
 };
 
 // Event metrics
@@ -94,6 +95,15 @@ pub static GUARDRAIL_REJECTIONS: Lazy<CounterVec> = Lazy::new(|| {
         "prefixd_guardrail_rejections_total",
         "Total number of guardrail rejections",
         &["reason"]
+    )
+    .unwrap()
+});
+
+// Controller fence metrics (ADR 027)
+pub static CONTROLLER_FENCE_ACTIVE: Lazy<Gauge> = Lazy::new(|| {
+    register_gauge!(
+        "prefixd_controller_fence_active",
+        "1 while this controller holds its POP's fence and may mutate the speaker, 0 in standby"
     )
     .unwrap()
 });
@@ -330,6 +340,7 @@ pub fn init_metrics() {
     Lazy::force(&ANNOUNCEMENTS_LATENCY);
     Lazy::force(&BGP_SESSION_UP);
     Lazy::force(&GUARDRAIL_REJECTIONS);
+    Lazy::force(&CONTROLLER_FENCE_ACTIVE);
     Lazy::force(&RECONCILIATION_RUNS);
     Lazy::force(&RECONCILIATION_REPAIRS);
     for status in ["success", "error"] {

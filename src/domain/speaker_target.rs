@@ -139,6 +139,11 @@ impl VerifiedSpeakerBinding {
         self.target_id
     }
 
+    /// Stable controller owner for this POP and verified target (ADR 027).
+    pub fn owner(&self) -> String {
+        controller_owner(&self.pop, self.target_id)
+    }
+
     pub fn validate(&self, pop: &str, target: &SpeakerTarget, backend: &str) -> Result<()> {
         if self.pop != pop || self.target != *target || self.target.backend != backend {
             return Err(binding_mismatch());
@@ -159,6 +164,33 @@ impl VerifiedSpeakerBinding {
         }
         Ok(())
     }
+}
+
+/// `prefixd.` + sanitized POP prefix + `.` + 16 hex of SHA-256(POP, NUL, target UUID).
+/// Always 1 to 64 bytes of `[A-Za-z0-9._-]`; the hash keeps POPs with equal prefixes apart.
+pub fn controller_owner(pop: &str, target_id: Uuid) -> String {
+    use sha2::{Digest, Sha256};
+    const MAX_OWNER_BYTES: usize = 64;
+    let digest = Sha256::new()
+        .chain_update(pop.as_bytes())
+        .chain_update([0])
+        .chain_update(target_id.hyphenated().to_string().as_bytes())
+        .finalize();
+    let hash = &hex::encode(digest)[..16];
+    // Every kept character is one ASCII byte, so a character budget is a byte budget.
+    let budget = MAX_OWNER_BYTES - "prefixd.".len() - ".".len() - hash.len();
+    let prefix: String = pop
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(budget)
+        .collect();
+    format!("prefixd.{prefix}.{hash}")
 }
 
 pub(crate) fn binding_mismatch() -> PrefixdError {
@@ -240,6 +272,43 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(!error.contains("secret"));
+        }
+    }
+
+    #[test]
+    fn controller_owner_derivation_is_pinned_sanitized_and_bounded() {
+        let target = Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
+        assert_eq!(
+            controller_owner("fra1", target),
+            "prefixd.fra1.6bec5166e567c666"
+        );
+        // Each disallowed character, multibyte included, becomes one '-'; the hash
+        // still covers the original POP bytes.
+        assert_eq!(
+            controller_owner("Frankfurt DC #1/\u{e9}\u{e9}", target),
+            "prefixd.Frankfurt-DC--1---.65565e0a0021abfc"
+        );
+        let long = controller_owner(&"x".repeat(100), target);
+        assert_eq!(long, format!("prefixd.{}.adb02dd5cde4b473", "x".repeat(39)));
+        assert_eq!(long.len(), 64);
+        // Truncation alone cannot merge two POPs.
+        assert_ne!(
+            long,
+            controller_owner(&format!("{}y", "x".repeat(99)), target)
+        );
+        assert_ne!(
+            controller_owner("fra1", target),
+            controller_owner("fra1", Uuid::nil())
+        );
+        for pop in ["", "fra1", "a.b", "\u{1F600}", &"\u{e9}".repeat(80)] {
+            let owner = controller_owner(pop, target);
+            assert!((1..=64).contains(&owner.len()), "{owner}");
+            assert!(
+                owner
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)),
+                "{owner}"
+            );
         }
     }
 

@@ -135,7 +135,8 @@ read. An observation error is not an empty RIB; an unsupported reader skips
 repair. Expired intent, pending creation and pending withdrawals cannot authorize
 fresh announcements. Each mutation rechecks current ownership and pending intent
 under the controller mutex. That mutex is released between rules and does not
-fence another controller process.
+fence another controller process; the advisory-lock fence under
+[Multi-POP ownership](#multi-pop-ownership) does.
 
 Missing local rules and supported action differences can be repaired under the
 single-controller, exclusive-target contract. Unknown local rules are preserved;
@@ -211,8 +212,15 @@ POP's mutations or provide operation through a database outage.
 Startup validates the registered target before connecting to the speaker.
 Credential rotation preserves target identity; pending withdrawals retain the
 original target even if configuration changes. Registration does not provide an
-interprocess lease, recognize DNS aliases, or fence a second controller/tool
-writing to the same physical speaker.
+interprocess lease or recognize DNS aliases.
+
+Before connecting to the speaker, each controller takes a PostgreSQL session
+advisory lock keyed on its POP and target owner
+([ADR 027](../adr/027-blackhole-mitigations.md)). Without it, the controller
+stays in standby and mutates nothing, so a second controller sharing the
+database cannot write to the speaker. The lock cannot see a controller using
+another database or another tool writing to the same physical speaker. See
+[controller fence and rolling deploys](../how-to/upgrading.md#controller-fence-and-rolling-deploys).
 
 ## Security model
 

@@ -21,6 +21,7 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
 
 #[derive(OpenApi)]
 #[openapi(
+    modifiers(&StandbyResponses),
     info(
         title = "prefixd API",
         description = "BGP FlowSpec routing policy daemon for automated DDoS mitigation",
@@ -166,9 +167,57 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
 )]
 pub struct ApiDoc;
 
+/// Every state-changing API operation can return 503 from a standby controller
+/// (ADR 027). Login and logout are outside the fenced routes.
+struct StandbyResponses;
+
+impl utoipa::Modify for StandbyResponses {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        for (path, item) in openapi.paths.paths.iter_mut() {
+            if path.starts_with("/v1/auth/") {
+                continue;
+            }
+            for operation in [
+                &mut item.post,
+                &mut item.put,
+                &mut item.delete,
+                &mut item.patch,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                operation
+                    .responses
+                    .responses
+                    .entry("503".into())
+                    .or_insert_with(|| {
+                        utoipa::openapi::Response::new(
+                            "Controller is in standby: another controller holds this POP's fence",
+                        )
+                        .into()
+                    });
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_changing_operations_document_standby() {
+        let doc = ApiDoc::openapi();
+        let paths = &doc.paths.paths;
+        let has_503 = |op: &Option<utoipa::openapi::path::Operation>| {
+            op.as_ref()
+                .is_some_and(|op| op.responses.responses.contains_key("503"))
+        };
+        assert!(has_503(&paths["/v1/mitigations"].post));
+        assert!(has_503(&paths["/v1/events"].post));
+        assert!(!has_503(&paths["/v1/mitigations"].get));
+        assert!(!has_503(&paths["/v1/auth/login"].post));
+    }
 
     #[test]
     fn info_version_comes_from_cargo() {

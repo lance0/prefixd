@@ -12,8 +12,11 @@ use prefixd::auth::create_auth_layer;
 use prefixd::bgp::speaker_factory;
 use prefixd::config::{AppConfig, AuthMode};
 use prefixd::db;
+use prefixd::fence;
 use prefixd::observability::init_tracing;
 use prefixd::scheduler::ReconciliationLoop;
+use sqlx::postgres::PgConnectOptions;
+use std::str::FromStr;
 
 #[derive(Parser)]
 #[command(
@@ -112,7 +115,30 @@ async fn main() -> anyhow::Result<()> {
     if config.settings.mode == prefixd::config::OperationMode::Enforced {
         prefixd::domain::check_enforced_startup(repo.as_ref(), &config.settings.pop).await?;
     }
-    let announcer = speaker_factory(&config.settings.bgp).await?;
+    // Fence before any speaker connection: without the lock, run in standby (ADR 027).
+    let fence_options = PgConnectOptions::from_str(&connection_string)?;
+    let owner = binding.owner();
+    let fence_key = fence::fence_lock_key(&owner);
+    let held = fence::try_acquire(&fence_options, fence_key).await?;
+    if held.is_none() {
+        tracing::warn!(owner = %owner, "another controller holds this POP's fence; starting in standby");
+    } else {
+        tracing::info!(owner = %owner, "controller fence acquired");
+    }
+    let controller_fence = Arc::new(fence::ControllerFence::new(held.is_some()));
+    tokio::spawn(fence::maintain(
+        controller_fence.clone(),
+        fence_options,
+        fence_key,
+        held,
+        fence::POLL_INTERVAL,
+        fence::CHECK_INTERVAL,
+    ));
+    let announcer: Arc<dyn prefixd::bgp::FlowSpecAnnouncer> =
+        Arc::new(fence::FencedAnnouncer::new(
+            speaker_factory(&config.settings.bgp).await?,
+            controller_fence.clone(),
+        ));
 
     // Init safelist from config
     for prefix in &config.settings.safelist.prefixes {
@@ -144,7 +170,8 @@ async fn main() -> anyhow::Result<()> {
         cli.config.clone(),
         Some(pool.clone()),
     )?
-    .with_speaker_binding(binding)?;
+    .with_speaker_binding(binding)?
+    .with_fence(controller_fence)?;
 
     // Create auth layer for session-based auth
     // Secure cookies require HTTPS - check if TLS is configured

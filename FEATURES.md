@@ -555,7 +555,9 @@ independent speaker may retain existing routes, but the controller does not
 continue safely without PostgreSQL.
 
 Bindings are startup consistency checks, not interprocess fencing or DNS-alias
-detection. Pending withdrawals retain their original speaker target.
+detection. Pending withdrawals retain their original speaker target. A separate
+PostgreSQL advisory-lock fence keeps a second controller for the same POP and
+target in standby when both share the database.
 
 ---
 

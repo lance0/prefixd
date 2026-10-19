@@ -480,9 +480,21 @@ storage:
 For production:
 
 1. Use PostgreSQL with streaming replication
-2. Configure connection pooling (PgBouncer)
+2. If you pool connections (PgBouncer), use session mode; see below
 3. Regular backups
 4. Monitor replication lag
+
+### Controller fence connection
+
+Each controller holds a PostgreSQL session advisory lock on one dedicated
+connection, opened from the same connection string as its pool, so that a
+second controller for the same POP and speaker target stays in standby. Session
+locks belong to the server session. **Connect directly or through a session-mode
+pooler.** PgBouncer transaction pooling hands the session to other clients and
+breaks the lock. The fence session sets server-side TCP keepalives so
+PostgreSQL releases a crashed host's lock within about 25 seconds; keep
+keepalive probes open between the controller and the database. See
+[controller fence and rolling deploys](upgrading.md#controller-fence-and-rolling-deploys).
 
 ---
 

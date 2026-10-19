@@ -22,6 +22,11 @@ pub enum PrefixdError {
     #[error("service shutting down")]
     ShuttingDown,
 
+    #[error(
+        "controller is in standby: another controller holds this POP's fence; retry against the active controller"
+    )]
+    Standby,
+
     // Domain errors
     #[error("duplicate event from {detector_source}: {external_id}")]
     DuplicateEvent {
@@ -136,7 +141,7 @@ impl PrefixdError {
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::NotFound(_) | Self::MitigationNotFound(_) => StatusCode::NOT_FOUND,
-            Self::ShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ShuttingDown | Self::Standby => StatusCode::SERVICE_UNAVAILABLE,
             Self::DuplicateEvent { .. } | Self::Conflict(_) => StatusCode::CONFLICT,
             Self::GuardrailViolation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::IpNotOwned(_) | Self::InvalidIpAddress(_) | Self::InvalidPrefix(_) => {

@@ -146,53 +146,68 @@ impl ReconciliationLoop {
             dry_run = self.dry_run,
             "starting reconciliation loop"
         );
-
-        // Initial reconciliation
-        match self.reconcile().await {
-            Ok(()) => {
-                crate::observability::metrics::RECONCILIATION_RUNS
-                    .with_label_values(&["success"])
-                    .inc();
-            }
-            Err(e) => {
-                crate::observability::metrics::RECONCILIATION_RUNS
-                    .with_label_values(&["error"])
-                    .inc();
-                tracing::error!(error = %e, "initial reconciliation failed");
-            }
-        }
-
-        let mut interval =
-            tokio::time::interval_at(tokio::time::Instant::now() + self.interval, self.interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
+        let mut fence = self.state.as_ref().map(|state| state.fence.subscribe());
         loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    match self.reconcile().await {
-                        Ok(()) => {
-                            crate::observability::metrics::RECONCILIATION_RUNS
-                                .with_label_values(&["success"])
-                                .inc();
-                        }
-                        Err(e) => {
-                            crate::observability::metrics::RECONCILIATION_RUNS
-                                .with_label_values(&["error"])
-                                .inc();
-                            tracing::error!(error = %e, "reconciliation failed");
+            // Standby runs nothing; on taking the fence, reconcile at once.
+            if let Some(fence) = fence.as_mut() {
+                tokio::select! {
+                    closed = async { fence.wait_for(|active| *active).await.is_err() } => {
+                        if closed {
+                            return;
                         }
                     }
+                    _ = shutdown.recv() => {
+                        tracing::info!("reconciliation loop shutting down");
+                        return;
+                    }
                 }
-                _ = shutdown.recv() => {
-                    tracing::info!("reconciliation loop shutting down");
-                    break;
+            }
+            self.record_run().await;
+            let mut interval = tokio::time::interval_at(
+                tokio::time::Instant::now() + self.interval,
+                self.interval,
+            );
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => self.record_run().await,
+                    // A fence change restarts the cycle: standby waits, a regained fence reconciles at once.
+                    _ = async {
+                        match fence.as_mut() {
+                            Some(fence) => {
+                                let _ = fence.changed().await;
+                            }
+                            None => std::future::pending().await,
+                        }
+                    } => break,
+                    _ = shutdown.recv() => {
+                        tracing::info!("reconciliation loop shutting down");
+                        return;
+                    }
                 }
             }
         }
     }
 
+    async fn record_run(&self) {
+        let status = match self.reconcile().await {
+            Ok(()) => "success",
+            Err(e) => {
+                tracing::error!(error = %e, "reconciliation failed");
+                "error"
+            }
+        };
+        crate::observability::metrics::RECONCILIATION_RUNS
+            .with_label_values(&[status])
+            .inc();
+    }
+
     /// Run one reconciliation cycle (for testing)
     pub async fn reconcile(&self) -> anyhow::Result<()> {
+        // The scheduler entry point: a standby controller expires, repairs and withdraws nothing.
+        if let Some(state) = &self.state {
+            state.fence.ensure_active()?;
+        }
         self.verified_speaker_binding()?;
         let mut failure = None;
         // Each stage is independent; a speaker failure must not stop expiry or health updates.
@@ -1933,6 +1948,51 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
         assert_eq!(speaker.inventories.load(SeqCst), 2);
+        shutdown.send(()).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn standby_loop_runs_nothing_and_a_regained_fence_reconciles_at_once() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FailingWithdrawal {
+            inner: MockAnnouncer::new(),
+            mode: AtomicUsize::new(0),
+            announcements: AtomicUsize::new(0),
+            inventories: AtomicUsize::new(0),
+        });
+        let fence = Arc::new(crate::fence::ControllerFence::new(false));
+        let state = action_state(repo.clone(), speaker.clone())
+            .with_fence(fence.clone())
+            .unwrap();
+        let reconciler =
+            ReconciliationLoop::new(repo, speaker.clone(), 30, false).with_app_state(state);
+        let (shutdown, rx) = broadcast::channel(1);
+        let task = tokio::spawn(async move { reconciler.run(rx).await });
+        let settle = || async {
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+        };
+        let runs = || speaker.inventories.load(SeqCst);
+        tokio::time::advance(Duration::from_secs(90)).await;
+        settle().await;
+        assert_eq!(runs(), 0, "standby reconciled");
+        fence.set(true);
+        settle().await;
+        assert_eq!(runs(), 1, "acquiring the fence reconciles at once");
+        tokio::time::advance(Duration::from_secs(30)).await;
+        settle().await;
+        assert_eq!(runs(), 2);
+        fence.set(false);
+        settle().await;
+        tokio::time::advance(Duration::from_secs(90)).await;
+        settle().await;
+        assert_eq!(runs(), 2, "lost fence stops the schedule");
+        fence.set(true);
+        settle().await;
+        assert_eq!(runs(), 3, "a regained fence reconciles at once");
         shutdown.send(()).unwrap();
         task.await.unwrap();
     }

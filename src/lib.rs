@@ -14,6 +14,7 @@ pub mod correlation;
 pub mod db;
 pub mod domain;
 pub mod error;
+pub mod fence;
 pub mod guardrails;
 pub mod observability;
 pub mod policy;

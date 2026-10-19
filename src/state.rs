@@ -44,8 +44,10 @@ pub struct AppState {
     /// PostgreSQL pool for metrics (None in tests with MockRepository)
     pub db_pool: Option<PgPool>,
     /// Serializes lifecycle reads, speaker RPCs and commits within one controller.
-    /// One controller owns each POP/speaker; this is not an active-active fence.
+    /// The interprocess guard is `fence`; this mutex does not cross processes.
     pub mitigation_lock: tokio::sync::Mutex<()>,
+    /// Advisory-lock fence state (ADR 027). Standalone fixtures run unfenced (active).
+    pub fence: Arc<crate::fence::ControllerFence>,
     /// Directory containing config files (for hot-reload)
     pub config_dir: PathBuf,
     shutting_down: AtomicBool,
@@ -124,6 +126,7 @@ impl AppState {
             inventory_loaded_at: RwLock::new(Utc::now()),
             playbooks_loaded_at: RwLock::new(Utc::now()),
             mitigation_lock: tokio::sync::Mutex::new(()),
+            fence: Arc::new(crate::fence::ControllerFence::new(true)),
             db_pool,
             config_dir,
             shutting_down: AtomicBool::new(false),
@@ -147,6 +150,20 @@ impl AppState {
             )
         })?;
         state.speaker_binding = Some(binding);
+        Ok(self)
+    }
+
+    /// Install the process fence before sharing state; the announcer must be fenced by it too.
+    pub fn with_fence(
+        mut self: Arc<Self>,
+        fence: Arc<crate::fence::ControllerFence>,
+    ) -> Result<Arc<Self>> {
+        let state = Arc::get_mut(&mut self).ok_or_else(|| {
+            PrefixdError::Internal(
+                "fence must be installed before sharing application state".into(),
+            )
+        })?;
+        state.fence = fence;
         Ok(self)
     }
 

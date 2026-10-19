@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- A second controller for the same POP and speaker target that shares the
+  database now starts in standby instead of mutating the speaker. The
+  database connection must be direct or through a session-mode pooler:
+  PgBouncer transaction pooling breaks the session advisory lock. See
+  [controller fence and rolling deploys](docs/how-to/upgrading.md#controller-fence-and-rolling-deploys).
+
 ### Added
 
 - The rustbgpd adapter can inject, delete and read back unicast blackhole
@@ -25,6 +33,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enforced modes. No API, playbook or detector path creates a blackhole yet,
   so the block changes no behavior; omitting it keeps every existing
   configuration valid. Older binaries ignore the block.
+
+- Fence duplicate controllers with a PostgreSQL session advisory lock (ADR
+  027). Each controller derives an owner from its POP and registered speaker
+  target and takes the lock on a dedicated connection before connecting to the
+  speaker. Without it the controller stays in standby: no scheduler, expiry,
+  reconciliation, announcement or withdrawal; `POST`, `PUT` and `DELETE`
+  requests on authenticated API routes return `503`; `GET /v1/health` stays
+  `ok`; `GET /v1/health/detail` reports `"status": "standby"`; and the new
+  `prefixd_controller_fence_active` gauge is `0`. Standby retries every 5
+  seconds. The holder checks its fence session every 2 seconds and, on a
+  failed check, stops starting speaker mutations at once, enters standby and
+  reacquires on a new connection. Rolling deploys wait in standby and take over
+  when the old process exits.
 
 ### Changed
 

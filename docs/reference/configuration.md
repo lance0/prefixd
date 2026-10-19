@@ -165,6 +165,11 @@ storage:
   connection_string: "postgres://prefixd:password@postgres:5432/prefixd"
 ```
 
+`DATABASE_URL` overrides this value. The controller also opens one dedicated
+fence connection from it, which holds a session advisory lock, so it must be a
+direct or session-mode connection; PgBouncer transaction pooling breaks the
+lock. See [controller fence connection](../how-to/deployment.md#controller-fence-connection).
+
 ### Guardrails
 
 ```yaml

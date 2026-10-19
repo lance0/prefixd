@@ -24,7 +24,7 @@ pub struct PublicHealthResponse {
 
 #[derive(Serialize, ToSchema)]
 pub struct HealthResponse {
-    /// Health status (healthy, degraded)
+    /// Health status (healthy, degraded, standby)
     status: String,
     /// Controller (prefixd) version
     version: String,
@@ -209,6 +209,10 @@ pub async fn health_detail(
         tokio::join!(check_health_status(&state), observe_daemon_health(&state));
     if daemon.status == "error" || daemon.ready == Some(false) {
         status = "degraded".into();
+    }
+    // Another controller holds this POP's fence; this one mutates nothing.
+    if !state.fence.is_active() {
+        status = "standby".into();
     }
 
     Ok(Json(HealthResponse {
