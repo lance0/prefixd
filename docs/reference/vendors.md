@@ -106,7 +106,7 @@ router bgp 65000
 |---|---|
 | Platform | Container (native Linux), `quay.io/frrouting/frr:10.7.1`, digest-pinned |
 | Lab method | Containerlab 0.74.3, [`lab/interop/`](../../lab/interop/) |
-| BGP session | eBGP, speaker AS 65010 ↔ FRR AS 65002; IPv4 and IPv6 FlowSpec only |
+| BGP session | eBGP, speaker AS 65010 ↔ FRR AS 65002; IPv4 and IPv6 FlowSpec, plus IPv4 and IPv6 unicast for blackholes with rustbgpd |
 | Driver | prefixd's HTTP API (bearer auth); FRR `show bgp ipv4\|ipv6 flowspec [detail] json` |
 
 Receipts, attributed per speaker:
@@ -127,6 +127,12 @@ expiry, a speaker stop and start restored by prefixd reconciliation (two
 repairs counted), an IPv6 `/128` discard, and a final withdrawal of everything.
 CI repeats both legs in the [Interop workflow](../../.github/workflows/interop.yml)
 and keeps each run's receipt as an artifact.
+
+Blackhole host routes ([ADR 027](../adr/027-blackhole-mitigations.md)) have a
+separate [FRR blackhole receipt](qualification/blackhole-frr-2026-10-19.md):
+rustbgpd 0.78.0 to FRR 10.7.1 over unicast, with an import route-map that
+rewrites BLACKHOLE routes to a static discard next hop. It covers FRR's BGP
+table, zebra RIB and the container's kernel FIB, not packet forwarding.
 
 **Known quirks:**
 - FRR FlowSpec support is control-plane only by default — it receives and installs routes in the BGP table but does not program iptables/nftables rules without additional configuration. The lab output shows `not installed in PBR`.

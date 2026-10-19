@@ -77,7 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   protocol, ports, rate or `expires_at_cap`. Manual blackholes are unleased
   and rustbgpd-only: one stays on the speaker if prefixd stops, and router
   enforcement depends on the router's RTBH policy, which prefixd does not
-  verify; FRR qualification is pending. Mitigation responses and WebSocket
+  verify; FRR 10.7.1 is qualified below. Mitigation responses and WebSocket
   messages gain an optional `blackhole` object (`next_hop`, `communities`,
   `large_communities`), present only for blackholes. A manual blackhole
   broadcasts `mitigation_created`. The dashboard shows blackholes with a danger
@@ -88,6 +88,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `prefixd_guardrail_rejections_total` reasons `BlackholeDisabled`,
   `BlackholeQuotaExceeded`, `BlackholeNotOwned`, `BlackholeSafelisted` and
   `InvalidBlackhole`.
+- `just interop-frr-blackhole` qualifies manual blackholes at FRR 10.7.1
+  through rustbgpd 0.78.0 over IPv4 and IPv6 unicast, with an import
+  route-map that rewrites BLACKHOLE routes to a static discard next hop. The
+  [dated receipt](docs/reference/qualification/blackhole-frr-2026-10-19.md)
+  shows receipt with the expected communities, discard installation in zebra
+  and the container kernel, removal on withdrawal and TTL expiry, and return
+  through prefixd repair after a speaker restart. It also records that a
+  blackhole persists past its TTL while prefixd is stopped. The interop lab's
+  rustbgpd peer now also negotiates unicast and sets `local_ipv6_nexthop`,
+  which rustbgpd needs to send IPv6 routes over IPv4 transport.
 
 - Fence duplicate controllers with a PostgreSQL session advisory lock (ADR
   027). Each controller derives an owner from its POP and registered speaker

@@ -112,7 +112,9 @@ IPv6 routes are suppressed. The steps are:
 
 The receipt lands in `target/interop/frr-rustbgpd-blackhole-<UTC stamp>/`, with
 raw BGP, zebra and kernel JSON per prefix under `frr/`. It is control-plane and
-FIB evidence inside the FRR container; no packets are forwarded.
+FIB evidence inside the FRR container; no packets are forwarded. The dated
+[FRR blackhole receipt](../docs/reference/qualification/blackhole-frr-2026-10-19.md)
+records the results.
 
 ## Nokia
 
