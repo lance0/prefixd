@@ -167,7 +167,17 @@ next hop with its own, so the router's import policy must match BLACKHOLE
 (`65535:666`) and set a discard next hop itself. Over an IPv4 session, set
 `local_ipv6_nexthop` on the rustbgpd neighbor, or IPv6 blackholes are silently
 withheld; the [FRR blackhole receipt](../../reference/qualification/blackhole-frr-2026-10-19.md)
-shows both.
+shows both. prefixd refuses `0.0.0.0` and `::` as next hops, which speakers
+commonly read as next-hop-self: RTBH needs the discard next hop that the edge
+routers map to null.
+
+**RPKI export filters.** A blackhole `/32` or `/128` is longer than its
+covering ROA's maxLength, so it is almost always RPKI-Invalid. If your speaker
+validates locally injected routes, or a router on the path validates them, an
+export policy that drops RPKI-Invalid routes toward the RTBH peers drops every
+blackhole silently: the ban succeeds in prefixd and nothing reaches the edge.
+Exempt the blackhole community or the RTBH peers from RPKI-Invalid filtering on
+export, then test one ban end to end.
 
 #### Blackhole TTL
 

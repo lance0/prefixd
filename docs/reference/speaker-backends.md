@@ -440,6 +440,17 @@ frozen next hop with its own (the session address, or `local_ipv6_nexthop` for
 IPv6), so the router's import policy
 must match BLACKHOLE (`65535:666`) and set a discard next hop itself. The
 [FRR blackhole receipt](qualification/blackhole-frr-2026-10-19.md) shows both.
+prefixd refuses `0.0.0.0` and `::` as configured next hops, which speakers
+commonly read as next-hop-self: RTBH needs the discard next hop that the edge
+routers map to null.
+
+**RPKI export filters.** A blackhole `/32` or `/128` is longer than its
+covering ROA's maxLength, so it is almost always RPKI-Invalid. If your speaker
+validates locally injected routes, or a router on the path validates them, an
+export policy that drops RPKI-Invalid routes toward the RTBH peers drops every
+blackhole silently: the add succeeds and nothing reaches the edge. Exempt the
+blackhole community or the RTBH peers from RPKI-Invalid filtering on export,
+then test one ban end to end.
 
 ## Remaining backend work
 
