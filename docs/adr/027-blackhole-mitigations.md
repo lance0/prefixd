@@ -9,6 +9,11 @@ ADR is implemented yet. Extends
 [ADR 025](025-pluggable-speaker-backends.md); qualifies the unicast caveat in
 [ADR 002](002-flowspec-only-afi-safi.md).
 
+Amended 2026-10-19: aligned with the rustbgpd injection lease contract,
+proposed upstream as rustbgpd ADR-0141. Leased injection uses new RPCs, a
+failed leased add never falls back to an unleased one, the owner is persisted
+per route, and the leased and unleased transition is decided below.
+
 ## Date
 
 2026-10-19
@@ -115,8 +120,9 @@ seeing the injected value. *Alternatives:* `0.0.0.0`/`::` (rustbgpd's
 semantics, see requirement (c); deferred until it ships and is qualified).
 
 The route has ORIGIN IGP, an empty AS_PATH, no LOCAL_PREF or MED, and
-`path_id = 0`. The resolved next hop and communities are snapshotted into the
-mitigation's action parameters at admission. A configuration reload affects only
+`path_id = 0`. The resolved next hop, communities and injection owner (see
+[Owner and lease](#owner-and-lease)) are snapshotted into the mitigation's
+action parameters at admission. A configuration reload affects only
 new mitigations, never live routes.
 
 ### 2. Guardrails
@@ -128,14 +134,18 @@ new mitigations, never live routes.
 - **Injection lease gate.** In enforced mode, startup and playbook reload or
   save refuse any playbook containing a `blackhole` step unless
   `SpeakerCapabilities.blackhole_lease` is true. The error names the missing
-  rustbgpd injection lease. The capability is true only when the adapter has
-  verified that the connected daemon supports the owner-scoped lease
-  (requirement (d)) and the renewal task holds a live lease. Enforced detector
-  blackholes are injected under the controller's owner and lease (see
-  [Owner and lease](#owner-and-lease)). If the controller dies, the speaker
-  withdraws them within one lease period. Dry-run detector blackholes and
-  manual blackholes are not gated. The controller mode can only change at
-  restart, so switching to enforced re-runs this check.
+  rustbgpd injection lease. The capability is true only when
+  `blackhole.leased` is enabled and the adapter's `ListInjectionLeases` call
+  to the connected daemon succeeded; an older daemon answers `UNIMPLEMENTED`.
+  The capability is the startup and playbook gate and the UI signal, but
+  correctness does not depend on it: a daemon rolled back after the check
+  answers the leased add itself with `UNIMPLEMENTED` and creates nothing
+  (rustbgpd ADR-0141 §3, §11). Enforced detector blackholes are injected under
+  the controller's owner and lease (see [Owner and lease](#owner-and-lease)).
+  If the controller dies, the speaker removes them within one lease period.
+  Dry-run detector blackholes and manual blackholes are not gated. The
+  controller mode can only change at restart, so switching to enforced re-runs
+  this check.
 - **Separate quota.** Add `max_active_per_pop` (default 10) and
   `max_active_global` (default 50) for blackholes. They are checked inside the
   existing `admit_mitigation` transaction and advisory lock, in addition to the
@@ -156,7 +166,8 @@ new mitigations, never live routes.
   that case prefixd still expires the blackhole at its TTL. That remaining gap
   is accepted rather than allowing uncapped blackholes.
 - **Safelist at announce time.** Recheck the safelist under the lifecycle mutex
-  immediately before every blackhole `AddPath`: on admission and before each
+  immediately before every blackhole add (`AddPath` or `AddLeasedPath`): on
+  admission and before each
   reconciliation repair. If the lookup fails, nothing is sent. If the victim is
   now safelisted, prefixd sends nothing and records a system withdrawal with
   the reason `safelisted after admission` through the normal immutable
@@ -213,8 +224,9 @@ new mitigations, never live routes.
   DEFAULT 'flowspec' CHECK (rule_kind IN ('flowspec', 'blackhole'))`. Every
   existing request is FlowSpec, so the default is a fact, not an inference.
   Replay creates no announcement or acknowledgement. Blackhole `rule_json`
-  holds the immutable route: prefix, next hop and communities. No mitigation row
-  is rewritten.
+  holds the immutable route: prefix, next hop, communities and the injection
+  owner the route was added under (`""` for an unleased route). No mitigation
+  row is rewritten.
 - **Coexistence.** One victim may hold a FlowSpec mitigation and a blackhole at
   once. They are independent rows with independent TTLs and withdrawals. A
   blackhole does not withdraw the FlowSpec rule: if the blackhole fails or
@@ -256,21 +268,24 @@ The rustbgpd mapping is:
 
 | Operation | rustbgpd call and semantics |
 |-----------|-----------------------------|
-| upsert | `AddPath(prefix, prefix_length, next_hop, origin=0, communities, large_communities, path_id=0)`, plus `owner` and `lease_seconds` once (d) exists |
-| renew | `RenewLease(owner)` from the renewal task once (d) exists |
-| delete | `DeletePath(prefix, prefix_length, path_id=0)`; `NOT_FOUND` means absent until `allow_missing` exists |
-| read | `ListReceivedRoutes(neighbor_address="0.0.0.0")` per unicast family, following `next_page_token` to the end |
+| upsert, unleased | `AddPath(prefix, prefix_length, next_hop, origin=0, communities, large_communities, path_id=0)` |
+| upsert, leased | `AddLeasedPath(path=<the same AddPathRequest>, lease=InjectionLease{owner, lease_seconds})`, returning the owner's `LeaseGeneration` (rustbgpd ADR-0141 §3) |
+| renew | `RenewLease(owner, generation, lease_seconds)` from the renewal task (ADR-0141 §2) |
+| delete | `DeletePath(prefix, prefix_length, path_id=0, owner=<owner recorded in rule_json>)`, never with `override_owner`; `NOT_FOUND` means absent until `allow_missing` exists |
+| read | `ListReceivedRoutes(neighbor_address="0.0.0.0")` per unicast family, following `next_page_token` to the end; rows carry `injection_owner`, `lease_generation` and `lease_remaining_ms` (ADR-0141 §3) |
+| lease | `ListInjectionLeases(owner)` (`sensitive_read`) for the capability check and to learn the live generation after a prefixd restart (ADR-0141 §3, §8) |
 
 Stages stay distinct:
 
 1. **Desired intent.** An active, enforced-origin, unexpired blackhole row
    without pending withdrawal.
-2. **RPC acceptance.** `AddPath` returned OK. In the rustbgpd source,
+2. **RPC acceptance.** `AddPath` or `AddLeasedPath` returned OK. In the
+   rustbgpd source,
    `handle_inject_route` inserts into the `0.0.0.0` Adj-RIB-In and runs best-path
    recomputation and distribution before replying.
 3. **Retained local intent.** A `ListReceivedRoutes` row for `0.0.0.0` with the
-   saved prefix, next hop and communities. Reconciliation compares against this
-   stage.
+   saved prefix, next hop, communities and owner. Reconciliation compares
+   against this stage.
 4. **Selected RIB.** `ListBestRoutes`. A received route can out-select the local
    one, so this is diagnostic only.
 5. **Export.** `ListAdvertisedRoutes` for a peer, showing post-policy Adj-RIB-Out
@@ -289,12 +304,21 @@ nonzero `path_id` on a desired key or a family mismatch fail the whole read.
   a desired row or pending withdrawal intent for this POP and verified target.
   That proof rests on the existing single-controller, exclusive-target contract
   ([speaker backends](../reference/speaker-backends.md#persistent-target-ownership)).
-  Once (d) ships, a route must also carry this controller's owner (see
+  Once (d) ships, a route must also carry the owner recorded for it (see
   [Owner and lease](#owner-and-lease)).
-  Before the first `AddPath` for a new blackhole, prefixd reads the exact prefix.
-  If a local row exists that the ledger does not own, admission returns `409`
-  and nothing is sent. Once requirement (a) exists, a `replaced` outcome on a
-  create is an alerted conflict.
+  - **Unleased path.** Before the first `AddPath` for a new unleased
+    blackhole, prefixd reads the exact prefix. If a local row exists that the
+    ledger does not own, admission returns `409` (untracked route) and nothing
+    is sent. Once requirement (a) exists, a `replaced` outcome on a create is
+    an alerted conflict.
+  - **Leased path.** The daemon checks ownership atomically in the RIB turn
+    that commits the add: a leased add on a key held by another owner or by no
+    owner returns `FAILED_PRECONDITION` and changes nothing (rustbgpd ADR-0141
+    §3, §4). prefixd maps that to the same `409` untracked-route response,
+    retires the just-committed desired row locally with an audit entry and no
+    delete RPC, and skips the pre-read. In reconciliation the same status is
+    a repair failure, reported with the unknown route and never retried
+    unleased.
 - **Never delete unknown or foreign routes.** Unknown local routes, other
   `path_id`s and other POPs' rows are reported, never deleted or overwritten.
   Deletion happens only from persisted withdrawal intent bound to this POP's
@@ -307,7 +331,10 @@ nonzero `path_id` on a desired key or a family mismatch fail the whole read.
   ownership key blocks repair (`pending_ownership_keys`). A new ban for that
   victim gets the existing `409` "pending withdrawal" conflict and stays
   retryable. Adapter retries after an ambiguous delete accept `NOT_FOUND`
-  as absence.
+  as absence. Every delete passes the owner recorded in `rule_json`. A
+  `FAILED_PRECONDITION` reply means the key now belongs to a different owner
+  (ADR-0141 §3); the withdrawal stays pending and is alerted, and prefixd
+  never sets `override_owner`.
 - **A failed or partial inventory is never empty.** A read succeeds only after
   both families page to an empty `next_page_token` with a consistent
   `page_version`. `ABORTED`, a missing family, a transport error or a decode
@@ -318,42 +345,112 @@ nonzero `path_id` on a desired key or a family mismatch fail the whole read.
 
 ### Owner and lease
 
-This applies once the rustbgpd injection lease, requirement (d), ships. It is
-required for enforced detector blackholes.
+This applies once the rustbgpd injection lease, requirement (d), ships as
+specified in rustbgpd ADR-0141. It is required for enforced detector
+blackholes.
 
 - **Owner identity.** Each controller has one stable owner, derived from its
   POP and the UUID of its verified speaker target, and unchanged across
-  restarts. Within one database, a target belongs to exactly one POP, so two
-  owners cannot collide. A collision across databases means two controllers are
-  configured with the same POP against one speaker, which is a
-  misconfiguration. Startup refuses when it can detect one: the speaker holds
-  routes under this owner that the ledger neither desires nor is withdrawing,
-  or the lease generation advances without this process renewing it.
-- **Renewal task.** A dedicated task calls `RenewLease(owner)` about every
-  `lease_seconds / 3` with its own deadline. It never takes the lifecycle mutex,
-  touches the database or waits for reconciliation. `blackhole.lease_seconds`
-  must fall within the daemon's minimum and maximum lease lengths. A
-  controller stall longer than the lease withdraws the routes. That is a
-  fail-open, the safe direction for blackholes.
+  restarts. The owner must be 1 to 64 bytes of `[A-Za-z0-9._-]` (ADR-0141 §3),
+  and startup refuses a POP that cannot form a valid owner. Within one
+  database, a target belongs to exactly one POP, so two owners cannot collide.
+  A collision across databases means two controllers are configured with the
+  same POP against one speaker, which is a misconfiguration. Startup refuses
+  when it can detect one: the speaker holds routes under this owner that the
+  ledger neither desires nor is withdrawing. A generation change is not a
+  collision signal: a second process with the same owner joins the live
+  generation rather than starting a new one, and a changed generation is
+  handled as lost state below.
+- **Leased RPCs.** Leased injection uses `AddLeasedPath`, which wraps the
+  existing `AddPathRequest` with `InjectionLease { owner, lease_seconds }`.
+  `AddPath` and `AddFlowSpec` are unchanged, and an older daemon answers the
+  leased RPCs with `UNIMPLEMENTED` and creates nothing (ADR-0141 §3, §11).
+  Every leased add joins the owner's live lease and renews it, setting the
+  deadline to now + `lease_seconds`, or starts a new generation when none is
+  live. Ownership is enforced atomically by the daemon: a leased add on a key
+  held by another owner or by no owner, and an unowned add on an owned key,
+  both return `FAILED_PRECONDITION` with no change (ADR-0141 §3). prefixd
+  therefore needs no extra refusal of its own. Moving a key between owners
+  takes a delete followed by an add.
+- **Never fall back.** A blackhole whose leased add fails for any reason,
+  including `UNIMPLEMENTED`, is not enforced. It goes to the existing
+  unconfirmed-announcement handling: the desired row stays, the request
+  reports `announcement_outcome: "unconfirmed"`, repair errors appear in
+  health and metrics, and reconciliation retries through `AddLeasedPath`
+  only. It is never retried through plain `AddPath`, which the ADR-0141
+  contract forbids (§3). Whether a route is leased or unleased is decided by
+  configuration and mitigation kind at admission, never by an error path.
+  `SpeakerCapabilities.blackhole_lease` remains the startup and playbook gate
+  and the UI signal, but correctness no longer depends on it. Upstream
+  rejected a mandatory capability probe because the daemon can be rolled back
+  between the probe and the add, and rejected deleting whatever comes back
+  unleased because the controller can die before the delete (ADR-0141 §3).
+- **Owner persisted per route.** The owner a route was added under is
+  snapshotted at admission and kept in the immutable blackhole `rule_json`,
+  `""` for an unleased route. Repair, renewal and deletion use the recorded
+  owner, not the current configuration. Every `DeletePath` passes it, and
+  prefixd never sets `override_owner`. Startup refuses to disable
+  `blackhole.leased` while leased intent is active or awaiting withdrawal.
+- **Lease length.** `blackhole.leased` (default false) enables the leased
+  path. `blackhole.lease_seconds` defaults to 60 and is validated at startup
+  to 5..=3600, the daemon's bounds (ADR-0141 §7). Sixty seconds bounds a dead
+  controller's blackholes to about a minute plus RIB queue lag, while renewal
+  at `lease_seconds / 3` (20 s) survives one lost renewal with 20 s to spare and
+  keeps successful renewals, which rustbgpd audits at `INFO`, to three per
+  minute (ADR-0141 §8). Every leased add and every renewal uses this one value,
+  because any leased add resets the owner's whole deadline: a shorter value on
+  one add would shorten the lease for every route the owner holds.
+- **Generation.** The daemon returns a `LeaseGeneration { incarnation,
+  sequence }` from every leased add and renewal; the incarnation is random per
+  daemon boot (ADR-0141 §2). prefixd holds the generation in memory only.
+  After a prefixd restart it learns the generation from its first leased add
+  or from `ListInjectionLeases(owner)`.
+- **Renewal task.** A dedicated task calls `RenewLease(owner, generation,
+  lease_seconds)` about every `lease_seconds / 3` with its own deadline, while
+  it holds a generation. It never takes the lifecycle mutex, touches the
+  database or waits for reconciliation. Renewal never resurrects a lease. A
+  generation that is not live returns `FAILED_PRECONDITION` (ADR-0141 §2). A
+  controller stall longer than the lease removes rustbgpd's routes. Whether
+  traffic then reaches the victim depends on the other routes the network
+  holds (ADR-0141 §5).
 - **Visibility.** The lease state (live, renewal failing or expired) and the
   last renewal result appear in authenticated operational health. A renewal
   result counter and a lease-state gauge appear in metrics. Public liveness is
   unchanged.
 - **Adoption and re-add.** After a prefixd restart within the lease, prefixd
-  re-adds every active enforced blackhole under the same owner, with the
-  safelist recheck. Unchanged outcomes from (a) make this cheap, and renewal
-  then resumes. If `RenewLease` reports that the lease had already expired, or
-  if the speaker restarted, the routes are gone. Reconciliation then re-adds the
-  active intents immediately, not on its next poll, and a late renewal is
-  never counted as success.
-- **Read-back.** Reconciliation compares only rows carrying this owner. Rows of
-  other owners and rows without an owner are still reported as unknown and are
-  never modified.
-- **Manual blackholes.** Once the lease is available, enforced manual
-  blackholes use the same owner and lease. Before it ships they are unleased.
-- **FlowSpec.** Leasing FlowSpec rules too would close the AGENTS.md gap that
-  rules can persist if prefixd stops. That is a later decision and is outside
-  every slice below.
+  re-adds every active enforced leased blackhole under its recorded owner,
+  with the safelist recheck. Each add joins the live lease, and renewal then
+  resumes with the returned generation. When a renewal returns
+  `FAILED_PRECONDITION`, or a leased add returns a generation other than the
+  one held, prefixd assumes the owner's state is gone and runs a full leased
+  re-add of the active intent immediately, not on its next poll (ADR-0141
+  §2). A late renewal is never counted as success. The speaker restarting
+  produces the same signal (ADR-0141 §9).
+- **Read-back.** A desired route matches only a row whose `injection_owner`
+  equals the owner recorded for it, unset for an unleased route. A leased row
+  with `lease_remaining_ms` of 0 is expired with its withdrawal pending
+  (ADR-0141 §3); prefixd treats it as lost and triggers the full re-add. Rows
+  of other owners, and unowned rows the ledger does not hold, are still
+  reported as unknown and are never modified.
+- **Manual blackholes.** Once `blackhole.leased` is enabled, new enforced
+  manual blackholes use the same owner and lease. Before then they are
+  unleased.
+- **Leased and unleased transition.** A blackhole added unleased, such as a
+  manual one from before the lease shipped, stays unleased until it is
+  withdrawn or expires. Extending it does not convert it, because conversion
+  takes a delete followed by an add, which reopens traffic to the victim in
+  between. New blackholes use the leased path once it is enabled. A leased add
+  on a key that holds prefixd's own unleased route would return
+  `FAILED_PRECONDITION`, but the existing rules prevent it. The partial unique
+  index `idx_mitigations_active_scope` allows one pending or active blackhole
+  per victim and POP, and an extension of that row sends no add. A pending
+  withdrawal of the unleased route blocks a new ban with the existing `409`,
+  and the route is gone once the withdrawal completes. If the status occurs
+  anyway, it is handled as an untracked route: the leased add is not retried
+  unleased and the unleased route is not deleted.
+- **FlowSpec.** Leasing FlowSpec rules too, through `AddLeasedFlowSpec`, would
+  close the AGENTS.md gap that rules can persist if prefixd stops. That is a
+  later decision and is outside every slice below.
 
 ## rustbgpd requirements before the v1.0 freeze
 
@@ -363,78 +460,103 @@ blackhole. Item (d) is a must-have for enforced detector-driven blackholes.
 
 | Ask | Exact requirement | Verified today | Need |
 |-----|-------------------|----------------|------|
-| (a) AddPath outcome | `AddPathResponse.outcome` on a new field number (field 1 is `reserved`): `CREATED`, `REPLACED`, `UNCHANGED`, with `UNSPECIFIED` treated as an error, mirroring `FlowSpecInjectOutcome` | `AddPathResponse` has only `reserved 1`. The RIB's `insert` already knows whether it replaced a path, but the reply is `Ok(())` | **Must-have.** A non-atomic pre-read plus upsert can silently replace a foreign route for the victim; the outcome is the only evidence |
+| (a) AddPath outcome | `AddPathResponse.outcome` on a new field number (field 1 is `reserved`): `CREATED`, `REPLACED`, `UNCHANGED`, with `UNSPECIFIED` treated as an error, mirroring `FlowSpecInjectOutcome` | `AddPathResponse` has only `reserved 1`. The RIB's `insert` already knows whether it replaced a path, but the reply is `Ok(())` | **Must-have for the unleased manual path.** A non-atomic pre-read plus upsert can silently replace a foreign unowned route for the victim; the outcome is the only evidence. Leased adds get atomic ownership checks from the daemon instead (rustbgpd ADR-0141 §3) |
 | (b) Delete `allow_missing` | `DeletePathRequest.allow_missing` and `DeletePathResponse.outcome` (`DELETED`, `NOT_PRESENT`) | Missing paths return `NOT_FOUND` from `handle_withdraw_injected`. `DeletePathResponse` is empty | Nice-to-have. That `NOT_FOUND` is the only one the RPC produces, so mapping it to absent is safe, as the FlowSpec adapter already does for older daemons |
 | (c) Next-hop-self | A documented self marker on `AddPath`, resolved per egress session, for both families | `parse_unicast_nexthop` rejects `0.0.0.0`, `::`, multicast and broadcast. IPv6 prefixes require IPv6 next hops | Nice-to-have. An explicit discard next hop works today |
-| (d) The rustbgpd injection lease (owner-scoped) | Described below | No owner or lease exists. `Route` and `FlowSpecRouteEntry` have no owner, and every local row shows peer `0.0.0.0` | **Must-have for enforced detector-driven blackholes** (the lease gate). Manual and dry-run blackholes do not need it. It is the only remedy for a stopped controller, and it is also the ownership evidence needed before shared-speaker support |
-| (e) Vendored proto | Re-vendor at the first release containing (a), then at the release containing (d), and bump the qualification pin each time | Unicast injection messages match upstream, but the vendored file is behind (it lacks, for example, `ComparePolicy` and `GetLastSighupReload`) | **Must-have.** This work is prefixd-side and mechanical |
+| (d) The rustbgpd injection lease (owner-scoped) | rustbgpd ADR-0141, summarized below | No owner or lease exists. `Route` and `FlowSpecRouteEntry` have no owner, and every local row shows peer `0.0.0.0` | **Must-have for enforced detector-driven blackholes** (the lease gate). Manual and dry-run blackholes do not need it. It is the only remedy for a stopped controller, and it is also the ownership evidence needed before shared-speaker support |
+| (e) Vendored proto | Re-vendor at the first release containing (a), then at the release containing ADR-0141, and bump the qualification pin each time | Unicast injection messages match upstream, but the vendored file is behind (it lacks, for example, `ComparePolicy` and `GetLastSighupReload`) | **Must-have.** This work is prefixd-side and mechanical |
 
-Requirement (d), as designed upstream on 2026-10-19:
+Requirement (d), as proposed upstream in rustbgpd ADR-0141 on 2026-10-19:
 
 - **Owner-scoped.** The lease belongs to a controller as a whole, like a
   dead-man's switch. It is not a per-route timer: per-route expiry stays with
-  prefixd's TTLs.
-- **Add calls.** `AddPath` and `AddFlowSpec` take an optional opaque `owner`,
-  never sent on the wire, and an optional `lease_seconds`.
-- **Renewal.** `RenewLease(owner)` keeps everything that owner added alive with
-  no per-route work. Renewals never wait behind RIB work, and lease time uses a
-  monotonic clock.
+  prefixd's TTLs (ADR-0141 §1).
+- **Leased RPCs.** `AddLeasedPath` and `AddLeasedFlowSpec` wrap the existing
+  request messages with `InjectionLease { owner, lease_seconds }`. `AddPath`
+  and `AddFlowSpec` are unchanged. An older daemon answers `UNIMPLEMENTED` and
+  creates nothing, and the contract forbids retrying a failed leased add
+  through `AddPath` or `AddFlowSpec` (ADR-0141 §3).
+- **Lease length.** `lease_seconds` must be 5..=3600. Any leased add joins the
+  owner's live lease and renews it, with deadline = now + `lease_seconds`
+  (ADR-0141 §3, §7). The owner is never sent in BGP.
+- **Renewal and generation.** Each live lease has a `LeaseGeneration
+  { incarnation, sequence }`, with the incarnation random per boot.
+  `RenewLease(owner, generation, lease_seconds)` returns
+  `FAILED_PRECONDITION` when that generation is not live and never resurrects
+  a lease. After that status, or a leased add returning a different
+  generation, the controller re-adds its full desired state. Renewals are
+  served from the lease table and never wait behind RIB work, and lease time
+  uses a monotonic clock (ADR-0141 §2, §4, §6). `ListInjectionLeases`
+  (`sensitive_read`) reports owner, generation and remaining time.
 - **Expiry.** The daemon withdraws everything the owner added in one batch,
-  with a warning log and a metric. Withdrawal fails open, the safe direction
-  for blackholes.
-- **Ownership.** Retained local-intent rows report their owner and can be
-  filtered by it. Without admin rights, one owner cannot renew or delete
-  another owner's routes. prefixd also requires that an add which would
-  replace another owner's path is refused rather than applied.
-- **Bounds.** The daemon enforces a minimum and maximum lease length and a cap
-  on the number of owners.
-- **Expired-lease signal.** `RenewLease` must report that the lease had
-  already expired, through a distinct status or an epoch/generation that
-  changes when a lease is recreated. prefixd then re-adds at once instead of
-  renewing an empty lease. Without this, a late renewal could look successful
-  while the routes are gone.
-- **Detectability.** An older daemon must be detectable, for example because
-  `RenewLease` returns `UNIMPLEMENTED`, rather than silently ignoring `owner`
-  and `lease_seconds`.
+  with a warning log and a metric (ADR-0141 §4, §10). Expiry removes
+  rustbgpd's own local intent. It does not promise that traffic flows again:
+  another source's equal or better route, or a received FlowSpec rule, can
+  still apply (ADR-0141 §5). If the expiry task dies unexpectedly, rustbgpd
+  shuts down rather than silently stop expiring leases (ADR-0141 §9).
+- **Ownership.** The daemon enforces ownership atomically. A leased add on a
+  key held by another owner or by no owner, an unowned add on an owned key,
+  and a delete whose `owner` (`""` for unowned) does not match the entry all
+  return `FAILED_PRECONDITION` with no change. `DeletePath` and
+  `DeleteFlowSpec` also gain `override_owner`, which prefixd never uses.
+  Local-intent rows from `0.0.0.0` report `injection_owner`,
+  `lease_generation` and `lease_remaining_ms`, where 0 means expired with the
+  withdrawal pending (ADR-0141 §3).
+- **Authorization.** `RenewLease` and the leased adds are `operator_only`, the
+  same tier as today's adds. A successful renewal is audited at `INFO`. The
+  owner is a label, not a security boundary: the audit line records the
+  caller's principal beside it (ADR-0141 §8).
+- **Bounds.** At most 64 live owners; a leased add that would create one more
+  returns `RESOURCE_EXHAUSTED` (ADR-0141 §3, §7).
 - **Interop proof.** Kill the controller, and the route disappears at FRR
-  within the lease time.
+  within the lease time (ADR-0141 §12).
 - **Rejected upstream alternatives.** Renewing by re-adding every route was
   rejected for its RIB cost and because it cannot express "controller dead". A
   stream-scoped lease was rejected because a proxy timeout or a stall would
-  drop everything.
+  drop everything (ADR-0141 §1). A mandatory capability probe and deleting
+  whatever comes back unleased were rejected in favor of separate RPCs
+  (ADR-0141 §3).
 
-Items (a)–(c) are reported as in progress upstream, and (d) is tracked
-upstream; none of them was in the source checked. Because the surface is
-already in rustbgpd's v1 inventory, (a), (b) and (d) are additive features that
-should land before the freeze.
+Items (a)–(c) are reported as in progress upstream, and (d) is proposed as
+rustbgpd ADR-0141; none of them was in the source checked. Because the surface
+is already in rustbgpd's v1 inventory, (a), (b) and (d) are additive features
+that should land before the freeze.
 
 ## Failure modes
 
 - **Speaker restart.** Injected paths live in rustbgpd's in-memory `0.0.0.0`
   Adj-RIB-In and are lost on restart, and router sessions drop. The blackhole
   lifts and attack traffic resumes until reconciliation re-injects live,
-  unexpired, non-safelisted intent under the same owner. Once (d) ships, that
-  happens as soon as renewal or a read sees the loss. Graceful Restart on the
-  router can retain the stale route meanwhile. Qualification must measure this
-  interval.
+  unexpired, non-safelisted intent under its recorded owner. Once (d) ships,
+  that happens as soon as a renewal returns `FAILED_PRECONDITION` or a read
+  sees the loss (rustbgpd ADR-0141 §9). Graceful Restart on the router can
+  retain the stale route meanwhile. Qualification must measure this interval.
+- **Speaker expiry task dies.** rustbgpd shuts down rather than silently stop
+  expiring leases (ADR-0141 §9). prefixd sees a speaker restart, and
+  reconciliation re-adds as above.
 - **Controller stopped, speaker up.** TTL expiry needs the running controller
   ([ADR 003](003-fail-open-ttl.md)). Enforced detector blackholes exist only
-  behind the lease gate. When renewals stop, the speaker withdraws all of this
-  owner's routes within `lease_seconds`. Before (d) ships, a manual blackhole
-  is unleased. It stays advertised until the controller returns or an Admin
-  removes it with a speaker-side `DeletePath`, which is the most dangerous
-  remaining case. Monitor controller availability independently of BGP health.
-  Lease expiry is daemon cleanup, not proof of router withdrawal.
+  behind the lease gate. When renewals stop, the speaker removes all of this
+  owner's routes within `lease_seconds` plus its RIB queue lag (ADR-0141 §4).
+  Expiry removes rustbgpd's route; whether traffic then reaches the victim
+  depends on the other routes the network holds (ADR-0141 §5). Before (d)
+  ships, and afterwards for a blackhole added before the leased path was
+  enabled, a manual blackhole is unleased. It stays advertised until the
+  controller returns or an Admin removes it with a speaker-side `DeletePath`,
+  which is the most dangerous remaining case. Monitor controller availability
+  independently of BGP health. Lease expiry is daemon cleanup, not proof of
+  router withdrawal.
 - **Split brain.** The lifecycle mutex is in-process, and target registration is
   not a lease. Without owners, two controllers on one speaker cannot
   distinguish each other's routes. Upserts can overwrite, and one controller's
   withdrawal can delete the other's same-prefix route, which the other then
-  re-injects. The result is flapping, not safety. Requirement (d) makes
-  distinct owners unable to renew, delete or replace each other's routes. Two
-  controllers deriving the same owner are a misconfiguration that startup
-  refuses when it can detect one. Shared speakers stay unsupported until that
-  work is qualified, and the [upgrade guide](../how-to/upgrading.md) procedures
-  still apply.
+  re-injects. The result is flapping, not safety. Requirement (d) stops
+  distinct owners from deleting or replacing each other's routes by mistake
+  (ADR-0141 §3). The owner is a label, not a security boundary (ADR-0141
+  §8). Two controllers deriving the same owner are a misconfiguration that
+  startup refuses when it can detect one. Shared speakers stay unsupported
+  until that work is qualified, and the
+  [upgrade guide](../how-to/upgrading.md) procedures still apply.
 
 ## Implementation slices
 
@@ -490,18 +612,29 @@ Each slice is a separate draft PR that passes `just gate`.
    second unicast receiver. This qualifies FRR only.
 7. **Detector blackholes with owner and lease.** Add
    `PlaybookAction::Blackhole`, the source allowlist and the extension cap.
-   Also add the enforced-mode lease gate at startup and on playbook reload or
-   save, the owner identity and collision checks, the independent renewal
-   task, lease health and metrics, restart adoption, immediate re-add on an
-   expired lease, and owner-filtered read-back. The gate and plumbing can merge
+   Also add the `blackhole.leased` and `blackhole.lease_seconds` settings,
+   the enforced-mode lease gate at startup and on playbook reload or save, the
+   owner identity and collision checks, the per-route owner in `rule_json`,
+   `AddLeasedPath` with no unleased fallback, the independent renewal task,
+   lease health and metrics, restart adoption, the full re-add on a lost
+   lease, and owner-filtered read-back. The gate and plumbing can merge
    against the mock before the upstream release. Enforced detector blackholes
-   become available only after re-vendoring a rustbgpd release that contains
-   (d). *Accept:*
+   become available only after re-vendoring the proto at the rustbgpd release
+   that contains ADR-0141 and bumping the qualification pin. *Accept:*
    - Enforced startup and playbook save are refused with a blackhole step when
      `blackhole_lease` is false, and accepted when it is true; dry-run accepts
      and sends no RPC.
    - Renewal proceeds while the lifecycle mutex and database are blocked.
-   - An expired-lease report triggers a re-add, never a reported success.
+   - `UNIMPLEMENTED` from an older daemon on the leased add leaves nothing
+     installed and makes no plain `AddPath` call: the fake records zero
+     `AddPath` calls, and the mitigation stays unconfirmed.
+   - `FAILED_PRECONDITION` from a renewal, and a leased add returning a
+     different generation, each trigger a full leased re-add of the active
+     intent, never a reported success.
+   - Every delete passes the owner recorded in the request's `rule_json`, and
+     none sets `override_owner`.
+   - `blackhole.lease_seconds` outside 5..=3600 is refused at startup, and
+     every leased add and renewal in the fake carries the configured value.
    - Rows of other owners and rows without an owner are untouched.
    - A released-daemon test removes the routes once renewals stop.
    - An FRR receipt shows a killed controller's route disappearing at the
@@ -530,7 +663,7 @@ The owner decided the following on 2026-10-19:
    The owner-scoped lease, requirement (d), is a must-have for them. It is
    enforced by the `SpeakerCapabilities.blackhole_lease` gate at enforced
    startup and on playbook reload or save. Manual and dry-run blackholes may
-   ship before it. The lease is per controller, renewed by `RenewLease(owner)`,
+   ship before it. The lease is per controller, renewed by `RenewLease`,
    and withdraws everything the owner added when it expires; per-route expiry
    stays with prefixd's TTLs.
 2. **Manual blackholes require Admin.** Operator is not enough, so bearer
