@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::{
-    BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer, FlowSpecReader, FlowSpecWriter,
-    PeerObserver, PeerStatus, SessionState,
+    BlackholeInventory, BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer, FlowSpecReader,
+    FlowSpecWriter, PeerObserver, PeerStatus, SessionState,
 };
 use crate::domain::FlowSpecRule;
 use crate::error::Result;
@@ -105,8 +105,11 @@ impl BlackholeSpeaker for MockAnnouncer {
             .retain(|r| r.prefix() != *prefix);
         Ok(())
     }
-    async fn list_blackholes(&self) -> Result<Vec<BlackholeRoute>> {
-        Ok(self.blackholes.read().await.clone())
+    async fn list_blackholes(&self) -> Result<BlackholeInventory> {
+        Ok(BlackholeInventory {
+            routes: self.blackholes.read().await.clone(),
+            unrecognized: vec![],
+        })
     }
 }
 #[async_trait]
@@ -150,12 +153,12 @@ mod tests {
         for extra in [vec![], vec![64512 << 16 | 1]] {
             let route = BlackholeRoute::new(prefix, next_hop, extra, vec![]).unwrap();
             speaker.announce_blackhole(&route).await.unwrap();
-            assert_eq!(speaker.list_blackholes().await.unwrap(), [route]);
+            assert_eq!(speaker.list_blackholes().await.unwrap().routes, [route]);
         }
         for _ in 0..2 {
             speaker.withdraw_blackhole(&prefix).await.unwrap();
         }
-        assert!(speaker.list_blackholes().await.unwrap().is_empty());
+        assert!(speaker.list_blackholes().await.unwrap() == BlackholeInventory::default());
         assert!(
             speaker
                 .withdraw_blackhole(&"2001:db8::/64".parse().unwrap())

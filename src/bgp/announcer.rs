@@ -169,6 +169,22 @@ pub fn require_host_route(prefix: &ipnet::IpNet) -> Result<()> {
     Ok(())
 }
 
+/// A well-formed local route that is not prefixd-shaped, such as another tool's
+/// injection. Callers report it and never touch it; it is not an observation error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnrecognizedRoute {
+    pub prefix: ipnet::IpNet,
+    pub reason: &'static str,
+}
+
+/// Complete retained local unicast intent, split into prefixd-shaped blackholes
+/// and unrecognized local routes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlackholeInventory {
+    pub routes: Vec<BlackholeRoute>,
+    pub unrecognized: Vec<UnrecognizedRoute>,
+}
+
 /// Optional unicast blackhole capability (ADR 027). Reading is mandatory: an
 /// unreadable speaker cannot prove absence. Success is the backend's local RPC
 /// acceptance or retained local intent, never export or router enforcement.
@@ -178,9 +194,9 @@ pub trait BlackholeSpeaker: Send + Sync {
     async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<()>;
     /// Idempotent: an absent route is success.
     async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet) -> Result<()>;
-    /// Complete retained local intent for both families. A failed or partial
-    /// read is an error, never an empty or truncated inventory.
-    async fn list_blackholes(&self) -> Result<Vec<BlackholeRoute>>;
+    /// Complete retained local intent for both families. A failed, partial or
+    /// malformed read is an error, never an empty or truncated inventory.
+    async fn list_blackholes(&self) -> Result<BlackholeInventory>;
 }
 
 /// Selected speaker: writing is required, observation is explicitly optional.

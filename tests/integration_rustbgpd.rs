@@ -56,7 +56,8 @@ async fn live_rustbgpd_blackhole_inject_read_delete_and_restart_loss() {
     let capabilities = (&speaker as &dyn FlowSpecAnnouncer).capabilities();
     assert!(capabilities.blackhole && !capabilities.blackhole_lease);
     let blackhole = speaker.blackhole().unwrap();
-    assert!(blackhole.list_blackholes().await.unwrap().is_empty());
+    let empty = prefixd::bgp::BlackholeInventory::default();
+    assert_eq!(blackhole.list_blackholes().await.unwrap(), empty);
     let route = |prefix: &str, next_hop: &str, extra: u32| {
         BlackholeRoute::new(
             prefix.parse().unwrap(),
@@ -78,6 +79,7 @@ async fn live_rustbgpd_blackhole_inject_read_delete_and_restart_loss() {
                 .list_blackholes()
                 .await
                 .unwrap()
+                .routes
                 .contains(expected)
         );
         let next_hop = if expected.prefix().addr().is_ipv4() {
@@ -90,6 +92,7 @@ async fn live_rustbgpd_blackhole_inject_read_delete_and_restart_loss() {
         let listed = blackhole.list_blackholes().await.unwrap();
         assert_eq!(
             listed
+                .routes
                 .iter()
                 .filter(|r| r.prefix() == expected.prefix())
                 .collect::<Vec<_>>(),
@@ -99,7 +102,7 @@ async fn live_rustbgpd_blackhole_inject_read_delete_and_restart_loss() {
             .withdraw_blackhole(&expected.prefix())
             .await
             .unwrap();
-        assert!(blackhole.list_blackholes().await.unwrap().is_empty());
+        assert_eq!(blackhole.list_blackholes().await.unwrap(), empty);
         // The daemon reports NOT_FOUND for the absent path.
         blackhole
             .withdraw_blackhole(&expected.prefix())
@@ -115,8 +118,8 @@ async fn live_rustbgpd_blackhole_inject_read_delete_and_restart_loss() {
         blackhole.announce_blackhole(route).await.unwrap();
     }
     let listed = blackhole.list_blackholes().await.unwrap();
-    assert_eq!(listed.len(), many.len());
-    assert!(many.iter().all(|route| listed.contains(route)));
+    assert_eq!(listed.routes.len(), many.len());
+    assert!(many.iter().all(|route| listed.routes.contains(route)));
     for route in &many {
         blackhole.withdraw_blackhole(&route.prefix()).await.unwrap();
     }
@@ -125,12 +128,46 @@ async fn live_rustbgpd_blackhole_inject_read_delete_and_restart_loss() {
     for expected in &routes {
         blackhole.announce_blackhole(expected).await.unwrap();
     }
-    assert_eq!(blackhole.list_blackholes().await.unwrap().len(), 2);
+    // Another tool's local injections are reported as unrecognized, never an error.
+    for (prefix, path_id, communities) in [
+        ("192.0.2.250", 0, vec![]),
+        ("192.0.2.240", 7, vec![prefixd::bgp::BLACKHOLE_COMMUNITY]),
+    ] {
+        fixture
+            .add_raw_path(prefixd::bgp::rustbgpd_pb::AddPathRequest {
+                prefix: prefix.into(),
+                prefix_length: 32,
+                next_hop: "192.0.2.66".into(),
+                communities,
+                path_id,
+                ..Default::default()
+            })
+            .await;
+    }
+    let listed = blackhole.list_blackholes().await.unwrap();
+    assert_eq!(listed.routes.len(), 2);
+    assert!(routes.iter().all(|route| listed.routes.contains(route)));
+    let mut foreign: Vec<_> = listed
+        .unrecognized
+        .iter()
+        .map(|row| (row.prefix.to_string(), row.reason))
+        .collect();
+    foreign.sort();
+    assert_eq!(
+        foreign,
+        [
+            ("192.0.2.240/32".to_string(), "nonzero path_id"),
+            (
+                "192.0.2.250/32".to_string(),
+                "missing BLACKHOLE or non-canonical communities"
+            ),
+        ]
+    );
     fixture.container.stop_with_timeout(Some(0)).await.unwrap();
     assert!(blackhole.list_blackholes().await.is_err());
     fixture.container.start().await.unwrap();
     fixture.ready().await;
-    assert!(blackhole.list_blackholes().await.unwrap().is_empty());
+    assert_eq!(blackhole.list_blackholes().await.unwrap(), empty);
 }
 
 #[tokio::test]

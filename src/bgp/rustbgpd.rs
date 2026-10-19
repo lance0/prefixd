@@ -1,6 +1,7 @@
 use super::{
-    BlackholeRoute, BlackholeSpeaker, DaemonHealth, DaemonHealthObserver, FlowSpecAnnouncer,
-    FlowSpecReader, FlowSpecWriter, PeerObserver, PeerStatus, SessionState, rustbgpd_pb as pb,
+    BlackholeInventory, BlackholeRoute, BlackholeSpeaker, DaemonHealth, DaemonHealthObserver,
+    FlowSpecAnnouncer, FlowSpecReader, FlowSpecWriter, PeerObserver, PeerStatus, SessionState,
+    UnrecognizedRoute, rustbgpd_pb as pb,
 };
 use crate::{
     config::RustBgpdConfig,
@@ -398,22 +399,15 @@ fn encode_blackhole(route: &BlackholeRoute) -> pb::AddPathRequest {
     }
 }
 
-/// Strict: any attribute prefixd never injects fails the whole read.
-fn decode_blackhole(route: pb::Route, family: i32) -> Result<BlackholeRoute> {
-    if route.peer_address != "0.0.0.0"
-        || route.origin != 0
-        || !route.as_path.is_empty()
-        || route.local_pref_attr.is_some()
-        || route.med_attr.is_some()
-        || route.med != 0
-        || !route.extended_communities.is_empty()
-        || route.path_id != 0
-        || route.stale
-        || route.llgr_stale
-        || route.aggregator.is_some()
-        || route.atomic_aggregate
-    {
-        return Err(invalid("unsupported local route attributes"));
+/// Malformed rows make the view untrustworthy and fail the whole read. A
+/// well-formed local row that is not prefixd-shaped is returned as unrecognized.
+fn decode_blackhole(
+    route: pb::Route,
+    family: i32,
+    inventory: &mut BlackholeInventory,
+) -> Result<()> {
+    if route.peer_address != "0.0.0.0" {
+        return Err(invalid("row outside the local intent view"));
     }
     let address: std::net::IpAddr = route
         .prefix
@@ -425,8 +419,9 @@ fn decode_blackhole(route: pb::Route, family: i32) -> Result<BlackholeRoute> {
     let prefix = u8::try_from(route.prefix_length)
         .ok()
         .and_then(|length| ipnet::IpNet::new(address, length).ok())
+        .filter(|prefix| *prefix == prefix.trunc())
         .ok_or_else(|| invalid("invalid local route prefix"))?;
-    let next_hop = route
+    let next_hop: std::net::IpAddr = route
         .next_hop
         .parse()
         .map_err(|_| invalid("invalid local route next hop"))?;
@@ -444,13 +439,40 @@ fn decode_blackhole(route: pb::Route, family: i32) -> Result<BlackholeRoute> {
                 .ok_or_else(|| invalid("invalid local route large community"))
         })
         .collect::<Result<Vec<_>>>()?;
-    let decoded = BlackholeRoute::new(prefix, next_hop, route.communities.clone(), large.clone())
-        .map_err(|_| invalid("local route is not a blackhole host route"))?;
-    // prefixd injects canonical communities including BLACKHOLE; anything else is foreign.
-    if decoded.communities() != route.communities || decoded.large_communities() != large {
-        return Err(invalid("unsupported local route communities"));
-    }
-    Ok(decoded)
+    let reason = if route.path_id != 0 {
+        "nonzero path_id"
+    } else if prefix.prefix_len() != prefix.max_prefix_len() {
+        "not a host route"
+    } else if route.origin != 0
+        || !route.as_path.is_empty()
+        || route.local_pref_attr.is_some()
+        || route.med_attr.is_some()
+        || route.med != 0
+        || !route.extended_communities.is_empty()
+        || route.stale
+        || route.llgr_stale
+        || route.aggregator.is_some()
+        || route.atomic_aggregate
+    {
+        "unexpected path attributes"
+    } else {
+        match BlackholeRoute::new(prefix, next_hop, route.communities.clone(), large.clone()) {
+            Err(_) => "next hop is not a same-family unicast address",
+            // prefixd injects canonical communities that include BLACKHOLE.
+            Ok(decoded)
+                if decoded.communities() == route.communities
+                    && decoded.large_communities() == large =>
+            {
+                inventory.routes.push(decoded);
+                return Ok(());
+            }
+            Ok(_) => "missing BLACKHOLE or non-canonical communities",
+        }
+    };
+    inventory
+        .unrecognized
+        .push(UnrecognizedRoute { prefix, reason });
+    Ok(())
 }
 
 /// Explicit, so a daemon default change cannot alter the walk.
@@ -607,8 +629,8 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
         Ok(())
     }
 
-    async fn list_blackholes(&self) -> Result<Vec<BlackholeRoute>> {
-        let mut routes = vec![];
+    async fn list_blackholes(&self) -> Result<BlackholeInventory> {
+        let mut inventory = BlackholeInventory::default();
         for family in [
             pb::AddressFamily::Ipv4Unicast as i32,
             pb::AddressFamily::Ipv6Unicast as i32,
@@ -634,7 +656,7 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
                     return Err(invalid("local intent changed during the read"));
                 }
                 for route in response.routes {
-                    routes.push(decode_blackhole(route, family)?);
+                    decode_blackhole(route, family, &mut inventory)?;
                 }
                 if response.next_page_token.is_empty() {
                     break;
@@ -645,7 +667,7 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
                 page_token = response.next_page_token;
             }
         }
-        Ok(routes)
+        Ok(inventory)
     }
 }
 

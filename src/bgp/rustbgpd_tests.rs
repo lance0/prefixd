@@ -780,8 +780,7 @@ const DELETE_INTERNAL: usize = 4;
 const LIST_UNIMPLEMENTED: usize = 5;
 const VERSION_CHANGES: usize = 6;
 const REPEATED_TOKEN: usize = 7;
-const ATTRIBUTE_BASE: usize = 100;
-const UNEXPECTED_ATTRIBUTES: usize = 17;
+const FOREIGN_BASE: usize = 100;
 
 fn same_key(left: &pb::AddPathRequest, prefix: &str, length: u32) -> bool {
     left.prefix == prefix && left.prefix_length == length
@@ -880,8 +879,9 @@ impl pb::rib_service_server::RibService for UnicastFake {
                     best: true,
                     ..Default::default()
                 };
-                if let Some(attribute) = mode.checked_sub(ATTRIBUTE_BASE) {
-                    unexpected_attribute(&mut route, attribute);
+                // Mutate one row per family; the others must still be returned.
+                if mode >= FOREIGN_BASE && route.prefix.ends_with('2') {
+                    mutate_row(&mut route, mode);
                 }
                 route
             })
@@ -909,28 +909,72 @@ impl pb::rib_service_server::RibService for UnicastFake {
     }
 }
 
-fn unexpected_attribute(route: &mut pb::Route, attribute: usize) {
+const ATTRIBUTES: &str = "unexpected path attributes";
+const COMMUNITIES: &str = "missing BLACKHOLE or non-canonical communities";
+const NEXT_HOP: &str = "next hop is not a same-family unicast address";
+
+/// Well-formed local rows that are not prefixd-shaped, with the reported reason.
+const FOREIGN_ROWS: [(usize, &str); 16] = [
+    (100, ATTRIBUTES),
+    (101, ATTRIBUTES),
+    (102, ATTRIBUTES),
+    (103, ATTRIBUTES),
+    (104, ATTRIBUTES),
+    (105, ATTRIBUTES),
+    (106, ATTRIBUTES),
+    (107, ATTRIBUTES),
+    (108, ATTRIBUTES),
+    (109, ATTRIBUTES),
+    (110, "nonzero path_id"),
+    (111, COMMUNITIES),
+    (112, COMMUNITIES),
+    (113, "not a host route"),
+    (114, NEXT_HOP),
+    (115, NEXT_HOP),
+];
+
+/// Rows the daemon cannot produce for this view; the read cannot be trusted.
+const MALFORMED_ROWS: [usize; 7] = [200, 201, 202, 203, 204, 205, 206];
+
+fn mutate_row(route: &mut pb::Route, case: usize) {
     let ipv4 = route.prefix.contains('.');
-    match attribute {
-        0 => route.peer_address = "192.0.2.9".into(),
-        1 => route.origin = 2,
-        2 => route.as_path = vec![64512],
-        3 => route.local_pref_attr = Some(100),
-        4 => route.med_attr = Some(0),
-        5 => route.med = 10,
-        6 => route.extended_communities = vec![1],
-        7 => route.path_id = 1,
-        8 => route.stale = true,
-        9 => route.llgr_stale = true,
-        10 => route.atomic_aggregate = true,
-        11 => route
+    match case {
+        100 => route.origin = 2,
+        101 => route.as_path = vec![64512],
+        102 => route.local_pref_attr = Some(100),
+        103 => route.med_attr = Some(0),
+        104 => route.med = 10,
+        105 => route.extended_communities = vec![1],
+        106 => {
+            route.aggregator = Some(pb::RouteAggregator {
+                asn: 64512,
+                router_id: "192.0.2.1".into(),
+            })
+        }
+        107 => route.atomic_aggregate = true,
+        108 => route.stale = true,
+        109 => route.llgr_stale = true,
+        110 => route.path_id = 1,
+        111 => route
             .communities
             .retain(|c| *c != crate::bgp::BLACKHOLE_COMMUNITY),
-        12 => route.communities.reverse(),
-        13 => route.large_communities = vec!["1:2".into()],
-        14 => route.prefix_length = 24,
-        15 => route.prefix = if ipv4 { "2001:db8::9" } else { "192.0.2.9" }.into(),
-        16 => route.next_hop = if ipv4 { "2001:db8::66" } else { "192.0.2.66" }.into(),
+        112 => route.communities.reverse(),
+        113 => {
+            (route.prefix, route.prefix_length) = if ipv4 {
+                ("192.0.2.0".into(), 24)
+            } else {
+                ("2001:db8::".into(), 64)
+            }
+        }
+        114 => route.next_hop = if ipv4 { "2001:db8::66" } else { "192.0.2.66" }.into(),
+        115 => route.next_hop = if ipv4 { "224.0.0.1" } else { "ff02::1" }.into(),
+        200 => route.peer_address = "192.0.2.9".into(),
+        201 => route.large_communities = vec!["1:2".into()],
+        202 => route.prefix_length = 24,
+        203 => route.prefix_length = if ipv4 { 33 } else { 129 },
+        204 => route.prefix = if ipv4 { "2001:db8::9" } else { "192.0.2.9" }.into(),
+        205 => route.prefix = "not-an-address".into(),
+        206 => route.next_hop = "not-an-address".into(),
         _ => unreachable!(),
     }
 }
@@ -990,14 +1034,14 @@ async fn blackhole_read_back_pages_to_completion_in_both_families() {
     let (speaker, fake, server) = unicast_speaker().await;
     assert!(speaker.blackhole().is_some());
     let mut expected = seed_blackholes(&speaker).await;
-    assert_eq!(speaker.list_blackholes().await.unwrap(), expected);
+    assert_eq!(speaker.list_blackholes().await.unwrap().routes, expected);
     assert_eq!(fake.pages.load(SeqCst), 5, "one route per page");
     // Upsert replaces the attributes of the same host key.
     let replacement = blackhole("192.0.2.1/32", "192.0.2.67", 2);
     speaker.announce_blackhole(&replacement).await.unwrap();
     expected.remove(0);
     expected.insert(1, replacement);
-    assert_eq!(speaker.list_blackholes().await.unwrap(), expected);
+    assert_eq!(speaker.list_blackholes().await.unwrap().routes, expected);
     for mode in [VERSION_CHANGES, REPEATED_TOKEN] {
         fake.mode.store(mode, SeqCst);
         assert!(speaker.list_blackholes().await.is_err());
@@ -1019,7 +1063,10 @@ async fn blackhole_read_back_aborted_mid_walk_is_an_error() {
 #[tokio::test]
 async fn blackhole_empty_view_is_success_distinct_from_unsupported_and_failed() {
     let (speaker, fake, server) = unicast_speaker().await;
-    assert!(speaker.list_blackholes().await.unwrap().is_empty());
+    assert_eq!(
+        speaker.list_blackholes().await.unwrap(),
+        crate::bgp::BlackholeInventory::default()
+    );
     assert_eq!(fake.pages.load(SeqCst), 2, "one empty page per family");
     fake.mode.store(LIST_UNIMPLEMENTED, SeqCst);
     assert!(speaker.list_blackholes().await.is_err());
@@ -1029,15 +1076,47 @@ async fn blackhole_empty_view_is_success_distinct_from_unsupported_and_failed() 
 }
 
 #[tokio::test]
-async fn blackhole_unexpected_local_attributes_fail_the_whole_read() {
+async fn blackhole_unrecognized_local_rows_are_returned_not_dropped_or_errors() {
+    let (speaker, fake, server) = unicast_speaker().await;
+    let seeded = seed_blackholes(&speaker).await;
+    let untouched: Vec<_> = seeded
+        .iter()
+        .filter(|route| !route.prefix().addr().to_string().ends_with('2'))
+        .cloned()
+        .collect();
+    assert_eq!(untouched.len(), 3);
+    for (case, reason) in FOREIGN_ROWS {
+        fake.mode.store(case, SeqCst);
+        let inventory = speaker
+            .list_blackholes()
+            .await
+            .unwrap_or_else(|error| panic!("foreign row case {case} failed the read: {error}"));
+        assert_eq!(inventory.routes, untouched, "case {case}");
+        let expected: Vec<_> = if case == 113 {
+            ["192.0.2.0/24", "2001:db8::/64"]
+        } else {
+            ["192.0.2.2/32", "2001:db8::2/128"]
+        }
+        .into_iter()
+        .map(|prefix| crate::bgp::UnrecognizedRoute {
+            prefix: prefix.parse().unwrap(),
+            reason,
+        })
+        .collect();
+        assert_eq!(inventory.unrecognized, expected, "case {case}");
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn blackhole_malformed_local_rows_fail_the_whole_read() {
     let (speaker, fake, server) = unicast_speaker().await;
     seed_blackholes(&speaker).await;
-    assert_eq!(speaker.list_blackholes().await.unwrap().len(), 5);
-    for attribute in 0..UNEXPECTED_ATTRIBUTES {
-        fake.mode.store(ATTRIBUTE_BASE + attribute, SeqCst);
+    for case in MALFORMED_ROWS {
+        fake.mode.store(case, SeqCst);
         assert!(
             speaker.list_blackholes().await.is_err(),
-            "attribute case {attribute} was accepted"
+            "malformed row case {case} was accepted"
         );
     }
     server.abort();
@@ -1054,6 +1133,7 @@ async fn blackhole_delete_not_found_is_absent_and_other_codes_are_errors() {
             .list_blackholes()
             .await
             .unwrap()
+            .routes
             .iter()
             .any(|route| route.prefix() == v4)
     );
@@ -1067,13 +1147,13 @@ async fn blackhole_delete_not_found_is_absent_and_other_codes_are_errors() {
         assert!(speaker.withdraw_blackhole(&v6).await.is_err());
     }
     fake.mode.store(0, SeqCst);
-    assert_eq!(speaker.list_blackholes().await.unwrap().len(), 4);
+    assert_eq!(speaker.list_blackholes().await.unwrap().routes.len(), 4);
     assert!(
         speaker
             .withdraw_blackhole(&"2001:db8::/64".parse().unwrap())
             .await
             .is_err()
     );
-    assert_eq!(speaker.list_blackholes().await.unwrap().len(), 4);
+    assert_eq!(speaker.list_blackholes().await.unwrap().routes.len(), 4);
     server.abort();
 }

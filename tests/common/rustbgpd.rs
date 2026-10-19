@@ -350,6 +350,26 @@ prefixd-test = "operator"
         .expect("bounded authenticated daemon readiness");
     }
 
+    /// Inject a local unicast path as another tool would, bypassing the adapter.
+    pub async fn add_raw_path(&self, path: pb::AddPathRequest) {
+        let channel = tonic::transport::Endpoint::from_shared(self.endpoint.clone())
+            .unwrap()
+            .connect_timeout(Duration::from_secs(1))
+            .timeout(Duration::from_secs(2))
+            .connect()
+            .await
+            .unwrap();
+        let mut request = tonic::Request::new(path);
+        let token = std::env::var("PREFIXD_RUSTBGPD_TEST_TOKEN").unwrap();
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        pb::injection_service_client::InjectionServiceClient::new(channel)
+            .add_path(request)
+            .await
+            .unwrap();
+    }
+
     /// Raw retained candidate view for the isolated bearer-authenticated peer fixture.
     pub async fn received_flow_spec(&self, family: i32, peer: &str) -> pb::ListFlowSpecResponse {
         tokio::time::timeout(Duration::from_secs(3), async {

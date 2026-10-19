@@ -28,9 +28,15 @@ provides it. It injects with unleased `AddPath` (ORIGIN IGP, empty AS_PATH,
 `path_id` 0, BLACKHOLE `65535:666` plus the route's communities), deletes with
 `DeletePath`, where `NOT_FOUND` means absent, and reads
 `ListReceivedRoutes(neighbor 0.0.0.0)` for each unicast family to the last page.
-`ABORTED` mid-walk, any other error or an unexpected attribute fails the whole
-read. GoBGP returns `None`, which is unsupported rather than empty. Nothing in
-the controller calls the capability yet.
+The read returns prefixd-shaped blackholes separately from unrecognized local
+routes. An unrecognized route is well formed but not prefixd-shaped, for
+example another tool's injection, a nonzero `path_id`, a missing BLACKHOLE or
+extra path attributes. It carries its prefix and a reason, so callers can report
+it without touching it. `ABORTED` mid-walk, a changed page version, any other
+error or a malformed row fails the whole read. A malformed row has a non-local
+peer, an unparseable prefix, next hop or large community, host bits or a
+family mismatch. GoBGP returns `None`, which is unsupported rather than empty.
+Nothing in the controller calls the capability yet.
 
 Health detail adds `speaker.backend` and availability booleans under
 `speaker.capabilities`: `rule_reader`, `peer_observer`, `daemon_health`,
