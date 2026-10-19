@@ -192,7 +192,7 @@ function readGuardrails(settings: { [key: string]: JsonValue } | undefined): Rul
   const flag = (key: string) => (guardrails[key] === true ? true : guardrails[key] === false ? false : undefined)
 
   return {
-    maxPorts: Number.isInteger(maxPorts) && maxPorts > 0 ? maxPorts : 8,
+    maxPorts: Number.isInteger(maxPorts) && maxPorts > 0 ? maxPorts : 5,
     allowFragmentMatch: flag("allow_fragment_match"),
     allowPacketLengthMatch: flag("allow_packet_length_match"),
   }

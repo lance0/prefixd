@@ -809,9 +809,11 @@ mod tests {
     use crate::domain::ActionType;
 
     #[test]
-    fn default_max_ports_guardrail_matches_the_encoder_cap() {
+    fn default_max_ports_guardrail_fits_under_the_encoder_cap() {
         let guardrails: crate::config::GuardrailsConfig = crate::config::parse_yaml("{}").unwrap();
-        assert_eq!(guardrails.max_ports, MAX_PORTS_PER_LIST);
+        // The default is FRR's five values per component, below the encoder cap.
+        assert_eq!(guardrails.max_ports, 5);
+        assert!(guardrails.max_ports <= MAX_PORTS_PER_LIST);
         let at_cap = FlowSpecNlri {
             dst_prefix: "192.0.2.1/32".into(),
             protocol: Some(17),

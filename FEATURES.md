@@ -169,7 +169,7 @@ guardrails:
   max_ttl_seconds: 3600
   dst_prefix_maxlen: 32      # /32 only for IPv4
   dst_prefix_maxlen_v6: 128  # /128 only for IPv6
-  max_ports: 8
+  max_ports: 5
 
 quotas:
   max_active_per_customer: 10

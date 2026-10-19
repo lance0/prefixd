@@ -1014,7 +1014,7 @@ playbooks:
     #[test]
     fn match_settings_refuse_opt_ins_port_caps_and_unsupported_speakers() {
         let yaml = amplification(
-            "          - match: {fragment: non_first}\n            action: police\n            rate_bps: 1000000\n          - match: {src_ports: [1, 2, 3, 4, 5, 6, 7, 8, 9], packet_length: {min: 100, max: 200}}\n            action: discard\n          - match: {src_ports: from_event}\n            action: discard\n",
+            "          - match: {fragment: non_first}\n            action: police\n            rate_bps: 1000000\n          - match: {src_ports: [1, 2, 3, 4, 5, 6], packet_length: {min: 100, max: 200}}\n            action: discard\n          - match: {src_ports: from_event}\n            action: discard\n",
         );
         let playbooks = check(&yaml).unwrap();
         let mut guardrails: crate::config::GuardrailsConfig =
@@ -1023,11 +1023,11 @@ playbooks:
         assert_eq!(errors.len(), 3, "{errors:?}");
         assert!(errors[0].contains("rule[0]: fragment needs guardrails.allow_fragment_match"));
         assert!(errors[1].contains("rule[1]: packet_length needs"));
-        assert!(errors[2].contains("rule[1]: src_ports has 9 ports; guardrails.max_ports is 8"));
+        assert!(errors[2].contains("rule[1]: src_ports has 6 ports; guardrails.max_ports is 5"));
         // Accepting control: opted in and within the cap.
         guardrails.allow_fragment_match = true;
         guardrails.allow_packet_length_match = true;
-        guardrails.max_ports = 9;
+        guardrails.max_ports = 6;
         assert!(
             playbooks
                 .check_match_settings(&guardrails, FlowSpecMatchSupport::ALL)

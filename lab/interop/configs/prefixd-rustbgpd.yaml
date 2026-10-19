@@ -23,6 +23,9 @@ guardrails:
   require_ttl: true
   dst_prefix_minlen: 32
   dst_prefix_maxlen: 32
+  # Deliberately above the default of 5: the FRR amplification scenario's
+  # negative step needs 8-value rules to show the session reset, then runs a
+  # copy at 5.
   max_ports: 8
   allow_src_prefix_match: false
   # ADR 028 opt-ins for the amplification scenario's fragment and

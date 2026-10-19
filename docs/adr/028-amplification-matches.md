@@ -10,7 +10,8 @@ Slice 7 is done: the
 [FRR amplification receipt](../reference/qualification/amplification-frr-2026-10-19.md)
 qualifies FRR 10.7.1's control plane for both speakers and families. It found
 that FRR accepts at most five values per component and resets the session on
-more, which the default `max_ports: 8` can produce. Extends
+more, which the earlier default `max_ports: 8` could produce; the default is
+now 5. Extends
 [ADR 012](012-playbook-policy-engine.md),
 [ADR 019](019-signal-adapter-architecture.md) and
 [ADR 025](025-pluggable-speaker-backends.md). It follows the identity
@@ -502,10 +503,14 @@ documented in the API reference.
 
 ### 6. Guardrails
 
-- **Port count.** `max_ports` (default 8) applies to each port list
-  separately. A source-port list above it is rejected, never truncated. The
-  rustbgpd encoder's eight-port cap applies to source ports too until a larger
-  value is qualified on routers.
+- **Port count.** `max_ports` applies to each port list separately. A
+  source-port list above it is rejected, never truncated. The default is 5:
+  the
+  [FRR receipt](../reference/qualification/amplification-frr-2026-10-19.md)
+  found that FRR 10.7.1 resets the session on a component with more than
+  five values. The
+  rustbgpd encoder's eight-port cap still bounds any raised value, for source
+  ports too, until a larger value is qualified on routers.
 - **Packet-length sanity.** Section 1 invariants. A range that cannot match
   anything is rejected, not installed.
 - **Fragments need opt-in.** `allow_fragment_match` (default false) becomes

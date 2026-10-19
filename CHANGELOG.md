@@ -21,7 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-list limit, now fails configuration load at startup and names both
   values. Before, rules over 8 ports were saved and then refused at
   announcement. Lower `max_ports` to 8 or less before upgrading. Shipped
-  configurations use 8, and GoBGP is unaffected.
+  configurations use 5, and GoBGP is unaffected.
+- The `guardrails.max_ports` default drops from 8 to 5, and the shipped
+  configurations now set 5. FRR 10.7.1 accepts at most five values in one
+  FlowSpec component and resets the whole session on a rule with more,
+  dropping every route on it; see the
+  [FRR amplification receipt](docs/reference/qualification/amplification-frr-2026-10-19.md).
+  Where `max_ports` is unset, manual and API requests with six to eight ports
+  in one list now return `422`, and a detector's `from_event` source ports
+  split into rules of at most five: a 20-port amplification report becomes
+  four source-port rules instead of three, each counting toward quotas. A
+  configuration that sets `max_ports: 8`, as earlier shipped files did, keeps
+  it. Raise it only for routers known to accept longer lists.
 - Migration 017 adds the nullable `events.top_src_ports_json` column. Replay
   leaves every existing event's value `NULL` and rewrites no other row.
 - Migration 018 replaces the `events` constraint
@@ -141,8 +152,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expected components, then removal on detector unban and TTL expiry and
   return through prefixd repair after a speaker restart. FRR installed none of
   them as a filter. It also records that FRR accepts at most five values per
-  component and resets the session on a rule with more, which the default
-  `guardrails.max_ports: 8` allows: use 5 or lower toward FRR.
+  component and resets the session on a rule with more, which the earlier
+  default `guardrails.max_ports: 8` allowed. The default is now 5; see the
+  upgrade notes.
 
 - Fence duplicate controllers with a PostgreSQL session advisory lock (ADR
   027). Each controller derives an owner from its POP and registered speaker

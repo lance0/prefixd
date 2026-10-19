@@ -34,7 +34,7 @@ impl PolicyEngine {
             pop,
             default_ttl,
             reflector_ports: AmplificationConfig::default().library_ports(),
-            max_ports: 8,
+            max_ports: crate::config::default_max_ports(),
         }
     }
 

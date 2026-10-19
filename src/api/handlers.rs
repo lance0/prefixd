@@ -3726,16 +3726,18 @@ playbooks:
         let first = ban(&f, event("c1", "udp_amplification", Some(&reported)))
             .await
             .unwrap();
-        assert_eq!(outcomes(&first), [Created, Created, Created, Created]);
+        assert_eq!(
+            outcomes(&first),
+            [Created, Created, Created, Created, Created]
+        );
         let mut chunks = Vec::new();
-        for id in &first.mitigation_ids[..3] {
+        for id in &first.mitigation_ids[..4] {
             chunks.push(get(&f, *id).await.match_criteria.src_ports);
         }
-        // Sorted, then split at max_ports (8), the rustbgpd per-list cap.
-        assert_eq!(chunks[0], library[..8]);
-        assert_eq!(chunks[1], library[8..16]);
-        assert_eq!(chunks[2], library[16..]);
-        assert!(chunks.iter().all(|chunk| chunk.len() <= 8));
+        // Sorted, then split at the default max_ports (5), FRR's per-component
+        // limit: twenty library ports make four source-port rules.
+        let expected: Vec<Vec<u16>> = library.chunks(5).map(<[u16]>::to_vec).collect();
+        assert_eq!(chunks, expected);
 
         // The same set in another order and with duplicates maps to the same
         // identities: every rule extends and none is duplicated.
@@ -3745,10 +3747,13 @@ playbooks:
         let again = ban(&f, event("c2", "udp_amplification", Some(&shuffled)))
             .await
             .unwrap();
-        assert_eq!(outcomes(&again), [Extended, Extended, Extended, Extended]);
+        assert_eq!(
+            outcomes(&again),
+            [Extended, Extended, Extended, Extended, Extended]
+        );
         assert_eq!(again.mitigation_ids, first.mitigation_ids);
-        assert_eq!(rows(&f).await.len(), 4);
-        assert_eq!(f.speaker.announced_count().await, 4);
+        assert_eq!(rows(&f).await.len(), 5);
+        assert_eq!(f.speaker.announced_count().await, 5);
     }
 
     #[tokio::test]

@@ -185,8 +185,8 @@ guardrails:
   dst_prefix_minlen_v6: 128
   dst_prefix_maxlen_v6: 128
   
-  # Max ports in each port list of a rule (router memory protection)
-  max_ports: 8
+  # Max ports in each port list of a rule (FRR accepts at most 5)
+  max_ports: 5
   
   # TTL bounds (optional overrides; if omitted, uses timers.min/max_ttl_seconds)
   min_ttl_seconds: 30
@@ -202,12 +202,22 @@ guardrails:
 ```
 
 `max_ports` applies to the destination-port list and the source-port list
-separately: a rule with eight of each passes the default. A list over the cap
-is refused, never truncated. Duplicate source ports count once. The rustbgpd
-encoder emits at most 8 ports per list, which is why the default is 8. With
-`bgp.backend: rustbgpd`, a `max_ports` above 8 fails configuration load at
-startup, naming both values, rather than saving rules the encoder could never
-announce. GoBGP has no per-list cap, so its `max_ports` is not limited.
+separately: a rule with five of each passes the default. A list over the cap
+is refused with `422`, never truncated. Duplicate source ports count once. A
+detector's `from_event` source ports are split into rules of at most
+`max_ports` ports, so the 20-port library becomes four source-port rules at
+the default.
+
+The default is 5 because FRR 10.7.1 accepts at most five values in one FlowSpec
+component: a rule with more makes it send NOTIFICATION 3/9 and reset the
+session, dropping every route on it (see the
+[FRR amplification receipt](qualification/amplification-frr-2026-10-19.md)).
+Raising `max_ports` is the operator's call, per router: do it only when every
+router that receives the rules is known to accept longer lists. The rustbgpd
+encoder emits at most 8 ports per list, so with `bgp.backend: rustbgpd` a
+`max_ports` above 8 fails configuration load at startup, naming both values,
+rather than saving rules the encoder could never announce. GoBGP has no
+per-list cap, so its `max_ports` is not limited.
 
 Rules with a non-first fragment match (`fragment`) are refused unless
 `allow_fragment_match` is `true`, and rules with a packet-length match

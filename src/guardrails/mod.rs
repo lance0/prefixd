@@ -393,33 +393,37 @@ mod tests {
 
     #[tokio::test]
     async fn max_ports_caps_each_port_list_separately() {
-        let (config, _) = test_config();
-        assert_eq!(config.max_ports, 8);
-        // Eight per list passes, sixteen in total.
+        // At the shipped default: FRR resets the session on a component with
+        // more than five values.
+        let (mut config, _) = test_config();
+        config.max_ports = crate::config::parse_yaml::<GuardrailsConfig>("{}")
+            .unwrap()
+            .max_ports;
+        // Five per list passes, ten in total.
         let full = MatchCriteria {
-            dst_ports: (1..=8).collect(),
-            ..udp((11..=18).collect())
+            dst_ports: (1..=5).collect(),
+            ..udp((11..=15).collect())
         };
         check(&config, full.clone()).await.unwrap();
         assert!(matches!(
-            refused(check(&config, udp((11..=19).collect())).await),
-            GuardrailError::TooManySourcePorts { count: 9, max: 8 }
+            refused(check(&config, udp((11..=16).collect())).await),
+            GuardrailError::TooManySourcePorts { count: 6, max: 5 }
         ));
         assert!(matches!(
             refused(
                 check(
                     &config,
                     MatchCriteria {
-                        dst_ports: (1..=9).collect(),
+                        dst_ports: (1..=6).collect(),
                         ..full.clone()
                     }
                 )
                 .await
             ),
-            GuardrailError::TooManyPorts { count: 9, max: 8 }
+            GuardrailError::TooManyPorts { count: 6, max: 5 }
         ));
         // Duplicates count once, as the encoders see them.
-        check(&config, udp([53; 9].into())).await.unwrap();
+        check(&config, udp([53; 6].into())).await.unwrap();
     }
 
     #[tokio::test]

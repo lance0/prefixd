@@ -162,7 +162,7 @@ detector unban and TTL expiry and restored by prefixd repair after a speaker
 restart. It is BGP-table evidence only.
 
 **Known quirks:**
-- FRR 10.7.1 accepts at most five values in one FlowSpec component. A rule with more (prefixd's default `max_ports: 8` allows eight source ports) makes FRR send NOTIFICATION 3/9 and reset the session, dropping every route on it.
+- FRR 10.7.1 accepts at most five values in one FlowSpec component. A rule with more (prefixd's earlier default `max_ports: 8` allowed eight source ports; the default is now 5) makes FRR send NOTIFICATION 3/9 and reset the session, dropping every route on it.
 - FRR's FlowSpec text and JSON omit the AND bit, so `>=1000 AND <=65535` and an OR list render alike.
 - With `local-install` set at runtime, FRR 10.7.1 in the lab container still reported every amplification rule `not installed in PBR`.
 - FRR FlowSpec support is control-plane only by default — it receives and installs routes in the BGP table but does not program iptables/nftables rules without additional configuration. The lab output shows `not installed in PBR`.

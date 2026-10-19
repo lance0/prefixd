@@ -283,8 +283,9 @@ pub struct GuardrailsConfig {
     /// Maximum prefix length for IPv6 (default: 128)
     #[serde(default)]
     pub dst_prefix_maxlen_v6: Option<u8>,
-    /// Cap on each port list (destination and source) separately. The default
-    /// equals the rustbgpd encoder's per-list cap.
+    /// Cap on each port list (destination and source) separately. The default,
+    /// 5, fits FRR's per-component limit and is below the rustbgpd encoder's
+    /// per-list cap of 8.
     #[serde(default = "default_max_ports")]
     pub max_ports: usize,
     /// Reserved (ADR 028): parsed so configurations load, has no effect.
@@ -338,8 +339,10 @@ fn default_true() -> bool {
 fn default_32() -> u8 {
     32
 }
-fn default_max_ports() -> usize {
-    8
+/// FRR 10.7.1 resets the session on a FlowSpec component with more than five
+/// values, so the default stays below the rustbgpd encoder's per-list cap.
+pub(crate) fn default_max_ports() -> usize {
+    5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1080,10 +1083,12 @@ observability:
     #[test]
     fn rustbgpd_refuses_max_ports_above_the_encoder_cap_at_load() {
         let shipped = include_str!("../../configs/prefixd.yaml");
-        assert_eq!(shipped.matches("max_ports: 8\n").count(), 1);
-        // The shipped rustbgpd config loads at the cap and is refused one above it.
+        assert_eq!(shipped.matches("max_ports: 5\n").count(), 1);
+        // The shipped rustbgpd config loads at its default, still loads at the
+        // encoder cap and is refused one above it.
         load_yaml(shipped).unwrap();
-        let error = load_yaml(&shipped.replace("max_ports: 8\n", "max_ports: 9\n"))
+        load_yaml(&shipped.replace("max_ports: 5\n", "max_ports: 8\n")).unwrap();
+        let error = load_yaml(&shipped.replace("max_ports: 5\n", "max_ports: 9\n"))
             .unwrap_err()
             .to_string();
         assert!(
@@ -1129,17 +1134,19 @@ observability:
             assert!(parse(yaml).reserved_flags_set().is_empty(), "{yaml}");
         }
         // Shipped configurations neither warn nor opt in to the enforced flags.
-        for shipped in [
-            include_str!("../../configs/prefixd.yaml"),
-            include_str!("../../configs/prefixd-gobgp.yaml"),
-            include_str!("testdata/v0.19.1-prefixd.yaml"),
+        // Current shipped configurations set the default max_ports; the
+        // v0.19.1 fixture keeps the 8 it shipped with.
+        for (shipped, max_ports) in [
+            (include_str!("../../configs/prefixd.yaml"), 5),
+            (include_str!("../../configs/prefixd-gobgp.yaml"), 5),
+            (include_str!("testdata/v0.19.1-prefixd.yaml"), 8),
         ] {
             let guardrails = crate::config::parse_yaml::<Settings>(shipped)
                 .unwrap()
                 .guardrails;
             assert!(guardrails.reserved_flags_set().is_empty());
             assert!(!guardrails.allow_fragment_match && !guardrails.allow_packet_length_match);
-            assert_eq!(guardrails.max_ports, 8);
+            assert_eq!(guardrails.max_ports, max_ports);
         }
     }
 

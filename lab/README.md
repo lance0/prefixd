@@ -134,7 +134,8 @@ steps are:
    family. Near-miss expectations (another port set, an extra rule, no
    fragment rule) must not match.
 2. Detector unban withdraws both rules per family.
-3. Negative result: at prefixd's default `max_ports: 8`, a 20-port report gives
+3. Negative result: at the lab configuration's `max_ports: 8`, deliberately
+   above prefixd's default of 5, a 20-port report gives
    8-value source-port rules. FRR 10.7.1 accepts at most five values per
    component, so it resets the session (NOTIFICATION 3/9), then the step
    unbans.

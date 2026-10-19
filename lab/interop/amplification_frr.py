@@ -10,8 +10,9 @@ destination, protocol, source ports, packet length, fragment and traffic-rate
 action, with no other component. The oracle is flowspec_frr.parse_frr.
 
 FRR 10.7.1 refuses a numeric component with more than five values and resets
-the session. One step records that at prefixd's default max_ports of 8; the
-rest of the scenario runs prefixd with max_ports 5.
+the session. One step records that at the lab configuration's max_ports of 8,
+deliberately above prefixd's default of 5; the rest of the scenario runs
+prefixd with max_ports 5.
 
 The receipt directory gets receipt.json, summary.md, commands.log and the raw
 FRR output of every step. This is control-plane evidence at FRR only: FRR
@@ -321,7 +322,7 @@ class AmplificationLab(Lab):
 
         self.step("unban", self.withdraw((v4, v6), "amp"), [])
 
-        # prefixd's default max_ports 8 chunks 20 ports as 8 + 8 + 4.
+        # The lab configuration's max_ports 8 chunks 20 ports as 8 + 8 + 4.
         self.step(
             "max-ports-8-session-reset",
             lambda: self.session_reset((o4, o6), LIBRARY),

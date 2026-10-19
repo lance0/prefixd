@@ -64,7 +64,7 @@ class OracleTests(unittest.TestCase):
     def test_chunks_respect_frr_value_limit(self):
         self.assertEqual(len(CHUNKED), 5)
         self.assertEqual(over_limit(CHUNKED), [])
-        # prefixd's default max_ports 8 produces rules FRR 10.7.1 refuses.
+        # The lab configuration's max_ports 8 produces rules FRR 10.7.1 refuses.
         self.assertEqual(len(over_limit(response("203.0.113.61", LIBRARY, 8))), 2)
 
     def test_different_source_port_set_is_a_diff(self):
