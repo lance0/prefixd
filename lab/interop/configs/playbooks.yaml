@@ -1,5 +1,8 @@
-# One deterministic detector playbook: a UDP flood is policed at 5 Mbit/s
-# (625000 bytes/s on the wire).
+# Deterministic detector playbooks. A UDP flood is policed at 5 Mbit/s (625000
+# bytes/s on the wire). The two udp_amplification playbooks follow ADR 028's
+# shipped example for the amplification scenario. The first playbook for a
+# vector wins, so the lab selects the packet-length variant by sending
+# top_dst_ports (require_top_ports) and the shipped example by omitting them.
 playbooks:
   - name: udp_flood_police
     match:
@@ -8,3 +11,34 @@ playbooks:
       - action: police
         rate_bps: 5000000
         ttl_seconds: 300
+
+  # Short TTL: the amplification scenario's expiry step uses this variant.
+  - name: udp_amplification_length
+    match:
+      vector: udp_amplification
+      require_top_ports: true
+    steps:
+      - ttl_seconds: 30
+        rules:
+          - match:
+              src_ports: from_event
+              packet_length: { min: 1000, max: 65535 }
+            action: discard
+          - match:
+              fragment: non_first
+            action: police
+            rate_bps: 20000000
+
+  - name: udp_amplification
+    match:
+      vector: udp_amplification
+    steps:
+      - ttl_seconds: 300
+        rules:
+          - match:
+              src_ports: from_event
+            action: discard
+          - match:
+              fragment: non_first
+            action: police
+            rate_bps: 20000000

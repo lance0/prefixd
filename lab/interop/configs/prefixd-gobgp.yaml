@@ -23,6 +23,10 @@ guardrails:
   dst_prefix_maxlen: 32
   max_ports: 8
   allow_src_prefix_match: false
+  # ADR 028 opt-ins for the amplification scenario's fragment and
+  # packet-length rules.
+  allow_fragment_match: true
+  allow_packet_length_match: true
 
 quotas:
   max_active_per_customer: 10

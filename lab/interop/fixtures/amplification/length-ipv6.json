@@ -1,0 +1,11 @@
+{
+ "vrfId": 0,
+ "vrfName": "default",
+ "tableVersion": 26,
+ "routerId": "10.0.0.2",
+ "defaultLocPrf": 100,
+ "localAS": 65002,
+ "routes": { "to 2001:db8:113::63/128/off 0 proto = 17  pktfrag = 2/25": [{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external","to":"2001:db8:113::63/128/off 0","proto":"= 17 ","pktfrag":"= 2","weight":0,"peerId":"10.0.0.1","path":"65010","origin":"IGP"}]
+,"to 2001:db8:113::63/128/off 0 proto = 17  srcp = 11211  pktlen >= 1000 , <= 65535 /33": [{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external","to":"2001:db8:113::63/128/off 0","proto":"= 17 ","srcp":"= 11211 ","pktlen":">= 1000 , <= 65535 ","weight":0,"peerId":"10.0.0.1","path":"65010","origin":"IGP"}]
+ } , "totalRoutes": 2, "totalPaths": 2,"numRoutes":2
+ }

@@ -116,6 +116,12 @@ interop-frr-blackhole:
     python3 -m unittest discover -s lab/interop -p 'test_*.py'
     lab/interop/run-frr.sh rustbgpd blackhole
 
+# Qualify amplification FlowSpec rules (ADR 028) at FRR and write dated receipts.
+interop-frr-amplification *speakers="rustbgpd gobgp":
+    docker build --build-arg CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}" -t prefixd:interop .
+    python3 -m unittest discover -s lab/interop -p 'test_*.py'
+    for speaker in {{speakers}}; do lab/interop/run-frr.sh "$speaker" amplification; done
+
 # Merging the release PR tags and publishes the release once main CI passes.
 # Prepare a release PR: version bump, Cargo.lock and CHANGELOG roll; commits nothing.
 release-prepare version:

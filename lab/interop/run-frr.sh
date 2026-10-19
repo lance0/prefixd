@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Deploy, drive and destroy the prefixd -> speaker -> FRR interop lab.
 #
-#   lab/interop/run-frr.sh rustbgpd|gobgp [flowspec|blackhole]
+#   lab/interop/run-frr.sh rustbgpd|gobgp [flowspec|blackhole|amplification]
 #
 # The default scenario is FlowSpec (flowspec_frr.py). The blackhole scenario
-# (blackhole_frr.py, rustbgpd only) qualifies ADR 027 host routes at FRR.
+# (blackhole_frr.py, rustbgpd only) qualifies ADR 027 host routes at FRR. The
+# amplification scenario (amplification_frr.py) qualifies ADR 028 source-port,
+# packet-length and fragment rules.
 #
 # Needs Docker, containerlab and python3, and an image tagged prefixd:interop
 # (`just interop-frr` builds it). CLAB selects the containerlab command; CI uses
@@ -17,10 +19,10 @@
 # a flaky attempt here should stay visible.
 set -euo pipefail
 
-speaker="${1:?usage: run-frr.sh rustbgpd|gobgp [flowspec|blackhole]}"
+speaker="${1:?usage: run-frr.sh rustbgpd|gobgp [flowspec|blackhole|amplification]}"
 scenario="${2:-flowspec}"
 case "$speaker" in rustbgpd | gobgp) ;; *) echo "unknown speaker: $speaker" >&2; exit 2 ;; esac
-case "$speaker/$scenario" in */flowspec | rustbgpd/blackhole) ;;
+case "$speaker/$scenario" in */flowspec | */amplification | rustbgpd/blackhole) ;;
     *) echo "unsupported scenario for $speaker: $scenario" >&2; exit 2 ;; esac
 
 cd "$(dirname "$0")/../.."
@@ -116,8 +118,10 @@ done
 docker exec -d "$(node controller)" sh -c 'echo $$ >/tmp/prefixd.pid; exec prefixd --config /etc/prefixd >>/tmp/prefixd.log 2>&1'
 
 extra=()
-[ "$scenario" = blackhole ] \
-    && extra=(--controller "$(node controller)" --admin-password-file "$run/admin.password")
+case "$scenario" in
+    blackhole) extra=(--controller "$(node controller)" --admin-password-file "$run/admin.password") ;;
+    amplification) extra=(--controller "$(node controller)") ;;
+esac
 python3 -I "lab/interop/${scenario}_frr.py" \
     --speaker "$speaker" \
     --api "http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(node postgres)"):8080" \

@@ -1,0 +1,14 @@
+{
+ "vrfId": 0,
+ "vrfName": "default",
+ "tableVersion": 9,
+ "routerId": "10.0.0.2",
+ "defaultLocPrf": 100,
+ "localAS": 65002,
+ "routes": { "to 2001:db8:113::62/128/off 0 proto = 17  pktfrag = 2/25": [{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external","to":"2001:db8:113::62/128/off 0","proto":"= 17 ","pktfrag":"= 2","weight":0,"peerId":"10.0.0.1","path":"65010","origin":"IGP"}]
+,"to 2001:db8:113::62/128/off 0 proto = 17  srcp = 5683 , = 10001 , = 11211 , = 33848 , = 37810 /38": [{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external","to":"2001:db8:113::62/128/off 0","proto":"= 17 ","srcp":"= 5683 , = 10001 , = 11211 , = 33848 , = 37810 ","weight":0,"peerId":"10.0.0.1","path":"65010","origin":"IGP"}]
+,"to 2001:db8:113::62/128/off 0 proto = 17  srcp = 1434 , = 1900 , = 3283 , = 3702 , = 5353 /38": [{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external","to":"2001:db8:113::62/128/off 0","proto":"= 17 ","srcp":"= 1434 , = 1900 , = 3283 , = 3702 , = 5353 ","weight":0,"peerId":"10.0.0.1","path":"65010","origin":"IGP"}]
+,"to 2001:db8:113::62/128/off 0 proto = 17  srcp = 137 , = 161 , = 389 , = 427 , = 520 /36": [{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external","to":"2001:db8:113::62/128/off 0","proto":"= 17 ","srcp":"= 137 , = 161 , = 389 , = 427 , = 520 ","weight":0,"peerId":"10.0.0.1","path":"65010","origin":"IGP"}]
+,"to 2001:db8:113::62/128/off 0 proto = 17  srcp = 17 , = 19 , = 53 , = 111 , = 123 /33": [{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external","to":"2001:db8:113::62/128/off 0","proto":"= 17 ","srcp":"= 17 , = 19 , = 53 , = 111 , = 123 ","weight":0,"peerId":"10.0.0.1","path":"65010","origin":"IGP"}]
+ } , "totalRoutes": 5, "totalPaths": 5,"numRoutes":5
+ }
