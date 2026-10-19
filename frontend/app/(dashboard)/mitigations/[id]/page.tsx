@@ -17,7 +17,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { formatBps, formatTimeRemaining, formatUtc } from "@/lib/format"
 import { FlowSpecPreview, formatFlowSpecRule } from "@/components/dashboard/flowspec-preview"
 import { IncidentReportDialog } from "@/components/dashboard/incident-report-dialog"
-import { withdrawMitigation, getIncidentReport, isNotFound } from "@/lib/api"
+import { withdrawMitigation, getIncidentReport, isNotFound, type Mitigation } from "@/lib/api"
 import { copyText } from "@/lib/clipboard"
 import { toast } from "sonner"
 import {
@@ -44,6 +44,36 @@ function protocolName(proto: number | null): string {
     case 17: return "UDP"
     default: return `${proto}`
   }
+}
+
+/** The saved blackhole route (ADR 027): the frozen next hop and communities, not router state. */
+function BlackholeRouteCard({ mitigation }: { mitigation: Mitigation }) {
+  const route = mitigation.blackhole
+
+  return (
+    <Card data-testid="blackhole-card">
+      <CardHeader>
+        <CardTitle>Blackhole route</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p role="note" className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <span>
+            All traffic to <span className="font-mono">{mitigation.victim_ip}</span> is dropped, including legitimate traffic.
+            This is the route prefixd saved; router enforcement depends on the router&apos;s blackhole policy and is not verified here.
+          </span>
+        </p>
+        <FieldList className="grid-cols-1 sm:grid-cols-3">
+          <Field label="Host prefix"><span className="font-mono">{mitigation.dst_prefix}</span></Field>
+          <Field label="Next hop"><span className="font-mono">{route?.next_hop ?? "unknown"}</span></Field>
+          <Field label="Communities"><span className="font-mono">{route?.communities.join(" ") || "unknown"}</span></Field>
+          {route && route.large_communities.length > 0 && (
+            <Field label="Large communities" className="sm:col-span-3"><span className="font-mono">{route.large_communities.join(" ")}</span></Field>
+          )}
+        </FieldList>
+      </CardContent>
+    </Card>
+  )
 }
 
 export default function MitigationDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -219,6 +249,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           <div className="space-y-6 lg:col-span-2">
+            {mitigation.action_type === "blackhole" ? <BlackholeRouteCard mitigation={mitigation} /> : (
             <Card>
               <CardHeader className="flex flex-wrap items-center justify-between gap-2">
                 <CardTitle>FlowSpec rule</CardTitle>
@@ -261,6 +292,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                 </FieldList>
               </CardContent>
             </Card>
+            )}
 
             <Card>
               <CardHeader>

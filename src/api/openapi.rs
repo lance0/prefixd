@@ -3,14 +3,14 @@ use utoipa::OpenApi;
 use super::handlers::{
     AddSafelistRequest, AlertmanagerAlert, AlertmanagerAlertResult, AlertmanagerWebhookPayload,
     AlertmanagerWebhookResponse, AnnouncementOutcome, AuditListResponse, BatchEventRequest,
-    BatchEventResponse, BatchEventResult, BulkAcknowledgeRequest, BulkAcknowledgeResponse,
-    BulkAcknowledgeResult, BulkWithdrawRequest, BulkWithdrawResponse, BulkWithdrawResult,
-    ChangePasswordRequest, CorrelationContext, CreateMitigationRequest, CreateOperatorRequest,
-    ErrorResponse, EventResponse, EventsListResponse, FastNetMonAttackDetails, FastNetMonPayload,
-    HealthResponse, IpHistoryResponse, LoginRequest, LoginResponse, MitigationResponse,
-    MitigationsListResponse, OperatorInfo, OperatorListResponse, PublicHealthResponse,
-    ReloadResponse, SignalGroupDetailResponse, SignalGroupsListResponse, TimeseriesResponse,
-    WebhookEventResult, WebhookResponse,
+    BatchEventResponse, BatchEventResult, BlackholeRouteResponse, BulkAcknowledgeRequest,
+    BulkAcknowledgeResponse, BulkAcknowledgeResult, BulkWithdrawRequest, BulkWithdrawResponse,
+    BulkWithdrawResult, ChangePasswordRequest, CorrelationContext, CreateMitigationRequest,
+    CreateOperatorRequest, ErrorResponse, EventResponse, EventsListResponse,
+    FastNetMonAttackDetails, FastNetMonPayload, HealthResponse, IpHistoryResponse, LoginRequest,
+    LoginResponse, MitigationResponse, MitigationsListResponse, OperatorInfo, OperatorListResponse,
+    PublicHealthResponse, ReloadResponse, SignalGroupDetailResponse, SignalGroupsListResponse,
+    TimeseriesResponse, WebhookEventResult, WebhookResponse,
 };
 use crate::correlation::config::{CorrelationConfig, SourceConfig};
 use crate::correlation::engine::{
@@ -84,6 +84,7 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
             AnnouncementOutcome,
             CreateMitigationRequest,
             MitigationResponse,
+            BlackholeRouteResponse,
             MitigationsListResponse,
             PublicHealthResponse,
             HealthResponse,
@@ -228,6 +229,23 @@ mod tests {
             schema["enum"],
             serde_json::json!(["standby", "draining", "ready"])
         );
+    }
+
+    #[test]
+    fn manual_blackhole_is_documented() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let schemas = &doc["components"]["schemas"];
+        let blackhole = schemas["MitigationResponse"]["properties"]["blackhole"].to_string();
+        assert!(
+            blackhole.contains("#/components/schemas/BlackholeRouteResponse"),
+            "{blackhole}"
+        );
+        let route = &schemas["BlackholeRouteResponse"];
+        for field in ["next_hop", "communities", "large_communities"] {
+            assert!(route["properties"][field].is_object(), "{field}");
+        }
+        assert!(schemas["CreateMitigationRequest"]["properties"]["confirm_victim_ip"].is_object());
+        assert!(doc["paths"]["/v1/mitigations"]["post"]["responses"]["403"].is_object());
     }
 
     #[test]

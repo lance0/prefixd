@@ -169,7 +169,7 @@ Common status values:
 | 400 | Invalid request body |
 | 401 | Authentication required |
 | 409 | Duplicate event, or in enforced mode the rule is owned by a dry-run mitigation (the event is not stored) |
-| 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length, etc.) |
+| 422 | Missing required field, including `protocol` for `"discard"` or `"police"`; guardrail rejection (safelist, quotas, new mitigation rate, prefix length, etc.) |
 | 429 | Rate limited |
 
 ### Batch Ingest Events
@@ -370,6 +370,10 @@ a corrupt lookahead row; it is never silently omitted or reported as end of hist
 }
 ```
 
+`action_type` is `discard`, `police` or `blackhole`. A blackhole also carries
+the optional `blackhole` object described under
+[manual blackhole](#manual-blackhole); FlowSpec rows omit it.
+
 `origin_mode` records the operation mode that admitted the mitigation:
 `dry-run` for a simulation that prefixd never announced, or `enforced`. It is
 `null` for rows created before origin tracking that startup has not tagged;
@@ -426,9 +430,10 @@ through `POST /v1/events`, which applies playbooks.
 | `operator_id` | string | no | Legacy field, ignored; authenticated operator identity is authoritative |
 | `reason` | string | yes | Reason for the mitigation |
 | `victim_ip` | string | yes | IPv4 or IPv6 host address to protect (`/32` or `/128` scope) |
-| `protocol` | string | yes | `"udp"`, `"tcp"`, `"icmp"` (IPv4 protocol 1), `"icmpv6"` (IPv6 protocol 58), or `"any"`; `""` also selects any protocol |
+| `protocol` | string | conditional | Required for `"discard"` and `"police"`: `"udp"`, `"tcp"`, `"icmp"` (IPv4 protocol 1), `"icmpv6"` (IPv6 protocol 58), or `"any"`; `""` also selects any protocol. Omit for `"blackhole"` |
 | `dst_ports` | array | no | Destination ports (default `[]`) |
-| `action` | string | yes | `"discard"` or `"police"` |
+| `action` | string | yes | `"discard"`, `"police"` or `"blackhole"` (Admin only, see [manual blackhole](#manual-blackhole)) |
+| `confirm_victim_ip` | string | conditional | Required for `"blackhole"`: must exactly equal `victim_ip` |
 | `rate_bps` | integer | conditional | Positive, exactly representable traffic rate for `"police"`; omit or use `null` for `"discard"` |
 | `ttl_seconds` | integer | yes | Requested time-to-live; subject to configured minimum and maximum |
 | `expires_at_cap` | RFC 3339 timestamp | no | Initial creation's absolute expiry ceiling, for maintenance recreation |
@@ -489,15 +494,76 @@ TTL while the controller is stopped.
 
 | Status | Reason |
 |--------|--------|
-| 400 | Invalid request (bad IP, invalid protocol or protocol/address-family mismatch, missing/zero/inexact police rate, discard with a rate, etc.) |
+| 400 | Invalid request (bad IP, invalid protocol or protocol/address-family mismatch, missing/zero/inexact police rate, discard with a rate, blackhole confirmation mismatch, etc.) |
 | 401 | Authentication required |
-| 409 | Scope already has an active canonical owner or pending withdrawal |
-| 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length, etc.) |
+| 403 | A blackhole was requested without the Admin role, including every bearer token |
+| 409 | Scope already has an active canonical owner or pending withdrawal, or an untracked local route holds a blackhole's prefix |
+| 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length, blackhole disabled, victim, TTL and quota checks, etc.) |
 
 Canonical ownership ignores equivalent IPv6 spelling and duplicate destination
 ports. A duplicate manual request is rejected before speaker mutation, preserving
 the original rule, action and TTL. Detector events extend a single existing owner;
 ambiguous legacy ownership is rejected before consuming the external event ID.
+
+#### Manual blackhole
+
+`"action": "blackhole"` requests a remotely triggered blackhole (RTBH) host
+route ([ADR 027](../adr/027-blackhole-mitigations.md)). It drops **all**
+traffic to the victim, including legitimate traffic, so it has stricter rules
+than FlowSpec:
+
+- **Admin only.** Operator and Viewer sessions get `403`. Bearer tokens map to
+  Operator, so `prefixdctl` and other token clients get `403` too. The role is
+  checked before anything else.
+- **Typed confirmation.** `confirm_victim_ip` must equal `victim_ip` exactly,
+  character for character, and `reason` must be nonempty. Otherwise the request
+  returns `400` without saving a row or audit entry.
+- **Host route only.** Omit `protocol` (or send `"any"` or `""`),
+  `dst_ports`, `rate_bps` and `expires_at_cap`; any of them returns `400`. The
+  route is the victim's `/32` or `/128`.
+- **Guardrails.** `blackhole.enabled` must be true, the victim must be owned in
+  inventory and pass the [blackhole victim checks](configuration.md#blackhole),
+  and the TTL must be nonzero and at most `blackhole.max_ttl_seconds`. These
+  return `422`, as do the blackhole quotas.
+- **Conflicts.** `409` when the victim already has a live blackhole, has a
+  pending blackhole withdrawal, or (in enforced mode) the speaker holds a local
+  route at the prefix that prefixd does not own.
+
+```json
+{
+  "reason": "Volumetric attack saturating transit",
+  "victim_ip": "203.0.113.10",
+  "confirm_victim_ip": "203.0.113.10",
+  "action": "blackhole",
+  "ttl_seconds": 600
+}
+```
+
+Dry-run saves and audits the blackhole and sends nothing. Enforced mode saves
+it, rechecks the safelist and adds the route; the same `201`/`202`
+`announcement_outcome` rules apply as above. A manual blackhole is unleased: it
+stays on the speaker if prefixd stops, until prefixd returns and expires it or
+an Admin deletes it on the speaker. The response carries the saved route:
+
+```json
+{
+  "action_type": "blackhole",
+  "dst_prefix": "203.0.113.10/32",
+  "protocol": null,
+  "dst_ports": [],
+  "blackhole": {
+    "next_hop": "192.0.2.66",
+    "communities": ["64496:666", "65535:666"],
+    "large_communities": []
+  }
+}
+```
+
+`blackhole` is present only on blackholes, in every mitigation response and
+WebSocket message. It is the next hop and communities frozen at admission, not
+evidence that a router installed or enforces the route. Withdraw a blackhole
+with the ordinary [withdraw](#withdraw-mitigation) and
+[bulk withdraw](#bulk-withdraw-mitigations) endpoints.
 
 ### Get Mitigation
 
@@ -1612,7 +1678,8 @@ rule delivery. `blackhole` reports the unicast blackhole adapter and
 ([ADR 027](../adr/027-blackhole-mitigations.md)); both are false when absent.
 `flowspec_match` reports which amplification match components the speaker
 encodes ([ADR 028](../adr/028-amplification-matches.md)); each is false when
-absent. No API path creates a blackhole or these components yet. Health performs no rule inventory probe.
+absent. Only an Admin's [manual blackhole](#manual-blackhole) creates a
+blackhole; no API path creates these components yet. Health performs no rule inventory probe.
 
 Top-level `version` and `uptime_seconds` describe prefixd. `speaker.daemon`
 independently reports authenticated speaker process metadata: `observed`, `error`
@@ -2102,6 +2169,10 @@ Requires session authentication (send session cookie).
 
 **ResyncRequired:** Sent when server detects client may have missed messages. Client should refresh data.
 
+`mitigation` uses the [mitigation response](#get-mitigation) shape, including
+the `blackhole` object for blackholes. A manual blackhole broadcasts
+`mitigation_created`.
+
 `event_ingested` is defined in the message schema but is not currently broadcast
 by event ingestion. Event lists retain their periodic API refresh.
 
@@ -2224,6 +2295,27 @@ prefixd_http_requests_total{method="POST",route="/v1/events",status_class="2xx"}
 
 `prefixd_controller_fence_active` is `1` while this controller holds its POP's
 fence and `0` in standby. Alert when no controller for a POP reports `1`.
+
+Series labelled `action_type` (`prefixd_mitigations_active`,
+`prefixd_mitigations_created_total`, `prefixd_mitigations_expired_total` and
+`prefixd_mitigations_withdrawn_total`) use `blackhole` for blackholes. Blackhole
+gauges count database state, not router enforcement. A refused
+[manual blackhole](#manual-blackhole) increments
+`prefixd_guardrail_rejections_total` with one of these `reason` values:
+
+| `reason` | Refusal |
+| --- | --- |
+| `BlackholeDisabled` | `blackhole.enabled` is false |
+| `BlackholeQuotaExceeded` | `blackhole.max_active_per_pop`, `blackhole.max_active_global` or a general quota is full |
+| `BlackholeNotOwned` | The victim is not in inventory |
+| `BlackholeSafelisted` | The victim is safelisted |
+| `InvalidBlackhole` | The victim is not a usable host address or is a configured next hop, or its family has no next hop |
+| `TtlRequired`, `TtlOutOfBounds` | The TTL is zero or above `blackhole.max_ttl_seconds` |
+| `NewMitigationRateExceeded` | `quotas.max_new_per_minute` is reached |
+
+A source-allowlist reason arrives with detector blackholes.
+`prefixd_unknown_local_routes{kind}` counts local speaker routes prefixd does
+not own, by `kind` (`blackhole` or `flowspec`), from the last successful read.
 
 See [FEATURES.md](../../FEATURES.md#prometheus-metrics) for full metric list.
 

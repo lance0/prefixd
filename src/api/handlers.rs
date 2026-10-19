@@ -208,7 +208,7 @@ pub struct MitigationResponse {
     pub victim_ip: String,
     /// Attack vector type
     pub vector: String,
-    /// Action type (discard, police)
+    /// Action type (discard, police, blackhole)
     pub action_type: String,
     /// Rate limit in bps (for police action)
     pub rate_bps: Option<u64>,
@@ -246,6 +246,41 @@ pub struct MitigationResponse {
     /// corroboration from the signal correlation engine)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correlation: Option<CorrelationContext>,
+    /// The route a blackhole was admitted with; absent for FlowSpec. A blackhole
+    /// drops all traffic to the victim. This is the saved intent, not router state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blackhole: Option<BlackholeRouteResponse>,
+}
+
+/// Next hop and communities frozen into a blackhole at admission (ADR 027).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct BlackholeRouteResponse {
+    /// Discard next hop, in the victim's address family.
+    #[schema(example = "192.0.2.66")]
+    pub next_hop: String,
+    /// Standard communities as `ASN:value`, always including BLACKHOLE `65535:666`.
+    #[schema(example = json!(["65535:666"]))]
+    pub communities: Vec<String>,
+    /// Large communities as `global:local1:local2`.
+    pub large_communities: Vec<String>,
+}
+
+impl From<&crate::domain::BlackholeRule> for BlackholeRouteResponse {
+    fn from(rule: &crate::domain::BlackholeRule) -> Self {
+        Self {
+            next_hop: rule.next_hop.to_string(),
+            communities: rule
+                .communities
+                .iter()
+                .map(|community| format!("{}:{}", community >> 16, community & 0xFFFF))
+                .collect(),
+            large_communities: rule
+                .large_communities
+                .iter()
+                .map(|[global, first, second]| format!("{global}:{first}:{second}"))
+                .collect(),
+        }
+    }
 }
 
 impl From<&Mitigation> for MitigationResponse {
@@ -279,6 +314,7 @@ impl From<&Mitigation> for MitigationResponse {
             // that have access to the signal group data. The basic From impl
             // sets it to None — callers enrich it when needed.
             correlation: None,
+            blackhole: m.action_params.blackhole.as_ref().map(Into::into),
         }
     }
 }
@@ -401,11 +437,18 @@ pub struct CreateMitigationRequest {
     victim_ip: String,
     /// IP protocol: udp, tcp, icmp (IPv4 protocol 1), icmpv6 (IPv6 protocol 58), or any.
     /// An empty string also selects any protocol. ICMP selectors must match the victim's address family.
+    /// Required for discard and police; omit for blackhole.
     #[schema(example = "icmpv6")]
-    protocol: String,
+    #[serde(default)]
+    protocol: Option<String>,
     #[serde(default)]
     dst_ports: Vec<u16>,
+    /// discard, police, or blackhole. A blackhole drops all traffic to the victim
+    /// and requires the Admin role, a nonempty reason and `confirm_victim_ip`.
     action: String,
+    /// Blackhole only: must exactly equal `victim_ip`, or the request returns 400.
+    #[serde(default)]
+    confirm_victim_ip: Option<String>,
     /// Positive bit rate exactly representable as an f32 bytes/second traffic rate for police.
     /// Must be omitted or null for discard.
     #[serde(default)]
@@ -1614,9 +1657,10 @@ pub async fn get_mitigation(
     responses(
         (status = 201, description = "Mitigation intent created", body = MitigationResponse),
         (status = 202, description = "Intent created; announcement unconfirmed for this request", body = MitigationResponse),
-        (status = 400, description = "Invalid input, including an unsupported action/rate or protocol/address-family mismatch"),
-        (status = 409, description = "Conflicting owner or pending withdrawal"),
-        (status = 422, description = "Guardrail rejection"),
+        (status = 400, description = "Invalid input, including an unsupported action/rate, protocol/address-family mismatch, or a blackhole whose confirm_victim_ip differs from victim_ip"),
+        (status = 403, description = "A blackhole requires the Admin role; bearer tokens map to Operator"),
+        (status = 409, description = "Conflicting owner, pending withdrawal, or an untracked local blackhole route at the prefix"),
+        (status = 422, description = "Guardrail rejection, including disabled blackholes and blackhole victim, TTL and quota checks"),
     )
 )]
 pub async fn create_mitigation(
@@ -1625,11 +1669,31 @@ pub async fn create_mitigation(
     headers: HeaderMap,
     Json(req): Json<CreateMitigationRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
+    // Only a blackhole may omit protocol. A discard or police request without it
+    // keeps the 422 it got when the field was required by the body schema, before
+    // authentication.
+    if req.action != "blackhole" && req.protocol.is_none() {
+        return Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Failed to deserialize the JSON body into the target type: missing field `protocol`",
+        )
+            .into_response());
+    }
     // Check auth first
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
-    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
+    // A blackhole drops all traffic to the victim, so it needs Admin (ADR 027);
+    // bearer tokens map to Operator and get 403 before anything is read or saved.
+    let required = if req.action == "blackhole" {
+        OperatorRole::Admin
+    } else {
+        OperatorRole::Operator
+    };
+    let operator = require_role(&state, &auth_session, auth_header, required)?;
     let operator_id = operator.username.clone();
+    if req.action == "blackhole" {
+        return Ok(create_blackhole(&state, operator_id, req).await);
+    }
     let _mitigation_guard = state.mitigation_lock.lock().await;
     if let Err(error) = state.verified_speaker_binding() {
         return Ok(AppError(error).into_response());
@@ -1648,23 +1712,22 @@ pub async fn create_mitigation(
     }
 
     // Validate protocol - reject unknown values instead of silently converting to None
-    let protocol = match req.protocol.as_str() {
+    let protocol = req.protocol.as_deref().unwrap_or_default();
+    let protocol = match protocol {
         "udp" => Some(17u8),
         "tcp" => Some(6u8),
         "icmp" if victim_ip.is_ipv4() => Some(1u8),
         "icmpv6" if victim_ip.is_ipv6() => Some(58u8),
         "icmp" | "icmpv6" => {
             return Ok(AppError(PrefixdError::InvalidRequest(format!(
-                "protocol '{}' does not match victim IP address family",
-                req.protocol
+                "protocol '{protocol}' does not match victim IP address family"
             )))
             .into_response());
         }
         "any" | "" => None,
         _ => {
             return Ok(AppError(PrefixdError::InvalidRequest(format!(
-                "invalid protocol '{}', expected: udp, tcp, icmp, icmpv6, any",
-                req.protocol
+                "invalid protocol '{protocol}', expected: udp, tcp, icmp, icmpv6, any"
             )))
             .into_response());
         }
@@ -1676,7 +1739,7 @@ pub async fn create_mitigation(
         "discard" => ActionType::Discard,
         _ => {
             return Ok(AppError(PrefixdError::InvalidRequest(format!(
-                "invalid action '{}', expected: discard, police",
+                "invalid action '{}', expected: discard, police, blackhole",
                 req.action
             )))
             .into_response());
@@ -1799,6 +1862,119 @@ pub async fn create_mitigation(
         StatusCode::CREATED
     };
     Ok((status, Json(response)).into_response())
+}
+
+/// Admin-only manual blackhole (ADR 027). The caller has checked the role; the
+/// confirmation and request shape are checked before the lifecycle mutex, and
+/// `admit_blackhole` does the rest under it.
+async fn create_blackhole(
+    state: &AppState,
+    operator_id: String,
+    req: CreateMitigationRequest,
+) -> axum::response::Response {
+    let victim_ip = match validate_ip(&req.victim_ip) {
+        Ok(ip) => ip,
+        Err(error) => return AppError(error).into_response(),
+    };
+    let invalid = if req.confirm_victim_ip.as_deref() != Some(req.victim_ip.as_str()) {
+        Some("confirm_victim_ip must exactly equal victim_ip")
+    } else if req.reason.trim().is_empty() {
+        Some("a blackhole requires a reason")
+    } else if !matches!(req.protocol.as_deref(), None | Some("" | "any"))
+        || !req.dst_ports.is_empty()
+        || req.rate_bps.is_some()
+        || req.expires_at_cap.is_some()
+    {
+        Some("a blackhole takes no protocol, dst_ports, rate_bps or expires_at_cap")
+    } else {
+        None
+    };
+    if let Some(message) = invalid {
+        return AppError(PrefixdError::InvalidRequest(message.into())).into_response();
+    }
+    if let Err(error) = validate_string_len(&req.reason, "reason", MAX_STRING_LEN)
+        .and_then(|()| validate_string_len(&operator_id, "operator_id", MAX_USERNAME_LEN))
+    {
+        return AppError(error).into_response();
+    }
+
+    let _mitigation_guard = state.mitigation_lock.lock().await;
+    let binding = match state.verified_speaker_binding() {
+        Ok(binding) => binding,
+        Err(error) => return AppError(error).into_response(),
+    };
+    let intent = MitigationIntent {
+        event_id: Uuid::new_v4(),
+        customer_id: None,
+        service_id: None,
+        pop: state.settings.pop.clone(),
+        match_criteria: MatchCriteria {
+            dst_prefix: ipnet::IpNet::from(victim_ip).to_string(),
+            ..Default::default()
+        },
+        action_type: ActionType::Blackhole,
+        action_params: ActionParams::default(),
+        ttl_seconds: req.ttl_seconds,
+        reason: req.reason,
+    };
+    // A snapshot, so a configuration reload never waits behind the speaker add.
+    let inventory = state.inventory.read().await.clone();
+    let admission = match crate::guardrails::admit_blackhole(
+        state.repo.as_ref(),
+        &state.settings,
+        &inventory,
+        intent,
+        &CreationActor::Operator(operator_id),
+        state.announcer.as_ref(),
+        binding,
+    )
+    .await
+    {
+        Ok(admission) => admission,
+        Err(error) => {
+            if let PrefixdError::GuardrailViolation(violation) = &error {
+                crate::observability::metrics::GUARDRAIL_REJECTIONS
+                    .with_label_values(&[blackhole_rejection_reason(violation)])
+                    .inc();
+            }
+            return AppError(error).into_response();
+        }
+    };
+
+    let mitigation = admission.mitigation;
+    crate::observability::metrics::MITIGATIONS_CREATED
+        .with_label_values(&[&mitigation.action_type.to_string(), &state.settings.pop])
+        .inc();
+    let mut response = MitigationResponse::from(&mitigation);
+    let _ = state
+        .ws_broadcast
+        .send(crate::ws::WsMessage::MitigationCreated {
+            mitigation: response.clone(),
+        });
+    tracing::info!(mitigation_id = %mitigation.mitigation_id, victim_ip = %mitigation.victim_ip,
+        unconfirmed = admission.unconfirmed, "created manual blackhole");
+    let status = if admission.unconfirmed {
+        response.announcement_outcome = Some(AnnouncementOutcome::Unconfirmed);
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::CREATED
+    };
+    (status, Json(response)).into_response()
+}
+
+/// `prefixd_guardrail_rejections_total` reason for a refused blackhole.
+fn blackhole_rejection_reason(violation: &GuardrailError) -> &'static str {
+    match violation {
+        GuardrailError::QuotaExceeded { .. } => "BlackholeQuotaExceeded",
+        GuardrailError::NotOwned { .. } => "BlackholeNotOwned",
+        GuardrailError::Safelisted { .. } => "BlackholeSafelisted",
+        GuardrailError::InvalidBlackhole { .. } => "InvalidBlackhole",
+        GuardrailError::BlackholeDisabled => "BlackholeDisabled",
+        GuardrailError::TtlRequired => "TtlRequired",
+        GuardrailError::TtlOutOfBounds { .. } => "TtlOutOfBounds",
+        GuardrailError::NewMitigationRateExceeded { .. } => "NewMitigationRateExceeded",
+        _ => "unknown",
+    }
 }
 
 pub async fn withdraw_mitigation(
@@ -2510,6 +2686,372 @@ mod tests {
                     "accepted cursor {cursor:?}"
                 );
             }
+        }
+    }
+
+    /// Manual blackholes through the router (ADR 027 slice 6).
+    mod blackhole {
+        use super::{AppState, Arc};
+        use crate::bgp::{FaultyBlackholes, FlowSpecAnnouncer};
+        use crate::config::{AuthMode, BgpMode, Customer, Inventory, OperationMode, Playbooks};
+        use crate::db::{ListParams, MockRepository, RepositoryTrait};
+        use crate::domain::OperatorRole;
+        use crate::observability::metrics::{GUARDRAIL_REJECTIONS, METRICS_TEST_LOCK};
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use serde_json::{Value, json};
+        use std::sync::atomic::Ordering::SeqCst;
+        use tower::ServiceExt;
+
+        fn state(
+            mode: OperationMode,
+            repo: Arc<MockRepository>,
+            speaker: Arc<dyn FlowSpecAnnouncer>,
+            auth: AuthMode,
+        ) -> Arc<AppState> {
+            let mut settings: crate::config::Settings =
+                crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+            settings.bgp.mode = BgpMode::Mock;
+            settings.mode = mode;
+            settings.http.auth.mode = AuthMode::None;
+            settings.blackhole.enabled = true;
+            settings.blackhole.next_hop_ipv4 = Some("192.0.2.66".parse().unwrap());
+            settings.blackhole.next_hop_ipv6 = Some("2001:db8:ffff::66".parse().unwrap());
+            let inventory = Inventory::new(vec![Customer {
+                customer_id: "customer-a".into(),
+                name: "Customer A".into(),
+                prefixes: vec!["203.0.113.0/24".into()],
+                policy_profile: crate::config::PolicyProfile::Normal,
+                services: vec![],
+            }]);
+            let mut state = AppState::new(
+                settings,
+                inventory,
+                Playbooks { playbooks: vec![] },
+                repo,
+                speaker,
+                ".".into(),
+            )
+            .unwrap();
+            let cached = Arc::get_mut(&mut state).unwrap();
+            cached.settings.http.auth.mode = auth;
+            cached.bearer_token = Some("operator-bearer-token".into());
+            state
+        }
+
+        fn create(victim: &str, confirm: Option<&str>) -> Value {
+            json!({"reason": "attack on victim", "victim_ip": victim,
+                "confirm_victim_ip": confirm, "action": "blackhole", "ttl_seconds": 600})
+        }
+
+        async fn send(
+            app: &axum::Router,
+            path: &str,
+            auth: Option<(&str, &str)>,
+            body: Value,
+        ) -> (StatusCode, Value) {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json");
+            if let Some((name, value)) = auth {
+                request = request.header(name, value);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::from(body.to_string())).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let cookie = response
+                .headers()
+                .get(axum::http::header::SET_COOKIE)
+                .map(|value| {
+                    value
+                        .to_str()
+                        .unwrap()
+                        .split(';')
+                        .next()
+                        .unwrap()
+                        .to_owned()
+                });
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            let mut json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            if let Some(cookie) = cookie {
+                json["cookie"] = cookie.into();
+            }
+            (status, json)
+        }
+
+        async fn login(
+            app: &axum::Router,
+            repo: &MockRepository,
+            name: &str,
+            role: OperatorRole,
+        ) -> String {
+            use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+            let salt = SaltString::encode_b64(b"blackhole-api-test").unwrap();
+            let hash = Argon2::default()
+                .hash_password(b"blackhole-password", &salt)
+                .unwrap()
+                .to_string();
+            repo.create_operator(name, &hash, role, None).await.unwrap();
+            let (status, body) = send(
+                app,
+                "/v1/auth/login",
+                None,
+                json!({"username": name, "password": "blackhole-password"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            body["cookie"].as_str().unwrap().to_owned()
+        }
+
+        async fn audit_len(repo: &MockRepository) -> usize {
+            repo.list_audit(&ListParams {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .len()
+        }
+
+        /// Operator sessions and bearer tokens get 403, a confirmation mismatch gets
+        /// 400, and neither saves a row or audit entry; Admin then succeeds in dry-run
+        /// and the response and WebSocket carry the frozen route.
+        #[tokio::test]
+        async fn manual_blackhole_needs_admin_and_exact_confirmation() {
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let state = state(
+                OperationMode::DryRun,
+                repo.clone(),
+                speaker.clone(),
+                AuthMode::Bearer,
+            );
+            let mut feed = state.ws_broadcast.subscribe();
+            let app = crate::api::create_test_router(state);
+            let admin = login(&app, &repo, "bh-admin", OperatorRole::Admin).await;
+            let operator = login(&app, &repo, "bh-operator", OperatorRole::Operator).await;
+            let before = audit_len(&repo).await;
+            let victim = "203.0.113.10";
+            let bearer = ("authorization", "Bearer operator-bearer-token");
+            for (auth, body, expected) in [
+                (bearer, create(victim, Some(victim)), StatusCode::FORBIDDEN),
+                (
+                    ("cookie", operator.as_str()),
+                    create(victim, Some(victim)),
+                    StatusCode::FORBIDDEN,
+                ),
+                (
+                    ("cookie", admin.as_str()),
+                    create(victim, Some("203.0.113.11")),
+                    StatusCode::BAD_REQUEST,
+                ),
+                (
+                    ("cookie", admin.as_str()),
+                    create(victim, Some(" 203.0.113.10")),
+                    StatusCode::BAD_REQUEST,
+                ),
+                (
+                    ("cookie", admin.as_str()),
+                    create(victim, None),
+                    StatusCode::BAD_REQUEST,
+                ),
+            ] {
+                let (status, response) = send(&app, "/v1/mitigations", Some(auth), body).await;
+                assert_eq!(status, expected, "{auth:?}: {response}");
+                assert_eq!(repo.count_active_global().await.unwrap(), 0);
+                assert_eq!(audit_len(&repo).await, before);
+            }
+            let (status, response) = send(
+                &app,
+                "/v1/mitigations",
+                Some(("cookie", &admin)),
+                create(victim, Some(victim)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{response}");
+            assert_eq!(response["action_type"], "blackhole");
+            assert_eq!(response["origin_mode"], "dry-run");
+            assert_eq!(response["dst_prefix"], "203.0.113.10/32");
+            assert_eq!(
+                response["blackhole"],
+                json!({"next_hop": "192.0.2.66", "communities": ["65535:666"], "large_communities": []})
+            );
+            assert_eq!(repo.count_active_global().await.unwrap(), 1);
+            assert_eq!(audit_len(&repo).await, before + 1);
+            // Dry-run sends nothing to the speaker.
+            assert_eq!(speaker.adds.load(SeqCst), 0);
+            assert!(speaker.routes().await.is_empty());
+            let message = serde_json::to_value(feed.try_recv().unwrap()).unwrap();
+            assert_eq!(message["type"], "mitigation_created");
+            assert_eq!(message["mitigation"]["blackhole"], response["blackhole"]);
+            // The bearer token keeps Operator access to FlowSpec creation.
+            let (status, _) = send(
+                &app,
+                "/v1/mitigations",
+                Some(bearer),
+                json!({"reason": "r", "victim_ip": "203.0.113.12", "protocol": "udp",
+                    "dst_ports": [53], "action": "discard", "ttl_seconds": 120}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+            // FlowSpec still requires a protocol with the same 422 as before.
+            let (status, _) = send(
+                &app,
+                "/v1/mitigations",
+                Some(bearer),
+                json!({"reason": "r", "victim_ip": "203.0.113.13", "action": "discard",
+                    "ttl_seconds": 120}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        /// Enforced creation adds the route; the ADR's 409s and the unconfirmed
+        /// outcome surface through the API; withdrawal deletes the route with an
+        /// audit entry, and a pending withdrawal blocks a new blackhole.
+        #[tokio::test]
+        async fn manual_blackhole_enforced_conflicts_and_withdrawal() {
+            use crate::bgp::{BlackholeRoute, BlackholeSpeaker};
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let state = state(
+                OperationMode::Enforced,
+                repo.clone(),
+                speaker.clone(),
+                AuthMode::None,
+            );
+            let app = crate::api::create_test_router(state);
+            let post = |victim: &'static str| {
+                send(&app, "/v1/mitigations", None, create(victim, Some(victim)))
+            };
+
+            let (status, created) = post("203.0.113.10").await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            assert_eq!(created["origin_mode"], "enforced");
+            assert!(created.get("announcement_outcome").is_none());
+            assert_eq!(speaker.adds.load(SeqCst), 1);
+            assert_eq!(
+                speaker.routes().await[0].prefix().to_string(),
+                "203.0.113.10/32"
+            );
+
+            let (status, conflict) = post("203.0.113.10").await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert!(
+                conflict["error"].as_str().unwrap().contains("active owner"),
+                "{conflict}"
+            );
+
+            let untracked = BlackholeRoute::new(
+                "203.0.113.20/32".parse().unwrap(),
+                "192.0.2.99".parse().unwrap(),
+                vec![],
+                vec![],
+            )
+            .unwrap();
+            speaker.inner.announce_blackhole(&untracked).await.unwrap();
+            let (status, conflict) = post("203.0.113.20").await;
+            assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+            assert_eq!(repo.count_active_global().await.unwrap(), 1);
+
+            speaker.fail_adds.store(true, SeqCst);
+            let (status, unconfirmed) = post("203.0.113.30").await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{unconfirmed}");
+            assert_eq!(unconfirmed["announcement_outcome"], "unconfirmed");
+            speaker.fail_adds.store(false, SeqCst);
+
+            // Withdrawal through the existing endpoint deletes the frozen route.
+            let id = created["mitigation_id"].as_str().unwrap();
+            let (status, withdrawn) = send(
+                &app,
+                &format!("/v1/mitigations/{id}/withdraw"),
+                None,
+                json!({"reason": "attack over"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{withdrawn}");
+            assert_eq!(withdrawn["status"], "withdrawn");
+            assert_eq!(withdrawn["blackhole"]["next_hop"], "192.0.2.66");
+            assert_eq!(speaker.routes().await, [untracked]);
+            let audit = repo
+                .list_audit(&ListParams {
+                    limit: 100,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert!(audit.iter().any(|entry| entry.action == "withdraw"
+                && entry.target_id.as_deref() == Some(id)
+                && entry.details["reason"] == "anonymous: attack over"));
+
+            // A withdrawal left pending blocks a new blackhole for the victim.
+            let (status, second) = post("203.0.113.11").await;
+            assert_eq!(status, StatusCode::CREATED, "{second}");
+            speaker.withdraw_fault.store(1, SeqCst);
+            let id = second["mitigation_id"].as_str().unwrap();
+            let (status, _) = send(
+                &app,
+                &format!("/v1/mitigations/{id}/withdraw"),
+                None,
+                json!({"reason": "attack over"}),
+            )
+            .await;
+            assert!(!status.is_success(), "{status}");
+            let (status, conflict) = post("203.0.113.11").await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert!(
+                conflict["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("pending withdrawal"),
+                "{conflict}"
+            );
+        }
+
+        /// Refused blackholes count under blackhole-specific reasons and save nothing.
+        #[tokio::test]
+        async fn manual_blackhole_rejections_are_counted_by_reason() {
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let mut state = state(
+                OperationMode::DryRun,
+                repo.clone(),
+                Arc::new(FaultyBlackholes::default()),
+                AuthMode::None,
+            );
+            Arc::get_mut(&mut state)
+                .unwrap()
+                .settings
+                .blackhole
+                .max_active_per_pop = 1;
+            let app = crate::api::create_test_router(state);
+            let count = |reason: &str| GUARDRAIL_REJECTIONS.with_label_values(&[reason]).get();
+            let post = |victim: &'static str| {
+                send(&app, "/v1/mitigations", None, create(victim, Some(victim)))
+            };
+            for (victim, reason) in [
+                ("198.51.100.10", "BlackholeNotOwned"),
+                ("127.0.0.1", "InvalidBlackhole"),
+            ] {
+                let before = count(reason);
+                let (status, body) = post(victim).await;
+                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{victim}: {body}");
+                assert_eq!(count(reason), before + 1.0, "{victim}");
+            }
+            assert_eq!(repo.count_active_global().await.unwrap(), 0);
+            assert_eq!(post("203.0.113.10").await.0, StatusCode::CREATED);
+            let before = count("BlackholeQuotaExceeded");
+            let (status, body) = post("203.0.113.11").await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(count("BlackholeQuotaExceeded"), before + 1.0);
+            assert_eq!(repo.count_active_global().await.unwrap(), 1);
         }
     }
 }

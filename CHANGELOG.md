@@ -29,7 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   host routes (ADR 027), and health detail reports
   `speaker.capabilities.blackhole` and `blackhole_lease`. GoBGP reports the
   capability as unsupported, and `blackhole_lease` is false for every backend.
-  Nothing creates a blackhole yet.
 - An optional `blackhole` block in `prefixd.yaml` configures RTBH host routes
   (ADR 027): `enabled` (default `false`), `next_hop_ipv4`, `next_hop_ipv6`,
   `communities`, `large_communities`, `max_ttl_seconds` (default 3600),
@@ -38,9 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   malformed communities, `NO_EXPORT`, `NO_EXPORT_SUBCONFED`, `NO_ADVERTISE`
   and unknown keys are refused. Startup refuses `enabled: true` when the speaker backend lacks the
   blackhole capability (GoBGP) or the safelist is empty, in dry-run and
-  enforced modes. No API, playbook or detector path creates a blackhole yet,
-  so the block changes no behavior; omitting it keeps every existing
-  configuration valid. Older binaries ignore the block.
+  enforced modes. Only the Admin-only manual path below creates a blackhole;
+  omitting the block keeps every existing configuration valid. Older binaries
+  ignore the block.
 - The rustbgpd and GoBGP adapters encode and strictly read back UDP source
   port, non-first fragment and packet-length FlowSpec matches in both
   families (ADR 028). Health detail reports
@@ -49,8 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the mock. The controller refuses a rule with a component the selected
   speaker cannot encode before persisting it or sending any RPC, in dry-run
   too. Nothing creates these matches yet.
-- Blackhole lifecycle and reconciliation (ADR 027), callable by the manual
-  creation path that a later release exposes. Enforced admission freezes the
+- Blackhole lifecycle and reconciliation (ADR 027), used by the manual
+  creation path below. Enforced admission freezes the
   next hop and communities into the row, returns `409` for a live owner, a
   pending withdrawal or an untracked local route at the prefix, persists, then
   adds the route. The safelist is rechecked before every add: a failed lookup
@@ -63,6 +62,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not own in the new `prefixd_unknown_local_routes{kind}` gauge
   (`blackhole` and `flowspec`). Blackhole and FlowSpec pending withdrawals
   and read failures do not block each other.
+- Admins can create manual blackholes (ADR 027) with `POST /v1/mitigations`
+  and `"action": "blackhole"`, or from the dashboard's Blackhole dialog. The
+  request needs the Admin role (Operator and Viewer sessions and every bearer
+  token get `403`), a nonempty `reason`, and `confirm_victim_ip` exactly equal
+  to `victim_ip` (`400` otherwise, with no row or audit entry). It takes no
+  protocol, ports, rate or `expires_at_cap`. Blackholes are manual, unleased
+  and rustbgpd-only: one stays on the speaker if prefixd stops, and router
+  enforcement depends on the router's RTBH policy, which prefixd does not
+  verify; FRR qualification is pending. Mitigation responses and WebSocket
+  messages gain an optional `blackhole` object (`next_hop`, `communities`,
+  `large_communities`), present only for blackholes. A manual blackhole
+  broadcasts `mitigation_created`. The dashboard shows blackholes with a danger
+  badge and their saved route, and asks Admins to type the victim IP twice.
+  `prefixdctl mitigations list/get/withdraw` show and withdraw blackholes by
+  ID; the CLI cannot create one. `action_type`-labelled metrics report
+  `blackhole`, and refused manual blackholes add
+  `prefixd_guardrail_rejections_total` reasons `BlackholeDisabled`,
+  `BlackholeQuotaExceeded`, `BlackholeNotOwned`, `BlackholeSafelisted` and
+  `InvalidBlackhole`.
 
 - Fence duplicate controllers with a PostgreSQL session advisory lock (ADR
   027). Each controller derives an owner from its POP and registered speaker

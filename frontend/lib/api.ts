@@ -30,6 +30,14 @@ export interface CorrelationContext {
 
 export type AnnouncementOutcome = "unconfirmed"
 
+/** Next hop and communities frozen into a blackhole at admission: saved intent, not router state. */
+export interface BlackholeRoute {
+  next_hop: string
+  /** `ASN:value`, always including BLACKHOLE `65535:666`. */
+  communities: string[]
+  large_communities: string[]
+}
+
 export interface Mitigation {
   /** This creation request had no successful speaker reply; not persisted status. */
   announcement_outcome?: AnnouncementOutcome
@@ -41,7 +49,7 @@ export interface Mitigation {
   pop: string
   victim_ip: string
   vector: string
-  action_type: "police" | "discard"
+  action_type: "police" | "discard" | "blackhole"
   rate_bps: number | null
   dst_prefix: string
   protocol: number | null
@@ -59,6 +67,8 @@ export interface Mitigation {
   origin_mode?: "dry-run" | "enforced" | null
   /** Correlation context (present when mitigation was created via corroboration) */
   correlation?: CorrelationContext | null
+  /** Present only for a blackhole, which drops all traffic to the victim. */
+  blackhole?: BlackholeRoute | null
 }
 
 export interface PaginatedResponse<T> {
@@ -278,6 +288,22 @@ export async function withdrawMitigation(
   await fetchApi(`/v1/mitigations/${id}/withdraw`, {
     method: "POST",
     body: JSON.stringify({ reason, operator_id: operator }),
+  })
+}
+
+export interface CreateBlackholeRequest {
+  victim_ip: string
+  /** Must exactly equal `victim_ip`; the controller returns 400 otherwise. */
+  confirm_victim_ip: string
+  reason: string
+  ttl_seconds: number
+}
+
+/** Admin-only manual blackhole (ADR 027). Bearer tokens and Operator sessions get 403. */
+export async function createBlackhole(request: CreateBlackholeRequest): Promise<Mitigation> {
+  return fetchApi<Mitigation>("/v1/mitigations", {
+    method: "POST",
+    body: JSON.stringify({ ...request, action: "blackhole" }),
   })
 }
 

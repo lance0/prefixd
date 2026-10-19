@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, XCircle, Plus, Download, Trash2 } from "lucide-react"
+import { Ban, Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, XCircle, Plus, Download, Trash2 } from "lucide-react"
 import { Checkbox } from "@/components/ui/checkbox"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 import { OriginTag } from "@/components/dashboard/status-pill"
@@ -32,6 +32,7 @@ import { withdrawMitigation, bulkWithdrawMitigations, type BulkWithdrawResult, t
 import { cn } from "@/lib/utils"
 import { downloadCsv } from "@/lib/csv"
 import { MitigateNowDialog } from "@/components/dashboard/mitigate-now-dialog"
+import { BlackholeDialog } from "@/components/dashboard/blackhole-dialog"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatRelative, formatTimeRemaining, formatUtc } from "@/lib/format"
@@ -68,6 +69,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   const withdrawTrigger = useRef<HTMLButtonElement | null>(null)
   const searchInput = useRef<HTMLInputElement | null>(null)
   const [mitigateNowOpen, setMitigateNowOpen] = useState(initialMitigateOpen ?? false)
+  const [blackholeOpen, setBlackholeOpen] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [bulkWithdrawOpen, setBulkWithdrawOpen] = useState(false)
   const [bulkWithdrawReason, setBulkWithdrawReason] = useState("")
@@ -352,6 +354,18 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
             >
               <Plus className="size-4" aria-hidden="true" />
               <span className="hidden sm:inline">Mitigate now</span>
+            </Button>
+          )}
+          {permissions.isAdmin && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-9 shrink-0 text-destructive"
+              onClick={() => setBlackholeOpen(true)}
+              aria-label="Blackhole a host"
+            >
+              <Ban className="size-4" aria-hidden="true" />
+              <span className="hidden sm:inline">Blackhole</span>
             </Button>
           )}
           <Button
@@ -758,6 +772,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
       </AlertDialog>
 
       <MitigateNowDialog open={mitigateNowOpen} onOpenChange={setMitigateNowOpen} />
+      {permissions.isAdmin && <BlackholeDialog open={blackholeOpen} onOpenChange={setBlackholeOpen} />}
     </div>
   )
 }

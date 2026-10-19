@@ -618,8 +618,9 @@ configuration error, except the removed `preserve_announcements` key below.
 
 Remotely triggered blackhole (RTBH) host routes, a second mitigation kind
 ([ADR 027](../adr/027-blackhole-mitigations.md)). The block is off by default
-and optional. No API, playbook or detector path creates a blackhole yet, so
-these settings change no behavior on their own.
+and optional. Only an Admin's manual request through
+[`POST /v1/mitigations`](api.md#manual-blackhole) creates a blackhole today;
+no playbook or detector path does.
 
 ```yaml
 blackhole:

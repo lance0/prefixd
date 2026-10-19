@@ -14338,3 +14338,131 @@ async fn test_mitigation_responses_expose_origin_mode_with_null_for_unknown() {
             .is_object()
     );
 }
+
+/// `prefixdctl mitigations list/get/withdraw` show a blackhole's route and withdraw it
+/// by ID with an Operator bearer token, which cannot create one (ADR 027).
+#[tokio::test]
+async fn prefixdctl_lists_gets_and_withdraws_a_blackhole() {
+    use prefixd::domain::{
+        ActionParams, ActionType, MatchCriteria, MitigationIntent, MitigationStatus,
+    };
+    const TOKEN: &str = "cli-blackhole-token";
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(MockAnnouncer::new());
+    let mut settings = test_settings();
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    settings.http.auth.mode = AuthMode::Credentials;
+    settings.blackhole.enabled = true;
+    settings.blackhole.next_hop_ipv4 = Some("192.0.2.66".parse().unwrap());
+    settings.blackhole.communities = vec!["64512:7".into()];
+    let mut state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    let cached = Arc::get_mut(&mut state).unwrap();
+    cached.settings.http.auth.mode = AuthMode::Bearer;
+    cached.bearer_token = Some(TOKEN.into());
+    let mitigation = prefixd::guardrails::admit_blackhole(
+        repo.as_ref(),
+        &state.settings,
+        &test_inventory(),
+        MitigationIntent {
+            event_id: uuid::Uuid::new_v4(),
+            customer_id: None,
+            service_id: None,
+            pop: "test1".into(),
+            match_criteria: MatchCriteria {
+                dst_prefix: "203.0.113.10/32".into(),
+                ..Default::default()
+            },
+            action_type: ActionType::Blackhole,
+            action_params: ActionParams::default(),
+            ttl_seconds: 600,
+            reason: "manual blackhole".into(),
+        },
+        &prefixd::observability::CreationActor::Operator("admin".into()),
+        speaker.as_ref(),
+        None,
+    )
+    .await
+    .unwrap()
+    .mitigation;
+    let id = mitigation.mitigation_id.to_string();
+    let blackholes = prefixd::bgp::FlowSpecAnnouncer::blackhole(speaker.as_ref()).unwrap();
+    assert_eq!(blackholes.list_blackholes().await.unwrap().routes.len(), 1);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, create_test_router(state))
+            .await
+            .unwrap();
+    });
+    let cli = |args: &[&str]| {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixdctl"));
+        command.args(["--api", &api, "--token", TOKEN]).args(args);
+        let label = args.join(" ");
+        async move {
+            let output = command.output().await.unwrap();
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(
+                output.status.success(),
+                "{label}\n{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            stdout
+        }
+    };
+
+    let list = cli(&["mitigations", "list"]).await;
+    let row = list.lines().find(|line| line.starts_with(&id)).unwrap();
+    assert!(
+        row.contains("203.0.113.10") && row.contains("blackhole"),
+        "{list}"
+    );
+    let get = cli(&["mitigations", "get", &id]).await;
+    for line in [
+        "Action:         blackhole",
+        "Blackhole:      drops all traffic to the victim",
+        "Next hop:       192.0.2.66",
+        "Communities:    64512:7 65535:666",
+    ] {
+        assert!(get.contains(line), "{line}\n{get}");
+    }
+    let json: serde_json::Value =
+        serde_json::from_str(&cli(&["--format", "json", "mitigations", "get", &id]).await).unwrap();
+    assert_eq!(json["blackhole"]["next_hop"], "192.0.2.66");
+    let withdrawn = cli(&[
+        "mitigations",
+        "withdraw",
+        &id,
+        "--reason",
+        "attack over",
+        "--operator",
+        "cli",
+    ])
+    .await;
+    assert!(withdrawn.contains(&format!("Withdrawn mitigation {id}")));
+    assert_eq!(
+        repo.get_mitigation(mitigation.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MitigationStatus::Withdrawn
+    );
+    assert!(
+        blackholes
+            .list_blackholes()
+            .await
+            .unwrap()
+            .routes
+            .is_empty()
+    );
+    server.abort();
+}

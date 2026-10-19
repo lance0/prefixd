@@ -98,6 +98,32 @@ Each ban uses a unique `event_id`, which prevents permanent duplicate collisions
 
 Unban correlation is done by querying active mitigations for the victim IP and withdrawing them directly.
 
+### Blackhole TTL (not yet available)
+
+> **Not yet available.** FastNetMon bans cannot create blackholes in this
+> release: no playbook or detector path does. Only an Admin can create a
+> [manual blackhole](../../reference/api.md#manual-blackhole). This section
+> applies once detector blackholes ship
+> ([ADR 027](../../adr/027-blackhole-mitigations.md), detector blackholes with
+> the injection lease).
+
+FastNetMon Community calls the script once on ban and once on unban, with no
+refresh in between, and skips detection for a host it already considers
+banned. If prefixd expired a blackhole before FastNetMon's `ban_time`, the
+host would stay unprotected until that ban ended. Keep:
+
+```text
+ban_time  <=  playbook blackhole step ttl_seconds  <=  blackhole.max_ttl_seconds
+```
+
+FastNetMon's shipped `ban_time` is 1900 seconds, and
+`blackhole.max_ttl_seconds` defaults to 3600. With FastNetMon's default
+`unban_only_if_attack_finished = on`, an IPv4 unban can come later than
+`ban_time` while the attack continues, without calling the script again.
+prefixd still expires the blackhole at its TTL in that case, so attack traffic
+can reach the victim until FastNetMon unbans and bans it again. That gap is
+accepted rather than allowing uncapped blackholes.
+
 ## Vector Detection
 
 On ban, the script infers the attack vector from the attack details FastNetMon writes to stdin:

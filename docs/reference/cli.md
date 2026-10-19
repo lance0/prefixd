@@ -150,14 +150,37 @@ prefixdctl mitigations get <id>
 # Created:     2026-01-18T10:30:00Z
 ```
 
+A blackhole ([ADR 027](../adr/027-blackhole-mitigations.md)) shows
+`blackhole` in the `ACTION` column of `list`, and `get` adds its saved route:
+
+```bash
+prefixdctl mitigations get <id>
+
+# Illustrative output for a blackhole:
+# Mitigation ID:  7f72a903-63d1-4a4a-a5db-0517e0a7df1d
+# Status:         active
+# Victim IP:      203.0.113.10
+# Vector:         unknown
+# Action:         blackhole
+# Blackhole:      drops all traffic to the victim
+# Next hop:       192.0.2.66
+# Communities:    64496:666 65535:666
+# ...
+```
+
+The next hop and communities are the route prefixd saved at admission, not
+evidence that a router enforces it. `-f json` output includes the same
+`blackhole` object as the API. The CLI cannot create a blackhole: creation
+requires an Admin session, and bearer tokens act as Operator.
+
 ### Withdraw Mitigation
 
 ```bash
-# Withdraw with reason
+# Withdraw with reason; blackholes and FlowSpec rules alike, by ID
 prefixdctl mitigations withdraw <id> --reason "false positive"
 
 # Example output:
-# Mitigation abc123 withdrawn
+# Withdrawn mitigation 7f72a903-63d1-4a4a-a5db-0517e0a7df1d
 ```
 
 ---

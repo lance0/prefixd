@@ -181,6 +181,36 @@ ExaBGP and other production adapters remain planned.
 
 ---
 
+## Blackhole Host Routes
+
+### Manual Blackholes
+
+An Admin can request a remotely triggered blackhole (RTBH) host route for an
+owned victim from the dashboard or `POST /v1/mitigations` with
+`"action": "blackhole"` ([ADR 027](docs/adr/027-blackhole-mitigations.md)). It
+drops all traffic to the victim. Current limits:
+
+- **Manual and unleased only.** No playbook or detector creates a blackhole
+  yet. A manual blackhole stays on the speaker if prefixd stops, until prefixd
+  returns and expires it or an Admin deletes it on the speaker.
+- **rustbgpd only.** GoBGP has no blackhole capability, and startup refuses
+  `blackhole.enabled` without it or with an empty safelist.
+- **Admin and typed confirmation.** Operators and bearer tokens get `403`; the
+  victim IP must be typed twice and match exactly.
+- **Stricter guardrails.** IPv4 `/32` or IPv6 `/128` only, a TTL capped at
+  `blackhole.max_ttl_seconds` (3600 s by default), separate quotas, victim
+  checks and a safelist recheck before every add.
+- **No router qualification yet.** prefixd records the route and the speaker's
+  acceptance. Whether a router drops the traffic depends on its RTBH import
+  policy; FRR interop qualification is pending.
+
+Blackholes are listed, shown and withdrawn by the existing dashboard views,
+withdrawal endpoints and `prefixdctl mitigations` commands. See the
+[manual blackhole API](docs/reference/api.md#manual-blackhole) and
+[configuration](docs/reference/configuration.md#blackhole).
+
+---
+
 ## Reconciliation
 
 ### Automatic State Management
@@ -446,6 +476,9 @@ for commands and mode-specific authentication.
 | `admin` | Read | Read | Yes | Full | Full | Full |
 
 **Permission hierarchy:** `admin > operator > viewer`
+
+Creating a [manual blackhole](#manual-blackholes) requires `admin`; bearer
+tokens act as `operator` and cannot create one.
 
 Account administration and self-service password changes are described in the
 [operator API](docs/reference/api.md#operators-admin-only).

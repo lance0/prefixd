@@ -240,6 +240,17 @@ struct MitigationResponse {
     created_at: String,
     expires_at: String,
     scope_hash: String,
+    /// Present only for a blackhole, which drops all traffic to the victim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blackhole: Option<BlackholeRoute>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct BlackholeRoute {
+    next_hop: String,
+    communities: Vec<String>,
+    #[serde(default)]
+    large_communities: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -531,15 +542,15 @@ async fn cmd_mitigations(
                     }
 
                     println!(
-                        "{:<36}  {:<10}  {:<15}  {:<10}  {:<8}  EXPIRES",
+                        "{:<36}  {:<10}  {:<15}  {:<10}  {:<9}  EXPIRES",
                         "ID", "STATUS", "VICTIM_IP", "VECTOR", "ACTION"
                     );
-                    println!("{}", "-".repeat(100));
+                    println!("{}", "-".repeat(101));
 
                     for m in &resp.mitigations {
                         let expires = &m.expires_at[..19]; // Trim to datetime
                         println!(
-                            "{:<36}  {:<10}  {:<15}  {:<10}  {:<8}  {}",
+                            "{:<36}  {:<10}  {:<15}  {:<10}  {:<9}  {}",
                             m.mitigation_id,
                             m.status,
                             m.victim_ip,
@@ -571,6 +582,14 @@ async fn cmd_mitigations(
                     println!("Action:         {}", m.action_type);
                     if let Some(rate) = m.rate_bps {
                         println!("Rate (bps):     {}", rate);
+                    }
+                    if let Some(route) = &m.blackhole {
+                        println!("Blackhole:      drops all traffic to the victim");
+                        println!("Next hop:       {}", route.next_hop);
+                        println!("Communities:    {}", route.communities.join(" "));
+                        if !route.large_communities.is_empty() {
+                            println!("Large comms:    {}", route.large_communities.join(" "));
+                        }
                     }
                     println!(
                         "Customer:       {}",
