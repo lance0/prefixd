@@ -162,6 +162,13 @@ prefixd cannot match exactly to its own records are reported, never deleted.
 Monitor the controller independently of BGP health with the
 [down alerts](../grafana.md#alert-rules).
 
+**Router and speaker requirements.** On eBGP, rustbgpd replaces prefixd's
+next hop with its own, so the router's import policy must match BLACKHOLE
+(`65535:666`) and set a discard next hop itself. Over an IPv4 session, set
+`local_ipv6_nexthop` on the rustbgpd neighbor, or IPv6 blackholes are silently
+withheld; the [FRR blackhole receipt](../../reference/qualification/blackhole-frr-2026-10-19.md)
+shows both.
+
 #### Blackhole TTL
 
 FastNetMon Community calls the script once on ban and once on unban, with no

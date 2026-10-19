@@ -12,7 +12,7 @@ other router.
 | Item | Value |
 | --- | --- |
 | Run | 2026-10-19T21:25:48Z, local, Linux 7.0.0-30-generic, containerlab 0.74.3, lab nodes pinned to eight CPUs |
-| prefixd | 0.20.0, local image `sha256:7cd08af4c52db22364c99592370d2bf109ccff2e785e69c1873770f6ae7e6d64` built from main `7ee9413` sources |
+| prefixd | 0.20.0, local image `sha256:7cd08af4c52db22364c99592370d2bf109ccff2e785e69c1873770f6ae7e6d64` built from main `7ee9413` sources; it predates #266, #267 and #269, which were not rerun here |
 | Speaker | rustbgpd 0.78.0, `ghcr.io/lance0/rustbgpd:0.78.0@sha256:1082f37a562e8c5b3728b24294a40748559c8d9afa9c68688d4b934a4637d9c7` |
 | Router | FRR 10.7.1, `quay.io/frrouting/frr:10.7.1@sha256:e995beaa50fdc9edb35eadcfefa29b7f062cc06f2b812613789b68fa541554d2` |
 | Topology | [`lab/interop/frr-rustbgpd.clab.yml`](../../../lab/interop/frr-rustbgpd.clab.yml): one eBGP session over IPv4 (speaker AS 65010 at 10.0.0.1, FRR AS 65002 at 10.0.0.2) carrying IPv4/IPv6 FlowSpec and IPv4/IPv6 unicast |

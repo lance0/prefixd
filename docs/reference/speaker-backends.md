@@ -431,6 +431,16 @@ reports it. Overdue live rows are expired through the normal withdrawal path
 first. The FlowSpec stage sets `kind="flowspec"` for the unknown local rules
 it already logs.
 
+### Router and speaker requirements
+
+Over an IPv4-transport session, rustbgpd sends IPv6 blackholes to an eBGP peer
+only when that neighbor sets `local_ipv6_nexthop`; without it the add succeeds
+but the route is silently withheld. On eBGP, rustbgpd also replaces prefixd's
+frozen next hop with its own (the session address, or `local_ipv6_nexthop` for
+IPv6), so the router's import policy
+must match BLACKHOLE (`65535:666`) and set a discard next hop itself. The
+[FRR blackhole receipt](qualification/blackhole-frr-2026-10-19.md) shows both.
+
 ## Remaining backend work
 
 Both readable adapters have shared contracts, released-daemon CI, secure

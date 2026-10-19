@@ -199,9 +199,10 @@ drops all traffic to the victim. Current limits:
 - **Stricter guardrails.** IPv4 `/32` or IPv6 `/128` only, a TTL capped at
   `blackhole.max_ttl_seconds` (3600 s by default), separate quotas, victim
   checks and a safelist recheck before every add.
-- **No router qualification yet.** prefixd records the route and the speaker's
-  acceptance. Whether a router drops the traffic depends on its RTBH import
-  policy; FRR interop qualification is pending.
+- **Router qualification: FRR only.** prefixd records the route and the
+  speaker's acceptance. Whether a router drops the traffic depends on its RTBH
+  import policy. FRR 10.7.1 is qualified in the control plane and FIB; see the
+  [FRR blackhole receipt](docs/reference/qualification/blackhole-frr-2026-10-19.md).
 
 Blackholes are listed, shown and withdrawn by the existing dashboard views,
 withdrawal endpoints and `prefixdctl mitigations` commands. See the
