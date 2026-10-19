@@ -185,21 +185,52 @@ guardrails:
   dst_prefix_minlen_v6: 128
   dst_prefix_maxlen_v6: 128
   
-  # Max ports per rule (router memory protection)
+  # Max ports in each port list of a rule (router memory protection)
   max_ports: 8
   
   # TTL bounds (optional overrides; if omitted, uses timers.min/max_ttl_seconds)
   min_ttl_seconds: 30
   max_ttl_seconds: 1800
   
-  # FlowSpec match-type toggles (all default false)
-  allow_src_prefix_match: false
-  allow_tcp_flags_match: false
+  # FlowSpec match opt-ins (default false)
   allow_fragment_match: false
   allow_packet_length_match: false
+
+  # Reserved: parsed, no effect (default false)
+  allow_src_prefix_match: false
+  allow_tcp_flags_match: false
 ```
 
-> **NOTE:** `allow_src_prefix_match`, `allow_tcp_flags_match`, `allow_fragment_match`, and `allow_packet_length_match` are parsed but not yet enforced. FlowSpec match types are currently limited to dst_prefix + protocol + ports.
+`max_ports` applies to the destination-port list and the source-port list
+separately: a rule with eight of each passes the default. A list over the cap
+is refused, never truncated. Duplicate source ports count once. The rustbgpd
+encoder emits at most 8 ports per list, which is why the default is 8. Raising
+`max_ports` above 8 with the rustbgpd backend admits rules that the encoder then
+refuses at announcement, so intent is saved but not announced. GoBGP has no
+per-list cap.
+
+Rules with a non-first fragment match (`fragment`) are refused unless
+`allow_fragment_match` is `true`, and rules with a packet-length match
+(`packet_length`) are refused unless `allow_packet_length_match` is `true`.
+Discarding fragments drops legitimate traffic such as large EDNS0 DNS
+responses and UDP-encapsulated VPNs, so prefer `police` for fragments.
+Source-port matches need no flag. Every rule with a source-port, fragment or
+packet-length match must also meet the
+[ADR 028](../adr/028-amplification-matches.md#1-components) rule invariants:
+UDP only, an IPv4 `/32` or IPv6 `/128` destination, no source ports together
+with `fragment`, `packet_length` only with source ports, and a lower bound above
+the IP and UDP headers (28 bytes for IPv4, 48 for IPv6). These checks run before
+anything is saved, in `dry-run` and `enforced` modes alike. Refusals return
+`422` and increment `prefixd_guardrail_rejections_total` with
+`reason="FragmentMatchNotAllowed"`, `"PacketLengthMatchNotAllowed"`,
+`"InvalidMatch"` or `"TooManySourcePorts"`. Rules without these components
+are checked as before. No API, playbook or detector path creates these matches
+yet.
+
+`allow_src_prefix_match` and `allow_tcp_flags_match` are reserved: they still
+parse so existing configurations load, but prefixd never matches source
+prefixes or TCP flags. Setting either to `true` logs one startup warning that
+the flag has no effect.
 
 ### Quotas
 

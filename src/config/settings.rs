@@ -281,16 +281,41 @@ pub struct GuardrailsConfig {
     /// Maximum prefix length for IPv6 (default: 128)
     #[serde(default)]
     pub dst_prefix_maxlen_v6: Option<u8>,
+    /// Cap on each port list (destination and source) separately. The default
+    /// equals the rustbgpd encoder's per-list cap.
     #[serde(default = "default_max_ports")]
     pub max_ports: usize,
+    /// Reserved (ADR 028): parsed so configurations load, has no effect.
     #[serde(default)]
     pub allow_src_prefix_match: bool,
+    /// Reserved (ADR 028): parsed so configurations load, has no effect.
     #[serde(default)]
     pub allow_tcp_flags_match: bool,
+    /// Admits rules with a non-first fragment match.
     #[serde(default)]
     pub allow_fragment_match: bool,
+    /// Admits rules with a packet-length match.
     #[serde(default)]
     pub allow_packet_length_match: bool,
+}
+
+impl GuardrailsConfig {
+    /// Reserved flags set to true; startup warns once for each.
+    pub fn reserved_flags_set(&self) -> Vec<&'static str> {
+        [
+            (
+                "guardrails.allow_src_prefix_match",
+                self.allow_src_prefix_match,
+            ),
+            (
+                "guardrails.allow_tcp_flags_match",
+                self.allow_tcp_flags_match,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(key, set)| set.then_some(key))
+        .collect()
+    }
 }
 
 fn default_true() -> bool {
@@ -916,6 +941,44 @@ observability:
             assert!(!json.contains(leaf), "{key} must not round-trip: {json}");
         }
         assert!(load_yaml(MINIMAL_SETTINGS_YAML).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn reserved_guardrail_flags_are_reported_for_the_startup_warning() {
+        let parse = |yaml: &str| crate::config::parse_yaml::<GuardrailsConfig>(yaml).unwrap();
+        assert_eq!(
+            parse("allow_src_prefix_match: true\nallow_tcp_flags_match: true\n")
+                .reserved_flags_set(),
+            [
+                "guardrails.allow_src_prefix_match",
+                "guardrails.allow_tcp_flags_match"
+            ]
+        );
+        assert_eq!(
+            parse("allow_tcp_flags_match: true\n").reserved_flags_set(),
+            ["guardrails.allow_tcp_flags_match"]
+        );
+        // Controls: unset, false, and the enforced opt-ins never warn.
+        for yaml in [
+            "{}",
+            "allow_src_prefix_match: false\nallow_tcp_flags_match: false\n",
+            "allow_fragment_match: true\nallow_packet_length_match: true\n",
+        ] {
+            assert!(parse(yaml).reserved_flags_set().is_empty(), "{yaml}");
+        }
+        // Shipped configurations neither warn nor opt in to the enforced flags.
+        for shipped in [
+            include_str!("../../configs/prefixd.yaml"),
+            include_str!("../../configs/prefixd-gobgp.yaml"),
+            include_str!("testdata/v0.19.1-prefixd.yaml"),
+        ] {
+            let guardrails = crate::config::parse_yaml::<Settings>(shipped)
+                .unwrap()
+                .guardrails;
+            assert!(guardrails.reserved_flags_set().is_empty());
+            assert!(!guardrails.allow_fragment_match && !guardrails.allow_packet_length_match);
+            assert_eq!(guardrails.max_ports, 8);
+        }
     }
 
     #[test]

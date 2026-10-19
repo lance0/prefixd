@@ -106,6 +106,20 @@ pub enum GuardrailError {
     #[error("too many ports: {count} (max={max})")]
     TooManyPorts { count: usize, max: usize },
 
+    #[error("too many source ports: {count} (max={max})")]
+    TooManySourcePorts { count: usize, max: usize },
+
+    #[error("invalid FlowSpec match: {reason}")]
+    InvalidMatch {
+        reason: crate::domain::FlowSpecMatchError,
+    },
+
+    #[error("fragment matching not allowed (guardrails.allow_fragment_match=false)")]
+    FragmentMatchNotAllowed,
+
+    #[error("packet length matching not allowed (guardrails.allow_packet_length_match=false)")]
+    PacketLengthMatchNotAllowed,
+
     #[error("quota exceeded: {quota_type} ({current}/{max})")]
     QuotaExceeded {
         quota_type: String,

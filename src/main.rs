@@ -64,6 +64,12 @@ async fn main() -> anyhow::Result<()> {
             deprecation.message
         );
     }
+    for key in config.settings.guardrails.reserved_flags_set() {
+        tracing::warn!(
+            key,
+            "reserved guardrail flag has no effect; prefixd does not match source prefixes or TCP flags"
+        );
+    }
 
     tracing::info!(
         pop = %config.settings.pop,

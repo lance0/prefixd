@@ -2391,6 +2391,101 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn match_opt_ins_refuse_alike_in_both_modes_and_dry_run_persists_without_rpc() {
+        use crate::bgp::MockAnnouncer;
+        use crate::config::{BgpMode, Inventory, OperationMode, Playbooks, Settings};
+        use crate::db::{MockRepository, RepositoryTrait};
+        use crate::domain::{
+            ActionParams, ActionType, AttackVector, FragmentMatch, MatchCriteria, Mitigation,
+            MitigationIntent,
+        };
+        use crate::guardrails::Guardrails;
+        let mut refusals = Vec::new();
+        for mode in [OperationMode::DryRun, OperationMode::Enforced] {
+            for allowed in [false, true] {
+                let mut settings: Settings =
+                    crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+                settings.bgp.mode = BgpMode::Mock;
+                settings.mode = mode;
+                settings.guardrails.allow_fragment_match = allowed;
+                let repo = Arc::new(MockRepository::new());
+                let speaker = Arc::new(MockAnnouncer::new());
+                let state = AppState::new(
+                    settings,
+                    Inventory::new(vec![]),
+                    Playbooks { playbooks: vec![] },
+                    repo.clone(),
+                    speaker.clone(),
+                    ".".into(),
+                )
+                .unwrap();
+                let intent = MitigationIntent {
+                    event_id: Uuid::new_v4(),
+                    customer_id: None,
+                    service_id: None,
+                    pop: state.settings.pop.clone(),
+                    match_criteria: MatchCriteria {
+                        dst_prefix: "192.0.2.1/32".into(),
+                        protocol: Some(17),
+                        fragment: Some(FragmentMatch::NonFirst),
+                        ..Default::default()
+                    },
+                    action_type: ActionType::Police,
+                    action_params: ActionParams {
+                        rate_bps: Some(1_000_000),
+                    },
+                    ttl_seconds: 60,
+                    reason: "test".into(),
+                };
+                // The same sequence both creation handlers run.
+                let guardrails = Guardrails::with_timers(
+                    state.settings.guardrails.clone(),
+                    state.settings.quotas.clone(),
+                    &state.settings.timers,
+                );
+                let checked = guardrails.validate(&intent, repo.as_ref(), false).await;
+                let mut mitigation =
+                    Mitigation::from_intent(intent, "192.0.2.1".into(), AttackVector::UdpFlood);
+                if allowed {
+                    checked.unwrap();
+                    let outcome = persist_new_mitigation(
+                        &state,
+                        &mut mitigation,
+                        &CreationActor::Detector("test".into()),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(outcome.is_none(), "{mode:?}");
+                    let persisted = repo
+                        .get_mitigation(mitigation.mitigation_id)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(persisted.origin_mode, Some(mode));
+                    assert_eq!(
+                        persisted.match_criteria.fragment,
+                        Some(FragmentMatch::NonFirst)
+                    );
+                } else {
+                    refusals.push(checked.unwrap_err().to_string());
+                    assert!(
+                        repo.get_mitigation(mitigation.mitigation_id)
+                            .await
+                            .unwrap()
+                            .is_none()
+                    );
+                }
+                let announced = allowed && mode == OperationMode::Enforced;
+                assert_eq!(speaker.announced_count().await, usize::from(announced));
+            }
+        }
+        // One refusal per mode, identical in both.
+        assert_eq!(refusals.len(), 2);
+        assert_eq!(refusals[0], refusals[1]);
+        assert!(refusals[0].contains("guardrails.allow_fragment_match=false"));
+    }
+
     #[test]
     fn test_cursor_decode_rejects_invalid_input() {
         let encoded =

@@ -8,7 +8,7 @@ use std::net::IpAddr;
 
 use crate::config::{GuardrailsConfig, QuotasConfig, TimersConfig};
 use crate::db::RepositoryTrait;
-use crate::domain::{FlowSpecAction, MatchCriteria, MitigationIntent};
+use crate::domain::{FlowSpecAction, FlowSpecNlri, MatchCriteria, MitigationIntent};
 use crate::error::{GuardrailError, PrefixdError, Result};
 
 pub struct Guardrails {
@@ -27,19 +27,6 @@ impl Guardrails {
         quotas: QuotasConfig,
         timers: &TimersConfig,
     ) -> Self {
-        if !config.allow_src_prefix_match
-            || !config.allow_tcp_flags_match
-            || !config.allow_fragment_match
-            || !config.allow_packet_length_match
-        {
-            tracing::debug!(
-                allow_src_prefix = config.allow_src_prefix_match,
-                allow_tcp_flags = config.allow_tcp_flags_match,
-                allow_fragment = config.allow_fragment_match,
-                allow_packet_length = config.allow_packet_length_match,
-                "guardrail allow_* flags are configured but not yet enforced; FlowSpec match types are limited to dst_prefix+protocol+ports"
-            );
-        }
         let min_ttl = config.min_ttl_seconds.unwrap_or(timers.min_ttl_seconds);
         let max_ttl = config.max_ttl_seconds.unwrap_or(timers.max_ttl_seconds);
         Self {
@@ -91,6 +78,9 @@ impl Guardrails {
 
         // Check port count
         self.validate_port_count(&intent.match_criteria)?;
+
+        // Check ADR 028 match invariants and opt-ins
+        self.validate_match(&intent.match_criteria)?;
 
         // Check quotas
         self.validate_quotas(intent, repo).await?;
@@ -170,14 +160,39 @@ impl Guardrails {
         Ok(())
     }
 
+    /// `max_ports` caps each port list separately (ADR 028), refusing rather than
+    /// truncating. Source ports count once each, as the encoders see them.
     fn validate_port_count(&self, criteria: &MatchCriteria) -> Result<()> {
-        if criteria.dst_ports.len() > self.config.max_ports {
+        let max = self.config.max_ports;
+        if criteria.dst_ports.len() > max {
             return Err(PrefixdError::GuardrailViolation(
                 GuardrailError::TooManyPorts {
                     count: criteria.dst_ports.len(),
-                    max: self.config.max_ports,
+                    max,
                 },
             ));
+        }
+        let count = crate::domain::canonical_ports(&criteria.src_ports).len();
+        if count > max {
+            return Err(PrefixdError::GuardrailViolation(
+                GuardrailError::TooManySourcePorts { count, max },
+            ));
+        }
+        Ok(())
+    }
+
+    /// ADR 028 rule invariants, then the fragment and packet-length opt-ins.
+    /// Mode-independent, so dry run refuses exactly as enforced mode does.
+    fn validate_match(&self, criteria: &MatchCriteria) -> Result<()> {
+        let refuse = |error| Err(PrefixdError::GuardrailViolation(error));
+        if let Err(reason) = FlowSpecNlri::from(criteria).validate() {
+            return refuse(GuardrailError::InvalidMatch { reason });
+        }
+        if criteria.fragment.is_some() && !self.config.allow_fragment_match {
+            return refuse(GuardrailError::FragmentMatchNotAllowed);
+        }
+        if criteria.packet_length.is_some() && !self.config.allow_packet_length_match {
+            return refuse(GuardrailError::PacketLengthMatchNotAllowed);
         }
         Ok(())
     }
@@ -286,6 +301,228 @@ mod tests {
         ));
         intent.action_params.rate_bps = None;
         guardrails.validate(&intent, &repo, false).await.unwrap();
+    }
+
+    fn intent_for(match_criteria: MatchCriteria) -> MitigationIntent {
+        use crate::domain::{ActionParams, ActionType};
+        MitigationIntent {
+            event_id: uuid::Uuid::new_v4(),
+            customer_id: None,
+            service_id: None,
+            pop: "test".into(),
+            match_criteria,
+            action_type: ActionType::Discard,
+            action_params: ActionParams { rate_bps: None },
+            ttl_seconds: 60,
+            reason: "amplification guardrails".into(),
+        }
+    }
+
+    fn udp(src_ports: Vec<u16>) -> MatchCriteria {
+        MatchCriteria {
+            dst_prefix: "192.0.2.1/32".into(),
+            protocol: Some(17),
+            src_ports,
+            ..Default::default()
+        }
+    }
+
+    async fn check(config: &GuardrailsConfig, criteria: MatchCriteria) -> Result<()> {
+        let (_, quotas) = test_config();
+        Guardrails::new(config.clone(), quotas)
+            .validate(
+                &intent_for(criteria),
+                &crate::db::MockRepository::new(),
+                false,
+            )
+            .await
+    }
+
+    fn refused(result: Result<()>) -> GuardrailError {
+        match result {
+            Err(PrefixdError::GuardrailViolation(error)) => error,
+            other => panic!("expected a guardrail refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fragment_match_needs_allow_fragment_match() {
+        use crate::domain::FragmentMatch;
+        let (mut config, _) = test_config();
+        for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
+            let criteria = MatchCriteria {
+                dst_prefix: prefix.into(),
+                fragment: Some(FragmentMatch::NonFirst),
+                ..udp(vec![])
+            };
+            config.allow_fragment_match = false;
+            assert!(matches!(
+                refused(check(&config, criteria.clone()).await),
+                GuardrailError::FragmentMatchNotAllowed
+            ));
+            config.allow_fragment_match = true;
+            check(&config, criteria).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn packet_length_match_needs_allow_packet_length_match() {
+        use crate::domain::PacketLengthRange;
+        let (mut config, _) = test_config();
+        let criteria = MatchCriteria {
+            packet_length: Some(PacketLengthRange {
+                min: 468,
+                max: 65535,
+            }),
+            ..udp(vec![123])
+        };
+        assert!(matches!(
+            refused(check(&config, criteria.clone()).await),
+            GuardrailError::PacketLengthMatchNotAllowed
+        ));
+        // Enabling the other flag does not admit it.
+        config.allow_fragment_match = true;
+        assert!(matches!(
+            refused(check(&config, criteria.clone()).await),
+            GuardrailError::PacketLengthMatchNotAllowed
+        ));
+        config.allow_packet_length_match = true;
+        check(&config, criteria).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn max_ports_caps_each_port_list_separately() {
+        let (config, _) = test_config();
+        assert_eq!(config.max_ports, 8);
+        // Eight per list passes, sixteen in total.
+        let full = MatchCriteria {
+            dst_ports: (1..=8).collect(),
+            ..udp((11..=18).collect())
+        };
+        check(&config, full.clone()).await.unwrap();
+        assert!(matches!(
+            refused(check(&config, udp((11..=19).collect())).await),
+            GuardrailError::TooManySourcePorts { count: 9, max: 8 }
+        ));
+        assert!(matches!(
+            refused(
+                check(
+                    &config,
+                    MatchCriteria {
+                        dst_ports: (1..=9).collect(),
+                        ..full.clone()
+                    }
+                )
+                .await
+            ),
+            GuardrailError::TooManyPorts { count: 9, max: 8 }
+        ));
+        // Duplicates count once, as the encoders see them.
+        check(&config, udp([53; 9].into())).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn match_invariants_run_in_the_guardrail_path() {
+        use crate::domain::{FlowSpecMatchError, FragmentMatch, PacketLengthRange};
+        // Every opt-in on and wide prefix bounds, so only the invariants refuse.
+        let (config, _) = relaxed_config();
+        let length = |min, max| Some(PacketLengthRange { min, max });
+        for (criteria, expected) in [
+            (
+                MatchCriteria {
+                    protocol: Some(6),
+                    ..udp(vec![123])
+                },
+                FlowSpecMatchError::RequiresUdp,
+            ),
+            (
+                MatchCriteria {
+                    fragment: Some(FragmentMatch::NonFirst),
+                    ..udp(vec![123])
+                },
+                FlowSpecMatchError::SourcePortsWithFragment,
+            ),
+            (
+                MatchCriteria {
+                    packet_length: length(468, 1500),
+                    ..udp(vec![])
+                },
+                FlowSpecMatchError::PacketLengthWithoutSourcePorts,
+            ),
+            (
+                MatchCriteria {
+                    packet_length: length(28, 1500),
+                    ..udp(vec![123])
+                },
+                FlowSpecMatchError::InvalidPacketLength {
+                    min: 28,
+                    max: 1500,
+                    floor: 28,
+                },
+            ),
+            (
+                MatchCriteria {
+                    dst_prefix: "192.0.2.0/24".into(),
+                    ..udp(vec![123])
+                },
+                FlowSpecMatchError::NotHostPrefix,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    refused(check(&config, criteria.clone()).await),
+                    GuardrailError::InvalidMatch { ref reason } if *reason == expected
+                ),
+                "{criteria:?}"
+            );
+        }
+        // Controls: the well-formed shapes pass.
+        check(&config, udp(vec![123])).await.unwrap();
+        check(
+            &config,
+            MatchCriteria {
+                packet_length: length(29, 1500),
+                ..udp(vec![123])
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn rules_without_new_components_are_unaffected() {
+        // Shipped defaults: both opt-ins off. Legacy shapes pass as before.
+        let (config, _) = test_config();
+        for (protocol, dst_ports) in [
+            (Some(17), (1..=8).collect()),
+            (Some(6), vec![80, 443]),
+            (None, vec![]),
+        ] {
+            check(
+                &config,
+                MatchCriteria {
+                    dst_prefix: "192.0.2.1/32".into(),
+                    protocol,
+                    dst_ports,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        // A legacy /24 under relaxed bounds is not held to the extended host-prefix invariant.
+        let (relaxed, _) = relaxed_config();
+        check(
+            &relaxed,
+            MatchCriteria {
+                dst_prefix: "192.0.2.0/24".into(),
+                protocol: Some(6),
+                dst_ports: vec![80],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     }
 
     fn test_config() -> (GuardrailsConfig, QuotasConfig) {

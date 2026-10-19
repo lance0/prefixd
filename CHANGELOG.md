@@ -88,6 +88,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Guardrails enforce the ADR 028 match settings before a rule is saved, in
+  dry-run and enforced modes. `guardrails.allow_fragment_match` and
+  `guardrails.allow_packet_length_match` now admit or refuse rules with a
+  fragment or packet-length match, `max_ports` caps the source-port list as
+  well as the destination-port list, and rules with these components must meet
+  the ADR 028 rule invariants. Refusals return `422` with the new
+  `prefixd_guardrail_rejections_total` reasons `FragmentMatchNotAllowed`,
+  `PacketLengthMatchNotAllowed`, `InvalidMatch` and `TooManySourcePorts`.
+  `guardrails.allow_src_prefix_match` and `guardrails.allow_tcp_flags_match`
+  are reserved: setting either to `true` logs a startup warning and has no
+  effect. Nothing creates these matches yet, so rules without them and
+  shipped configurations behave as before.
+
 - Releases publish themselves. Once `ci.yml` passes on the `main` commit that
   sets a new Cargo.toml version with a dated CHANGELOG section, the release
   workflow tags that commit `vX.Y.Z` and publishes the GitHub Release, which
