@@ -36,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enforced modes. No API, playbook or detector path creates a blackhole yet,
   so the block changes no behavior; omitting it keeps every existing
   configuration valid. Older binaries ignore the block.
+- The rustbgpd and GoBGP adapters encode and strictly read back UDP source
+  port, non-first fragment and packet-length FlowSpec matches in both
+  families (ADR 028). Health detail reports
+  `speaker.capabilities.flowspec_match` with `source_ports`, `fragment` and
+  `packet_length`; all three are true for rustbgpd 0.76.0 to 0.78.0, GoBGP
+  and the mock. The controller refuses a rule with a component the selected
+  speaker cannot encode before persisting it or sending any RPC, in dry-run
+  too. Nothing creates these matches yet.
 
 - Fence duplicate controllers with a PostgreSQL session advisory lock (ADR
   027). Each controller derives an owner from its POP and registered speaker

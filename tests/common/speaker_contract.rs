@@ -82,6 +82,15 @@ pub fn exact_inventory(actual: &[FlowSpecRule], expected: &[FlowSpecRule]) -> Re
             wanted.nlri.dst_prefix
         );
         ensure!(
+            // Source ports are an equality set, read back ascending and unique.
+            prefixd::domain::canonical_ports(&found.nlri.src_ports)
+                == prefixd::domain::canonical_ports(&wanted.nlri.src_ports)
+                && found.nlri.fragment == wanted.nlri.fragment
+                && found.nlri.packet_length == wanted.nlri.packet_length,
+            "source port, fragment or packet length mismatch for {}",
+            wanted.nlri.dst_prefix
+        );
+        ensure!(
             found.actions.len() == wanted.actions.len(),
             "action cardinality mismatch for {}",
             wanted.nlri.dst_prefix
@@ -226,6 +235,86 @@ pub async fn run_action_contract(speaker: &dyn FlowSpecAnnouncer) -> Result<()> 
         speaker.withdraw(rule).await?;
     }
     wait_inventory(speaker, &[]).await
+}
+
+/// ADR 028 rules in both families: source ports, source ports with a packet
+/// length, and non-first fragments, each beside an all-UDP rule for the same victim.
+#[allow(
+    dead_code,
+    reason = "Peered targets do not repeat local match-encoding qualification."
+)]
+pub fn amplification_rules() -> Vec<FlowSpecRule> {
+    use prefixd::domain::{FragmentMatch, PacketLengthRange};
+    let mut rules = vec![];
+    for prefix in ["192.0.2.247/32", "2001:0DB8:0:0:0:0:0:247/128"] {
+        let udp = FlowSpecNlri {
+            dst_prefix: prefix.into(),
+            protocol: Some(17),
+            ..Default::default()
+        };
+        rules.extend([
+            FlowSpecRule::new(udp.clone(), FlowSpecAction::police(80_000_000)),
+            FlowSpecRule::new(
+                FlowSpecNlri {
+                    src_ports: vec![389, 123, 53],
+                    ..udp.clone()
+                },
+                FlowSpecAction::discard(),
+            ),
+            FlowSpecRule::new(
+                FlowSpecNlri {
+                    src_ports: vec![11211],
+                    packet_length: Some(PacketLengthRange {
+                        min: 1000,
+                        max: 65535,
+                    }),
+                    ..udp.clone()
+                },
+                FlowSpecAction::discard(),
+            ),
+            FlowSpecRule::new(
+                FlowSpecNlri {
+                    fragment: Some(FragmentMatch::NonFirst),
+                    ..udp
+                },
+                FlowSpecAction::police(20_000_000),
+            ),
+        ]);
+    }
+    rules
+}
+
+/// Injects, reads back as matching and deletes each ADR 028 rule. A speaker that
+/// dropped a component would collapse two rules into one route and fail here.
+#[allow(
+    dead_code,
+    reason = "Peered targets do not repeat local match-encoding qualification."
+)]
+pub async fn run_amplification_contract(speaker: &dyn FlowSpecAnnouncer) -> Result<()> {
+    ensure!(
+        speaker.capabilities().flowspec_match == prefixd::bgp::FlowSpecMatchSupport::ALL,
+        "speaker must report every ADR 028 component"
+    );
+    wait_inventory(speaker, &[])
+        .await
+        .context("isolated initial inventory")?;
+    let mut expected = amplification_rules();
+    for rule in &expected {
+        speaker.announce(rule).await.context("announce")?;
+        speaker.announce(rule).await.context("duplicate announce")?;
+    }
+    wait_inventory(speaker, &expected)
+        .await
+        .context("extended rules read back as matching")?;
+    // Delete one rule at a time; its siblings on the same victim must survive.
+    for rule in amplification_rules().iter().rev() {
+        speaker.withdraw(rule).await.context("withdraw")?;
+        expected.retain(|other| other.nlri_hash() != rule.nlri_hash());
+        wait_inventory(speaker, &expected)
+            .await
+            .context("withdraw only the exact extended rule")?;
+    }
+    Ok(())
 }
 
 pub async fn run_readable_contract(speaker: &dyn FlowSpecAnnouncer) -> Result<()> {

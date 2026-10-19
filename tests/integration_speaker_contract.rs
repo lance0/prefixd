@@ -15,6 +15,13 @@ async fn mock_passes_readable_backend_contract() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn mock_passes_amplification_contract() {
+    contract::run_amplification_contract(&MockAnnouncer::new())
+        .await
+        .unwrap();
+}
+
 struct MissingActions(MockAnnouncer);
 impl FlowSpecAnnouncer for MissingActions {
     fn backend(&self) -> &'static str {

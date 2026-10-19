@@ -759,41 +759,126 @@ async fn list_path_deadline_is_shared_across_both_families() {
     tokio::time::resume();
 }
 
+/// GoBGP's own normalization on read-back: `NewFlowSpecComponent` sets end-of-list
+/// on the last item and `NewFlowSpecComponentItem` sets the value-width bits.
+fn gobgp_read_back(path: &mut Path) {
+    for rule in components(path) {
+        if let Some(flow_spec_rule::Rule::Component(component)) = &mut rule.rule {
+            let last = component.items.len() - 1;
+            for (index, item) in component.items.iter_mut().enumerate() {
+                item.op |= if item.value > 0xff { 0x10 } else { 0 };
+                item.op |= if index == last { 0x80 } else { 0 };
+            }
+        }
+    }
+}
+
+fn items(path: &Path) -> Vec<(u32, Vec<(u32, u64)>)> {
+    let Some(nlri::Nlri::FlowSpec(nlri)) = &path.nlri.as_ref().unwrap().nlri else {
+        panic!("FlowSpec path expected");
+    };
+    nlri.rules
+        .iter()
+        .map(|rule| match &rule.rule {
+            Some(flow_spec_rule::Rule::IpPrefix(prefix)) => (prefix.r#type, vec![]),
+            Some(flow_spec_rule::Rule::Component(c)) => (
+                c.r#type,
+                c.items.iter().map(|item| (item.op, item.value)).collect(),
+            ),
+            _ => panic!("unexpected component"),
+        })
+        .collect()
+}
+
 #[tokio::test]
-async fn amplification_components_fail_closed_before_any_rpc() {
+async fn amplification_components_encode_per_adr_and_read_back_strictly() {
     use crate::domain::{FragmentMatch, PacketLengthRange};
     let fake = Fake::default();
     let adds = fake.adds.clone();
     let deletes = fake.deletes.clone();
     let (speaker, _server) = serve(fake).await;
     for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
-        let control = rule(prefix);
-        let mut ports = control.clone();
-        ports.nlri.src_ports = vec![123];
-        let mut fragment = control.clone();
-        fragment.nlri.fragment = Some(FragmentMatch::NonFirst);
+        let mut ports = rule(prefix);
+        ports.nlri.dst_ports.clear();
+        ports.nlri.src_ports = vec![123, 53, 53];
         let mut length = ports.clone();
         length.nlri.packet_length = Some(PacketLengthRange {
             min: 468,
             max: 65535,
         });
-        for extended in [ports, fragment, length] {
-            for result in [
-                speaker.announce(&extended).await,
-                speaker.withdraw(&extended).await,
-            ] {
-                assert!(matches!(
-                    result,
-                    Err(PrefixdError::Internal(message)) if message.contains("not supported")
-                ));
-            }
+        let mut fragment = ports.clone();
+        fragment.nlri.src_ports.clear();
+        fragment.nlri.fragment = Some(FragmentMatch::NonFirst);
+        // Not a valid rule (ADR 028 invariants), but it pins the full component order.
+        let mut every = length.clone();
+        every.nlri.dst_ports = vec![443];
+        every.nlri.fragment = Some(FragmentMatch::NonFirst);
+        let src = (6, vec![(0x01, 53), (0x01, 123)]);
+        let len = (10, vec![(0x03, 468), (0x45, 65535)]);
+        // 0x02 in both families: the IPv6-reserved bit 0x01 is never emitted.
+        let frag = (12, vec![(0x01, 0x02)]);
+        let pinned = [
+            (&ports, vec![src.clone()]),
+            (&length, vec![src.clone(), len.clone()]),
+            (&fragment, vec![frag.clone()]),
+            (&every, vec![(5, vec![(0x81, 443)]), src, len, frag]),
+        ];
+        for (rule, expected) in pinned {
+            speaker.announce(rule).await.unwrap();
+            speaker.withdraw(rule).await.unwrap();
+            let add = adds.lock().unwrap().pop().unwrap().path.unwrap();
+            let delete = deletes.lock().unwrap().pop().unwrap().path.unwrap();
+            let sent = items(&add);
+            assert_eq!(sent[..2], [(1, vec![]), (3, vec![(0x81, 17)])]);
+            assert_eq!(sent[2..], expected);
+            assert_eq!(items(&delete), sent);
+            // Read back as the same canonical rule, and the same backend route.
+            let mut observed = add;
+            gobgp_read_back(&mut observed);
+            let decoded = speaker.parse_flowspec_path(&observed).unwrap();
+            assert_eq!(decoded.nlri_hash(), rule.nlri_hash());
+            assert_eq!(decoded.nlri.packet_length, rule.nlri.packet_length);
+            assert_eq!(decoded.nlri.fragment, rule.nlri.fragment);
+            assert!(speaker.matches_nlri(&rule.nlri, &decoded.nlri).unwrap());
         }
-        assert!(adds.lock().unwrap().is_empty());
-        assert!(deletes.lock().unwrap().is_empty());
-        // Control: the same connection carries the rule without new components.
-        speaker.announce(&control).await.unwrap();
-        speaker.withdraw(&control).await.unwrap();
-        assert_eq!(adds.lock().unwrap().drain(..).count(), 1);
-        assert_eq!(deletes.lock().unwrap().drain(..).count(), 1);
+        // One differing component is a different route.
+        for (left, right) in [(&ports, &fragment), (&length, &ports)] {
+            assert!(!speaker.matches_nlri(&left.nlri, &right.nlri).unwrap());
+        }
+        // Only the exact operators prefixd emits decode; anything else fails the read.
+        let mut base = speaker.build_flowspec_path(&every).unwrap();
+        gobgp_read_back(&mut base);
+        let mutations: &[fn(&mut Path)] = &[
+            |p| component(p, 3).items.reverse(),
+            |p| component(p, 3).items[0].value = 123,
+            |p| component(p, 3).items[0].op = 0x03,
+            |p| component(p, 3).items[1].op |= 0x40,
+            |p| component(p, 3).items[1].value = 65536,
+            |p| component(p, 4).items.truncate(1),
+            |p| component(p, 4).items[0].op = 0x01,
+            |p| component(p, 4).items[0].op = 0x02,
+            |p| component(p, 4).items[1].op = 0x85,
+            |p| component(p, 4).items[1].op = 0xc4,
+            |p| component(p, 4).items[1].value = 65536,
+            |p| component(p, 5).items[0].value = 0x01,
+            |p| component(p, 5).items[0].value = 0x06,
+            |p| component(p, 5).items[0].op = 0x80,
+            |p| component(p, 5).items[0].op = 0x83,
+            |p| component(p, 5).items[0].op = 0xc1,
+            |p| {
+                let extra = component(p, 5).items[0];
+                component(p, 5).items.insert(0, extra);
+                component(p, 5).items[0].op = 0x01;
+            },
+            |p| component(p, 5).r#type = 9,
+            |p| component(p, 3).r#type = 4,
+            |p| components(p).swap(4, 5),
+        ];
+        assert!(speaker.parse_flowspec_path(&base).is_ok());
+        for (index, mutate) in mutations.iter().enumerate() {
+            let mut p = base.clone();
+            mutate(&mut p);
+            assert!(speaker.parse_flowspec_path(&p).is_err(), "mutation {index}");
+        }
     }
 }

@@ -126,13 +126,12 @@ impl pb::injection_service_server::InjectionService for Fake {
         }
         let request = request.into_inner();
         assert!(matches!(request.afi_safi, 3 | 4));
-        assert_eq!(
+        // The daemon requires strictly ascending component types and does not reorder.
+        assert!(
             request
                 .components
-                .iter()
-                .map(|c| c.r#type)
-                .collect::<Vec<_>>(),
-            [1, 3, 5]
+                .windows(2)
+                .all(|c| c[0].r#type < c[1].r#type)
         );
         let mut rules = self.rules.lock().unwrap();
         let existing = rules.iter().position(|old| {
@@ -198,9 +197,7 @@ impl pb::rib_service_server::RibService for Fake {
                     panic!("expected rate action")
                 };
                 let mut components = rule.components.clone();
-                for component in &mut components {
-                    component.value = component.value.replace('=', "==");
-                }
+                super::tests::read_back(&mut components);
                 if self.mode.load(SeqCst) == 8 {
                     components.push(pb::FlowSpecComponent {
                         r#type: 10,
@@ -1162,7 +1159,7 @@ async fn blackhole_delete_not_found_is_absent_and_other_codes_are_errors() {
 }
 
 #[tokio::test]
-async fn amplification_components_fail_closed_before_any_rpc() {
+async fn amplification_components_inject_read_back_and_delete_through_rpc() {
     use crate::domain::{FragmentMatch, PacketLengthRange};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -1175,6 +1172,7 @@ async fn amplification_components_fail_closed_before_any_rpc() {
             .add_service(pb::injection_service_server::InjectionServiceServer::new(
                 fake.clone(),
             ))
+            .add_service(pb::rib_service_server::RibServiceServer::new(fake.clone()))
             .serve_with_incoming(incoming),
     );
     let config = RustBgpdConfig {
@@ -1185,39 +1183,63 @@ async fn amplification_components_fail_closed_before_any_rpc() {
     let speaker = RustBgpdAnnouncer::connect_with_token(&config, "test-secret")
         .await
         .unwrap();
+    assert_eq!(
+        (&speaker as &dyn FlowSpecAnnouncer)
+            .capabilities()
+            .flowspec_match,
+        crate::bgp::FlowSpecMatchSupport::ALL
+    );
+    let mut rules = vec![];
     for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
-        let mut control = rule(prefix, 0);
-        control.nlri.protocol = Some(17);
-        let mut ports = control.clone();
-        ports.nlri.src_ports = vec![123];
-        let mut fragment = control.clone();
-        fragment.nlri.fragment = Some(FragmentMatch::NonFirst);
+        let mut ports = rule(prefix, 0);
+        ports.nlri.protocol = Some(17);
+        ports.nlri.dst_ports.clear();
+        ports.nlri.src_ports = vec![389, 123];
         let mut length = ports.clone();
         length.nlri.packet_length = Some(PacketLengthRange {
             min: 468,
             max: 65535,
         });
-        for extended in [ports, fragment, length] {
-            for result in [
-                speaker.announce(&extended).await,
-                speaker.withdraw(&extended).await,
-                speaker
-                    .matches_nlri(&extended.nlri, &extended.nlri)
-                    .map(|_| ()),
-            ] {
-                assert!(matches!(
-                    result,
-                    Err(PrefixdError::Internal(message)) if message.contains("not supported")
-                ));
-            }
-        }
-        assert_eq!(fake.attempts.load(SeqCst), 0);
-        assert_eq!(fake.deletes.load(SeqCst), 0);
-        // Control: the same connection carries the rule without new components.
-        speaker.announce(&control).await.unwrap();
-        speaker.withdraw(&control).await.unwrap();
-        assert_eq!(fake.attempts.swap(0, SeqCst), 1);
-        assert_eq!(fake.deletes.swap(0, SeqCst), 1);
+        let mut fragment = ports.clone();
+        fragment.nlri.src_ports.clear();
+        fragment.nlri.fragment = Some(FragmentMatch::NonFirst);
+        rules.extend([ports, length, fragment]);
     }
+    for rule in &rules {
+        speaker.announce(rule).await.unwrap();
+    }
+    let sent: Vec<Vec<(u32, String)>> = fake
+        .rules
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| {
+            request.components[2..]
+                .iter()
+                .map(|c| (c.r#type, c.value.clone()))
+                .collect()
+        })
+        .collect();
+    let ports = (6, "=123, =389".to_string());
+    let expected = vec![
+        vec![ports.clone()],
+        vec![ports, (10, ">=468 & <=65535".into())],
+        vec![(12, "0x02".into())],
+    ];
+    assert_eq!(sent, [expected.clone(), expected].concat());
+    let active = speaker.list_active().await.unwrap();
+    assert_eq!(active.len(), rules.len());
+    for rule in &rules {
+        let observed = active
+            .iter()
+            .find(|r| r.nlri_hash() == rule.nlri_hash())
+            .unwrap();
+        assert!(speaker.matches_nlri(&rule.nlri, &observed.nlri).unwrap());
+    }
+    for rule in &rules {
+        speaker.withdraw(rule).await.unwrap();
+    }
+    assert!(speaker.list_active().await.unwrap().is_empty());
+    assert_eq!(fake.deletes.load(SeqCst), rules.len());
     server.abort();
 }

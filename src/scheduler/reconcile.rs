@@ -695,7 +695,11 @@ impl ReconciliationLoop {
 
                 if !self.dry_run {
                     let start = std::time::Instant::now();
-                    if let Err(e) = self.announcer.announce(&rule).await {
+                    let announced = match self.announcer.match_support().require(&rule.nlri) {
+                        Ok(()) => self.announcer.announce(&rule).await,
+                        Err(error) => Err(error),
+                    };
+                    if let Err(e) = announced {
                         crate::observability::metrics::RECONCILIATION_REPAIRS
                             .with_label_values(&["error"])
                             .inc();
@@ -1154,6 +1158,30 @@ mod tests {
                 .get(),
             1.0
         );
+    }
+
+    #[tokio::test]
+    async fn repair_refuses_unencodable_components_before_any_rpc() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let mut mitigation = expired_mitigation("192.0.2.30");
+        mitigation.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+        mitigation.match_criteria.dst_ports.clear();
+        mitigation.match_criteria.src_ports = vec![123];
+        mitigation.scope_hash = mitigation.match_criteria.compute_scope_hash();
+        // The control speaker encodes source ports; the other has not opted in.
+        for supported in [false, true] {
+            let repo = Arc::new(MockRepository::new());
+            repo.insert_mitigation(&mitigation).await.unwrap();
+            let speaker = Arc::new(if supported {
+                MockAnnouncer::new()
+            } else {
+                MockAnnouncer::without_match_support()
+            });
+            let reconciler = ReconciliationLoop::new(repo, speaker.clone(), 30, false);
+            let result = reconciler.sync_announcements().await;
+            assert_eq!(result.is_ok(), supported, "{result:?}");
+            assert_eq!(speaker.announced_count().await, usize::from(supported));
+        }
     }
 
     #[tokio::test]

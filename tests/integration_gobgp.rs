@@ -23,6 +23,67 @@ async fn test_announce_and_list_active() {
 
 #[tokio::test]
 #[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
+async fn amplification_components_inject_read_and_delete() {
+    use prefixd::bgp::apipb::{TableType, flow_spec_rule, nlri};
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    // GoBGP's accepted local RIB after its own normalization (ADR 028 table).
+    let rules = contract::amplification_rules();
+    for rule in &rules {
+        speaker.announce(rule).await.unwrap();
+    }
+    for afi in [1, 2] {
+        // Per path: component type and its (operator, value) items after the prefix.
+        type Components = Vec<(u32, Vec<(u32, u64)>)>;
+        let mut observed: Vec<Components> = fixture
+            .paths(afi, TableType::Global)
+            .await
+            .into_iter()
+            .map(|path| {
+                let Some(nlri::Nlri::FlowSpec(flowspec)) = path.nlri.unwrap().nlri else {
+                    panic!("FlowSpec path expected");
+                };
+                flowspec.rules[1..]
+                    .iter()
+                    .map(|rule| {
+                        let Some(flow_spec_rule::Rule::Component(c)) = &rule.rule else {
+                            panic!("numeric component expected");
+                        };
+                        (c.r#type, c.items.iter().map(|i| (i.op, i.value)).collect())
+                    })
+                    .collect()
+            })
+            .collect();
+        observed.sort();
+        println!("GoBGP 4.10.0 afi {afi} read-back: {observed:x?}");
+        let protocol = (3, vec![(0x81, 17)]);
+        assert_eq!(
+            observed,
+            [
+                vec![protocol.clone()],
+                vec![
+                    protocol.clone(),
+                    (6, vec![(0x01, 53), (0x01, 123), (0x91, 389)])
+                ],
+                vec![
+                    protocol.clone(),
+                    (6, vec![(0x91, 11211)]),
+                    (10, vec![(0x13, 1000), (0xd5, 65535)])
+                ],
+                vec![protocol, (12, vec![(0x81, 0x02)])],
+            ]
+        );
+    }
+    for rule in &rules {
+        speaker.withdraw(rule).await.unwrap();
+    }
+    contract::run_amplification_contract(&speaker)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
 async fn faithful_policing_and_historical_action_withdrawal() {
     let fixture = fixture::Speaker::start().await;
     let speaker = fixture.connect().await;
@@ -205,12 +266,10 @@ async fn test_local_provenance_and_unsupported_local_rule() {
         panic!("expected FlowSpec");
     };
     nlri.rules.push(apipb::FlowSpecRule {
+        // ICMP type (7): a component prefixd never encodes, so the read must fail.
         rule: Some(flow_spec_rule::Rule::Component(apipb::FlowSpecComponent {
-            r#type: 6,
-            items: vec![apipb::FlowSpecComponentItem {
-                op: 0x81,
-                value: 123,
-            }],
+            r#type: 7,
+            items: vec![apipb::FlowSpecComponentItem { op: 0x81, value: 8 }],
         })),
     });
     let added = client

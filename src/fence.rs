@@ -16,7 +16,7 @@ use tokio::sync::watch;
 
 use crate::bgp::{
     BlackholeInventory, BlackholeRoute, BlackholeSpeaker, DaemonHealthObserver, FlowSpecAnnouncer,
-    FlowSpecReader, FlowSpecWriter, PeerObserver,
+    FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, PeerObserver,
 };
 use crate::domain::{FlowSpecNlri, FlowSpecRule};
 use crate::error::{PrefixdError, Result};
@@ -213,6 +213,11 @@ impl FlowSpecAnnouncer for FencedAnnouncer {
         self.inner.peer_observer()
     }
 
+    /// The wrapper must not fall back to the trait default, which supports nothing.
+    fn match_support(&self) -> FlowSpecMatchSupport {
+        self.inner.match_support()
+    }
+
     /// Never the inner handle: blackhole writes go through the fence too.
     fn blackhole(&self) -> Option<&dyn BlackholeSpeaker> {
         self.inner
@@ -286,6 +291,7 @@ mod tests {
         ));
         assert_eq!(inner.announced_count().await, 0);
         assert!(writer.reader().is_some() && writer.peer_observer().is_some());
+        assert_eq!(writer.match_support(), FlowSpecMatchSupport::ALL);
         fence.set(true);
         writer.announce(&rule).await.unwrap();
         assert_eq!(inner.announced_count().await, 1);

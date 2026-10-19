@@ -1,11 +1,11 @@
 use super::{
     BlackholeInventory, BlackholeRoute, BlackholeSpeaker, DaemonHealth, DaemonHealthObserver,
-    FlowSpecAnnouncer, FlowSpecReader, FlowSpecWriter, PeerObserver, PeerStatus, SessionState,
-    UnrecognizedRoute, rustbgpd_pb as pb,
+    FlowSpecAnnouncer, FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, PeerObserver,
+    PeerStatus, SessionState, UnrecognizedRoute, rustbgpd_pb as pb,
 };
 use crate::{
     config::RustBgpdConfig,
-    domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule},
+    domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule, FragmentMatch, PacketLengthRange},
     error::{PrefixdError, Result},
 };
 use async_trait::async_trait;
@@ -234,13 +234,8 @@ async fn connect_owner_socket(path: &std::path::Path) -> std::io::Result<tokio::
     Ok(stream)
 }
 
+/// Components in strictly ascending type order; the daemon does not reorder them.
 fn encode_match(nlri: &FlowSpecNlri) -> Result<(i32, Vec<pb::FlowSpecComponent>)> {
-    // Dropping a component would widen the rule, so refuse it before any RPC.
-    if nlri.is_extended() {
-        return Err(invalid(
-            "source port, fragment and packet length matches are not supported",
-        ));
-    }
     let prefix: ipnet::IpNet = nlri
         .dst_prefix
         .parse()
@@ -261,18 +256,39 @@ fn encode_match(nlri: &FlowSpecNlri) -> Result<(i32, Vec<pb::FlowSpecComponent>)
         });
     }
     let mut ports = nlri.dst_ports.clone();
-    if ports.len() > 8 {
-        return Err(invalid("at most eight destination ports are supported"));
-    }
     ports.sort_unstable();
-    if !ports.is_empty() {
+    // Source ports are an equality set (ADR 028); the eight-term cap applies to both lists.
+    for (r#type, ports) in [
+        (5, ports),
+        (6, crate::domain::canonical_ports(&nlri.src_ports)),
+    ] {
+        if ports.len() > 8 {
+            return Err(invalid("at most eight ports per list are supported"));
+        }
+        if !ports.is_empty() {
+            components.push(pb::FlowSpecComponent {
+                r#type,
+                value: ports
+                    .iter()
+                    .map(|port| format!("={port}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                ..Default::default()
+            });
+        }
+    }
+    if let Some(range) = nlri.packet_length {
         components.push(pb::FlowSpecComponent {
-            r#type: 5,
-            value: ports
-                .iter()
-                .map(|port| format!("={port}"))
-                .collect::<Vec<_>>()
-                .join(", "),
+            r#type: 10,
+            value: format!(">={} & <={}", range.min, range.max),
+            ..Default::default()
+        });
+    }
+    if let Some(fragment) = nlri.fragment {
+        // The daemon always sets the match bit on injected bitmask terms.
+        components.push(pb::FlowSpecComponent {
+            r#type: 12,
+            value: format!("{:#04x}", fragment.bitmask()),
             ..Default::default()
         });
     }
@@ -359,6 +375,44 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
             5 if component.prefix.is_empty() => {
                 nlri.dst_ports = numbers(&component.value)?;
                 nlri.dst_ports.sort_unstable();
+            }
+            // ADR 028 components accept only the exact form the daemon renders for
+            // prefixd's injection; any other operator, term or bit fails the read.
+            6 if component.prefix.is_empty() => {
+                let ports: Option<Vec<u16>> = component
+                    .value
+                    .split(", ")
+                    .map(|term| term.strip_prefix("==")?.parse().ok())
+                    .collect();
+                nlri.src_ports = ports
+                    .filter(|ports| {
+                        ports.windows(2).all(|pair| pair[0] < pair[1])
+                            && ports
+                                .iter()
+                                .map(|port| format!("=={port}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                                == component.value
+                    })
+                    .ok_or_else(|| invalid("unsupported source port expression"))?;
+            }
+            10 if component.prefix.is_empty() => {
+                let range = component
+                    .value
+                    .strip_prefix(">=")
+                    .and_then(|value| value.split_once(" & <="))
+                    .and_then(|(min, max)| {
+                        Some(PacketLengthRange {
+                            min: min.parse().ok()?,
+                            max: max.parse().ok()?,
+                        })
+                    })
+                    .filter(|range| format!(">={} & <={}", range.min, range.max) == component.value)
+                    .ok_or_else(|| invalid("unsupported packet length expression"))?;
+                nlri.packet_length = Some(range);
+            }
+            12 if component.prefix.is_empty() && component.value == "0x0002/match" => {
+                nlri.fragment = Some(FragmentMatch::NonFirst);
             }
             _ => return Err(invalid("unsupported component")),
         }
@@ -501,6 +555,10 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
 
     fn peer_observer(&self) -> Option<&dyn PeerObserver> {
         Some(self)
+    }
+    fn match_support(&self) -> FlowSpecMatchSupport {
+        // Types 6, 10 and 12 parse and render alike in every pinned release (0.76.0 to 0.78.0).
+        FlowSpecMatchSupport::ALL
     }
 }
 
@@ -875,6 +933,179 @@ mod tests {
         assert!(encode(&bad).is_ok());
         bad.actions[0].rate_bps = Some(u64::MAX);
         assert!(encode(&bad).is_err());
+    }
+
+    /// Daemon read-back of `encode_match` output (`format_numeric_ops`, `format_bitmask_ops`).
+    pub(super) fn read_back(components: &mut [pb::FlowSpecComponent]) {
+        for component in components {
+            component.value = match component.r#type {
+                3 | 5 | 6 => component.value.replace('=', "=="),
+                12 => format!(
+                    "0x{:04x}/match",
+                    u16::from_str_radix(&component.value[2..], 16).unwrap()
+                ),
+                _ => component.value.clone(),
+            };
+        }
+    }
+
+    fn route(rule: &FlowSpecRule) -> pb::FlowSpecRouteEntry {
+        let encoded = encode(rule).unwrap();
+        let mut components = encoded.components;
+        read_back(&mut components);
+        pb::FlowSpecRouteEntry {
+            components,
+            actions: encoded.actions,
+            peer_address: "0.0.0.0".into(),
+            afi_safi: encoded.afi_safi,
+            extended_communities: vec![0x8006_u64 << 48],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn amplification_components_encode_per_adr_and_read_back_strictly() {
+        use crate::domain::{FragmentMatch, PacketLengthRange};
+        let writer = RustBgpdAnnouncer {
+            channel: Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            token: None,
+        };
+        for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
+            let udp = FlowSpecNlri {
+                dst_prefix: prefix.into(),
+                protocol: Some(17),
+                ..Default::default()
+            };
+            let ports = FlowSpecNlri {
+                src_ports: vec![123, 53, 53],
+                ..udp.clone()
+            };
+            let length = FlowSpecNlri {
+                packet_length: Some(PacketLengthRange {
+                    min: 468,
+                    max: 65535,
+                }),
+                ..ports.clone()
+            };
+            let fragment = FlowSpecNlri {
+                fragment: Some(FragmentMatch::NonFirst),
+                ..udp.clone()
+            };
+            // Not a valid rule (ADR 028 invariants), but it pins the full component order.
+            let every = FlowSpecNlri {
+                dst_ports: vec![443, 80],
+                fragment: Some(FragmentMatch::NonFirst),
+                ..length.clone()
+            };
+            let pinned: [(&FlowSpecNlri, &[(u32, &str)]); 4] = [
+                (&ports, &[(6, "=53, =123")]),
+                (&length, &[(6, "=53, =123"), (10, ">=468 & <=65535")]),
+                // 0x02 in both families: the IPv6-reserved bit 0x01 is never emitted.
+                (&fragment, &[(12, "0x02")]),
+                (
+                    &every,
+                    &[
+                        (5, "=80, =443"),
+                        (6, "=53, =123"),
+                        (10, ">=468 & <=65535"),
+                        (12, "0x02"),
+                    ],
+                ),
+            ];
+            for (nlri, expected) in pinned {
+                let (_, components) = encode_match(nlri).unwrap();
+                let tail: Vec<_> = components[2..]
+                    .iter()
+                    .map(|c| (c.r#type, c.value.as_str()))
+                    .collect();
+                assert_eq!(tail, expected);
+                assert_eq!(
+                    components
+                        .iter()
+                        .map(|c| c.r#type)
+                        .take(2)
+                        .collect::<Vec<_>>(),
+                    [1, 3]
+                );
+                // Read back as the same canonical rule, and the same backend route.
+                let rule = FlowSpecRule::new(nlri.clone(), FlowSpecAction::discard());
+                let decoded = decode(route(&rule), route(&rule).afi_safi).unwrap();
+                assert_eq!(decoded.nlri_hash(), rule.nlri_hash());
+                assert_eq!(
+                    decoded.nlri.src_ports,
+                    [53, 123][..nlri.src_ports.len().min(2)]
+                );
+                assert_eq!(decoded.nlri.packet_length, nlri.packet_length);
+                assert_eq!(decoded.nlri.fragment, nlri.fragment);
+                assert!(writer.matches_nlri(nlri, &decoded.nlri).unwrap());
+            }
+            // One differing component is a different route.
+            for (left, right) in [
+                (&ports, &udp),
+                (
+                    &ports,
+                    &FlowSpecNlri {
+                        src_ports: vec![53],
+                        ..ports.clone()
+                    },
+                ),
+                (&length, &ports),
+                (
+                    &length,
+                    &FlowSpecNlri {
+                        packet_length: Some(PacketLengthRange {
+                            min: 468,
+                            max: 1500,
+                        }),
+                        ..length.clone()
+                    },
+                ),
+                (&fragment, &udp),
+            ] {
+                assert!(!writer.matches_nlri(left, right).unwrap());
+                assert!(!writer.matches_nlri(right, left).unwrap());
+            }
+            let mut nine = ports.clone();
+            nine.src_ports = (1..=9).collect();
+            assert!(encode_match(&nine).is_err());
+            // Only the exact rendered forms decode; anything else fails the whole read.
+            let rule = FlowSpecRule::new(every.clone(), FlowSpecAction::discard());
+            for (index, value) in [
+                (3, "=53, =123"),
+                (3, "==123, ==53"),
+                (3, "==53, ==53, ==123"),
+                (3, "==53,==123"),
+                (3, "==53 & ==123"),
+                (3, ">=53"),
+                (3, "==1, ==2, ==3, ==4, ==5, ==6, ==7, ==8, ==9"),
+                (4, ">468 & <=65535"),
+                (4, ">=468, <=65535"),
+                (4, ">=468 & <=65535 & <=1500"),
+                (4, ">=0468 & <=65535"),
+                (4, ">=468 & <=65536"),
+                (5, "0x02"),
+                (5, "0x0002"),
+                (5, "0x0001/match"),
+                (5, "0x0003/match"),
+                (5, "!0x0002/match"),
+                (5, "0x0002/match, 0x0004/match"),
+            ] {
+                let mut bad = route(&rule);
+                bad.components[index].value = value.into();
+                assert!(decode(bad, route(&rule).afi_safi).is_err(), "{value}");
+            }
+            for mutate in [
+                // Unknown component types, descending order and a prefix-shaped value.
+                |c: &mut Vec<pb::FlowSpecComponent>| c[5].r#type = 9,
+                |c: &mut Vec<pb::FlowSpecComponent>| c[3].r#type = 4,
+                |c: &mut Vec<pb::FlowSpecComponent>| c.swap(4, 5),
+                |c: &mut Vec<pb::FlowSpecComponent>| c[5].prefix = "192.0.2.1/32".into(),
+            ] {
+                let mut bad = route(&rule);
+                mutate(&mut bad.components);
+                assert!(decode(bad, route(&rule).afi_safi).is_err());
+            }
+        }
     }
 }
 

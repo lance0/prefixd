@@ -484,8 +484,10 @@ async fn persist_new_mitigation(
     mitigation: &mut Mitigation,
     actor: &CreationActor,
 ) -> crate::error::Result<Option<AnnouncementOutcome>> {
-    // Fail closed before persistence: only a FlowSpec rule can be announced here.
+    // Fail closed before persistence: only a FlowSpec rule can be announced here,
+    // and only with components the selected speaker encodes, in dry-run too.
     let rule = mitigation_rule(mitigation)?;
+    state.announcer.match_support().require(&rule.nlri)?;
     mitigation.activate();
     mitigation.origin_mode = Some(state.settings.mode);
     state
@@ -2286,7 +2288,10 @@ impl IntoResponse for AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_list_cursor, encode_list_cursor};
+    use super::{
+        AppState, Arc, CreationActor, decode_list_cursor, encode_list_cursor,
+        persist_new_mitigation,
+    };
     use crate::db::ListCursor;
     use chrono::{DateTime, Utc};
     use uuid::Uuid;
@@ -2306,6 +2311,82 @@ mod tests {
                 decode_list_cursor(&cursor, prefix),
                 Some(ListCursor { timestamp, id })
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn admission_refuses_unencodable_components_in_both_modes_before_any_rpc() {
+        use crate::bgp::MockAnnouncer;
+        use crate::config::{BgpMode, Inventory, OperationMode, Playbooks, Settings};
+        use crate::db::{MockRepository, RepositoryTrait};
+        use crate::domain::{
+            ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
+        };
+        for mode in [OperationMode::DryRun, OperationMode::Enforced] {
+            // The control speaker encodes source ports; the other has not opted in.
+            for supported in [false, true] {
+                let mut settings: Settings =
+                    crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+                settings.bgp.mode = BgpMode::Mock;
+                settings.mode = mode;
+                let repo = Arc::new(MockRepository::new());
+                let speaker = Arc::new(if supported {
+                    MockAnnouncer::new()
+                } else {
+                    MockAnnouncer::without_match_support()
+                });
+                let state = AppState::new(
+                    settings,
+                    Inventory::new(vec![]),
+                    Playbooks { playbooks: vec![] },
+                    repo.clone(),
+                    speaker.clone(),
+                    ".".into(),
+                )
+                .unwrap();
+                let mut mitigation = Mitigation::from_intent(
+                    MitigationIntent {
+                        event_id: Uuid::new_v4(),
+                        customer_id: None,
+                        service_id: None,
+                        pop: state.settings.pop.clone(),
+                        match_criteria: MatchCriteria {
+                            dst_prefix: "192.0.2.1/32".into(),
+                            protocol: Some(17),
+                            src_ports: vec![123],
+                            ..Default::default()
+                        },
+                        action_type: ActionType::Discard,
+                        action_params: ActionParams { rate_bps: None },
+                        ttl_seconds: 60,
+                        reason: "test".into(),
+                    },
+                    "192.0.2.1".into(),
+                    AttackVector::UdpFlood,
+                );
+                let result = persist_new_mitigation(
+                    &state,
+                    &mut mitigation,
+                    &CreationActor::Detector("test".into()),
+                )
+                .await;
+                let persisted = repo.get_mitigation(mitigation.mitigation_id).await.unwrap();
+                if supported {
+                    assert!(result.unwrap().is_none(), "{mode:?}");
+                    assert!(persisted.is_some());
+                } else {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("cannot encode the source port match"),
+                        "{mode:?}"
+                    );
+                    assert!(persisted.is_none());
+                }
+                let announced = supported && mode == OperationMode::Enforced;
+                assert_eq!(speaker.announced_count().await, usize::from(announced));
+            }
         }
     }
 

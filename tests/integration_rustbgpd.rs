@@ -50,6 +50,55 @@ async fn live_rustbgpd_controller_roundtrip() {
 
 #[tokio::test]
 #[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
+async fn live_rustbgpd_amplification_components_inject_read_and_delete() {
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.78.0".into());
+    // The daemon's own rendering of the injected components (ADR 028 read-back column).
+    let rules = contract::amplification_rules();
+    for rule in &rules {
+        speaker.announce(rule).await.unwrap();
+    }
+    for family in [3, 4] {
+        let mut observed: Vec<Vec<(u32, String)>> = fixture
+            .received_flow_spec(family, "0.0.0.0")
+            .await
+            .received_routes
+            .into_iter()
+            .map(|row| {
+                row.route.unwrap().components[1..]
+                    .iter()
+                    .map(|c| (c.r#type, c.value.clone()))
+                    .collect()
+            })
+            .collect();
+        observed.sort();
+        println!("rustbgpd {version} family {family} read-back: {observed:?}");
+        let protocol = (3, "==17".to_string());
+        assert_eq!(
+            observed,
+            [
+                vec![protocol.clone()],
+                vec![
+                    protocol.clone(),
+                    (6, "==11211".into()),
+                    (10, ">=1000 & <=65535".into())
+                ],
+                vec![protocol.clone(), (6, "==53, ==123, ==389".into())],
+                vec![protocol, (12, "0x0002/match".into())],
+            ]
+        );
+    }
+    for rule in &rules {
+        speaker.withdraw(rule).await.unwrap();
+    }
+    contract::run_amplification_contract(&speaker)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
 async fn live_rustbgpd_blackhole_inject_read_delete_and_restart_loss() {
     use prefixd::bgp::BlackholeRoute;
     let fixture = fixture::Speaker::start().await;

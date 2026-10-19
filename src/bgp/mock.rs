@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::{
-    BlackholeInventory, BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer, FlowSpecReader,
-    FlowSpecWriter, PeerObserver, PeerStatus, SessionState,
+    BlackholeInventory, BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer, FlowSpecMatchSupport,
+    FlowSpecReader, FlowSpecWriter, PeerObserver, PeerStatus, SessionState,
 };
 use crate::domain::FlowSpecRule;
 use crate::error::Result;
@@ -15,6 +15,8 @@ pub struct MockAnnouncer {
     rules: Arc<RwLock<Vec<FlowSpecRule>>>,
     blackholes: RwLock<Vec<BlackholeRoute>>,
     peers: Vec<PeerStatus>,
+    /// Test seam: report no ADR 028 match support, like an adapter that has not opted in.
+    no_match_support: bool,
 }
 
 impl MockAnnouncer {
@@ -27,6 +29,7 @@ impl MockAnnouncer {
                 address: "127.0.0.1".to_string(),
                 state: SessionState::Established,
             }],
+            no_match_support: false,
         }
     }
 
@@ -35,6 +38,15 @@ impl MockAnnouncer {
             rules: Arc::new(RwLock::new(Vec::new())),
             blackholes: RwLock::default(),
             peers,
+            no_match_support: false,
+        }
+    }
+
+    /// Reports no ADR 028 match support, so callers must refuse extended rules.
+    pub fn without_match_support() -> Self {
+        Self {
+            no_match_support: true,
+            ..Self::new()
         }
     }
 
@@ -55,6 +67,13 @@ impl FlowSpecAnnouncer for MockAnnouncer {
     }
     fn blackhole(&self) -> Option<&dyn BlackholeSpeaker> {
         Some(self)
+    }
+    fn match_support(&self) -> FlowSpecMatchSupport {
+        if self.no_match_support {
+            FlowSpecMatchSupport::default()
+        } else {
+            FlowSpecMatchSupport::ALL
+        }
     }
 }
 

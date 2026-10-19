@@ -361,6 +361,7 @@ async fn finish_withdrawal_request(
     if request.speaker_delete_required
         && let Some(announcer) = announcer
     {
+        announcer.match_support().require(&rule.nlri)?;
         announcer.withdraw(&rule).await?;
     }
     let rpc_seconds = start.elapsed().as_secs_f64();
@@ -1023,6 +1024,49 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn withdrawal_refuses_unencodable_components_before_any_rpc() {
+        let repo = MockRepository::new();
+        let mut extended = mitigation("192.0.2.1/32");
+        extended.match_criteria.dst_ports.clear();
+        extended.match_criteria.fragment = Some(FragmentMatch::NonFirst);
+        extended.scope_hash = extended.match_criteria.compute_scope_hash();
+        repo.insert_mitigation(&extended).await.unwrap();
+        let rule = mitigation_rule(&extended).unwrap();
+        let request = request_withdrawal(
+            &repo,
+            &extended,
+            false,
+            "operator",
+            "alice",
+            "test".into(),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        // The rule is installed; a refused delete leaves it and the pending intent intact.
+        let unsupported = MockAnnouncer::without_match_support();
+        unsupported.announce(&rule).await.unwrap();
+        let error = execute_withdrawal(&repo, &unsupported, false, &request, None)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot encode the fragment match")
+        );
+        assert_eq!(unsupported.announced_count().await, 1);
+        assert_eq!(repo.pending_withdrawals(None).await.unwrap().len(), 1);
+        // Control: a speaker that encodes the component completes the same request.
+        let supported = MockAnnouncer::new();
+        supported.announce(&rule).await.unwrap();
+        execute_withdrawal(&repo, &supported, false, &request, None)
+            .await
+            .unwrap();
+        assert_eq!(supported.announced_count().await, 0);
     }
 
     #[tokio::test]

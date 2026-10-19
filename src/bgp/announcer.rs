@@ -223,6 +223,60 @@ pub trait FlowSpecAnnouncer: FlowSpecWriter {
     fn blackhole(&self) -> Option<&dyn BlackholeSpeaker> {
         None
     }
+
+    /// ADR 028 components this adapter encodes. Defaults to none, so an adapter
+    /// that has not opted in is refused instead of silently dropping a component.
+    fn match_support(&self) -> FlowSpecMatchSupport {
+        FlowSpecMatchSupport::default()
+    }
+}
+
+/// ADR 028 match components a speaker can encode: availability, not delivery.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    utoipa::ToSchema,
+)]
+#[serde(default)]
+pub struct FlowSpecMatchSupport {
+    pub source_ports: bool,
+    pub fragment: bool,
+    pub packet_length: bool,
+}
+
+impl FlowSpecMatchSupport {
+    pub const ALL: Self = Self {
+        source_ports: true,
+        fragment: true,
+        packet_length: true,
+    };
+
+    /// Refuses, before any RPC, a rule with a component this speaker cannot
+    /// encode. Dropping the component instead would widen the rule.
+    pub fn require(self, nlri: &FlowSpecNlri) -> Result<()> {
+        for (present, supported, component) in [
+            (!nlri.src_ports.is_empty(), self.source_ports, "source port"),
+            (nlri.fragment.is_some(), self.fragment, "fragment"),
+            (
+                nlri.packet_length.is_some(),
+                self.packet_length,
+                "packet length",
+            ),
+        ] {
+            if present && !supported {
+                return Err(crate::error::PrefixdError::InvalidRequest(format!(
+                    "the selected speaker cannot encode the {component} match"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Observation availability, not the success of a recent read or rule delivery.
@@ -239,6 +293,9 @@ pub struct SpeakerCapabilities {
     /// Owner-scoped injection lease (ADR 027). No adapter supports it yet.
     #[serde(default)]
     pub blackhole_lease: bool,
+    /// ADR 028 match components the adapter encodes; all false when absent.
+    #[serde(default)]
+    pub flowspec_match: FlowSpecMatchSupport,
 }
 
 impl dyn FlowSpecAnnouncer + '_ {
@@ -249,6 +306,7 @@ impl dyn FlowSpecAnnouncer + '_ {
             daemon_health: self.daemon_health_observer().is_some(),
             blackhole: self.blackhole().is_some(),
             blackhole_lease: false,
+            flowspec_match: self.match_support(),
         }
     }
 }
@@ -273,6 +331,83 @@ mod tests {
         let older: SpeakerCapabilities =
             serde_json::from_str(r#"{"rule_reader":true,"peer_observer":true}"#).unwrap();
         assert!(!older.blackhole && !older.blackhole_lease && !older.daemon_health);
+        assert_eq!(older.flowspec_match, FlowSpecMatchSupport::default());
+    }
+
+    #[test]
+    fn match_support_is_reported_and_refuses_each_unsupported_component() {
+        use crate::domain::{FragmentMatch, PacketLengthRange};
+        let mock = crate::bgp::MockAnnouncer::new();
+        let gobgp = crate::bgp::GoBgpAnnouncer::new("http://127.0.0.1:1".into());
+        for speaker in [&mock as &dyn FlowSpecAnnouncer, &gobgp] {
+            assert_eq!(
+                speaker.capabilities().flowspec_match,
+                FlowSpecMatchSupport::ALL
+            );
+        }
+        let json = serde_json::to_value(FlowSpecMatchSupport::ALL).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"source_ports": true, "fragment": true, "packet_length": true})
+        );
+        let base = FlowSpecNlri {
+            dst_prefix: "192.0.2.1/32".into(),
+            protocol: Some(17),
+            ..Default::default()
+        };
+        let cases = [
+            (
+                FlowSpecNlri {
+                    src_ports: vec![123],
+                    ..base.clone()
+                },
+                "source port",
+            ),
+            (
+                FlowSpecNlri {
+                    fragment: Some(FragmentMatch::NonFirst),
+                    ..base.clone()
+                },
+                "fragment",
+            ),
+            (
+                FlowSpecNlri {
+                    src_ports: vec![123],
+                    packet_length: Some(PacketLengthRange {
+                        min: 468,
+                        max: 65535,
+                    }),
+                    ..base.clone()
+                },
+                "packet length",
+            ),
+        ];
+        // The trait default supports nothing, so only legacy rules pass.
+        let none = FlowSpecMatchSupport::default();
+        none.require(&base).unwrap();
+        let all = FlowSpecMatchSupport::ALL;
+        let lacking = [
+            FlowSpecMatchSupport {
+                source_ports: false,
+                ..all
+            },
+            FlowSpecMatchSupport {
+                fragment: false,
+                ..all
+            },
+            FlowSpecMatchSupport {
+                packet_length: false,
+                ..all
+            },
+        ];
+        for ((nlri, component), support) in cases.iter().zip(lacking) {
+            all.require(nlri).unwrap();
+            assert!(none.require(nlri).is_err());
+            // Each flag gates exactly its own component.
+            let error = support.require(nlri).unwrap_err().to_string();
+            assert!(error.contains(&format!("{component} match")), "{error}");
+        }
+        lacking[2].require(&cases[0].0).unwrap();
     }
 
     #[test]

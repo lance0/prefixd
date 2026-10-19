@@ -15,7 +15,8 @@ use super::apipb::{
 };
 use super::apipb::{attribute, extended_community, flow_spec_rule, nlri};
 use super::{
-    FlowSpecAnnouncer, FlowSpecReader, FlowSpecWriter, PeerObserver, PeerStatus, SessionState,
+    FlowSpecAnnouncer, FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, PeerObserver,
+    PeerStatus, SessionState,
 };
 #[cfg(test)]
 use crate::domain::ActionType;
@@ -202,7 +203,6 @@ impl GoBgpAnnouncer {
     }
 
     fn build_flowspec_nlri_v4(&self, nlri: &FlowSpecNlri) -> Result<ProtoFlowSpecNlri> {
-        refuse_unencoded_components(nlri)?;
         let (prefix_u32, prefix_len) = self.parse_prefix_v4(&nlri.dst_prefix)?;
 
         // Build FlowSpec NLRI components per RFC 5575 using typed FlowSpecRule
@@ -268,11 +268,11 @@ impl GoBgpAnnouncer {
             });
         }
 
+        push_amplification_components(&mut rules, nlri);
         Ok(ProtoFlowSpecNlri { rules })
     }
 
     fn build_flowspec_nlri_v6(&self, nlri: &FlowSpecNlri) -> Result<ProtoFlowSpecNlri> {
-        refuse_unencoded_components(nlri)?;
         let (addr, prefix_len) = self.parse_prefix_v6(&nlri.dst_prefix)?;
 
         // Build FlowSpec NLRI components for IPv6 per RFC 8956
@@ -328,6 +328,7 @@ impl GoBgpAnnouncer {
             });
         }
 
+        push_amplification_components(&mut rules, nlri);
         Ok(ProtoFlowSpecNlri { rules })
     }
 
@@ -385,14 +386,33 @@ impl GoBgpAnnouncer {
     }
 }
 
-/// Dropping a component would widen the rule, so refuse it before any RPC.
-fn refuse_unencoded_components(nlri: &FlowSpecNlri) -> Result<()> {
-    if nlri.is_extended() {
-        return Err(PrefixdError::Internal(
-            "GoBGP: source port, fragment and packet length matches are not supported".into(),
-        ));
+/// ADR 028 components, after destination ports so types stay ascending. GoBGP
+/// sets the end-of-list bit and picks each value width itself.
+fn push_amplification_components(rules: &mut Vec<ProtoFlowSpecRule>, nlri: &FlowSpecNlri) {
+    let mut push = |r#type, items: Vec<(u32, u64)>| {
+        rules.push(ProtoFlowSpecRule {
+            rule: Some(flow_spec_rule::Rule::Component(FlowSpecComponent {
+                r#type,
+                items: items
+                    .into_iter()
+                    .map(|(op, value)| FlowSpecComponentItem { op, value })
+                    .collect(),
+            })),
+        })
+    };
+    let ports = crate::domain::canonical_ports(&nlri.src_ports);
+    if !ports.is_empty() {
+        // Numeric `==` terms, ORed.
+        push(6, ports.iter().map(|&port| (0x01, port.into())).collect());
     }
-    Ok(())
+    if let Some(range) = nlri.packet_length {
+        // `>=min`, then AND `<=max`.
+        push(10, vec![(0x03, range.min.into()), (0x45, range.max.into())]);
+    }
+    if let Some(fragment) = nlri.fragment {
+        // Bitmask with the match bit: (data AND mask) == mask.
+        push(12, vec![(0x01, fragment.bitmask().into())]);
+    }
 }
 
 impl FlowSpecAnnouncer for GoBgpAnnouncer {
@@ -404,6 +424,9 @@ impl FlowSpecAnnouncer for GoBgpAnnouncer {
     }
     fn peer_observer(&self) -> Option<&dyn PeerObserver> {
         Some(self)
+    }
+    fn match_support(&self) -> FlowSpecMatchSupport {
+        FlowSpecMatchSupport::ALL
     }
 }
 
@@ -680,6 +703,9 @@ impl GoBgpAnnouncer {
         let mut dst_prefix = String::new();
         let mut protocol: Option<u8> = None;
         let mut dst_ports: Vec<u16> = Vec::new();
+        let mut src_ports: Vec<u16> = Vec::new();
+        let mut packet_length = None;
+        let mut fragment = None;
 
         let mut previous_type = 0;
         for rule in &proto_nlri.rules {
@@ -698,7 +724,7 @@ impl GoBgpAnnouncer {
                     1
                 }
                 Some(flow_spec_rule::Rule::Component(component))
-                    if matches!(component.r#type, 3 | 5) =>
+                    if matches!(component.r#type, 3 | 5 | 6) =>
                 {
                     if component.items.is_empty()
                         || (component.r#type == 3 && component.items.len() != 1)
@@ -724,12 +750,60 @@ impl GoBgpAnnouncer {
                                 PrefixdError::Internal("GoBGP protocol exceeds u8".into())
                             })?);
                         } else {
-                            dst_ports.push(u16::try_from(item.value).map_err(|_| {
-                                PrefixdError::Internal("GoBGP destination port exceeds u16".into())
-                            })?);
+                            let port = u16::try_from(item.value).map_err(|_| {
+                                PrefixdError::Internal("GoBGP port exceeds u16".into())
+                            })?;
+                            if component.r#type == 5 {
+                                dst_ports.push(port);
+                            } else if src_ports.last().is_none_or(|&last| last < port) {
+                                src_ports.push(port);
+                            } else {
+                                // prefixd emits source ports as an ascending set.
+                                return Err(PrefixdError::Internal(
+                                    "GoBGP source ports are not ascending and unique".into(),
+                                ));
+                            }
                         }
                     }
                     component.r#type
+                }
+                // ADR 028: only the exact operators prefixd emits, width bits masked.
+                Some(flow_spec_rule::Rule::Component(component)) if component.r#type == 10 => {
+                    let [min, max] = component.items.as_slice() else {
+                        return Err(PrefixdError::Internal(
+                            "GoBGP unsupported packet length cardinality".into(),
+                        ));
+                    };
+                    let bound = |item: &FlowSpecComponentItem, op| {
+                        u16::try_from(item.value)
+                            .ok()
+                            .filter(|_| item.op & !0x30 == op)
+                            .ok_or_else(|| {
+                                PrefixdError::Internal(
+                                    "GoBGP unsupported packet length operator".into(),
+                                )
+                            })
+                    };
+                    packet_length = Some(crate::domain::PacketLengthRange {
+                        min: bound(min, 0x03)?,
+                        max: bound(max, 0xc5)?,
+                    });
+                    10
+                }
+                Some(flow_spec_rule::Rule::Component(component)) if component.r#type == 12 => {
+                    let [item] = component.items.as_slice() else {
+                        return Err(PrefixdError::Internal(
+                            "GoBGP unsupported fragment cardinality".into(),
+                        ));
+                    };
+                    let non_first = crate::domain::FragmentMatch::NonFirst;
+                    if item.op & !0x30 != 0x81 || item.value != u64::from(non_first.bitmask()) {
+                        return Err(PrefixdError::Internal(
+                            "GoBGP unsupported fragment match".into(),
+                        ));
+                    }
+                    fragment = Some(non_first);
+                    12
                 }
                 _ => {
                     return Err(PrefixdError::Internal(
@@ -755,7 +829,9 @@ impl GoBgpAnnouncer {
             dst_prefix,
             protocol,
             dst_ports,
-            ..Default::default()
+            src_ports,
+            fragment,
+            packet_length,
         })
     }
 

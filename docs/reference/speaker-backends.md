@@ -38,9 +38,21 @@ peer, an unparseable prefix, next hop or large community, host bits or a
 family mismatch. GoBGP returns `None`, which is unsupported rather than empty.
 Nothing in the controller calls the capability yet.
 
+`match_support()` reports which [ADR 028](../adr/028-amplification-matches.md)
+match components the adapter encodes: UDP source ports (type 6), a non-first
+fragment (type 12, bit `0x02` with the match bit) and one packet-length range
+(type 10). The default is none. rustbgpd, GoBGP and the mock report all three
+in both families. Before any speaker RPC, and before persistence in dry-run
+and enforced modes, the controller refuses a rule with a component the
+selected speaker does not encode. It never drops the component, because that
+would widen the rule. Both adapters emit components in ascending type order and
+decode only the forms they emit: any other operator, term or bit fails the
+whole read. No API, playbook or detector creates these components yet.
+
 Health detail adds `speaker.backend` and availability booleans under
 `speaker.capabilities`: `rule_reader`, `peer_observer`, `daemon_health`,
-`blackhole` and `blackhole_lease`. `blackhole_lease` is false for every backend. The legacy `gobgp`
+`blackhole`, `blackhole_lease` and the `flowspec_match` object
+(`source_ports`, `fragment`, `packet_length`). `blackhole_lease` is false for every backend. The legacy `gobgp`
 component reports `unsupported` without an error when peer observation is absent,
 `error` when it fails, and `connected` when it succeeds (even with zero peers).
 `bgp_sessions` remains the same peer-name/state map. Missing optional observation

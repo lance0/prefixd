@@ -1580,7 +1580,12 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
       "peer_observer": true,
       "daemon_health": true,
       "blackhole": true,
-      "blackhole_lease": false
+      "blackhole_lease": false,
+      "flowspec_match": {
+        "source_ports": true,
+        "fragment": true,
+        "packet_length": true
+      }
     },
     "daemon": {
       "status": "observed",
@@ -1605,7 +1610,9 @@ Older daemons may omit it. Capabilities do not report recent read success or
 rule delivery. `blackhole` reports the unicast blackhole adapter and
 `blackhole_lease` its owner-scoped injection lease
 ([ADR 027](../adr/027-blackhole-mitigations.md)); both are false when absent.
-No API path creates a blackhole yet. Health performs no rule inventory probe.
+`flowspec_match` reports which amplification match components the speaker
+encodes ([ADR 028](../adr/028-amplification-matches.md)); each is false when
+absent. No API path creates a blackhole or these components yet. Health performs no rule inventory probe.
 
 Top-level `version` and `uptime_seconds` describe prefixd. `speaker.daemon`
 independently reports authenticated speaker process metadata: `observed`, `error`
