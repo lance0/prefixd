@@ -176,9 +176,18 @@ connecting to the speaker.
 - **Standby.** A controller without the lock runs no scheduler, expiry,
   reconciliation, announcement or withdrawal. `POST`, `PUT` and `DELETE`
   requests on authenticated API routes return `503`; reads still work.
-  `GET /v1/health` stays `ok`, `GET /v1/health/detail` reports
-  `"status": "standby"` and `prefixd_controller_fence_active` is `0`. It
-  retries the lock every 5 seconds.
+  `GET /v1/health` stays `ok`, `GET /v1/ready` returns `503`,
+  `GET /v1/health/detail` reports `"status": "standby"` and
+  `prefixd_controller_fence_active` is `0`. It retries the lock every 5
+  seconds.
+- **Routing.** Load balancers and detector routing must use `GET /v1/ready`,
+  which returns `200` only on the controller holding the fence.
+  `GET /v1/health` stays liveness and is `200` on a standby, so routing by it
+  would send detector events to a controller that refuses them.
+- **One-shot maintenance.** `--adopt-legacy-speaker` and
+  `--retire-dry-run-intent` take the same lock once and refuse with "another
+  controller holds the fence for owner …; stop it first" while a controller
+  holds it. Stop the controller, run the command, then start the controller.
 - **Restarts and rolling deploys.** Process exit closes the fence session and
   releases the lock; the old process keeps it through its shutdown drain. A
   replacement started while the old process runs waits in standby, takes over

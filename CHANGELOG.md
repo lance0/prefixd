@@ -12,7 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A second controller for the same POP and speaker target that shares the
   database now starts in standby instead of mutating the speaker. The
   database connection must be direct or through a session-mode pooler:
-  PgBouncer transaction pooling breaks the session advisory lock. See
+  PgBouncer transaction pooling breaks the session advisory lock. Point load
+  balancers and detector routing at `GET /v1/ready`, not `GET /v1/health`.
+  `--adopt-legacy-speaker` and `--retire-dry-run-intent` now refuse while a
+  controller for the POP holds the fence; stop it first. See
   [controller fence and rolling deploys](docs/how-to/upgrading.md#controller-fence-and-rolling-deploys).
 
 ### Added
@@ -46,6 +49,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed check, stops starting speaker mutations at once, enters standby and
   reacquires on a new connection. Rolling deploys wait in standby and take over
   when the old process exits.
+
+- Add public `GET /v1/ready`: `200` with `{"status":"ready"}` while the
+  controller holds its fence, `503` with `{"status":"standby"}` otherwise.
+
+- Fence the `--adopt-legacy-speaker` and `--retire-dry-run-intent` one-shot
+  modes: each takes the controller's fence once, refuses while another process
+  holds it, and releases it on exit.
+
+- `scripts/prefixd-fastnetmon.sh` retries a ban `POST /v1/events` with the same
+  event ID on a connection error or `503`, up to `BAN_POST_ATTEMPTS` (default 3)
+  attempts `BAN_POST_DELAY_SECONDS` (default 1) apart. It never retries a `4xx`.
 
 ### Changed
 
