@@ -190,7 +190,18 @@ accepted rather than allowing uncapped blackholes.
 
 ## Vector Detection
 
-On ban, the script infers the attack vector from the attack details FastNetMon writes to stdin:
+On ban, the script first reads FastNetMon's own `Attack protocol:` line, the
+protocol with the most packets toward the victim:
+
+| `Attack protocol:` | prefixd Vector |
+|--------------------|----------------|
+| `udp`              | `udp_flood` (or `udp_amplification`, below) |
+| `icmp`             | `icmp_flood`   |
+| `tcp`              | `syn_flood` with a `syn` token, else `ack_flood` with an `ack` token, else `unknown` |
+
+Background SYN counters or TCP ACK samples in the dump therefore cannot turn a
+UDP flood into a TCP rule. Only when the line is missing or says `unknown` does
+the script infer the vector from tokens in the attack details:
 
 | Detail token                       | prefixd Vector |
 |------------------------------------|----------------|

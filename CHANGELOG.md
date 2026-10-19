@@ -236,6 +236,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prepares the release PR. A manually pushed tag still releases, and a
   dispatch is still a dry run.
 
+### Fixed
+
+- `scripts/prefixd-fastnetmon.sh` now takes the vector from FastNetMon's own
+  `Attack protocol:` line (the protocol with the most packets) before looking
+  for tokens. `udp` gives `udp_flood`, then the amplification refinement;
+  `icmp` gives `icmp_flood`; `tcp` keeps the SYN and ACK checks, and is
+  `unknown` without either. Before, a nonzero SYN counter or a TCP ACK sample
+  in the dump sent a UDP flood as `syn_flood` or `ack_flood`, so the
+  mitigation was a TCP rule that missed the attack. Without a usable
+  protocol line, the script infers the vector from tokens as before.
+
 ## [0.20.0] - 2026-10-19
 
 ### Upgrade notes

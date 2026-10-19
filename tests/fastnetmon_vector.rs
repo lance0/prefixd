@@ -194,6 +194,55 @@ fn ntp_and_memcached_dump_reports_reflector_ports_by_share() {
 }
 
 #[test]
+fn udp_attack_protocol_wins_over_background_syn_and_ack() {
+    // Nonzero SYN counters and two TCP psh,ack samples, but FastNetMon reports
+    // "Attack protocol: udp". The token heuristic alone said syn_flood.
+    let (vector, ports) = amplification(&community_fixture("community-ntp-tcp-noise.txt"), &[]);
+    assert_eq!(vector, "udp_amplification");
+    assert_eq!(ports, Some(vec![123, 11211]));
+}
+
+#[test]
+fn attack_protocol_line_selects_the_vector() {
+    for (details, expected) in [
+        // A genuine SYN flood still reads its flags.
+        (
+            "Attack protocol: tcp\nIncoming syn tcp pps: 900000 packets per second",
+            "syn_flood",
+        ),
+        (
+            "Attack protocol: tcp\nx:1 > y:2 protocol: tcp flags: psh,ack frag: 0",
+            "ack_flood",
+        ),
+        (
+            "Attack protocol: tcp\nIncoming tcp pps: 900000 packets per second",
+            "unknown",
+        ),
+        (
+            "Attack protocol: icmp\nIncoming syn tcp pps: 50 packets per second",
+            "icmp_flood",
+        ),
+        (
+            "Attack protocol: udp\nIncoming syn tcp pps: 50 packets per second",
+            "udp_flood",
+        ),
+        // An unusable line falls back to the token heuristic.
+        (
+            "Attack protocol: unknown\nIncoming syn tcp pps: 50 packets per second",
+            "syn_flood",
+        ),
+        (
+            "Attack protocol:\nIncoming udp traffic: 900 mbps",
+            "udp_flood",
+        ),
+    ] {
+        assert_eq!(detected_vector(details), expected, "details: {details:?}");
+    }
+    let (vector, _) = amplification(&community_fixture("community-syn-flood.txt"), &[]);
+    assert_eq!(vector, "syn_flood");
+}
+
+#[test]
 fn share_threshold_is_configurable() {
     let details = community_fixture("community-ntp-memcached.txt");
     let (vector, ports) = amplification(&details, &[("PREFIXD_SRC_PORT_MIN_SHARE", "0.4")]);

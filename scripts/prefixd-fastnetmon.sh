@@ -155,16 +155,38 @@ ZERO_METRIC_RE='(^|[^0-9.])0+(\.0+)?[[:space:]]*(mbps|kbps|gbps|bps|pps|kpps|mpp
 RAW_SIGNAL=$(printf '%s\n' "$RAW_LOWER" | grep -vE "$ZERO_METRIC_RE" || true)
 
 # Token boundaries keep "ack" out of "packets" and "attack_type" while
-# preserving "syn_flood"/"tcp_syn". TCP flag vectors precede udp for mixed floods.
-if grep -qE '(^|[^[:alnum:]])syn([^[:alnum:]]|$)' <<< "$RAW_SIGNAL"; then
-    VECTOR="syn_flood"
-elif grep -qE '(^|[^[:alnum:]])ack([^[:alnum:]]|$)' <<< "$RAW_SIGNAL"; then
-    VECTOR="ack_flood"
-elif grep -qE '(^|[^[:alnum:]])icmp([^[:alnum:]]|$)' <<< "$RAW_SIGNAL"; then
-    VECTOR="icmp_flood"
-elif grep -qE '(^|[^[:alnum:]])udp([^[:alnum:]]|$)' <<< "$RAW_SIGNAL"; then
-    VECTOR="udp_flood"
-fi
+# preserving "syn_flood"/"tcp_syn".
+has_token() {
+    grep -qE "(^|[^[:alnum:]])$1([^[:alnum:]]|\$)" <<< "$RAW_SIGNAL"
+}
+
+# FastNetMon's own verdict comes first: "Attack protocol: tcp|udp|icmp|unknown",
+# the protocol with the most packets toward the victim. Background SYN
+# counters or TCP ACK samples must not turn a UDP flood into a TCP rule.
+ATTACK_PROTOCOL=$(printf '%s\n' "$RAW_LOWER" | awk '/^attack protocol:/ { print $3; exit }' || true)
+case "$ATTACK_PROTOCOL" in
+    udp) VECTOR="udp_flood" ;;
+    icmp) VECTOR="icmp_flood" ;;
+    tcp)
+        if has_token syn; then
+            VECTOR="syn_flood"
+        elif has_token ack; then
+            VECTOR="ack_flood"
+        fi
+        ;;
+    # No usable protocol line: infer from tokens, TCP flags before udp.
+    *)
+        if has_token syn; then
+            VECTOR="syn_flood"
+        elif has_token ack; then
+            VECTOR="ack_flood"
+        elif has_token icmp; then
+            VECTOR="icmp_flood"
+        elif has_token udp; then
+            VECTOR="udp_flood"
+        fi
+        ;;
+esac
 
 # Reflector source ports (ADR 028). FastNetMon writes one line per sampled
 # packet between "Attack traffic dump" and "Flow dump", such as
