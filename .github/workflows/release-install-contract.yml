@@ -1,14 +1,18 @@
 name: Release install contract
 
-# Check a release's published artifacts install and start: SHA256SUMS verifies
+# Check a published release's artifacts install and start: SHA256SUMS verifies
 # the assets, the tarball binaries run, and both images resolve to the digests
 # recorded in the release and pass the same smoke test as the release build.
-# Runs after a tag-triggered Release succeeds (the release is still a draft),
-# or on demand for any release tag.
+# The Release workflow calls this after it publishes, whether a tag push or the
+# automatic tag after main CI started it. Dispatch it by hand for any published
+# release tag, for example after rerunning a Release job.
 on:
-  workflow_run:
-    workflows: [Release]
-    types: [completed]
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to verify (vX.Y.Z)
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -22,15 +26,10 @@ permissions:
 jobs:
   contract:
     name: Verify published release
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      # Draft releases are visible only to tokens with write access. This job
-      # reads assets and writes nothing.
-      contents: write
+      contents: read # published releases and their assets
       packages: read
     steps:
       - uses: actions/checkout@v7
@@ -50,6 +49,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          # For a tag push, the triggering run's head branch is the tag name.
-          TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+          TAG: ${{ inputs.tag }}
         run: scripts/release-install-contract.sh "$TAG"

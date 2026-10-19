@@ -1,14 +1,28 @@
 name: Release
 
-# A `vX.Y.Z` tag publishes once, fail-closed: the tag must equal the Cargo.toml
-# version, name a commit on main whose ci.yml push run passed, and every build
-# must succeed before anything is pushed. The GitHub Release is created as a
-# draft; publishing it is the owner's step. See docs/project/release-checklist.md.
+# A release publishes once, fail-closed. Three triggers resolve the same tag and
+# commit in `verify`, and every later job builds that commit:
 #
-# A manual dispatch is a dry run of the same jobs at the chosen ref: the tag name
-# comes from Cargo.toml, images are built and smoke-tested but never pushed, and
-# no release is created. Publication steps are guarded on the push event itself.
+# - workflow_run: ci.yml passed on a main push. If that commit is the one that
+#   set Cargo.toml to an untagged X.Y.Z with a dated CHANGELOG section, this
+#   run tags it vX.Y.Z and publishes. Any other main commit is a quiet no-op.
+#   A tag pushed with GITHUB_TOKEN starts no workflow, so this same run builds
+#   and publishes the release.
+# - push of a vX.Y.Z tag: a manually tagged commit publishes the same way.
+# - workflow_dispatch: a dry run at the chosen ref. The tag name comes from
+#   Cargo.toml, images are built and smoke-tested but never pushed, and no tag
+#   or release is created.
+#
+# Before anything is tagged or pushed, scripts/release-check.sh requires the
+# tag to equal the Cargo.toml version, the commit to be on main, and ci.yml's
+# push run to have passed on that exact commit. github-actions[bot] publishes
+# the GitHub Release with the CHANGELOG section as its body; an existing
+# release is never overwritten. See docs/project/release-checklist.md.
 on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   push:
     tags: ["v*"]
   workflow_dispatch:
@@ -16,44 +30,117 @@ on:
 permissions:
   contents: read
 
+# One release per commit. Only the commit that sets a version can auto-tag it,
+# and an existing tag ends the auto path, so this is also one run per version.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: false
 
 jobs:
   verify:
     name: Verify tag, main CI and notes
+    # workflow_run: only a successful main push run of ci.yml in this repository.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: read # read ci.yml runs for the tagged commit
+      actions: read # read ci.yml runs for the release commit
     outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+      publish: ${{ steps.check.outputs.publish }}
+      create: ${{ steps.check.outputs.create }}
       tag: ${{ steps.check.outputs.tag }}
       version: ${{ steps.check.outputs.version }}
+      sha: ${{ steps.check.outputs.sha }}
+      previous: ${{ steps.info.outputs.previous }}
+      latest: ${{ steps.info.outputs.latest }}
     steps:
       - uses: actions/checkout@v7
         with:
+          # workflow_run would otherwise check out the default branch head.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check tag, main ancestry and exact-commit CI
+      - name: Resolve tag, check main ancestry and exact-commit CI
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            tag="v$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
-          else
+          cargo_version() {
+            git show "$1:Cargo.toml" |
+              python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["package"]["version"])'
+          }
+          sha="$(git rev-parse HEAD)"
+          version="$(cargo_version "$sha")"
+          publish=true
+          create=false
+          case "$GITHUB_EVENT_NAME" in
+          push)
             tag="$GITHUB_REF_NAME"
+            ;;
+          workflow_dispatch)
+            tag="v$version"
+            publish=false
+            ;;
+          workflow_run)
+            tag="v$version"
+            create=true
+            skip=""
+            if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+              skip="$tag already exists"
+            elif git rev-parse --verify --quiet "$sha^" >/dev/null &&
+              [ "$(cargo_version "$sha^")" = "$version" ]; then
+              skip="$sha did not change the Cargo.toml version"
+            elif ! git show "$sha:CHANGELOG.md" >"$RUNNER_TEMP/CHANGELOG.md" ||
+              ! scripts/release-notes.py "$version" "$RUNNER_TEMP/CHANGELOG.md" >/dev/null 2>&1; then
+              skip="CHANGELOG.md has no dated, nonempty ## [$version] section"
+              echo "::warning::not tagging $tag: $skip"
+            fi
+            if [ -n "$skip" ]; then
+              echo "No release: $skip."
+              echo "proceed=false" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
+            ;;
+          *)
+            echo "::error::unexpected event $GITHUB_EVENT_NAME"
+            exit 1
+            ;;
+          esac
+          scripts/release-check.sh "$tag" "$sha"
+          if [ "$publish" = true ] && gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::a GitHub Release for $tag already exists; fix forward with a new version"
+            exit 1
           fi
-          scripts/release-check.sh "$tag" "$GITHUB_SHA"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          {
+            echo "proceed=true"
+            echo "publish=$publish"
+            echo "create=$create"
+            echo "tag=$tag"
+            echo "version=${tag#v}"
+            echo "sha=$sha"
+          } >>"$GITHUB_OUTPUT"
+          echo "Release $tag at $sha (publish=$publish, create tag=$create)"
+
+      - name: Previous release and latest marker
+        id: info
+        if: steps.check.outputs.proceed == 'true'
+        env:
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          scripts/release-notes.py --tag-info "$TAG" | tee -a "$GITHUB_OUTPUT"
 
       - name: Extract CHANGELOG section
+        if: steps.check.outputs.proceed == 'true'
         env:
           VERSION: ${{ steps.check.outputs.version }}
         run: |
@@ -63,6 +150,7 @@ jobs:
           cat release-notes.md
 
       - uses: actions/upload-artifact@v7
+        if: steps.check.outputs.proceed == 'true'
         with:
           name: release-notes
           path: release-notes.md
@@ -71,6 +159,7 @@ jobs:
   binaries:
     name: Linux binaries and SBOM
     needs: verify
+    if: needs.verify.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     # Debian 12 (glibc 2.36), same toolchain as the Dockerfile builder. Building
@@ -84,6 +173,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.verify.outputs.sha }}
           persist-credentials: false
 
       - name: Install protobuf compiler
@@ -117,10 +207,37 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  tag:
+    name: Tag release commit
+    # Runs after the checks and the binary build pass and before any image is
+    # pushed. Only the workflow_run path creates a tag; the others pass through.
+    needs: [verify, binaries]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # create the annotated tag
+    steps:
+      - name: Create annotated tag
+        if: needs.verify.outputs.create == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          SHA: ${{ needs.verify.outputs.sha }}
+        run: |
+          set -euo pipefail
+          object="$(gh api "repos/$GH_REPO/git/tags" -f tag="$TAG" -f message="$TAG" \
+            -f object="$SHA" -f type=commit \
+            -f 'tagger[name]=github-actions[bot]' \
+            -f 'tagger[email]=41898282+github-actions[bot]@users.noreply.github.com' --jq .sha)"
+          # Fails if the tag already exists, so two runs can't both tag a version.
+          gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$object" --silent
+          echo "Tagged $SHA as $TAG"
+
   images:
     name: Image (${{ matrix.image }})
-    # Push no image unless the tag checks and binary build passed.
-    needs: [verify, binaries]
+    # Push no image unless the checks, binary build and tag passed.
+    needs: [verify, binaries, tag]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -138,10 +255,12 @@ jobs:
             file: ./frontend/Dockerfile
     env:
       VERSION: ${{ needs.verify.outputs.version }}
+      SHA: ${{ needs.verify.outputs.sha }}
       REPOSITORY: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.verify.outputs.sha }}
           persist-credentials: false
 
       - uses: docker/setup-buildx-action@v4
@@ -157,6 +276,9 @@ jobs:
           tags: |
             type=semver,pattern={{version}},value=${{ needs.verify.outputs.tag }}
             type=semver,pattern={{major}}.{{minor}},value=${{ needs.verify.outputs.tag }}
+          # The default revision is github.sha, which is the default branch
+          # head on workflow_run; record the release commit instead.
+          labels: org.opencontainers.image.revision=${{ needs.verify.outputs.sha }}
 
       - name: Build image for verification
         uses: docker/build-push-action@v7
@@ -169,10 +291,10 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image }}
 
       - name: Smoke-test image
-        run: scripts/release-smoke-image.sh "${{ matrix.image }}" "${{ matrix.image }}:verify" "$VERSION" "$GITHUB_SHA"
+        run: scripts/release-smoke-image.sh "${{ matrix.image }}" "${{ matrix.image }}:verify" "$VERSION" "$SHA"
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name == 'push'
+        if: needs.verify.outputs.publish == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -180,7 +302,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push version tags
-        if: github.event_name == 'push'
+        if: needs.verify.outputs.publish == 'true'
         id: push
         uses: docker/build-push-action@v7
         with:
@@ -192,7 +314,7 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image }}
 
       - name: Record digest
-        if: github.event_name == 'push'
+        if: needs.verify.outputs.publish == 'true'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
@@ -202,7 +324,7 @@ jobs:
           echo "$REPOSITORY $DIGEST" > "digests/${{ matrix.image }}"
 
       - name: Upload digest
-        if: github.event_name == 'push'
+        if: needs.verify.outputs.publish == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.image }}
@@ -210,14 +332,17 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Draft GitHub Release
+    name: Publish GitHub Release
     needs: [verify, binaries, images]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write # create the draft release
+      contents: write # create the release
     env:
       TAG: ${{ needs.verify.outputs.tag }}
+      PREVIOUS: ${{ needs.verify.outputs.previous }}
+      LATEST: ${{ needs.verify.outputs.latest }}
+      PUBLISH: ${{ needs.verify.outputs.publish }}
       GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/download-artifact@v8
@@ -230,7 +355,7 @@ jobs:
           path: dist
 
       - uses: actions/download-artifact@v8
-        if: github.event_name == 'push'
+        if: needs.verify.outputs.publish == 'true'
         with:
           pattern: digest-*
           path: digests
@@ -239,7 +364,7 @@ jobs:
       - name: Assemble release body
         run: |
           set -euo pipefail
-          if [ "$GITHUB_EVENT_NAME" = push ]; then
+          if [ "$PUBLISH" = true ]; then
             cat digests/* | sort > dist/image-digests.txt
             test "$(wc -l < dist/image-digests.txt)" -eq 2
           fi
@@ -264,17 +389,37 @@ jobs:
             echo '```text'
             cat dist/SHA256SUMS
             echo '```'
+            if [ -n "$PREVIOUS" ]; then
+              echo
+              echo "**Full changelog:** $GITHUB_SERVER_URL/$GH_REPO/compare/$PREVIOUS...$TAG"
+            fi
           } > release-body.md
           cat release-body.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Create draft release
-        if: github.event_name == 'push'
+      - name: Publish release
+        if: needs.verify.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          prerelease=()
-          [[ "$TAG" == *-* ]] && prerelease=(--prerelease)
+          if [[ "$TAG" == *-* ]]; then
+            flags=(--prerelease --latest=false)
+          elif [ "$LATEST" = true ]; then
+            flags=(--latest)
+          else
+            flags=(--latest=false) # a backported patch leaves releases/latest alone
+          fi
           # Fails if a release for this tag already exists; nothing is overwritten.
-          gh release create "$TAG" --draft --verify-tag "${prerelease[@]}" \
+          gh release create "$TAG" --verify-tag "${flags[@]}" \
             --title "$TAG" --notes-file release-body.md dist/*
+
+  install-contract:
+    name: Install contract
+    needs: [verify, release]
+    if: needs.verify.outputs.publish == 'true'
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/release-install-contract.yml
+    with:
+      tag: ${{ needs.verify.outputs.tag }}

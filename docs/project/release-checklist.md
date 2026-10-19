@@ -8,12 +8,134 @@ Follow this page for every prefixd release. A release publishes:
 - a CycloneDX SBOM;
 - `SHA256SUMS` and the image digests.
 
-The tag-triggered [release workflow](../../.github/workflows/release.yml)
-publishes the images and creates a **draft** GitHub Release. The owner approves
-the tag push and publishes the draft; no automation does either.
+The release is automatic once the release PR merges. When `ci.yml` passes on
+the `main` commit that sets a new Cargo.toml version, the
+[release workflow](../../.github/workflows/release.yml) tags that commit
+`vX.Y.Z` and publishes the GitHub Release as `github-actions[bot]`. Merging the
+release PR is the approval; there is no tag push or draft to publish by hand.
 
-Never force-push `main`, move or re-create a pushed tag, or overwrite a release.
-If a pushed tag can't release, fix forward with the next patch version.
+Never force-push `main`, move, delete or re-create a pushed tag, or overwrite a
+release. If a tag can't release, fix forward with the next patch version.
+
+## Steps
+
+1. **Prepare.** From a clean, up-to-date `main` checkout on a new branch:
+
+   ```bash
+   just release-prepare X.Y.Z
+   ```
+
+   [`scripts/release-prepare.sh`](../../scripts/release-prepare.sh) sets the
+   Cargo.toml version, runs `cargo update --workspace` and checks that
+   Cargo.lock changed only the `prefixd` entry. It rolls `## [Unreleased]` into
+   `## [X.Y.Z] - <today, UTC>` under a fresh empty `## [Unreleased]`, moves the
+   compare links at the end of the CHANGELOG and previews the release body. It
+   refuses a dirty tree, a version that isn't greater than the current one, and
+   an empty `[Unreleased]` section. It commits and pushes nothing. Then finish
+   the manual items it prints; see [Version bump points](#version-bump-points).
+
+2. **Release PR.** Open a PR titled `chore(release): prepare vX.Y.Z`. Its body
+   records the [preconditions](#preconditions): `just gate`, the rustbgpd
+   fixture pins and the upgrade proof, plus the release-notes preview. Review
+   it like any other PR.
+
+   Changes to `release.yml`, `release-install-contract.yml` or the
+   `scripts/release-*` files land in their own PR first, never in the release
+   PR. After that PR merges and its `main` CI passes,
+   [dry-run](#dry-run) the release workflow on `main`.
+
+3. **Merge.** Merging is the release decision. When `ci.yml`'s push run on the
+   merge commit succeeds, the release workflow starts from that run. Matching
+   file contents on another commit don't count. Watch it with
+   `gh run list --workflow release.yml --limit 3` and
+   `gh run watch <run-id> --exit-status`. Its jobs run in order, and each needs
+   the previous one:
+   - `verify` resolves the tag from the Cargo version at the merge commit. It
+     stops quietly if that commit didn't change the version, the tag already
+     exists or the CHANGELOG has no dated section. Otherwise it runs
+     `scripts/release-check.sh`: the tag equals the Cargo version, the commit
+     is on `main` and its `ci.yml` push run succeeded. It also refuses a
+     version that already has a release, then extracts the notes.
+   - `binaries` builds on Debian 12 (glibc 2.36) and produces the tarball,
+     SBOM and `SHA256SUMS`.
+   - `tag` creates the annotated `vX.Y.Z` tag on the merge commit.
+   - `images` builds each image, smoke-tests it, then pushes `X.Y.Z` and `X.Y`
+     and records the digest. `latest` stays with ci.yml's `main` images.
+   - `release` publishes the GitHub Release. Its title is the tag, and its body
+     is the CHANGELOG section, the digests and `SHA256SUMS`, then a compare
+     link to the previous final release. A final release is marked latest
+     unless a newer final release exists; an `X.Y.Z-rc.N` version is marked as
+     a prerelease.
+   - `install-contract` checks the published release; see step 4.
+
+   A failure before `tag` creates nothing. A failure at or after `tag` leaves
+   the version spent. See [Stop or recover](#stop-or-recover) for both.
+
+4. **Verify.** Each image's version tags resolve to the digest in the release:
+
+   ```bash
+   docker buildx imagetools inspect ghcr.io/lance0/prefixd:X.Y.Z
+   docker buildx imagetools inspect ghcr.io/lance0/prefixd-dashboard:X.Y
+   ```
+
+   The [install contract](../../.github/workflows/release-install-contract.yml)
+   runs as the last job of the release run. It runs
+   `scripts/release-install-contract.sh`, which checks:
+   - every asset verifies against `SHA256SUMS`;
+   - the tarball binaries run and report `X.Y.Z`;
+   - the SBOM is CycloneDX;
+   - both images resolve to the recorded digests and pass the image smoke
+     test.
+
+   If it didn't run, or after any rerun, start it by hand:
+
+   ```bash
+   gh workflow run release-install-contract.yml -f tag=vX.Y.Z
+   ```
+
+## Stop or recover
+
+- **Before merge**, nothing has happened; close or fix the PR.
+- **To stop a release in flight**, cancel the release run before its `tag` job
+  (`gh run cancel <run-id>`). Nothing is tagged or pushed until then. Don't
+  cancel after `tag`: the tag exists and the version is spent.
+- **A transient failure** (registry, runner, network): rerun the failed jobs
+  with `gh run rerun <run-id> --failed`. The rerun keeps the verified tag and
+  commit. Rerunning `images` rebuilds and can move the version
+  tags to a new digest; the release records the final digests. Don't use
+  "Re-run all jobs": `verify` sees the existing tag and stops.
+- **A bad release or a failure that a rerun can't fix:** don't re-tag, delete
+  the tag or edit published assets. Fix forward: land the fix and release the
+  next patch version through a new release PR. Say what went wrong in its
+  CHANGELOG section.
+- **If CI fails on the release commit,** rerun the failed CI jobs if the
+  failure is transient; a passing rerun starts the release. If the release
+  commit itself is broken, land the fix and then release a new version. Only
+  the commit that sets a version can tag itself. To release an existing later
+  commit instead, the owner can push the tag by hand:
+
+  ```bash
+  git tag -a vX.Y.Z -m "vX.Y.Z" <sha>
+  git push origin vX.Y.Z
+  ```
+
+  A pushed tag runs the same workflow and checks: that commit must carry the
+  version, be on `main` and have passed `ci.yml`.
+
+## Dry run
+
+A manual dispatch of the release workflow is a dry run at the chosen ref:
+
+```bash
+gh workflow run release.yml --ref main
+```
+
+It takes the tag name from that ref's Cargo.toml, runs `release-check.sh`
+without checking where an existing tag points, and runs every build, smoke
+test and body assembly. It creates no tag, pushes no image and creates no
+release. The run summary shows the release body it would publish. The ref's
+commit must be on `main` with a passing `ci.yml` push run, so a PR branch
+can't be dry-run.
 
 ## Preconditions
 
@@ -49,13 +171,16 @@ Check these on the release candidate before opening the release PR:
 
 ## CHANGELOG section
 
-[`scripts/release-notes.py`](../../scripts/release-notes.py) extracts the
-section that becomes the release body. It fails closed when the section is
-missing, undated or empty.
+`just release-prepare` rolls the section;
+[`scripts/release-notes.py`](../../scripts/release-notes.py) extracts it as
+the release body. The workflow fails closed, or doesn't tag, when the section
+is missing, undated or empty.
 
-- [ ] Rename the completed `## [Unreleased]` entries to
-      `## [X.Y.Z] - YYYY-MM-DD`, with no leading `v` and the UTC date of the
-      planned tag. Leave a fresh, empty `## [Unreleased]` above it.
+- [ ] The heading reads `## [X.Y.Z] - YYYY-MM-DD`, with no leading `v`. The
+      date is the UTC day `release-prepare` ran; correct it if the PR merges
+      on a later day.
+- [ ] An optional short summary paragraph may open the section, before the
+      first `###` group. It leads the release body.
 - [ ] Keep the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) groups
       already in use: `### Upgrade notes` first when an upgrade needs operator
       action, then `Security`, `Added`, `Changed`, `Fixed` and `Documentation`.
@@ -70,10 +195,13 @@ missing, undated or empty.
 
 ## Version bump points
 
+`just release-prepare` covers the first two; the rest stay manual.
+
 - [ ] `Cargo.toml` `[package] version` is `X.Y.Z`.
-- [ ] Run `cargo update --workspace`. Afterwards `git diff Cargo.lock` changes
-      only the `prefixd` package version.
+- [ ] `git diff Cargo.lock` changes only the `prefixd` package version.
 - [ ] The README **Status** line names the new release and is accurate.
+- [ ] The [upgrade guide](../how-to/upgrading.md) has a section for the
+      previous release → `X.Y.Z`.
 - [ ] The OpenAPI document at `/openapi.json` reports `info.version` `X.Y.Z`.
       It must take that version from Cargo (`CARGO_PKG_VERSION`), not a
       literal in `src/api/openapi.rs`.
@@ -82,79 +210,3 @@ missing, undated or empty.
 - [ ] Search for the previous version in current examples, such as pinned
       images in the upgrade and deployment guides, and move only current ones.
       Leave historical records unchanged.
-
-## Release steps
-
-1. **Release PR.** Open a PR with the bump and the CHANGELOG roll, titled
-   `chore(release): prepare vX.Y.Z`. Its body records `just gate`, both fixture
-   pins, the upgrade proof and the release-notes preview. Review it like any
-   other PR.
-2. **Merge.** Merge the release PR once its checks pass. Note the merge commit
-   SHA; that commit is the one you tag.
-3. **Exact-main CI.** Wait for `ci.yml`'s push run on that exact commit to
-   succeed. Matching file contents on another commit don't count:
-
-   ```bash
-   gh run list --workflow ci.yml --branch main --commit <sha>
-   ```
-
-   If this cycle changed `release.yml`, `release-install-contract.yml` or the
-   `scripts/release-*` files, dry-run the release workflow too. A dispatch
-   runs every job at `main` but pushes no image and creates no release:
-
-   ```bash
-   gh workflow run release.yml --ref main
-   ```
-
-4. **Owner-approved tag.** With the owner's explicit approval, push an
-   annotated tag for the release commit:
-
-   ```bash
-   git tag -a vX.Y.Z -m "vX.Y.Z" <sha>
-   git push origin vX.Y.Z
-   ```
-
-5. **Release workflow.** Watch the run (`gh run watch <run-id> --exit-status`).
-   It runs these jobs in order, and each needs the previous one:
-   - `verify` runs `scripts/release-check.sh`. It checks that the tag equals
-     the Cargo version, the tag points at the commit, the commit is on `main`
-     and its `ci.yml` push run succeeded. Then it extracts the notes.
-   - `binaries` builds on Debian 12 (glibc 2.36) and produces the tarball,
-     SBOM and `SHA256SUMS`.
-   - `images` builds each image, smoke-tests it, then pushes `X.Y.Z` and `X.Y`
-     and records the digest. `latest` stays with ci.yml's `main` images.
-   - `release` creates the draft with the notes, digests, checksums and assets.
-
-   A failure before `images` pushed anything publishes nothing. Rerunning a
-   failed `images` job rebuilds the image and can move the version tags to a
-   new digest. The draft records the final digests; verify against those.
-6. **Verify digests.** Each image's version tags resolve to the digest in the
-   draft:
-
-   ```bash
-   docker buildx imagetools inspect ghcr.io/lance0/prefixd:X.Y.Z
-   docker buildx imagetools inspect ghcr.io/lance0/prefixd-dashboard:X.Y
-   ```
-
-7. **Install contract.** The
-   [install contract](../../.github/workflows/release-install-contract.yml)
-   runs after a successful tag-triggered release. It runs
-   `scripts/release-install-contract.sh`, which checks:
-   - every asset verifies against `SHA256SUMS`;
-   - the tarball binaries run and report `X.Y.Z`;
-   - the SBOM is CycloneDX;
-   - both images resolve to the recorded digests and pass the image smoke
-     test.
-
-   If the contract didn't run, or after any rerun, start it by hand:
-
-   ```bash
-   gh workflow run release-install-contract.yml -f tag=vX.Y.Z
-   ```
-
-8. **Owner publishes.** The owner reviews the draft's notes, assets and
-   digests, then publishes it. Publishing is the owner's step:
-
-   ```bash
-   gh release edit vX.Y.Z --draft=false
-   ```

@@ -280,11 +280,20 @@ We document significant design decisions in [docs/adr/](docs/adr/). When making 
 
 ## Release Process
 
-Follow the [release checklist](docs/project/release-checklist.md). It covers
-the preconditions, CHANGELOG section rules, version bump points and the release
-steps. A `vX.Y.Z` tag runs the release workflow, which publishes both images and
-creates a draft GitHub Release; the owner approves the tag push and publishes
-the release.
+Follow the [release checklist](docs/project/release-checklist.md). In short:
+
+1. Run `just release-prepare X.Y.Z` on a branch. It bumps the version,
+   refreshes Cargo.lock and rolls the CHANGELOG; finish the manual items it
+   prints.
+2. Open `chore(release): prepare vX.Y.Z`. It must pass `just gate`, both
+   rustbgpd fixture pins and the upgrade proof, as recorded in its body.
+3. Merge it. When `ci.yml` passes on the merge commit, the release workflow
+   tags it `vX.Y.Z` and publishes the images and the GitHub Release.
+4. Verify the image digests and the install contract.
+
+Never re-tag, move a tag or overwrite a release; fix forward with a patch
+version. A manual dispatch of the release workflow is a dry run that publishes
+nothing.
 
 ---
 

@@ -2,8 +2,7 @@
 # Check that a GitHub Release's published artifacts install and start.
 #
 # Usage: scripts/release-install-contract.sh vX.Y.Z [ASSET_DIR]
-#   Without ASSET_DIR, downloads the release's assets with gh (a draft release
-#   needs a token with write access to the repository to be visible).
+#   Without ASSET_DIR, downloads the published release's assets with gh.
 #
 # Checks:
 #   - SHA256SUMS verifies, and lists every asset except itself and image-digests.txt;

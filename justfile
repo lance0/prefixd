@@ -102,3 +102,8 @@ interop-frr *speakers="rustbgpd gobgp":
     docker build --build-arg CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}" -t prefixd:interop .
     python3 -m unittest discover -s lab/interop -p 'test_*.py'
     for speaker in {{speakers}}; do lab/interop/run-frr.sh "$speaker"; done
+
+# Merging the release PR tags and publishes the release once main CI passes.
+# Prepare a release PR: version bump, Cargo.lock and CHANGELOG roll; commits nothing.
+release-prepare version:
+    scripts/release-prepare.sh {{version}}

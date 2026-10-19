@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Releases publish themselves. Once `ci.yml` passes on the `main` commit that
+  sets a new Cargo.toml version with a dated CHANGELOG section, the release
+  workflow tags that commit `vX.Y.Z` and publishes the GitHub Release, which
+  is no longer a draft. The body is the CHANGELOG section, the artifacts and
+  a compare link to the previous release. `just release-prepare X.Y.Z`
+  prepares the release PR. A manually pushed tag still releases, and a
+  dispatch is still a dry run.
+
 ## [0.20.0] - 2026-10-19
 
 ### Upgrade notes
@@ -1610,7 +1620,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.19.1...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/lance0/prefixd/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/lance0/prefixd/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/lance0/prefixd/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/lance0/prefixd/compare/v0.18.0...v0.18.1

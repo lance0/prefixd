@@ -3,11 +3,17 @@
 
 Usage:
   scripts/release-notes.py X.Y.Z [CHANGELOG.md]
+  scripts/release-notes.py --tag-info vX.Y.Z
   scripts/release-notes.py --selftest
 
 Fails unless CHANGELOG.md has a dated, nonempty `## [X.Y.Z] - YYYY-MM-DD`
 section. The heading line is dropped because the release page shows the
-version.
+version; a summary paragraph before the first `###` group is kept.
+
+--tag-info reads the local tag list and prints two GITHUB_OUTPUT lines:
+`previous=` the newest final release tag older than vX.Y.Z (empty when there
+is none), and `latest=true` when vX.Y.Z is a final release with no newer final
+tag, so a backported patch never takes over releases/latest.
 
 CHANGELOG.md is hard-wrapped, but GitHub renders every newline in a release
 body as a line break. Each paragraph and list item is joined onto one line;
@@ -18,12 +24,14 @@ boundaries (including nesting) stay as they are.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 
 HEADING = re.compile(r"^#{1,6}\s")
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
 VERBATIM = re.compile(r"^\s*[|>]")
+TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?")
 
 
 class NotesError(Exception):
@@ -91,6 +99,23 @@ def notes(changelog: str, version: str) -> str:
     return reflow(extract(changelog, version))
 
 
+def tag_info(tag: str, tags: list[str]) -> tuple[str, bool]:
+    """Return (newest final tag older than tag, whether tag becomes latest)."""
+    m = TAG.fullmatch(tag)
+    if not m:
+        raise NotesError(f"tag {tag!r} is not vX.Y.Z")
+    base = tuple(int(n) for n in m.groups()[:3])
+    finals = sorted(
+        tuple(int(n) for n in f.groups()[:3])
+        for f in map(TAG.fullmatch, tags)
+        if f and f.group(4) is None
+    )
+    older = [f for f in finals if f < base]
+    previous = "v%d.%d.%d" % older[-1] if older else ""
+    latest = m.group(4) is None and all(f <= base for f in finals)
+    return previous, latest
+
+
 def selftest() -> None:
     changelog = """# Changelog
 
@@ -101,6 +126,9 @@ def selftest() -> None:
 - Not released yet.
 
 ## [1.2.0] - 2026-10-18
+
+A short summary
+before the groups.
 
 ### Security
 
@@ -127,7 +155,9 @@ keep
 
 - Older entry.
 """
-    want = """### Security
+    want = """A short summary before the groups.
+
+### Security
 
 - Reject a thing across two lines.
   - Nested item continues here.
@@ -166,12 +196,35 @@ keep
         pass
     else:
         raise AssertionError("prefix match selected a prerelease section")
+    tags = ["v0.9.9", "v0.19.0", "v0.19.1", "v0.20.0-rc.1", "v0.20.0", "v0.21.0-rc.1", "x1"]
+    assert tag_info("v0.20.0", tags) == ("v0.19.1", True)
+    assert tag_info("v0.20.1", tags) == ("v0.20.0", True)
+    assert tag_info("v0.21.0-rc.2", tags) == ("v0.20.0", False)
+    assert tag_info("v0.21.0", tags) == ("v0.20.0", True)
+    assert tag_info("v0.19.2", tags) == ("v0.19.1", False)  # backport
+    assert tag_info("v0.10.0", tags) == ("v0.9.9", False)  # numeric, not lexical
+    assert tag_info("v0.1.0", []) == ("", True)
+    try:
+        tag_info("0.20.0", tags)
+    except NotesError:
+        pass
+    else:
+        raise AssertionError("accepted a tag without the leading v")
     print("release-notes selftest: ok")
 
 
 def main(argv: list[str]) -> int:
     if argv == ["--selftest"]:
         selftest()
+        return 0
+    if len(argv) == 2 and argv[0] == "--tag-info":
+        tags = subprocess.run(["git", "tag", "--list", "v*"], check=True, capture_output=True, text=True)
+        try:
+            previous, latest = tag_info(argv[1], tags.stdout.split())
+        except NotesError as e:
+            print(f"::error::{e}", file=sys.stderr)
+            return 1
+        print(f"previous={previous}\nlatest={str(latest).lower()}")
         return 0
     if len(argv) not in (1, 2):
         print(__doc__, file=sys.stderr)
