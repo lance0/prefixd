@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed. Nothing in this ADR is implemented. Extends
+Accepted 2026-10-19, with the owner decisions recorded below. Nothing in this
+ADR is implemented yet. Extends
 [ADR 004](004-destination-prefix-32-only.md),
 [ADR 012](012-playbook-policy-engine.md) and
 [ADR 025](025-pluggable-speaker-backends.md); qualifies the unicast caveat in
@@ -123,18 +124,38 @@ new mitigations, never live routes.
 - **Enablement.** `blackhole.enabled` defaults to false. Startup refuses
   blackhole playbook steps or the manual blackhole action when the feature is
   disabled, the selected backend lacks the blackhole capability, or the
-  safelist is empty. The same validation runs in dry-run and enforced modes, so
-  a dry run validates the configuration that enforcement will use.
-- **Separate quota.** Add `max_active_per_pop` and `max_active_global` for
-  blackholes, with small defaults. They are checked inside the existing
-  `admit_mitigation` transaction and advisory lock, in addition to the existing
-  per-customer/POP/global quotas and `max_new_per_minute`. Concurrent
+  safelist is empty. These checks run in dry-run and enforced modes alike.
+- **Injection lease gate.** In enforced mode, startup and playbook reload or
+  save refuse any playbook containing a `blackhole` step unless
+  `SpeakerCapabilities.blackhole_lease` is true. The error names the missing
+  rustbgpd injection lease. The capability is true only when the adapter has
+  verified that the connected daemon supports the lease (requirement (f)), and
+  every leased upsert must echo the granted lease or it fails. Each detector
+  blackhole is injected with a lease equal to its remaining TTL, as a relative
+  duration so clock skew cannot affect it. Extensions and repairs re-upsert
+  with the new remaining TTL, so the speaker drops the route at the
+  application expiry even if the controller has stopped. Dry-run detector
+  blackholes and manual blackholes are not gated. The controller mode can only
+  change at restart, so switching to enforced re-runs this check.
+- **Separate quota.** Add `max_active_per_pop` (default 10) and
+  `max_active_global` (default 50) for blackholes. They are checked inside the
+  existing `admit_mitigation` transaction and advisory lock, in addition to the
+  existing per-customer/POP/global quotas and `max_new_per_minute`. Concurrent
   admissions therefore cannot overshoot.
-- **Mandatory, capped TTL.** A nonzero TTL is required. `blackhole.max_ttl_seconds`
-  is tighter than the FlowSpec bound. Detector extensions (`extend_ttl`) are
-  capped at `now + max_ttl_seconds`. An ongoing attack keeps the route alive only
-  while the detector keeps re-sending. Neither an absolute lifetime cap nor a
-  speaker lease is in this ADR (see open questions and requirement (f)).
+- **Mandatory, capped TTL.** A nonzero TTL is required.
+  `blackhole.max_ttl_seconds` defaults to 3600 and bounds playbook steps, manual
+  requests and detector extensions (`extend_ttl` is capped at
+  `now + max_ttl_seconds`). The cap must cover FastNetMon Community's ban
+  lifetime. Its shipped `src/fastnetmon.conf` sets `ban_time = 1900`. It calls
+  the notify script once on ban and once on unban, with no refresh in between,
+  and it skips detection for a host that is already banned. If prefixd
+  expired the blackhole first, FastNetMon would still consider the host banned
+  and would not ban it again. Operators keep `ban_time` at or below the
+  playbook step TTL, which is itself at or below the cap. FastNetMon's default
+  `unban_only_if_attack_finished = on` can also delay an IPv4 unban past
+  `ban_time` while the attack continues, without calling the script again. In
+  that case prefixd still expires the blackhole at its TTL. That remaining gap
+  is accepted rather than allowing uncapped blackholes.
 - **Safelist at announce time.** Recheck the safelist under the lifecycle mutex
   immediately before every blackhole `AddPath`: on admission and before each
   reconciliation repair. If the lookup fails, nothing is sent. If the victim is
@@ -147,7 +168,8 @@ new mitigations, never live routes.
   `blackhole.detector_sources`. Other sources matching a blackhole playbook are
   rejected as guardrail violations. This keeps dashboard events and other
   adapters off the blackhole path. `source` is asserted by the caller, so this
-  is a routing guard, not authorization. Escalation from FlowSpec to blackhole
+  is a routing guard that works alongside detector credentials, not
+  authorization. Escalation from FlowSpec to blackhole
   needs its own ADR once escalation exists. The unused `escalated_from_id`
   column stays available for it.
   *Alternative:* allowing blackhole only as an escalation step (rejected: there
@@ -166,7 +188,9 @@ new mitigations, never live routes.
   mode and is retired only locally. Pending enforced-mode blackhole withdrawals
   stay pending in dry-run.
 - **Manual blackholes.** `POST /v1/mitigations` accepts `action: "blackhole"`
-  with Operator role. It additionally requires a nonempty `reason` and a
+  only with the Admin role. Bearer tokens map to Operator
+  (`src/api/auth.rs`), so they cannot create one. The request also requires a
+  nonempty `reason` and a
   `confirm_victim_ip` that exactly equals `victim_ip`. A mismatch returns `400`
   before persistence. Creation and withdrawal use the existing audit entries
   committed with the row (`admit_mitigation`, `finish_withdrawal`). The
@@ -221,7 +245,8 @@ Add an optional blackhole capability alongside the FlowSpec writer:
 blackhole speaker provides upsert, idempotent delete and complete local-route
 read-back for both families. Reading is mandatory: there is no write-only
 blackhole backend, because an unreadable speaker cannot prove absence (ADR 025).
-`SpeakerCapabilities.blackhole` reports availability, which is not success.
+`SpeakerCapabilities.blackhole` and `blackhole_lease` report availability,
+which is not success.
 
 Ship rustbgpd first. GoBGP returns `None` until it has its own decision and
 qualification. GoBGP's `ListPath` read-back of the global table is its accepted
@@ -232,7 +257,7 @@ The rustbgpd mapping is:
 
 | Operation | rustbgpd call and semantics |
 |-----------|-----------------------------|
-| upsert | `AddPath(prefix, prefix_length, next_hop, origin=0, communities, large_communities, path_id=0)` |
+| upsert | `AddPath(prefix, prefix_length, next_hop, origin=0, communities, large_communities, path_id=0)`, plus the lease for detector blackholes once (f) exists |
 | delete | `DeletePath(prefix, prefix_length, path_id=0)`; `NOT_FOUND` means absent until `allow_missing` exists |
 | read | `ListReceivedRoutes(neighbor_address="0.0.0.0")` per unicast family, following `next_page_token` to the end |
 
@@ -292,21 +317,22 @@ nonzero `path_id` on a desired key or a family mismatch fail the whole read.
 ## rustbgpd requirements before the v1.0 freeze
 
 Each item was checked against the rustbgpd source and the vendored
-`proto/rustbgpd.proto`. "Must-have" means prefixd will not enable enforced
-blackholes without it.
+`proto/rustbgpd.proto`. Items (a) and (e) are must-haves for any enforced
+blackhole. Item (f) is a must-have for enforced detector-driven blackholes.
 
 | Ask | Exact requirement | Verified today | Need |
 |-----|-------------------|----------------|------|
 | (a) AddPath outcome | `AddPathResponse.outcome` on a new field number (field 1 is `reserved`): `CREATED`, `REPLACED`, `UNCHANGED`, with `UNSPECIFIED` treated as an error, mirroring `FlowSpecInjectOutcome` | `AddPathResponse` has only `reserved 1`. The RIB's `insert` already knows whether it replaced a path, but the reply is `Ok(())` | **Must-have.** A non-atomic pre-read plus upsert can silently replace a foreign route for the victim; the outcome is the only evidence |
 | (b) Delete `allow_missing` | `DeletePathRequest.allow_missing` and `DeletePathResponse.outcome` (`DELETED`, `NOT_PRESENT`) | Missing paths return `NOT_FOUND` from `handle_withdraw_injected`. `DeletePathResponse` is empty | Nice-to-have. That `NOT_FOUND` is the only one the RPC produces, so mapping it to absent is safe, as the FlowSpec adapter already does for older daemons |
 | (c) Next-hop-self | A documented self marker on `AddPath`, resolved per egress session, for both families | `parse_unicast_nexthop` rejects `0.0.0.0`, `::`, multicast and broadcast. IPv6 prefixes require IPv6 next hops | Nice-to-have. An explicit discard next hop works today |
-| (d) Owner tag | An opaque owner (at most 64 bytes, never sent on the wire) on `AddPath` and `AddFlowSpec`, returned on `0.0.0.0` rows and filterable. `expected_owner` on add and delete returns `FAILED_PRECONDITION` on mismatch | `Route` and `FlowSpecRouteEntry` have no owner. Every local row shows peer `0.0.0.0` | Nice-to-have for the exclusive-target contract. Must-have before shared speakers or multiple controllers can be claimed |
-| (e) Vendored proto | Re-vendor at the first release containing (a) and bump the qualification pin | Unicast injection messages match upstream, but the vendored file is behind (it lacks, for example, `ComparePolicy` and `GetLastSighupReload`) | Must-have. This work is prefixd-side and mechanical |
-| (f) Injection lease | An optional per-route lease on `AddPath`, removed by the daemon if not refreshed | No such field exists | Nice-to-have, strongly recommended. It is the only remedy for a stopped controller (see below) |
+| (d) Owner tag | An opaque owner (at most 64 bytes, never sent on the wire) on `AddPath` and `AddFlowSpec`, returned on `0.0.0.0` rows and filterable. `expected_owner` on add and delete returns `FAILED_PRECONDITION` on mismatch | `Route` and `FlowSpecRouteEntry` have no owner. Every local row shows peer `0.0.0.0` | Not required for the first enforced release: the one-controller-per-speaker rule covers ownership. Must-have before shared-speaker support. Still requested before the freeze |
+| (e) Vendored proto | Re-vendor at the first release containing (a), and at the release containing (f), and bump the qualification pin | Unicast injection messages match upstream, but the vendored file is behind (it lacks, for example, `ComparePolicy` and `GetLastSighupReload`) | **Must-have.** This work is prefixd-side and mechanical |
+| (f) The rustbgpd injection lease | An optional relative lease in seconds on `AddPath`. The daemon removes the path when the lease elapses unless an upsert renews it, and removal is an ordinary withdrawal. `AddPathResponse` echoes the granted lease, so a daemon that ignored the field is detectable. Retained-local-intent rows report the remaining lease | No such field exists | **Must-have for enforced detector-driven blackholes** (the lease gate above). Manual and dry-run blackholes do not need it. It is the only remedy for a stopped controller |
 
-Items (a)–(c) are reported as in progress upstream but were not in the source
-checked. Because the surface is already in rustbgpd's v1 inventory, (a), (b),
-(d) and (f) are additive features that should land before the freeze.
+Items (a)–(c) are reported as in progress upstream, and the rustbgpd injection
+lease is tracked upstream; none of them was in the source checked. Because the
+surface is already in rustbgpd's v1 inventory, (a), (b), (d) and (f) are
+additive features that should land before the freeze.
 
 ## Failure modes
 
@@ -317,16 +343,19 @@ checked. Because the surface is already in rustbgpd's v1 inventory, (a), (b),
   router can retain the stale route meanwhile. Qualification must measure this
   interval.
 - **Controller stopped, speaker up.** TTL expiry needs the running controller
-  ([ADR 003](003-fail-open-ttl.md)). The blackhole stays advertised indefinitely,
-  which is the most dangerous case. Mitigations: the tighter TTL cap,
-  monitoring controller availability independently of BGP health, a documented
-  speaker-side manual `DeletePath`, and requirement (f). Nothing here claims
-  crash cleanup.
+  ([ADR 003](003-fail-open-ttl.md)). Enforced detector blackholes exist only
+  behind the lease gate, so the speaker removes each one when its leased
+  remaining TTL (at most 3600 seconds) elapses. Manual blackholes may be
+  unleased. One of those stays advertised until the controller returns or an
+  Admin removes it with a speaker-side `DeletePath`, which is the most
+  dangerous remaining case. Monitor controller availability independently of
+  BGP health. Lease removal is daemon cleanup under requirement (f), not proof
+  of router withdrawal.
 - **Split brain.** The lifecycle mutex is in-process, and target registration is
   not a lease. Two controllers on one speaker cannot distinguish each other's
   routes. Upserts can overwrite, and one controller's withdrawal can delete the
   other's same-prefix route, which the other then re-injects. The result is
-  flapping, not safety. This configuration is unsupported until (d) exists; the
+  flapping, not safety. This configuration stays unsupported until (d) exists. The
   [upgrade guide](../how-to/upgrading.md) procedures still apply.
 
 ## Implementation slices
@@ -341,18 +370,23 @@ Each slice is a separate draft PR that passes `just gate`.
    FlowSpec rule on one host have distinct keys. A blackhole row reaching a
    FlowSpec path errors with no RPC.
 2. **Speaker capability and rustbgpd adapter.** Add the trait, mock, rustbgpd
-   implementation and capability JSON. GoBGP returns `None`. *Accept:*
+   implementation and capability JSON, with `blackhole_lease` reported false
+   until slice 7. GoBGP returns `None`. *Accept:*
    fake-RPC tests show paging to completion, `ABORTED` mid-walk as an error, an
    empty view as success, unexpected attributes as an error, delete
    `NOT_FOUND` as absent, and other codes as errors. Released-daemon tests
    through `scripts/test-rustbgpd.sh` cover inject, read, delete and loss on
    daemon restart for both families.
-3. **Configuration, guardrails and playbooks.** Add the `blackhole` settings,
+3. **Configuration, guardrails, playbooks and the lease gate.** Add the
+   `blackhole` settings (TTL cap 3600, quotas 10 per POP and 50 globally),
    startup validation, `PlaybookAction::Blackhole`, the source allowlist,
-   victim checks, quotas inside `admit_mitigation` and the TTL cap on extension.
-   *Accept:* a rejection test for each guardrail with a negative control. A
-   concurrent-admission PostgreSQL test cannot exceed the blackhole quota. Dry
-   run persists and sends no RPC.
+   victim checks, quotas inside `admit_mitigation`, the TTL cap on extension,
+   and the enforced-mode lease gate at startup and on playbook reload or save.
+   *Accept:* a rejection test for each guardrail with a negative control. The
+   gate test shows enforced startup and playbook save refused with a detector
+   blackhole step when `blackhole_lease` is false, and accepted when it is true
+   on a mock. Dry-run accepts the same playbook, persists and sends no RPC. A
+   concurrent-admission PostgreSQL test cannot exceed the blackhole quota.
 4. **Lifecycle and reconciliation.** Add announce with the safelist recheck,
    kind-aware withdrawal and expiry, repair, unknown-route reporting and the
    safelist withdrawal. *Accept:* tests mirroring the FlowSpec reconciliation
@@ -360,22 +394,34 @@ Each slice is a separate draft PR that passes `just gate`.
    a failed or partial read causes no repair, a foreign POP and unknown routes
    are untouched, an already safelisted victim is withdrawn rather than
    repaired, and a pre-existing unowned local route returns `409`.
-5. **Operator surfaces.** Update manual creation with confirmation, the API and
-   OpenAPI, WebSocket, the frontend (type, badge, typed confirmation), CLI
-   display, metrics, references and the FastNetMon guide. *Accept:* a
-   confirmation mismatch returns `400` with no row or audit entry. The
-   frontend `bun run test` and `bun run build` pass. Docs links resolve.
+5. **Operator surfaces.** Update Admin-only manual creation with
+   confirmation, the API and OpenAPI, WebSocket, the frontend (type, badge,
+   typed confirmation), CLI display, metrics and references. Update the
+   FastNetMon guide to state that `ban_time` must be at or below the playbook
+   step TTL, which is at or below the blackhole TTL cap, and to explain the
+   `unban_only_if_attack_finished` gap. *Accept:* a confirmation mismatch
+   returns `400` with no row or audit entry. Operator and bearer-token callers
+   get `403`. The frontend `bun run test` and `bun run build` pass. Docs links
+   resolve.
 6. **FRR interop qualification.** Extend the `lab/interop/` containerlab
    harness with an FRR IPv4/IPv6 unicast session and an import route-map that
    rewrites BLACKHOLE routes to a discard next hop. *Accept:* a dated receipt
    showing FRR receives both host routes with the expected communities and
    installs them as discard, then removes them on withdrawal and TTL expiry. It
-   also records the route returning after a speaker restart and persisting
-   after a controller stop, recorded as the negative case. SR Linux has no
-   FlowSpec but could serve as an optional second unicast receiver. This
-   qualifies FRR only.
-7. **Later, each with its own decision:** GoBGP blackhole, owner tags once (d)
-   ships, next-hop-self once (c) ships, and FlowSpec-to-blackhole escalation.
+   also records the route returning after a speaker restart and, for an
+   unleased manual blackhole, persisting after a controller stop, recorded as
+   the negative case. SR Linux has no FlowSpec but could serve as an optional
+   second unicast receiver. This qualifies FRR only.
+7. **Lease adoption, which lifts the gate.** When a rustbgpd release contains
+   the rustbgpd injection lease: re-vendor and pin it, send the lease equal to
+   the remaining TTL, require the echoed grant, and report `blackhole_lease`.
+   *Accept:* fake-RPC tests show a missing echo failing the upsert and the
+   capability staying false. A released-daemon test shows a leased route
+   removed at lease expiry while the controller is stopped. An FRR receipt
+   shows the same removal at the router.
+8. **Later, each with its own decision:** GoBGP blackhole, owner tags once (d)
+   ships (required before shared speakers), next-hop-self once (c) ships, and
+   FlowSpec-to-blackhole escalation.
 
 ## Consequences
 
@@ -385,18 +431,28 @@ contract, a second identity namespace and a router-policy dependency: the
 receiving router must turn the community or next hop into a discard. That
 dependency is outside prefixd's evidence. Operators must add unicast families
 to the speaker, separately from FlowSpec where the router requires it, and
-restrict unicast export to BLACKHOLE host routes. A stopped controller can leave
-a blackhole in place until (f) or an equivalent exists.
+restrict unicast export to BLACKHOLE host routes. Enforced detector blackholes
+depend on an upstream feature (the rustbgpd injection lease) and cannot ship
+before it. An unleased manual blackhole can outlive a stopped controller.
 
-## Open questions for the owner
+## Decisions recorded
 
-1. Should enforced detector-driven blackholes wait for (f) or another
-   controller-down remedy?
-2. Should manual blackholes require Admin? Bearer tokens currently map to
-   Operator.
-3. What should the default caps be? This ADR proposes a TTL cap of 600 seconds
-   and quotas of 10 per POP and 50 globally.
-4. Is the allowlist of caller-asserted `source` values acceptable as a routing
-   guard?
-5. Should (d) become a must-have before the first enforced release instead of
-   only before shared-speaker support?
+The owner decided the following on 2026-10-19:
+
+1. **Detector-driven enforced blackholes wait for the injection lease.**
+   Requirement (f) is a must-have for them, enforced by the
+   `SpeakerCapabilities.blackhole_lease` gate at enforced startup and on
+   playbook reload or save. Manual and dry-run blackholes may ship before it.
+2. **Manual blackholes require Admin.** Operator is not enough, so bearer
+   tokens, which map to Operator, cannot create one.
+3. **Default caps:** a TTL cap of 3600 seconds, and quotas of 10 per POP and 50
+   globally. The cap covers FastNetMon Community's default `ban_time` of 1900
+   seconds, because FastNetMon neither refreshes a ban nor bans a banned host
+   again. Slice 5 documents the requirement that `ban_time` stays at or below
+   the cap.
+4. **The `source` allowlist is accepted** as a routing guard alongside detector
+   credentials, not as authorization.
+5. **The owner tag (d) is not required before the first enforced release.** The
+   one-controller-per-speaker rule covers ownership. (d) remains a must-have
+   before shared-speaker support and is still requested upstream before the
+   freeze.
