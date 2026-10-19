@@ -1,4 +1,4 @@
-//! Regression tests for attack-vector inference in scripts/prefixd-fastnetmon.sh.
+//! Regression tests for scripts/prefixd-fastnetmon.sh: attack-vector inference and ban retry.
 //!
 //! The script maps FastNetMon's stdin details to a prefixd vector. Idle protocol
 //! lines ("outgoing udp traffic: 0 mbps") must not select a vector: they were
@@ -150,5 +150,85 @@ fn protocol_tokens_do_not_match_inside_words() {
         "audp_flood",
     ] {
         assert_eq!(detected_vector(details), "unknown", "details: {details}");
+    }
+}
+
+/// Run a `ban` against a curl stub that answers each attempt from `outcomes`
+/// (`refused` = connection error, otherwise an HTTP status). Returns whether the
+/// script succeeded and the event IDs it posted, one per attempt.
+fn ban_attempts(outcomes: &[&str]) -> (bool, Vec<String>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir(&bin_dir).expect("mkdir bin");
+    let outcomes_file = dir.path().join("outcomes");
+    fs::write(&outcomes_file, outcomes.join("\n") + "\n").expect("write outcomes");
+    let calls = dir.path().join("calls");
+    let stub = format!(
+        r#"#!/bin/bash
+for arg in "$@"; do
+    case "$arg" in *'"event_id"'*) printf '%s\n' "$(tr -d '\n' <<< "$arg")" >> '{calls}' ;; esac
+done
+n=$(wc -l < '{calls}')
+outcome=$(sed -n "${{n}}p" '{outcomes}')
+if [[ "$outcome" == refused ]]; then printf '\n000'; exit 7; fi
+printf '{{"status":"x"}}\n%s' "$outcome"
+"#,
+        calls = calls.display(),
+        outcomes = outcomes_file.display()
+    );
+    let curl_path = bin_dir.join("curl");
+    fs::write(&curl_path, stub).expect("write curl stub");
+    fs::set_permissions(&curl_path, fs::Permissions::from_mode(0o755)).expect("chmod curl stub");
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let status = Command::new("bash")
+        .arg(SCRIPT)
+        .args(["198.51.100.7", "incoming", "250000", "ban"])
+        .env("PATH", path)
+        .env("PREFIXD_API", "http://127.0.0.1:1")
+        .env("PREFIXD_OPERATOR", "test_operator")
+        .env("PREFIXD_LOG", dir.path().join("script.log"))
+        .env("BAN_POST_DELAY_SECONDS", "0")
+        .stdin(Stdio::null())
+        .status()
+        .expect("run script");
+    let event_ids = fs::read_to_string(&calls)
+        .expect("curl was never called")
+        .lines()
+        .map(|payload| {
+            let json: serde_json::Value = serde_json::from_str(payload).expect("payload JSON");
+            json["event_id"].as_str().expect("event_id").to_string()
+        })
+        .collect();
+    (status.success(), event_ids)
+}
+
+#[test]
+fn ban_retries_connection_errors_and_503_with_the_same_event_id() {
+    let (ok, ids) = ban_attempts(&["refused", "503", "202"]);
+    assert!(ok);
+    assert_eq!(ids.len(), 3);
+    assert!(
+        ids.iter().all(|id| id == &ids[0]),
+        "retries reuse the event ID"
+    );
+}
+
+#[test]
+fn ban_gives_up_after_the_configured_attempts() {
+    let (ok, ids) = ban_attempts(&["503", "503", "503", "202"]);
+    assert!(!ok);
+    assert_eq!(ids.len(), 3);
+}
+
+#[test]
+fn ban_does_not_retry_client_errors() {
+    for status in ["400", "401", "409", "422"] {
+        let (ok, ids) = ban_attempts(&[status, "202"]);
+        assert!(!ok, "{status}");
+        assert_eq!(ids.len(), 1, "{status} was retried");
     }
 }

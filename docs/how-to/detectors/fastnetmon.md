@@ -44,7 +44,20 @@ PREFIXD_LOG="/var/log/prefixd-fastnetmon.log"
 # Unban lookup retries to handle ban/unban race windows (optional)
 UNBAN_QUERY_RETRIES="5"
 UNBAN_QUERY_DELAY_SECONDS="1"
+
+# Ban delivery attempts on a connection error or 503 (optional)
+BAN_POST_ATTEMPTS="3"
+BAN_POST_DELAY_SECONDS="1"
 ```
+
+FastNetMon runs the script once per ban and never repeats it. The script
+therefore retries the same event, with the same `event_id`, when prefixd cannot
+be reached or answers `503` (a standby or draining controller). It stops after
+`BAN_POST_ATTEMPTS` attempts in total. It never retries a `4xx`: a `409` means
+that event ID already arrived. A `409` after a retried connection error usually
+means the first attempt reached prefixd. Point `PREFIXD_API` at the active
+controller, or at a load balancer that routes by `GET /v1/ready`; see
+[controller fence and rolling deploys](../upgrading.md#controller-fence-and-rolling-deploys).
 
 3. Configure FastNetMon to use the script. Edit `/etc/fastnetmon.conf`:
 
@@ -67,7 +80,8 @@ sudo systemctl restart fastnetmon
 1. FastNetMon detects attack on victim IP
 2. Calls script with args: `$1=IP $2=direction $3=pps $4=ban` and writes the attack details to its stdin
 3. Script generates a unique UUID `event_id` for each ban occurrence
-4. Sends `POST /v1/events` with `action: "ban"`
+4. Sends `POST /v1/events` with `action: "ban"`, retrying a connection error or
+   `503` up to `BAN_POST_ATTEMPTS` times with the same `event_id`
 5. prefixd evaluates playbook, creates mitigation, announces FlowSpec
 
 ### Unban Flow
@@ -128,6 +142,8 @@ tail -f /var/log/prefixd-fastnetmon.log
 ### Common issues
 
 1. **Connection refused**: Verify `PREFIXD_API` is reachable
+1. **503 Service Unavailable**: `PREFIXD_API` reaches a standby controller; route
+   it to the controller whose `GET /v1/ready` returns `200`
 2. **401 Unauthorized**: Check `PREFIXD_TOKEN` matches prefixd config
 3. **422 Unprocessable**: Victim IP not in prefixd inventory
 4. **No mitigation created**: Check playbooks match the vector

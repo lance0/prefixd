@@ -19,6 +19,8 @@ PREFIXD_OPERATOR="${PREFIXD_OPERATOR:-fastnetmon}"
 LOG_FILE="${PREFIXD_LOG:-/var/log/prefixd-fastnetmon.log}"
 UNBAN_QUERY_RETRIES="${UNBAN_QUERY_RETRIES:-5}"
 UNBAN_QUERY_DELAY_SECONDS="${UNBAN_QUERY_DELAY_SECONDS:-1}"
+BAN_POST_ATTEMPTS="${BAN_POST_ATTEMPTS:-3}"
+BAN_POST_DELAY_SECONDS="${BAN_POST_DELAY_SECONDS:-1}"
 
 # Args
 IP="${1:-}"
@@ -216,17 +218,30 @@ fi
 # Send to prefixd
 log "Sending $API_ACTION for $IP ($VECTOR, ${PPS} pps, event_id=$EVENT_ID)"
 
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$PREFIXD_API/v1/events" \
-    -H "Content-Type: application/json" \
-    "${AUTH_ARGS[@]}" \
-    -d "$PAYLOAD" 2>&1)
+# FastNetMon calls ban once. Retry the same event (same event_id) only when it
+# never reached prefixd or a standby or draining controller refused it with 503.
+# Any 4xx is final: 409 means this event ID already arrived.
+ATTEMPT=1
+while true; do
+    CURL_STATUS=0
+    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$PREFIXD_API/v1/events" \
+        -H "Content-Type: application/json" \
+        "${AUTH_ARGS[@]}" \
+        -d "$PAYLOAD" 2>&1) || CURL_STATUS=$?
 
-HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-BODY=$(echo "$RESPONSE" | head -n -1)
+    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+    BODY=$(echo "$RESPONSE" | head -n -1)
 
-if [[ "$HTTP_CODE" =~ ^2 ]]; then
-    log "SUCCESS ($HTTP_CODE): $BODY"
-else
-    log "ERROR ($HTTP_CODE): $BODY"
+    if [[ "$CURL_STATUS" -eq 0 && "$HTTP_CODE" =~ ^2 ]]; then
+        log "SUCCESS ($HTTP_CODE): $BODY"
+        exit 0
+    fi
+    if [[ ( "$CURL_STATUS" -ne 0 || "$HTTP_CODE" == "503" ) && "$ATTEMPT" -lt "$BAN_POST_ATTEMPTS" ]]; then
+        log "Ban for $IP not accepted (curl=$CURL_STATUS, http=$HTTP_CODE), attempt $ATTEMPT/$BAN_POST_ATTEMPTS; retrying in ${BAN_POST_DELAY_SECONDS}s"
+        sleep "$BAN_POST_DELAY_SECONDS"
+        ATTEMPT=$((ATTEMPT + 1))
+        continue
+    fi
+    log "ERROR ($HTTP_CODE, curl=$CURL_STATUS): $BODY"
     exit 1
-fi
+done
