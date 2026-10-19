@@ -5265,8 +5265,7 @@ async fn test_blackhole_dry_run_admission_persists_without_rpc() {
         pop: pop.clone(),
         match_criteria: prefixd::domain::MatchCriteria {
             dst_prefix: prefix.into(),
-            protocol: None,
-            dst_ports: vec![],
+            ..Default::default()
         },
         action_type: prefixd::domain::ActionType::Blackhole,
         action_params: prefixd::domain::ActionParams { rate_bps: None },

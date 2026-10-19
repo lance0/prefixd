@@ -627,7 +627,8 @@ configuration change affects only new blackholes.
 
 Blackhole guardrails are stricter than FlowSpec's and do not use the
 `guardrails` prefix bounds or the `timers` TTL bounds. A blackhole is an IPv4
-`/32` or IPv6 `/128` with no protocol, ports or rate. Its victim must be
+`/32` or IPv6 `/128` with no other match term (protocol, ports, fragment or
+packet length) and no rate. Its victim must be
 owned in inventory, even for a manual request, and must not be safelisted,
 unspecified, loopback, multicast, link-local, IPv4 broadcast, IPv4-mapped
 IPv6 or a configured next hop. The blackhole quotas are checked in the same
