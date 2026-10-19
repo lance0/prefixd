@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--adopt-legacy-speaker` and `--retire-dry-run-intent` now refuse while a
   controller for the POP holds the fence; stop it first. See
   [controller fence and rolling deploys](docs/how-to/upgrading.md#controller-fence-and-rolling-deploys).
+- With the rustbgpd backend, a `guardrails.max_ports` above 8, the encoder's
+  per-list limit, now fails configuration load at startup and names both
+  values. Before, rules over 8 ports were saved and then refused at
+  announcement. Lower `max_ports` to 8 or less before upgrading. Shipped
+  configurations use 8, and GoBGP is unaffected.
 
 ### Added
 

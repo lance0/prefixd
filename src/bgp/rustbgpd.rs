@@ -234,10 +234,7 @@ async fn connect_owner_socket(path: &std::path::Path) -> std::io::Result<tokio::
     Ok(stream)
 }
 
-/// Equality terms per port list this encoder emits. The `max_ports` guardrail
-/// defaults to the same value and refuses before persistence; raising it above
-/// this lets rules through that this encoder then refuses at announcement.
-const MAX_PORTS_PER_LIST: usize = 8;
+use super::RUSTBGPD_MAX_PORTS_PER_LIST as MAX_PORTS_PER_LIST;
 
 /// Components in strictly ascending type order; the daemon does not reorder them.
 fn encode_match(nlri: &FlowSpecNlri) -> Result<(i32, Vec<pb::FlowSpecComponent>)> {

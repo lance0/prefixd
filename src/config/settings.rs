@@ -300,6 +300,18 @@ pub struct GuardrailsConfig {
 }
 
 impl GuardrailsConfig {
+    /// A rustbgpd `max_ports` above the encoder's per-list cap would save intent
+    /// the encoder never announces. GoBGP has no per-list cap.
+    pub fn validate_for_backend(&self, backend: BgpMode) -> Result<()> {
+        let cap = crate::bgp::RUSTBGPD_MAX_PORTS_PER_LIST;
+        anyhow::ensure!(
+            backend != BgpMode::Rustbgpd || self.max_ports <= cap,
+            "guardrails.max_ports is {} but the rustbgpd backend encodes at most {cap} ports per list; set guardrails.max_ports to {cap} or less",
+            self.max_ports
+        );
+        Ok(())
+    }
+
     /// Reserved flags set to true; startup warns once for each.
     pub fn reserved_flags_set(&self) -> Vec<&'static str> {
         [
@@ -671,6 +683,9 @@ impl Settings {
         let deprecations = settings.deprecations(&content);
         settings.http.validate_auth_transport()?;
         settings.blackhole.validate()?;
+        settings
+            .guardrails
+            .validate_for_backend(settings.bgp.mode)?;
         let correlation_errors = settings.correlation.validate();
         if !correlation_errors.is_empty() {
             return Err(anyhow::anyhow!(
@@ -941,6 +956,34 @@ observability:
             assert!(!json.contains(leaf), "{key} must not round-trip: {json}");
         }
         assert!(load_yaml(MINIMAL_SETTINGS_YAML).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn rustbgpd_refuses_max_ports_above_the_encoder_cap_at_load() {
+        let shipped = include_str!("../../configs/prefixd.yaml");
+        assert_eq!(shipped.matches("max_ports: 8\n").count(), 1);
+        // The shipped rustbgpd config loads at the cap and is refused one above it.
+        load_yaml(shipped).unwrap();
+        let error = load_yaml(&shipped.replace("max_ports: 8\n", "max_ports: 9\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("guardrails.max_ports is 9")
+                && error.contains("encodes at most 8 ports per list"),
+            "{error}"
+        );
+        // GoBGP and the mock have no per-list cap.
+        let parse = |yaml: &str| crate::config::parse_yaml::<GuardrailsConfig>(yaml).unwrap();
+        for (backend, max_ports, accepted) in [
+            (BgpMode::Rustbgpd, 8, true),
+            (BgpMode::Rustbgpd, 9, false),
+            (BgpMode::Gobgp, 64, true),
+            (BgpMode::Sidecar, 64, true),
+            (BgpMode::Mock, 64, true),
+        ] {
+            let result = parse(&format!("max_ports: {max_ports}\n")).validate_for_backend(backend);
+            assert_eq!(result.is_ok(), accepted, "{backend:?} {max_ports}");
+        }
     }
 
     #[test]

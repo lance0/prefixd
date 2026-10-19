@@ -204,10 +204,10 @@ guardrails:
 `max_ports` applies to the destination-port list and the source-port list
 separately: a rule with eight of each passes the default. A list over the cap
 is refused, never truncated. Duplicate source ports count once. The rustbgpd
-encoder emits at most 8 ports per list, which is why the default is 8. Raising
-`max_ports` above 8 with the rustbgpd backend admits rules that the encoder then
-refuses at announcement, so intent is saved but not announced. GoBGP has no
-per-list cap.
+encoder emits at most 8 ports per list, which is why the default is 8. With
+`bgp.backend: rustbgpd`, a `max_ports` above 8 fails configuration load at
+startup, naming both values, rather than saving rules the encoder could never
+announce. GoBGP has no per-list cap, so its `max_ports` is not limited.
 
 Rules with a non-first fragment match (`fragment`) are refused unless
 `allow_fragment_match` is `true`, and rules with a packet-length match

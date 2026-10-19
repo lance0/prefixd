@@ -12,6 +12,11 @@ pub use proto::apipb;
 #[cfg(feature = "bgp-rustbgpd")]
 pub use rustbgpd_proto::rustbgpd_pb;
 
+/// Equality terms per port list the rustbgpd encoder emits. Settings refuse a
+/// rustbgpd `guardrails.max_ports` above it, so the guardrail never admits a
+/// rule this encoder would refuse at announcement. GoBGP has no per-list cap.
+pub const RUSTBGPD_MAX_PORTS_PER_LIST: usize = 8;
+
 #[cfg(feature = "bgp-rustbgpd")]
 mod rustbgpd;
 #[cfg(feature = "bgp-rustbgpd")]
