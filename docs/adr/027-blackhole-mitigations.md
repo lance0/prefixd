@@ -12,7 +12,8 @@ ADR is implemented yet. Extends
 Amended 2026-10-19: aligned with the rustbgpd injection lease contract,
 proposed upstream as rustbgpd ADR-0141. Leased injection uses new RPCs, a
 failed leased add never falls back to an unleased one, the owner is persisted
-per route, and the leased and unleased transition is decided below.
+per route, and the leased and unleased transition is decided below. A
+PostgreSQL advisory lock fences duplicate controllers.
 
 ## Date
 
@@ -347,7 +348,8 @@ nonzero `path_id` on a desired key or a family mismatch fail the whole read.
 
 This applies once the rustbgpd injection lease, requirement (d), ships as
 specified in rustbgpd ADR-0141. It is required for enforced detector
-blackholes.
+blackholes. The owner identity also keys the
+[controller fence](#controller-fence), which does not wait for the lease.
 
 - **Owner identity.** Each controller has one stable owner, derived from its
   POP and the UUID of its verified speaker target, and unchanged across
@@ -362,12 +364,13 @@ blackholes.
   when sanitizing or truncation makes their prefixes identical. Changing the
   POP or the speaker target changes the owner, so both follow the
   [upgrade guide](../how-to/upgrading.md#drained-target-transfer). Within one
-  database, a target belongs to exactly one POP, so two owners cannot collide.
-  A collision across databases means two controllers are configured with the
-  same POP against one speaker, which is a misconfiguration. Startup refuses
-  when it can detect one: the speaker holds routes under this owner that the
-  ledger neither desires nor is withdrawing. A generation change is not a
-  collision signal: a second process with the same owner joins the live
+  database, a target belongs to exactly one POP, so two owners cannot collide,
+  and the [controller fence](#controller-fence) allows one active process per
+  owner. A collision across databases means two controllers are configured
+  with the same POP against one speaker, which is a misconfiguration. Startup
+  refuses when it can detect one: the speaker holds routes under this owner
+  that the ledger neither desires nor is withdrawing. A generation change is
+  not a collision signal: a second process with the same owner joins the live
   generation rather than starting a new one, and a changed generation is
   handled as lost state below.
 - **Leased RPCs.** Leased injection uses `AddLeasedPath`, which wraps the
@@ -460,6 +463,73 @@ blackholes.
 - **FlowSpec.** Leasing FlowSpec rules too, through `AddLeasedFlowSpec`, would
   close the AGENTS.md gap that rules can persist if prefixd stops. That is a
   later decision and is outside every slice below.
+
+### Controller fence
+
+The lifecycle mutex is in-process, so it cannot stop a second controller
+process. Each controller therefore fences itself with a PostgreSQL session
+advisory lock keyed on its owner name (see
+[Owner and lease](#owner-and-lease)). The fence covers every speaker mutation,
+FlowSpec included, and does not depend on the lease or on blackholes being
+enabled. The owner name is derived as above in every deployment.
+
+- **Lock key.** A stable `i64`: the first 8 bytes, read big-endian, of
+  SHA-256 over the fixed tag `prefixd-controller-fence\0` followed by the
+  owner. The tag keeps the key away from other advisory-lock users. The fence
+  uses PostgreSQL's single 64-bit key form, which does not overlap the
+  two-integer key space of the existing quota lock in `admit_mitigation`.
+- **Acquisition.** After target registration and before any speaker
+  connection, the controller calls `pg_try_advisory_lock(key)`. It never runs
+  active without the lock. When the database is shared, exactly one controller
+  per owner is active. A clean restart needs no lease wait: the old process's
+  session ends, PostgreSQL releases the lock, and the new process takes it and
+  announces at once. In a rolling deploy, the overlapping process waits in
+  standby instead of competing. A crashed host holds the lock until
+  PostgreSQL ends its session, so the deployment sets TCP keepalives on the
+  fence connection or the server to bound that delay.
+- **Dedicated connection.** The lock is held on one connection opened outside
+  the sqlx pool, because the pool recycles connections and a session lock
+  would follow the recycled session. Transaction-mode poolers such as
+  PgBouncer transaction pooling break session advisory locks. The fence
+  connection must be direct or use a session-mode pooler, and the deployment
+  documentation must say so.
+- **Standby.** Without the lock, the controller runs no scheduler, expiry,
+  reconciliation, announcement, withdrawal or lease renewal, and refuses
+  mutation requests with `503`. Public liveness stays up, and authenticated
+  operational health reports `standby` with a fence-state metric. Standby
+  retries `pg_try_advisory_lock` every 5 seconds rather than blocking in
+  `pg_advisory_lock`, so it stays observable and responsive to shutdown.
+- **Losing the lock.** A failed fence check, a dropped fence connection or a
+  database restart means the lock may be gone. The controller stops starting
+  speaker mutations at once, returns to standby and polls to reacquire on a
+  new connection. An RPC already in flight runs to its own deadline. Its
+  result is recorded only if the database write succeeds; otherwise the
+  announcement stays unconfirmed, or the withdrawal stays pending with its
+  original rule, actor, reason and operation ID. Whichever process next holds
+  the lock reconciles that durable intent; an ambiguous delete still never
+  becomes an announcement. The fence connection runs a health query every 2
+  seconds with a 2-second timeout. A process that lost its lock without
+  seeing it can therefore keep issuing RPCs for up to about 4 seconds plus one
+  RPC deadline, overlapping a new holder under the same owner. That window is
+  well under the 60-second default lease, and the overlap is the existing
+  flapping risk, bounded in time. The daemon's ownership checks do not
+  separate the two processes, because they share an owner.
+- **Lease interaction.** A restarted process that takes the lock adopts the
+  existing lease under the same owner. It learns the generation from
+  `ListInjectionLeases(owner)` or its first leased add, so restarts and
+  deploys have no lease-length gap. Standby never renews, so a lease outlives
+  a fenced-out process only until its deadline.
+- **Startup check stays.** Startup still refuses when the speaker holds
+  routes under this owner that the ledger neither desires nor is withdrawing.
+  It is the only check for two controllers with separate databases, which the
+  lock cannot see.
+- **Rejected:** a holder or takeover check in rustbgpd. A holder check would
+  block a restarted controller until the old lease runs out, up to the lease
+  length of no new mitigation on every restart or deploy. Fixing that needs a
+  takeover option, which brings the duplicate back. A lease guards against a
+  dead controller and cannot choose between two live ones. A "last renewing
+  credential" field in `ListInjectionLeases` is not requested now; it remains
+  possible future diagnostics.
 
 ## rustbgpd requirements before the v1.0 freeze
 
@@ -556,14 +626,20 @@ that should land before the freeze.
   independently of BGP health. Lease expiry is daemon cleanup, not proof of
   router withdrawal.
 - **Split brain.** The lifecycle mutex is in-process, and target registration is
-  not a lease. Without owners, two controllers on one speaker cannot
+  not a lease. Two controllers sharing a database are fenced: only the holder
+  of the owner's advisory lock mutates the speaker (see
+  [Controller fence](#controller-fence)), apart from the bounded window after
+  an unnoticed lock loss. With separate databases the lock cannot see the
+  other process. Without owners, two controllers on one speaker cannot
   distinguish each other's routes. Upserts can overwrite, and one controller's
   withdrawal can delete the other's same-prefix route, which the other then
   re-injects. The result is flapping, not safety. Requirement (d) stops
   distinct owners from deleting or replacing each other's routes by mistake
   (ADR-0141 §3). The owner is a label, not a security boundary (ADR-0141
-  §8). Two controllers deriving the same owner are a misconfiguration that
-  startup refuses when it can detect one. Shared speakers stay unsupported
+  §8). Two controllers with separate databases deriving the same owner are a
+  misconfiguration that only the startup check catches, and only partly: it
+  sees the other controller's routes once they exist, not a second controller
+  that has not yet added any. Shared speakers stay unsupported
   until that work is qualified, and the
   [upgrade guide](../how-to/upgrading.md) procedures still apply.
 
@@ -571,46 +647,67 @@ that should land before the freeze.
 
 Each slice is a separate draft PR that passes `just gate`.
 
-1. **Kind-aware identity and schema, without behavior.** Add the
+1. **Controller fence.** Add the owner derivation, the advisory-lock key,
+   the dedicated fence connection, acquisition before any speaker connection,
+   standby, the fence health check, lock loss and reacquisition, and the
+   health and metric surfaces (see [Controller fence](#controller-fence)). It
+   protects FlowSpec today, depends on no other slice and no upstream
+   release, and ships first. Slices 2 to 7 do not depend on it. Slice 8
+   requires it, because lease adoption assumes one active process per owner.
+   The deployment documentation states that the fence connection needs a
+   direct or session-mode connection. *Accept:*
+   - Two processes against one PostgreSQL instance: exactly one is active and
+     the other reports standby, and the fake records no mutation RPC from the
+     standby.
+   - Killing the active process lets the standby take over within the poll
+     interval.
+   - Dropping the fence connection forces standby, with no further mutation
+     RPCs after the loss is noticed.
+   - A unit test pins one owner derivation, covering a POP name that needs
+     sanitizing and checking that every derived owner is at most 64 bytes of
+     `[A-Za-z0-9._-]`. A unit test pins the lock key derivation.
+   - Negative control: with the lock acquisition removed, the two-process test
+     shows both processes sending mutation RPCs.
+2. **Kind-aware identity and schema, without behavior.** Add the
    `ActionType::Blackhole` parse path, `MitigationRoute`, kind-discriminated
    hashes, migration 016, and fail-closed FlowSpec paths. *Accept:* existing
    FlowSpec hashes are unchanged (golden test). Migration replay on a populated
    database keeps every request `flowspec`. A blackhole and an any-protocol
    FlowSpec rule on one host have distinct keys. A blackhole row reaching a
    FlowSpec path errors with no RPC.
-2. **Speaker capability and rustbgpd adapter.** Add the trait, mock, rustbgpd
+3. **Speaker capability and rustbgpd adapter.** Add the trait, mock, rustbgpd
    implementation and capability JSON, with `blackhole_lease` reported false
-   until slice 7. GoBGP returns `None`. Manual blackholes need no lease and ship
-   through slices 1 to 6. *Accept:*
+   until slice 8. GoBGP returns `None`. Manual blackholes need no lease and ship
+   through slices 2 to 7. *Accept:*
    fake-RPC tests show paging to completion, `ABORTED` mid-walk as an error, an
    empty view as success, unexpected attributes as an error, delete
    `NOT_FOUND` as absent, and other codes as errors. Released-daemon tests
    through `scripts/test-rustbgpd.sh` cover inject, read, delete and loss on
    daemon restart for both families.
-3. **Configuration and guardrails for manual blackholes.** Add the
+4. **Configuration and guardrails for manual blackholes.** Add the
    `blackhole` settings (TTL cap 3600, quotas 10 per POP and 50 globally),
    startup validation, victim checks, quotas inside `admit_mitigation` and the
    TTL cap. There is no playbook path yet. *Accept:* a rejection test for each
    guardrail with a negative control. A concurrent-admission PostgreSQL test
    cannot exceed the blackhole quota. Dry run persists and sends no RPC.
-4. **Lifecycle and reconciliation.** Add announce with the safelist recheck,
+5. **Lifecycle and reconciliation.** Add announce with the safelist recheck,
    kind-aware withdrawal and expiry, repair, unknown-route reporting and the
    safelist withdrawal. *Accept:* tests mirroring the FlowSpec reconciliation
    tests show that an ambiguous delete stays pending and is never re-announced,
    a failed or partial read causes no repair, a foreign POP and unknown routes
    are untouched, an already safelisted victim is withdrawn rather than
    repaired, and a pre-existing unowned local route returns `409`.
-5. **Operator surfaces.** Update Admin-only manual creation with
+6. **Operator surfaces.** Update Admin-only manual creation with
    confirmation, the API and OpenAPI, WebSocket, the frontend (type, badge,
    typed confirmation), CLI display, metrics and references. Update the
    FastNetMon guide to state that `ban_time` must be at or below the playbook
    step TTL, which is at or below the blackhole TTL cap, and to explain the
-   `unban_only_if_attack_finished` gap, for use once slice 7 enables detector
+   `unban_only_if_attack_finished` gap, for use once slice 8 enables detector
    blackholes. *Accept:* a confirmation mismatch
    returns `400` with no row or audit entry. Operator and bearer-token callers
    get `403`. The frontend `bun run test` and `bun run build` pass. Docs links
    resolve.
-6. **FRR interop qualification.** Extend the `lab/interop/` containerlab
+7. **FRR interop qualification.** Extend the `lab/interop/` containerlab
    harness with an FRR IPv4/IPv6 unicast session and an import route-map that
    rewrites BLACKHOLE routes to a discard next hop. *Accept:* a dated receipt
    showing FRR receives both host routes with the expected communities and
@@ -619,11 +716,11 @@ Each slice is a separate draft PR that passes `just gate`.
    unleased manual blackhole, persisting after a controller stop, recorded as
    the negative case. SR Linux has no FlowSpec but could serve as an optional
    second unicast receiver. This qualifies FRR only.
-7. **Detector blackholes with owner and lease.** Add
+8. **Detector blackholes with owner and lease.** Add
    `PlaybookAction::Blackhole`, the source allowlist and the extension cap.
    Also add the `blackhole.leased` and `blackhole.lease_seconds` settings,
    the enforced-mode lease gate at startup and on playbook reload or save, the
-   owner identity and collision checks, the per-route owner in `rule_json`,
+   owner collision checks, the per-route owner in `rule_json`,
    `AddLeasedPath` with no unleased fallback, the independent renewal task,
    lease health and metrics, restart adoption, the full re-add on a lost
    lease, and owner-filtered read-back. The gate and plumbing can merge
@@ -642,16 +739,13 @@ Each slice is a separate draft PR that passes `just gate`.
      intent, never a reported success.
    - Every delete passes the owner recorded in the request's `rule_json`, and
      none sets `override_owner`.
-   - A unit test pins one owner derivation and covers a POP name that needs
-     sanitizing, and every derived owner is at most 64 bytes of
-     `[A-Za-z0-9._-]`.
    - `blackhole.lease_seconds` outside 5..=3600 is refused at startup, and
      every leased add and renewal in the fake carries the configured value.
    - Rows of other owners and rows without an owner are untouched.
    - A released-daemon test removes the routes once renewals stop.
    - An FRR receipt shows a killed controller's route disappearing at the
      router within the lease time.
-8. **Later, each with its own decision:** GoBGP blackhole, next-hop-self once
+9. **Later, each with its own decision:** GoBGP blackhole, next-hop-self once
    (c) ships, leasing FlowSpec rules, shared-speaker support on owner evidence,
    and FlowSpec-to-blackhole escalation.
 
@@ -683,7 +777,7 @@ The owner decided the following on 2026-10-19:
 3. **Default caps:** a TTL cap of 3600 seconds, and quotas of 10 per POP and 50
    globally. The cap covers FastNetMon Community's default `ban_time` of 1900
    seconds, because FastNetMon neither refreshes a ban nor bans a banned host
-   again. Slice 5 documents the requirement that `ban_time` stays at or below
+   again. Slice 6 documents the requirement that `ban_time` stays at or below
    the cap.
 4. **The `source` allowlist is accepted** as a routing guard alongside detector
    credentials, not as authorization.
@@ -693,3 +787,13 @@ The owner decided the following on 2026-10-19:
    blackholes an owner as well. Owner evidence remains a must-have before
    shared-speaker support, and the combined lease and owner work is requested
    upstream before the freeze.
+6. **prefixd fences duplicate controllers itself.** Each controller holds a
+   PostgreSQL session advisory lock keyed on its owner before it mutates the
+   speaker, and stays in standby without it; the fence covers FlowSpec too.
+   rustbgpd gets no holder or takeover check: a holder check would block every
+   restart or deploy for up to one lease, and a takeover option would
+   reintroduce the duplicate. A lease guards against a dead controller and
+   cannot choose between two live ones. The startup check for unexplained
+   routes under this owner stays, for controllers with separate databases. A
+   "last renewing credential" field in `ListInjectionLeases` is possible
+   future diagnostics, not a current request.
