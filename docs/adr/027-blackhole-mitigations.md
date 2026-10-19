@@ -98,11 +98,12 @@ communities in the `blackhole` settings, for example a provider's own RTBH
 trigger. Configuration is per controller, so each POP sets its own. Per-peer
 community or next-hop differences belong to speaker export policy, because
 ADR 025 leaves peer and routing policy to the daemon. prefixd rejects
-`NO_EXPORT` and `NO_ADVERTISE` in its configuration. The rustbgpd configuration
-reference states that a route carrying `NO_EXPORT` is suppressed toward eBGP
-neighbors with `interpret_rfc1997` (on by default), and rustbgpd's RFC 7999 ADR
-makes `NO_ADVERTISE` pre-export ineligibility for unicast. Either community set
-at injection could keep the route from reaching the router. Scoping goes
+`NO_EXPORT`, `NO_EXPORT_SUBCONFED` and `NO_ADVERTISE` in its configuration. The
+rustbgpd configuration reference states that a route carrying `NO_EXPORT` or
+`NO_EXPORT_SUBCONFED` is suppressed toward eBGP neighbors with
+`interpret_rfc1997` (on by default), and rustbgpd's RFC 7999 ADR makes
+`NO_ADVERTISE` pre-export ineligibility for unicast. Any of these communities
+set at injection could keep the route from reaching the router. Scoping goes
 in the receiving router's import policy, as RFC 7999 recommends, or in speaker
 export policy, which rustbgpd documents as delivering an export-added
 `NO_EXPORT`. *Alternatives:* a per-peer community map in prefixd (rejected:

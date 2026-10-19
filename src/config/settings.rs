@@ -457,8 +457,11 @@ impl Default for BlackholeConfig {
 }
 
 /// RFC 1997 communities that can stop the route from reaching the router.
-const REJECTED_BLACKHOLE_COMMUNITIES: [(u32, &str); 2] =
-    [(0xFFFF_FF01, "NO_EXPORT"), (0xFFFF_FF02, "NO_ADVERTISE")];
+const REJECTED_BLACKHOLE_COMMUNITIES: [(u32, &str); 3] = [
+    (0xFFFF_FF01, "NO_EXPORT"),
+    (0xFFFF_FF02, "NO_ADVERTISE"),
+    (0xFFFF_FF03, "NO_EXPORT_SUBCONFED"),
+];
 
 impl BlackholeConfig {
     /// Configured standard communities; BLACKHOLE is added by `BlackholeRoute`.
@@ -1079,6 +1082,16 @@ observability:
                 "'65535:65282'",
                 "must not include NO_ADVERTISE",
             ),
+            // rustbgpd suppresses NO_EXPORT_SUBCONFED toward eBGP exactly like
+            // NO_EXPORT (`no_export_export_suppressed` in its
+            // crates/rib/src/manager/distribution/mod.rs, pinned by
+            // `no_export_predicate_pins`), so it would also keep the route from
+            // reaching an eBGP-facing router.
+            (
+                "'64496:666'",
+                "'65535:65283'",
+                "must not include NO_EXPORT_SUBCONFED",
+            ),
             ("'64496:666'", "'65536:1'", "communities entry"),
             ("'64496:666'", "'64496:666:1'", "communities entry"),
             ("'64496:666'", "'64496'", "communities entry"),
@@ -1109,6 +1122,17 @@ observability:
                 .to_string();
             assert!(error.contains(expected), "{to}: {error}");
         }
+        // Control: the refusal matches the exact well-known value, not its low half.
+        let config = load_yaml(&valid.replacen("'64496:666'", "'64496:65283'", 1))
+            .unwrap()
+            .0
+            .blackhole;
+        assert!(
+            config
+                .parsed_communities()
+                .unwrap()
+                .contains(&((64496 << 16) | 65283))
+        );
         // Enablement needs a next hop; with one family configured it loads.
         let neither = valid
             .replacen("  next_hop_ipv4: 192.0.2.66\n", "", 1)

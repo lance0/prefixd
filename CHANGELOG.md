@@ -19,8 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `communities`, `large_communities`, `max_ttl_seconds` (default 3600),
   `max_active_per_pop` (default 10) and `max_active_global` (default 50).
   Every key is validated at load. Wrong-family or non-unicast next hops,
-  malformed communities, `NO_EXPORT`, `NO_ADVERTISE` and unknown keys are
-  refused. Startup refuses `enabled: true` when the speaker backend lacks the
+  malformed communities, `NO_EXPORT`, `NO_EXPORT_SUBCONFED`, `NO_ADVERTISE`
+  and unknown keys are refused. Startup refuses `enabled: true` when the speaker backend lacks the
   blackhole capability (GoBGP) or the safelist is empty, in dry-run and
   enforced modes. No API, playbook or detector path creates a blackhole yet,
   so the block changes no behavior; omitting it keeps every existing

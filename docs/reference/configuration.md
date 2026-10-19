@@ -613,7 +613,7 @@ blackhole:
 | `enabled` | `false` | Startup also refuses it without the speaker's blackhole capability or with an empty safelist, in dry-run and enforced modes |
 | `next_hop_ipv4` | unset | An IPv4 nonzero unicast address |
 | `next_hop_ipv6` | unset | An IPv6 nonzero unicast address |
-| `communities` | `[]` | `ASN:value`; `65535:65281` (`NO_EXPORT`) and `65535:65282` (`NO_ADVERTISE`) are refused because they can stop the route reaching the router |
+| `communities` | `[]` | `ASN:value`; `65535:65281` (`NO_EXPORT`), `65535:65282` (`NO_ADVERTISE`) and `65535:65283` (`NO_EXPORT_SUBCONFED`) are refused because they can stop the route reaching the router |
 | `large_communities` | `[]` | Three colon-separated 32-bit values |
 | `max_ttl_seconds` | `3600` | Nonzero |
 | `max_active_per_pop` | `10` | Counted at the configured `pop` |
