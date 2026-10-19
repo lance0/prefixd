@@ -101,7 +101,7 @@ class ConfigSeeding(unittest.TestCase):
         paths = ["/etc/prefixd", "/data", "/run/rustbgpd"]
         mounts = [
             arg
-            for volume, path in zip(volumes, paths)
+            for volume, path in zip(volumes, paths, strict=True)
             for arg in ("--mount", f"type=volume,source={volume},target={path},volume-nocopy")
         ]
         cpuset = os.environ.get("PREFIXD_TEST_CPUSET")

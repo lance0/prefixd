@@ -113,7 +113,7 @@ def tag_info(tag: str, tags: list[str]) -> tuple[str, bool]:
         if f and f.group(4) is None
     )
     older = [f for f in finals if f < base]
-    previous = "v%d.%d.%d" % older[-1] if older else ""
+    previous = "v{}.{}.{}".format(*older[-1]) if older else ""
     latest = m.group(4) is None and all(f <= base for f in finals)
     return previous, latest
 

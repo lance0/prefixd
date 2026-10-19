@@ -84,7 +84,7 @@ class OracleTests(unittest.TestCase):
     def test_missing_or_extra_rule_is_a_diff(self):
         self.assertNotEqual(ordered(EXPECTED[:1]), observed())
         self.assertNotEqual(
-            ordered(EXPECTED + [rule("ipv4", "203.0.113.30/32", 17, 123, 625_000)]), observed()
+            ordered([*EXPECTED, rule("ipv4", "203.0.113.30/32", 17, 123, 625_000)]), observed()
         )
 
     def test_inconsistent_frr_views_are_rejected(self):

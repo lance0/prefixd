@@ -134,7 +134,12 @@ class Lab:
             status, text = error.code, error.read().decode()
         self.log(f"{method} {path} {json.dumps(body) if body is not None else ''} -> {status}")
         assert status in expect, (method, path, status, text)
-        return json.loads(text) if text else None
+        # Every endpoint the lab calls answers with a JSON object; callers index it.
+        reply = json.loads(text) if text else None
+        assert isinstance(reply, dict), (
+            f"{method} {path} -> {status}: expected a JSON object, got {text!r}"
+        )
+        return reply
 
     def metric(self, name):
         with urllib.request.urlopen(self.args.api.rstrip("/") + "/metrics", timeout=10) as response:

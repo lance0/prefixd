@@ -33,7 +33,7 @@ from flowspec_frr import SPEAKER_ADDRESS, Lab
 # prefixd's frozen route: BLACKHOLE plus the lab's configured community.
 COMMUNITIES = ["65010:666", "65535:666"]
 # What FRR 10.7.1 holds: it adds NO_EXPORT on receipt of BLACKHOLE (RFC 7999 3.2).
-FRR_COMMUNITIES = COMMUNITIES + ["noExport"]
+FRR_COMMUNITIES = [*COMMUNITIES, "noExport"]
 NEXT_HOPS = {"ipv4": "192.0.2.66", "ipv6": "2001:db8:ffff::66"}
 ROUTE_MAPS = {"ipv4": "RTBH-IN-V4", "ipv6": "RTBH-IN-V6"}
 CONTROLLER_START = (
