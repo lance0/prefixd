@@ -2434,6 +2434,7 @@ mod tests {
                     action_type: ActionType::Police,
                     action_params: ActionParams {
                         rate_bps: Some(1_000_000),
+                        ..Default::default()
                     },
                     ttl_seconds: 60,
                     reason: "test".into(),

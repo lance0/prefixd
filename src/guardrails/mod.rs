@@ -312,7 +312,7 @@ mod tests {
             pop: "test".into(),
             match_criteria,
             action_type: ActionType::Discard,
-            action_params: ActionParams { rate_bps: None },
+            action_params: ActionParams::default(),
             ttl_seconds: 60,
             reason: "amplification guardrails".into(),
         }
