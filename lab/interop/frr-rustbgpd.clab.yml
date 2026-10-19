@@ -1,4 +1,5 @@
-# prefixd -> rustbgpd -> FRR FlowSpec interop lab (CI and `just interop-frr`).
+# prefixd -> rustbgpd -> FRR interop lab: FlowSpec (CI and `just interop-frr`)
+# and blackhole host routes over unicast (`just interop-frr-blackhole`).
 #
 # Layout follows rustbgpd's M22 FlowSpec lab (tests/interop/m22-flowspec-frr):
 # the speaker is 10.0.0.1 and FRR 10.0.0.2 on one link. The postgres node owns
@@ -13,6 +14,9 @@ mgmt:
   ipv4-subnet: 172.31.231.0/24
 
 topology:
+  # run-frr.sh sets this from its own CPU affinity, so `taskset` pins the lab.
+  defaults:
+    cpu-set: ${PREFIXD_INTEROP_CPU_SET}
   nodes:
     postgres:
       kind: linux

@@ -19,7 +19,8 @@ prefixd ── loopback gRPC ── speaker (AS 65010, 10.0.0.1) ── eBGP ─
 | rustbgpd | `interop/frr-rustbgpd.clab.yml` | `ghcr.io/lance0/rustbgpd:0.78.0`, digest-pinned |
 | GoBGP | `interop/frr-gobgp.clab.yml` | `jauderho/gobgp` digest that CI pins as 4.10.0 |
 
-The speaker negotiates only IPv4 and IPv6 FlowSpec with FRR. After each step,
+Both speakers negotiate IPv4 and IPv6 FlowSpec with FRR; rustbgpd also
+negotiates IPv4 and IPv6 unicast for the blackhole scenario below. After each step,
 `interop/flowspec_frr.py` waits up to 60 s for FRR's IPv4 and IPv6 tables to
 hold exactly the expected rules. It reads `show bgp <family> flowspec json`
 and `... detail json`. A rule matches on destination, protocol, destination
@@ -66,6 +67,52 @@ not program a dataplane here. Recorded results are in the
 [vendor matrix](../docs/reference/vendors.md#frr--verified-control-plane).
 The lab does not touch the Compose stack or other labs. It uses its own lab
 names and the management subnets 172.31.231.0/24 and 172.31.232.0/24.
+
+### Blackhole scenario (rustbgpd)
+
+`just interop-frr-blackhole` runs `run-frr.sh rustbgpd blackhole`, which
+qualifies [ADR 027](../docs/adr/027-blackhole-mitigations.md) host routes at
+FRR. The same topology carries them over IPv4 and IPv6 unicast. FRR's import
+route-maps `RTBH-IN-V4` and `RTBH-IN-V6` accept only routes carrying BLACKHOLE
+(`65535:666`), rewrite the next hop to 192.0.2.1 or 2001:db8:ffff::1, and
+static `blackhole` routes for those addresses make zebra install the host
+route as discard. prefixd's own configured next hops (192.0.2.66 and
+2001:db8:ffff::66) do not resolve at FRR, so without the route-map nothing is
+installed as discard.
+
+`interop/blackhole_frr.py` creates an Admin with `prefixdctl`, logs in and
+creates each blackhole through `POST /v1/mitigations`. For every watched
+prefix it reads `show bgp <afi> unicast <prefix> json`, `show ip[v6] route
+<prefix> json` and the FRR container's `ip -j route show exact <prefix>`. A
+prefix is *discard* when FRR holds one valid best path from the speaker with
+exactly `65010:666` and `65535:666`, zebra has selected and installed it with
+only blackhole FIB next hops, and the kernel route has type `blackhole`. It is
+*absent* when none of the three views has it, and *stale* when it is discard
+but FRR holds the path only as a Graceful Restart helper. FRR adds `no-export`
+to every route carrying BLACKHOLE (RFC 7999 section 3.2), so the oracle expects
+it at FRR but not in prefixd's response. Over the IPv4 session rustbgpd sends
+IPv6 unicast only because the lab sets `local_ipv6_nexthop`; without it the
+IPv6 routes are suppressed. The steps are:
+
+1. Baseline and negative control: the victims and two never-announced host
+   routes are absent.
+2. IPv4 and IPv6 blackholes for 203.0.113.50 and 2001:db8:113::50 become discard.
+3. Negative control: unbinding both route-maps leaves the routes received but
+   not discard. Rebinding restores discard.
+4. Speaker restart: while the speaker is stopped FRR keeps both routes as
+   stale discard. After the speaker starts, the step records each state
+   change until prefixd repair restores both as discard, and the repairs
+   counter rises by at least two.
+5. Operator withdrawal removes both routes.
+6. A 15 s TTL blackhole per family appears, then expires and is removed.
+7. Negative case: a 20 s blackhole per family stays discard at FRR for 30 s past
+   its expiry while prefixd is stopped and the speaker is up. Manual blackholes
+   are unleased, so nothing expires them without the controller. Restarting
+   prefixd expires and removes them.
+
+The receipt lands in `target/interop/frr-rustbgpd-blackhole-<UTC stamp>/`, with
+raw BGP, zebra and kernel JSON per prefix under `frr/`. It is control-plane and
+FIB evidence inside the FRR container; no packets are forwarded.
 
 ## Nokia
 

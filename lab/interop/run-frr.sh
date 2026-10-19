@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
-# Deploy, drive and destroy the prefixd -> speaker -> FRR FlowSpec interop lab.
+# Deploy, drive and destroy the prefixd -> speaker -> FRR interop lab.
 #
-#   lab/interop/run-frr.sh rustbgpd|gobgp
+#   lab/interop/run-frr.sh rustbgpd|gobgp [flowspec|blackhole]
+#
+# The default scenario is FlowSpec (flowspec_frr.py). The blackhole scenario
+# (blackhole_frr.py, rustbgpd only) qualifies ADR 027 host routes at FRR.
 #
 # Needs Docker, containerlab and python3, and an image tagged prefixd:interop
 # (`just interop-frr` builds it). CLAB selects the containerlab command; CI uses
 # "sudo containerlab". The dated receipt lands in target/interop/ unless
-# PREFIXD_INTEROP_RECEIPTS names another directory.
+# PREFIXD_INTEROP_RECEIPTS names another directory. Lab containers are pinned to
+# PREFIXD_INTEROP_CPU_SET, which defaults to this script's own CPU affinity.
 #
 # Lifecycle (destroy, pre-pull with retry, deploy, test, always destroy) is
 # adapted from rustbgpd's .github/actions/run-interop-test, without its retry:
 # a flaky attempt here should stay visible.
 set -euo pipefail
 
-speaker="${1:?usage: run-frr.sh rustbgpd|gobgp}"
+speaker="${1:?usage: run-frr.sh rustbgpd|gobgp [flowspec|blackhole]}"
+scenario="${2:-flowspec}"
 case "$speaker" in rustbgpd | gobgp) ;; *) echo "unknown speaker: $speaker" >&2; exit 2 ;; esac
+case "$speaker/$scenario" in */flowspec | rustbgpd/blackhole) ;;
+    *) echo "unsupported scenario for $speaker: $scenario" >&2; exit 2 ;; esac
 
 cd "$(dirname "$0")/../.."
 clab="${CLAB:-containerlab}"
@@ -22,7 +29,10 @@ lab="prefixd-frr-${speaker}"
 topology="lab/interop/frr-${speaker}.clab.yml"
 run="lab/interop/.run/${lab}"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-receipt="${PREFIXD_INTEROP_RECEIPTS:-target/interop}/frr-${speaker}-${stamp}"
+suffix="${scenario#flowspec}"
+receipt="${PREFIXD_INTEROP_RECEIPTS:-target/interop}/frr-${speaker}${suffix:+-$suffix}-${stamp}"
+PREFIXD_INTEROP_CPU_SET="${PREFIXD_INTEROP_CPU_SET:-$(taskset -pc $$ | sed 's/.*: //')}"
+export PREFIXD_INTEROP_CPU_SET
 node() { echo "clab-${lab}-$1"; }
 
 docker image inspect prefixd:interop >/dev/null \
@@ -45,7 +55,7 @@ finish() {
     destroy
     rm -rf "$run"
     # The receipt is uploaded from CI: refuse it if any per-run secret leaked.
-    if grep -rqF -e "$api_token" -e "$speaker_token" -e "$db_password" "$receipt"; then
+    if grep -rqF -e "$api_token" -e "$speaker_token" -e "$db_password" -e "$admin_password" "$receipt"; then
         echo "a lab secret reached the receipt; deleting it" >&2
         rm -rf "$receipt"
         status=1
@@ -68,13 +78,16 @@ secret() { python3 -c 'import secrets; print(secrets.token_hex(32))'; }
 db_password="$(secret)"
 api_token="$(secret)"
 speaker_token="$(secret)"
+admin_password="$(secret)"
 printf 'POSTGRES_PASSWORD=%s\n' "$db_password" >"$run/postgres.env"
 {
     printf 'DATABASE_URL=postgres://prefixd:%s@127.0.0.1:5432/prefixd\n' "$db_password"
     printf 'PREFIXD_API_TOKEN=%s\n' "$api_token"
     printf 'PREFIXD_RUSTBGPD_TOKEN=%s\n' "$speaker_token"
+    printf 'PREFIXD_LAB_ADMIN_PASSWORD=%s\n' "$admin_password"
 } >"$run/prefixd.env"
 printf '%s\n' "$api_token" >"$run/api.token"
+printf '%s\n' "$admin_password" >"$run/admin.password"
 # The released rustbgpd image runs as UID 999 and must read its token file.
 printf '%s\n' "$speaker_token" >"$run/rustbgpd.token"
 chmod 0644 "$run/rustbgpd.token"
@@ -97,13 +110,18 @@ for _ in $(seq 60); do
     docker exec "$(node postgres)" pg_isready -q -h 127.0.0.1 -U prefixd && break
     sleep 1
 done
-docker exec -d "$(node controller)" sh -c 'exec prefixd --config /etc/prefixd >/tmp/prefixd.log 2>&1'
+# The blackhole scenario stops and restarts prefixd through this PID file.
+docker exec -d "$(node controller)" sh -c 'echo $$ >/tmp/prefixd.pid; exec prefixd --config /etc/prefixd >>/tmp/prefixd.log 2>&1'
 
-python3 -I lab/interop/flowspec_frr.py \
+extra=()
+[ "$scenario" = blackhole ] \
+    && extra=(--controller "$(node controller)" --admin-password-file "$run/admin.password")
+python3 -I "lab/interop/${scenario}_frr.py" \
     --speaker "$speaker" \
     --api "http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(node postgres)"):8080" \
     --token-file "$run/api.token" \
     --frr "$(node frr)" \
     --speaker-container "$(node speaker)" \
     --topology "$topology" \
-    --receipt "$receipt"
+    --receipt "$receipt" \
+    "${extra[@]}"

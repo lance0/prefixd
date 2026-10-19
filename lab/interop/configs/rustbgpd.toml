@@ -1,6 +1,7 @@
 # Interop lab speaker, adapted from configs/rustbgpd.toml. prefixd shares this
 # network namespace and uses the loopback TCP listener with a per-run bearer
-# token; the peer is the FRR receiver on the lab link.
+# token; the peer is the FRR receiver on the lab link. Unicast carries prefixd's
+# blackhole host routes (ADR 027).
 config_epoch = 2
 
 [global]
@@ -42,5 +43,8 @@ export_chain = ["distribute-mitigation"]
 address = "10.0.0.2"
 remote_asn = 65002
 description = "frr-interop"
-families = ["ipv4_flowspec", "ipv6_flowspec"]
+families = ["ipv4_flowspec", "ipv6_flowspec", "ipv4_unicast", "ipv6_unicast"]
+# Over IPv4 transport rustbgpd suppresses IPv6 unicast toward eBGP peers unless
+# this is set. FRR's import route-map replaces it with its discard next hop.
+local_ipv6_nexthop = "2001:db8:0:1::1"
 hold_time = 30

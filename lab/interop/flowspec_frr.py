@@ -89,11 +89,16 @@ def diff(expected, observed):
 
 
 class Lab:
+    TITLE = "FlowSpec interop"
+    SCOPE = "control-plane receipt of prefixd intent in FRR's BGP FlowSpec table; no dataplane or forwarding claim"
+
     def __init__(self, args):
         self.args = args
         self.receipt = Path(args.receipt)
         (self.receipt / "frr").mkdir(parents=True, exist_ok=True)
         self.token = Path(args.token_file).read_text().strip()
+        # Keeps a session cookie for subclasses that log in; bearer requests set none.
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
         self.commands = (self.receipt / "commands.log").open("a")
         self.steps = []
         self.step_no = 0
@@ -113,7 +118,7 @@ class Lab:
         request.add_header("Authorization", f"Bearer {self.token}")
         request.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with self.opener.open(request, timeout=30) as response:
                 status, text = response.status, response.read().decode()
         except urllib.error.HTTPError as error:
             status, text = error.code, error.read().decode()
@@ -282,8 +287,7 @@ class Lab:
     def main(self):
         receipt = {"date_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                    "speaker": self.args.speaker, "result": "fail",
-                   "scope": "control-plane receipt of prefixd intent in FRR's BGP FlowSpec table; "
-                            "no dataplane or forwarding claim"}
+                   "scope": self.SCOPE}
         try:
             self.wait_ready()
             receipt["versions"] = self.versions()
@@ -302,7 +306,7 @@ class Lab:
 
     def summary(self, receipt):
         versions = receipt.get("versions", {})
-        lines = [f"### FlowSpec interop: prefixd -> {receipt['speaker']} -> FRR ({receipt['result']})", "",
+        lines = [f"### {self.TITLE}: prefixd -> {receipt['speaker']} -> FRR ({receipt['result']})", "",
                  f"{receipt['date_utc']}; prefixd {versions.get('prefixd', '?')} "
                  f"({versions.get('prefixd_commit', '?')[:12]}); speaker {versions.get('speaker', '?')}; "
                  f"{versions.get('frr', '?')}", "", "| step | result | seconds |", "|---|---|---|"]

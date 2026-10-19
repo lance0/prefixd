@@ -50,6 +50,14 @@ safelist:
   prefixes:
     - "10.0.0.0/8"
 
+# Manual blackholes (ADR 027) for the blackhole scenario. FRR rewrites the next
+# hop on import, so these values deliberately do not resolve at FRR.
+blackhole:
+  enabled: true
+  next_hop_ipv4: "192.0.2.66"
+  next_hop_ipv6: "2001:db8:ffff::66"
+  communities: ["65010:666"]
+
 correlation:
   enabled: true
   window_seconds: 300
