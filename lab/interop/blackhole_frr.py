@@ -28,7 +28,7 @@ from pathlib import Path
 
 # run-frr.sh uses python3 -I, which leaves the script directory off sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from flowspec_frr import SPEAKER_ADDRESS, Lab  # noqa: E402
+from flowspec_frr import SPEAKER_ADDRESS, Lab
 
 # prefixd's frozen route: BLACKHOLE plus the lab's configured community.
 COMMUNITIES = ["65010:666", "65535:666"]
@@ -36,7 +36,9 @@ COMMUNITIES = ["65010:666", "65535:666"]
 FRR_COMMUNITIES = COMMUNITIES + ["noExport"]
 NEXT_HOPS = {"ipv4": "192.0.2.66", "ipv6": "2001:db8:ffff::66"}
 ROUTE_MAPS = {"ipv4": "RTBH-IN-V4", "ipv6": "RTBH-IN-V6"}
-CONTROLLER_START = "echo $$ >/tmp/prefixd.pid; exec prefixd --config /etc/prefixd >>/tmp/prefixd.log 2>&1"
+CONTROLLER_START = (
+    "echo $$ >/tmp/prefixd.pid; exec prefixd --config /etc/prefixd >>/tmp/prefixd.log 2>&1"
+)
 ADMIN = "interop-admin"
 
 
@@ -93,8 +95,10 @@ def classify(prefix, bgp, rib, fib, communities=FRR_COMMUNITIES):
 
 class BlackholeLab(Lab):
     TITLE = "Blackhole interop"
-    SCOPE = ("control-plane receipt of prefixd blackhole host routes in FRR's unicast BGP table, "
-             "zebra RIB and container kernel FIB; no packet forwarding or vendor claim")
+    SCOPE = (
+        "control-plane receipt of prefixd blackhole host routes in FRR's unicast BGP table, "
+        "zebra RIB and container kernel FIB; no packet forwarding or vendor claim"
+    )
 
     def quiet(self, *command, check=True):
         # Polled every second, so not logged per call; scenario() logs them once.
@@ -106,13 +110,28 @@ class BlackholeLab(Lab):
         for prefix in prefixes:
             afi = family(prefix)
             bgp = json.loads(self.vtysh(f"show bgp {afi} unicast {prefix} json") or "{}")
-            rib = json.loads(self.vtysh(f"show {'ipv6' if afi == 'ipv6' else 'ip'} route {prefix} json") or "{}")
-            fib = json.loads(self.quiet("docker", "exec", self.args.frr, "ip", "-j",
-                                        "-6" if afi == "ipv6" else "-4", "route", "show", "exact",
-                                        prefix).stdout or "[]")
+            rib = json.loads(
+                self.vtysh(f"show {'ipv6' if afi == 'ipv6' else 'ip'} route {prefix} json") or "{}"
+            )
+            fib = json.loads(
+                self.quiet(
+                    "docker",
+                    "exec",
+                    self.args.frr,
+                    "ip",
+                    "-j",
+                    "-6" if afi == "ipv6" else "-4",
+                    "route",
+                    "show",
+                    "exact",
+                    prefix,
+                ).stdout
+                or "[]"
+            )
             name = prefix.replace("/", "_").replace(":", "-")
             (self.receipt / "frr" / f"{label}-{name}.json").write_text(
-                json.dumps({"bgp": bgp, "rib": rib, "kernel": fib}, indent=2) + "\n")
+                json.dumps({"bgp": bgp, "rib": rib, "kernel": fib}, indent=2) + "\n"
+            )
             states[prefix] = classify(prefix, bgp, rib, fib)
         return states
 
@@ -128,7 +147,9 @@ class BlackholeLab(Lab):
             except (ValueError, subprocess.SubprocessError) as error:
                 problem = repr(error)
             if time.monotonic() >= deadline:
-                raise AssertionError(f"{label}: FRR did not reach {want} within {seconds}s: {problem}")
+                raise AssertionError(
+                    f"{label}: FRR did not reach {want} within {seconds}s: {problem}"
+                )
             time.sleep(1)
 
     def bstep(self, name, action, want, seconds=60):
@@ -141,30 +162,56 @@ class BlackholeLab(Lab):
         self.steps.append(record)
         result = action()
         states = self.wait_states(f"{label}-after", want, seconds)
-        record.update(result="pass", seconds=round(time.monotonic() - started, 1),
-                      observed={prefix: state for prefix, (state, _) in states.items()})
+        record.update(
+            result="pass",
+            seconds=round(time.monotonic() - started, 1),
+            observed={prefix: state for prefix, (state, _) in states.items()},
+        )
         print(f"[{label}] PASS in {record['seconds']}s", flush=True)
         return result
 
     def login(self):
-        self.run("docker", "exec", self.args.controller, "sh", "-c",
-                 f'prefixdctl operators create --username {ADMIN} --role admin '
-                 '--password "$PREFIXD_LAB_ADMIN_PASSWORD"')
+        self.run(
+            "docker",
+            "exec",
+            self.args.controller,
+            "sh",
+            "-c",
+            f"prefixdctl operators create --username {ADMIN} --role admin "
+            '--password "$PREFIXD_LAB_ADMIN_PASSWORD"',
+        )
         password = Path(self.args.admin_password_file).read_text().strip()
-        request = urllib.request.Request(self.args.api + "/v1/auth/login", method="POST",
-                                         data=json.dumps({"username": ADMIN, "password": password}).encode(),
-                                         headers={"Content-Type": "application/json"})
+        request = urllib.request.Request(
+            self.args.api + "/v1/auth/login",
+            method="POST",
+            data=json.dumps({"username": ADMIN, "password": password}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
         with self.opener.open(request, timeout=30) as response:
             role = json.loads(response.read().decode())["role"]
-        self.log(f"POST /v1/auth/login {ADMIN} (password withheld) -> {response.status}, role {role}")
+        self.log(
+            f"POST /v1/auth/login {ADMIN} (password withheld) -> {response.status}, role {role}"
+        )
         assert role == "admin", role
 
     def blackhole(self, victim, ttl):
-        mitigation = self.api("POST", "/v1/mitigations", {
-            "action": "blackhole", "victim_ip": victim, "confirm_victim_ip": victim,
-            "reason": "interop blackhole", "ttl_seconds": ttl}, expect=(201,))
+        mitigation = self.api(
+            "POST",
+            "/v1/mitigations",
+            {
+                "action": "blackhole",
+                "victim_ip": victim,
+                "confirm_victim_ip": victim,
+                "reason": "interop blackhole",
+                "ttl_seconds": ttl,
+            },
+            expect=(201,),
+        )
         frozen = mitigation["blackhole"]
-        assert (mitigation["action_type"], mitigation["dst_prefix"]) == ("blackhole", host(victim)), mitigation
+        assert (mitigation["action_type"], mitigation["dst_prefix"]) == (
+            "blackhole",
+            host(victim),
+        ), mitigation
         assert frozen["next_hop"] == NEXT_HOPS[family(victim)], frozen
         assert sorted(frozen["communities"]) == COMMUNITIES, frozen
         return mitigation["mitigation_id"]
@@ -172,17 +219,51 @@ class BlackholeLab(Lab):
     def route_maps(self, bound):
         for afi, name in ROUTE_MAPS.items():
             prefix = "" if bound else "no "
-            self.run("docker", "exec", self.args.frr, "vtysh", "-c", "configure terminal",
-                     "-c", "router bgp 65002", "-c", f"address-family {afi} unicast",
-                     "-c", f"{prefix}neighbor {SPEAKER_ADDRESS} route-map {name} in")
-            self.run("docker", "exec", self.args.frr, "vtysh", "-c",
-                     f"clear bgp {afi} unicast {SPEAKER_ADDRESS} soft in")
+            self.run(
+                "docker",
+                "exec",
+                self.args.frr,
+                "vtysh",
+                "-c",
+                "configure terminal",
+                "-c",
+                "router bgp 65002",
+                "-c",
+                f"address-family {afi} unicast",
+                "-c",
+                f"{prefix}neighbor {SPEAKER_ADDRESS} route-map {name} in",
+            )
+            self.run(
+                "docker",
+                "exec",
+                self.args.frr,
+                "vtysh",
+                "-c",
+                f"clear bgp {afi} unicast {SPEAKER_ADDRESS} soft in",
+            )
 
     def stop_controller(self):
-        self.run("docker", "exec", self.args.controller, "sh", "-c", 'kill -TERM "$(cat /tmp/prefixd.pid)"')
+        self.run(
+            "docker",
+            "exec",
+            self.args.controller,
+            "sh",
+            "-c",
+            'kill -TERM "$(cat /tmp/prefixd.pid)"',
+        )
         deadline = time.monotonic() + 30
-        while self.quiet("docker", "exec", self.args.controller, "sh", "-c",
-                         'kill -0 "$(cat /tmp/prefixd.pid)"', check=False).returncode == 0:
+        while (
+            self.quiet(
+                "docker",
+                "exec",
+                self.args.controller,
+                "sh",
+                "-c",
+                'kill -0 "$(cat /tmp/prefixd.pid)"',
+                check=False,
+            ).returncode
+            == 0
+        ):
             assert time.monotonic() < deadline, "prefixd did not stop within 30s"
             time.sleep(1)
 
@@ -197,20 +278,29 @@ class BlackholeLab(Lab):
         never = {host("203.0.113.99"): "absent", host("2001:db8:113::99"): "absent"}
 
         for afi in ("ipv4", "ipv6"):
-            self.log(f"polled: docker exec {self.args.frr} vtysh -c 'show bgp {afi} unicast <prefix> json', "
-                     f"'show ip[v6] route <prefix> json'; ip -j route show exact <prefix>")
+            self.log(
+                f"polled: docker exec {self.args.frr} vtysh -c 'show bgp {afi} unicast <prefix> json', "
+                f"'show ip[v6] route <prefix> json'; ip -j route show exact <prefix>"
+            )
         self.login()
         # Negative control: a route that was never announced is reported absent.
         self.wait_states("00-baseline", {**gone, **never})
 
-        ids = self.bstep("announce", lambda: [self.blackhole(v, 600) for v in (v4, v6)], {**main, **never})
+        ids = self.bstep(
+            "announce", lambda: [self.blackhole(v, 600) for v in (v4, v6)], {**main, **never}
+        )
 
         # Negative control: without the import route-map, the discard check fails.
         def unbind():
             self.route_maps(bound=False)
+
         self.bstep("route-map-removed", unbind, {prefix: "other" for prefix in main})
-        self.steps[-1]["problems"] = {prefix: problems for prefix, (_, problems)
-                                      in self.observe(f"{self.step_no:02d}-route-map-removed-detail", main).items()}
+        self.steps[-1]["problems"] = {
+            prefix: problems
+            for prefix, (_, problems) in self.observe(
+                f"{self.step_no:02d}-route-map-removed-detail", main
+            ).items()
+        }
         self.bstep("route-map-restored", lambda: self.route_maps(bound=True), main)
 
         repairs = 'prefixd_reconciliation_repairs_total{status="success"}'
@@ -221,27 +311,44 @@ class BlackholeLab(Lab):
             # while the speaker is down (ADR 027 failure modes: measure this).
             before = self.metric(repairs)
             self.run("docker", "stop", speaker)
-            self.wait_states(f"{self.step_no:02d}-speaker-stopped", {prefix: "stale" for prefix in main})
+            self.wait_states(
+                f"{self.step_no:02d}-speaker-stopped", {prefix: "stale" for prefix in main}
+            )
             started = time.monotonic()
             self.run("docker", "start", speaker)
             timeline, last = [], None
             while time.monotonic() - started < 120:
-                states = {prefix: state for prefix, (state, _) in self.observe(
-                    f"{self.step_no:02d}-speaker-restarting", main).items()}
+                states = {
+                    prefix: state
+                    for prefix, (state, _) in self.observe(
+                        f"{self.step_no:02d}-speaker-restarting", main
+                    ).items()
+                }
                 if states != last:
-                    timeline.append({"seconds_after_start": round(time.monotonic() - started, 1), **states})
+                    timeline.append(
+                        {"seconds_after_start": round(time.monotonic() - started, 1), **states}
+                    )
                     last = states
                 if states == main:
                     break
                 time.sleep(0.5)
             return before, timeline
+
         before, timeline = self.bstep("speaker-restart", restart, main, seconds=120)
         repaired = self.metric(repairs) - before
-        assert repaired >= 2, f"expected prefixd to repair 2 blackholes, repairs metric moved {repaired}"
+        assert repaired >= 2, (
+            f"expected prefixd to repair 2 blackholes, repairs metric moved {repaired}"
+        )
         self.steps[-1].update(reconciliation_repairs=repaired, timeline_after_start=timeline)
 
-        self.bstep("withdraw", lambda: [self.api("POST", f"/v1/mitigations/{m}/withdraw",
-                                                 {"reason": "interop withdrawal"}) for m in ids], gone)
+        self.bstep(
+            "withdraw",
+            lambda: [
+                self.api("POST", f"/v1/mitigations/{m}/withdraw", {"reason": "interop withdrawal"})
+                for m in ids
+            ],
+            gone,
+        )
         assert [self.status(m) for m in ids] == ["withdrawn", "withdrawn"]
 
         expiring = {host("203.0.113.51"): "discard", host("2001:db8:113::51"): "discard"}
@@ -250,7 +357,10 @@ class BlackholeLab(Lab):
             created = [self.blackhole(v, 15) for v in ("203.0.113.51", "2001:db8:113::51")]
             self.wait_states(f"{self.step_no:02d}-ttl-expiry-announced", expiring)
             return created
-        created = self.bstep("ttl-expiry", expire, {prefix: "absent" for prefix in expiring}, seconds=90)
+
+        created = self.bstep(
+            "ttl-expiry", expire, {prefix: "absent" for prefix in expiring}, seconds=90
+        )
         assert [self.status(m) for m in created] == ["expired", "expired"]
 
         # Negative case (ADR 027 failure modes): a manual blackhole is unleased, so
@@ -259,22 +369,34 @@ class BlackholeLab(Lab):
 
         def stop():
             created = [self.blackhole(v, 20) for v in ("203.0.113.52", "2001:db8:113::52")]
-            expires = max(datetime.datetime.fromisoformat(self.api("GET", f"/v1/mitigations/{m}")["expires_at"])
-                          for m in created)
+            expires = max(
+                datetime.datetime.fromisoformat(
+                    self.api("GET", f"/v1/mitigations/{m}")["expires_at"]
+                )
+                for m in created
+            )
             self.wait_states(f"{self.step_no:02d}-controller-stop-announced", stranded)
             self.stop_controller()
             self.wait_states(f"{self.step_no:02d}-controller-stopped", stranded)
             # Hold until 30 s past the TTL; the step then requires discard still.
-            now = datetime.datetime.now(datetime.timezone.utc)
+            now = datetime.datetime.now(datetime.UTC)
             time.sleep(max(0.0, (expires - now).total_seconds()) + 30)
             return created, expires
-        created, expires = self.bstep("controller-stopped-route-persists", stop, stranded)
-        past = datetime.datetime.now(datetime.timezone.utc) - expires
-        self.steps[-1].update(expires_at=expires.isoformat(), checked_seconds_after_expiry=round(past.total_seconds()),
-                              note="known unleased gap: nothing expires a manual blackhole while prefixd is stopped")
 
-        self.bstep("controller-restart-expires", self.start_controller,
-                   {prefix: "absent" for prefix in stranded}, seconds=90)
+        created, expires = self.bstep("controller-stopped-route-persists", stop, stranded)
+        past = datetime.datetime.now(datetime.UTC) - expires
+        self.steps[-1].update(
+            expires_at=expires.isoformat(),
+            checked_seconds_after_expiry=round(past.total_seconds()),
+            note="known unleased gap: nothing expires a manual blackhole while prefixd is stopped",
+        )
+
+        self.bstep(
+            "controller-restart-expires",
+            self.start_controller,
+            {prefix: "absent" for prefix in stranded},
+            seconds=90,
+        )
         assert [self.status(m) for m in created] == ["expired", "expired"]
         self.wait_states(f"{self.step_no:02d}-end", {**gone, **never})
 
@@ -283,8 +405,17 @@ def main():
     if __doc__ is None:  # stripped by python -OO
         raise SystemExit("blackhole_frr.py needs its docstring; do not run it with -OO")
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    for name in ("speaker", "api", "token-file", "frr", "speaker-container", "topology", "receipt",
-                 "controller", "admin-password-file"):
+    for name in (
+        "speaker",
+        "api",
+        "token-file",
+        "frr",
+        "speaker-container",
+        "topology",
+        "receipt",
+        "controller",
+        "admin-password-file",
+    ):
         parser.add_argument(f"--{name}", required=True)
     raise SystemExit(0 if BlackholeLab(parser.parse_args()).main() else 1)
 

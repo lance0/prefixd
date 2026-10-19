@@ -13,22 +13,52 @@ PREFIX = "203.0.113.50/32"
 
 
 def bgp(communities=("65010:666", "blackhole", "noExport"), peer="10.0.0.1", valid=True, paths=1):
-    path = {"valid": valid, "bestpath": {"overall": valid}, "peer": {"peerId": peer},
-            "community": {"string": " ".join(communities), "list": list(communities)},
-            "nexthops": [{"ip": "192.0.2.1", "afi": "ipv4", "accessible": True, "used": True}]}
+    path = {
+        "valid": valid,
+        "bestpath": {"overall": valid},
+        "peer": {"peerId": peer},
+        "community": {"string": " ".join(communities), "list": list(communities)},
+        "nexthops": [{"ip": "192.0.2.1", "afi": "ipv4", "accessible": True, "used": True}],
+    }
     return {"prefix": PREFIX, "paths": [copy.deepcopy(path) for _ in range(paths)]}
 
 
 def rib(blackhole=True):
     hops = [{"ip": "192.0.2.1", "afi": "ipv4", "active": True, "recursive": True, "weight": 1}]
     if blackhole:
-        hops.append({"flags": 3, "fib": True, "unreachable": True, "blackhole": True,
-                     "active": True, "resolver": True, "weight": 1})
+        hops.append(
+            {
+                "flags": 3,
+                "fib": True,
+                "unreachable": True,
+                "blackhole": True,
+                "active": True,
+                "resolver": True,
+                "weight": 1,
+            }
+        )
     else:
-        hops = [{"fib": True, "ip": "10.0.0.1", "afi": "ipv4", "interfaceName": "eth1",
-                 "active": True, "weight": 1}]
-    return {PREFIX: [{"prefix": PREFIX, "protocol": "bgp", "selected": True, "installed": True,
-                      "nexthops": hops}]}
+        hops = [
+            {
+                "fib": True,
+                "ip": "10.0.0.1",
+                "afi": "ipv4",
+                "interfaceName": "eth1",
+                "active": True,
+                "weight": 1,
+            }
+        ]
+    return {
+        PREFIX: [
+            {
+                "prefix": PREFIX,
+                "protocol": "bgp",
+                "selected": True,
+                "installed": True,
+                "nexthops": hops,
+            }
+        ]
+    }
 
 
 KERNEL_DISCARD = [{"type": "blackhole", "dst": "203.0.113.50", "protocol": "bgp", "metric": 20}]
@@ -62,10 +92,15 @@ class OracleTests(unittest.TestCase):
                 self.assertEqual(classify(PREFIX, *views)[0], "other")
 
     def test_communities_must_match_exactly(self):
-        for communities in (("65010:666", "blackhole"), ("blackhole", "noExport"),
-                            ("65010:666", "blackhole", "noExport", "noAdvertise")):
+        for communities in (
+            ("65010:666", "blackhole"),
+            ("blackhole", "noExport"),
+            ("65010:666", "blackhole", "noExport", "noAdvertise"),
+        ):
             with self.subTest(communities=communities):
-                self.assertEqual(classify(PREFIX, bgp(communities), rib(), KERNEL_DISCARD)[0], "other")
+                self.assertEqual(
+                    classify(PREFIX, bgp(communities), rib(), KERNEL_DISCARD)[0], "other"
+                )
 
     def test_path_must_be_one_valid_best_from_the_speaker(self):
         for path in (bgp(peer="10.0.0.9"), bgp(valid=False), bgp(paths=2)):

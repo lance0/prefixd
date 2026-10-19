@@ -43,7 +43,9 @@ def extract(changelog: str, version: str) -> str:
     start = None
     for i, line in enumerate(lines):
         if line.startswith(f"## [{version}]"):
-            if not re.fullmatch(rf"## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}", line.rstrip()):
+            if not re.fullmatch(
+                rf"## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}", line.rstrip()
+            ):
                 raise NotesError(f"heading must read '## [{version}] - YYYY-MM-DD': {line!r}")
             start = i + 1
             break
@@ -218,7 +220,9 @@ def main(argv: list[str]) -> int:
         selftest()
         return 0
     if len(argv) == 2 and argv[0] == "--tag-info":
-        tags = subprocess.run(["git", "tag", "--list", "v*"], check=True, capture_output=True, text=True)
+        tags = subprocess.run(
+            ["git", "tag", "--list", "v*"], check=True, capture_output=True, text=True
+        )
         try:
             previous, latest = tag_info(argv[1], tags.stdout.split())
         except NotesError as e:

@@ -3,14 +3,16 @@
 
 import json
 import os
-from pathlib import Path
 import subprocess
 import unittest
 import uuid
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTROLLER_IMAGE = os.environ.get("PREFIXD_IMAGE") or "ghcr.io/lance0/prefixd:main"
-DASHBOARD_IMAGE = os.environ.get("PREFIXD_DASHBOARD_IMAGE") or "ghcr.io/lance0/prefixd-dashboard:main"
+DASHBOARD_IMAGE = (
+    os.environ.get("PREFIXD_DASHBOARD_IMAGE") or "ghcr.io/lance0/prefixd-dashboard:main"
+)
 
 
 def docker(*args, check=True):
@@ -24,7 +26,9 @@ def docker(*args, check=True):
 
 class Profiles(unittest.TestCase):
     def model(self, profile):
-        return json.loads(docker("compose", "--profile", profile, "config", "--format", "json").stdout)
+        return json.loads(
+            docker("compose", "--profile", profile, "config", "--format", "json").stdout
+        )
 
     def test_profiles_isolate_backends_and_management(self):
         releases = json.loads((ROOT / "tests/fixtures/rustbgpd/releases.json").read_text())
@@ -47,12 +51,18 @@ class Profiles(unittest.TestCase):
                     for mount in service.get("volumes", []):
                         if mount["target"] in ("/etc/prefixd", "/data", "/run/rustbgpd"):
                             self.assertTrue(mount["volume"]["nocopy"], mount)
-                self.assertTrue(mounts["/etc/prefixd/prefixd.yaml"]["source"].endswith(
-                    "prefixd.yaml" if profile == "rustbgpd" else "prefixd-gobgp.yaml"))
+                self.assertTrue(
+                    mounts["/etc/prefixd/prefixd.yaml"]["source"].endswith(
+                        "prefixd.yaml" if profile == "rustbgpd" else "prefixd-gobgp.yaml"
+                    )
+                )
                 for service in services.values():
                     for port in service.get("ports", []):
                         self.assertNotIn(str(port["target"]), ("8080", "50051", "5432"))
-                for name, target, published in (("prometheus", 9090, "9091"), ("grafana", 3000, "3001")):
+                for name, target, published in (
+                    ("prometheus", 9090, "9091"),
+                    ("grafana", 3000, "3001"),
+                ):
                     ports = services[name]["ports"]
                     self.assertEqual(len(ports), 1)
                     self.assertEqual(ports[0]["host_ip"], "127.0.0.1")
@@ -62,8 +72,11 @@ class Profiles(unittest.TestCase):
                     self.assertEqual(services[profile]["image"], releases["0.78.0"]["image"])
                     self.assertEqual(services[profile]["user"], "999:999")
                     self.assertIn("prefixd", services[selected]["networks"]["default"]["aliases"])
-                    socket_users = {name for name, service in services.items()
-                                    if any(v["target"] == "/run/rustbgpd" for v in service.get("volumes", []))}
+                    socket_users = {
+                        name
+                        for name, service in services.items()
+                        if any(v["target"] == "/run/rustbgpd" for v in service.get("volumes", []))
+                    }
                     self.assertEqual(socket_users, {"init", "rustbgpd", selected})
                 else:
                     self.assertEqual(services[selected]["network_mode"], "service:gobgp")
@@ -74,7 +87,9 @@ class Profiles(unittest.TestCase):
                     self.assertIn("@sha256:", services[profile]["image"])
 
     def test_two_profiles_fail_before_startup(self):
-        result = docker("compose", "--profile", "rustbgpd", "--profile", "gobgp", "config", check=False)
+        result = docker(
+            "compose", "--profile", "rustbgpd", "--profile", "gobgp", "config", check=False
+        )
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("prefixd", result.stderr)
 
@@ -84,18 +99,44 @@ class ConfigSeeding(unittest.TestCase):
         image = CONTROLLER_IMAGE
         volumes = [f"prefixd-init-test-{uuid.uuid4().hex}" for _ in range(3)]
         paths = ["/etc/prefixd", "/data", "/run/rustbgpd"]
-        mounts = [arg for volume, path in zip(volumes, paths)
-                  for arg in ("--mount", f"type=volume,source={volume},target={path},volume-nocopy")]
+        mounts = [
+            arg
+            for volume, path in zip(volumes, paths)
+            for arg in ("--mount", f"type=volume,source={volume},target={path},volume-nocopy")
+        ]
         cpuset = os.environ.get("PREFIXD_TEST_CPUSET")
         affinity = ["--cpuset-cpus", cpuset] if cpuset else []
         try:
             for volume in volumes:
                 docker("volume", "create", volume)
             for iteration in range(2):
-                docker("run", "--rm", "--network", "none", *affinity, "--user", "0:0", *mounts,
-                       "--entrypoint", "/usr/local/bin/prefixd-init", image)
-                result = docker("run", "--rm", "--network", "none", *affinity, "--user", "999:999", *mounts,
-                                "--entrypoint", "/bin/sh", image, "-exc", '''
+                docker(
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    *affinity,
+                    "--user",
+                    "0:0",
+                    *mounts,
+                    "--entrypoint",
+                    "/usr/local/bin/prefixd-init",
+                    image,
+                )
+                result = docker(
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    *affinity,
+                    "--user",
+                    "999:999",
+                    *mounts,
+                    "--entrypoint",
+                    "/bin/sh",
+                    image,
+                    "-exc",
+                    """
 for directory in /etc/prefixd /data /run/rustbgpd; do
     test "$(stat -c '%u:%g:%a' "$directory")" = '999:999:700'
 done
@@ -112,7 +153,8 @@ else
     mv /etc/prefixd/.alerting.tmp /etc/prefixd/alerting.yaml
     touch /data/edited
 fi
-''')
+""",
+                )
                 self.assertEqual(result.returncode, 0, f"initializer iteration {iteration}")
         finally:
             for volume in volumes:

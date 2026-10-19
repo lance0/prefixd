@@ -9,32 +9,49 @@ import unittest
 
 from flowspec_frr import diff, ordered, parse_frr, rule
 
-PATH = ('{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external",'
-        '"to":"%s","proto":"= %d ","dstp":"= %d ","weight":0,"peerId":"10.0.0.1","path":"65010","origin":"IGP"}')
+PATH = (
+    '{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external",'
+    '"to":"%s","proto":"= %d ","dstp":"= %d ","weight":0,"peerId":"10.0.0.1","path":"65010","origin":"IGP"}'
+)
 
 
 def table(*routes, total=None):
-    body = ",".join(f'"to {to} proto = {proto}  dstp = {port} /12": [{PATH % (to, proto, port)}]'
-                    for to, proto, port in routes)
+    body = ",".join(
+        f'"to {to} proto = {proto}  dstp = {port} /12": [{PATH % (to, proto, port)}]'
+        for to, proto, port in routes
+    )
     count = len(routes) if total is None else total
     return f'{{"routes": {{ {body} }}, "totalRoutes": {count}, "totalPaths": {count}}}'
 
 
 def detail(*routes):
-    return "\n".join(json.dumps([{"to": to, "proto": f"= {proto} ", "dstp": f"= {port} "},
-                                 {"ecomlist": action}, {"time": "00:00:01"}], indent=2)
-                     for to, proto, port, action in routes)
+    return "\n".join(
+        json.dumps(
+            [
+                {"to": to, "proto": f"= {proto} ", "dstp": f"= {port} "},
+                {"ecomlist": action},
+                {"time": "00:00:01"},
+            ],
+            indent=2,
+        )
+        for to, proto, port, action in routes
+    )
 
 
 POLICE = ("203.0.113.20/32", 6, 80)
 DISCARD = ("203.0.113.10/32", 17, 53)
-EXPECTED = [rule("ipv4", "203.0.113.20/32", 6, 80, 1_000_000),
-            rule("ipv4", "203.0.113.10/32", 17, 53, 0)]
+EXPECTED = [
+    rule("ipv4", "203.0.113.20/32", 6, 80, 1_000_000),
+    rule("ipv4", "203.0.113.10/32", 17, 53, 0),
+]
 
 
 def observed(police_action="FS:rate 1000000.000000", **table_args):
-    return parse_frr("ipv4", table(POLICE, DISCARD, **table_args),
-                     detail((*POLICE, police_action), (*DISCARD, "FS:rate 0.000000")))
+    return parse_frr(
+        "ipv4",
+        table(POLICE, DISCARD, **table_args),
+        detail((*POLICE, police_action), (*DISCARD, "FS:rate 0.000000")),
+    )
 
 
 class OracleTests(unittest.TestCase):
@@ -66,8 +83,9 @@ class OracleTests(unittest.TestCase):
 
     def test_missing_or_extra_rule_is_a_diff(self):
         self.assertNotEqual(ordered(EXPECTED[:1]), observed())
-        self.assertNotEqual(ordered(EXPECTED + [rule("ipv4", "203.0.113.30/32", 17, 123, 625_000)]),
-                            observed())
+        self.assertNotEqual(
+            ordered(EXPECTED + [rule("ipv4", "203.0.113.30/32", 17, 123, 625_000)]), observed()
+        )
 
     def test_inconsistent_frr_views_are_rejected(self):
         with self.assertRaises(AssertionError):

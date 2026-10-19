@@ -30,8 +30,13 @@ CONVERGE_SECONDS = 60
 
 def rule(family, to, proto, dstp, rate_bytes):
     """One rule as FRR 10.7 renders it; discard is a zero traffic rate."""
-    return {"family": family, "to": to, "proto": f"={proto}", "dstp": f"={dstp}",
-            "action": f"FS:rate {rate_bytes:.6f}"}
+    return {
+        "family": family,
+        "to": to,
+        "proto": f"={proto}",
+        "dstp": f"={dstp}",
+        "action": f"FS:rate {rate_bytes:.6f}",
+    }
 
 
 def _compact(key, value):
@@ -78,7 +83,10 @@ def parse_frr(family, table_text, detail_text):
 
     stripped = [{k: v for k, v in r.items() if k in MATCH_FIELDS} for r in detail_rules]
     assert sorted(map(key, stripped)) == sorted(map(key, table_rules)), (
-        "table and detail views disagree", table_rules, detail_rules)
+        "table and detail views disagree",
+        table_rules,
+        detail_rules,
+    )
     return ordered(detail_rules)
 
 
@@ -104,13 +112,15 @@ class Lab:
         self.step_no = 0
 
     def log(self, line):
-        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S")
+        stamp = datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S")
         self.commands.write(f"{stamp} {line}\n")
         self.commands.flush()
 
     def run(self, *command, check=True):
         self.log("$ " + " ".join(command))
-        return subprocess.run(command, check=check, text=True, capture_output=True, timeout=60).stdout
+        return subprocess.run(
+            command, check=check, text=True, capture_output=True, timeout=60
+        ).stdout
 
     def api(self, method, path, body=None, expect=(200, 201, 202)):
         data = json.dumps(body).encode() if body is not None else None
@@ -134,8 +144,13 @@ class Lab:
 
     def vtysh(self, command):
         # Polled every second, so not logged per call; scenario() logs them once.
-        return subprocess.run(["docker", "exec", self.args.frr, "vtysh", "-c", command],
-                              check=True, text=True, capture_output=True, timeout=60).stdout
+        return subprocess.run(
+            ["docker", "exec", self.args.frr, "vtysh", "-c", command],
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=60,
+        ).stdout
 
     def frr_rules(self, label):
         """Read both families once, save the raw JSON under label, return rules."""
@@ -190,25 +205,35 @@ class Lab:
         while True:
             try:
                 state = json.loads(self.vtysh(f"show bgp neighbors {SPEAKER_ADDRESS} json"))
-                if (state[SPEAKER_ADDRESS]["bgpState"] == "Established"
-                        and self.api("GET", "/v1/health")["status"] == "ok"):
+                if (
+                    state[SPEAKER_ADDRESS]["bgpState"] == "Established"
+                    and self.api("GET", "/v1/health")["status"] == "ok"
+                ):
                     return
             except (AssertionError, KeyError, ValueError, OSError, subprocess.SubprocessError):
                 pass
-            assert time.monotonic() < deadline, "speaker session or prefixd API not ready within 90s"
+            assert time.monotonic() < deadline, (
+                "speaker session or prefixd API not ready within 90s"
+            )
             time.sleep(2)
 
     def versions(self):
         def out(*command):
             result = subprocess.run(command, text=True, capture_output=True, timeout=30)
             return (result.stdout.strip() or result.stderr.strip()).splitlines()[0]
-        speaker = (["rustbgpd", "--version"] if self.args.speaker == "rustbgpd"
-                   else ["/usr/local/bin/gobgpd", "--version"])
+
+        speaker = (
+            ["rustbgpd", "--version"]
+            if self.args.speaker == "rustbgpd"
+            else ["/usr/local/bin/gobgpd", "--version"]
+        )
         images = re.findall(r"^\s+image:\s*(\S+)", Path(self.args.topology).read_text(), re.M)
         return {
             "prefixd": self.api("GET", "/v1/health")["version"],
             "prefixd_commit": out("git", "rev-parse", "HEAD"),
-            "prefixd_image_id": out("docker", "image", "inspect", "-f", "{{.Id}}", "prefixd:interop"),
+            "prefixd_image_id": out(
+                "docker", "image", "inspect", "-f", "{{.Id}}", "prefixd:interop"
+            ),
             "speaker": out("docker", "exec", self.args.speaker_container, *speaker),
             "frr": out("docker", "exec", self.args.frr, "vtysh", "-c", "show version"),
             "containerlab": out("containerlab", "version", "--short"),
@@ -226,68 +251,137 @@ class Lab:
         ipv6 = rule("ipv6", "2001:db8:113::10/128/off 0", 17, 53, 0)
 
         for family in FAMILIES:
-            self.log(f"polled: docker exec {self.args.frr} vtysh -c 'show bgp {family} flowspec [detail] json'")
+            self.log(
+                f"polled: docker exec {self.args.frr} vtysh -c 'show bgp {family} flowspec [detail] json'"
+            )
         self.wait_frr("00-baseline", [])
 
-        m_discard = self.step("manual-discard", lambda: self.mitigate({
-            "reason": "interop manual discard", "victim_ip": "203.0.113.10", "protocol": "udp",
-            "dst_ports": [53], "action": "discard", "ttl_seconds": 1800}), [discard])
-        m_police = self.step("manual-police", lambda: self.mitigate({
-            "reason": "interop manual police", "victim_ip": "203.0.113.20", "protocol": "tcp",
-            "dst_ports": [80], "action": "police", "rate_bps": 8_000_000, "ttl_seconds": 1800}),
-            [discard, police])
+        m_discard = self.step(
+            "manual-discard",
+            lambda: self.mitigate(
+                {
+                    "reason": "interop manual discard",
+                    "victim_ip": "203.0.113.10",
+                    "protocol": "udp",
+                    "dst_ports": [53],
+                    "action": "discard",
+                    "ttl_seconds": 1800,
+                }
+            ),
+            [discard],
+        )
+        m_police = self.step(
+            "manual-police",
+            lambda: self.mitigate(
+                {
+                    "reason": "interop manual police",
+                    "victim_ip": "203.0.113.20",
+                    "protocol": "tcp",
+                    "dst_ports": [80],
+                    "action": "police",
+                    "rate_bps": 8_000_000,
+                    "ttl_seconds": 1800,
+                }
+            ),
+            [discard, police],
+        )
 
         def detect():
-            event = self.api("POST", "/v1/events", {
-                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "source": "fastnetmon", "victim_ip": "203.0.113.30", "vector": "udp_flood",
-                "bps": 900_000_000, "pps": 500_000, "confidence": 0.9,
-                "top_dst_ports": [123], "action": "ban"}, expect=(202,))
+            event = self.api(
+                "POST",
+                "/v1/events",
+                {
+                    "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+                    "source": "fastnetmon",
+                    "victim_ip": "203.0.113.30",
+                    "vector": "udp_flood",
+                    "bps": 900_000_000,
+                    "pps": 500_000,
+                    "confidence": 0.9,
+                    "top_dst_ports": [123],
+                    "action": "ban",
+                },
+                expect=(202,),
+            )
             assert event["status"] == "accepted" and event.get("mitigation_id"), event
             detail = self.api("GET", f"/v1/mitigations/{event['mitigation_id']}")
             assert (detail["action_type"], detail["rate_bps"]) == ("police", 5_000_000), detail
             return event["mitigation_id"]
+
         m_detector = self.step("detector-event", detect, [discard, police, detector])
 
-        self.step("operator-withdrawal", lambda: self.api(
-            "POST", f"/v1/mitigations/{m_discard}/withdraw", {"reason": "interop withdrawal"}),
-            [police, detector])
+        self.step(
+            "operator-withdrawal",
+            lambda: self.api(
+                "POST", f"/v1/mitigations/{m_discard}/withdraw", {"reason": "interop withdrawal"}
+            ),
+            [police, detector],
+        )
         assert self.status(m_discard) == "withdrawn"
 
         def expire():
-            mitigation = self.mitigate({
-                "reason": "interop ttl expiry", "victim_ip": "203.0.113.40", "protocol": "udp",
-                "dst_ports": [53], "action": "discard", "ttl_seconds": 15})
+            mitigation = self.mitigate(
+                {
+                    "reason": "interop ttl expiry",
+                    "victim_ip": "203.0.113.40",
+                    "protocol": "udp",
+                    "dst_ports": [53],
+                    "action": "discard",
+                    "ttl_seconds": 15,
+                }
+            )
             self.wait_frr(f"{self.step_no:02d}-ttl-expiry-announced", [police, detector, expiring])
             return mitigation
+
         m_expiring = self.step("ttl-expiry", expire, [police, detector], seconds=90)
         assert self.status(m_expiring) == "expired"
 
         repairs = 'prefixd_reconciliation_repairs_total{status="success"}'
+
         def restart():
             before = self.metric(repairs)
             self.run("docker", "stop", speaker)
             self.wait_frr(f"{self.step_no:02d}-speaker-restart-stopped", [])
             self.run("docker", "start", speaker)
             return before
+
         before = self.step("speaker-restart", restart, [police, detector], seconds=120)
         repaired = self.metric(repairs) - before
-        assert repaired >= 2, f"expected prefixd re-injection of 2 rules, repairs metric moved {repaired}"
+        assert repaired >= 2, (
+            f"expected prefixd re-injection of 2 rules, repairs metric moved {repaired}"
+        )
         self.steps[-1]["reconciliation_repairs"] = repaired
 
-        m_ipv6 = self.step("ipv6-discard", lambda: self.mitigate({
-            "reason": "interop ipv6 discard", "victim_ip": "2001:db8:113::10", "protocol": "udp",
-            "dst_ports": [53], "action": "discard", "ttl_seconds": 1800}), [police, detector, ipv6])
+        m_ipv6 = self.step(
+            "ipv6-discard",
+            lambda: self.mitigate(
+                {
+                    "reason": "interop ipv6 discard",
+                    "victim_ip": "2001:db8:113::10",
+                    "protocol": "udp",
+                    "dst_ports": [53],
+                    "action": "discard",
+                    "ttl_seconds": 1800,
+                }
+            ),
+            [police, detector, ipv6],
+        )
 
         def withdraw_all():
             for mitigation in (m_police, m_detector, m_ipv6):
-                self.api("POST", f"/v1/mitigations/{mitigation}/withdraw", {"reason": "interop cleanup"})
+                self.api(
+                    "POST", f"/v1/mitigations/{mitigation}/withdraw", {"reason": "interop cleanup"}
+                )
+
         self.step("withdraw-all", withdraw_all, [])
 
     def main(self):
-        receipt = {"date_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-                   "speaker": self.args.speaker, "result": "fail",
-                   "scope": self.SCOPE}
+        receipt = {
+            "date_utc": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
+            "speaker": self.args.speaker,
+            "result": "fail",
+            "scope": self.SCOPE,
+        }
         try:
             self.wait_ready()
             receipt["versions"] = self.versions()
@@ -306,12 +400,20 @@ class Lab:
 
     def summary(self, receipt):
         versions = receipt.get("versions", {})
-        lines = [f"### {self.TITLE}: prefixd -> {receipt['speaker']} -> FRR ({receipt['result']})", "",
-                 f"{receipt['date_utc']}; prefixd {versions.get('prefixd', '?')} "
-                 f"({versions.get('prefixd_commit', '?')[:12]}); speaker {versions.get('speaker', '?')}; "
-                 f"{versions.get('frr', '?')}", "", "| step | result | seconds |", "|---|---|---|"]
-        lines += [f"| {s['step']} | {s.get('result', 'not reached')} | {s.get('seconds', '')} |"
-                  for s in receipt["steps"]]
+        lines = [
+            f"### {self.TITLE}: prefixd -> {receipt['speaker']} -> FRR ({receipt['result']})",
+            "",
+            f"{receipt['date_utc']}; prefixd {versions.get('prefixd', '?')} "
+            f"({versions.get('prefixd_commit', '?')[:12]}); speaker {versions.get('speaker', '?')}; "
+            f"{versions.get('frr', '?')}",
+            "",
+            "| step | result | seconds |",
+            "|---|---|---|",
+        ]
+        lines += [
+            f"| {s['step']} | {s.get('result', 'not reached')} | {s.get('seconds', '')} |"
+            for s in receipt["steps"]
+        ]
         if "failure" in receipt:
             lines += ["", "```diff", receipt["failure"], "```"]
         (self.receipt / "summary.md").write_text("\n".join(lines) + "\n")

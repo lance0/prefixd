@@ -1,0 +1,14 @@
+# Python here is stdlib-only tooling run by the host python3 (CI: ubuntu-latest).
+# release-prepare.sh already needs tomllib, so 3.11 is the floor.
+target-version = "py311"
+# Matches rustfmt's default width used by the Rust code.
+line-length = 100
+# Python sources only; leave Markdown code blocks alone.
+include = ["*.py"]
+# Lab modules import their siblings (run-frr.sh puts that directory on sys.path).
+src = [".", "lab/interop"]
+
+[lint]
+# Explicit, so a ruff upgrade cannot widen the set: the classic E4/E7/E9/F
+# defaults plus bugbear, pyupgrade, simplify, isort and ruff's own rules.
+select = ["E4", "E7", "E9", "F", "B", "UP", "SIM", "I", "RUF"]

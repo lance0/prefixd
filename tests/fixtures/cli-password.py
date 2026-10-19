@@ -39,13 +39,17 @@ def interactive(username, password, expected, ending=b"\n"):
                 # The prompt can precede the terminal-mode change by a few instructions.
                 echo_deadline = time.monotonic() + 2
                 while termios.tcgetattr(terminal)[3] & termios.ECHO:
-                    assert time.monotonic() < echo_deadline, "password input leaves terminal echo enabled"
+                    assert time.monotonic() < echo_deadline, (
+                        "password input leaves terminal echo enabled"
+                    )
                     time.sleep(0.01)
                 os.write(terminal, password + ending)
                 sent = True
                 # Exercise child exit before its final PTY output is consumed.
                 while not os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG):
-                    assert time.monotonic() < deadline, "child did not exit before the capture deadline"
+                    assert time.monotonic() < deadline, (
+                        "child did not exit before the capture deadline"
+                    )
                     time.sleep(0.001)
             if not finished:
                 finished, status = os.waitpid(pid, os.WNOHANG)
@@ -58,7 +62,9 @@ def interactive(username, password, expected, ending=b"\n"):
         exit_code = os.waitstatus_to_exitcode(status)
         assert exit_code == expected, "unexpected command exit status"
         terminal_flags = termios.ECHO | termios.ICANON | termios.ISIG
-        assert termios.tcgetattr(terminal)[3] & terminal_flags == terminal_flags, "terminal mode was not restored"
+        assert termios.tcgetattr(terminal)[3] & terminal_flags == terminal_flags, (
+            "terminal mode was not restored"
+        )
         if password:
             assert password.strip() not in output, "password appeared in terminal output"
         elif ending == b"\n":
@@ -84,7 +90,15 @@ result = subprocess.run(
 assert result.returncode != 0, "password prompt succeeded without a terminal"
 assert b"failed to read password" in result.stderr, "missing terminal did not fail explicitly"
 result = subprocess.run(
-    [sys.argv[1], "operators", "create", "--username", "pty-explicit", "--password", "pty-test-password"],
+    [
+        sys.argv[1],
+        "operators",
+        "create",
+        "--username",
+        "pty-explicit",
+        "--password",
+        "pty-test-password",
+    ],
     stdin=subprocess.DEVNULL,
     capture_output=True,
     start_new_session=True,
