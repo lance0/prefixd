@@ -188,32 +188,48 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     })
 }
 
+/// Readiness, in precedence order: standby, then draining, then ready.
+#[derive(Serialize, ToSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReadinessStatus {
+    /// Another controller holds this POP's fence.
+    Standby,
+    /// Shutdown has begun; the fence stays held until the process exits.
+    Draining,
+    /// This controller holds the fence and accepts mutations.
+    Ready,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct ReadinessResponse {
-    /// ready or standby
-    status: &'static str,
+    status: ReadinessStatus,
 }
 
 /// Public readiness: route detectors and load balancers only to the controller
-/// holding this POP's fence (ADR 027). Liveness stays on `/v1/health`.
+/// holding this POP's fence (ADR 027) and not draining. Liveness stays on `/v1/health`.
 #[utoipa::path(
     get,
     path = "/v1/ready",
     tag = "health",
     responses(
         (status = 200, description = "This controller holds its POP's fence and accepts mutations", body = ReadinessResponse),
-        (status = 503, description = "Standby: another controller holds this POP's fence", body = ReadinessResponse)
+        (status = 503, description = "Standby (another controller holds this POP's fence) or draining after a shutdown signal", body = ReadinessResponse)
     )
 )]
 pub async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if state.fence.is_active() {
-        (StatusCode::OK, Json(ReadinessResponse { status: "ready" }))
+    let status = if !state.fence.is_active() {
+        ReadinessStatus::Standby
+    } else if state.is_shutting_down() {
+        ReadinessStatus::Draining
     } else {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ReadinessResponse { status: "standby" }),
-        )
-    }
+        ReadinessStatus::Ready
+    };
+    let code = if status == ReadinessStatus::Ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, Json(ReadinessResponse { status }))
 }
 
 /// Authenticated health detail: full operational status

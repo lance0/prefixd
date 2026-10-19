@@ -357,6 +357,10 @@ async fn shutdown_signal(state: Arc<AppState>) {
         _ = terminate => {},
     }
 
+    // Drain first: readiness fails and ingest refuses before anything else runs.
+    // The fence stays held until the process exits.
+    state.trigger_shutdown();
+
     let drain_timeout = state.settings.shutdown.drain_timeout_seconds;
     let active = state.repo.count_active_global().await.unwrap_or(0);
 
@@ -365,8 +369,6 @@ async fn shutdown_signal(state: Arc<AppState>) {
         active_mitigations = active,
         "shutdown signal received, beginning graceful shutdown"
     );
-
-    state.trigger_shutdown();
 
     if drain_timeout > 0 {
         tracing::info!(seconds = drain_timeout, "waiting for drain period");

@@ -88,6 +88,7 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
             PublicHealthResponse,
             HealthResponse,
             super::handlers::ReadinessResponse,
+            super::handlers::ReadinessStatus,
             super::handlers::SpeakerHealth,
             super::handlers::DaemonHealthObservation,
             ErrorResponse,
@@ -219,6 +220,14 @@ mod tests {
         assert!(has_503(&paths["/v1/events"].post));
         assert!(!has_503(&paths["/v1/mitigations"].get));
         assert!(!has_503(&paths["/v1/auth/login"].post));
+        assert!(has_503(&paths["/v1/ready"].get));
+        let schema =
+            serde_json::to_value(&doc.components.as_ref().unwrap().schemas["ReadinessStatus"])
+                .unwrap();
+        assert_eq!(
+            schema["enum"],
+            serde_json::json!(["standby", "draining", "ready"])
+        );
     }
 
     #[test]

@@ -1530,13 +1530,20 @@ GET /v1/ready
 ```
 
 Public readiness for load balancers and detector routing. No authentication is
-required, and it does not query the database or speaker. It returns `200` with
-`{"status": "ready"}` while this controller holds its POP's fence
-([ADR 027](../adr/027-blackhole-mitigations.md)), and `503` with
-`{"status": "standby"}` while another controller holds it. A standby controller
-refuses state-changing requests, so route detector events and operator writes
-only to a ready controller. `GET /v1/health` stays liveness: it returns `200`
-for a standby controller too.
+required, and it does not query the database or speaker. The response is
+`{"status": "<status>"}`; the first matching row applies:
+
+| Status | HTTP | Meaning |
+|--------|------|---------|
+| `standby` | 503 | Another controller holds this POP's fence ([ADR 027](../adr/027-blackhole-mitigations.md)) |
+| `draining` | 503 | A shutdown signal arrived; the controller still holds the fence until it exits |
+| `ready` | 200 | This controller holds the fence and accepts mutations |
+
+Standby and draining controllers refuse detector events, so route detector
+events and operator writes only to a ready controller. Draining begins before
+any other shutdown step, so set the load balancer's readiness check interval
+shorter than `shutdown.drain_timeout_seconds`. `GET /v1/health` stays liveness:
+it returns `200` for standby and draining controllers too.
 
 ### Health Detail (Authenticated)
 

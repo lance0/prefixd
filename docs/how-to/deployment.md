@@ -497,9 +497,12 @@ keepalive probes open between the controller and the database. See
 [controller fence and rolling deploys](upgrading.md#controller-fence-and-rolling-deploys).
 
 Load balancers and detector routing must health-check `GET /v1/ready`, which
-returns `200` only on the controller that holds the fence and `503` in standby.
-`GET /v1/health` is liveness and stays `200` on a standby, so routing by it can
-deliver detector events to a controller that refuses them with `503`.
+returns `200` only on the controller that holds the fence, and `503` in standby
+or while draining after a shutdown signal. Set the readiness check interval
+shorter than `shutdown.drain_timeout_seconds` so traffic moves off a draining
+controller before it exits. `GET /v1/health` is liveness and stays `200` on a
+standby or draining controller, so routing by it can deliver detector events to
+a controller that refuses them with `503`.
 
 ---
 

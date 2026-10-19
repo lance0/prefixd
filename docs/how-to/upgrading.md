@@ -181,17 +181,21 @@ connecting to the speaker.
   `prefixd_controller_fence_active` is `0`. It retries the lock every 5
   seconds.
 - **Routing.** Load balancers and detector routing must use `GET /v1/ready`,
-  which returns `200` only on the controller holding the fence.
-  `GET /v1/health` stays liveness and is `200` on a standby, so routing by it
-  would send detector events to a controller that refuses them.
+  which returns `200` only on the controller holding the fence and not
+  draining. `GET /v1/health` stays liveness and is `200` on a standby or
+  draining controller, so routing by it would send detector events to a
+  controller that refuses them. Set the readiness check interval shorter than
+  `shutdown.drain_timeout_seconds`.
 - **One-shot maintenance.** `--adopt-legacy-speaker` and
   `--retire-dry-run-intent` take the same lock once and refuse with "another
   controller holds the fence for owner …; stop it first" while a controller
   holds it. Stop the controller, run the command, then start the controller.
 - **Restarts and rolling deploys.** Process exit closes the fence session and
-  releases the lock; the old process keeps it through its shutdown drain. A
-  replacement started while the old process runs waits in standby, takes over
-  within one poll interval of the old process exiting, and reconciles at once.
+  releases the lock; the old process keeps it through its shutdown drain, but
+  `GET /v1/ready` returns `503` with `"draining"` from the moment the shutdown
+  signal arrives. A replacement started while the old process runs waits in
+  standby, takes over within one poll interval of the old process exiting, and
+  reconciles at once.
 - **Lock loss.** The holder checks its fence session every 2 seconds with a
   2-second timeout. After a failed check or a PostgreSQL restart it stops
   starting speaker mutations, enters standby and reacquires on a new

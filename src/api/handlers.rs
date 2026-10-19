@@ -52,8 +52,8 @@ pub use signals::{
 mod health;
 pub use health::{
     __path_health, __path_health_detail, __path_ready, ComponentHealth, DaemonHealthObservation,
-    HealthResponse, PublicHealthResponse, ReadinessResponse, SpeakerHealth, health, health_detail,
-    ready,
+    HealthResponse, PublicHealthResponse, ReadinessResponse, ReadinessStatus, SpeakerHealth,
+    health, health_detail, ready,
 };
 
 use axum::{

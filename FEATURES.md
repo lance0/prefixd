@@ -512,7 +512,7 @@ pending. See the [audit API](docs/reference/api.md#audit-log).
 | Endpoint | Access | Meaning |
 | --- | --- | --- |
 | `GET /v1/health` | Public | Lightweight liveness, package version and auth mode |
-| `GET /v1/ready` | Public | `200` only while this controller holds its POP's fence; use for load balancers and detector routing |
+| `GET /v1/ready` | Public | `200` only while this controller holds its POP's fence and is not draining; use for load balancers and detector routing |
 | `GET /v1/health/detail` | Mode-aware authentication | Controller uptime, database/status counts, selected backend/capabilities, peer observation and separate daemon metadata |
 
 Top-level uptime belongs to the controller. `speaker.daemon` separately reports

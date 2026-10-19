@@ -394,3 +394,137 @@ async fn standby_refuses_mutation_requests_with_503_and_reports_standby() {
     let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(health["status"], "standby");
 }
+
+/// Readiness precedence: standby, then draining, then ready.
+#[tokio::test]
+async fn readiness_reports_standby_before_draining_before_ready() {
+    async fn readiness(active: bool, shutting_down: bool) -> (StatusCode, serde_json::Value) {
+        let fence = Arc::new(ControllerFence::new(active));
+        let state = AppState::new(
+            common::test_settings(),
+            test_inventory(),
+            test_playbooks(),
+            Arc::new(prefixd::db::MockRepository::new()),
+            Arc::new(FencedAnnouncer::new(
+                Arc::new(MockAnnouncer::new()),
+                fence.clone(),
+            )),
+            ".".into(),
+        )
+        .unwrap()
+        .with_fence(fence)
+        .unwrap();
+        if shutting_down {
+            state.trigger_shutdown();
+        }
+        let response = prefixd::api::create_test_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+    let unavailable = StatusCode::SERVICE_UNAVAILABLE;
+    for (active, shutting_down, expected) in [
+        (true, false, (StatusCode::OK, "ready")),
+        (true, true, (unavailable, "draining")),
+        (false, true, (unavailable, "standby")),
+        (false, false, (unavailable, "standby")),
+    ] {
+        let (code, body) = readiness(active, shutting_down).await;
+        assert_eq!((code, body["status"].as_str().unwrap()), expected);
+    }
+}
+
+/// A real SIGTERM: readiness fails with `draining` at once, while the process
+/// still runs and still holds the fence; the fence is released only on exit.
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_signal_drains_readiness_while_the_fence_is_held() {
+    let ctx = TestContext::new().await;
+    let owner = binding(&ctx).await.owner();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut settings = ctx.state.settings.clone();
+    settings.http.listen = format!("127.0.0.1:{port}");
+    settings.shutdown.drain_timeout_seconds = 5;
+    let directory = tempfile::tempdir().unwrap();
+    for (name, yaml) in [
+        ("prefixd.yaml", serde_saphyr::to_string(&settings).unwrap()),
+        (
+            "inventory.yaml",
+            serde_saphyr::to_string(&test_inventory()).unwrap(),
+        ),
+        (
+            "playbooks.yaml",
+            serde_saphyr::to_string(&test_playbooks()).unwrap(),
+        ),
+    ] {
+        common::write_yaml(directory.path(), name, &yaml);
+    }
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixd"))
+        .arg("--config")
+        .arg(directory.path())
+        .env("DATABASE_URL", &settings.storage.connection_string)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let url = format!("http://127.0.0.1:{port}/v1/ready");
+    let readiness = async || {
+        let response = reqwest::get(&url).await.ok()?;
+        let code = response.status().as_u16();
+        let body: serde_json::Value = response.json().await.ok()?;
+        Some((code, body["status"].as_str()?.to_owned()))
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while readiness().await != Some((200, "ready".into())) {
+        assert!(Instant::now() < deadline, "controller never became ready");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let pid = child.id().unwrap().to_string();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while readiness().await != Some((503, "draining".into())) {
+        assert!(Instant::now() < deadline, "readiness did not drain");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "exited before draining"
+    );
+    assert!(
+        fence_holder(&ctx, &owner).await.is_some(),
+        "the fence is held through the drain"
+    );
+
+    let status = tokio::time::timeout(Duration::from_secs(20), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.success());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fence_holder(&ctx, &owner).await.is_some() {
+        assert!(Instant::now() < deadline, "fence not released on exit");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}

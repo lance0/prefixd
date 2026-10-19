@@ -51,7 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the old process exits.
 
 - Add public `GET /v1/ready`: `200` with `{"status":"ready"}` while the
-  controller holds its fence, `503` with `{"status":"standby"}` otherwise.
+  controller holds its fence, otherwise `503` with `{"status":"standby"}`,
+  or `{"status":"draining"}` from the moment a shutdown signal arrives. The
+  fence stays held through the drain. Set the load balancer's readiness
+  interval shorter than `shutdown.drain_timeout_seconds`.
 
 - Fence the `--adopt-legacy-speaker` and `--retire-dry-run-intent` one-shot
   modes: each takes the controller's fence once, refuses while another process
