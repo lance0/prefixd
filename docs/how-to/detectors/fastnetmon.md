@@ -7,7 +7,7 @@ This guide covers integrating FastNetMon Community Edition with prefixd for auto
 FastNetMon detects DDoS attacks via NetFlow/sFlow analysis and calls a notify script when attacks are detected. The `prefixd-fastnetmon.sh` script bridges FastNetMon to prefixd's HTTP APIs (event ingest + mitigation withdraw).
 
 ```
-FastNetMon → notify_script → prefixd → GoBGP → Routers (FlowSpec)
+FastNetMon → notify script → prefixd → BGP speaker (rustbgpd by default, or GoBGP) → routers (FlowSpec)
 ```
 
 ## Prerequisites
@@ -50,8 +50,9 @@ UNBAN_QUERY_DELAY_SECONDS="1"
 
 ```ini
 notify_script_path = /usr/local/bin/prefixd-fastnetmon.sh
-notify_script_pass_details = on
 ```
+
+`notify_script_path` is the only notify-script setting in FastNetMon Community. The script file must exist when FastNetMon starts, or notifications are disabled.
 
 4. Restart FastNetMon:
 
@@ -64,7 +65,7 @@ sudo systemctl restart fastnetmon
 ### Ban Flow
 
 1. FastNetMon detects attack on victim IP
-2. Calls script with args: `$1=IP $2=direction $3=pps $4=ban`
+2. Calls script with args: `$1=IP $2=direction $3=pps $4=ban` and writes the attack details to its stdin
 3. Script generates a unique UUID `event_id` for each ban occurrence
 4. Sends `POST /v1/events` with `action: "ban"`
 5. prefixd evaluates playbook, creates mitigation, announces FlowSpec
@@ -72,7 +73,7 @@ sudo systemctl restart fastnetmon
 ### Unban Flow
 
 1. FastNetMon attack subsides
-2. Calls script with args: `$1=IP $2=direction $3=pps $4=unban`
+2. Calls script with args: `$1=IP $2=direction $3=pps $4=unban`; no attack details are sent
 3. Script queries `GET /v1/mitigations?status=pending,active,escalated&victim_ip=<ip>`
 4. Script withdraws each matching mitigation via `POST /v1/mitigations/{id}/withdraw`
 5. Script retries lookup briefly to handle ban/unban races
@@ -85,7 +86,7 @@ Unban correlation is done by querying active mitigations for the victim IP and w
 
 ## Vector Detection
 
-The script infers the attack vector from FastNetMon's stdin details:
+On ban, the script infers the attack vector from the attack details FastNetMon writes to stdin:
 
 | Detail token                       | prefixd Vector |
 |------------------------------------|----------------|
