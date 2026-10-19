@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed 2026-10-19. Nothing in this ADR is implemented. Extends
+Accepted 2026-10-19, with the owner decisions recorded below. Nothing in this
+ADR is implemented yet. Extends
 [ADR 012](012-playbook-policy-engine.md),
 [ADR 019](019-signal-adapter-architecture.md) and
 [ADR 025](025-pluggable-speaker-backends.md). It follows the identity
@@ -285,7 +286,8 @@ existing data. *Rejected:* (a) for the reasons in the table; (b) as redundant.
 Consequences of (c):
 
 - **Admission.** Each rule goes through guardrails and `admit_mitigation`
-  independently, in playbook order. Partial admission is accepted: every
+  independently, in playbook order. Admission is per rule, not all or
+  nothing. Partial admission is accepted: every
   admitted rule is narrower than the all-UDP alternative and stands on its
   own. The event response lists the outcome of each rule (created, extended
   or rejected with a reason) and returns `202` when at least one rule was
@@ -390,9 +392,12 @@ Ports some proposals include but this default leaves out:
   ties the port to abuse. Operators can still add any of them.
 
 DNS (53) is in the default even though its collateral is real. A victim that
-resolves names through external resolvers loses those replies while the rule
-lives. Shipped playbooks therefore police rather than discard, and operators
-of resolvers should exclude 53 or safelist the resolver.
+resolves names through external resolvers loses those replies while a
+source-port rule containing 53 lives. The configuration reference, the
+detector guides and the shipped playbook example state this. An operator who
+cannot accept it can police the source-port rule instead of discarding it,
+remove 53 from the library, or safelist the victim. The shipped example polices
+the fragment rule and discards only the source-port rule.
 
 **Playbooks.** A step may carry `rules:` instead of a top-level action. Each rule
 has its own `match` and `action`, and the step's TTL applies to all of them.
@@ -410,6 +415,9 @@ playbooks:
         rules:
           - match:
               src_ports: from_event       # event ports intersected with the library
+            # If 53 is reported, the victim's DNS replies from external
+            # resolvers are dropped too until the TTL ends. Use police here,
+            # or remove 53 from the library, if that is unacceptable.
             action: discard
           - match:
               fragment: non_first         # needs guardrails.allow_fragment_match
@@ -521,8 +529,9 @@ documented in the API reference.
   - Collateral is bounded too: the victim loses replies from that service port
     while the rule lives.
   - The induced-collateral risk remains. An attacker can spoof sport-53 traffic
-    so that prefixd blocks the victim's DNS replies, which is why shipped
-    playbooks police and why the library is editable.
+    so that prefixd blocks the victim's DNS replies. This is why the
+    collateral is documented, the rule is bounded by its TTL, and the library
+    is editable.
 - **Dry run.** Preserved as in [ADR 013](013-dry-run-mode.md). Extended rules
   are persisted with their components and `origin_mode = dry-run`, and are
   audited, but no RPC is sent. Capability and opt-in checks run in both modes.
@@ -688,13 +697,20 @@ explicit opt-in because its collateral is real. Router support for these
 components varies more than for destination ports, so operators must qualify
 their platform. Downgrades past slice 1 need a documented drain.
 
-## Open questions for the owner
+## Decisions recorded
 
-1. **Fragment action in shipped examples:** police (recommended) or discard.
-2. **`min_src_port_share` default:** 0.2 (recommended) or a stricter value.
-3. **Partial admission:** accept per-rule outcomes (recommended) or require all
-   rules of a step to be admitted together.
-4. **DNS (53) in the default library:** include it with the documented
-   collateral (recommended) or ship it disabled.
-5. **Source ports without a new flag:** rely on vector and playbook opt-in
-   (recommended), or add `allow_src_port_match`.
+The owner decided the following on 2026-10-19:
+
+1. **Fragment action.** Shipped examples police the non-first-fragment rule;
+   they do not discard it. Discard remains available when an operator writes it
+   explicitly, behind `allow_fragment_match`.
+2. **DNS in the library.** Port 53 is in the default reflector-port library.
+   Its collateral (the victim's replies from external resolvers) is documented
+   in the configuration reference, the detector guides and the shipped
+   playbook example.
+3. **Admission.** Rules emitted by one step are admitted per rule, not all or
+   nothing. The event response reports each rule's outcome.
+4. **Sample threshold.** `min_src_port_share` defaults to 0.2.
+5. **No source-port flag.** There is no `allow_src_port_match`. Source ports
+   are opt-in through the `udp_amplification` playbook or an explicit manual
+   request, and they are bounded by the library and `max_ports`.
