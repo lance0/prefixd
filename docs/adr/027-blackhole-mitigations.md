@@ -15,6 +15,21 @@ failed leased add never falls back to an unleased one, the owner is persisted
 per route, and the leased and unleased transition is decided below. A
 PostgreSQL advisory lock fences duplicate controllers.
 
+Amended 2026-10-19 (evening): the owner decided that enforced detector
+blackholes ship before the rustbgpd injection lease, as an explicit opt-in.
+In enforced mode, a playbook blackhole step without `blackhole_lease` is
+allowed only when `blackhole.enabled` is true and `blackhole.detector_sources`
+is nonempty. The controller then warns at startup and reports
+`detector_unleased` in authenticated health and a gauge. Reconciliation
+deletes routes left behind by terminal blackhole rows, and shipped Prometheus
+rules alert when prefixd is down, has no active controller, or was holding
+blackholes when it stopped. The lease becomes a later hardening step: once
+`blackhole_lease` is true, the leased path takes over, and a failed leased add
+still never falls back to an unleased one. Where this ADR elsewhere says that
+enforced detector blackholes wait for the lease (the requirements table,
+failure modes and consequences), this amendment supersedes it; §2, decision 1
+and slice 8 are updated in place.
+
 ## Date
 
 2026-10-19
@@ -135,7 +150,9 @@ new mitigations, never live routes.
   safelist is empty. These checks run in dry-run and enforced modes alike.
 - **Injection lease gate.** In enforced mode, startup and playbook reload or
   save refuse any playbook containing a `blackhole` step unless
-  `SpeakerCapabilities.blackhole_lease` is true. The error names the missing
+  `SpeakerCapabilities.blackhole_lease` is true or, as amended, the operator
+  opted into unleased detector blackholes with `blackhole.enabled` and a
+  nonempty `blackhole.detector_sources`. The error names the missing
   rustbgpd injection lease. The capability is true only when
   `blackhole.leased` is enabled and the adapter's `ListInjectionLeases` call
   to the connected daemon succeeded; an older daemon answers `UNIMPLEMENTED`.
@@ -719,20 +736,25 @@ Each slice is a separate draft PR that passes `just gate`.
    unleased manual blackhole, persisting after a controller stop, recorded as
    the negative case. SR Linux has no FlowSpec but could serve as an optional
    second unicast receiver. This qualifies FRR only.
-8. **Detector blackholes with owner and lease.** Add
-   `PlaybookAction::Blackhole`, the source allowlist and the extension cap.
-   Also add the `blackhole.leased` and `blackhole.lease_seconds` settings,
-   the enforced-mode lease gate at startup and on playbook reload or save, the
-   owner collision checks, the per-route owner in `rule_json`,
+8. **Detector blackholes with owner and lease.** As amended, this ships in two
+   parts. The first part adds `PlaybookAction::Blackhole`, the source
+   allowlist, the extension cap, the `blackhole.leased` and
+   `blackhole.lease_seconds` settings, the enforced-mode gate with its
+   unleased opt-in at startup and on playbook reload or save, the
+   `detector_unleased` health field and gauge, orphan cleanup and the down
+   alerts. It needs no upstream release. The second part, the lease
+   hardening, adds the owner collision checks, the per-route owner in `rule_json`,
    `AddLeasedPath` with no unleased fallback, the independent renewal task,
    lease health and metrics, restart adoption, the full re-add on a lost
-   lease, and owner-filtered read-back. The gate and plumbing can merge
-   against the mock before the upstream release. Enforced detector blackholes
-   become available only after re-vendoring the proto at the rustbgpd release
-   that contains ADR-0141 and bumping the qualification pin. *Accept:*
+   lease, and owner-filtered read-back. Leased detector blackholes become
+   available only after re-vendoring the proto at the rustbgpd release that
+   contains ADR-0141 and bumping the qualification pin. *Accept:*
    - Enforced startup and playbook save are refused with a blackhole step when
-     `blackhole_lease` is false, and accepted when it is true; dry-run accepts
-     and sends no RPC.
+     `blackhole_lease` is false and `blackhole.detector_sources` is empty, and
+     accepted when either holds; dry-run accepts and sends no RPC.
+   - An overdue blackhole is withdrawn on the first reconcile after a restart,
+     a route matching a terminal row exactly is withdrawn, a route with no
+     matching ledger row is only reported, and a failed read changes nothing.
    - Renewal proceeds while the lifecycle mutex and database are blocked.
    - `UNIMPLEMENTED` from an older daemon on the leased add leaves nothing
      installed and makes no plain `AddPath` call: the fake records zero
@@ -768,13 +790,21 @@ before it. An unleased manual blackhole can outlive a stopped controller.
 
 The owner decided the following on 2026-10-19:
 
-1. **Detector-driven enforced blackholes wait for the injection lease.**
-   The owner-scoped lease, requirement (d), is a must-have for them. It is
-   enforced by the `SpeakerCapabilities.blackhole_lease` gate at enforced
-   startup and on playbook reload or save. Manual and dry-run blackholes may
-   ship before it. The lease is per controller, renewed by `RenewLease`,
-   and withdraws everything the owner added when it expires; per-route expiry
-   stays with prefixd's TTLs.
+1. **Detector-driven enforced blackholes ship before the injection lease,
+   as an opt-in** (amended the evening of 2026-10-19; first decided as a hard
+   wait). Without `SpeakerCapabilities.blackhole_lease`, enforced startup and
+   playbook reload or save allow a blackhole step only when
+   `blackhole.enabled` is true and `blackhole.detector_sources` is nonempty;
+   both are off by default. The controller warns, reports `detector_unleased`
+   in authenticated health and a gauge, cleans up routes left by terminal
+   rows, and ships down alerts. The remaining gap is accepted: if prefixd is
+   down for a long time while rustbgpd keeps running, detector blackholes
+   stay announced until prefixd returns or an operator withdraws them. The
+   owner-scoped lease, requirement (d), becomes the later hardening step that
+   closes it. Once `blackhole_lease` is true, the leased path takes over and
+   never falls back to an unleased add. The lease is per controller, renewed
+   by `RenewLease`, and withdraws everything the owner added when it expires;
+   per-route expiry stays with prefixd's TTLs.
 2. **Manual blackholes require Admin.** Operator is not enough, so bearer
    tokens, which map to Operator, cannot create one.
 3. **Default caps:** a TTL cap of 3600 seconds, and quotas of 10 per POP and 50

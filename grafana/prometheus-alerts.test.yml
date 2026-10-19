@@ -1,0 +1,71 @@
+rule_files:
+  - prometheus-alerts.yml
+evaluation_interval: 1m
+tests:
+  # Blackholes active, then prefixd goes down: all three relevant alerts fire.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x10 0x20'
+      - series: 'prefixd_controller_fence_active{job="prefixd",instance="a"}'
+        values: '1x10 stale'
+      - series: 'prefixd_mitigations_active{job="prefixd",instance="a",action_type="blackhole",pop="p"}'
+        values: '2x10 stale'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PrefixdDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: prefixd, instance: a}
+            exp_annotations:
+              summary: "prefixd is down"
+              description: "a has failed scrapes for 2 minutes. TTL expiry and withdrawals stop while it is down, and announced routes stay on the speaker."
+      - eval_time: 20m
+        alertname: PrefixdBlackholesWhileDegraded
+        exp_alerts:
+          - exp_labels: {severity: critical, job: prefixd}
+            exp_annotations:
+              summary: "Blackholes may outlive an inactive prefixd"
+              description: "prefixd had active blackholes when its last active controller stopped. They stay announced until prefixd returns or an operator withdraws them on the speaker."
+      - eval_time: 20m
+        alertname: PrefixdNotReady
+        exp_alerts: []
+  # Blackholes ended before prefixd went down: only PrefixdDown fires.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x10 0x20'
+      - series: 'prefixd_controller_fence_active{job="prefixd",instance="a"}'
+        values: '1x10 stale'
+      - series: 'prefixd_mitigations_active{job="prefixd",instance="a",action_type="blackhole",pop="p"}'
+        values: '2x4 stale'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PrefixdBlackholesWhileDegraded
+        exp_alerts: []
+  # Up but in standby with blackholes: not ready and degraded.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x30'
+      - series: 'prefixd_controller_fence_active{job="prefixd",instance="a"}'
+        values: '1x10 0x20'
+      - series: 'prefixd_mitigations_active{job="prefixd",instance="a",action_type="blackhole",pop="p"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PrefixdNotReady
+        exp_alerts:
+          - exp_labels: {severity: critical, job: prefixd}
+            exp_annotations:
+              summary: "No active prefixd controller"
+              description: "Every scraped prefixd process is in standby: none holds the fence, so nothing expires, withdraws or reconciles."
+      - eval_time: 20m
+        alertname: PrefixdBlackholesWhileDegraded
+        exp_alerts:
+          - exp_labels: {severity: critical, job: prefixd}
+            exp_annotations:
+              summary: "Blackholes may outlive an inactive prefixd"
+              description: "prefixd had active blackholes when its last active controller stopped. They stay announced until prefixd returns or an operator withdraws them on the speaker."
+      - eval_time: 20m
+        alertname: PrefixdDown
+        exp_alerts: []

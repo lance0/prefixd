@@ -181,6 +181,7 @@ services:
       - "127.0.0.1:9091:9090"
     volumes:
       - ./grafana/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./grafana/prometheus-alerts.yml:/etc/prometheus/prometheus-alerts.yml:ro
       - prometheus-data:/prometheus
     restart: unless-stopped
 

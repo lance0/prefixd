@@ -255,12 +255,10 @@ pub async fn update_playbooks(
         playbooks: body.playbooks,
     };
 
-    // Validate, including the opt-ins and speaker capability rules need (ADR 028)
+    // Validate, including the rule opt-ins and speaker capability (ADR 028) and
+    // the blackhole enablement, TTL cap and lease gate (ADR 027).
     let mut errors = new_playbooks.validate();
-    errors.extend(
-        new_playbooks
-            .check_match_settings(&state.settings.guardrails, state.announcer.match_support()),
-    );
+    errors.extend(new_playbooks.check_settings(&state.settings, state.announcer.capabilities()));
     if !errors.is_empty() {
         return Ok((
             StatusCode::BAD_REQUEST,

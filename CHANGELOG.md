@@ -45,8 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   malformed communities, `NO_EXPORT`, `NO_EXPORT_SUBCONFED`, `NO_ADVERTISE`
   and unknown keys are refused. Startup refuses `enabled: true` when the speaker backend lacks the
   blackhole capability (GoBGP) or the safelist is empty, in dry-run and
-  enforced modes. Only the Admin-only manual path below creates a blackhole;
-  omitting the block keeps every existing configuration valid. Older binaries
+  enforced modes. Omitting the block keeps every existing configuration valid. Older binaries
   ignore the block.
 - The rustbgpd and GoBGP adapters encode and strictly read back UDP source
   port, non-first fragment and packet-length FlowSpec matches in both
@@ -75,7 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request needs the Admin role (Operator and Viewer sessions and every bearer
   token get `403`), a nonempty `reason`, and `confirm_victim_ip` exactly equal
   to `victim_ip` (`400` otherwise, with no row or audit entry). It takes no
-  protocol, ports, rate or `expires_at_cap`. Blackholes are manual, unleased
+  protocol, ports, rate or `expires_at_cap`. Manual blackholes are unleased
   and rustbgpd-only: one stays on the speaker if prefixd stops, and router
   enforcement depends on the router's RTBH policy, which prefixd does not
   verify; FRR qualification is pending. Mitigation responses and WebSocket
@@ -112,6 +111,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fence the `--adopt-legacy-speaker` and `--retire-dry-run-intent` one-shot
   modes: each takes the controller's fence once, refuses while another process
   holds it, and releases it on exit.
+
+- Detectors can trigger blackholes (ADR 027). A playbook step with
+  `action: blackhole` (`ttl_seconds`, no `rate_bps`) creates or extends a
+  blackhole through the manual path's admission, for events whose `source` is
+  listed in the new `blackhole.detector_sources` (default `[]`). Other sources
+  get `422` and count under `prefixd_guardrail_rejections_total` reason
+  `BlackholeSourceNotAllowed`. A blackhole step carries no `rules`, a rule
+  cannot use `action: blackhole`, and a blackhole step in a
+  `udp_amplification` playbook is refused. A repeated ban extends the blackhole to at most
+  `blackhole.max_ttl_seconds` from now, and the FastNetMon unban withdraws it.
+  Startup, playbook reload and `PUT /v1/config/playbooks` refuse a blackhole
+  step when `blackhole.enabled` is false or the step TTL exceeds the cap, and
+  in enforced mode unless the speaker provides the rustbgpd injection lease or
+  `detector_sources` is nonempty. Dry-run is not gated. No rustbgpd release
+  provides the lease, so enforced detector blackholes run unleased: startup
+  logs a warning, health detail reports the new `speaker.detector_unleased`
+  and the new `prefixd_blackhole_detector_unleased` gauge is `1`. If prefixd
+  stays down while rustbgpd keeps running, these blackholes stay announced
+  until prefixd returns or an operator withdraws them.
+- `blackhole.leased` (default `false`) and `blackhole.lease_seconds`
+  (default `60`, `5..=3600`) reserve the injection-lease settings. Startup
+  refuses `leased: true` while the speaker lacks the lease, and a route
+  recorded under a lease owner is never added through the unleased `AddPath`.
+- Blackhole reconciliation, at startup and on every pass, deletes a local
+  route that exactly matches the frozen route of a terminal, enforced-origin
+  blackhole of this POP with no live row or pending withdrawal, and audits it
+  with the reason `orphaned after controller downtime`. Every other unknown
+  route is still only reported. Overdue blackholes keep expiring through the
+  normal withdrawal path.
+- `grafana/prometheus-alerts.yml`, loaded by the Compose Prometheus, adds
+  `PrefixdDown`, `PrefixdNotReady` and `PrefixdBlackholesWhileDegraded`, with
+  promtool unit tests in `grafana/prometheus-alerts.test.yml`.
 
 - `scripts/prefixd-fastnetmon.sh` retries a ban `POST /v1/events` with the same
   event ID on a connection error or `503`, up to `BAN_POST_ATTEMPTS` (default 3)

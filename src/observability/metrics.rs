@@ -108,6 +108,15 @@ pub static CONTROLLER_FENCE_ACTIVE: Lazy<Gauge> = Lazy::new(|| {
     .unwrap()
 });
 
+/// 1 when enforced detector blackholes run without the rustbgpd injection lease (ADR 027).
+pub static BLACKHOLE_DETECTOR_UNLEASED: Lazy<Gauge> = Lazy::new(|| {
+    register_gauge!(
+        "prefixd_blackhole_detector_unleased",
+        "1 when enforced detector blackholes run without the rustbgpd injection lease and can outlive a stopped controller"
+    )
+    .unwrap()
+});
+
 // Reconciliation metrics
 pub static RECONCILIATION_RUNS: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
@@ -354,6 +363,7 @@ pub fn init_metrics() {
     Lazy::force(&BGP_SESSION_UP);
     Lazy::force(&GUARDRAIL_REJECTIONS);
     Lazy::force(&CONTROLLER_FENCE_ACTIVE);
+    Lazy::force(&BLACKHOLE_DETECTOR_UNLEASED);
     Lazy::force(&RECONCILIATION_RUNS);
     Lazy::force(&RECONCILIATION_REPAIRS);
     for status in ["success", "error"] {

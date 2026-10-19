@@ -98,14 +98,71 @@ Each ban uses a unique `event_id`, which prevents permanent duplicate collisions
 
 Unban correlation is done by querying active mitigations for the victim IP and withdrawing them directly.
 
-### Blackhole TTL (not yet available)
+### Blackholes (RTBH)
 
-> **Not yet available.** FastNetMon bans cannot create blackholes in this
-> release: no playbook or detector path does. Only an Admin can create a
-> [manual blackhole](../../reference/api.md#manual-blackhole). This section
-> applies once detector blackholes ship
-> ([ADR 027](../../adr/027-blackhole-mitigations.md), detector blackholes with
-> the injection lease).
+FastNetMon Community users usually mitigate with remotely triggered blackhole
+(RTBH) host routes. prefixd turns a ban into a blackhole when the matching
+playbook's step is `action: blackhole` and the event's `source` is listed in
+`blackhole.detector_sources`
+([ADR 027](../../adr/027-blackhole-mitigations.md)). A blackhole drops all
+traffic to the victim, so it is opt-in at every layer. In `prefixd.yaml`:
+
+```yaml
+blackhole:
+  enabled: true
+  next_hop_ipv4: 192.0.2.66        # the routers' discard next hop
+  next_hop_ipv6: "2001:db8::66"
+  max_ttl_seconds: 3600
+  detector_sources: [fastnetmon]   # the script posts source "fastnetmon"
+```
+
+Blackholes need the rustbgpd backend and a nonempty safelist; see the
+[blackhole configuration](../../reference/configuration.md#blackhole). In
+`playbooks.yaml`, one playbook per vector the script sends (`udp_flood`,
+`syn_flood`, `ack_flood`, `icmp_flood` and `unknown`). The first playbook that
+matches a vector wins, so put blackhole playbooks before FlowSpec ones for the
+same vector, or replace them:
+
+```yaml
+playbooks:
+  - name: fastnetmon_rtbh_udp
+    match:
+      vector: udp_flood
+    steps:
+      - action: blackhole
+        ttl_seconds: 1900   # at or above FastNetMon's ban_time
+```
+
+A blackhole step takes no `rate_bps` and matches only the victim's `/32` or
+`/128`. A ban from any other source, such as the dashboard's mitigate-now
+dialog (`source: "dashboard"`), gets `422` instead of a blackhole. A repeated
+ban extends the blackhole, capped at `blackhole.max_ttl_seconds` from now. The
+script's unban withdraws blackholes like any other mitigation: it lists the
+victim's live mitigations and withdraws each one.
+
+**Rehearse in dry-run first.** In `mode: dry-run`, the same configuration
+creates and audits the blackhole, shows it in the dashboard and API, and sends
+nothing to the speaker.
+
+**Enforced mode and the injection lease.** The rustbgpd injection lease lets
+the speaker remove a dead controller's routes on its own. It has not shipped
+in any rustbgpd release, so enforced detector blackholes run without it.
+Startup and playbook reload or save refuse a blackhole step in enforced mode
+unless `detector_sources` is nonempty; a nonempty list is the opt-in. Startup
+then logs a warning, health detail reports `speaker.detector_unleased: true`
+and `prefixd_blackhole_detector_unleased` is `1`.
+
+**The remaining gap.** TTL expiry needs the running controller. If prefixd
+stays down while rustbgpd keeps running, detector blackholes stay announced
+until prefixd returns or an operator withdraws them on the speaker, and the
+victim stays unreachable. When prefixd returns, reconciliation expires overdue
+blackholes at once and removes routes left behind by blackholes that already
+ended, with the audit reason `orphaned after controller downtime`. Routes
+prefixd cannot match exactly to its own records are reported, never deleted.
+Monitor the controller independently of BGP health with the
+[down alerts](../grafana.md#alert-rules).
+
+#### Blackhole TTL
 
 FastNetMon Community calls the script once on ban and once on unban, with no
 refresh in between, and skips detection for a host it already considers
@@ -171,7 +228,8 @@ tail -f /var/log/prefixd-fastnetmon.log
 1. **503 Service Unavailable**: `PREFIXD_API` reaches a standby controller; route
    it to the controller whose `GET /v1/ready` returns `200`
 2. **401 Unauthorized**: Check `PREFIXD_TOKEN` matches prefixd config
-3. **422 Unprocessable**: Victim IP not in prefixd inventory
+3. **422 Unprocessable**: Victim IP not in prefixd inventory, or a blackhole
+   playbook matched and `source` is not in `blackhole.detector_sources`
 4. **No mitigation created**: Check playbooks match the vector
 5. **400 on withdraw**: Ensure script sends `operator_id` (set `PREFIXD_OPERATOR`, default: `fastnetmon`)
 

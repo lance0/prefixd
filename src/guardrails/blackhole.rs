@@ -6,7 +6,9 @@ use std::net::IpAddr;
 use uuid::Uuid;
 
 use crate::bgp::FlowSpecAnnouncer;
-use crate::config::{BlackholeConfig, Inventory, OperationMode, Settings};
+use crate::config::{
+    BlackholeConfig, Inventory, OperationMode, PlaybookAction, Playbooks, Settings,
+};
 use crate::db::RepositoryTrait;
 use crate::domain::{
     ActionType, AttackVector, BlackholeAnnouncement, BlackholeRule, Mitigation, MitigationIntent,
@@ -44,7 +46,82 @@ pub async fn check_blackhole_startup(
             "blackhole.enabled requires a nonempty safelist".into(),
         ));
     }
+    // A leased configuration never runs unleased.
+    if config.leased && !speaker.capabilities().blackhole_lease {
+        return Err(PrefixdError::Config(format!(
+            "blackhole.leased requires the rustbgpd injection lease, which the {} speaker does not provide",
+            speaker.backend()
+        )));
+    }
     Ok(())
+}
+
+/// Playbook refusals (ADR 027 §2) at startup and on every playbook reload or
+/// save. A blackhole step needs the feature enabled and a TTL within the cap. In
+/// enforced mode it also needs the rustbgpd injection lease, unless the operator
+/// opted into unleased detector blackholes with a nonempty
+/// `blackhole.detector_sources`. Dry-run is not gated by the lease.
+pub fn check_blackhole_playbooks(
+    settings: &Settings,
+    blackhole_lease: bool,
+    playbooks: &Playbooks,
+) -> Result<()> {
+    let config = &settings.blackhole;
+    for playbook in &playbooks.playbooks {
+        for step in &playbook.steps {
+            if step.action != Some(PlaybookAction::Blackhole) {
+                continue;
+            }
+            let name = &playbook.name;
+            if !config.enabled {
+                return Err(PrefixdError::Config(format!(
+                    "playbook {name:?} has a blackhole step, but blackhole.enabled is false"
+                )));
+            }
+            if step.ttl_seconds > config.max_ttl_seconds {
+                return Err(PrefixdError::Config(format!(
+                    "playbook {name:?} blackhole step ttl_seconds {} exceeds blackhole.max_ttl_seconds {}",
+                    step.ttl_seconds, config.max_ttl_seconds
+                )));
+            }
+            if settings.mode == OperationMode::Enforced
+                && !blackhole_lease
+                && config.detector_sources.is_empty()
+            {
+                return Err(PrefixdError::Config(format!(
+                    "playbook {name:?} has a blackhole step, but the speaker does not provide the rustbgpd injection lease; \
+                     list the detectors in blackhole.detector_sources to run detector blackholes unleased"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Enforced detector blackholes may run without the injection lease: a
+/// controller stopped for longer than a blackhole's TTL leaves it announced
+/// until the controller returns or an operator withdraws it.
+pub fn detector_unleased(settings: &Settings, blackhole_lease: bool) -> bool {
+    settings.mode == OperationMode::Enforced
+        && settings.blackhole.enabled
+        && !settings.blackhole.detector_sources.is_empty()
+        && !blackhole_lease
+}
+
+/// Only an allowlisted event `source` may reach a blackhole step (ADR 027 §2).
+pub fn check_detector_source(config: &BlackholeConfig, source: &str) -> Result<()> {
+    if config
+        .detector_sources
+        .iter()
+        .any(|allowed| allowed == source)
+    {
+        return Ok(());
+    }
+    Err(PrefixdError::GuardrailViolation(
+        GuardrailError::BlackholeSourceNotAllowed {
+            source_name: source.into(),
+        },
+    ))
 }
 
 /// Shape, TTL, address and next-hop checks that need no inventory or database.
@@ -123,19 +200,26 @@ pub struct BlackholeAdmission {
     pub unconfirmed: bool,
 }
 
-/// Shared manual-blackhole admission: the caller holds the lifecycle mutex and has
-/// already authorized the request. The victim must be owned in inventory and not
+/// Shared manual and detector blackhole admission: the caller holds the
+/// lifecycle mutex and has already authorized the request (a detector source is
+/// checked against `blackhole.detector_sources` before this call). The victim must be owned in inventory and not
 /// safelisted; quotas are enforced inside `admit_mitigation`. A live owner, a
 /// pending withdrawal or (in enforced mode) an untracked local route at the
 /// prefix returns `409` before persistence. The configured next hop and
 /// communities are frozen into the row. Dry-run persists the row with its audit
 /// entry and sends nothing; enforced mode persists first, then rechecks the
 /// safelist and adds the route.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Detector admission records the event vector and signal group with the row"
+)]
 pub async fn admit_blackhole(
     repo: &dyn RepositoryTrait,
     settings: &Settings,
     inventory: &Inventory,
     mut intent: MitigationIntent,
+    vector: AttackVector,
+    signal_group_id: Option<Uuid>,
     actor: &CreationActor,
     announcer: &dyn FlowSpecAnnouncer,
     binding: Option<&VerifiedSpeakerBinding>,
@@ -187,7 +271,8 @@ pub async fn admit_blackhole(
         })?;
         refuse_untracked_route(speaker, prefix).await?;
     }
-    let mut mitigation = Mitigation::from_intent(intent, victim, AttackVector::Unknown);
+    let mut mitigation = Mitigation::from_intent(intent, victim, vector);
+    mitigation.signal_group_id = signal_group_id;
     mitigation.activate();
     mitigation.origin_mode = Some(settings.mode);
     repo.admit_mitigation(&mitigation, &settings.quotas, config, actor)
@@ -300,9 +385,19 @@ mod tests {
         intent: MitigationIntent,
     ) -> Result<Mitigation> {
         let speaker = crate::bgp::MockAnnouncer::new();
-        admit_blackhole(repo, settings, inventory, intent, &actor(), &speaker, None)
-            .await
-            .map(|admission| admission.mitigation)
+        admit_blackhole(
+            repo,
+            settings,
+            inventory,
+            intent,
+            AttackVector::Unknown,
+            None,
+            &actor(),
+            &speaker,
+            None,
+        )
+        .await
+        .map(|admission| admission.mitigation)
     }
 
     fn reason(error: PrefixdError) -> String {
@@ -386,7 +481,18 @@ mod tests {
         intent: MitigationIntent,
     ) -> Result<BlackholeAdmission> {
         let owned = inventory(&["203.0.113.0/24", "2001:db8::/48"]);
-        admit_blackhole(repo, &enforced(), &owned, intent, &actor(), speaker, None).await
+        admit_blackhole(
+            repo,
+            &enforced(),
+            &owned,
+            intent,
+            AttackVector::Unknown,
+            None,
+            &actor(),
+            speaker,
+            None,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -839,5 +945,113 @@ mod tests {
         check_blackhole_startup(&BlackholeConfig::default(), &gobgp, &empty)
             .await
             .unwrap();
+        // No speaker provides the injection lease yet, so leased never runs unleased.
+        let leased = BlackholeConfig {
+            leased: true,
+            ..config
+        };
+        let error = check_blackhole_startup(&leased, &mock, &safelisted)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("rustbgpd injection lease"), "{error}");
+    }
+
+    fn blackhole_playbooks(ttl_seconds: u32) -> Playbooks {
+        crate::config::parse_yaml(&format!(
+            "playbooks:\n  - name: rtbh\n    match: {{vector: udp_flood}}\n    steps:\n      - {{action: blackhole, ttl_seconds: {ttl_seconds}}}\n"
+        ))
+        .unwrap()
+    }
+
+    /// The enforced lease gate (startup, reload and save share this check).
+    #[test]
+    fn enforced_blackhole_steps_need_the_lease_or_an_unleased_opt_in() {
+        let playbooks = blackhole_playbooks(1800);
+        let dry_run = settings();
+        let mut enforced = enforced();
+        // Dry-run is not gated by the lease.
+        check_blackhole_playbooks(&dry_run, false, &playbooks).unwrap();
+        assert!(!detector_unleased(&dry_run, false));
+        // Enforced without the lease and without an opt-in is refused, naming the lease.
+        let error = check_blackhole_playbooks(&enforced, false, &playbooks)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("rustbgpd injection lease"), "{error}");
+        assert!(!detector_unleased(&enforced, false));
+        // The lease alone passes, and so does the unleased opt-in, which is reported.
+        check_blackhole_playbooks(&enforced, true, &playbooks).unwrap();
+        enforced.blackhole.detector_sources = vec!["fastnetmon".into()];
+        check_blackhole_playbooks(&enforced, false, &playbooks).unwrap();
+        assert!(detector_unleased(&enforced, false));
+        assert!(!detector_unleased(&enforced, true));
+        // A disabled feature refuses the step in either mode.
+        for mut settings in [dry_run, enforced.clone()] {
+            settings.blackhole.enabled = false;
+            let error = check_blackhole_playbooks(&settings, true, &playbooks)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("blackhole.enabled is false"), "{error}");
+            assert!(!detector_unleased(&settings, false));
+        }
+        // The step TTL is bounded by the cap.
+        let error = check_blackhole_playbooks(&enforced, true, &blackhole_playbooks(3601))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("exceeds blackhole.max_ttl_seconds 3600"),
+            "{error}"
+        );
+        // FlowSpec-only playbooks are unaffected.
+        let flowspec: Playbooks = crate::config::parse_yaml(
+            "playbooks:\n  - name: d\n    match: {vector: udp_flood}\n    steps:\n      - {action: discard, ttl_seconds: 60}\n",
+        )
+        .unwrap();
+        let mut bare = enforced;
+        bare.blackhole = BlackholeConfig::default();
+        check_blackhole_playbooks(&bare, false, &flowspec).unwrap();
+    }
+
+    #[test]
+    fn only_allowlisted_detector_sources_reach_a_blackhole() {
+        let mut config = settings().blackhole;
+        assert!(matches!(
+            check_detector_source(&config, "fastnetmon"),
+            Err(PrefixdError::GuardrailViolation(
+                GuardrailError::BlackholeSourceNotAllowed { .. }
+            ))
+        ));
+        config.detector_sources = vec!["fastnetmon".into()];
+        check_detector_source(&config, "fastnetmon").unwrap();
+        for refused in ["dashboard", "FastNetMon", "fastnetmon ", ""] {
+            assert!(
+                check_detector_source(&config, refused).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    /// The leased seam: a route recorded under an injection owner is never sent
+    /// through the unleased add.
+    #[tokio::test]
+    async fn a_leased_route_never_falls_back_to_an_unleased_add() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        let mut mitigation = admit_enforced(&repo, &speaker, intent("203.0.113.10/32"))
+            .await
+            .unwrap()
+            .mitigation;
+        assert_eq!(speaker.adds.load(SeqCst), 1);
+        mitigation.action_params.blackhole.as_mut().unwrap().owner =
+            "prefixd.pop-a.0123456789abcdef".into();
+        let error = announce_blackhole(&repo, &speaker, &mitigation, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("leased"), "{error}");
+        assert_eq!(speaker.adds.load(SeqCst), 1);
     }
 }

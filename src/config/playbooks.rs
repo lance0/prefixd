@@ -60,6 +60,8 @@ pub struct PlaybookStep {
 pub enum PlaybookAction {
     Police,
     Discard,
+    /// RTBH host route (ADR 027): the victim's /32 or /128 only, with no rate.
+    Blackhole,
 }
 
 impl PlaybookAction {
@@ -68,6 +70,7 @@ impl PlaybookAction {
             action_type: match self {
                 Self::Police => ActionType::Police,
                 Self::Discard => ActionType::Discard,
+                Self::Blackhole => ActionType::Blackhole,
             },
             rate_bps,
         }
@@ -122,6 +125,19 @@ impl PlaybookStep {
     /// Settings-independent checks, run at load, save and validation.
     fn check(&self, vector: AttackVector) -> std::result::Result<(), String> {
         match (self.flowspec_action(), self.rules.as_slice()) {
+            // A blackhole drops all traffic to the victim, so it never combines
+            // with the narrowed source-port rules of an amplification playbook.
+            (Some(action), []) if action.action_type == ActionType::Blackhole => {
+                if vector == AttackVector::UdpAmplification {
+                    return Err(
+                        "a blackhole step is not valid in udp_amplification playbooks".into(),
+                    );
+                }
+                match self.rate_bps {
+                    Some(_) => Err("a blackhole step takes no rate_bps".into()),
+                    None => Ok(()),
+                }
+            }
             (Some(action), []) => action
                 .traffic_rate_bytes_per_second()
                 .map(|_| ())
@@ -177,6 +193,9 @@ impl PlaybookRule {
     }
 
     fn check(&self) -> std::result::Result<(), String> {
+        if self.action == PlaybookAction::Blackhole {
+            return Err("a rule cannot blackhole; a blackhole is a step of its own".into());
+        }
         self.flowspec_action()
             .traffic_rate_bytes_per_second()
             .map_err(|error| error.to_string())?;
@@ -223,6 +242,23 @@ impl Playbooks {
     /// the fragment and packet-length opt-ins, `max_ports` for static source
     /// ports, and speaker capability. Startup, reload and save run them in
     /// dry-run and enforced modes alike. Returns every error found.
+    /// Every settings- and speaker-dependent playbook check, shared by startup,
+    /// reload and save: the ADR 028 match checks and the ADR 027 blackhole
+    /// enablement, TTL cap and lease gate. Returns every error found.
+    pub fn check_settings(
+        &self,
+        settings: &crate::config::Settings,
+        speaker: crate::bgp::SpeakerCapabilities,
+    ) -> Vec<String> {
+        let mut errors = self.check_match_settings(&settings.guardrails, speaker.flowspec_match);
+        if let Err(error) =
+            crate::guardrails::check_blackhole_playbooks(settings, speaker.blackhole_lease, self)
+        {
+            errors.push(error.to_string());
+        }
+        errors
+    }
+
     pub fn check_match_settings(
         &self,
         guardrails: &GuardrailsConfig,
@@ -518,6 +554,96 @@ mod tests {
                 Some(rate)
             );
         }
+    }
+
+    #[test]
+    fn blackhole_step_parses_and_refuses_a_rate() {
+        let yaml = |extra: &str| {
+            format!(
+                "playbooks:\n  - name: rtbh\n    match:\n      vector: udp_flood\n    steps:\n      - action: blackhole\n        ttl_seconds: 1800\n{extra}"
+            )
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("playbooks.yaml");
+        std::fs::write(&path, yaml("")).unwrap();
+        let loaded = Playbooks::load(&path).unwrap();
+        let step = &loaded.playbooks[0].steps[0];
+        assert_eq!(step.action, Some(PlaybookAction::Blackhole));
+        assert_eq!(
+            step.flowspec_action().unwrap().action_type,
+            ActionType::Blackhole
+        );
+        assert!(loaded.validate().is_empty());
+        loaded.save(&path).unwrap();
+        // A rate is refused on load, validation and save.
+        std::fs::write(&path, yaml("        rate_bps: 1000000\n")).unwrap();
+        let error = Playbooks::load(&path).unwrap_err().to_string();
+        assert!(
+            error.contains("blackhole step takes no rate_bps"),
+            "{error}"
+        );
+        let mut invalid = loaded.clone();
+        invalid.playbooks[0].steps[0].rate_bps = Some(1_000_000);
+        assert!(invalid.validate()[0].contains("takes no rate_bps"));
+        assert!(invalid.save(&path).is_err());
+        // An unknown action is refused.
+        std::fs::write(&path, yaml("").replace("blackhole", "rtbh")).unwrap();
+        assert!(Playbooks::load(&path).is_err());
+    }
+
+    /// A blackhole drops all traffic, so it never combines with `rules` or an
+    /// amplification playbook, on load, validation and save.
+    #[test]
+    fn blackhole_never_combines_with_rules_or_amplification() {
+        let rule =
+            "        rules:\n          - match: {src_ports: [123]}\n            action: ACTION\n";
+        let playbook = |vector: &str, step: &str| {
+            format!(
+                "playbooks:\n  - name: rtbh\n    match:\n      vector: {vector}\n    steps:\n      - ttl_seconds: 600\n{step}"
+            )
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("playbooks.yaml");
+        for (yaml, expected) in [
+            (
+                playbook(
+                    "udp_amplification",
+                    &format!(
+                        "        action: blackhole\n{}",
+                        rule.replace("ACTION", "discard")
+                    ),
+                ),
+                "an action or rules, not both",
+            ),
+            (
+                playbook("udp_amplification", &rule.replace("ACTION", "blackhole")),
+                "a rule cannot blackhole",
+            ),
+            (
+                playbook("udp_amplification", "        action: blackhole\n"),
+                "not valid in udp_amplification playbooks",
+            ),
+        ] {
+            std::fs::write(&path, &yaml).unwrap();
+            let error = Playbooks::load(&path).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+            let parsed: Playbooks = crate::config::parse_yaml(&yaml).unwrap();
+            assert!(
+                parsed.validate().iter().any(|e| e.contains(expected)),
+                "{expected}"
+            );
+            assert!(parsed.save(dir.path().join("saved.yaml")).is_err());
+        }
+        // Negative control: the same rule with a FlowSpec action, and a blackhole
+        // step in another vector, both load.
+        std::fs::write(
+            &path,
+            playbook("udp_amplification", &rule.replace("ACTION", "discard")),
+        )
+        .unwrap();
+        Playbooks::load(&path).unwrap();
+        std::fs::write(&path, playbook("udp_flood", "        action: blackhole\n")).unwrap();
+        Playbooks::load(&path).unwrap();
     }
 
     #[test]

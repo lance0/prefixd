@@ -227,14 +227,23 @@ Common status values:
 - Ban path: `"accepted"`, `"extended"`, `"accepted_no_playbook"`, `"accepted_no_mitigation"`
 - Unban path: `"withdrawn"`, `"ignored_no_event_id"`, `"not_found"`, `"no_active_mitigation"`
 
+When the matching playbook's step is `action: blackhole`
+([blackhole steps](configuration.md#blackhole-steps)), the ban creates or
+extends a blackhole through the same admission as a
+[manual blackhole](#manual-blackhole), recorded with the detector as actor. An
+event whose `source` is not in `blackhole.detector_sources` gets `422` before
+it is stored, whether it would create or extend the blackhole. An extension is
+capped at now plus `blackhole.max_ttl_seconds`. In enforced mode an unconfirmed
+add reports `"announcement_outcome": "unconfirmed"` as above.
+
 **Error Responses:**
 
 | Status | Reason |
 |--------|--------|
 | 400 | Invalid request body |
 | 401 | Authentication required |
-| 409 | Duplicate event, or in enforced mode the rule is owned by a dry-run mitigation (when every rule is refused before admission, the event is not stored) |
-| 422 | Missing required field, including `protocol` for `"discard"` or `"police"`; guardrail rejection (safelist, quotas, new mitigation rate, prefix length, etc.) |
+| 409 | Duplicate event, or in enforced mode the rule is owned by a dry-run mitigation (when every rule is refused before admission, the event is not stored); for a blackhole, a pending withdrawal or an untracked local route at the prefix |
+| 422 | Missing required field, including `protocol` for `"discard"` or `"police"`; guardrail rejection (safelist, quotas, new mitigation rate, prefix length, blackhole source allowlist and victim checks, etc.) |
 | 429 | Rate limited |
 
 ### Batch Ingest Events
@@ -1747,6 +1756,7 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
         "packet_length": true
       }
     },
+    "detector_unleased": false,
     "daemon": {
       "status": "observed",
       "version": "<rustbgpd-version>",
@@ -1772,8 +1782,11 @@ rule delivery. `blackhole` reports the unicast blackhole adapter and
 ([ADR 027](../adr/027-blackhole-mitigations.md)); both are false when absent.
 `flowspec_match` reports which amplification match components the speaker
 encodes ([ADR 028](../adr/028-amplification-matches.md)); each is false when
-absent. Only an Admin's [manual blackhole](#manual-blackhole) creates a
-blackhole; no API path creates these components yet. Health performs no rule inventory probe.
+absent. No API path creates these components yet. `detector_unleased` is true
+when enforced detector blackholes run without the injection lease
+(`blackhole.enabled`, a nonempty `blackhole.detector_sources` and
+`blackhole_lease` false): if prefixd stops while the speaker runs, they stay
+announced until prefixd returns or an operator withdraws them. Health performs no rule inventory probe.
 
 Top-level `version` and `uptime_seconds` describe prefixd. `speaker.daemon`
 independently reports authenticated speaker process metadata: `observed`, `error`
@@ -2389,12 +2402,17 @@ prefixd_http_requests_total{method="POST",route="/v1/events",status_class="2xx"}
 
 `prefixd_controller_fence_active` is `1` while this controller holds its POP's
 fence and `0` in standby. Alert when no controller for a POP reports `1`.
+`prefixd_blackhole_detector_unleased` is `1` when enforced detector blackholes
+run without the rustbgpd injection lease, matching health detail's
+`speaker.detector_unleased`. The shipped
+[availability alerts](../how-to/grafana.md#availability-alerts) use these
+gauges.
 
 Series labelled `action_type` (`prefixd_mitigations_active`,
 `prefixd_mitigations_created_total`, `prefixd_mitigations_expired_total` and
 `prefixd_mitigations_withdrawn_total`) use `blackhole` for blackholes. Blackhole
 gauges count database state, not router enforcement. A refused
-[manual blackhole](#manual-blackhole) increments
+[manual blackhole](#manual-blackhole) or detector blackhole increments
 `prefixd_guardrail_rejections_total` with one of these `reason` values:
 
 | `reason` | Refusal |
@@ -2406,8 +2424,8 @@ gauges count database state, not router enforcement. A refused
 | `InvalidBlackhole` | The victim is not a usable host address or is a configured next hop, or its family has no next hop |
 | `TtlRequired`, `TtlOutOfBounds` | The TTL is zero or above `blackhole.max_ttl_seconds` |
 | `NewMitigationRateExceeded` | `quotas.max_new_per_minute` is reached |
+| `BlackholeSourceNotAllowed` | A detector event matched a blackhole step, but its `source` is not in `blackhole.detector_sources` |
 
-A source-allowlist reason arrives with detector blackholes.
 `prefixd_unknown_local_routes{kind}` counts local speaker routes prefixd does
 not own, by `kind` (`blackhole` or `flowspec`), from the last successful read.
 

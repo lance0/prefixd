@@ -238,8 +238,8 @@ impl AppState {
             let mut playbooks_guard = self.playbooks.write().await;
             let new_playbooks = Playbooks::load(&playbooks_path)
                 .map_err(|e| PrefixdError::Config(format!("playbooks: {}", e)))?;
-            let errors = new_playbooks
-                .check_match_settings(&self.settings.guardrails, self.announcer.match_support());
+            let errors =
+                new_playbooks.check_settings(&self.settings, self.announcer.capabilities());
             if !errors.is_empty() {
                 return Err(PrefixdError::Config(format!(
                     "playbooks: {}",

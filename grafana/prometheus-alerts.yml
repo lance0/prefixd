@@ -1,0 +1,52 @@
+# prefixd availability alerts. TTL expiry, withdrawals and reconciliation need
+# a running controller that holds its POP's fence; routes already announced
+# stay on the speaker while it is down. See docs/how-to/grafana.md.
+groups:
+  - name: prefixd-availability
+    rules:
+      - alert: PrefixdDown
+        expr: up{job="prefixd"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "prefixd is down"
+          description: >-
+            {{ $labels.instance }} has failed scrapes for 2 minutes. TTL expiry
+            and withdrawals stop while it is down, and announced routes stay on
+            the speaker.
+
+      - alert: PrefixdNotReady
+        expr: max by (job) (prefixd_controller_fence_active) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No active prefixd controller"
+          description: >-
+            Every scraped prefixd process is in standby: none holds the fence,
+            so nothing expires, withdraws or reconciles.
+
+      # The blackhole count at the last moment a controller was active, once no
+      # controller is up and active. The gauge counts database state, not routes.
+      - alert: PrefixdBlackholesWhileDegraded
+        expr: |
+          (
+            max by (job) (up{job="prefixd"}) == 0
+            or on (job) max by (job) (prefixd_controller_fence_active) == 0
+          )
+          and on (job)
+          (
+            last_over_time((timestamp(sum by (job) (prefixd_mitigations_active{action_type="blackhole"}) > 0))[3d:5m])
+            >= on (job)
+            last_over_time((timestamp(max by (job) (prefixd_controller_fence_active) == 1))[3d:5m]) - 300
+          )
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Blackholes may outlive an inactive prefixd"
+          description: >-
+            prefixd had active blackholes when its last active controller
+            stopped. They stay announced until prefixd returns or an operator
+            withdraws them on the speaker.

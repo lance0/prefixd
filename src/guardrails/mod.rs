@@ -1,7 +1,8 @@
 mod blackhole;
 
 pub use blackhole::{
-    BlackholeAdmission, admit_blackhole, check_blackhole_startup, extend_blackhole,
+    BlackholeAdmission, admit_blackhole, check_blackhole_playbooks, check_blackhole_startup,
+    check_detector_source, detector_unleased, extend_blackhole,
 };
 
 use std::net::IpAddr;

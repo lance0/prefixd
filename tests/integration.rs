@@ -14396,6 +14396,8 @@ async fn prefixdctl_lists_gets_and_withdraws_a_blackhole() {
             ttl_seconds: 600,
             reason: "manual blackhole".into(),
         },
+        AttackVector::Unknown,
+        None,
         &prefixd::observability::CreationActor::Operator("admin".into()),
         speaker.as_ref(),
         None,

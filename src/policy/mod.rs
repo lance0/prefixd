@@ -5,8 +5,8 @@ use crate::config::{
 };
 
 use crate::domain::{
-    ActionParams, AttackEvent, AttackVector, FlowSpecAction, MatchCriteria, MitigationIntent,
-    canonical_ports,
+    ActionParams, ActionType, AttackEvent, AttackVector, FlowSpecAction, MatchCriteria,
+    MitigationIntent, canonical_ports,
 };
 use crate::error::{GuardrailError, PrefixdError, Result};
 
@@ -115,6 +115,18 @@ impl PolicyEngine {
             PrefixdError::NoPlaybookFound(format!("{vector} (step has no action)"))
         })?;
 
+        let reason = format!("{} to {} (playbook: {})", vector, service, playbook.name);
+        // A blackhole matches only the host prefix: no protocol, ports or rate (ADR 027).
+        if action.action_type == ActionType::Blackhole {
+            let host = MatchCriteria {
+                dst_prefix,
+                ..Default::default()
+            };
+            return Ok(Some(vec![
+                self.intent(event, context, host, action, step, reason)?,
+            ]));
+        }
+
         // Compute allowed ports intersection
         let dst_ports = self.compute_port_intersection(&ports, context, vector);
         // An empty intersection must not turn explicit detector ports into a wildcard.
@@ -131,7 +143,6 @@ impl PolicyEngine {
             dst_ports,
             ..Default::default()
         };
-        let reason = format!("{} to {} (playbook: {})", vector, service, playbook.name);
         Ok(Some(vec![self.intent(
             event,
             context,
@@ -213,9 +224,11 @@ impl PolicyEngine {
         step: &PlaybookStep,
         reason: String,
     ) -> Result<MitigationIntent> {
-        action.traffic_rate_bytes_per_second().map_err(|error| {
-            PrefixdError::GuardrailViolation(GuardrailError::InvalidAction(error))
-        })?;
+        if action.action_type != ActionType::Blackhole {
+            action.traffic_rate_bytes_per_second().map_err(|error| {
+                PrefixdError::GuardrailViolation(GuardrailError::InvalidAction(error))
+            })?;
+        }
         let ttl = if step.ttl_seconds > 0 {
             step.ttl_seconds
         } else {
@@ -395,6 +408,33 @@ mod tests {
                 Err(PrefixdError::InvalidIpAddress(_))
             ));
         }
+    }
+
+    #[test]
+    fn blackhole_step_builds_a_bare_host_intent() {
+        let mut playbooks = test_playbooks();
+        playbooks.playbooks[0].steps[0] = PlaybookStep {
+            action: Some(PlaybookAction::Blackhole),
+            rate_bps: None,
+            ttl_seconds: 1800,
+            rules: vec![],
+            require_confidence_at_least: None,
+            require_persistence_seconds: None,
+        };
+        let engine = PolicyEngine::new(playbooks, "iad1".into(), 120);
+        // Detector ports outside the allowed set would refuse a FlowSpec step.
+        let context = make_context("cust_123", vec![123], vec![]);
+        let event = make_event("2001:db8::10", "udp_flood", &[53]);
+        let decision = engine.evaluate(&event, Some(&context)).unwrap();
+        assert_eq!(decision.intents.len(), 1);
+        let intent = &decision.intents[0];
+        assert_eq!(intent.action_type, ActionType::Blackhole);
+        let criteria = &intent.match_criteria;
+        assert_eq!(criteria.dst_prefix, "2001:db8::10/128");
+        assert!(criteria.protocol.is_none() && criteria.dst_ports.is_empty());
+        assert!(criteria.src_ports.is_empty() && criteria.fragment.is_none());
+        assert_eq!(intent.action_params.rate_bps, None);
+        assert_eq!(intent.ttl_seconds, 1800);
     }
 
     // ==========================================================================

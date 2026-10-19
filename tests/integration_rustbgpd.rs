@@ -757,6 +757,8 @@ async fn live_rustbgpd_blackhole_enforced_lifecycle_restart_repair_and_expiry() 
                 ttl_seconds: 600,
                 reason: "live blackhole lifecycle".into(),
             },
+            prefixd::domain::AttackVector::Unknown,
+            None,
             &prefixd::observability::CreationActor::Operator("admin".into()),
             speaker.as_ref(),
             Some(&binding),

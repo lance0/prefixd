@@ -34,12 +34,13 @@ the remedy: the speaker would remove them when the controller stops renewing.
 
 - Add blackhole (RTBH) host routes as a second mitigation kind, as decided in
   [ADR 027](docs/adr/027-blackhole-mitigations.md). The design is accepted and
-  kind-aware identity and schema have merged; blackholes are not supported yet.
-  Manual blackholes come first, unleased, behind stricter guardrails than
-  FlowSpec. Detector-driven blackholes wait for the rustbgpd owner-scoped
-  injection lease, so a stopped controller cannot leave a victim blackholed
-  indefinitely. Qualification is at FRR in the containerlab harness. FastNetMon
-  Community users mostly mitigate with blackholes.
+  manual and detector blackholes have merged, unleased, behind stricter
+  guardrails than FlowSpec. Enforced detector blackholes are an explicit
+  opt-in; until the rustbgpd owner-scoped injection lease ships, a controller
+  stopped for a long time leaves them announced, mitigated by orphan cleanup
+  on return and down alerts. The lease is the later hardening step.
+  Qualification is at FRR in the containerlab harness. FastNetMon Community
+  users mostly mitigate with blackholes.
 - Fence duplicate controllers with a PostgreSQL advisory lock keyed on the
   controller's owner. When controllers share a database, one is active per
   owner and the others wait in standby to take over. The fence protects

@@ -14,6 +14,9 @@ use crate::state::AppState;
 use crate::ws::WsMessage;
 use tokio::sync::RwLock;
 
+/// Audit reason for a local blackhole route withdrawn because its row is already terminal.
+pub const ORPHANED_AFTER_DOWNTIME: &str = "orphaned after controller downtime";
+
 fn wire_action(rule: &FlowSpecRule) -> crate::error::Result<u32> {
     let [action] = rule.actions.as_slice() else {
         return Err(crate::error::PrefixdError::BgpAnnouncementFailed(
@@ -804,12 +807,22 @@ impl ReconciliationLoop {
         let inventory = speaker.list_blackholes().await?;
         let identity =
             |prefix: &ipnet::IpNet| crate::domain::blackhole_identity(&prefix.to_string());
+        let mut repair_error = None;
         let mut unknown = 0.0;
         for route in &inventory.routes {
-            if !owned.contains(&identity(&route.prefix())) {
-                unknown += 1.0;
-                tracing::warn!(prefix = %route.prefix(), "unknown blackhole route in local RIB; left untouched");
+            if owned.contains(&identity(&route.prefix())) {
+                continue;
             }
+            match self.withdraw_orphan(speaker, route, pop).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(prefix = %route.prefix(), error = %error, "orphaned blackhole route not withdrawn");
+                    repair_error = Some(error);
+                }
+            }
+            unknown += 1.0;
+            tracing::warn!(prefix = %route.prefix(), "unknown blackhole route in local RIB; left untouched");
         }
         for row in &inventory.unrecognized {
             unknown += 1.0;
@@ -820,7 +833,6 @@ impl ReconciliationLoop {
             .with_label_values(&["blackhole"])
             .set(unknown);
 
-        let mut repair_error = None;
         for (key, candidate) in &desired {
             // A row without a usable frozen route fails its own repair; others continue.
             let (rule, wanted) = match crate::domain::blackhole_rule(candidate)
@@ -979,6 +991,79 @@ impl ReconciliationLoop {
                 .await
                 .notify(crate::alerting::Alert::mitigation_withdrawn(withdrawn));
         }
+    }
+
+    /// Withdraws a local route that prefixd left behind (ADR 027): it exactly
+    /// matches the frozen, unleased route of a terminal, enforced-origin
+    /// blackhole row of this POP, and no live row or pending withdrawal holds its
+    /// key. For example, an enforced blackhole withdrawn locally while the
+    /// controller ran in dry-run. Overdue live rows are not orphans:
+    /// `expire_mitigations` withdraws them through the immutable path first.
+    /// Returns false, sending nothing, for every other route.
+    async fn withdraw_orphan(
+        &self,
+        speaker: &dyn crate::bgp::BlackholeSpeaker,
+        route: &crate::bgp::BlackholeRoute,
+        pop: Option<&str>,
+    ) -> crate::error::Result<bool> {
+        if self.dry_run {
+            return Ok(false);
+        }
+        let _guard = match &self.state {
+            Some(state) => Some(state.mitigation_lock.lock().await),
+            None => None,
+        };
+        // Fresh ledger checks under the lifecycle mutex.
+        let key = crate::domain::blackhole_identity(&route.prefix().to_string());
+        let pending = self.repo.pending_withdrawals(pop).await?;
+        if pending_ownership_keys(&pending)?.contains(&key)
+            || self
+                .repo
+                .active_mitigation_inventory(pop)
+                .await?
+                .iter()
+                .any(|live| MitigationRoute::of(live).ownership_key() == key)
+        {
+            return Ok(false);
+        }
+        // ponytail: the newest 100 rows for the victim; an older match is only reported.
+        let history = self
+            .repo
+            .list_mitigations_by_ip(&route.prefix().addr().to_string(), 100)
+            .await?;
+        let Some(row) = history.into_iter().find(|row| {
+            row.action_type == ActionType::Blackhole
+                && matches!(
+                    row.status,
+                    MitigationStatus::Withdrawn | MitigationStatus::Expired
+                )
+                && !row.is_dry_run_origin()
+                && pop.is_none_or(|pop| row.pop == pop)
+                && crate::domain::blackhole_rule(row).is_ok_and(|rule| {
+                    rule.owner.is_empty() && rule.route().is_ok_and(|frozen| frozen == *route)
+                })
+        }) else {
+            return Ok(false);
+        };
+        self.verified_speaker_binding()?;
+        speaker.withdraw_blackhole(&route.prefix()).await?;
+        tracing::warn!(mitigation_id = %row.mitigation_id, prefix = %route.prefix(),
+            "withdrew blackhole route orphaned after controller downtime");
+        self.repo
+            .insert_audit(&crate::observability::AuditEntry::new(
+                crate::observability::ActorType::System,
+                Some("reconciler".into()),
+                "withdraw",
+                Some("mitigation"),
+                Some(row.mitigation_id.to_string()),
+                serde_json::json!({
+                    "reason": ORPHANED_AFTER_DOWNTIME,
+                    "prefix": route.prefix().to_string(),
+                    "next_hop": route.next_hop().to_string(),
+                }),
+            ))
+            .await?;
+        Ok(true)
     }
 
     async fn update_bgp_session_metrics(&self) {
@@ -2641,6 +2726,127 @@ mod tests {
                 5.0
             );
         }
+    }
+
+    /// A live row that expired while the controller was down is withdrawn through
+    /// the immutable path on the first reconcile of a fresh loop.
+    #[tokio::test]
+    async fn overdue_blackhole_is_withdrawn_on_the_first_reconcile_after_a_restart() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let mut overdue = blackhole_row("192.0.2.1");
+        overdue.expires_at = chrono::Utc::now() - chrono::Duration::hours(2);
+        repo.insert_mitigation(&overdue).await.unwrap();
+        speaker
+            .inner
+            .announce_blackhole(&frozen(&overdue))
+            .await
+            .unwrap();
+        // A fresh loop, as after a restart.
+        blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), false)
+            .reconcile()
+            .await
+            .unwrap();
+        assert_eq!(status(&repo, &overdue).await, MitigationStatus::Expired);
+        assert!(speaker.routes().await.is_empty());
+        assert_eq!(speaker.deletes.load(SeqCst), 1);
+        assert_eq!(speaker.adds.load(SeqCst), 0);
+    }
+
+    /// Only a route that exactly matches a terminal, enforced-origin row of this
+    /// POP, with no live owner, is withdrawn; everything else is only reported.
+    #[tokio::test]
+    async fn terminal_row_orphan_is_withdrawn_and_other_routes_are_only_reported() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let terminal = |ip, status| {
+            let mut mitigation = blackhole_row(ip);
+            mitigation.status = status;
+            mitigation
+        };
+        // Withdrawn locally while the controller ran in dry-run; the route stayed.
+        let orphan = terminal("192.0.2.1", MitigationStatus::Withdrawn);
+        // The present route differs from the frozen one (another next hop).
+        let drifted = terminal("192.0.2.2", MitigationStatus::Expired);
+        // A simulation was never sent, so it cannot own a route.
+        let mut simulated = terminal("192.0.2.3", MitigationStatus::Expired);
+        simulated.origin_mode = Some(crate::config::OperationMode::DryRun);
+        // Another POP's terminal row is not this controller's.
+        let mut foreign = terminal("192.0.2.4", MitigationStatus::Withdrawn);
+        foreign.pop = "another-target".into();
+        // A live owner of the same route keeps it.
+        let replaced = terminal("192.0.2.5", MitigationStatus::Withdrawn);
+        let live = blackhole_row("192.0.2.5");
+        for mitigation in [&orphan, &drifted, &simulated, &foreign, &replaced, &live] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        let other_next_hop = crate::bgp::BlackholeRoute::new(
+            "192.0.2.2/32".parse().unwrap(),
+            "192.0.2.99".parse().unwrap(),
+            frozen(&drifted).communities().to_vec(),
+            vec![],
+        )
+        .unwrap();
+        let no_ledger_row = crate::bgp::BlackholeRoute::new(
+            "198.51.100.1/32".parse().unwrap(),
+            "192.0.2.66".parse().unwrap(),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        for route in [
+            frozen(&orphan),
+            other_next_hop.clone(),
+            frozen(&simulated),
+            frozen(&foreign),
+            frozen(&live),
+            no_ledger_row.clone(),
+        ] {
+            speaker.inner.announce_blackhole(&route).await.unwrap();
+        }
+        let all = speaker.routes().await;
+        let unknown =
+            crate::observability::metrics::UNKNOWN_LOCAL_ROUTES.with_label_values(&["blackhole"]);
+
+        // A failed read does nothing.
+        speaker.fail_reads.store(true, SeqCst);
+        let reconciler = blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), false);
+        assert!(reconciler.reconcile().await.is_err());
+        speaker.fail_reads.store(false, SeqCst);
+        // Dry-run reports and sends nothing.
+        blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), true)
+            .reconcile()
+            .await
+            .unwrap();
+        assert_eq!(speaker.deletes.load(SeqCst), 0);
+        assert_eq!(speaker.routes().await, all);
+        assert_eq!(unknown.get(), 5.0);
+
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.deletes.load(SeqCst), 1);
+        let remaining = speaker.routes().await;
+        assert!(!remaining.contains(&frozen(&orphan)));
+        assert_eq!(remaining.len(), all.len() - 1);
+        assert_eq!(unknown.get(), 4.0);
+        assert_eq!(speaker.adds.load(SeqCst), 0);
+        // The row stays terminal; the deletion is audited with its reason.
+        assert_eq!(status(&repo, &orphan).await, MitigationStatus::Withdrawn);
+        let audit = repo
+            .list_audit(&crate::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let orphan_id = orphan.mitigation_id.to_string();
+        assert!(audit.iter().any(|entry| entry.action == "withdraw"
+            && entry.target_id.as_deref() == Some(orphan_id.as_str())
+            && entry.details["reason"] == ORPHANED_AFTER_DOWNTIME));
+        // Converged: a second pass sends nothing more.
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.deletes.load(SeqCst), 1);
     }
 
     #[tokio::test]

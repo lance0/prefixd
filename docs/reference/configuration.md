@@ -621,9 +621,10 @@ configuration error, except the removed `preserve_announcements` key below.
 
 Remotely triggered blackhole (RTBH) host routes, a second mitigation kind
 ([ADR 027](../adr/027-blackhole-mitigations.md)). The block is off by default
-and optional. Only an Admin's manual request through
-[`POST /v1/mitigations`](api.md#manual-blackhole) creates a blackhole today;
-no playbook or detector path does.
+and optional. An Admin's manual request through
+[`POST /v1/mitigations`](api.md#manual-blackhole) creates a blackhole, and so
+does a [playbook `blackhole` step](#blackhole-steps) for an event whose
+`source` is listed in `detector_sources`.
 
 ```yaml
 blackhole:
@@ -646,6 +647,16 @@ blackhole:
   # Active blackholes, on top of the quotas section's limits.
   max_active_per_pop: 10
   max_active_global: 50
+
+  # Event sources allowed to trigger a playbook blackhole step. Empty refuses
+  # every detector. In enforced mode, a nonempty list also opts in to
+  # detector blackholes without the rustbgpd injection lease.
+  detector_sources: [fastnetmon]
+
+  # The owner-scoped rustbgpd injection lease. No speaker provides it yet,
+  # so startup refuses leased: true.
+  leased: false
+  lease_seconds: 60
 ```
 
 | Key | Default | Validation |
@@ -658,6 +669,9 @@ blackhole:
 | `max_ttl_seconds` | `3600` | Nonzero |
 | `max_active_per_pop` | `10` | Counted at the configured `pop` |
 | `max_active_global` | `50` | Counted across every POP sharing the database |
+| `detector_sources` | `[]` | Nonempty strings, matched exactly against an event's `source` |
+| `leased` | `false` | Startup refuses `true` while the speaker lacks the rustbgpd injection lease, which no release provides yet |
+| `lease_seconds` | `60` | `5..=3600`, validated even while `leased` is false |
 
 prefixd validates every key at load, even when `enabled` is false, and
 unknown keys in `blackhole` fail configuration loading. Scope routes in the
@@ -677,6 +691,57 @@ locked admission transaction as the [quotas](#quotas), so concurrent
 admissions cannot exceed them; the general quotas and `max_new_per_minute`
 still apply. A quota rejection names `blackhole_pop` or `blackhole_global`.
 
+#### Blackhole steps
+
+A playbook step with `action: blackhole` creates a blackhole for the event's
+victim. It takes `ttl_seconds` and no `rate_bps`; the route matches only the
+victim's `/32` or `/128`, whatever ports the detector reports.
+
+```yaml
+playbooks:
+  - name: fastnetmon_rtbh
+    match:
+      vector: udp_flood
+    steps:
+      - action: blackhole
+        ttl_seconds: 1800
+```
+
+- **Source allowlist.** Only an event whose `source` is listed in
+  `blackhole.detector_sources` reaches the step, for creation and for
+  extension. Other sources get `422` and count under
+  `prefixd_guardrail_rejections_total{reason="BlackholeSourceNotAllowed"}`.
+  The dashboard's mitigate-now dialog posts `source: "dashboard"`, so it stays
+  off this path unless listed. `source` is asserted by the caller: this is a
+  routing guard alongside detector credentials, not authorization.
+- **Not with rules.** A blackhole drops all traffic to the victim, so it never
+  combines with the narrowed rules of [ADR 028](../adr/028-amplification-matches.md).
+  A blackhole step carries no `rules`, a rule cannot use `action: blackhole`,
+  and a blackhole step in a `udp_amplification` playbook is refused at load,
+  save and reload. An amplification event that falls back to `udp_flood` uses
+  the `udp_flood` playbook, which may be a blackhole step.
+- **TTL.** The step TTL must be at or below `max_ttl_seconds`. A repeated ban
+  extends the blackhole to at most now plus `max_ttl_seconds`.
+- **Startup, reload and save.** A blackhole step is refused when `enabled` is
+  false or its TTL exceeds the cap. In enforced mode it is also refused
+  unless the speaker provides the rustbgpd injection lease or
+  `detector_sources` is nonempty. Dry-run mode is not gated by the lease.
+- **Unleased detector blackholes.** No speaker provides the lease yet, so an
+  enforced deployment with a nonempty `detector_sources` runs detector
+  blackholes unleased. Startup logs a warning, health detail reports
+  `speaker.detector_unleased: true`, and `prefixd_blackhole_detector_unleased`
+  is `1`. TTL expiry needs the running controller: if prefixd stays down
+  while rustbgpd keeps running, detector blackholes stay announced until
+  prefixd returns or an operator withdraws them. Alert on it with the
+  [down alerts](../how-to/grafana.md#alert-rules).
+- **Cleanup after downtime.** When prefixd returns, reconciliation at startup
+  and on every pass first expires overdue blackholes through the normal
+  withdrawal path. It then deletes a local route left behind by a terminal
+  blackhole row of this POP, but only when the route exactly matches that
+  row's saved prefix, next hop and communities and no live row or pending
+  withdrawal holds it. The deletion is audited with the reason
+  `orphaned after controller downtime`. Any other route is reported in
+  `prefixd_unknown_local_routes{kind="blackhole"}` and left untouched.
 ### Amplification
 
 UDP reflection handling for the `udp_amplification` vector
@@ -873,6 +938,7 @@ match:
 |--------|------------|-------------|
 | `police` | `rate_bps`, `ttl_seconds` | Rate-limit to N bps |
 | `discard` | `ttl_seconds` | Drop all matching traffic |
+| `blackhole` | `ttl_seconds` | RTBH host route for the victim; see [blackhole steps](#blackhole-steps) |
 
 ### Step Options
 
@@ -885,8 +951,8 @@ match:
 Policing rates are preserved exactly by both speaker backends. Fractional
 bytes/second are supported: 1, 7, 8 and 9 bits/second are valid. Missing or zero
 police rates, rates that lose wire precision (for example 16,777,217 bits/second),
-and a non-null rate on `discard` are rejected on startup, reload and playbook
-edits. Correct the step before reloading; a failed playbook reload keeps the
+and a non-null rate on `discard` or `blackhole` are rejected on startup, reload
+and playbook edits. Correct the step before reloading; a failed playbook reload keeps the
 previous running playbooks.
 
 ### Step selection

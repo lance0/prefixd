@@ -421,8 +421,15 @@ communities differ from the frozen route is replaced. A desired prefix that
 also holds an unrecognized local row is reported as a repair error and left
 alone. Recognized routes outside the ledger, including other POPs' routes, and
 every unrecognized row are logged and counted in
-`prefixd_unknown_local_routes{kind="blackhole"}`, never modified. The FlowSpec
-stage sets `kind="flowspec"` for the unknown local rules it already logs.
+`prefixd_unknown_local_routes{kind="blackhole"}`, never modified. One
+exception: a recognized route that exactly matches the frozen route (prefix,
+next hop and communities) of a terminal, enforced-origin, unleased blackhole
+row of this POP, with no live row or pending withdrawal for the prefix, was
+left behind by prefixd. Enforced reconciliation deletes it and audits the
+deletion with the reason `orphaned after controller downtime`; dry-run only
+reports it. Overdue live rows are expired through the normal withdrawal path
+first. The FlowSpec stage sets `kind="flowspec"` for the unknown local rules
+it already logs.
 
 ## Remaining backend work
 

@@ -478,6 +478,14 @@ pub struct BlackholeConfig {
     pub max_active_per_pop: u32,
     /// Active blackholes across all POPs sharing the database.
     pub max_active_global: u32,
+    /// Event `source` values allowed to trigger a blackhole playbook step. Empty
+    /// refuses every detector; a routing guard, not authorization.
+    pub detector_sources: Vec<String>,
+    /// Inject through the owner-scoped rustbgpd injection lease. No speaker
+    /// provides it yet, so startup refuses `true`.
+    pub leased: bool,
+    /// Owner lease length in seconds, 5..=3600 (rustbgpd ADR-0141).
+    pub lease_seconds: u32,
 }
 
 impl Default for BlackholeConfig {
@@ -491,6 +499,9 @@ impl Default for BlackholeConfig {
             max_ttl_seconds: 3600,
             max_active_per_pop: 10,
             max_active_global: 50,
+            detector_sources: Vec::new(),
+            leased: false,
+            lease_seconds: 60,
         }
     }
 }
@@ -583,6 +594,17 @@ impl BlackholeConfig {
         if self.max_ttl_seconds == 0 {
             return Err(blackhole_config_error(
                 "max_ttl_seconds must be nonzero".into(),
+            ));
+        }
+        if !(5..=3600).contains(&self.lease_seconds) {
+            return Err(blackhole_config_error(format!(
+                "lease_seconds must be 5..=3600, got {}",
+                self.lease_seconds
+            )));
+        }
+        if self.detector_sources.iter().any(|source| source.is_empty()) {
+            return Err(blackhole_config_error(
+                "detector_sources entries must be nonempty".into(),
             ));
         }
         if self.enabled && self.next_hop_ipv4.is_none() && self.next_hop_ipv6.is_none() {
@@ -1215,6 +1237,9 @@ observability:
                 "max_ttl_seconds": 3600,
                 "max_active_per_pop": 10,
                 "max_active_global": 50,
+                "detector_sources": [],
+                "leased": false,
+                "lease_seconds": 60,
             })
         );
         let (settings, _) = load_yaml(&format!("{MINIMAL_SETTINGS_YAML}{BLACKHOLE_YAML}")).unwrap();
@@ -1315,7 +1340,22 @@ observability:
             ),
             (
                 "  enabled: true\n",
-                "  enabled: true\n  leased: true\n",
+                "  enabled: true\n  lease_seconds: 4\n",
+                "blackhole.lease_seconds must be 5..=3600, got 4",
+            ),
+            (
+                "  enabled: true\n",
+                "  enabled: true\n  lease_seconds: 3601\n",
+                "blackhole.lease_seconds must be 5..=3600, got 3601",
+            ),
+            (
+                "  enabled: true\n",
+                "  enabled: true\n  detector_sources: ['']\n",
+                "detector_sources entries must be nonempty",
+            ),
+            (
+                "  enabled: true\n",
+                "  enabled: true\n  lease: true\n",
                 "unknown field",
             ),
         ] {
@@ -1336,6 +1376,21 @@ observability:
                 .unwrap()
                 .contains(&((64496 << 16) | 65283))
         );
+        // Control: the lease bounds and new keys load.
+        for lease_seconds in [5, 3600] {
+            let config = load_yaml(&valid.replacen(
+                "  enabled: true\n",
+                &format!(
+                    "  enabled: true\n  leased: false\n  lease_seconds: {lease_seconds}\n  detector_sources: [fastnetmon]\n"
+                ),
+                1,
+            ))
+            .unwrap()
+            .0
+            .blackhole;
+            assert_eq!(config.lease_seconds, lease_seconds);
+            assert_eq!(config.detector_sources, ["fastnetmon"]);
+        }
         // Enablement needs a next hop; with one family configured it loads.
         let neither = valid
             .replacen("  next_hop_ipv4: 192.0.2.66\n", "", 1)

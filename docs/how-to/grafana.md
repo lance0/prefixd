@@ -93,7 +93,34 @@ scrape_configs:
 
 ## Alert Rules
 
-Example Prometheus alerting rules:
+### Availability alerts
+
+[`grafana/prometheus-alerts.yml`](../../grafana/prometheus-alerts.yml) ships
+three rules, loaded by the Compose Prometheus through `rule_files` in
+`grafana/prometheus.yml`. They expect the scrape job to be named `prefixd`.
+TTL expiry, withdrawals and reconciliation need a running controller that
+holds its POP's fence, so monitor it independently of BGP health:
+
+| Alert | Fires when | Why it matters |
+| --- | --- | --- |
+| `PrefixdDown` | `up{job="prefixd"} == 0` for 2 minutes | Nothing expires or withdraws; announced routes stay on the speaker |
+| `PrefixdNotReady` | Every scraped process reports `prefixd_controller_fence_active` 0 for 2 minutes | All controllers are in standby, so none mutates the speaker |
+| `PrefixdBlackholesWhileDegraded` | No controller is up and active for 2 minutes, and `prefixd_mitigations_active{action_type="blackhole"}` was above zero when the last active controller was last seen (within 3 days, at 5-minute resolution) | Blackholes, including unleased detector blackholes, stay announced until prefixd returns or an operator withdraws them |
+
+The blackhole gauge counts database state, not routes on the speaker. Route
+these alerts to whoever can restart prefixd or withdraw a blackhole on the
+speaker. Check the rules and their unit tests with a pinned Prometheus image:
+
+```bash
+docker run --rm -v "$PWD/grafana:/rules:ro" --entrypoint promtool \
+  prom/prometheus:v3.15.0 check rules /rules/prometheus-alerts.yml
+docker run --rm -v "$PWD/grafana:/rules:ro" --entrypoint promtool \
+  prom/prometheus:v3.15.0 test rules /rules/prometheus-alerts.test.yml
+```
+
+### Example rules
+
+More example Prometheus alerting rules:
 
 ```yaml
 groups:

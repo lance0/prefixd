@@ -143,6 +143,9 @@ pub enum GuardrailError {
 
     #[error("blackhole refused: {reason}")]
     InvalidBlackhole { reason: String },
+
+    #[error("source {source_name:?} is not in blackhole.detector_sources")]
+    BlackholeSourceNotAllowed { source_name: String },
 }
 
 pub type Result<T> = std::result::Result<T, PrefixdError>;

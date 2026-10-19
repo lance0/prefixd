@@ -898,6 +898,24 @@ async fn handle_ban(
         }
         result => result,
     };
+    // Only allowlisted detectors reach a blackhole, whether it creates or extends (ADR 027).
+    if let Ok(decision) = &decision
+        && decision
+            .intents
+            .iter()
+            .any(|intent| intent.action_type == ActionType::Blackhole)
+        && let Err(error) =
+            crate::guardrails::check_detector_source(&state.settings.blackhole, &event.source)
+    {
+        crate::observability::metrics::EVENTS_REJECTED
+            .with_label_values(&[event.source.as_str(), "guardrail"])
+            .inc();
+        crate::observability::metrics::GUARDRAIL_REJECTIONS
+            .with_label_values(&["BlackholeSourceNotAllowed"])
+            .inc();
+        tracing::warn!(error = %error, "blackhole playbook refused for this source");
+        return Err(AppError(error));
+    }
     // Owners are checked per rule. When every rule is refused here, nothing is
     // stored, so the same detector event remains retryable.
     let mut owners = Vec::new();
@@ -1254,7 +1272,17 @@ async fn handle_ban(
     for (intent, owner) in decision.intents.into_iter().zip(owners) {
         let admitted = async {
             if let Some(mut existing) = owner? {
-                existing.extend_ttl(intent.ttl_seconds, event.event_id);
+                // A blackhole extension is capped at now + max_ttl_seconds.
+                if existing.action_type == ActionType::Blackhole {
+                    crate::guardrails::extend_blackhole(
+                        &state.settings.blackhole,
+                        &mut existing,
+                        intent.ttl_seconds,
+                        event.event_id,
+                    )?;
+                } else {
+                    existing.extend_ttl(intent.ttl_seconds, event.event_id);
+                }
                 state.repo.update_mitigation(&existing).await?;
                 let _ = state
                     .ws_broadcast
@@ -1273,30 +1301,37 @@ async fn handle_ban(
                 });
             }
 
-            if let Err(e) = guardrails
-                .validate(&intent, state.repo.as_ref(), is_safelisted)
-                .await
+            let (mitigation, announcement_outcome) = if intent.action_type == ActionType::Blackhole
             {
-                let reason = match &e {
-                    PrefixdError::GuardrailViolation(g) => format!("{:?}", g)
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    _ => "unknown".to_string(),
-                };
-                crate::observability::metrics::GUARDRAIL_REJECTIONS
-                    .with_label_values(&[&reason])
-                    .inc();
-                tracing::warn!(error = %e, "guardrail rejected mitigation");
-                return Err(e);
-            }
+                admit_detector_blackhole(&state, intent, &event, decision.vector, signal_group_id)
+                    .await?
+            } else {
+                if let Err(e) = guardrails
+                    .validate(&intent, state.repo.as_ref(), is_safelisted)
+                    .await
+                {
+                    let reason = match &e {
+                        PrefixdError::GuardrailViolation(g) => format!("{:?}", g)
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        _ => "unknown".to_string(),
+                    };
+                    crate::observability::metrics::GUARDRAIL_REJECTIONS
+                        .with_label_values(&[&reason])
+                        .inc();
+                    tracing::warn!(error = %e, "guardrail rejected mitigation");
+                    return Err(e);
+                }
 
-            let mut mitigation =
-                Mitigation::from_intent(intent, event.victim_ip.clone(), decision.vector);
-            mitigation.signal_group_id = signal_group_id;
-            let announcement_outcome =
-                persist_new_mitigation(&state, &mut mitigation, &actor).await?;
+                let mut mitigation =
+                    Mitigation::from_intent(intent, event.victim_ip.clone(), decision.vector);
+                mitigation.signal_group_id = signal_group_id;
+                let announcement_outcome =
+                    persist_new_mitigation(&state, &mut mitigation, &actor).await?;
+                (mitigation, announcement_outcome)
+            };
 
             crate::observability::metrics::MITIGATIONS_CREATED
                 .with_label_values(&[&mitigation.action_type.to_string(), &state.settings.pop])
@@ -1407,12 +1442,16 @@ async fn rule_owner(
                 crate::domain::RETIRE_DRY_RUN_FLAG
             )));
         }
-        (FlowSpecAction {
-            action_type: owner.action_type,
-            rate_bps: owner.action_params.rate_bps,
-        })
-        .traffic_rate_bytes_per_second()
-        .map_err(|error| PrefixdError::GuardrailViolation(GuardrailError::InvalidAction(error)))?;
+        if owner.action_type != ActionType::Blackhole {
+            (FlowSpecAction {
+                action_type: owner.action_type,
+                rate_bps: owner.action_params.rate_bps,
+            })
+            .traffic_rate_bytes_per_second()
+            .map_err(|error| {
+                PrefixdError::GuardrailViolation(GuardrailError::InvalidAction(error))
+            })?;
+        }
     }
     Ok(owner)
 }
@@ -1937,6 +1976,44 @@ pub async fn create_mitigation(
     Ok((status, Json(response)).into_response())
 }
 
+/// A detector blackhole through the shared admission (ADR 027). The caller holds
+/// the lifecycle mutex and has checked the source allowlist.
+async fn admit_detector_blackhole(
+    state: &AppState,
+    intent: MitigationIntent,
+    event: &AttackEvent,
+    vector: crate::domain::AttackVector,
+    signal_group_id: Option<Uuid>,
+) -> crate::error::Result<(Mitigation, Option<AnnouncementOutcome>)> {
+    let binding = state.verified_speaker_binding()?;
+    // A snapshot, so a configuration reload never waits behind the speaker add.
+    let inventory = state.inventory.read().await.clone();
+    let admission = crate::guardrails::admit_blackhole(
+        state.repo.as_ref(),
+        &state.settings,
+        &inventory,
+        intent,
+        vector,
+        signal_group_id,
+        &CreationActor::Detector(event.source.clone()),
+        state.announcer.as_ref(),
+        binding,
+    )
+    .await
+    .inspect_err(|error| {
+        if let PrefixdError::GuardrailViolation(violation) = error {
+            crate::observability::metrics::GUARDRAIL_REJECTIONS
+                .with_label_values(&[blackhole_rejection_reason(violation)])
+                .inc();
+            tracing::warn!(error = %error, "guardrail rejected detector blackhole");
+        }
+    })?;
+    let outcome = admission
+        .unconfirmed
+        .then_some(AnnouncementOutcome::Unconfirmed);
+    Ok((admission.mitigation, outcome))
+}
+
 /// Admin-only manual blackhole (ADR 027). The caller has checked the role; the
 /// confirmation and request shape are checked before the lifecycle mutex, and
 /// `admit_blackhole` does the rest under it.
@@ -1997,6 +2074,8 @@ async fn create_blackhole(
         &state.settings,
         &inventory,
         intent,
+        crate::domain::AttackVector::Unknown,
+        None,
         &CreationActor::Operator(operator_id),
         state.announcer.as_ref(),
         binding,
@@ -2043,6 +2122,7 @@ fn blackhole_rejection_reason(violation: &GuardrailError) -> &'static str {
         GuardrailError::Safelisted { .. } => "BlackholeSafelisted",
         GuardrailError::InvalidBlackhole { .. } => "InvalidBlackhole",
         GuardrailError::BlackholeDisabled => "BlackholeDisabled",
+        GuardrailError::BlackholeSourceNotAllowed { .. } => "BlackholeSourceNotAllowed",
         GuardrailError::TtlRequired => "TtlRequired",
         GuardrailError::TtlOutOfBounds { .. } => "TtlOutOfBounds",
         GuardrailError::NewMitigationRateExceeded { .. } => "NewMitigationRateExceeded",
@@ -3139,6 +3219,295 @@ mod tests {
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
             assert_eq!(count("BlackholeQuotaExceeded"), before + 1.0);
             assert_eq!(repo.count_active_global().await.unwrap(), 1);
+        }
+
+        fn blackhole_playbooks(ttl_seconds: u32) -> Playbooks {
+            crate::config::parse_yaml(&format!(
+                "playbooks:\n  - name: rtbh\n    match: {{vector: udp_flood}}\n    steps:\n      - {{action: blackhole, ttl_seconds: {ttl_seconds}}}\n"
+            ))
+            .unwrap()
+        }
+
+        /// A state whose `fastnetmon` source may trigger the blackhole playbook.
+        async fn detector_state(
+            mode: OperationMode,
+            repo: Arc<MockRepository>,
+            speaker: Arc<FaultyBlackholes>,
+        ) -> Arc<AppState> {
+            let mut state = state(mode, repo, speaker, AuthMode::None);
+            Arc::get_mut(&mut state)
+                .unwrap()
+                .settings
+                .blackhole
+                .detector_sources = vec!["fastnetmon".into()];
+            *state.playbooks.write().await = blackhole_playbooks(600);
+            // FastNetMon sends no confidence, so it acts alone.
+            state.correlation_config.write().await.enabled = false;
+            state
+        }
+
+        /// The payload `scripts/prefixd-fastnetmon.sh` posts for a ban.
+        fn fastnetmon_ban(source: &str, victim: &str) -> Value {
+            json!({
+                "event_id": uuid::Uuid::new_v4().to_string(),
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "source": source,
+                "victim_ip": victim,
+                "vector": "udp_flood",
+                "action": "ban",
+                "pps": 250000,
+                "raw_details": {"raw": "incoming udp traffic: 900 mbps", "direction": "incoming", "original_action": "ban"},
+            })
+        }
+
+        async fn get(app: &axum::Router, path: &str) -> (StatusCode, Value) {
+            let response = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        /// FastNetMon ban to a dry-run blackhole with no RPC; a repeated ban extends
+        /// it within the cap; another source is refused for creation and extension;
+        /// the script's unban (list by victim, withdraw each) and the event unban
+        /// both withdraw blackholes.
+        #[tokio::test]
+        async fn fastnetmon_event_drives_a_dry_run_blackhole_end_to_end() {
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let state = detector_state(OperationMode::DryRun, repo.clone(), speaker.clone()).await;
+            let app = crate::api::create_test_router(state.clone());
+            let victim = "203.0.113.10";
+            let refused = || {
+                GUARDRAIL_REJECTIONS
+                    .with_label_values(&["BlackholeSourceNotAllowed"])
+                    .get()
+            };
+
+            // A source outside blackhole.detector_sources is refused before any row.
+            let before = refused();
+            let (status, body) = send(
+                &app,
+                "/v1/events",
+                None,
+                fastnetmon_ban("dashboard", victim),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert!(
+                body["error"].as_str().unwrap().contains("detector_sources"),
+                "{body}"
+            );
+            assert_eq!(refused(), before + 1.0);
+            assert_eq!(repo.count_active_global().await.unwrap(), 0);
+
+            let (status, body) = send(
+                &app,
+                "/v1/events",
+                None,
+                fastnetmon_ban("fastnetmon", victim),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(body["status"], "accepted");
+            assert!(body.get("announcement_outcome").is_none());
+            let id = body["mitigation_id"].as_str().unwrap().to_owned();
+            let stored = repo
+                .get_mitigation(id.parse().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.action_type, crate::domain::ActionType::Blackhole);
+            assert_eq!(stored.origin_mode, Some(OperationMode::DryRun));
+            assert_eq!(stored.vector, crate::domain::AttackVector::UdpFlood);
+            assert_eq!(stored.customer_id.as_deref(), Some("customer-a"));
+            assert!(stored.match_criteria.protocol.is_none());
+            let created_expiry = stored.expires_at;
+            // Dry-run sends nothing: no add and no route.
+            assert_eq!(speaker.adds.load(SeqCst), 0);
+            assert!(speaker.routes().await.is_empty());
+
+            // A step beyond the cap (written past the gate) still extends only to now + max_ttl.
+            *state.playbooks.write().await = blackhole_playbooks(86_400);
+            let (status, body) = send(
+                &app,
+                "/v1/events",
+                None,
+                fastnetmon_ban("fastnetmon", victim),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(body["status"], "extended");
+            assert_eq!(body["mitigation_id"], id.as_str());
+            let extended = repo
+                .get_mitigation(id.parse().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            let cap = chrono::Utc::now() + chrono::Duration::seconds(3600);
+            assert!(extended.expires_at > created_expiry);
+            assert!(extended.expires_at <= cap, "{}", extended.expires_at);
+            assert!(extended.expires_at > cap - chrono::Duration::seconds(10));
+
+            // Another source cannot extend it either.
+            let (status, _) = send(
+                &app,
+                "/v1/events",
+                None,
+                fastnetmon_ban("dashboard", victim),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            let unchanged = repo
+                .get_mitigation(id.parse().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(unchanged.expires_at, extended.expires_at);
+
+            // The script's unban: list live mitigations for the victim, withdraw each.
+            let (status, listed) = get(
+                &app,
+                &format!(
+                    "/v1/mitigations?status=pending,active,escalated&victim_ip={victim}&limit=1000"
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{listed}");
+            let ids: Vec<_> = listed["mitigations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["mitigation_id"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(ids, std::slice::from_ref(&id));
+            let (status, withdrawn) = send(
+                &app,
+                &format!("/v1/mitigations/{id}/withdraw"),
+                None,
+                json!({"operator_id": "fastnetmon", "reason": "FastNetMon unban"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{withdrawn}");
+            assert_eq!(withdrawn["status"], "withdrawn");
+            assert_eq!(withdrawn["action_type"], "blackhole");
+
+            // An event unban with the ban's event ID withdraws the blackhole too.
+            *state.playbooks.write().await = blackhole_playbooks(600);
+            let ban = fastnetmon_ban("fastnetmon", "203.0.113.11");
+            let (status, body) = send(&app, "/v1/events", None, ban.clone()).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            let mut unban = ban;
+            unban["action"] = "unban".into();
+            let (status, body) = send(&app, "/v1/events", None, unban).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(body["status"], "withdrawn");
+            assert_eq!(repo.count_active_global().await.unwrap(), 0);
+            assert_eq!(speaker.adds.load(SeqCst), 0);
+            assert_eq!(speaker.deletes.load(SeqCst), 0);
+        }
+
+        /// The unleased opt-in: an enforced detector blackhole adds the frozen route,
+        /// health reports it unleased, and the unban deletes it.
+        #[tokio::test]
+        async fn enforced_detector_blackhole_runs_unleased_when_opted_in() {
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let state =
+                detector_state(OperationMode::Enforced, repo.clone(), speaker.clone()).await;
+            let app = crate::api::create_test_router(state);
+            let (status, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(status, StatusCode::OK, "{health}");
+            assert_eq!(health["speaker"]["detector_unleased"], true);
+            assert_eq!(health["speaker"]["capabilities"]["blackhole_lease"], false);
+            let (status, body) = send(
+                &app,
+                "/v1/events",
+                None,
+                fastnetmon_ban("fastnetmon", "203.0.113.10"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(speaker.adds.load(SeqCst), 1);
+            assert_eq!(
+                speaker.routes().await[0].next_hop().to_string(),
+                "192.0.2.66"
+            );
+            let id = body["mitigation_id"].as_str().unwrap();
+            let (status, withdrawn) = send(
+                &app,
+                &format!("/v1/mitigations/{id}/withdraw"),
+                None,
+                json!({"reason": "FastNetMon unban"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{withdrawn}");
+            assert!(speaker.routes().await.is_empty());
+        }
+
+        /// The enforced gate on playbook save and reload: refused without the lease or
+        /// the unleased opt-in, accepted in dry-run; manual blackholes are unaffected.
+        #[tokio::test]
+        async fn enforced_playbook_save_and_reload_need_the_lease_or_an_opt_in() {
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            for mode in [OperationMode::Enforced, OperationMode::DryRun] {
+                let dir = tempfile::tempdir().unwrap();
+                let repo = Arc::new(MockRepository::new());
+                let speaker = Arc::new(FaultyBlackholes::default());
+                let mut state = state(mode, repo.clone(), speaker.clone(), AuthMode::None);
+                Arc::get_mut(&mut state).unwrap().config_dir = dir.path().into();
+                let app = crate::api::create_test_router(state.clone());
+                let body = serde_json::to_value(blackhole_playbooks(600)).unwrap();
+                let request = Request::put("/v1/config/playbooks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap();
+                let response = app.clone().oneshot(request).await.unwrap();
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                    .await
+                    .unwrap();
+                let saved = dir.path().join("playbooks.yaml");
+                let enforced = mode == OperationMode::Enforced;
+                if enforced {
+                    assert_eq!(status, StatusCode::BAD_REQUEST);
+                    let text = String::from_utf8_lossy(&bytes);
+                    assert!(text.contains("rustbgpd injection lease"), "{text}");
+                    assert!(!saved.exists());
+                } else {
+                    assert_eq!(status, StatusCode::OK);
+                    assert!(saved.exists());
+                }
+                // Reload of the same file: refused in enforced mode, playbooks unchanged.
+                blackhole_playbooks(600).save(&saved).unwrap();
+                let result = state.reload_config().await;
+                assert_eq!(result.is_err(), enforced, "{mode:?}: {result:?}");
+                assert_eq!(
+                    state.playbooks.read().await.playbooks.len(),
+                    usize::from(!enforced)
+                );
+                // A manual blackhole needs no lease in either mode.
+                let (status, created) = send(
+                    &app,
+                    "/v1/mitigations",
+                    None,
+                    create("203.0.113.10", Some("203.0.113.10")),
+                )
+                .await;
+                assert_eq!(status, StatusCode::CREATED, "{created}");
+                assert_eq!(speaker.adds.load(SeqCst), usize::from(enforced));
+            }
         }
     }
 }

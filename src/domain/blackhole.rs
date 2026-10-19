@@ -144,7 +144,8 @@ pub async fn announce_blackhole(
     mitigation: &Mitigation,
     binding: Option<&VerifiedSpeakerBinding>,
 ) -> Result<BlackholeAnnouncement> {
-    let route = blackhole_rule(mitigation)?.route()?;
+    let rule = blackhole_rule(mitigation)?;
+    let route = rule.route()?;
     let speaker = announcer.blackhole().ok_or_else(|| {
         PrefixdError::Internal("speaker does not support blackhole routes".into())
     })?;
@@ -155,6 +156,9 @@ pub async fn announce_blackhole(
         let withdrawn = withdraw_safelisted(repo, announcer, false, mitigation, binding).await?;
         return Ok(BlackholeAnnouncement::Withdrawn(Box::new(withdrawn)));
     }
+    // Leased seam: a route recorded under an owner needs AddLeasedPath, which
+    // arrives with the rustbgpd injection lease. It never falls back to AddPath.
+    rule.require_unleased()?;
     let start = std::time::Instant::now();
     speaker.announce_blackhole(&route).await?;
     crate::observability::metrics::ANNOUNCEMENTS_TOTAL

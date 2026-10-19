@@ -50,6 +50,9 @@ pub struct HealthResponse {
 pub struct SpeakerHealth {
     backend: &'static str,
     capabilities: crate::bgp::SpeakerCapabilities,
+    /// Enforced detector blackholes run without the rustbgpd injection lease, so
+    /// they stay announced if prefixd stops while the speaker runs.
+    detector_unleased: bool,
     daemon: DaemonHealthObservation,
 }
 
@@ -271,6 +274,10 @@ pub async fn health_detail(
         speaker: SpeakerHealth {
             backend: state.announcer.backend(),
             capabilities: state.announcer.capabilities(),
+            detector_unleased: crate::guardrails::detector_unleased(
+                &state.settings,
+                state.announcer.capabilities().blackhole_lease,
+            ),
             daemon,
         },
         auth_mode: resolve_auth_mode(&state),

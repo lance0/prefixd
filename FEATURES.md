@@ -190,9 +190,8 @@ owned victim from the dashboard or `POST /v1/mitigations` with
 `"action": "blackhole"` ([ADR 027](docs/adr/027-blackhole-mitigations.md)). It
 drops all traffic to the victim. Current limits:
 
-- **Manual and unleased only.** No playbook or detector creates a blackhole
-  yet. A manual blackhole stays on the speaker if prefixd stops, until prefixd
-  returns and expires it or an Admin deletes it on the speaker.
+- **Unleased.** A manual blackhole stays on the speaker if prefixd stops,
+  until prefixd returns and expires it or an Admin deletes it on the speaker.
 - **rustbgpd only.** GoBGP has no blackhole capability, and startup refuses
   `blackhole.enabled` without it or with an empty safelist.
 - **Admin and typed confirmation.** Operators and bearer tokens get `403`; the
@@ -208,6 +207,35 @@ Blackholes are listed, shown and withdrawn by the existing dashboard views,
 withdrawal endpoints and `prefixdctl mitigations` commands. See the
 [manual blackhole API](docs/reference/api.md#manual-blackhole) and
 [configuration](docs/reference/configuration.md#blackhole).
+
+### Detector Blackholes
+
+A playbook step with `action: blackhole` turns a detector ban, such as a
+FastNetMon Community ban, into a blackhole for the victim
+([FastNetMon guide](docs/how-to/detectors/fastnetmon.md#blackholes-rtbh)).
+
+- **Source allowlist.** Only events whose `source` is listed in
+  `blackhole.detector_sources` reach a blackhole step; others get `422`. The
+  dashboard's mitigate-now dialog stays off this path unless listed.
+- **Same guardrails as manual blackholes.** Ownership, safelist, quotas and the
+  TTL cap apply. A repeated ban extends the blackhole to at most
+  `blackhole.max_ttl_seconds` from now, and the FastNetMon unban withdraws it.
+- **Dry-run first.** In dry-run mode a detector blackhole is recorded and
+  audited and sends nothing.
+- **Enforced without the injection lease.** The rustbgpd injection lease has
+  not shipped, so enforced detector blackholes run unleased. They are refused
+  unless `blackhole.detector_sources` is nonempty, and startup logs a warning,
+  health detail reports `speaker.detector_unleased: true` and
+  `prefixd_blackhole_detector_unleased` is `1`.
+- **Remaining gap.** If prefixd is down for a long time while rustbgpd keeps
+  running, detector blackholes stay announced until prefixd returns or an
+  operator withdraws them. On return, reconciliation expires overdue
+  blackholes and deletes routes that exactly match blackholes that already
+  ended, audited as `orphaned after controller downtime`; unknown routes are
+  only reported. The shipped
+  [availability alerts](docs/how-to/grafana.md#availability-alerts) page when
+  prefixd is down, has no active controller, or was holding blackholes when it
+  stopped.
 
 ---
 

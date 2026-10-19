@@ -172,10 +172,11 @@ async fn main() -> anyhow::Result<()> {
             .await?;
     }
     // Rules the guardrails or the selected speaker would refuse fail startup,
-    // in dry-run and enforced modes alike (ADR 028).
+    // in dry-run and enforced modes alike (ADR 028), as do blackhole steps the
+    // settings or the lease gate refuse (ADR 027).
     let playbook_errors = config
         .playbooks
-        .check_match_settings(&config.settings.guardrails, announcer.match_support());
+        .check_settings(&config.settings, announcer.capabilities());
     if !playbook_errors.is_empty() {
         anyhow::bail!("playbooks.yaml: {}", playbook_errors.join("; "));
     }
@@ -185,6 +186,18 @@ async fn main() -> anyhow::Result<()> {
         repo.as_ref(),
     )
     .await?;
+    let blackhole_lease = announcer.capabilities().blackhole_lease;
+    let detector_unleased =
+        prefixd::guardrails::detector_unleased(&config.settings, blackhole_lease);
+    prefixd::observability::metrics::BLACKHOLE_DETECTOR_UNLEASED
+        .set(f64::from(u8::from(detector_unleased)));
+    if detector_unleased {
+        tracing::warn!(
+            detector_sources = ?config.settings.blackhole.detector_sources,
+            "enforced detector blackholes run without the rustbgpd injection lease; \
+             if prefixd stops while the speaker runs, they stay announced until prefixd returns or an operator withdraws them"
+        );
+    }
 
     // Load alerting config from alerting.yaml if present, falling back to prefixd.yaml
     let alerting_path = cli.config.join("alerting.yaml");
