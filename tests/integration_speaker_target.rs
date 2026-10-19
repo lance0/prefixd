@@ -1497,6 +1497,109 @@ async fn withdrawal_rule_kind_replay_keeps_every_request_flowspec() {
 }
 
 #[tokio::test]
+async fn event_top_src_ports_replay_leaves_existing_events_null() {
+    let ctx = common::TestContext::new().await;
+    let speaker = MockAnnouncer::new();
+    let row = mitigation("srcports", "203.0.113.30");
+    ctx.repo.insert_mitigation(&row).await.unwrap();
+    speaker
+        .announce(&prefixd::domain::mitigation_rule(&row).unwrap())
+        .await
+        .unwrap();
+    // Simulate a database from before migration 017, with populated events.
+    sqlx::query("ALTER TABLE events DROP COLUMN top_src_ports_json")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    for (external, vector) in [("old-1", "udp_flood"), ("old-2", "syn_flood")] {
+        sqlx::query(
+            "INSERT INTO events (event_id, external_event_id, source, event_timestamp, ingested_at,
+                 victim_ip, vector, protocol, top_dst_ports_json, action)
+             VALUES ($1, $2, 'replay', now(), now(), '203.0.113.30', $3, 17, '[53]', 'ban')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(external)
+        .bind(vector)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    }
+    let snapshot = || {
+        let pool = ctx.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Value>(
+                "SELECT jsonb_build_array(
+                    (SELECT jsonb_agg(to_jsonb(e) - 'top_src_ports_json' ORDER BY event_id) FROM events e),
+                    (SELECT jsonb_agg(to_jsonb(m) ORDER BY mitigation_id) FROM mitigations m),
+                    (SELECT count(*) FROM withdrawal_requests),
+                    (SELECT count(*) FROM flowspec_announcements),
+                    (SELECT count(*) FROM audit_log))",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let before = snapshot().await;
+
+    // Replay is repeatable and only adds the nullable column.
+    for _ in 0..2 {
+        init_postgres_pool(&ctx.state.settings.storage.connection_string)
+            .await
+            .unwrap();
+    }
+    assert_eq!(snapshot().await, before);
+    let stored: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT top_src_ports_json FROM events ORDER BY external_event_id")
+            .fetch_all(&ctx.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, [None, None]);
+    assert_eq!(speaker.announced_count().await, 1);
+
+    // New events keep absent apart from empty, and every read path returns them.
+    for (external, ports) in [
+        ("new-absent", None),
+        ("new-empty", Some(vec![])),
+        ("new-ranked", Some(vec![123, 53])),
+    ] {
+        let input = serde_json::from_value(json!({
+            "event_id": external, "timestamp": chrono::Utc::now(), "source": "replay",
+            "victim_ip": "203.0.113.31", "vector": "udp_amplification", "top_src_ports": ports,
+        }))
+        .unwrap();
+        ctx.repo
+            .insert_event(&AttackEvent::from_input(input))
+            .await
+            .unwrap();
+    }
+    let read = |external: &'static str| {
+        let repo = ctx.repo.clone();
+        async move {
+            repo.find_ban_event_by_external_id("replay", external)
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    };
+    assert_eq!(read("old-1").await.top_src_ports_json, None);
+    assert_eq!(read("new-absent").await.top_src_ports_json, None);
+    assert_eq!(
+        read("new-empty").await.top_src_ports_json.as_deref(),
+        Some("[]")
+    );
+    let ranked = read("new-ranked").await;
+    assert_eq!(ranked.top_src_ports(), [123, 53]);
+    assert_eq!(ranked.attack_vector(), AttackVector::UdpAmplification);
+    let by_ip = ctx
+        .repo
+        .list_events_by_ip("203.0.113.31", 10)
+        .await
+        .unwrap();
+    assert_eq!(by_ip.len(), 3);
+}
+
+#[tokio::test]
 async fn one_shot_maintenance_refuses_while_another_instance_holds_the_fence() {
     use sqlx::Connection;
     use std::{str::FromStr, time::Duration};

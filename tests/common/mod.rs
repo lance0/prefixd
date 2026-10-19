@@ -219,6 +219,7 @@ pub fn test_settings() -> Settings {
         alerting: Default::default(),
         correlation: Default::default(),
         blackhole: Default::default(),
+        amplification: Default::default(),
     }
 }
 
@@ -262,11 +263,12 @@ pub fn test_playbooks() -> Playbooks {
                 },
                 correlation: None,
                 steps: vec![PlaybookStep {
-                    action: PlaybookAction::Police,
+                    action: Some(PlaybookAction::Police),
                     rate_bps: Some(10_000_000),
                     ttl_seconds: 120,
                     require_confidence_at_least: None,
                     require_persistence_seconds: None,
+                    rules: Vec::new(),
                 }],
             },
             Playbook {
@@ -277,11 +279,12 @@ pub fn test_playbooks() -> Playbooks {
                 },
                 correlation: None,
                 steps: vec![PlaybookStep {
-                    action: PlaybookAction::Discard,
+                    action: Some(PlaybookAction::Discard),
                     rate_bps: None,
                     ttl_seconds: 60,
                     require_confidence_at_least: None,
                     require_persistence_seconds: None,
+                    rules: Vec::new(),
                 }],
             },
         ],

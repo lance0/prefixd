@@ -315,9 +315,9 @@ impl RepositoryTrait for Repository {
             r#"
             INSERT INTO events (
                 event_id, external_event_id, source, event_timestamp, ingested_at,
-                victim_ip, vector, protocol, bps, pps, top_dst_ports_json, confidence,
+                victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
                 action, raw_details
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             "#,
         )
         .bind(event.event_id)
@@ -331,6 +331,7 @@ impl RepositoryTrait for Repository {
         .bind(event.bps)
         .bind(event.pps)
         .bind(&event.top_dst_ports_json)
+        .bind(&event.top_src_ports_json)
         .bind(event.confidence)
         .bind(&event.action)
         .bind(&event.raw_details)
@@ -347,7 +348,7 @@ impl RepositoryTrait for Repository {
         let event = sqlx::query_as::<_, AttackEvent>(
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
-                   victim_ip, vector, protocol, bps, pps, top_dst_ports_json, confidence,
+                   victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
                    action, raw_details
             FROM events 
             WHERE source = $1 AND external_event_id = $2 AND action = 'ban'
@@ -366,7 +367,7 @@ impl RepositoryTrait for Repository {
         let events = sqlx::query_as::<_, AttackEvent>(
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
-                   victim_ip, vector, protocol, bps, pps, top_dst_ports_json, confidence,
+                   victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
                    action, raw_details
             FROM events
             WHERE ($2::timestamptz IS NULL OR (ingested_at, event_id) < ($2, $5))
@@ -659,8 +660,8 @@ impl RepositoryTrait for Repository {
         }
     }
 
-    async fn find_active_by_triggering_event(&self, event_id: Uuid) -> Result<Option<Mitigation>> {
-        let row = sqlx::query_as::<_, MitigationRow>(
+    async fn list_active_by_triggering_event(&self, event_id: Uuid) -> Result<Vec<Mitigation>> {
+        let rows = sqlx::query_as::<_, MitigationRow>(
             r#"
             SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
                    match_json, action_type, action_params_json, status,
@@ -669,15 +670,13 @@ impl RepositoryTrait for Repository {
                    acknowledged_at, acknowledged_by, signal_group_id, origin_mode
             FROM mitigations
             WHERE triggering_event_id = $1 AND status IN ('pending', 'active', 'escalated')
+            ORDER BY created_at, mitigation_id
             "#,
         )
         .bind(event_id)
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
-        match row {
-            Some(r) => Ok(Some(Mitigation::from_row(r)?)),
-            None => Ok(None),
-        }
+        rows.into_iter().map(Mitigation::from_row).collect()
     }
 
     async fn list_mitigations(
@@ -1001,7 +1000,7 @@ impl RepositoryTrait for Repository {
         let events = sqlx::query_as::<_, AttackEvent>(
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
-                   victim_ip, vector, protocol, bps, pps, top_dst_ports_json, confidence,
+                   victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
                    action, raw_details
             FROM events WHERE victim_ip = $1 ORDER BY ingested_at DESC LIMIT $2
             "#,
@@ -2028,7 +2027,7 @@ mod checked_timestamp_rows {
         }
         check_row!(
             AttackEvent,
-            "gen_random_uuid() AS event_id, NULL::text AS external_event_id, 'test'::text AS source, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, 17::integer AS protocol, NULL::bigint AS bps, NULL::bigint AS pps, '[]'::text AS top_dst_ports_json, NULL::real AS confidence, 'ban'::text AS action, NULL::jsonb AS raw_details",
+            "gen_random_uuid() AS event_id, NULL::text AS external_event_id, 'test'::text AS source, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, 17::integer AS protocol, NULL::bigint AS bps, NULL::bigint AS pps, '[]'::text AS top_dst_ports_json, NULL::text AS top_src_ports_json, NULL::real AS confidence, 'ban'::text AS action, NULL::jsonb AS raw_details",
             [event_timestamp, ingested_at],
             []
         );

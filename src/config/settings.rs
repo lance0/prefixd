@@ -24,6 +24,8 @@ pub struct Settings {
     pub correlation: crate::correlation::CorrelationConfig,
     #[serde(default)]
     pub blackhole: BlackholeConfig,
+    #[serde(default)]
+    pub amplification: AmplificationConfig,
 }
 
 fn default_mode() -> OperationMode {
@@ -592,6 +594,100 @@ impl BlackholeConfig {
     }
 }
 
+/// UDP reflection handling (ADR 028): which event source ports policy may match.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AmplificationConfig {
+    /// Minimum share of sampled UDP packets for a source port to count, where a
+    /// detector adapter has samples.
+    pub min_src_port_share: f64,
+    /// Reflector ports policy may match. Absent means the built-in default;
+    /// an explicit empty list disables event-derived source ports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reflector_ports: Option<Vec<ReflectorPort>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReflectorPort {
+    pub port: u16,
+    pub name: String,
+}
+
+/// The built-in reflector-port library. Each entry is cited in ADR 028; changes
+/// are release notes. 53 drops a victim's replies from external resolvers.
+pub const DEFAULT_REFLECTOR_PORTS: [(u16, &str); 20] = [
+    (17, "qotd"),
+    (19, "chargen"),
+    (53, "dns"),
+    (111, "portmap"),
+    (123, "ntp"),
+    (137, "netbios-ns"),
+    (161, "snmp"),
+    (389, "cldap"),
+    (427, "slp"),
+    (520, "ripv1"),
+    (1434, "ms-sql-resolution"),
+    (1900, "ssdp"),
+    (3283, "apple-remote-desktop"),
+    (3702, "ws-discovery"),
+    (5353, "mdns"),
+    (5683, "coap"),
+    (10001, "ubiquiti-discovery"),
+    (11211, "memcached"),
+    (33848, "jenkins-discovery"),
+    (37810, "dvr-dhcpdiscover"),
+];
+
+impl Default for AmplificationConfig {
+    fn default() -> Self {
+        Self {
+            min_src_port_share: 0.2,
+            reflector_ports: None,
+        }
+    }
+}
+
+impl AmplificationConfig {
+    /// The effective library: configured ports, or the built-in default when absent.
+    pub fn library_ports(&self) -> Vec<u16> {
+        match &self.reflector_ports {
+            Some(ports) => ports.iter().map(|entry| entry.port).collect(),
+            None => DEFAULT_REFLECTOR_PORTS
+                .iter()
+                .map(|(port, _)| *port)
+                .collect(),
+        }
+    }
+
+    pub fn validate(&self) -> crate::error::Result<()> {
+        let error = |message: String| {
+            Err(crate::error::PrefixdError::Config(format!(
+                "amplification.{message}"
+            )))
+        };
+        if !(self.min_src_port_share > 0.0 && self.min_src_port_share <= 1.0) {
+            return error(format!(
+                "min_src_port_share must be above 0 and at most 1, got {}",
+                self.min_src_port_share
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for entry in self.reflector_ports.iter().flatten() {
+            if entry.port == 0 {
+                return error(format!("reflector_ports: {} has port 0", entry.name));
+            }
+            if !seen.insert(entry.port) {
+                return error(format!(
+                    "reflector_ports: port {} is listed twice",
+                    entry.port
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn blackhole_config_error(message: String) -> crate::error::PrefixdError {
     crate::error::PrefixdError::Config(format!("blackhole.{message}"))
 }
@@ -683,6 +779,7 @@ impl Settings {
         let deprecations = settings.deprecations(&content);
         settings.http.validate_auth_transport()?;
         settings.blackhole.validate()?;
+        settings.amplification.validate()?;
         settings
             .guardrails
             .validate_for_backend(settings.bgp.mode)?;
@@ -1320,5 +1417,49 @@ correlation: {}
         // Empty section should still use defaults
         assert!(!settings.correlation.enabled);
         assert_eq!(settings.correlation.window_seconds, 300);
+    }
+
+    #[test]
+    fn amplification_defaults_to_the_cited_library_and_validates_overrides() {
+        let settings: Settings =
+            crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+        let config = &settings.amplification;
+        assert_eq!(config.min_src_port_share, 0.2);
+        let library = config.library_ports();
+        assert_eq!(library.len(), 20);
+        // DNS is in the default despite its collateral (owner decision).
+        for port in [53, 123, 389, 11211, 37810] {
+            assert!(library.contains(&port), "{port}");
+        }
+        // QUIC/DTLS, TFTP, STUN and game ports are deliberately excluded.
+        for port in [443, 69, 3478, 27015] {
+            assert!(!library.contains(&port), "{port}");
+        }
+        config.validate().unwrap();
+
+        let parse = |yaml: &str| crate::config::parse_yaml::<AmplificationConfig>(yaml);
+        // An explicit empty list disables event-derived source ports.
+        let disabled = parse("reflector_ports: []").unwrap();
+        assert!(disabled.library_ports().is_empty());
+        disabled.validate().unwrap();
+        let custom =
+            parse("reflector_ports: [{port: 123, name: ntp}, {port: 9999, name: lab}]").unwrap();
+        assert_eq!(custom.library_ports(), [123, 9999]);
+        custom.validate().unwrap();
+        for (yaml, expected) in [
+            ("min_src_port_share: 0", "min_src_port_share"),
+            ("min_src_port_share: 1.5", "min_src_port_share"),
+            ("min_src_port_share: .nan", "min_src_port_share"),
+            ("reflector_ports: [{port: 0, name: zero}]", "port 0"),
+            (
+                "reflector_ports: [{port: 53, name: a}, {port: 53, name: b}]",
+                "listed twice",
+            ),
+        ] {
+            let error = parse(yaml).unwrap().validate().unwrap_err().to_string();
+            assert!(error.contains(expected), "{yaml}: {error}");
+        }
+        assert!(parse("reflector_port: []").is_err());
+        assert!(parse("reflector_ports: [{port: 53}]").is_err());
     }
 }

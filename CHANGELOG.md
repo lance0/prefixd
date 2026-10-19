@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values. Before, rules over 8 ports were saved and then refused at
   announcement. Lower `max_ports` to 8 or less before upgrading. Shipped
   configurations use 8, and GoBGP is unaffected.
+- Migration 017 adds the nullable `events.top_src_ports_json` column. Replay
+  leaves every existing event's value `NULL` and rewrites no other row.
+- Earlier releases refuse a playbooks.yaml with a `udp_amplification`
+  playbook or a multi-rule step, by design: a release that ignored the step
+  would widen the rule. Before downgrading, remove such playbooks and withdraw
+  every `udp_amplification` mitigation; earlier releases also refuse rows with
+  that vector. The shipped `configs/playbooks.yaml` carries the new playbooks
+  as commented examples only.
 
 ### Added
 
@@ -109,6 +117,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   event ID on a connection error or `503`, up to `BAN_POST_ATTEMPTS` (default 3)
   attempts `BAN_POST_DELAY_SECONDS` (default 1) apart. It never retries a `4xx`.
 
+- The `udp_amplification` vector, the `top_src_ports` event field and
+  multi-rule playbook steps (ADR 028). `POST /v1/events` accepts
+  `top_src_ports` (at most 64, otherwise `400`), stored as `top_src_ports_json`.
+  In a `udp_amplification` playbook a step may carry `rules`, each with its own
+  `match` (`src_ports`, `fragment`, `packet_length`) and action; every rule
+  becomes its own mitigation for UDP to the victim, admitted on its own.
+  `src_ports: from_event` matches the event's ports that are in the new
+  `amplification.reflector_ports` library (20 cited ports by default,
+  including 53, whose collateral the configuration reference documents),
+  sorted and split into rules of at most `guardrails.max_ports` ports, so a
+  repeated port set extends the same rules. With no library port, or no
+  `udp_amplification` playbook, the event is handled exactly as `udp_flood`.
+  Startup, reload and playbook edits refuse rules that need
+  `allow_fragment_match` or `allow_packet_length_match` while it is false,
+  static source-port lists over `max_ports`, and components the speaker cannot
+  encode, in both modes. The `amplification` section (also
+  `min_src_port_share`, default 0.2) is exposed by `GET /v1/config/settings`.
+- Event responses add `mitigation_ids`, every mitigation the request created,
+  extended or withdrew, and `rules`, each evaluated rule's outcome (`created`,
+  `extended` or `rejected` with a `reason`). `mitigation_id` stays the first of
+  them. A ban returns `202` when any rule was created or extended, otherwise
+  the first rule's error as before. Batch results add `mitigation_ids` when
+  nonempty.
+
 ### Changed
 
 - `POST /v1/safelist` now withdraws every live blackhole on this POP whose
@@ -121,6 +153,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   withdraws present, owned, live blackholes that the safelist now covers, so
   entries seeded from configuration or written to the database converge. A
   failed safelist lookup withdraws nothing. FlowSpec rules are unchanged.
+
+- A detector unban by `event_id` withdraws every live mitigation the original
+  ban created, not one of them. Bans before multi-rule steps created one, so
+  their unbans behave as before.
 
 - Guardrails enforce the ADR 028 match settings before a rule is saved, in
   dry-run and enforced modes. `guardrails.allow_fragment_match` and

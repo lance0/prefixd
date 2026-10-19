@@ -76,6 +76,7 @@ use crate::domain::{
     ActionParams, ActionType, AttackEvent, AttackEventInput, FlowSpecAction, MatchCriteria,
     Mitigation, MitigationIntent, MitigationRoute, MitigationStatus, execute_withdrawal,
     find_mitigation_owner, mitigation_rule, request_withdrawal, validate_confidence,
+    validate_top_src_ports,
 };
 use crate::error::{GuardrailError, PrefixdError};
 use crate::guardrails::Guardrails;
@@ -159,8 +160,57 @@ pub struct EventResponse {
     pub external_event_id: Option<String>,
     /// Processing status
     pub status: String,
-    /// ID of the created mitigation, if any
+    /// The first mitigation this request created, extended or withdrew, if any.
     pub mitigation_id: Option<Uuid>,
+    /// Every mitigation this request created, extended or withdrew, in playbook
+    /// rule order; the first equals `mitigation_id` (ADR 028).
+    pub mitigation_ids: Vec<Uuid>,
+    /// Outcome of each rule policy produced for a ban, in playbook order.
+    /// Omitted when no rule was evaluated.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<EventRuleOutcome>,
+}
+
+impl EventResponse {
+    fn new(
+        event_id: Uuid,
+        external_event_id: Option<String>,
+        status: &str,
+        mitigation_id: Option<Uuid>,
+    ) -> Self {
+        Self {
+            announcement_outcome: None,
+            event_id,
+            external_event_id,
+            status: status.to_string(),
+            mitigation_id,
+            mitigation_ids: mitigation_id.into_iter().collect(),
+            rules: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleOutcome {
+    Created,
+    Extended,
+    Rejected,
+}
+
+/// What one rule of an event's response became. Rules are admitted one by one.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct EventRuleOutcome {
+    pub outcome: RuleOutcome,
+    /// The created or extended mitigation; absent when rejected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mitigation_id: Option<Uuid>,
+    /// Why the rule was rejected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Present only when this rule's intent was committed without a successful speaker reply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub announcement_outcome: Option<AnnouncementOutcome>,
 }
 
 /// Correlation context attached to a mitigation that was created via the
@@ -651,6 +701,7 @@ async fn handle_unban(
     input: AttackEventInput,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
     validate_confidence(input.confidence).map_err(AppError)?;
+    validate_top_src_ports(input.top_src_ports.as_deref()).map_err(AppError)?;
     let ext_id = match &input.event_id {
         Some(id) => id.clone(),
         None => {
@@ -658,13 +709,12 @@ async fn handle_unban(
             tracing::warn!(source = %input.source, "unban without event_id, ignoring");
             return Ok((
                 StatusCode::ACCEPTED,
-                Json(EventResponse {
-                    announcement_outcome: None,
-                    event_id: Uuid::new_v4(),
-                    external_event_id: None,
-                    status: "ignored_no_event_id".to_string(),
-                    mitigation_id: None,
-                }),
+                Json(EventResponse::new(
+                    Uuid::new_v4(),
+                    None,
+                    "ignored_no_event_id",
+                    None,
+                )),
             ));
         }
     };
@@ -683,36 +733,34 @@ async fn handle_unban(
             tracing::debug!(source = %input.source, external_id = %ext_id, "unban for unknown event");
             return Ok((
                 StatusCode::ACCEPTED,
-                Json(EventResponse {
-                    announcement_outcome: None,
-                    event_id: Uuid::new_v4(),
-                    external_event_id: Some(ext_id),
-                    status: "not_found".to_string(),
-                    mitigation_id: None,
-                }),
+                Json(EventResponse::new(
+                    Uuid::new_v4(),
+                    Some(ext_id),
+                    "not_found",
+                    None,
+                )),
             ));
         }
         Err(e) => return Err(AppError(e)),
     };
 
-    // Find active mitigation for this event
-    let mitigation = match state
+    // Every live rule the ban created: one event can create several (ADR 028).
+    let mitigations = match state
         .repo
-        .find_active_by_triggering_event(original_event.event_id)
+        .list_active_by_triggering_event(original_event.event_id)
         .await
     {
-        Ok(Some(m)) => m,
-        Ok(None) => {
+        Ok(found) if !found.is_empty() => found,
+        Ok(_) => {
             tracing::debug!(event_id = %original_event.event_id, "no active mitigation for event");
             return Ok((
                 StatusCode::ACCEPTED,
-                Json(EventResponse {
-                    announcement_outcome: None,
-                    event_id: original_event.event_id,
-                    external_event_id: Some(ext_id),
-                    status: "no_active_mitigation".to_string(),
-                    mitigation_id: None,
-                }),
+                Json(EventResponse::new(
+                    original_event.event_id,
+                    Some(ext_id),
+                    "no_active_mitigation",
+                    None,
+                )),
             ));
         }
         Err(e) => return Err(AppError(e)),
@@ -725,32 +773,33 @@ async fn handle_unban(
         tracing::warn!(error = %e, "failed to insert unban event");
     }
 
-    let mitigation = withdraw_and_notify(
-        &state,
-        &mitigation,
-        "detector",
-        &source,
-        format!("Detector unban: {}", source),
-    )
-    .await
-    .map_err(AppError)?;
+    let mut withdrawn = Vec::with_capacity(mitigations.len());
+    for mitigation in &mitigations {
+        let mitigation = withdraw_and_notify(
+            &state,
+            mitigation,
+            "detector",
+            &source,
+            format!("Detector unban: {}", source),
+        )
+        .await
+        .map_err(AppError)?;
+        tracing::info!(
+            mitigation_id = %mitigation.mitigation_id,
+            victim_ip = %mitigation.victim_ip,
+            "withdrew mitigation via detector unban"
+        );
+        withdrawn.push(mitigation.mitigation_id);
+    }
 
-    tracing::info!(
-        mitigation_id = %mitigation.mitigation_id,
-        victim_ip = %mitigation.victim_ip,
-        "withdrew mitigation via detector unban"
+    let mut response = EventResponse::new(
+        unban_event.event_id,
+        unban_event.external_event_id,
+        "withdrawn",
+        withdrawn.first().copied(),
     );
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(EventResponse {
-            announcement_outcome: None,
-            event_id: unban_event.event_id,
-            external_event_id: unban_event.external_event_id,
-            status: "withdrawn".to_string(),
-            mitigation_id: Some(mitigation.mitigation_id),
-        }),
-    ))
+    response.mitigation_ids = withdrawn;
+    Ok((StatusCode::ACCEPTED, Json(response)))
 }
 
 /// A `mode: corroborating` source must never create a mitigation by itself (ADR 021).
@@ -786,6 +835,7 @@ async fn handle_ban(
     // Every ban path (single, batch, signal adapters) routes through here.
     reject_corroborating_source(&state, &input).await?;
     validate_confidence(input.confidence).map_err(AppError)?;
+    validate_top_src_ports(input.top_src_ports.as_deref()).map_err(AppError)?;
     // shortcut: one controller per speaker; use a leader fence before supporting active-active controllers.
     let _mitigation_guard = state.mitigation_lock.lock().await;
     state.verified_speaker_binding().map_err(AppError)?;
@@ -818,8 +868,12 @@ async fn handle_ban(
         playbooks.clone(),
         state.settings.pop.clone(),
         state.settings.timers.default_ttl_seconds,
+    )
+    .with_amplification(
+        state.settings.amplification.library_ports(),
+        state.settings.guardrails.max_ports,
     );
-    let candidate_intent = match policy.evaluate(&event, context.as_ref()) {
+    let decision = match policy.evaluate(&event, context.as_ref()) {
         Err(
             error @ PrefixdError::GuardrailViolation(
                 GuardrailError::NoAllowedPorts | GuardrailError::InvalidAction(_),
@@ -844,39 +898,17 @@ async fn handle_ban(
         }
         result => result,
     };
-    let mut existing_owner = None;
-    // Reject before storing the detector ID so the same event remains retryable.
-    if let Ok(intent) = &candidate_intent {
-        existing_owner = find_mitigation_owner(
-            state.repo.as_ref(),
-            &state.settings.pop,
-            &MitigationRoute::new(
-                intent.action_type,
-                &intent.match_criteria,
-                &intent.action_params,
-            ),
-            &intent.match_criteria.scope_hash_for(intent.action_type),
-        )
-        .await
-        .map_err(AppError)?;
-        if let Some(owner) = &existing_owner {
-            // Extending a simulation in enforced mode would leave the attack unmitigated.
-            if owner.is_dry_run_origin() && !state.is_dry_run() {
-                return Err(AppError(PrefixdError::Conflict(format!(
-                    "FlowSpec rule is owned by a dry-run simulation; retire it with {}",
-                    crate::domain::RETIRE_DRY_RUN_FLAG
-                ))));
+    // Owners are checked per rule. When every rule is refused here, nothing is
+    // stored, so the same detector event remains retryable.
+    let mut owners = Vec::new();
+    if let Ok(decision) = &decision {
+        for intent in &decision.intents {
+            owners.push(rule_owner(&state, intent).await);
+        }
+        if !owners.is_empty() && owners.iter().all(Result::is_err) {
+            if let Err(error) = owners.swap_remove(0) {
+                return Err(AppError(error));
             }
-            (FlowSpecAction {
-                action_type: owner.action_type,
-                rate_bps: owner.action_params.rate_bps,
-            })
-            .traffic_rate_bytes_per_second()
-            .map_err(|error| {
-                AppError(PrefixdError::GuardrailViolation(
-                    GuardrailError::InvalidAction(error),
-                ))
-            })?;
         }
     }
 
@@ -896,13 +928,12 @@ async fn handle_ban(
         tracing::warn!(victim_ip = %event.victim_ip, "event for unowned IP, skipping mitigation");
         return Ok((
             StatusCode::ACCEPTED,
-            Json(EventResponse {
-                announcement_outcome: None,
-                event_id: event.event_id,
-                external_event_id: event.external_event_id.clone(),
-                status: "accepted_no_mitigation".to_string(),
-                mitigation_id: None,
-            }),
+            Json(EventResponse::new(
+                event.event_id,
+                event.external_event_id.clone(),
+                "accepted_no_mitigation",
+                None,
+            )),
         ));
     }
 
@@ -1118,13 +1149,12 @@ async fn handle_ban(
             );
             return Ok((
                 StatusCode::ACCEPTED,
-                Json(EventResponse {
-                    announcement_outcome: None,
-                    event_id: event.event_id,
-                    external_event_id: event.external_event_id.clone(),
-                    status: "accepted".to_string(),
-                    mitigation_id: None,
-                }),
+                Json(EventResponse::new(
+                    event.event_id,
+                    event.external_event_id.clone(),
+                    "accepted",
+                    None,
+                )),
             ));
         }
 
@@ -1187,55 +1217,21 @@ async fn handle_ban(
 
     // ── Policy evaluation ──────────────────────────────────────────────
 
-    let intent = match candidate_intent {
-        Ok(i) => i,
+    let decision = match decision {
+        Ok(decision) => decision,
         Err(e) => {
             tracing::warn!(error = %e, "policy evaluation failed");
             return Ok((
                 StatusCode::ACCEPTED,
-                Json(EventResponse {
-                    announcement_outcome: None,
-                    event_id: event.event_id,
-                    external_event_id: event.external_event_id.clone(),
-                    status: "accepted_no_playbook".to_string(),
-                    mitigation_id: None,
-                }),
+                Json(EventResponse::new(
+                    event.event_id,
+                    event.external_event_id.clone(),
+                    "accepted_no_playbook",
+                    None,
+                )),
             ));
         }
     };
-
-    if let Some(mut existing) = existing_owner {
-        // Extend TTL
-        existing.extend_ttl(intent.ttl_seconds, event.event_id);
-        state
-            .repo
-            .update_mitigation(&existing)
-            .await
-            .map_err(AppError)?;
-
-        // Broadcast mitigation update via WebSocket
-        let _ = state
-            .ws_broadcast
-            .send(crate::ws::WsMessage::MitigationUpdated {
-                mitigation: MitigationResponse::from(&existing),
-            });
-
-        tracing::info!(
-            mitigation_id = %existing.mitigation_id,
-            "extended existing mitigation TTL"
-        );
-
-        return Ok((
-            StatusCode::ACCEPTED,
-            Json(EventResponse {
-                announcement_outcome: None,
-                event_id: event.event_id,
-                external_event_id: event.external_event_id.clone(),
-                status: "extended".to_string(),
-                mitigation_id: Some(existing.mitigation_id),
-            }),
-        ));
-    }
 
     let guardrails = Guardrails::with_timers(
         state.settings.guardrails.clone(),
@@ -1248,57 +1244,123 @@ async fn handle_ban(
         .is_safelisted(&event.victim_ip)
         .await
         .map_err(AppError)?;
+    let actor = CreationActor::Detector(event.source.clone());
 
-    if let Err(e) = guardrails
-        .validate(&intent, state.repo.as_ref(), is_safelisted)
-        .await
-    {
-        crate::observability::metrics::EVENTS_REJECTED
-            .with_label_values(&[event.source.as_str(), "guardrail"])
-            .inc();
-        let reason = match &e {
-            PrefixdError::GuardrailViolation(g) => format!("{:?}", g)
-                .split_whitespace()
-                .next()
-                .unwrap_or("unknown")
-                .to_string(),
-            _ => "unknown".to_string(),
-        };
-        crate::observability::metrics::GUARDRAIL_REJECTIONS
-            .with_label_values(&[&reason])
-            .inc();
-        tracing::warn!(error = %e, "guardrail rejected mitigation");
-        return Err(AppError(e));
+    // Each rule is admitted on its own, in playbook order (ADR 028): every
+    // admitted rule is narrower than the all-UDP alternative and stands alone.
+    let mut rules = Vec::with_capacity(decision.intents.len());
+    let mut first_error = None;
+    let mut created_any = false;
+    for (intent, owner) in decision.intents.into_iter().zip(owners) {
+        let admitted = async {
+            if let Some(mut existing) = owner? {
+                existing.extend_ttl(intent.ttl_seconds, event.event_id);
+                state.repo.update_mitigation(&existing).await?;
+                let _ = state
+                    .ws_broadcast
+                    .send(crate::ws::WsMessage::MitigationUpdated {
+                        mitigation: MitigationResponse::from(&existing),
+                    });
+                tracing::info!(
+                    mitigation_id = %existing.mitigation_id,
+                    "extended existing mitigation TTL"
+                );
+                return Ok(EventRuleOutcome {
+                    outcome: RuleOutcome::Extended,
+                    mitigation_id: Some(existing.mitigation_id),
+                    reason: None,
+                    announcement_outcome: None,
+                });
+            }
+
+            if let Err(e) = guardrails
+                .validate(&intent, state.repo.as_ref(), is_safelisted)
+                .await
+            {
+                let reason = match &e {
+                    PrefixdError::GuardrailViolation(g) => format!("{:?}", g)
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    _ => "unknown".to_string(),
+                };
+                crate::observability::metrics::GUARDRAIL_REJECTIONS
+                    .with_label_values(&[&reason])
+                    .inc();
+                tracing::warn!(error = %e, "guardrail rejected mitigation");
+                return Err(e);
+            }
+
+            let mut mitigation =
+                Mitigation::from_intent(intent, event.victim_ip.clone(), decision.vector);
+            mitigation.signal_group_id = signal_group_id;
+            let announcement_outcome =
+                persist_new_mitigation(&state, &mut mitigation, &actor).await?;
+
+            crate::observability::metrics::MITIGATIONS_CREATED
+                .with_label_values(&[&mitigation.action_type.to_string(), &state.settings.pop])
+                .inc();
+
+            // Build response with optional correlation context
+            let mut mit_response = MitigationResponse::from(&mitigation);
+            mit_response.correlation = correlation_context.clone();
+            let _ = state
+                .ws_broadcast
+                .send(crate::ws::WsMessage::MitigationCreated {
+                    mitigation: mit_response,
+                });
+            state
+                .alerting
+                .read()
+                .await
+                .notify(crate::alerting::Alert::mitigation_created(&mitigation));
+            tracing::info!(
+                mitigation_id = %mitigation.mitigation_id,
+                victim_ip = %mitigation.victim_ip,
+                action = %mitigation.action_type,
+                signal_group_id = ?mitigation.signal_group_id,
+                "created mitigation"
+            );
+            Ok(EventRuleOutcome {
+                outcome: RuleOutcome::Created,
+                mitigation_id: Some(mitigation.mitigation_id),
+                reason: None,
+                announcement_outcome,
+            })
+        }
+        .await;
+        match admitted {
+            Ok(outcome) => {
+                created_any |= matches!(outcome.outcome, RuleOutcome::Created);
+                rules.push(outcome);
+            }
+            Err(error) => {
+                rules.push(EventRuleOutcome {
+                    outcome: RuleOutcome::Rejected,
+                    mitigation_id: None,
+                    reason: Some(error.to_string()),
+                    announcement_outcome: None,
+                });
+                first_error.get_or_insert(error);
+            }
+        }
     }
 
-    // Create mitigation
-    let mut mitigation =
-        Mitigation::from_intent(intent, event.victim_ip.clone(), event.attack_vector());
-    mitigation.signal_group_id = signal_group_id;
+    let mitigation_ids: Vec<Uuid> = rules.iter().filter_map(|rule| rule.mitigation_id).collect();
+    if mitigation_ids.is_empty() {
+        // No rule was created or extended: the first rule's error, as before.
+        let error = first_error
+            .unwrap_or_else(|| PrefixdError::Internal("policy produced no rules".into()));
+        if matches!(error, PrefixdError::GuardrailViolation(_)) {
+            crate::observability::metrics::EVENTS_REJECTED
+                .with_label_values(&[event.source.as_str(), "guardrail"])
+                .inc();
+        }
+        return Err(AppError(error));
+    }
 
-    let actor = CreationActor::Detector(event.source.clone());
-    let announcement_outcome = persist_new_mitigation(&state, &mut mitigation, &actor)
-        .await
-        .inspect_err(|error| {
-            if matches!(
-                error,
-                PrefixdError::GuardrailViolation(
-                    GuardrailError::QuotaExceeded { .. }
-                        | GuardrailError::NewMitigationRateExceeded { .. }
-                )
-            ) {
-                crate::observability::metrics::EVENTS_REJECTED
-                    .with_label_values(&[event.source.as_str(), "guardrail"])
-                    .inc();
-            }
-        })
-        .map_err(AppError)?;
-
-    crate::observability::metrics::MITIGATIONS_CREATED
-        .with_label_values(&[&mitigation.action_type.to_string(), &state.settings.pop])
-        .inc();
-
-    if let Some(group_id) = signal_group_id {
+    if let (true, Some(group_id)) = (created_any, signal_group_id) {
         if let Ok(Some(mut group)) = state.repo.get_signal_group(group_id).await {
             group.status = crate::correlation::SignalGroupStatus::Resolved;
             if let Err(e) = state.repo.update_signal_group(&group).await {
@@ -1307,41 +1369,52 @@ async fn handle_ban(
         }
     }
 
-    // Build response with optional correlation context
-    let mut mit_response = MitigationResponse::from(&mitigation);
-    mit_response.correlation = correlation_context;
-
-    // Broadcast new mitigation via WebSocket
-    let _ = state
-        .ws_broadcast
-        .send(crate::ws::WsMessage::MitigationCreated {
-            mitigation: mit_response.clone(),
-        });
-
-    state
-        .alerting
-        .read()
-        .await
-        .notify(crate::alerting::Alert::mitigation_created(&mitigation));
-
-    tracing::info!(
-        mitigation_id = %mitigation.mitigation_id,
-        victim_ip = %mitigation.victim_ip,
-        action = %mitigation.action_type,
-        signal_group_id = ?mitigation.signal_group_id,
-        "created mitigation"
-    );
-
     Ok((
         StatusCode::ACCEPTED,
         Json(EventResponse {
-            announcement_outcome,
+            announcement_outcome: rules.iter().find_map(|rule| rule.announcement_outcome),
             event_id: event.event_id,
             external_event_id: event.external_event_id.clone(),
-            status: "accepted".to_string(),
-            mitigation_id: Some(mitigation.mitigation_id),
+            status: if created_any { "accepted" } else { "extended" }.to_string(),
+            mitigation_id: mitigation_ids.first().copied(),
+            mitigation_ids,
+            rules,
         }),
     ))
+}
+
+/// The live mitigation a rule would extend, or why this rule cannot proceed.
+async fn rule_owner(
+    state: &AppState,
+    intent: &MitigationIntent,
+) -> crate::error::Result<Option<Mitigation>> {
+    let owner = find_mitigation_owner(
+        state.repo.as_ref(),
+        &state.settings.pop,
+        &MitigationRoute::new(
+            intent.action_type,
+            &intent.match_criteria,
+            &intent.action_params,
+        ),
+        &intent.match_criteria.scope_hash_for(intent.action_type),
+    )
+    .await?;
+    if let Some(owner) = &owner {
+        // Extending a simulation in enforced mode would leave the attack unmitigated.
+        if owner.is_dry_run_origin() && !state.is_dry_run() {
+            return Err(PrefixdError::Conflict(format!(
+                "FlowSpec rule is owned by a dry-run simulation; retire it with {}",
+                crate::domain::RETIRE_DRY_RUN_FLAG
+            )));
+        }
+        (FlowSpecAction {
+            action_type: owner.action_type,
+            rate_bps: owner.action_params.rate_bps,
+        })
+        .traffic_rate_bytes_per_second()
+        .map_err(|error| PrefixdError::GuardrailViolation(GuardrailError::InvalidAction(error)))?;
+    }
+    Ok(owner)
 }
 
 /// List events
@@ -2297,6 +2370,9 @@ pub struct BatchEventResult {
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     mitigation_id: Option<Uuid>,
+    /// Every mitigation the event created, extended or withdrew; see `EventResponse`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mitigation_ids: Vec<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -2366,6 +2442,7 @@ pub async fn ingest_events_batch(
                 event_id: Uuid::nil(),
                 status: "rejected".to_string(),
                 mitigation_id: None,
+                mitigation_ids: Vec::new(),
                 error: Some(err.to_string()),
             });
             continue;
@@ -2390,6 +2467,7 @@ pub async fn ingest_events_batch(
                     event_id: resp.event_id,
                     status: resp.status,
                     mitigation_id: resp.mitigation_id,
+                    mitigation_ids: resp.mitigation_ids,
                     error: None,
                 });
             }
@@ -2401,6 +2479,7 @@ pub async fn ingest_events_batch(
                     event_id: Uuid::nil(),
                     status: "rejected".to_string(),
                     mitigation_id: None,
+                    mitigation_ids: Vec::new(),
                     error: Some(err.to_string()),
                 });
             }
@@ -3053,5 +3132,374 @@ mod tests {
             assert_eq!(count("BlackholeQuotaExceeded"), before + 1.0);
             assert_eq!(repo.count_active_global().await.unwrap(), 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod amplification_tests {
+    //! ADR 028 slice 4: multi-rule playbook steps admitted per rule.
+    use super::{AppError, AppState, Arc, EventResponse, RuleOutcome, handle_ban, handle_unban};
+    use crate::bgp::MockAnnouncer;
+    use crate::config::{
+        BgpMode, DEFAULT_REFLECTOR_PORTS, Inventory, OperationMode, Playbooks, ReflectorPort,
+        Settings,
+    };
+    use crate::db::{MitigationListParams, MockRepository, RepositoryTrait};
+    use crate::domain::{
+        ActionType, AttackEventInput, AttackVector, FragmentMatch, Mitigation, MitigationStatus,
+    };
+    use crate::error::PrefixdError;
+    use uuid::Uuid;
+
+    const VICTIM: &str = "203.0.113.10";
+    const PLAYBOOKS: &str = r#"
+playbooks:
+  - name: udp_flood_police
+    match: { vector: udp_flood }
+    steps:
+      - { action: police, rate_bps: 5000000, ttl_seconds: 120 }
+  - name: udp_amplification
+    match: { vector: udp_amplification }
+    steps:
+      - ttl_seconds: 300
+        rules:
+          - match: { src_ports: from_event }
+            action: discard
+          - match: { fragment: non_first }
+            action: police
+            rate_bps: 20000000
+"#;
+
+    struct Fixture {
+        state: Arc<AppState>,
+        repo: Arc<MockRepository>,
+        speaker: Arc<MockAnnouncer>,
+    }
+
+    fn fixture(mode: OperationMode, tweak: impl FnOnce(&mut Settings, &mut Playbooks)) -> Fixture {
+        let mut settings: Settings =
+            crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+        settings.bgp.mode = BgpMode::Mock;
+        settings.mode = mode;
+        settings.correlation.enabled = false;
+        settings.guardrails.allow_fragment_match = true;
+        let mut playbooks: Playbooks = crate::config::parse_yaml(PLAYBOOKS).unwrap();
+        tweak(&mut settings, &mut playbooks);
+        let parsed: Inventory =
+            crate::config::parse_yaml(include_str!("../../configs/inventory.yaml")).unwrap();
+        let inventory = Inventory::new(parsed.customers);
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(MockAnnouncer::new());
+        let state = AppState::new(
+            settings,
+            inventory,
+            playbooks,
+            repo.clone(),
+            speaker.clone(),
+            ".".into(),
+        )
+        .unwrap();
+        Fixture {
+            state,
+            repo,
+            speaker,
+        }
+    }
+
+    fn event(id: &str, vector: &str, src_ports: Option<&[u16]>) -> AttackEventInput {
+        serde_json::from_value(serde_json::json!({
+            "event_id": id, "timestamp": chrono::Utc::now(), "source": "amp-test",
+            "victim_ip": VICTIM, "vector": vector, "top_src_ports": src_ports,
+            "confidence": 0.9,
+        }))
+        .unwrap()
+    }
+
+    async fn ban(f: &Fixture, input: AttackEventInput) -> Result<EventResponse, PrefixdError> {
+        handle_ban(f.state.clone(), input)
+            .await
+            .map(|(_, axum::Json(response))| response)
+            .map_err(|AppError(error)| error)
+    }
+
+    async fn rows(f: &Fixture) -> Vec<Mitigation> {
+        let params = MitigationListParams {
+            limit: 100,
+            ..Default::default()
+        };
+        let mut rows = f
+            .repo
+            .list_mitigations(None, None, None, None, &params)
+            .await
+            .unwrap();
+        rows.sort_by_key(|m| (m.created_at, m.mitigation_id));
+        rows
+    }
+
+    fn outcomes(response: &EventResponse) -> Vec<RuleOutcome> {
+        response.rules.iter().map(|rule| rule.outcome).collect()
+    }
+
+    async fn get(f: &Fixture, id: Uuid) -> Mitigation {
+        f.repo.get_mitigation(id).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn library_intersection_per_rule_admission_refresh_and_changed_set() {
+        use RuleOutcome::{Created, Extended};
+        let f = fixture(OperationMode::Enforced, |_, _| {});
+        // 4444 is not a reflector port: it is dropped, never matched.
+        let first = ban(&f, event("e1", "udp_amplification", Some(&[123, 4444, 53])))
+            .await
+            .unwrap();
+        assert_eq!(first.status, "accepted");
+        assert_eq!(outcomes(&first), [Created, Created]);
+        assert_eq!(first.mitigation_ids.len(), 2);
+        assert_eq!(first.mitigation_id, Some(first.mitigation_ids[0]));
+        let ports = get(&f, first.mitigation_ids[0]).await;
+        assert_eq!(ports.vector, AttackVector::UdpAmplification);
+        assert_eq!(ports.match_criteria.src_ports, [53, 123]);
+        assert!(ports.match_criteria.dst_ports.is_empty());
+        assert_eq!(ports.match_criteria.protocol, Some(17));
+        assert_eq!(ports.action_type, ActionType::Discard);
+        let fragments = get(&f, first.mitigation_ids[1]).await;
+        assert_eq!(
+            fragments.match_criteria.fragment,
+            Some(FragmentMatch::NonFirst)
+        );
+        assert!(fragments.match_criteria.src_ports.is_empty());
+        assert_eq!(fragments.action_type, ActionType::Police);
+        assert_eq!(fragments.action_params.rate_bps, Some(20_000_000));
+        assert_eq!(f.speaker.announced_count().await, 2);
+
+        // A refresh reproducing both rules extends both.
+        let refresh = ban(&f, event("e2", "udp_amplification", Some(&[53, 123])))
+            .await
+            .unwrap();
+        assert_eq!(refresh.status, "extended");
+        assert_eq!(outcomes(&refresh), [Extended, Extended]);
+        assert_eq!(refresh.mitigation_ids, first.mitigation_ids);
+        assert_eq!(rows(&f).await.len(), 2);
+
+        // A changed port set is a new scope; the fragment rule is unchanged.
+        let changed = ban(&f, event("e3", "udp_amplification", Some(&[123])))
+            .await
+            .unwrap();
+        assert_eq!(outcomes(&changed), [Created, Extended]);
+        assert_ne!(changed.mitigation_ids[0], first.mitigation_ids[0]);
+        assert_eq!(changed.mitigation_ids[1], first.mitigation_ids[1]);
+        assert_eq!(
+            get(&f, changed.mitigation_ids[0])
+                .await
+                .match_criteria
+                .src_ports,
+            [123]
+        );
+        assert_eq!(rows(&f).await.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn library_ports_split_into_stable_chunks_of_max_ports() {
+        use RuleOutcome::{Created, Extended};
+        let f = fixture(OperationMode::Enforced, |_, _| {});
+        let library: Vec<u16> = DEFAULT_REFLECTOR_PORTS.iter().map(|(p, _)| *p).collect();
+        assert_eq!(library.len(), 20);
+        let mut reported: Vec<u16> = library.iter().rev().copied().collect();
+        reported.push(4444);
+        let first = ban(&f, event("c1", "udp_amplification", Some(&reported)))
+            .await
+            .unwrap();
+        assert_eq!(outcomes(&first), [Created, Created, Created, Created]);
+        let mut chunks = Vec::new();
+        for id in &first.mitigation_ids[..3] {
+            chunks.push(get(&f, *id).await.match_criteria.src_ports);
+        }
+        // Sorted, then split at max_ports (8), the rustbgpd per-list cap.
+        assert_eq!(chunks[0], library[..8]);
+        assert_eq!(chunks[1], library[8..16]);
+        assert_eq!(chunks[2], library[16..]);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 8));
+
+        // The same set in another order and with duplicates maps to the same
+        // identities: every rule extends and none is duplicated.
+        let mut shuffled = library.clone();
+        shuffled.rotate_left(7);
+        shuffled.extend_from_slice(&[53, 123]);
+        let again = ban(&f, event("c2", "udp_amplification", Some(&shuffled)))
+            .await
+            .unwrap();
+        assert_eq!(outcomes(&again), [Extended, Extended, Extended, Extended]);
+        assert_eq!(again.mitigation_ids, first.mitigation_ids);
+        assert_eq!(rows(&f).await.len(), 4);
+        assert_eq!(f.speaker.announced_count().await, 4);
+    }
+
+    #[tokio::test]
+    async fn partial_admission_reports_each_rule_and_none_admitted_returns_first_error() {
+        // The quota admits one rule: the second is rejected and reported.
+        let f = fixture(OperationMode::Enforced, |settings, _| {
+            settings.quotas.max_active_per_pop = 1;
+        });
+        let partial = ban(&f, event("p1", "udp_amplification", Some(&[123])))
+            .await
+            .unwrap();
+        assert_eq!(partial.status, "accepted");
+        assert_eq!(
+            outcomes(&partial),
+            [RuleOutcome::Created, RuleOutcome::Rejected]
+        );
+        assert_eq!(partial.mitigation_ids.len(), 1);
+        let rejected = &partial.rules[1];
+        assert!(rejected.mitigation_id.is_none());
+        assert!(rejected.reason.as_deref().unwrap().contains("quota"));
+        assert_eq!(rows(&f).await.len(), 1);
+
+        // Every rule refused: the first rule's error, as for one rule.
+        let f = fixture(OperationMode::Enforced, |_, _| {});
+        f.repo
+            .insert_safelist(&format!("{VICTIM}/32"), "test", None)
+            .await
+            .unwrap();
+        let error = ban(&f, event("p2", "udp_amplification", Some(&[123])))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, PrefixdError::GuardrailViolation(_)),
+            "{error}"
+        );
+        assert!(rows(&f).await.is_empty());
+        assert_eq!(f.speaker.announced_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn dry_run_persists_every_rule_and_sends_no_rpc() {
+        let f = fixture(OperationMode::DryRun, |_, _| {});
+        let response = ban(&f, event("d1", "udp_amplification", Some(&[123, 389])))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcomes(&response),
+            [RuleOutcome::Created, RuleOutcome::Created]
+        );
+        let saved = rows(&f).await;
+        assert_eq!(saved.len(), 2);
+        assert!(saved.iter().all(Mitigation::is_dry_run_origin));
+        assert_eq!(saved[0].match_criteria.src_ports, [123, 389]);
+        assert_eq!(f.speaker.announced_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn no_usable_source_ports_or_playbook_falls_back_to_udp_flood() {
+        let empty_library = |settings: &mut Settings, _: &mut Playbooks| {
+            settings.amplification.reflector_ports = Some(Vec::new());
+        };
+        let no_playbook = |_: &mut Settings, playbooks: &mut Playbooks| {
+            playbooks
+                .playbooks
+                .retain(|p| p.name != "udp_amplification");
+        };
+        let keep = |_: &mut Settings, _: &mut Playbooks| {};
+        type Tweak = Box<dyn FnOnce(&mut Settings, &mut Playbooks)>;
+        let cases: [(&str, Option<&[u16]>, Tweak, &str); 4] = [
+            (
+                "foreign",
+                Some(&[4444, 27015]),
+                Box::new(keep),
+                "no reflector source ports",
+            ),
+            ("absent", None, Box::new(keep), "no reflector source ports"),
+            (
+                "disabled",
+                Some(&[123]),
+                Box::new(empty_library),
+                "no reflector source ports",
+            ),
+            (
+                "unconfigured",
+                Some(&[123]),
+                Box::new(no_playbook),
+                "no udp_amplification playbook",
+            ),
+        ];
+        for (name, ports, tweak, why) in cases {
+            let f = fixture(OperationMode::Enforced, tweak);
+            let response = ban(&f, event(name, "udp_amplification", ports))
+                .await
+                .unwrap();
+            assert_eq!(outcomes(&response), [RuleOutcome::Created], "{name}");
+            let saved = rows(&f).await;
+            assert_eq!(saved.len(), 1, "{name}");
+            // Exactly today's udp_flood rule: police, service ports, no source ports.
+            let rule = &saved[0];
+            assert_eq!(rule.vector, AttackVector::UdpFlood, "{name}");
+            assert_eq!(rule.action_type, ActionType::Police);
+            assert_eq!(rule.action_params.rate_bps, Some(5_000_000));
+            assert_eq!(rule.match_criteria.dst_ports, [53]);
+            assert!(rule.match_criteria.src_ports.is_empty());
+            assert!(rule.match_criteria.fragment.is_none());
+            assert!(
+                rule.reason
+                    .contains(&format!("udp_amplification fallback: {why}")),
+                "{name}: {}",
+                rule.reason
+            );
+        }
+        // Control: a library port is matched, not fallen back from.
+        let f = fixture(OperationMode::Enforced, |settings, _| {
+            settings.amplification.reflector_ports = Some(vec![ReflectorPort {
+                port: 123,
+                name: "ntp".into(),
+            }]);
+        });
+        ban(&f, event("library", "udp_amplification", Some(&[123])))
+            .await
+            .unwrap();
+        assert!(
+            rows(&f)
+                .await
+                .iter()
+                .all(|m| m.vector == AttackVector::UdpAmplification)
+        );
+    }
+
+    #[tokio::test]
+    async fn detector_unban_withdraws_every_rule_the_ban_created() {
+        let f = fixture(OperationMode::Enforced, |_, _| {});
+        let banned = ban(&f, event("u1", "udp_amplification", Some(&[123])))
+            .await
+            .unwrap();
+        let mut unban = event("u1", "udp_amplification", None);
+        unban.action = "unban".into();
+        let (_, axum::Json(response)) = handle_unban(f.state.clone(), unban)
+            .await
+            .map_err(|AppError(error)| error)
+            .unwrap();
+        assert_eq!(response.status, "withdrawn");
+        assert_eq!(response.mitigation_ids, banned.mitigation_ids);
+        for id in banned.mitigation_ids {
+            assert_eq!(get(&f, id).await.status, MitigationStatus::Withdrawn);
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_top_src_ports_is_refused_before_any_state() {
+        let f = fixture(OperationMode::Enforced, |_, _| {});
+        let too_many: Vec<u16> = (1..=65).collect();
+        let error = ban(&f, event("big", "udp_amplification", Some(&too_many)))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PrefixdError::InvalidRequest(_)), "{error}");
+        assert_eq!(error.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            f.repo
+                .find_ban_event_by_external_id("amp-test", "big")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Control: 64 entries are accepted.
+        ban(&f, event("max", "udp_amplification", Some(&too_many[..64])))
+            .await
+            .unwrap();
     }
 }

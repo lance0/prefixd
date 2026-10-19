@@ -97,6 +97,16 @@ pub async fn get_config_settings(
             })).collect::<Vec<_>>(),
         },
         "guardrails": s.guardrails,
+        "amplification": {
+            "min_src_port_share": s.amplification.min_src_port_share,
+            "reflector_ports": s.amplification.reflector_ports.clone().unwrap_or_else(|| {
+                crate::config::DEFAULT_REFLECTOR_PORTS
+                    .iter()
+                    .map(|&(port, name)| crate::config::ReflectorPort { port, name: name.into() })
+                    .collect()
+            }),
+            "reflector_ports_default": s.amplification.reflector_ports.is_none(),
+        },
         "quotas": s.quotas,
         "timers": s.timers,
         "storage": { "connection_string": "[redacted]" },
@@ -245,8 +255,12 @@ pub async fn update_playbooks(
         playbooks: body.playbooks,
     };
 
-    // Validate
-    let errors = new_playbooks.validate();
+    // Validate, including the opt-ins and speaker capability rules need (ADR 028)
+    let mut errors = new_playbooks.validate();
+    errors.extend(
+        new_playbooks
+            .check_match_settings(&state.settings.guardrails, state.announcer.match_support()),
+    );
     if !errors.is_empty() {
         return Ok((
             StatusCode::BAD_REQUEST,

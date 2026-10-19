@@ -141,7 +141,7 @@ pub(super) mod canonical_src_ports {
 }
 
 /// Fragment match (RFC 8955 type 12). Only non-first fragments (IsF) are matched.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FragmentMatch {
     NonFirst,
@@ -157,7 +157,7 @@ impl FragmentMatch {
 }
 
 /// One inclusive total-IP-length range (RFC 8955 type 10); both bounds are required.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PacketLengthRange {
     pub min: u16,

@@ -1,14 +1,30 @@
 use std::net::IpAddr;
 
-use crate::config::{AllowedPorts, IpContext, Playbooks};
+use crate::config::{
+    AllowedPorts, AmplificationConfig, IpContext, Playbook, PlaybookStep, Playbooks, SrcPortsSpec,
+};
 
-use crate::domain::{ActionParams, AttackEvent, AttackVector, MatchCriteria, MitigationIntent};
+use crate::domain::{
+    ActionParams, AttackEvent, AttackVector, FlowSpecAction, MatchCriteria, MitigationIntent,
+    canonical_ports,
+};
 use crate::error::{GuardrailError, PrefixdError, Result};
+
+/// Policy output for one event: one intent per rule, admitted per rule (ADR 028).
+#[derive(Debug)]
+pub struct PolicyDecision {
+    /// The vector the mitigations record: `udp_flood` when an amplification
+    /// event fell back.
+    pub vector: AttackVector,
+    pub intents: Vec<MitigationIntent>,
+}
 
 pub struct PolicyEngine {
     playbooks: Playbooks,
     pop: String,
     default_ttl: u32,
+    reflector_ports: Vec<u16>,
+    max_ports: usize,
 }
 
 impl PolicyEngine {
@@ -17,20 +33,63 @@ impl PolicyEngine {
             playbooks,
             pop,
             default_ttl,
+            reflector_ports: AmplificationConfig::default().library_ports(),
+            max_ports: 8,
         }
+    }
+
+    /// The reflector-port library `from_event` rules intersect with, and the
+    /// per-rule source-port cap (`guardrails.max_ports`) they are split by.
+    pub fn with_amplification(mut self, reflector_ports: Vec<u16>, max_ports: usize) -> Self {
+        self.reflector_ports = reflector_ports;
+        self.max_ports = max_ports;
+        self
     }
 
     pub fn evaluate(
         &self,
         event: &AttackEvent,
         context: Option<&IpContext>,
-    ) -> Result<MitigationIntent> {
+    ) -> Result<PolicyDecision> {
         let victim_ip: IpAddr = event
             .victim_ip
             .parse()
             .map_err(|_| PrefixdError::InvalidIpAddress(event.victim_ip.clone()))?;
-        let prefix_len = if victim_ip.is_ipv4() { 32 } else { 128 };
         let vector = event.attack_vector();
+        let why = match self.evaluate_as(event, context, victim_ip, vector) {
+            Ok(Some(intents)) => return Ok(PolicyDecision { vector, intents }),
+            Ok(None) => "no reflector source ports",
+            Err(PrefixdError::NoPlaybookFound(_)) if vector == AttackVector::UdpAmplification => {
+                "no udp_amplification playbook"
+            }
+            Err(error) => return Err(error),
+        };
+        // An amplification event is never less mitigated than a UDP flood (ADR 028).
+        let fallback = AttackVector::UdpFlood;
+        let mut intents = self
+            .evaluate_as(event, context, victim_ip, fallback)?
+            .ok_or_else(|| PrefixdError::NoPlaybookFound(fallback.to_string()))?;
+        for intent in &mut intents {
+            intent
+                .reason
+                .push_str(&format!(" [udp_amplification fallback: {why}]"));
+        }
+        Ok(PolicyDecision {
+            vector: fallback,
+            intents,
+        })
+    }
+
+    /// `None` when a `from_event` rule has no library ports to match.
+    fn evaluate_as(
+        &self,
+        event: &AttackEvent,
+        context: Option<&IpContext>,
+        victim_ip: IpAddr,
+        vector: AttackVector,
+    ) -> Result<Option<Vec<MitigationIntent>>> {
+        let prefix_len = if victim_ip.is_ipv4() { 32 } else { 128 };
+        let dst_prefix = format!("{victim_ip}/{prefix_len}");
         let ports = event.top_dst_ports();
         let has_ports = !ports.is_empty();
 
@@ -45,6 +104,16 @@ impl PolicyEngine {
             .playbooks
             .get_initial_step(playbook)
             .ok_or_else(|| PrefixdError::NoPlaybookFound(format!("{} (no steps)", vector)))?;
+        let service = context
+            .and_then(|c| c.service_name.as_deref())
+            .unwrap_or("unknown service");
+
+        if !step.rules.is_empty() {
+            return self.rule_intents(event, context, dst_prefix, vector, playbook, step, service);
+        }
+        let action = step.flowspec_action().ok_or_else(|| {
+            PrefixdError::NoPlaybookFound(format!("{vector} (step has no action)"))
+        })?;
 
         // Compute allowed ports intersection
         let dst_ports = self.compute_port_intersection(&ports, context, vector);
@@ -57,46 +126,112 @@ impl PolicyEngine {
 
         // Build match criteria
         let match_criteria = MatchCriteria {
-            dst_prefix: format!("{victim_ip}/{prefix_len}"),
+            dst_prefix,
             protocol: vector.to_protocol_for(victim_ip),
             dst_ports,
             ..Default::default()
         };
+        let reason = format!("{} to {} (playbook: {})", vector, service, playbook.name);
+        Ok(Some(vec![self.intent(
+            event,
+            context,
+            match_criteria,
+            action,
+            step,
+            reason,
+        )?]))
+    }
 
-        // Build action
-        let action = step.flowspec_action();
+    /// One intent per rule of a `rules` step, in playbook order. A `from_event`
+    /// rule yields one intent per chunk of at most `max_ports` sorted library
+    /// ports, so a repeated port set maps to the same identities.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "private helper sharing evaluate_as's resolved inputs"
+    )]
+    fn rule_intents(
+        &self,
+        event: &AttackEvent,
+        context: Option<&IpContext>,
+        dst_prefix: String,
+        vector: AttackVector,
+        playbook: &Playbook,
+        step: &PlaybookStep,
+        service: &str,
+    ) -> Result<Option<Vec<MitigationIntent>>> {
+        let event_ports = self.library_ports(event);
+        let mut intents = Vec::new();
+        for (k, rule) in step.rules.iter().enumerate() {
+            let port_sets = match &rule.match_criteria.src_ports {
+                None => vec![Vec::new()],
+                Some(SrcPortsSpec::Static(ports)) => vec![canonical_ports(ports)],
+                Some(SrcPortsSpec::FromEvent(_)) if event_ports.is_empty() => return Ok(None),
+                Some(SrcPortsSpec::FromEvent(_)) => event_ports
+                    .chunks(self.max_ports.max(1))
+                    .map(<[u16]>::to_vec)
+                    .collect(),
+            };
+            for ports in port_sets {
+                let reason = format!(
+                    "{} to {} (playbook: {}, rule {})",
+                    vector, service, playbook.name, k
+                );
+                intents.push(self.intent(
+                    event,
+                    context,
+                    rule.match_for(dst_prefix.clone(), ports),
+                    rule.flowspec_action(),
+                    step,
+                    reason,
+                )?);
+            }
+        }
+        Ok(Some(intents))
+    }
+
+    /// The event's source ports in the reflector-port library, sorted and
+    /// deduplicated. Ports outside it are dropped: the library is the operator's
+    /// statement of which source ports are safe to match.
+    fn library_ports(&self, event: &AttackEvent) -> Vec<u16> {
+        let (kept, dropped): (Vec<u16>, Vec<u16>) = event
+            .top_src_ports()
+            .into_iter()
+            .partition(|port| self.reflector_ports.contains(port));
+        if !dropped.is_empty() {
+            tracing::info!(event_id = %event.event_id, dropped = ?canonical_ports(&dropped),
+                "source ports outside the reflector-port library dropped");
+        }
+        canonical_ports(&kept)
+    }
+
+    fn intent(
+        &self,
+        event: &AttackEvent,
+        context: Option<&IpContext>,
+        match_criteria: MatchCriteria,
+        action: FlowSpecAction,
+        step: &PlaybookStep,
+        reason: String,
+    ) -> Result<MitigationIntent> {
         action.traffic_rate_bytes_per_second().map_err(|error| {
             PrefixdError::GuardrailViolation(GuardrailError::InvalidAction(error))
         })?;
-        let action_type = action.action_type;
-        let action_params = ActionParams {
-            rate_bps: action.rate_bps,
-            ..Default::default()
-        };
-
         let ttl = if step.ttl_seconds > 0 {
             step.ttl_seconds
         } else {
             self.default_ttl
         };
-
-        let reason = format!(
-            "{} to {} (playbook: {})",
-            vector,
-            context
-                .and_then(|c| c.service_name.as_deref())
-                .unwrap_or("unknown service"),
-            playbook.name
-        );
-
         Ok(MitigationIntent {
             event_id: event.event_id,
             customer_id: context.map(|c| c.customer_id.clone()),
             service_id: context.and_then(|c| c.service_id.clone()),
             pop: self.pop.clone(),
             match_criteria,
-            action_type,
-            action_params,
+            action_type: action.action_type,
+            action_params: ActionParams {
+                rate_bps: action.rate_bps,
+                ..Default::default()
+            },
             ttl_seconds: ttl,
             reason,
         })
@@ -112,7 +247,7 @@ impl PolicyEngine {
         let allowed = context.map(|c| &c.allowed_ports).unwrap_or(&default_ports);
 
         let allowed_for_proto = match vector {
-            AttackVector::UdpFlood => &allowed.udp,
+            AttackVector::UdpFlood | AttackVector::UdpAmplification => &allowed.udp,
             AttackVector::SynFlood | AttackVector::AckFlood => &allowed.tcp,
             _ => return event_ports.to_vec(),
         };
@@ -156,6 +291,7 @@ mod tests {
             bps: Some(100_000_000),
             pps: Some(50_000),
             top_dst_ports_json: serde_json::to_string(ports).unwrap(),
+            top_src_ports_json: None,
             confidence: Some(0.9),
             action: "ban".to_string(),
             raw_details: None,
@@ -188,11 +324,12 @@ mod tests {
                     },
                     correlation: None,
                     steps: vec![PlaybookStep {
-                        action: PlaybookAction::Police,
+                        action: Some(PlaybookAction::Police),
                         rate_bps: Some(5_000_000),
                         ttl_seconds: 120,
                         require_confidence_at_least: None,
                         require_persistence_seconds: None,
+                        rules: Vec::new(),
                     }],
                 },
                 Playbook {
@@ -203,11 +340,12 @@ mod tests {
                     },
                     correlation: None,
                     steps: vec![PlaybookStep {
-                        action: PlaybookAction::Discard,
+                        action: Some(PlaybookAction::Discard),
                         rate_bps: None,
                         ttl_seconds: 60,
                         require_confidence_at_least: None,
                         require_persistence_seconds: None,
+                        rules: Vec::new(),
                     }],
                 },
             ],
@@ -235,7 +373,7 @@ mod tests {
                 ),
             ] {
                 let event = make_event(ip, vector.as_str(), &[]);
-                let intent = engine.evaluate(&event, None).unwrap();
+                let intent = engine.evaluate(&event, None).unwrap().intents.remove(0);
                 assert_eq!(intent.match_criteria.dst_prefix, prefix);
                 assert_eq!(intent.match_criteria.protocol, Some(protocol));
             }
@@ -268,7 +406,7 @@ mod tests {
         let engine = PolicyEngine::new(test_playbooks(), "iad1".to_string(), 120);
         let event = make_event("203.0.113.10", "udp_flood", &[53]);
 
-        let intent = engine.evaluate(&event, None).unwrap();
+        let intent = engine.evaluate(&event, None).unwrap().intents.remove(0);
 
         assert_eq!(intent.match_criteria.dst_prefix, "203.0.113.10/32");
         assert_eq!(intent.action_type, ActionType::Police);
@@ -282,7 +420,7 @@ mod tests {
         let engine = PolicyEngine::new(test_playbooks(), "lax1".to_string(), 120);
         let event = make_event("10.0.0.1", "syn_flood", &[443]);
 
-        let intent = engine.evaluate(&event, None).unwrap();
+        let intent = engine.evaluate(&event, None).unwrap().intents.remove(0);
 
         assert_eq!(intent.match_criteria.dst_prefix, "10.0.0.1/32");
         assert_eq!(intent.action_type, ActionType::Discard);
@@ -297,7 +435,11 @@ mod tests {
         let event = make_event("192.168.1.1", "udp_flood", &[53, 80, 443]);
         let context = make_context("cust_123", vec![53, 123], vec![]);
 
-        let intent = engine.evaluate(&event, Some(&context)).unwrap();
+        let intent = engine
+            .evaluate(&event, Some(&context))
+            .unwrap()
+            .intents
+            .remove(0);
 
         assert_eq!(intent.customer_id, Some("cust_123".to_string()));
         assert_eq!(intent.service_id, Some("svc_1".to_string()));
@@ -416,7 +558,9 @@ mod tests {
                     let event = make_event(ip, vector.as_str(), &event_ports);
                     let result = engine.evaluate(&event, Some(&context));
                     match expected {
-                        Some(ports) => assert_eq!(result.unwrap().match_criteria.dst_ports, ports),
+                        Some(ports) => {
+                            assert_eq!(result.unwrap().intents[0].match_criteria.dst_ports, ports)
+                        }
                         None => assert!(matches!(
                             result,
                             Err(PrefixdError::GuardrailViolation(
@@ -428,9 +572,7 @@ mod tests {
                 for ports in [vec![53, 123], vec![]] {
                     let event = make_event(ip, vector.as_str(), &ports);
                     assert_eq!(
-                        engine
-                            .evaluate(&event, None)
-                            .unwrap()
+                        engine.evaluate(&event, None).unwrap().intents[0]
                             .match_criteria
                             .dst_ports,
                         ports
@@ -449,9 +591,7 @@ mod tests {
             let context = make_context("customer", vec![53], vec![53]);
             let event = make_event("203.0.113.10", vector.as_str(), &[80, 443]);
             assert_eq!(
-                engine
-                    .evaluate(&event, Some(&context))
-                    .unwrap()
+                engine.evaluate(&event, Some(&context)).unwrap().intents[0]
                     .match_criteria
                     .dst_ports,
                 [80, 443]
@@ -469,12 +609,12 @@ mod tests {
 
         // UDP flood should have protocol 17
         let udp_event = make_event("10.0.0.1", "udp_flood", &[53]);
-        let udp_intent = engine.evaluate(&udp_event, None).unwrap();
+        let udp_intent = engine.evaluate(&udp_event, None).unwrap().intents.remove(0);
         assert_eq!(udp_intent.match_criteria.protocol, Some(17));
 
         // SYN flood should have protocol 6
         let syn_event = make_event("10.0.0.1", "syn_flood", &[443]);
-        let syn_intent = engine.evaluate(&syn_event, None).unwrap();
+        let syn_intent = engine.evaluate(&syn_event, None).unwrap().intents.remove(0);
         assert_eq!(syn_intent.match_criteria.protocol, Some(6));
     }
 
@@ -493,11 +633,12 @@ mod tests {
                 },
                 correlation: None,
                 steps: vec![PlaybookStep {
-                    action: PlaybookAction::Discard,
+                    action: Some(PlaybookAction::Discard),
                     rate_bps: None,
                     ttl_seconds: 0, // Zero - should use default
                     require_confidence_at_least: None,
                     require_persistence_seconds: None,
+                    rules: Vec::new(),
                 }],
             }],
         };
@@ -505,7 +646,7 @@ mod tests {
         let engine = PolicyEngine::new(playbooks, "iad1".to_string(), 300);
         let event = make_event("10.0.0.1", "udp_flood", &[53]);
 
-        let intent = engine.evaluate(&event, None).unwrap();
+        let intent = engine.evaluate(&event, None).unwrap().intents.remove(0);
         assert_eq!(intent.ttl_seconds, 300); // Uses default
     }
 
@@ -514,7 +655,41 @@ mod tests {
         let engine = PolicyEngine::new(test_playbooks(), "iad1".to_string(), 300);
         let event = make_event("10.0.0.1", "udp_flood", &[53]);
 
-        let intent = engine.evaluate(&event, None).unwrap();
+        let intent = engine.evaluate(&event, None).unwrap().intents.remove(0);
         assert_eq!(intent.ttl_seconds, 120); // Uses step TTL, not default 300
+    }
+
+    #[test]
+    fn rules_steps_chunk_by_max_ports_and_keep_static_lists_whole() {
+        let playbooks: Playbooks = crate::config::parse_yaml(
+            "playbooks:\n  - name: amp\n    match: {vector: udp_amplification}\n    steps:\n      - ttl_seconds: 0\n        rules:\n          - match: {src_ports: from_event}\n            action: discard\n          - match: {src_ports: [11211, 11211], packet_length: {min: 1000, max: 65535}}\n            action: discard\n",
+        )
+        .unwrap();
+        let engine = PolicyEngine::new(playbooks, "iad1".into(), 90)
+            .with_amplification(vec![17, 19, 53, 123, 389], 2);
+        let mut event = make_event("2001:db8::10", "udp_amplification", &[80]);
+        event.top_src_ports_json = Some("[389, 9, 123, 17, 53, 19, 53]".into());
+        let decision = engine.evaluate(&event, None).unwrap();
+        assert_eq!(decision.vector, AttackVector::UdpAmplification);
+        let ports: Vec<_> = decision
+            .intents
+            .iter()
+            .map(|i| i.match_criteria.src_ports.clone())
+            .collect();
+        assert_eq!(ports, [vec![17, 19], vec![53, 123], vec![389], vec![11211]]);
+        for (k, intent) in decision.intents.iter().enumerate() {
+            // Reflection rules never match the spoofed destination ports.
+            assert!(intent.match_criteria.dst_ports.is_empty());
+            assert_eq!(intent.match_criteria.dst_prefix, "2001:db8::10/128");
+            assert_eq!(intent.match_criteria.protocol, Some(17));
+            assert_eq!(intent.ttl_seconds, 90);
+            let rule = if k < 3 { 0 } else { 1 };
+            assert!(
+                intent
+                    .reason
+                    .ends_with(&format!("(playbook: amp, rule {rule})"))
+            );
+        }
+        assert!(decision.intents[3].match_criteria.packet_length.is_some());
     }
 }

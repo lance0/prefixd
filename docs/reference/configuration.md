@@ -224,8 +224,11 @@ anything is saved, in `dry-run` and `enforced` modes alike. Refusals return
 `422` and increment `prefixd_guardrail_rejections_total` with
 `reason="FragmentMatchNotAllowed"`, `"PacketLengthMatchNotAllowed"`,
 `"InvalidMatch"` or `"TooManySourcePorts"`. Rules without these components
-are checked as before. No API, playbook or detector path creates these matches
-yet.
+are checked as before. Only `udp_amplification` playbook
+[rules](#multi-rule-steps-udp-amplification) create these matches; the manual
+API does not yet. A playbook rule that needs a flag left `false`, a static
+source-port list over `max_ports`, or a component the selected speaker cannot
+encode fails startup, reload and playbook edits, in both modes.
 
 `allow_src_prefix_match` and `allow_tcp_flags_match` are reserved: they still
 parse so existing configurations load, but prefixd never matches source
@@ -674,6 +677,47 @@ locked admission transaction as the [quotas](#quotas), so concurrent
 admissions cannot exceed them; the general quotas and `max_new_per_minute`
 still apply. A quota rejection names `blackhole_pop` or `blackhole_global`.
 
+### Amplification
+
+UDP reflection handling for the `udp_amplification` vector
+([ADR 028](../adr/028-amplification-matches.md#5-vectors-playbooks-and-the-port-library)).
+The section is optional; unknown keys are refused.
+
+```yaml
+amplification:
+  # Minimum share of sampled UDP packets for a source port to count, where a
+  # detector adapter has samples. Above 0, at most 1.
+  min_src_port_share: 0.2
+  # Optional. When absent, the built-in default below is used.
+  # An explicit empty list disables event-derived source ports.
+  reflector_ports:
+    - { port: 123, name: ntp }
+    - { port: 11211, name: memcached }
+```
+
+`reflector_ports` is the operator's statement of which UDP source ports are
+safe to match. A `src_ports: from_event` playbook rule matches only event ports
+in this library; other reported ports are dropped and logged. A port may appear
+once, and port 0 is refused. When no reported port is in the library, the event
+is handled exactly as `udp_flood`. `GET /v1/config/settings` reports the
+effective library and whether it is the built-in default.
+
+The built-in default, cited in ADR 028, is 17 (QOTD), 19 (CharGen), 53 (DNS),
+111 (portmap), 123 (NTP), 137 (NetBIOS name service), 161 (SNMP), 389 (CLDAP),
+427 (SLP), 520 (RIPv1), 1434 (MS-SQL resolution), 1900 (SSDP), 3283 (Apple
+Remote Desktop), 3702 (WS-Discovery), 5353 (mDNS), 5683 (CoAP), 10001 (Ubiquiti
+discovery), 11211 (memcached), 33848 (Jenkins discovery) and 37810 (DVR
+DHCPDiscover). Changes to it are release notes.
+
+> **DNS collateral.** Port 53 is in the default. While a source-port rule
+> containing 53 lives, the victim also loses DNS replies from external
+> resolvers it queries. If that is unacceptable, police the source-port rule
+> instead of discarding it, remove 53 from `reflector_ports`, or safelist the
+> victim.
+
+`min_src_port_share` is read by detector adapters that sample packets; no
+adapter uses it yet.
+
 ### Removed keys
 
 These v0.19.1 keys have no effect. This release still loads them, ignores them
@@ -862,6 +906,56 @@ steps:
     require_confidence_at_least: 0.7
 ```
 
+### Multi-rule steps (UDP amplification)
+
+In a `udp_amplification` playbook, a step may carry `rules` instead of
+`action`. Each rule has its own `match` and `action` (and `rate_bps` for
+police), and the step's `ttl_seconds` applies to each. Every rule becomes its
+own mitigation for UDP to the victim host, linked to the others by
+`triggering_event_id`, and is admitted on its own
+([ADR 028](../adr/028-amplification-matches.md#4-one-response-several-rules)).
+
+```yaml
+playbooks:
+  - name: udp_amplification
+    match:
+      vector: udp_amplification
+    steps:
+      - ttl_seconds: 300
+        rules:
+          - match:
+              src_ports: from_event       # event ports intersected with the library
+            # If 53 is reported, the victim's DNS replies from external
+            # resolvers are dropped too until the TTL ends.
+            action: discard
+          - match:
+              fragment: non_first         # needs guardrails.allow_fragment_match
+            action: police
+            rate_bps: 20000000
+```
+
+| Rule `match` key | Value | Notes |
+|------------------|-------|-------|
+| `src_ports` | `from_event` or a list such as `[11211]` | `from_event` uses the event's `top_src_ports` that are in [`amplification.reflector_ports`](#amplification), sorted and split into rules of at most `guardrails.max_ports` ports. A static list need not be in the library, must not be empty, and must fit `max_ports` |
+| `fragment` | `non_first` | Non-first fragments, which carry no ports. Needs `guardrails.allow_fragment_match: true`. Cannot share a rule with `src_ports` |
+| `packet_length` | `{min, max}` | Inclusive total IP length. Needs `src_ports` and `guardrails.allow_packet_length_match: true`. `min` must exceed 48, the IPv6 plus UDP headers, because a playbook serves both families |
+
+A rule needs at least one key, and unknown keys are refused. `rules` are valid
+only under `vector: udp_amplification`, a step has `action` or `rules` but not
+both, and `rate_bps` belongs on each rule. These checks, the guardrail opt-ins
+and the selected speaker's capability run on startup, reload and playbook
+edits, in dry-run and enforced modes alike. Releases before multi-rule steps
+refuse such a playbook, both for the vector and for the step without
+`action`.
+
+If a `from_event` rule has no library ports, or no `udp_amplification`
+playbook exists, the whole event is handled exactly as `udp_flood`, including
+dropping the other rules of the step. The shipped `configs/playbooks.yaml`
+carries this playbook, and a static-list `memcached_reflection` variant, as
+commented examples: the source-port rule discards and the fragment rule
+polices. The dashboard playbook editor cannot edit multi-rule steps yet; edit
+the file and reload.
+
 ### Default Playbook
 
 Fallback when no playbook matches:
@@ -908,14 +1002,16 @@ playbooks:
       - action: discard
         ttl_seconds: 300
 
-  # Amplification attacks: police only
-  - name: dns_amp
+  # UDP reflection: one rule for the reflector source ports
+  - name: udp_amplification
     match:
-      vector: udp_flood
+      vector: udp_amplification
     steps:
-      - action: police
-        rate_bps: 50000000
-        ttl_seconds: 120
+      - ttl_seconds: 300
+        rules:
+          - match:
+              src_ports: from_event
+            action: discard
 
   # Conservative fallback
   - name: unknown_conservative

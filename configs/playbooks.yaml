@@ -38,3 +38,44 @@ playbooks:
       - action: police
         rate_bps: 1000000
         ttl_seconds: 60
+
+  # UDP reflection (ADR 028). Uncomment to answer udp_amplification events
+  # with narrowed rules; without this playbook they are handled exactly as
+  # udp_flood. Each rule becomes its own mitigation, admitted on its own, and
+  # the step's TTL applies to each. The fragment rule needs
+  # guardrails.allow_fragment_match: true; it polices rather than discards
+  # because large DNS responses and UDP VPNs fragment too. Releases without
+  # multi-rule steps refuse this playbook, and the dashboard playbook editor
+  # cannot edit it yet: edit this file instead.
+  # - name: udp_amplification
+  #   match:
+  #     vector: udp_amplification
+  #   steps:
+  #     - ttl_seconds: 300
+  #       rules:
+  #         - match:
+  #             src_ports: from_event   # event ports intersected with the library
+  #           # If 53 is reported, the victim's DNS replies from external
+  #           # resolvers are dropped too until the TTL ends. Use police here,
+  #           # or remove 53 from amplification.reflector_ports, if that is
+  #           # unacceptable.
+  #           action: discard
+  #         - match:
+  #             fragment: non_first
+  #           action: police
+  #           rate_bps: 20000000
+
+  # One protocol with a static source-port list, which need not be in the
+  # library. The first playbook for a vector wins, so use this instead of the
+  # playbook above, not with it. packet_length needs
+  # guardrails.allow_packet_length_match: true.
+  # - name: memcached_reflection
+  #   match:
+  #     vector: udp_amplification
+  #   steps:
+  #     - ttl_seconds: 600
+  #       rules:
+  #         - match:
+  #             src_ports: [11211]
+  #             packet_length: { min: 1000, max: 65535 }
+  #           action: discard

@@ -521,11 +521,11 @@ impl RepositoryTrait for MockRepository {
             .cloned())
     }
 
-    async fn find_active_by_triggering_event(&self, event_id: Uuid) -> Result<Option<Mitigation>> {
+    async fn list_active_by_triggering_event(&self, event_id: Uuid) -> Result<Vec<Mitigation>> {
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
             .iter()
-            .find(|m| {
+            .filter(|m| {
                 m.triggering_event_id == event_id
                     && matches!(
                         m.status,
@@ -534,7 +534,8 @@ impl RepositoryTrait for MockRepository {
                             | MitigationStatus::Escalated
                     )
             })
-            .cloned())
+            .cloned()
+            .collect())
     }
 
     async fn list_mitigations(

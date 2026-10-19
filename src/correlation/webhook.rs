@@ -531,6 +531,7 @@ fn map_one(
         bps,
         pps,
         top_dst_ports,
+        top_src_ports: None,
         confidence,
         action,
         raw_details: Some(node.clone()),

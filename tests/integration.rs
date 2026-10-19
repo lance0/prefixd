@@ -1104,6 +1104,7 @@ fn test_settings() -> Settings {
         alerting: Default::default(),
         correlation: Default::default(),
         blackhole: Default::default(),
+        amplification: Default::default(),
     }
 }
 
@@ -1139,11 +1140,12 @@ fn test_playbooks() -> Playbooks {
             },
             correlation: None,
             steps: vec![PlaybookStep {
-                action: PlaybookAction::Police,
+                action: Some(PlaybookAction::Police),
                 rate_bps: Some(5_000_000),
                 ttl_seconds: 120,
                 require_confidence_at_least: None,
                 require_persistence_seconds: None,
+                rules: Vec::new(),
             }],
         }],
     }
@@ -8167,11 +8169,12 @@ async fn test_late_corroborator_finalizes_with_playbook_override() {
                 ..Default::default()
             }),
             steps: vec![PlaybookStep {
-                action: PlaybookAction::Police,
+                action: Some(PlaybookAction::Police),
                 rate_bps: Some(5_000_000),
                 ttl_seconds: 120,
                 require_confidence_at_least: None,
                 require_persistence_seconds: None,
+                rules: Vec::new(),
             }],
         }],
     };
@@ -8430,6 +8433,7 @@ async fn test_decay_refresh_lowers_derived_confidence() {
         bps: None,
         pps: None,
         top_dst_ports_json: "[]".to_string(),
+        top_src_ports_json: None,
         confidence: Some(0.9),
         action: "ban".to_string(),
         raw_details: None,
@@ -8451,6 +8455,7 @@ async fn test_decay_refresh_lowers_derived_confidence() {
         bps: None,
         pps: None,
         top_dst_ports_json: "[]".to_string(),
+        top_src_ports_json: None,
         confidence: Some(0.1),
         action: "ban".to_string(),
         raw_details: None,
@@ -8550,6 +8555,7 @@ async fn test_decay_one_shot_corroboration_no_flap_back() {
         bps: None,
         pps: None,
         top_dst_ports_json: "[]".to_string(),
+        top_src_ports_json: None,
         confidence: Some(0.1),
         action: "ban".to_string(),
         raw_details: None,
@@ -8571,6 +8577,7 @@ async fn test_decay_one_shot_corroboration_no_flap_back() {
         bps: None,
         pps: None,
         top_dst_ports_json: "[]".to_string(),
+        top_src_ports_json: None,
         confidence: Some(0.1),
         action: "ban".to_string(),
         raw_details: None,
@@ -8658,6 +8665,7 @@ async fn test_decay_disabled_does_not_touch_groups() {
         bps: None,
         pps: None,
         top_dst_ports_json: "[]".to_string(),
+        top_src_ports_json: None,
         confidence: Some(0.85),
         action: "ban".to_string(),
         raw_details: None,
@@ -9786,7 +9794,7 @@ mod manual_protocol {
                 )
                 .unwrap();
                 let mut playbooks = state.playbooks.write().await;
-                playbooks.playbooks[0].steps[0].action = action;
+                playbooks.playbooks[0].steps[0].action = Some(action);
                 playbooks.playbooks[0].steps[0].rate_bps = rate;
                 drop(playbooks);
                 let request = serde_json::json!({
@@ -11815,6 +11823,7 @@ async fn test_public_list_cursor_mock_tuple_order_and_filters() {
                 bps: None,
                 pps: None,
                 top_dst_ports: None,
+                top_src_ports: None,
                 confidence: None,
                 action: "ban".into(),
                 raw_details: None,
@@ -12012,6 +12021,7 @@ mod list_filter_validation {
                 bps: None,
                 pps: None,
                 top_dst_ports: None,
+                top_src_ports: None,
                 confidence: None,
                 action: "ban".into(),
                 raw_details: None,
@@ -13185,6 +13195,7 @@ mod query_router_validator_boundaries {
                 bps: None,
                 pps: None,
                 top_dst_ports: None,
+                top_src_ports: None,
                 confidence: None,
                 action: "ban".into(),
                 raw_details: None,

@@ -106,11 +106,12 @@ Content-Type: application/json
 | `timestamp` | datetime | yes | Event timestamp (ISO 8601) |
 | `source` | string | yes | Detector identifier (e.g. "fastnetmon", "dashboard") |
 | `victim_ip` | string | yes | IPv4 or IPv6 address under attack |
-| `vector` | string | yes | Attack type: `udp_flood`, `syn_flood`, `ack_flood`, `icmp_flood`, `unknown` |
+| `vector` | string | yes | Attack type: `udp_flood`, `syn_flood`, `ack_flood`, `icmp_flood`, `udp_amplification`, `unknown` |
 | `bps` | integer | no | Bits per second |
 | `pps` | integer | no | Packets per second |
 | `confidence` | float | no | Finite 0.0–1.0 inclusive, or null; invalid values return 400 |
 | `top_dst_ports` | array | no | Destination ports involved (max 8) |
+| `top_src_ports` | array | no | UDP source ports, ranked by the detector; at most 64, otherwise 400. Used by `udp_amplification` playbooks |
 | `action` | string | no | `"ban"` (default) or `"unban"` |
 | `event_id` | string | no | External event ID (for dedup / unban correlation) |
 | `raw_details` | object | no | Raw detector payload for forensics |
@@ -132,9 +133,73 @@ prefix, port, TTL, quota and safelist checks still apply.
   "event_id": "550e8400-e29b-41d4-a716-446655440000",
   "external_event_id": null,
   "mitigation_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d",
+  "mitigation_ids": ["7f72a903-63d1-4a4a-a5db-0517e0a7df1d"],
+  "rules": [
+    { "outcome": "created", "mitigation_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d" }
+  ],
   "status": "accepted"
 }
 ```
+
+`mitigation_ids` lists every mitigation the request created, extended or
+withdrew, in playbook rule order; it is `[]` when there are none.
+`mitigation_id` is its first entry, kept for existing callers. `rules` reports
+each rule a ban evaluated, in playbook order, with `outcome` `created`,
+`extended` or `rejected` (with a `reason`); it is omitted when no rule was
+evaluated, for example on the unban path or with no playbook.
+
+#### UDP amplification
+
+A `udp_amplification` event carries the reflected service in `top_src_ports`:
+
+```json
+{
+  "timestamp": "2026-10-19T10:30:00Z",
+  "source": "fastnetmon",
+  "victim_ip": "203.0.113.10",
+  "vector": "udp_amplification",
+  "top_src_ports": [123, 389, 4444],
+  "action": "ban"
+}
+```
+
+A playbook step with `rules` emits one mitigation per rule
+([ADR 028](../adr/028-amplification-matches.md#4-one-response-several-rules)),
+linked by `triggering_event_id`. A `src_ports: from_event` rule matches the
+event's ports that are in the reflector-port library
+([`amplification`](configuration.md#amplification)); others, such as 4444
+above, are dropped and logged. The ports are sorted and split into rules of at
+most `guardrails.max_ports` ports each, so a detector that reports the same set
+again extends the same rules. A changed set is a new rule; the old one runs out
+its TTL. Reflection rules match UDP to the victim host with no destination
+ports.
+
+Each rule is admitted on its own: guardrails, quotas and the new-mitigation
+rate apply per rule, so one rule can be created while another is rejected. The
+response is `202` when at least one rule was created or extended; otherwise it
+is the first rule's error, as for a single rule. `status` is `accepted` when any
+rule was created and `extended` otherwise, and `announcement_outcome` is
+`unconfirmed` when any created rule's announcement was.
+
+```json
+{
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "external_event_id": null,
+  "mitigation_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d",
+  "mitigation_ids": ["7f72a903-63d1-4a4a-a5db-0517e0a7df1d"],
+  "rules": [
+    { "outcome": "created", "mitigation_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d" },
+    { "outcome": "rejected", "reason": "quota exceeded: pop (200/200)" }
+  ],
+  "status": "accepted"
+}
+```
+
+When no reported port is in the library, or no `udp_amplification` playbook is
+configured, the event is evaluated exactly as `udp_flood`: the mitigation's
+vector is `udp_flood` and its reason ends with
+`[udp_amplification fallback: ...]`. An unban by `event_id` withdraws every
+live mitigation the original ban created.
 
 When a new mitigation is needed, prefixd commits its Active desired row before
 calling the speaker. A persistence failure sends no announcement. If intent
@@ -168,7 +233,7 @@ Common status values:
 |--------|--------|
 | 400 | Invalid request body |
 | 401 | Authentication required |
-| 409 | Duplicate event, or in enforced mode the rule is owned by a dry-run mitigation (the event is not stored) |
+| 409 | Duplicate event, or in enforced mode the rule is owned by a dry-run mitigation (when every rule is refused before admission, the event is not stored) |
 | 422 | Missing required field, including `protocol` for `"discard"` or `"police"`; guardrail rejection (safelist, quotas, new mitigation rate, prefix length, etc.) |
 | 429 | Rate limited |
 
@@ -235,6 +300,9 @@ Accepts up to 100 events in a single request. Each event is processed sequential
 | 400 | Empty batch or exceeds 100 event limit |
 | 401 | Authentication required |
 
+A result whose event created or extended several rules also lists them in
+`mitigation_ids` (omitted when empty).
+
 A result whose intent committed but whose announcement is unconfirmed includes
 `announcement_outcome: "unconfirmed"` and its mitigation ID. It counts as accepted,
 not rejected, and does not receive an `error` field. The same additive outcome is
@@ -290,6 +358,9 @@ cause `500`, including the lookahead row used for
   "has_more": false
 }
 ```
+
+`top_src_ports_json` appears only on events whose detector sent
+`top_src_ports`, in the detector's order (`"[]"` when it sent an empty list).
 
 ---
 

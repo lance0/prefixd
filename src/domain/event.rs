@@ -13,6 +13,8 @@ pub enum AttackVector {
     SynFlood,
     AckFlood,
     IcmpFlood,
+    /// UDP reflection: the event's source ports name the abused service (ADR 028).
+    UdpAmplification,
     Unknown,
 }
 
@@ -20,7 +22,7 @@ impl AttackVector {
     /// IPv4 protocol mapping retained for existing callers.
     pub fn to_protocol(&self) -> Option<u8> {
         match self {
-            Self::UdpFlood => Some(17),
+            Self::UdpFlood | Self::UdpAmplification => Some(17),
             Self::SynFlood | Self::AckFlood => Some(6),
             Self::IcmpFlood => Some(1),
             Self::Unknown => None,
@@ -41,6 +43,7 @@ impl AttackVector {
             Self::SynFlood => "syn_flood",
             Self::AckFlood => "ack_flood",
             Self::IcmpFlood => "icmp_flood",
+            Self::UdpAmplification => "udp_amplification",
             Self::Unknown => "unknown",
         }
     }
@@ -61,6 +64,7 @@ impl std::str::FromStr for AttackVector {
             "syn_flood" => Ok(Self::SynFlood),
             "ack_flood" => Ok(Self::AckFlood),
             "icmp_flood" => Ok(Self::IcmpFlood),
+            "udp_amplification" => Ok(Self::UdpAmplification),
             "unknown" => Ok(Self::Unknown),
             _ => Err(format!("unknown vector: {}", s)),
         }
@@ -86,6 +90,11 @@ pub struct AttackEventInput {
     pub pps: Option<i64>,
     #[serde(default)]
     pub top_dst_ports: Option<Vec<u16>>,
+    /// UDP source ports ranked by the detector, at most 64. Policy uses only
+    /// ports in the reflector-port library (ADR 028).
+    #[serde(default)]
+    #[schema(max_items = 64)]
+    pub top_src_ports: Option<Vec<u16>>,
     /// Optional finite detection confidence in the inclusive range 0..=1.
     #[serde(default)]
     #[schema(minimum = 0, maximum = 1)]
@@ -108,6 +117,19 @@ pub(crate) fn validate_confidence(confidence: Option<f32>) -> crate::error::Resu
     Ok(())
 }
 
+/// Most source ports one event may carry (ADR 028).
+pub const MAX_TOP_SRC_PORTS: usize = 64;
+
+/// Refuse an oversized source-port list before ingestion changes any state.
+pub(crate) fn validate_top_src_ports(ports: Option<&[u16]>) -> crate::error::Result<()> {
+    if ports.is_some_and(|ports| ports.len() > MAX_TOP_SRC_PORTS) {
+        return Err(crate::error::PrefixdError::InvalidRequest(format!(
+            "top_src_ports accepts at most {MAX_TOP_SRC_PORTS} entries"
+        )));
+    }
+    Ok(())
+}
+
 /// Internal event representation
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
 pub struct AttackEvent {
@@ -124,6 +146,9 @@ pub struct AttackEvent {
     pub bps: Option<i64>,
     pub pps: Option<i64>,
     pub top_dst_ports_json: String,
+    /// `None` when the detector sent no source ports; `"[]"` when it sent an empty list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_src_ports_json: Option<String>,
     pub confidence: Option<f32>,
     pub action: String,
     pub raw_details: Option<serde_json::Value>,
@@ -151,6 +176,10 @@ impl AttackEvent {
             bps: input.bps,
             pps: input.pps,
             top_dst_ports_json: serde_json::to_string(&ports).unwrap_or_default(),
+            top_src_ports_json: input
+                .top_src_ports
+                .as_ref()
+                .map(|ports| serde_json::to_string(ports).unwrap_or_default()),
             confidence: input.confidence,
             action: input.action,
             raw_details: input.raw_details,
@@ -159,6 +188,13 @@ impl AttackEvent {
 
     pub fn top_dst_ports(&self) -> Vec<u16> {
         serde_json::from_str(&self.top_dst_ports_json).unwrap_or_default()
+    }
+
+    pub fn top_src_ports(&self) -> Vec<u16> {
+        self.top_src_ports_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default()
     }
 
     pub fn attack_vector(&self) -> AttackVector {
@@ -198,6 +234,7 @@ mod tests {
             (AttackVector::SynFlood, Some(6), Some(6)),
             (AttackVector::AckFlood, Some(6), Some(6)),
             (AttackVector::IcmpFlood, Some(1), Some(58)),
+            (AttackVector::UdpAmplification, Some(17), Some(17)),
             (AttackVector::Unknown, None, None),
         ] {
             assert_eq!(vector.to_protocol(), v4_protocol);
@@ -219,5 +256,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn top_src_ports_keeps_absent_apart_from_empty_and_is_bounded() {
+        let input = |ports: serde_json::Value| -> AttackEventInput {
+            serde_json::from_value(serde_json::json!({
+                "timestamp": "2026-10-19T00:00:00Z", "source": "test",
+                "victim_ip": "203.0.113.10", "vector": "udp_amplification",
+                "top_src_ports": ports,
+            }))
+            .unwrap()
+        };
+        let absent = AttackEvent::from_input(input(serde_json::Value::Null));
+        assert_eq!(absent.top_src_ports_json, None);
+        assert!(absent.top_src_ports().is_empty());
+        let empty = AttackEvent::from_input(input(serde_json::json!([])));
+        assert_eq!(empty.top_src_ports_json.as_deref(), Some("[]"));
+        // Stored in the detector's rank order.
+        let ranked = AttackEvent::from_input(input(serde_json::json!([123, 53])));
+        assert_eq!(ranked.top_src_ports_json.as_deref(), Some("[123,53]"));
+        assert_eq!(ranked.top_src_ports(), [123, 53]);
+        assert_eq!(ranked.attack_vector(), AttackVector::UdpAmplification);
+        assert_eq!(ranked.protocol, Some(17));
+        // Events without the key serialize as before.
+        assert!(
+            serde_json::to_value(&absent)
+                .unwrap()
+                .get("top_src_ports_json")
+                .is_none()
+        );
+
+        let ports: Vec<u16> = (1..=65).collect();
+        assert!(validate_top_src_ports(None).is_ok());
+        assert!(validate_top_src_ports(Some(&ports[..64])).is_ok());
+        let error = validate_top_src_ports(Some(&ports)).unwrap_err();
+        assert_eq!(error.status_code(), axum::http::StatusCode::BAD_REQUEST);
     }
 }

@@ -82,6 +82,8 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
     components(
         schemas(
             EventResponse,
+            super::handlers::EventRuleOutcome,
+            super::handlers::RuleOutcome,
             AnnouncementOutcome,
             CreateMitigationRequest,
             MitigationResponse,

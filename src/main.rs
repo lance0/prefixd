@@ -171,6 +171,14 @@ async fn main() -> anyhow::Result<()> {
         repo.insert_safelist(prefix, "config", Some("from prefixd.yaml"))
             .await?;
     }
+    // Rules the guardrails or the selected speaker would refuse fail startup,
+    // in dry-run and enforced modes alike (ADR 028).
+    let playbook_errors = config
+        .playbooks
+        .check_match_settings(&config.settings.guardrails, announcer.match_support());
+    if !playbook_errors.is_empty() {
+        anyhow::bail!("playbooks.yaml: {}", playbook_errors.join("; "));
+    }
     prefixd::guardrails::check_blackhole_startup(
         &config.settings.blackhole,
         announcer.as_ref(),
