@@ -507,10 +507,12 @@ correlation:
         confidence: "$.score"
         source_id: "$.id"
         top_dst_ports: "$.ports"
+        top_src_ports: "$.reflector_ports" # UDP source ports, read on bans only
         action: "$.action"                # "ban" (default) or "unban"
       vector_map:                         # normalize detector strings
         UDP_FLOOD: udp_flood
         SYN_FLOOD: syn_flood
+        NTP_AMP: udp_amplification
       default_vector: unknown
       confidence_scale: 100               # divide extracted value by this
       source_id_prefix: "radware-"
@@ -546,8 +548,9 @@ correlation:
 | `fields.confidence` | no | JSONPath | Number; scaled via `confidence_scale`, clamped to `[0,1]` |
 | `fields.source_id` | no | JSONPath | String/number; becomes `event_id` with optional prefix |
 | `fields.top_dst_ports` | no | JSONPath | Array of port numbers |
+| `fields.top_src_ports` | no | JSONPath | Array of UDP source ports (0–65535, at most 64), ranked by the detector. Read on bans only; any other value is a per-event error. Policy keeps ports in the [reflector-port library](#amplification) |
 | `fields.action` | no | JSONPath | `ban` (default) or `unban` |
-| `vector_map` | no | map | Raw detector string → prefixd vector name |
+| `vector_map` | no | map | Raw detector string → prefixd vector name (`udp_flood`, `udp_amplification`, `syn_flood`, `ack_flood`, `icmp_flood`, `unknown`) |
 | `default_vector` | no | string | Fallback when vector missing or not in map |
 | `confidence_scale` | no | float | Divisor (e.g. `100` for 0–100 scales) |
 | `source_id_prefix` | no | string | Prefix prepended to extracted `source_id` |
@@ -780,8 +783,11 @@ DHCPDiscover). Changes to it are release notes.
 > instead of discarding it, remove 53 from `reflector_ports`, or safelist the
 > victim.
 
-`min_src_port_share` is read by detector adapters that sample packets; no
-adapter uses it yet.
+`min_src_port_share` is read by the FastNetMon JSON endpoint, which keeps the
+library ports whose share of sampled UDP packets in `packet_dump_detailed`
+meets it. The Community notify script takes the same default from
+`PREFIXD_SRC_PORT_MIN_SHARE`. Alertmanager and generic webhooks report
+`top_src_ports` directly and are not resampled.
 
 ### Removed keys
 

@@ -1,0 +1,65 @@
+IP: 203.0.113.10
+Attack type: syn_flood
+Initial attack power: 900000 packets per second
+Peak attack power: 900000 packets per second
+Attack direction: incoming
+Attack protocol: tcp
+Total incoming traffic: 460 mbps
+Total outgoing traffic: 0 mbps
+Total incoming pps: 900000 packets per second
+Total outgoing pps: 0 packets per second
+Total incoming flows: 0 flows per second
+Total outgoing flows: 0 flows per second
+Incoming ip fragmented traffic: 0 mbps
+Outgoing ip fragmented traffic: 0 mbps
+Incoming ip fragmented pps: 0 packets per second
+Outgoing ip fragmented pps: 0 packets per second
+Incoming dropped traffic: 0 mbps
+Outgoing dropped traffic: 0 mbps
+Incoming dropped pps: 0 packets per second
+Outgoing dropped pps: 0 packets per second
+Incoming tcp traffic: 460 mbps
+Outgoing tcp traffic: 0 mbps
+Incoming tcp pps: 900000 packets per second
+Outgoing tcp pps: 0 packets per second
+Incoming syn tcp traffic: 460 mbps
+Outgoing syn tcp traffic: 0 mbps
+Incoming syn tcp pps: 900000 packets per second
+Outgoing syn tcp pps: 0 packets per second
+Incoming udp traffic: 0 mbps
+Outgoing udp traffic: 0 mbps
+Incoming udp pps: 0 packets per second
+Outgoing udp pps: 0 packets per second
+Incoming icmp traffic: 0 mbps
+Outgoing icmp traffic: 0 mbps
+Incoming icmp pps: 0 packets per second
+Outgoing icmp pps: 0 packets per second
+
+
+
+Attack traffic dump
+
+2026-10-19 14:02:00.000000 192.0.2.1:30000 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:01.007919 192.0.2.2:30001 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:02.015838 192.0.2.3:30002 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:03.023757 192.0.2.4:30003 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:04.031676 192.0.2.5:30004 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:05.039595 192.0.2.6:30005 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:06.047514 192.0.2.7:30006 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:07.055433 192.0.2.8:30007 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:08.063352 192.0.2.9:30008 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:09.071271 192.0.2.10:30009 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:10.079190 192.0.2.11:30010 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:11.087109 192.0.2.12:30011 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:12.095028 192.0.2.13:30012 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:13.102947 192.0.2.14:30013 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:14.110866 192.0.2.15:30014 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:15.118785 192.0.2.16:30015 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:16.126704 192.0.2.17:30016 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:17.134623 192.0.2.18:30017 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:18.142542 192.0.2.19:30018 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:19.150461 192.0.2.20:30019 > 203.0.113.10:443 protocol: tcp flags: syn frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+
+
+Flow dump
+

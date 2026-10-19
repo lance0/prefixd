@@ -6021,6 +6021,78 @@ async fn test_fastnetmon_auth_required() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 }
 
+/// ADR 028: a native FastNetMon dump with reflector ports stores the event as
+/// `udp_amplification` with the ports that meet `min_src_port_share`.
+#[tokio::test]
+async fn test_fastnetmon_packet_dump_reports_reflector_ports() {
+    let (app, repo) = setup_app_correlation_with_repo(1, 0.5).await;
+    let payload = include_str!("fixtures/fastnetmon/native-ntp-memcached.json");
+    let (status, _) = post_fastnetmon(&app, payload).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let events = repo
+        .list_events(&prefixd::db::ListParams {
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].vector, "udp_amplification");
+    assert_eq!(events[0].top_src_ports_json.as_deref(), Some("[123,11211]"));
+}
+
+/// ADR 028: Alertmanager's `top_src_ports` annotation reaches the event; a
+/// malformed one fails that alert instead of becoming an empty list.
+#[tokio::test]
+async fn test_alertmanager_top_src_ports_annotation() {
+    let (app, repo) = setup_app_correlation_with_repo(1, 0.5).await;
+    let mut good = make_alert(
+        "firing",
+        "203.0.113.10",
+        "udp_amplification",
+        "critical",
+        "amp-good",
+    );
+    good["annotations"]["top_src_ports"] = "123, 11211".into();
+    let mut bad = make_alert(
+        "firing",
+        "203.0.113.11",
+        "udp_amplification",
+        "critical",
+        "amp-bad",
+    );
+    bad["annotations"]["top_src_ports"] = "123,ntp".into();
+    let mut resolved = bad.clone();
+    resolved["status"] = "resolved".into();
+
+    let (status, json) =
+        post_alertmanager(&app, &make_alertmanager_payload(&[good, bad, resolved])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["results"][0]["status"], "accepted");
+    assert_eq!(json["results"][1]["status"], "error");
+    assert!(
+        json["results"][1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("top_src_ports")
+    );
+    // A resolved alert ignores the annotation, so it never blocks an unban.
+    assert_ne!(json["results"][2]["status"], "error");
+
+    let events = repo
+        .list_events(&prefixd::db::ListParams {
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let bans: Vec<_> = events.iter().filter(|e| e.action == "ban").collect();
+    assert_eq!(bans.len(), 1);
+    assert_eq!(bans[0].vector, "udp_amplification");
+    assert_eq!(bans[0].top_src_ports_json.as_deref(), Some("[123,11211]"));
+}
+
 /// VAL-ENGINE-034: OpenAPI spec includes FastNetMon signal endpoint
 #[tokio::test]
 async fn test_openapi_includes_fastnetmon() {
@@ -6735,6 +6807,7 @@ fn basic_webhook_adapter(name: &str) -> prefixd::correlation::WebhookAdapter {
             confidence: Some("$.score".into()),
             source_id: Some("$.id".into()),
             top_dst_ports: None,
+            top_src_ports: None,
             action: None,
         },
         vector_map: Default::default(),

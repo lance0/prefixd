@@ -27,8 +27,8 @@ backend selection and deployment defaults, use the
 Available ingestion paths (payloads must satisfy the selected adapter and authentication):
 
 - **FastNetMon Community** - Notify script integration ([setup guide](docs/how-to/detectors/fastnetmon.md))
-- **FastNetMon** (native webhook) - `POST /v1/signals/fastnetmon` accepts FastNetMon's JSON payload directly, classifies vector from traffic breakdown, configurable confidence mapping
-- **Prometheus/Alertmanager** - `POST /v1/signals/alertmanager` accepts Alertmanager v4 webhook payloads, maps labels/annotations to event fields, handles batched alerts with per-alert results
+- **FastNetMon** (native webhook) - `POST /v1/signals/fastnetmon` accepts FastNetMon's JSON payload directly, classifies vector from traffic breakdown, reports reflector source ports from `packet_dump_detailed` as `udp_amplification`, configurable confidence mapping
+- **Prometheus/Alertmanager** - `POST /v1/signals/alertmanager` accepts Alertmanager v4 webhook payloads, maps labels/annotations (including `top_src_ports`) to event fields, handles batched alerts with per-alert results
 - **Generic webhook adapter** - `POST /v1/signals/webhook/{name}` for detectors without a native adapter. Configured per-adapter in `correlation.yaml` with JSONPath field mappings, HMAC-SHA256 / bearer / none authentication, optional array batching via `root_path`, vector normalization, and confidence scaling. See ADR 020 and [docs/how-to/detectors/generic-webhook.md](docs/how-to/detectors/generic-webhook.md).
 - **Corroborating signals** - `POST /v1/signals/corroborator` for coarse telemetry (router CPU, per-PoP interface utilization, customer NetFlow). Sources configured with `mode: corroborating` strengthen open signal groups without ever triggering mitigations on their own. See [ADR 021](docs/adr/021-corroborating-signals.md).
 - **Custom scripts** - Simple curl calls to `POST /v1/events`
@@ -98,6 +98,7 @@ encode a rule such as "UDP except port 53".
 | Vector | Automatic protocol |
 | --- | --- |
 | `udp_flood` | UDP (17) |
+| `udp_amplification` | UDP (17), with reflector source ports from the event |
 | `syn_flood`, `ack_flood` | TCP (6) |
 | `icmp_flood` | ICMP (1) for IPv4, ICMPv6 (58) for IPv6 |
 | `unknown` | No protocol constraint |

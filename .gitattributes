@@ -1,0 +1,2 @@
+# FastNetMon writes trailing spaces and blank lines; fixtures keep its exact output.
+tests/fixtures/fastnetmon/*.txt -whitespace

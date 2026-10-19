@@ -1199,6 +1199,7 @@ sources:
                 confidence: None,
                 source_id: None,
                 top_dst_ports: None,
+                top_src_ports: None,
                 action: None,
             },
             vector_map: HashMap::new(),

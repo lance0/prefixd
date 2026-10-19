@@ -971,10 +971,19 @@ Accepts an [Alertmanager v4 webhook payload](https://prometheus.io/docs/alerting
 | `victim_ip` | `labels.victim_ip` | `labels.instance` (port stripped) |
 | `bps` | `annotations.bps` (parsed as i64) | None |
 | `pps` | `annotations.pps` (parsed as i64) | None |
+| `top_src_ports` | `annotations.top_src_ports`, comma-separated ports such as `"123, 11211"`; read for firing alerts only | None |
 | `confidence` | `labels.severity` → `critical`=0.9, `warning`=0.7, `info`=0.5 | 0.5 |
 | `action` | `alerts[].status` ("resolved" → "unban", else "ban") | "ban" |
 | `event_id` (dedup) | `alerts[].fingerprint` | None |
 | `source` | hardcoded `"alertmanager"` | — |
+
+For UDP reflection, set `labels.vector` to `udp_amplification` and list the
+reflector source ports in `annotations.top_src_ports`. prefixd keeps only ports
+in its [reflector-port library](configuration.md#amplification) and handles the
+event as `udp_flood` when none remain. A `top_src_ports` annotation with an
+empty or non-numeric entry, or a port above 65535, fails that alert with
+`status: "error"` rather than becoming an empty list; more than 64 ports fails
+it the same way. Resolved alerts ignore the annotation.
 
 **Response (200):**
 
@@ -1059,7 +1068,21 @@ Accepts FastNetMon's native JSON notify payload. Extracts attack vector from tra
     "total_incoming_pps": 500100,
     "total_incoming_traffic_bits": 4000800000,
     "total_incoming_flows": 12000
-  }
+  },
+  "packet_dump_detailed": [
+    {
+      "ip_version": "ipv4",
+      "source_ip": "198.51.100.10",
+      "destination_ip": "203.0.113.10",
+      "source_port": 123,
+      "destination_port": 40000,
+      "protocol": "udp",
+      "fragmentation": false,
+      "packets": 1,
+      "length": 486,
+      "sample_ratio": 1024
+    }
+  ]
 }
 ```
 
@@ -1071,6 +1094,7 @@ Accepts FastNetMon's native JSON notify payload. Extracts attack vector from tra
 | `ip` | string | yes | Victim IPv4 address under attack |
 | `alert_scope` | string | no | Scope: `"host"` or `"total"` |
 | `attack_details` | object | no | Traffic metrics and classification (see below) |
+| `packet_dump_detailed` | array | no | Sampled packets as FastNetMon serializes them. prefixd reads `protocol`, `source_port` and `packets` of each entry and ignores entries it cannot read |
 
 **Attack Details Fields:**
 
@@ -1117,11 +1141,21 @@ correlation:
 
 The attack vector is automatically classified from the traffic breakdown in `attack_details`:
 
-- **UDP dominant** → `udp_flood`
+- **UDP dominant** → `udp_flood`, or `udp_amplification` when sampled packets
+  show reflector source ports (below)
 - **SYN TCP dominant** (>60% of TCP PPS) → `syn_flood`
 - **ICMP dominant** → `icmp_flood`
 - **Other TCP** → `ack_flood`
 - **No details** → `unknown`
+
+For a UDP-dominant attack, prefixd sums the UDP entries of
+`packet_dump_detailed` per `source_port`, weighted by `packets`. Each
+[reflector-port library](configuration.md#amplification) port whose share of
+sampled UDP packets is at least `amplification.min_src_port_share` (default
+0.2) is kept, ranked by share. If any port is kept, the event is
+`udp_amplification` with those ports in `top_src_ports`. Otherwise, including
+with no dump, an empty dump or entries that do not parse, the vector above
+stands. TCP and ICMP attacks are never classified as amplification.
 
 **Response (202 Accepted):**
 

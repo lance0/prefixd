@@ -353,6 +353,14 @@ fn extract_vector(labels: &HashMap<String, String>) -> Option<String> {
     None
 }
 
+/// Parse comma-separated ports such as `"123, 11211"`. Any empty or invalid
+/// entry rejects the whole list, so a malformed annotation never becomes empty.
+fn parse_port_list(raw: &str) -> Option<Vec<u16>> {
+    raw.split(',')
+        .map(|port| port.trim().parse::<u16>().ok())
+        .collect()
+}
+
 /// Parse an optional i64 from annotations.
 fn parse_optional_i64(annotations: &HashMap<String, String>, key: &str) -> Option<i64> {
     annotations.get(key).and_then(|v| v.parse::<i64>().ok())
@@ -519,6 +527,26 @@ async fn process_alertmanager_alert(
         "ban".to_string()
     };
 
+    // Source ports matter only for a ban; a bad annotation never blocks an unban.
+    let top_src_ports = match alert.annotations.get("top_src_ports") {
+        Some(raw) if action == "ban" => match parse_port_list(raw) {
+            Some(ports) => Some(ports),
+            None => {
+                return Err(AlertmanagerAlertResult {
+                    announcement_outcome: None,
+                    index,
+                    status: "error".to_string(),
+                    event_id: None,
+                    mitigation_id: None,
+                    error: Some(format!(
+                        "invalid annotations.top_src_ports: '{raw}' (expected comma-separated ports)"
+                    )),
+                });
+            }
+        },
+        _ => None,
+    };
+
     // Use fingerprint as external_event_id for dedup
     let external_event_id = alert.fingerprint.clone();
 
@@ -538,7 +566,7 @@ async fn process_alertmanager_alert(
         bps,
         pps,
         top_dst_ports: None,
-        top_src_ports: None,
+        top_src_ports,
         confidence: Some(confidence),
         action,
         raw_details: None,
@@ -615,6 +643,11 @@ pub struct FastNetMonPayload {
     /// Attack details with traffic metrics and classification
     #[serde(default)]
     pub attack_details: Option<FastNetMonAttackDetails>,
+    /// Sampled packets, one object each with `protocol`, `source_port` and
+    /// `packets` (FastNetMon's `serialize_simple_packet_to_json`). UDP samples
+    /// select reflector source ports; entries that do not parse are ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packet_dump_detailed: Option<serde_json::Value>,
 }
 
 /// Attack details from FastNetMon.
@@ -719,6 +752,69 @@ fn classify_fastnetmon_vector(details: &FastNetMonAttackDetails) -> AttackVector
     }
 }
 
+/// Classify a FastNetMon payload, upgrading a UDP flood to `udp_amplification`
+/// when sampled packets show reflector source ports (ADR 028).
+///
+/// Only a UDP-dominant attack is upgraded. Each library port whose share of
+/// sampled UDP packets (weighted by `packets`) is at least `min_src_port_share`
+/// is kept, ranked by share. With no dump, no UDP sample or no qualifying port,
+/// the counter classification stands and no ports are reported.
+fn classify_fastnetmon(
+    payload: &FastNetMonPayload,
+    amplification: &crate::config::AmplificationConfig,
+) -> (AttackVector, Option<Vec<u16>>) {
+    let vector = payload
+        .attack_details
+        .as_ref()
+        .map(classify_fastnetmon_vector)
+        .unwrap_or(AttackVector::Unknown);
+    if vector != AttackVector::UdpFlood {
+        return (vector, None);
+    }
+    let mut packets_by_port: HashMap<u16, u128> = HashMap::new();
+    let mut total: u128 = 0;
+    let samples = payload
+        .packet_dump_detailed
+        .as_ref()
+        .and_then(serde_json::Value::as_array);
+    for sample in samples.into_iter().flatten() {
+        let field = |name| sample.get(name).and_then(serde_json::Value::as_u64);
+        if sample.get("protocol").and_then(serde_json::Value::as_str) != Some("udp") {
+            continue;
+        }
+        let (Some(port), Some(packets)) = (
+            field("source_port").and_then(|port| u16::try_from(port).ok()),
+            field("packets"),
+        ) else {
+            continue;
+        };
+        *packets_by_port.entry(port).or_default() += u128::from(packets);
+        total += u128::from(packets);
+    }
+    let library = amplification.library_ports();
+    let mut ports: Vec<(u16, u128)> = packets_by_port
+        .into_iter()
+        .filter(|(port, packets)| {
+            library.contains(port)
+                && *packets as f64 >= amplification.min_src_port_share * total as f64
+        })
+        .collect();
+    if total == 0 || ports.is_empty() {
+        return (vector, None);
+    }
+    ports.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    (
+        AttackVector::UdpAmplification,
+        Some(
+            ports
+                .into_iter()
+                .take(crate::domain::MAX_TOP_SRC_PORTS)
+                .map(|(port, _)| port)
+                .collect(),
+        ),
+    )
+}
+
 /// Ingest a signal from FastNetMon
 #[utoipa::path(
     post,
@@ -782,12 +878,7 @@ async fn ingest_fastnetmon_inner(
         )));
     }
 
-    // Classify attack vector from details
-    let vector = payload
-        .attack_details
-        .as_ref()
-        .map(classify_fastnetmon_vector)
-        .unwrap_or(AttackVector::Unknown);
+    let (vector, top_src_ports) = classify_fastnetmon(&payload, &state.settings.amplification);
 
     // Compute confidence from action type via configurable mapping
     let correlation_config = state.correlation_config.read().await;
@@ -833,7 +924,7 @@ async fn ingest_fastnetmon_inner(
         bps,
         pps,
         top_dst_ports: None,
-        top_src_ports: None,
+        top_src_ports,
         confidence: Some(confidence),
         action,
         raw_details,
@@ -1611,9 +1702,151 @@ async fn recompute_group_aggregates(state: &Arc<AppState>, group_id: Uuid) -> Re
 
 #[cfg(test)]
 mod tests {
-    use super::{FastNetMonAttackDetails, classify_fastnetmon_vector};
+    use super::{
+        FastNetMonAttackDetails, FastNetMonPayload, classify_fastnetmon,
+        classify_fastnetmon_vector, parse_port_list,
+    };
+    use crate::config::AmplificationConfig;
     use crate::domain::AttackVector;
     use chrono::Utc;
+    use serde_json::json;
+
+    /// FastNetMon native JSON in the v1.2.9 shape: `packet_dump_detailed`
+    /// entries carry `serialize_simple_packet_to_json`'s fields. 123 has 9 of 20
+    /// sampled UDP packets, 11211 has 6 and 53 has 1.
+    const NATIVE_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/fastnetmon/native-ntp-memcached.json");
+
+    fn native(edit: impl FnOnce(&mut serde_json::Value)) -> FastNetMonPayload {
+        let mut payload: serde_json::Value = serde_json::from_str(NATIVE_FIXTURE).unwrap();
+        edit(&mut payload);
+        serde_json::from_value(payload).unwrap()
+    }
+
+    fn classify(payload: &FastNetMonPayload) -> (AttackVector, Option<Vec<u16>>) {
+        classify_fastnetmon(payload, &AmplificationConfig::default())
+    }
+
+    #[test]
+    fn native_dump_classifies_amplification_with_ranked_library_ports() {
+        assert_eq!(
+            classify(&native(|_| {})),
+            (AttackVector::UdpAmplification, Some(vec![123, 11211]))
+        );
+    }
+
+    #[test]
+    fn native_dump_below_share_stays_udp_flood() {
+        // A random-source-port flood: 53 is a library port, but at 1 of 21
+        // sampled packets it is below 0.2.
+        let payload = native(|p| {
+            let dump = p["packet_dump_detailed"].as_array_mut().unwrap();
+            dump.retain(|sample| sample["source_port"] != 123 && sample["source_port"] != 11211);
+            for port in 0..16u16 {
+                let mut sample = dump[0].clone();
+                sample["source_port"] = json!(20000 + port);
+                dump.push(sample);
+            }
+        });
+        assert_eq!(classify(&payload), (AttackVector::UdpFlood, None));
+        // A higher threshold drops 11211 (0.3) and keeps 123 (0.45).
+        let amplification = AmplificationConfig {
+            min_src_port_share: 0.4,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_fastnetmon(&native(|_| {}), &amplification),
+            (AttackVector::UdpAmplification, Some(vec![123]))
+        );
+    }
+
+    #[test]
+    fn native_ports_outside_the_library_do_not_count() {
+        let amplification = AmplificationConfig {
+            reflector_ports: Some(vec![crate::config::ReflectorPort {
+                port: 11211,
+                name: "memcached".into(),
+            }]),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_fastnetmon(&native(|_| {}), &amplification),
+            (AttackVector::UdpAmplification, Some(vec![11211]))
+        );
+        let disabled = AmplificationConfig {
+            reflector_ports: Some(vec![]),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_fastnetmon(&native(|_| {}), &disabled),
+            (AttackVector::UdpFlood, None)
+        );
+    }
+
+    #[test]
+    fn native_tcp_and_icmp_are_never_amplification() {
+        for (counter, expected) in [
+            ("incoming_syn_tcp_pps", AttackVector::SynFlood),
+            ("incoming_tcp_pps", AttackVector::AckFlood),
+            ("incoming_icmp_pps", AttackVector::IcmpFlood),
+        ] {
+            // The dump still shows UDP reflection, but the counters say otherwise.
+            let payload = native(|p| {
+                p["attack_details"]["incoming_udp_pps"] = json!(1000);
+                p["attack_details"][counter] = json!(9_000_000);
+            });
+            assert_eq!(classify(&payload), (expected, None), "{counter}");
+        }
+        // TCP samples from a library port are not UDP samples.
+        let payload = native(|p| {
+            for sample in p["packet_dump_detailed"].as_array_mut().unwrap() {
+                sample["protocol"] = json!("tcp");
+            }
+        });
+        assert_eq!(classify(&payload), (AttackVector::UdpFlood, None));
+    }
+
+    #[test]
+    fn native_malformed_or_empty_dump_falls_back() {
+        for dump in [
+            json!(null),
+            json!([]),
+            json!("not an array"),
+            json!({"protocol": "udp", "source_port": 123, "packets": 1}),
+            json!([
+                {"protocol": "udp", "source_port": 70000, "packets": 5},
+                {"protocol": "udp", "source_port": "123", "packets": 5},
+                {"protocol": "udp", "source_port": 123, "packets": -1},
+                {"protocol": "udp", "source_port": 123},
+                {"protocol": "icmp", "packets": 9},
+                "garbage"
+            ]),
+            json!([{"protocol": "udp", "source_port": 123, "packets": 0}]),
+        ] {
+            let payload = native(|p| p["packet_dump_detailed"] = dump.clone());
+            assert_eq!(classify(&payload), (AttackVector::UdpFlood, None), "{dump}");
+        }
+        let payload = native(|p| {
+            p.as_object_mut().unwrap().remove("packet_dump_detailed");
+        });
+        assert_eq!(classify(&payload), (AttackVector::UdpFlood, None));
+        let payload = native(|p| {
+            p.as_object_mut().unwrap().remove("attack_details");
+        });
+        assert_eq!(classify(&payload), (AttackVector::Unknown, None));
+    }
+
+    #[test]
+    fn alertmanager_port_lists_parse_or_reject_whole() {
+        assert_eq!(parse_port_list("123"), Some(vec![123]));
+        assert_eq!(
+            parse_port_list(" 123, 11211 ,53"),
+            Some(vec![123, 11211, 53])
+        );
+        for raw in ["", " ", "123,", "123,,53", "ntp", "70000", "-1", "123;53"] {
+            assert_eq!(parse_port_list(raw), None, "{raw:?}");
+        }
+    }
 
     #[tokio::test]
     async fn confidence_typed_nonfinite_inputs_are_rejected_at_shared_ingestion_boundaries() {

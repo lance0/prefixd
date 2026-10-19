@@ -588,6 +588,7 @@ function FieldMapEditor({
     ["confidence", 'Optional number', false],
     ["source_id", 'Optional; used for dedup', false],
     ["top_dst_ports", 'Optional array of ports', false],
+    ["top_src_ports", 'Optional array of UDP source ports', false],
     ["action", 'Optional "ban" or "unban"', false],
   ]
 
@@ -627,6 +628,7 @@ function newAdapter(): WebhookAdapter {
       confidence: null,
       source_id: null,
       top_dst_ports: null,
+      top_src_ports: null,
       action: null,
     },
     vector_map: {},

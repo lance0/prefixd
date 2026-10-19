@@ -901,6 +901,7 @@ export interface WebhookFieldMap {
   confidence?: string | null
   source_id?: string | null
   top_dst_ports?: string | null
+  top_src_ports?: string | null
   action?: string | null
 }
 

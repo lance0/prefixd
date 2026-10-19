@@ -1,0 +1,65 @@
+IP: 0.0.0.0
+Attack type: udp_flood
+Initial attack power: 1200000 packets per second
+Peak attack power: 1200000 packets per second
+Attack direction: incoming
+Attack protocol: udp
+Total incoming traffic: 8000 mbps
+Total outgoing traffic: 0 mbps
+Total incoming pps: 1200000 packets per second
+Total outgoing pps: 0 packets per second
+Total incoming flows: 0 flows per second
+Total outgoing flows: 0 flows per second
+Incoming ip fragmented traffic: 0 mbps
+Outgoing ip fragmented traffic: 0 mbps
+Incoming ip fragmented pps: 0 packets per second
+Outgoing ip fragmented pps: 0 packets per second
+Incoming dropped traffic: 0 mbps
+Outgoing dropped traffic: 0 mbps
+Incoming dropped pps: 0 packets per second
+Outgoing dropped pps: 0 packets per second
+Incoming tcp traffic: 0 mbps
+Outgoing tcp traffic: 0 mbps
+Incoming tcp pps: 0 packets per second
+Outgoing tcp pps: 0 packets per second
+Incoming syn tcp traffic: 0 mbps
+Outgoing syn tcp traffic: 0 mbps
+Incoming syn tcp pps: 0 packets per second
+Outgoing syn tcp pps: 0 packets per second
+Incoming udp traffic: 8000 mbps
+Outgoing udp traffic: 0 mbps
+Incoming udp pps: 1200000 packets per second
+Outgoing udp pps: 0 packets per second
+Incoming icmp traffic: 0 mbps
+Outgoing icmp traffic: 0 mbps
+Incoming icmp pps: 0 packets per second
+Outgoing icmp pps: 0 packets per second
+
+
+
+Attack traffic dump
+
+2026-10-19 14:02:00.000000 2001:db8:5::1:11211 > 2001:db8:a::10:41000 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:01.007919 2001:db8:5::2:11211 > 2001:db8:a::10:41001 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:02.015838 2001:db8:5::3:11211 > 2001:db8:a::10:41002 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:03.023757 2001:db8:5::4:11211 > 2001:db8:a::10:41003 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:04.031676 2001:db8:5::5:11211 > 2001:db8:a::10:41004 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:05.039595 2001:db8:5::6:11211 > 2001:db8:a::10:41005 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:06.047514 2001:db8:5::7:11211 > 2001:db8:a::10:41006 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:07.055433 2001:db8:5::8:11211 > 2001:db8:a::10:41007 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:08.063352 2001:db8:5::9:11211 > 2001:db8:a::10:41008 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:09.071271 2001:db8:5::a:11211 > 2001:db8:a::10:41009 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:10.079190 2001:db8:5::b:11211 > 2001:db8:a::10:41010 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:11.087109 2001:db8:5::c:11211 > 2001:db8:a::10:41011 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:12.095028 2001:db8:6::1:40000 > 2001:db8:a::10:42000 protocol: udp frag: 0  packets: 1 size: 120 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:13.102947 2001:db8:6::2:40013 > 2001:db8:a::10:42001 protocol: udp frag: 0  packets: 1 size: 120 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:14.110866 2001:db8:6::3:40026 > 2001:db8:a::10:42002 protocol: udp frag: 0  packets: 1 size: 120 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:15.118785 2001:db8:6::4:40039 > 2001:db8:a::10:42003 protocol: udp frag: 0  packets: 1 size: 120 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:16.126704 2001:db8:6::5:40052 > 2001:db8:a::10:42004 protocol: udp frag: 0  packets: 1 size: 120 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:17.134623 2001:db8:6::6:40065 > 2001:db8:a::10:42005 protocol: udp frag: 0  packets: 1 size: 120 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:18.142542 2001:db8:6::7:40078 > 2001:db8:a::10:42006 protocol: udp frag: 0  packets: 1 size: 120 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:19.150461 2001:db8:6::8:40091 > 2001:db8:a::10:42007 protocol: udp frag: 0  packets: 1 size: 120 bytes ttl: 54 sample ratio: 1024  
+
+
+Flow dump
+

@@ -175,6 +175,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   static source-port lists over `max_ports`, and components the speaker cannot
   encode, in both modes. The `amplification` section (also
   `min_src_port_share`, default 0.2) is exposed by `GET /v1/config/settings`.
+- Detector adapters report UDP reflection (ADR 028). `POST
+  /v1/signals/fastnetmon` reads the optional `packet_dump_detailed` sample:
+  for a UDP-dominant attack, reflector-library ports whose share of sampled UDP
+  packets meets `amplification.min_src_port_share` make the event
+  `udp_amplification` with those ports in `top_src_ports`.
+  `scripts/prefixd-fastnetmon.sh` does the same from the Community
+  `Attack traffic dump` lines, with the new `PREFIXD_SRC_PORT_MIN_SHARE`
+  (default 0.2) and at most 64 ports; prefixd intersects them with the
+  library. Alertmanager reads an optional `top_src_ports` annotation of
+  comma-separated ports, and a malformed one fails that alert. Generic
+  webhook adapters gain `fields.top_src_ports`, where a value that is not an
+  array of ports fails that event. Annotations and fields are read on bans
+  only. Without a sample, a qualifying port or a UDP-dominant attack, events
+  are classified as before, and TCP and ICMP attacks are never
+  `udp_amplification`. The generic webhook guide's example no longer maps to
+  the nonexistent vectors `dns_amp` and `ntp_amp`.
 - Event responses add `mitigation_ids`, every mitigation the request created,
   extended or withdrew, and `rules`, each evaluated rule's outcome (`created`,
   `extended` or `rejected` with a `reason`). `mitigation_id` stays the first of

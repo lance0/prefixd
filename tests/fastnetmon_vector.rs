@@ -16,6 +16,15 @@ const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/prefixd-fastn
 /// Run a `ban` invocation with `details` on stdin, returning the vector in the
 /// payload handed to curl.
 fn detected_vector(details: &str) -> String {
+    ban_payload(details, &[])["vector"]
+        .as_str()
+        .expect("vector is a string")
+        .to_string()
+}
+
+/// Run a `ban` invocation with `details` on stdin and extra environment,
+/// returning the JSON payload handed to curl.
+fn ban_payload(details: &str, envs: &[(&str, &str)]) -> serde_json::Value {
     let dir = tempfile::tempdir().expect("tempdir");
     let bin_dir = dir.path().join("bin");
     fs::create_dir(&bin_dir).expect("mkdir bin");
@@ -44,6 +53,7 @@ fn detected_vector(details: &str) -> String {
         .env("PREFIXD_API", "http://127.0.0.1:1")
         .env("PREFIXD_OPERATOR", "test_operator")
         .env("PREFIXD_LOG", dir.path().join("script.log"))
+        .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -69,12 +79,7 @@ fn detected_vector(details: &str) -> String {
         .split('\0')
         .find(|arg| arg.contains("\"vector\""))
         .expect("payload with vector not passed to curl");
-    let json: serde_json::Value = serde_json::from_str(payload).expect("payload is valid JSON");
-
-    json["vector"]
-        .as_str()
-        .expect("vector is a string")
-        .to_string()
+    serde_json::from_str(payload).expect("payload is valid JSON")
 }
 
 #[test]
@@ -151,6 +156,126 @@ fn protocol_tokens_do_not_match_inside_words() {
     ] {
         assert_eq!(detected_vector(details), "unknown", "details: {details}");
     }
+}
+
+/// FastNetMon Community notify-script stdin, as FastNetMon v1.2.9 writes it:
+/// `get_attack_description`, then "Attack traffic dump" with one
+/// `print_simple_packet` line per sample (fast_library.cpp), then "Flow dump"
+/// (`call_blackhole_actions_per_host`, fastnetmon_logic.cpp).
+fn community_fixture(name: &str) -> String {
+    let path = format!(
+        "{}/tests/fixtures/fastnetmon/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+}
+
+/// The vector and `top_src_ports` the script sends for `details`.
+fn amplification(details: &str, envs: &[(&str, &str)]) -> (String, Option<Vec<u64>>) {
+    let payload = ban_payload(details, envs);
+    let ports = payload.get("top_src_ports").map(|ports| {
+        ports
+            .as_array()
+            .expect("top_src_ports is an array")
+            .iter()
+            .map(|port| port.as_u64().expect("port is a number"))
+            .collect()
+    });
+    (payload["vector"].as_str().unwrap().to_string(), ports)
+}
+
+#[test]
+fn ntp_and_memcached_dump_reports_reflector_ports_by_share() {
+    // 123 carries 9 of 20 sampled UDP packets and 11211 carries 6; DNS (1 of
+    // 20) and the random ports stay below the default 0.2 share.
+    let (vector, ports) = amplification(&community_fixture("community-ntp-memcached.txt"), &[]);
+    assert_eq!(vector, "udp_amplification");
+    assert_eq!(ports, Some(vec![123, 11211]));
+}
+
+#[test]
+fn share_threshold_is_configurable() {
+    let details = community_fixture("community-ntp-memcached.txt");
+    let (vector, ports) = amplification(&details, &[("PREFIXD_SRC_PORT_MIN_SHARE", "0.4")]);
+    assert_eq!(vector, "udp_amplification");
+    assert_eq!(ports, Some(vec![123]));
+    let (vector, ports) = amplification(&details, &[("PREFIXD_SRC_PORT_MIN_SHARE", "0.05")]);
+    assert_eq!(vector, "udp_amplification");
+    assert_eq!(ports.unwrap()[..3], [123, 11211, 53]);
+}
+
+#[test]
+fn random_source_port_flood_stays_udp_flood() {
+    let (vector, ports) = amplification(&community_fixture("community-random-ports.txt"), &[]);
+    assert_eq!(vector, "udp_flood");
+    assert_eq!(ports, None);
+}
+
+#[test]
+fn zero_udp_dump_is_never_amplification() {
+    let (vector, ports) = amplification(&community_fixture("community-syn-flood.txt"), &[]);
+    assert_eq!(vector, "syn_flood");
+    assert_eq!(ports, None);
+}
+
+#[test]
+fn mixed_dump_counts_only_udp_samples() {
+    // Ten TCP samples from port 443 do not count; NTP is 6 of 8 UDP packets.
+    let (vector, ports) = amplification(&community_fixture("community-mixed.txt"), &[]);
+    assert_eq!(vector, "udp_amplification");
+    assert_eq!(ports, Some(vec![123]));
+}
+
+#[test]
+fn ipv6_dump_reads_the_port_after_the_last_colon() {
+    let (vector, ports) = amplification(&community_fixture("community-ipv6.txt"), &[]);
+    assert_eq!(vector, "udp_amplification");
+    assert_eq!(ports, Some(vec![11211]));
+}
+
+#[test]
+fn malformed_or_missing_dump_falls_back_to_udp_flood() {
+    let header = "Attack type: udp_flood\nIncoming udp pps: 900000 packets per second\n";
+    for dump in [
+        // No dump section at all.
+        String::new(),
+        // An empty dump.
+        "\n\nAttack traffic dump\n\n\n\nFlow dump\n\n".to_string(),
+        // Lines that do not parse: no port, a port out of range, a bad count.
+        "\n\nAttack traffic dump\n\n\
+         2026-10-19 14:02:00.000000 198.51.100.1 > 203.0.113.10:4000 protocol: udp frag: 0  packets: 1 size: 486 bytes\n\
+         2026-10-19 14:02:00.000000 198.51.100.1:70000 > 203.0.113.10:4000 protocol: udp frag: 0  packets: 1 size: 486 bytes\n\
+         2026-10-19 14:02:00.000000 198.51.100.1:123 > 203.0.113.10:4000 protocol: udp frag: 0  packets: many size: 486 bytes\n\
+         garbage\n\nFlow dump\n"
+            .to_string(),
+        // Sampled packets outside the dump section are ignored.
+        "2026-10-19 14:02:00.000000 198.51.100.1:123 > 203.0.113.10:4000 protocol: udp frag: 0  packets: 1 size: 486 bytes\n".to_string(),
+    ] {
+        let (vector, ports) = amplification(&format!("{header}{dump}"), &[]);
+        assert_eq!(vector, "udp_flood", "dump: {dump:?}");
+        assert_eq!(ports, None, "dump: {dump:?}");
+    }
+    let details = community_fixture("community-ntp-memcached.txt");
+    for share in ["abc", "0", "1.5", "-0.2"] {
+        let (vector, ports) = amplification(&details, &[("PREFIXD_SRC_PORT_MIN_SHARE", share)]);
+        assert_eq!(vector, "udp_flood", "share: {share:?}");
+        assert_eq!(ports, None, "share: {share:?}");
+    }
+}
+
+#[test]
+fn reported_ports_are_capped_at_64() {
+    let mut details = String::from("Attack type: udp_flood\n\n\nAttack traffic dump\n\n");
+    for port in 1000..1100 {
+        details.push_str(&format!(
+            "2026-10-19 14:02:00.000000 198.51.100.1:{port} > 203.0.113.10:4000 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1  \n"
+        ));
+    }
+    let (vector, ports) = amplification(&details, &[("PREFIXD_SRC_PORT_MIN_SHARE", "0.001")]);
+    assert_eq!(vector, "udp_amplification");
+    let ports = ports.unwrap();
+    assert_eq!(ports.len(), 64);
+    assert_eq!(ports[..2], [1000, 1001], "ties rank by port");
 }
 
 /// Run a `ban` against a curl stub that answers each attempt from `outcomes`

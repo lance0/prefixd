@@ -1,0 +1,64 @@
+IP: 203.0.113.10
+Attack type: udp_flood
+Initial attack power: 2500000 packets per second
+Peak attack power: 2500000 packets per second
+Attack direction: incoming
+Attack protocol: udp
+Total incoming traffic: 9600 mbps
+Total outgoing traffic: 0 mbps
+Total incoming pps: 2500000 packets per second
+Total outgoing pps: 0 packets per second
+Total incoming flows: 0 flows per second
+Total outgoing flows: 0 flows per second
+Incoming ip fragmented traffic: 0 mbps
+Outgoing ip fragmented traffic: 0 mbps
+Incoming ip fragmented pps: 0 packets per second
+Outgoing ip fragmented pps: 0 packets per second
+Incoming dropped traffic: 0 mbps
+Outgoing dropped traffic: 0 mbps
+Incoming dropped pps: 0 packets per second
+Outgoing dropped pps: 0 packets per second
+Incoming tcp traffic: 0 mbps
+Outgoing tcp traffic: 0 mbps
+Incoming tcp pps: 0 packets per second
+Outgoing tcp pps: 0 packets per second
+Incoming syn tcp traffic: 0 mbps
+Outgoing syn tcp traffic: 0 mbps
+Incoming syn tcp pps: 0 packets per second
+Outgoing syn tcp pps: 0 packets per second
+Incoming udp traffic: 9600 mbps
+Outgoing udp traffic: 0 mbps
+Incoming udp pps: 2500000 packets per second
+Outgoing udp pps: 0 packets per second
+Incoming icmp traffic: 0 mbps
+Outgoing icmp traffic: 0 mbps
+Incoming icmp pps: 0 packets per second
+Outgoing icmp pps: 0 packets per second
+
+
+
+Attack traffic dump
+
+2026-10-19 14:02:00.000000 198.51.100.10:123 > 203.0.113.10:40000 protocol: udp frag: 0  packets: 2 size: 486 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:01.007919 198.51.100.11:123 > 203.0.113.10:40001 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:02.015838 198.51.100.12:123 > 203.0.113.10:40002 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:03.023757 198.51.100.13:123 > 203.0.113.10:40003 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:04.031676 198.51.100.14:123 > 203.0.113.10:40004 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:05.039595 198.51.100.15:123 > 203.0.113.10:40005 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:06.047514 198.51.100.16:123 > 203.0.113.10:40006 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:07.055433 198.51.100.17:123 > 203.0.113.10:40007 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:08.063352 192.0.2.20:11211 > 203.0.113.10:41000 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:09.071271 192.0.2.21:11211 > 203.0.113.10:41001 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:10.079190 192.0.2.22:11211 > 203.0.113.10:41002 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:11.087109 192.0.2.23:11211 > 203.0.113.10:41003 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:12.095028 192.0.2.24:11211 > 203.0.113.10:41004 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:13.102947 192.0.2.25:11211 > 203.0.113.10:41005 protocol: udp frag: 0  packets: 1 size: 1442 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:14.110866 198.51.100.200:53 > 203.0.113.10:42000 protocol: udp frag: 0  packets: 1 size: 512 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:15.118785 203.0.113.100:50000 > 203.0.113.10:43000 protocol: udp frag: 0  packets: 1 size: 120 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:16.126704 203.0.113.101:50977 > 203.0.113.10:43001 protocol: udp frag: 0  packets: 1 size: 120 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:17.134623 203.0.113.102:51954 > 203.0.113.10:43002 protocol: udp frag: 0  packets: 1 size: 120 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:18.142542 203.0.113.103:52931 > 203.0.113.10:43003 protocol: udp frag: 0  packets: 1 size: 120 bytes ttl: 54 sample ratio: 1024  
+
+
+Flow dump
+

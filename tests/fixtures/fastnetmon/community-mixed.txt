@@ -1,0 +1,63 @@
+IP: 203.0.113.10
+Attack type: udp_flood
+Initial attack power: 2000000 packets per second
+Peak attack power: 2000000 packets per second
+Attack direction: incoming
+Attack protocol: udp
+Total incoming traffic: 7100 mbps
+Total outgoing traffic: 0 mbps
+Total incoming pps: 2000000 packets per second
+Total outgoing pps: 0 packets per second
+Total incoming flows: 0 flows per second
+Total outgoing flows: 0 flows per second
+Incoming ip fragmented traffic: 0 mbps
+Outgoing ip fragmented traffic: 0 mbps
+Incoming ip fragmented pps: 0 packets per second
+Outgoing ip fragmented pps: 0 packets per second
+Incoming dropped traffic: 0 mbps
+Outgoing dropped traffic: 0 mbps
+Incoming dropped pps: 0 packets per second
+Outgoing dropped pps: 0 packets per second
+Incoming tcp traffic: 100 mbps
+Outgoing tcp traffic: 0 mbps
+Incoming tcp pps: 200000 packets per second
+Outgoing tcp pps: 0 packets per second
+Incoming syn tcp traffic: 0 mbps
+Outgoing syn tcp traffic: 0 mbps
+Incoming syn tcp pps: 0 packets per second
+Outgoing syn tcp pps: 0 packets per second
+Incoming udp traffic: 7000 mbps
+Outgoing udp traffic: 0 mbps
+Incoming udp pps: 1800000 packets per second
+Outgoing udp pps: 0 packets per second
+Incoming icmp traffic: 0 mbps
+Outgoing icmp traffic: 0 mbps
+Incoming icmp pps: 0 packets per second
+Outgoing icmp pps: 0 packets per second
+
+
+
+Attack traffic dump
+
+2026-10-19 14:02:00.000000 192.0.2.1:443 > 203.0.113.10:50000 protocol: tcp flags: rst frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:01.007919 192.0.2.2:443 > 203.0.113.10:50001 protocol: tcp flags: rst frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:02.015838 192.0.2.3:443 > 203.0.113.10:50002 protocol: tcp flags: rst frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:03.023757 192.0.2.4:443 > 203.0.113.10:50003 protocol: tcp flags: rst frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:04.031676 192.0.2.5:443 > 203.0.113.10:50004 protocol: tcp flags: rst frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:05.039595 192.0.2.6:443 > 203.0.113.10:50005 protocol: tcp flags: rst frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:06.047514 192.0.2.7:443 > 203.0.113.10:50006 protocol: tcp flags: rst frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:07.055433 192.0.2.8:443 > 203.0.113.10:50007 protocol: tcp flags: rst frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:08.063352 192.0.2.9:443 > 203.0.113.10:50008 protocol: tcp flags: rst frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:09.071271 192.0.2.10:443 > 203.0.113.10:50009 protocol: tcp flags: rst frag: 0  packets: 1 size: 60 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:10.079190 198.51.100.1:123 > 203.0.113.10:40000 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:11.087109 198.51.100.2:123 > 203.0.113.10:40001 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:12.095028 198.51.100.3:123 > 203.0.113.10:40002 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:13.102947 198.51.100.4:123 > 203.0.113.10:40003 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:14.110866 198.51.100.5:123 > 203.0.113.10:40004 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:15.118785 198.51.100.6:123 > 203.0.113.10:40005 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:16.126704 203.0.113.200:60000 > 203.0.113.10:40100 protocol: udp frag: 0  packets: 1 size: 120 bytes ttl: 54 sample ratio: 1024  
+2026-10-19 14:02:17.134623 203.0.113.201:60001 > 203.0.113.10:40101 protocol: udp frag: 0  packets: 1 size: 120 bytes ttl: 54 sample ratio: 1024  
+
+
+Flow dump
+

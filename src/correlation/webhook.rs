@@ -55,7 +55,7 @@ pub struct WebhookAdapter {
 
     /// Optional normalization map for the `vector` string extracted from payload.
     /// Keys are the raw detector strings, values are prefixd vector names
-    /// (udp_flood, syn_flood, ack_flood, icmp_flood, unknown).
+    /// (udp_flood, udp_amplification, syn_flood, ack_flood, icmp_flood, unknown).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub vector_map: HashMap<String, String>,
 
@@ -153,6 +153,10 @@ pub struct WebhookFieldMap {
     pub source_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_dst_ports: Option<String>,
+    /// JSONPath to an array of UDP source ports, ranked by the detector.
+    /// Read on bans only; a non-port entry is a per-event error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_src_ports: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
 }
@@ -263,6 +267,7 @@ pub struct CompiledAdapter {
     pub confidence: Option<JsonPath>,
     pub source_id: Option<JsonPath>,
     pub top_dst_ports: Option<JsonPath>,
+    pub top_src_ports: Option<JsonPath>,
     pub action: Option<JsonPath>,
     pub transforms: HashMap<String, CompiledTransform>,
 }
@@ -311,6 +316,7 @@ impl CompiledAdapter {
             confidence: compile_opt("confidence", &adapter.fields.confidence)?,
             source_id: compile_opt("source_id", &adapter.fields.source_id)?,
             top_dst_ports: compile_opt("top_dst_ports", &adapter.fields.top_dst_ports)?,
+            top_src_ports: compile_opt("top_src_ports", &adapter.fields.top_src_ports)?,
             action: compile_opt("action", &adapter.fields.action)?,
             transforms: compile_transforms(&adapter.transforms)?,
         })
@@ -522,6 +528,29 @@ fn map_one(
         }
     };
 
+    // Source ports matter only for a ban; a bad value never blocks an unban.
+    let top_src_ports = match compiled
+        .top_src_ports
+        .as_ref()
+        .and_then(|p| p.query(node).at_most_one().ok().flatten())
+    {
+        Some(value) if action == "ban" && !value.is_null() => Some(
+            value
+                .as_array()
+                .and_then(|ports| {
+                    ports
+                        .iter()
+                        .map(|port| port.as_u64().and_then(|port| u16::try_from(port).ok()))
+                        .collect::<Option<Vec<u16>>>()
+                })
+                .ok_or(MapError::WrongType {
+                    field: "top_src_ports",
+                    expected: "array of ports 0-65535",
+                })?,
+        ),
+        _ => None,
+    };
+
     Ok(AttackEventInput {
         event_id,
         timestamp,
@@ -531,7 +560,7 @@ fn map_one(
         bps,
         pps,
         top_dst_ports,
-        top_src_ports: None,
+        top_src_ports,
         confidence,
         action,
         raw_details: Some(node.clone()),
@@ -685,6 +714,7 @@ mod tests {
                 confidence: Some("$.score".into()),
                 source_id: Some("$.id".into()),
                 top_dst_ports: Some("$.ports".into()),
+                top_src_ports: Some("$.src_ports".into()),
                 action: Some("$.action".into()),
             },
             vector_map: HashMap::new(),
@@ -705,6 +735,58 @@ mod tests {
         assert!(!is_valid_name("has space"));
         assert!(!is_valid_name("has/slash"));
         assert!(!is_valid_name(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn maps_top_src_ports_and_amplification_vector() {
+        let mut adapter = basic_adapter();
+        adapter
+            .vector_map
+            .insert("NTP_AMP".into(), "udp_amplification".into());
+        let compiled = CompiledAdapter::compile(&adapter).unwrap();
+        let body = |src_ports: Value, action: &str| {
+            json!({
+                "target": { "ip": "203.0.113.5" },
+                "alert_type": "NTP_AMP",
+                "src_ports": src_ports,
+                "action": action,
+            })
+        };
+        let map = |body: Value| map_payload(&adapter, &compiled, &body).remove(0);
+
+        let event = map(body(json!([123, 11211]), "ban")).unwrap();
+        assert_eq!(event.vector, AttackVector::UdpAmplification);
+        assert_eq!(event.top_src_ports, Some(vec![123, 11211]));
+        // Absent or null stays absent; an empty list stays empty.
+        let event = map(json!({ "target": { "ip": "203.0.113.5" } })).unwrap();
+        assert_eq!(event.top_src_ports, None);
+        assert_eq!(map(body(json!(null), "ban")).unwrap().top_src_ports, None);
+        assert_eq!(
+            map(body(json!([]), "ban")).unwrap().top_src_ports,
+            Some(vec![])
+        );
+        // A malformed list fails the event rather than shrinking.
+        for bad in [
+            json!([123, 70000]),
+            json!(["123"]),
+            json!([-1]),
+            json!("123"),
+        ] {
+            let error = map(body(bad.clone(), "ban")).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    MapError::WrongType {
+                        field: "top_src_ports",
+                        ..
+                    }
+                ),
+                "{bad}"
+            );
+            // An unban never fails on it.
+            let event = map(body(bad, "unban")).unwrap();
+            assert_eq!(event.top_src_ports, None);
+        }
     }
 
     #[test]

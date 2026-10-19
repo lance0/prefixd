@@ -65,12 +65,13 @@ webhook_adapters:
       confidence: "$.score"
       source_id: "$.id"
       top_dst_ports: "$.ports"
+      top_src_ports: "$.reflectors.ports"
       action: "$.action"
     vector_map:
       UDP_FLOOD: udp_flood
       SYN_FLOOD: syn_flood
-      DNS_AMP: dns_amp
-      NTP_AMP: ntp_amp
+      DNS_AMP: udp_amplification
+      NTP_AMP: udp_amplification
     default_vector: unknown
     confidence_scale: 100
     source_id_prefix: "radware-"
@@ -120,6 +121,16 @@ A sample payload, after Radware-side HMAC:
       "ports": [53, 123],
       "score": 87,
       "action": "ban"
+    },
+    {
+      "id": "alert-12346",
+      "time": "2026-04-18T19:24:00Z",
+      "alert_type": "NTP_AMP",
+      "target": { "ip": "203.0.113.11" },
+      "traffic": { "bps": 9600000000, "pps": 2500000 },
+      "reflectors": { "ports": [123] },
+      "score": 92,
+      "action": "ban"
     }
   ]
 }
@@ -129,9 +140,10 @@ prefixd resolves the mapping in order:
 
 1. **`root_path: "$.alerts[*]"`** iterates the array, producing one `AttackEventInput` per alert.
 2. **`fields.victim_ip: "$.target.ip"`** extracts the victim IP (relative to each alert node).
-3. **`vector_map`** translates `UDP_FLOOD` → `udp_flood` (falls back to `default_vector: unknown` if missing).
-4. **`confidence_scale: 100`** divides the extracted `score` (87) to produce `0.87`.
-5. **`source_id_prefix`** prepends `radware-` to `alert-12345` for the event ID.
+3. **`vector_map`** translates `UDP_FLOOD` → `udp_flood` and `NTP_AMP` → `udp_amplification` (falls back to `default_vector: unknown` if missing). Vector names must be ones prefixd accepts; an unknown name such as `ntp_amp` falls back to `default_vector`.
+4. **`fields.top_src_ports`** copies the reflector source ports (`[123]`) into the second event's `top_src_ports`. prefixd keeps only ports in its [reflector-port library](../../reference/configuration.md#amplification), and handles the event as `udp_flood` when none remain or no `udp_amplification` playbook exists. The default library includes 53, so a source-port rule containing it also drops the victim's replies from external DNS resolvers. The field is read on bans only, and anything other than an array of ports 0–65535 is a per-event error.
+5. **`confidence_scale: 100`** divides the extracted `score` (87) to produce `0.87`.
+6. **`source_id_prefix`** prepends `radware-` to `alert-12345` for the event ID.
 
 The adapter then calls the standard `handle_ban` path, which runs guardrails, correlation, and FlowSpec announcement exactly as if the event had come from the native API.
 
@@ -183,6 +195,7 @@ The adapter uses RFC 9535 JSONPath (`serde_json_path`):
 | HTTP 200 with per-event `results[].status="error"` and `"invalid IP address"` | `victim_ip` extracted but didn't parse as an IP — check for port suffixes or extra whitespace |
 | HTTP 200 with per-event `results[].status="error"` and `"invalid value for field 'action'"` | Payload contained an `action` field with something other than `"ban"` or `"unban"` |
 | Events appear but `vector: unknown` | Raw vector string isn't in `vector_map`; add it, or accept `default_vector` |
+| HTTP 200 with per-event `results[].status="error"` and `"field 'top_src_ports' has wrong type"` | The `top_src_ports` JSONPath matched something other than an array of integers 0–65535 |
 | Confidence always 1.0 | `confidence_scale` missing or mis-set; detectors that emit 0–100 need `confidence_scale: 100` |
 
 Mapping failures never fail the whole batch — they produce per-event `status: "error"` entries with the error message inline, and the overall HTTP status stays `200` so the sender doesn't retry valid events in the same payload.

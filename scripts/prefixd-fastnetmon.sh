@@ -166,6 +166,45 @@ elif grep -qE '(^|[^[:alnum:]])udp([^[:alnum:]]|$)' <<< "$RAW_SIGNAL"; then
     VECTOR="udp_flood"
 fi
 
+# Reflector source ports (ADR 028). FastNetMon writes one line per sampled
+# packet between "Attack traffic dump" and "Flow dump", such as
+#   2026-10-19 12:00:00.000000 192.0.2.1:123 > 198.51.100.7:40000 protocol: udp frag: 0  packets: 1 size: 468 bytes ttl: 54 sample ratio: 1
+# Sum sampled UDP packets per source port and keep ports whose share is at
+# least PREFIXD_SRC_PORT_MIN_SHARE, ranked by share, at most 64. prefixd keeps
+# only ports in its reflector-port library. Any parse trouble leaves the
+# vector as udp_flood with no ports.
+SRC_PORTS=""
+if [[ "$VECTOR" == "udp_flood" ]]; then
+    SRC_PORTS=$(printf '%s\n' "$RAW_DETAILS" | awk -v share="${PREFIXD_SRC_PORT_MIN_SHARE:-0.2}" '
+        BEGIN { if (share !~ /^(0?\.[0-9]+|1(\.0*)?)$/ || share + 0 <= 0) exit 1 }
+        /^Attack traffic dump/ { dump = 1; next }
+        /^Flow dump/ { dump = 0 }
+        !dump { next }
+        {
+            src = ""; proto = ""; packets = ""
+            for (i = 2; i < NF; i++) {
+                if ($i == ">") src = $(i - 1)
+                else if ($i == "protocol:") proto = $(i + 1)
+                else if ($i == "packets:") packets = $(i + 1)
+            }
+            if (proto != "udp" || packets !~ /^[0-9]+$/) next
+            n = split(src, part, ":")
+            port = part[n]
+            if (n < 2 || port !~ /^[0-9]+$/ || port + 0 > 65535) next
+            count[port + 0] += packets
+            total += packets
+        }
+        END {
+            if (total <= 0) exit
+            for (port in count) if (count[port] >= share * total) print count[port], port
+        }' | sort -k1,1nr -k2,2n | head -n 64 | awk '{ printf "%s%s", sep, $2; sep = "," }') || SRC_PORTS=""
+    if [[ "$SRC_PORTS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        VECTOR="udp_amplification"
+    else
+        SRC_PORTS=""
+    fi
+fi
+
 # Build JSON payload
 TIMESTAMP=$(date -u +%FT%TZ)
 
@@ -180,6 +219,7 @@ if command -v jq &> /dev/null; then
         --argjson pps "${PPS:-0}" \
         --arg raw "$RAW_DETAILS" \
         --arg direction "$DIRECTION" \
+        --arg src_ports "$SRC_PORTS" \
         '{
             event_id: $event_id,
             timestamp: $timestamp,
@@ -193,10 +233,12 @@ if command -v jq &> /dev/null; then
                 direction: $direction,
                 original_action: $action
             }
-        }')
+        } + (if $src_ports == "" then {} else {top_src_ports: ($src_ports | split(",") | map(tonumber))} end)')
 else
     # Fallback: manual JSON construction (escape raw details)
     RAW_ESCAPED=$(echo "$RAW_DETAILS" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\n/\\n/g' | tr '\n' ' ')
+    SRC_PORTS_FIELD=""
+    [[ -n "$SRC_PORTS" ]] && SRC_PORTS_FIELD="\"top_src_ports\": [$SRC_PORTS],"
     PAYLOAD=$(cat <<EOF
 {
     "event_id": "$EVENT_ID",
@@ -204,6 +246,7 @@ else
     "source": "fastnetmon",
     "victim_ip": "$IP",
     "vector": "$VECTOR",
+    $SRC_PORTS_FIELD
     "action": "$API_ACTION",
     "pps": ${PPS:-0},
     "raw_details": {
