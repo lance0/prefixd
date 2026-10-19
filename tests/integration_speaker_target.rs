@@ -85,7 +85,7 @@ fn mitigation(pop: &str, ip: &str) -> Mitigation {
                 ..Default::default()
             },
             action_type: ActionType::Discard,
-            action_params: ActionParams { rate_bps: None },
+            action_params: ActionParams::default(),
             ttl_seconds: 600,
             reason: "ownership test".into(),
         },

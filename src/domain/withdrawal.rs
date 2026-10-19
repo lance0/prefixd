@@ -54,6 +54,14 @@ impl MitigationRoute {
         }
     }
 
+    /// Error-message noun for this kind.
+    fn noun(&self) -> &'static str {
+        match self {
+            Self::FlowSpec(_) => "FlowSpec rule",
+            Self::Blackhole { .. } => "blackhole route",
+        }
+    }
+
     /// Kind-discriminated: a blackhole never shares a key with a FlowSpec rule.
     pub fn ownership_key(&self) -> String {
         match self {
@@ -71,6 +79,13 @@ impl MitigationRoute {
 }
 
 const FLOWSPEC_KIND: &str = "flowspec";
+const BLACKHOLE_KIND: &str = "blackhole";
+
+/// The route a withdrawal deletes, parsed from its intent with identity checked.
+enum PersistedRoute {
+    FlowSpec(FlowSpecRule),
+    Blackhole(super::BlackholeRule),
+}
 
 fn not_flowspec(kind: &str) -> PrefixdError {
     PrefixdError::Internal(format!("{kind} route cannot use a FlowSpec path"))
@@ -110,14 +125,29 @@ impl WithdrawalRequest {
         reason: String,
         speaker_delete_required: bool,
     ) -> Result<Self> {
-        let rule = mitigation_rule(mitigation)?;
+        // A blackhole records its frozen route, never one rebuilt from configuration.
+        let (nlri_hash, rule_kind, rule_json) = match MitigationRoute::of(mitigation) {
+            MitigationRoute::FlowSpec(rule) => (
+                rule.nlri_hash(),
+                FLOWSPEC_KIND,
+                serde_json::to_string(&rule)?,
+            ),
+            MitigationRoute::Blackhole { .. } => {
+                let rule = super::blackhole_rule(mitigation)?;
+                (
+                    rule.identity(),
+                    BLACKHOLE_KIND,
+                    serde_json::to_string(&rule)?,
+                )
+            }
+        };
         Ok(Self {
             operation_id: Uuid::new_v4(),
             mitigation_id: mitigation.mitigation_id,
             pop: mitigation.pop.clone(),
-            nlri_hash: rule.nlri_hash(),
-            rule_kind: FLOWSPEC_KIND.into(),
-            rule_json: serde_json::to_string(&rule)?,
+            nlri_hash,
+            rule_kind: rule_kind.into(),
+            rule_json,
             mitigation_updated_at: mitigation.updated_at,
             terminal_status: if expired { "expired" } else { "withdrawn" }.into(),
             speaker_delete_required,
@@ -161,6 +191,50 @@ impl WithdrawalRequest {
             return Err(not_flowspec(&self.rule_kind));
         }
         Ok(serde_json::from_str(&self.rule_json)?)
+    }
+
+    /// The persisted route of either kind; an unknown kind or a rule whose
+    /// identity differs from `nlri_hash` fails closed.
+    fn persisted_route(&self) -> Result<PersistedRoute> {
+        let (route, identity) = match self.rule_kind.as_str() {
+            FLOWSPEC_KIND => {
+                let rule = self.flowspec_rule()?;
+                let identity = rule.nlri_hash();
+                (PersistedRoute::FlowSpec(rule), identity)
+            }
+            BLACKHOLE_KIND => {
+                let rule: super::BlackholeRule = serde_json::from_str(&self.rule_json)?;
+                let identity = rule.identity();
+                (PersistedRoute::Blackhole(rule), identity)
+            }
+            kind => {
+                return Err(PrefixdError::Internal(format!(
+                    "unknown withdrawal rule kind {kind:?}"
+                )));
+            }
+        };
+        if identity != self.nlri_hash {
+            return Err(PrefixdError::Internal(
+                "withdrawal rule identity does not match persisted intent".into(),
+            ));
+        }
+        Ok(route)
+    }
+
+    /// The ownership key this pending deletion blocks, for either kind.
+    pub fn ownership_key(&self) -> Result<String> {
+        Ok(match self.persisted_route()? {
+            PersistedRoute::FlowSpec(rule) => ownership_key(&rule),
+            PersistedRoute::Blackhole(rule) => rule.identity(),
+        })
+    }
+}
+
+/// The identity a withdrawal request records for `mitigation`'s route.
+fn request_identity(mitigation: &Mitigation) -> Result<String> {
+    match MitigationRoute::of(mitigation) {
+        MitigationRoute::FlowSpec(rule) => Ok(rule.nlri_hash()),
+        MitigationRoute::Blackhole { .. } => Ok(super::blackhole_rule(mitigation)?.identity()),
     }
 }
 
@@ -215,11 +289,8 @@ pub async fn find_mitigation_owner(
     route: &MitigationRoute,
     scope_hash: &str,
 ) -> Result<Option<Mitigation>> {
-    let MitigationRoute::FlowSpec(rule) = route else {
-        return Err(not_flowspec(route.kind()));
-    };
     let pending = repo.pending_withdrawals(Some(pop)).await?;
-    let key = ownership_key(rule);
+    let key = route.ownership_key();
     let owners: Vec<_> = repo
         .active_mitigations_for_pop(pop)
         .await?
@@ -231,21 +302,22 @@ pub async fn find_mitigation_owner(
         })
         .collect();
     for request in pending {
-        let pending_rule = request.flowspec_rule()?;
-        if ownership_key(&pending_rule) == key
+        if request.ownership_key()? == key
             || owners
                 .iter()
                 .any(|owner| owner.mitigation_id == request.mitigation_id)
         {
-            return Err(PrefixdError::Conflict(
-                "FlowSpec rule has a pending withdrawal".into(),
-            ));
+            return Err(PrefixdError::Conflict(format!(
+                "{} has a pending withdrawal",
+                route.noun()
+            )));
         }
     }
     if owners.len() > 1 {
-        return Err(PrefixdError::Conflict(
-            "FlowSpec rule has multiple active owners".into(),
-        ));
+        return Err(PrefixdError::Conflict(format!(
+            "{} has multiple active owners",
+            route.noun()
+        )));
     }
     Ok(owners.into_iter().next())
 }
@@ -261,13 +333,15 @@ async fn check_withdrawal_owner(
     if !current.is_active()
         || current.pop != request.pop
         || current.updated_at != request.mitigation_updated_at
-        || mitigation_rule(&current)?.nlri_hash() != request.nlri_hash
+        || MitigationRoute::of(&current).kind() != request.rule_kind
+        || request_identity(&current)? != request.nlri_hash
     {
         return Err(PrefixdError::Conflict(
             "withdrawal intent no longer matches mitigation".into(),
         ));
     }
-    let key = MitigationRoute::of(&current).ownership_key();
+    let route = MitigationRoute::of(&current);
+    let key = route.ownership_key();
     let now = Utc::now();
     if repo
         .active_mitigations_for_pop(&request.pop)
@@ -279,9 +353,10 @@ async fn check_withdrawal_owner(
                 && MitigationRoute::of(owner).ownership_key() == key
         })
     {
-        return Err(PrefixdError::Conflict(
-            "FlowSpec rule has another active owner".into(),
-        ));
+        return Err(PrefixdError::Conflict(format!(
+            "{} has another active owner",
+            route.noun()
+        )));
     }
     Ok(())
 }
@@ -351,18 +426,31 @@ async fn finish_withdrawal_request(
         ));
     }
     check_withdrawal_owner(repo, &request).await?;
-    let rule = request.flowspec_rule()?;
-    if rule.nlri_hash() != request.nlri_hash {
-        return Err(PrefixdError::Internal(
-            "withdrawal rule identity does not match persisted intent".into(),
-        ));
-    }
+    let route = request.persisted_route()?;
     let start = std::time::Instant::now();
     if request.speaker_delete_required
         && let Some(announcer) = announcer
     {
-        announcer.match_support().require(&rule.nlri)?;
-        announcer.withdraw(&rule).await?;
+        // Each kind deletes only its own persisted route; an error keeps the intent pending.
+        match &route {
+            PersistedRoute::FlowSpec(rule) => {
+                announcer.match_support().require(&rule.nlri)?;
+                announcer.withdraw(rule).await?
+            }
+            PersistedRoute::Blackhole(rule) => {
+                rule.require_unleased()?;
+                announcer
+                    .blackhole()
+                    .ok_or_else(|| {
+                        PrefixdError::Conflict(
+                            "pending blackhole withdrawal requires a blackhole-capable speaker"
+                                .into(),
+                        )
+                    })?
+                    .withdraw_blackhole(&rule.prefix)
+                    .await?
+            }
+        }
     }
     let rpc_seconds = start.elapsed().as_secs_f64();
     let mitigation = repo.finish_withdrawal(&request).await?.ok_or_else(|| {
@@ -464,7 +552,7 @@ mod tests {
                     ..Default::default()
                 },
                 action_type: ActionType::Discard,
-                action_params: ActionParams { rate_bps: None },
+                action_params: ActionParams::default(),
                 ttl_seconds: 60,
                 reason: "test".into(),
             },
@@ -744,8 +832,14 @@ mod tests {
                 [(ActionType::Discard, None), (ActionType::Police, Some(8))]
             {
                 assert_eq!(criteria.scope_hash_for(action_type), scope);
-                let route =
-                    MitigationRoute::new(action_type, &criteria, &ActionParams { rate_bps });
+                let route = MitigationRoute::new(
+                    action_type,
+                    &criteria,
+                    &ActionParams {
+                        rate_bps,
+                        ..Default::default()
+                    },
+                );
                 assert_eq!(route.kind(), "flowspec");
                 assert_eq!(route.ownership_key(), owner);
                 let rule = route.into_flowspec().unwrap();
@@ -790,8 +884,14 @@ mod tests {
                 [(ActionType::Discard, None), (ActionType::Police, Some(8))]
             {
                 assert_eq!(criteria.scope_hash_for(action_type), pinned);
-                let route =
-                    MitigationRoute::new(action_type, &criteria, &ActionParams { rate_bps });
+                let route = MitigationRoute::new(
+                    action_type,
+                    &criteria,
+                    &ActionParams {
+                        rate_bps,
+                        ..Default::default()
+                    },
+                );
                 assert_eq!(route.ownership_key(), pinned);
                 assert_eq!(route.into_flowspec().unwrap().nlri_hash(), pinned);
             }
@@ -823,11 +923,8 @@ mod tests {
         let mut other = criteria.clone();
         other.src_ports = vec![123, 53];
         let identities = |criteria: &MatchCriteria| {
-            let route = MitigationRoute::new(
-                ActionType::Discard,
-                criteria,
-                &ActionParams { rate_bps: None },
-            );
+            let route =
+                MitigationRoute::new(ActionType::Discard, criteria, &ActionParams::default());
             [
                 criteria.compute_scope_hash(),
                 route.ownership_key(),
@@ -902,13 +999,9 @@ mod tests {
         let writer = MockAnnouncer::new();
         let mut criteria = amplification_criteria("192.0.2.10/32");
         criteria.src_ports = vec![389, 123, 123];
-        let rule = MitigationRoute::new(
-            ActionType::Discard,
-            &criteria,
-            &ActionParams { rate_bps: None },
-        )
-        .into_flowspec()
-        .unwrap();
+        let rule = MitigationRoute::new(ActionType::Discard, &criteria, &ActionParams::default())
+            .into_flowspec()
+            .unwrap();
         let read_back = FlowSpecNlri {
             src_ports: vec![123, 389],
             ..FlowSpecNlri::from(&amplification_criteria("192.0.2.10/32"))
@@ -1084,7 +1177,8 @@ mod tests {
         repo.insert_mitigation(&blackhole).await.unwrap();
 
         assert!(mitigation_rule(&blackhole).is_err());
-        assert!(
+        // Kind-aware ownership finds the blackhole row, never the FlowSpec rule.
+        assert_eq!(
             find_mitigation_owner(
                 &repo,
                 "test",
@@ -1092,8 +1186,11 @@ mod tests {
                 &blackhole.scope_hash
             )
             .await
-            .is_err()
+            .unwrap()
+            .map(|owner| owner.mitigation_id),
+            Some(blackhole.mitigation_id)
         );
+        // A row without its frozen route cannot form withdrawal intent.
         assert!(
             request_withdrawal(
                 &repo,

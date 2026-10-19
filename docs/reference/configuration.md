@@ -628,6 +628,7 @@ prefixd validates every key at load, even when `enabled` is false, and
 unknown keys in `blackhole` fail configuration loading. Scope routes in the
 receiving router's import policy or the speaker's export policy, not with
 `NO_EXPORT` at injection. Each POP's controller sets its own block. A
+blackhole keeps the next hop and communities it was admitted with, so a
 configuration change affects only new blackholes.
 
 Blackhole guardrails are stricter than FlowSpec's and do not use the

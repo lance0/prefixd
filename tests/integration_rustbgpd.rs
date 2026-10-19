@@ -280,7 +280,7 @@ async fn live_rustbgpd_ttl_reconciliation() {
                     ..Default::default()
                 },
                 action_type: ActionType::Discard,
-                action_params: ActionParams { rate_bps: None },
+                action_params: ActionParams::default(),
                 ttl_seconds: 30,
                 reason: "live TTL test".into(),
             },
@@ -417,7 +417,10 @@ async fn live_rustbgpd_restart_recovers_with_the_same_client_and_desired_state()
                     ..Default::default()
                 },
                 action_type,
-                action_params: ActionParams { rate_bps },
+                action_params: ActionParams {
+                    rate_bps,
+                    ..Default::default()
+                },
                 ttl_seconds: 300,
                 reason: "restart test".into(),
             },
@@ -676,4 +679,136 @@ async fn live_rustbgpd_owner_socket_lifecycle_and_recreation() {
 #[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
 async fn live_rustbgpd_native_mtls_lifecycle_and_rejected_credentials() {
     secure_controller_lifecycle("mtls").await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
+async fn live_rustbgpd_blackhole_enforced_lifecycle_restart_repair_and_expiry() {
+    use prefixd::{
+        config::{Customer, Inventory, PolicyProfile},
+        db::{MockRepository, RepositoryTrait},
+        domain::{ActionParams, ActionType, MatchCriteria, MitigationIntent, MitigationStatus},
+        scheduler::ReconciliationLoop,
+    };
+    use std::sync::Arc;
+
+    let fixture = fixture::Speaker::start().await;
+    let speaker = Arc::new(fixture.connect().await);
+    let repo = Arc::new(MockRepository::new());
+    let mut settings = fixture_settings(&fixture, "blackhole-live");
+    settings.blackhole = prefixd::config::BlackholeConfig {
+        enabled: true,
+        next_hop_ipv4: Some("192.0.2.66".parse().unwrap()),
+        next_hop_ipv6: Some("2001:db8::66".parse().unwrap()),
+        communities: vec!["64512:1".into()],
+        ..Default::default()
+    };
+    let binding = repo
+        .register_speaker_target(
+            &settings.pop,
+            &prefixd::domain::SpeakerTarget::from_config(&settings.bgp).unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+    repo.insert_safelist("198.18.0.0/15", "config", None)
+        .await
+        .unwrap();
+    prefixd::guardrails::check_blackhole_startup(
+        &settings.blackhole,
+        speaker.as_ref(),
+        repo.as_ref(),
+    )
+    .await
+    .unwrap();
+    let inventory = Inventory::new(vec![Customer {
+        customer_id: "blackhole-live".into(),
+        name: "Blackhole live test".into(),
+        prefixes: vec!["192.0.2.0/24".into(), "2001:db8::/48".into()],
+        policy_profile: PolicyProfile::Normal,
+        services: vec![],
+    }]);
+    let routes = || async {
+        speaker
+            .blackhole()
+            .unwrap()
+            .list_blackholes()
+            .await
+            .unwrap()
+            .routes
+    };
+    let mut admitted = Vec::new();
+    for prefix in ["192.0.2.241/32", "2001:db8::241/128"] {
+        let admission = prefixd::guardrails::admit_blackhole(
+            repo.as_ref(),
+            &settings,
+            &inventory,
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: settings.pop.clone(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: prefix.into(),
+                    ..Default::default()
+                },
+                action_type: ActionType::Blackhole,
+                action_params: ActionParams::default(),
+                ttl_seconds: 600,
+                reason: "live blackhole lifecycle".into(),
+            },
+            &prefixd::observability::CreationActor::Operator("admin".into()),
+            speaker.as_ref(),
+            Some(&binding),
+        )
+        .await
+        .unwrap();
+        assert!(!admission.unconfirmed);
+        // Retained local intent holds exactly the frozen route.
+        let frozen = prefixd::domain::blackhole_rule(&admission.mitigation)
+            .unwrap()
+            .route()
+            .unwrap();
+        assert!(routes().await.contains(&frozen));
+        admitted.push((admission.mitigation, frozen));
+    }
+    assert_eq!(routes().await.len(), 2);
+
+    // A daemon restart loses local intent; reconciliation re-adds the frozen routes.
+    fixture.container.stop_with_timeout(Some(0)).await.unwrap();
+    fixture.container.start().await.unwrap();
+    fixture.ready().await;
+    assert!(routes().await.is_empty());
+    let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+        .with_speaker_binding(binding);
+    reconciler.reconcile().await.unwrap();
+    let restored = routes().await;
+    assert_eq!(restored.len(), 2);
+    for (_, frozen) in &admitted {
+        assert!(restored.contains(frozen));
+    }
+
+    // TTL expiry withdraws through the immutable withdrawal path.
+    for (mitigation, _) in &admitted {
+        let mut expired = repo
+            .get_mitigation(mitigation.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        expired.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        repo.update_mitigation(&expired).await.unwrap();
+    }
+    reconciler.reconcile().await.unwrap();
+    assert!(routes().await.is_empty());
+    for (mitigation, _) in &admitted {
+        assert_eq!(
+            repo.get_mitigation(mitigation.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MitigationStatus::Expired
+        );
+    }
+    assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
 }

@@ -170,7 +170,7 @@ async fn action_reconciliation_rejects_port_order_alias_without_mutation() {
                         ..Default::default()
                     },
                     action_type: ActionType::Discard,
-                    action_params: ActionParams { rate_bps: None },
+                    action_params: ActionParams::default(),
                     ttl_seconds: 300,
                     reason: "port order alias qualification".into(),
                 },
@@ -345,6 +345,7 @@ async fn restart_recovers_through_the_same_client_and_reconciler() {
                 action_type: rule.actions[0].action_type,
                 action_params: ActionParams {
                     rate_bps: rule.actions[0].rate_bps,
+                    ..Default::default()
                 },
                 ttl_seconds: 300,
                 reason: "speaker restart qualification".into(),

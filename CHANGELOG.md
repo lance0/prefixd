@@ -44,6 +44,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the mock. The controller refuses a rule with a component the selected
   speaker cannot encode before persisting it or sending any RPC, in dry-run
   too. Nothing creates these matches yet.
+- Blackhole lifecycle and reconciliation (ADR 027), callable by the manual
+  creation path that a later release exposes. Enforced admission freezes the
+  next hop and communities into the row, returns `409` for a live owner, a
+  pending withdrawal or an untracked local route at the prefix, persists, then
+  adds the route. The safelist is rechecked before every add: a failed lookup
+  sends nothing, and a victim safelisted since admission is withdrawn with the
+  reason `safelisted after admission` and counted in
+  `prefixd_mitigations_withdrawn_total{reason="safelisted"}`. Withdrawal,
+  TTL expiry and repair use the frozen route; withdrawal intent records
+  `rule_kind` `blackhole`. Reconciliation repairs missing blackholes in a
+  stage separate from FlowSpec and reports, without touching, local routes it
+  does not own in the new `prefixd_unknown_local_routes{kind}` gauge
+  (`blackhole` and `flowspec`). Blackhole and FlowSpec pending withdrawals
+  and read failures do not block each other.
 
 - Fence duplicate controllers with a PostgreSQL session advisory lock (ADR
   027). Each controller derives an owner from its POP and registered speaker

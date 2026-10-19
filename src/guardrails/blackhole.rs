@@ -8,7 +8,11 @@ use uuid::Uuid;
 use crate::bgp::FlowSpecAnnouncer;
 use crate::config::{BlackholeConfig, Inventory, OperationMode, Settings};
 use crate::db::RepositoryTrait;
-use crate::domain::{ActionType, AttackVector, Mitigation, MitigationIntent};
+use crate::domain::{
+    ActionType, AttackVector, BlackholeAnnouncement, BlackholeRule, Mitigation, MitigationIntent,
+    MitigationRoute, VerifiedSpeakerBinding, announce_blackhole, find_mitigation_owner,
+    refuse_untracked_route,
+};
 use crate::error::{GuardrailError, PrefixdError, Result};
 use crate::observability::CreationActor;
 
@@ -108,18 +112,34 @@ fn check_intent(config: &BlackholeConfig, intent: &MitigationIntent) -> Result<I
     Ok(victim)
 }
 
+/// The result of `admit_blackhole`.
+#[derive(Debug)]
+pub struct BlackholeAdmission {
+    pub mitigation: Mitigation,
+    /// Enforced intent was committed, but this request did not see the add
+    /// accepted: the add failed, the safelist lookup failed, or the victim was
+    /// safelisted meanwhile and the row withdrawn. Reconciliation retries a
+    /// retained row. Always false in dry-run, which sends nothing.
+    pub unconfirmed: bool,
+}
+
 /// Shared manual-blackhole admission: the caller holds the lifecycle mutex and has
 /// already authorized the request. The victim must be owned in inventory and not
-/// safelisted; quotas are enforced inside `admit_mitigation`. Dry-run persists the
-/// row with its audit entry and sends nothing. Enforced mode refuses before
-/// persistence until the lifecycle slice adds the announcement.
+/// safelisted; quotas are enforced inside `admit_mitigation`. A live owner, a
+/// pending withdrawal or (in enforced mode) an untracked local route at the
+/// prefix returns `409` before persistence. The configured next hop and
+/// communities are frozen into the row. Dry-run persists the row with its audit
+/// entry and sends nothing; enforced mode persists first, then rechecks the
+/// safelist and adds the route.
 pub async fn admit_blackhole(
     repo: &dyn RepositoryTrait,
     settings: &Settings,
     inventory: &Inventory,
     mut intent: MitigationIntent,
     actor: &CreationActor,
-) -> Result<Mitigation> {
+    announcer: &dyn FlowSpecAnnouncer,
+    binding: Option<&VerifiedSpeakerBinding>,
+) -> Result<BlackholeAdmission> {
     let config = &settings.blackhole;
     if !config.enabled {
         return Err(PrefixdError::GuardrailViolation(
@@ -138,20 +158,66 @@ pub async fn admit_blackhole(
             GuardrailError::Safelisted { ip: victim },
         ));
     }
-    if settings.mode == OperationMode::Enforced {
-        return Err(refused(
-            "enforced blackhole announcement is not available in this release",
-        ));
-    }
     intent.customer_id = Some(owner.customer_id);
     // Canonical spelling, so stored match and victim agree with the identity hash.
-    intent.match_criteria.dst_prefix = ipnet::IpNet::from(address).to_string();
+    let prefix = ipnet::IpNet::from(address);
+    intent.match_criteria.dst_prefix = prefix.to_string();
+    let route = MitigationRoute::new(
+        intent.action_type,
+        &intent.match_criteria,
+        &intent.action_params,
+    );
+    let scope_hash = intent.match_criteria.scope_hash_for(ActionType::Blackhole);
+    if find_mitigation_owner(repo, &intent.pop, &route, &scope_hash)
+        .await?
+        .is_some()
+    {
+        return Err(PrefixdError::Conflict(
+            "blackhole route already has an active owner".into(),
+        ));
+    }
+    intent.action_params.blackhole = Some(BlackholeRule::from_config(config, prefix)?);
+    let enforced = settings.mode == OperationMode::Enforced;
+    if enforced {
+        let speaker = announcer.blackhole().ok_or_else(|| {
+            PrefixdError::Config(format!(
+                "{} speaker has no blackhole capability",
+                announcer.backend()
+            ))
+        })?;
+        refuse_untracked_route(speaker, prefix).await?;
+    }
     let mut mitigation = Mitigation::from_intent(intent, victim, AttackVector::Unknown);
     mitigation.activate();
     mitigation.origin_mode = Some(settings.mode);
     repo.admit_mitigation(&mitigation, &settings.quotas, config, actor)
         .await?;
-    Ok(mitigation)
+    if !enforced {
+        return Ok(BlackholeAdmission {
+            mitigation,
+            unconfirmed: false,
+        });
+    }
+    Ok(
+        match announce_blackhole(repo, announcer, &mitigation, binding).await {
+            Ok(BlackholeAnnouncement::Announced) => BlackholeAdmission {
+                mitigation,
+                unconfirmed: false,
+            },
+            Ok(BlackholeAnnouncement::Withdrawn(mitigation)) => BlackholeAdmission {
+                mitigation: *mitigation,
+                unconfirmed: true,
+            },
+            Err(error) => {
+                tracing::warn!(mitigation_id = %mitigation.mitigation_id, error = %error,
+                    "blackhole intent retained after unconfirmed announcement");
+                BlackholeAdmission {
+                    mitigation,
+                    unconfirmed: true,
+                }
+            }
+        },
+    )
 }
 
 /// Extends a blackhole to at most `now + max_ttl_seconds`, whatever TTL the
@@ -177,9 +243,11 @@ pub fn extend_blackhole(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bgp::FaultyBlackholes;
     use crate::config::{Customer, PolicyProfile};
     use crate::db::MockRepository;
     use crate::domain::{ActionParams, MatchCriteria, MitigationStatus};
+    use std::sync::atomic::Ordering::SeqCst;
 
     fn settings() -> Settings {
         let settings: Settings = crate::config::parse_yaml(
@@ -215,7 +283,7 @@ mod tests {
                 ..Default::default()
             },
             action_type: ActionType::Blackhole,
-            action_params: ActionParams { rate_bps: None },
+            action_params: ActionParams::default(),
             ttl_seconds: 600,
             reason: "manual blackhole".into(),
         }
@@ -231,7 +299,10 @@ mod tests {
         inventory: &Inventory,
         intent: MitigationIntent,
     ) -> Result<Mitigation> {
-        admit_blackhole(repo, settings, inventory, intent, &actor()).await
+        let speaker = crate::bgp::MockAnnouncer::new();
+        admit_blackhole(repo, settings, inventory, intent, &actor(), &speaker, None)
+            .await
+            .map(|admission| admission.mitigation)
     }
 
     fn reason(error: PrefixdError) -> String {
@@ -302,17 +373,168 @@ mod tests {
         assert_eq!(audit.len(), 2);
     }
 
+    fn enforced() -> Settings {
+        let mut settings = settings();
+        settings.mode = OperationMode::Enforced;
+        settings.blackhole.communities = vec!["64512:1".into()];
+        settings
+    }
+
+    async fn admit_enforced(
+        repo: &MockRepository,
+        speaker: &FaultyBlackholes,
+        intent: MitigationIntent,
+    ) -> Result<BlackholeAdmission> {
+        let owned = inventory(&["203.0.113.0/24", "2001:db8::/48"]);
+        admit_blackhole(repo, &enforced(), &owned, intent, &actor(), speaker, None).await
+    }
+
     #[tokio::test]
-    async fn enforced_mode_refuses_before_persistence() {
-        let owned = inventory(&["203.0.113.0/24"]);
-        let mut enforced = settings();
-        enforced.mode = OperationMode::Enforced;
-        let error = rejected_then_admitted(
-            (&enforced, &owned, intent("203.0.113.10/32")),
-            (&settings(), &owned, intent("203.0.113.10/32")),
+    async fn enforced_admission_persists_then_adds_the_frozen_route() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        for (prefix, next_hop) in [
+            ("203.0.113.10/32", "192.0.2.66"),
+            ("2001:db8::10/128", "2001:db8:ffff::66"),
+        ] {
+            let admission = admit_enforced(&repo, &speaker, intent(prefix))
+                .await
+                .unwrap();
+            assert!(!admission.unconfirmed);
+            let stored = repo
+                .get_mitigation(admission.mitigation.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.origin_mode, Some(OperationMode::Enforced));
+            let frozen = crate::domain::blackhole_rule(&stored).unwrap();
+            assert_eq!(frozen.next_hop.to_string(), next_hop);
+            assert_eq!(
+                frozen.communities,
+                [(64512 << 16) | 1, crate::bgp::BLACKHOLE_COMMUNITY]
+            );
+            assert_eq!(frozen.owner, "");
+            assert!(speaker.routes().await.contains(&frozen.route().unwrap()));
+        }
+        assert_eq!(speaker.adds.load(SeqCst), 2);
+        // A failed add keeps the desired row for reconciliation and reports it unconfirmed.
+        speaker.fail_adds.store(true, SeqCst);
+        let admission = admit_enforced(&repo, &speaker, intent("203.0.113.11/32"))
+            .await
+            .unwrap();
+        assert!(admission.unconfirmed);
+        assert!(
+            repo.get_mitigation(admission.mitigation.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active()
+        );
+        assert_eq!(speaker.routes().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn untracked_local_route_returns_409_before_persistence_or_add() {
+        use crate::bgp::{BlackholeRoute, BlackholeSpeaker, UnrecognizedRoute};
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let prefix: ipnet::IpNet = "203.0.113.10/32".parse().unwrap();
+        for case in [
+            "recognized",
+            "nonzero path_id",
+            "unexpected path attributes",
+        ] {
+            let repo = MockRepository::new();
+            let speaker = FaultyBlackholes::default();
+            if case == "recognized" {
+                let route =
+                    BlackholeRoute::new(prefix, "192.0.2.99".parse().unwrap(), vec![], vec![])
+                        .unwrap();
+                speaker.inner.announce_blackhole(&route).await.unwrap();
+            } else {
+                speaker
+                    .unrecognized
+                    .lock()
+                    .unwrap()
+                    .push(UnrecognizedRoute {
+                        prefix,
+                        reason: case,
+                    });
+            }
+            let error = admit_enforced(&repo, &speaker, intent("203.0.113.10/32"))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, PrefixdError::Conflict(_)),
+                "{case}: {error}"
+            );
+            assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
+            assert_eq!(repo.count_active_global().await.unwrap(), 0, "{case}");
+            assert_eq!(speaker.adds.load(SeqCst), 0, "{case}");
+            // Negative control: another prefix is admitted and added.
+            admit_enforced(&repo, &speaker, intent("203.0.113.12/32"))
+                .await
+                .unwrap();
+            assert_eq!(speaker.adds.load(SeqCst), 1, "{case}");
+        }
+        // A failed pre-read is never an empty speaker: nothing persisted or added.
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        speaker.fail_reads.store(true, SeqCst);
+        assert!(
+            admit_enforced(&repo, &speaker, intent("203.0.113.10/32"))
+                .await
+                .is_err()
+        );
+        assert_eq!(repo.count_active_global().await.unwrap(), 0);
+        assert_eq!(speaker.adds.load(SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn live_owner_and_pending_withdrawal_return_409_without_add() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        let first = admit_enforced(&repo, &speaker, intent("203.0.113.10/32"))
+            .await
+            .unwrap()
+            .mitigation;
+        let error = admit_enforced(&repo, &speaker, intent("203.0.113.10/32"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PrefixdError::Conflict(_)), "{error}");
+        assert!(error.to_string().contains("active owner"), "{error}");
+        speaker.withdraw_fault.store(1, SeqCst);
+        let request = crate::domain::request_withdrawal(
+            &repo,
+            &first,
+            false,
+            "operator",
+            "alice",
+            "test".into(),
+            true,
+            None,
         )
-        .await;
-        assert!(reason(error).contains("enforced"));
+        .await
+        .unwrap();
+        assert!(
+            crate::domain::execute_withdrawal(&repo, &speaker, false, &request, None)
+                .await
+                .is_err()
+        );
+        let error = admit_enforced(&repo, &speaker, intent("203.0.113.10/32"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PrefixdError::Conflict(_)), "{error}");
+        assert!(error.to_string().contains("pending withdrawal"), "{error}");
+        assert_eq!(speaker.adds.load(SeqCst), 1);
+        assert_eq!(repo.count_active_global().await.unwrap(), 1);
     }
 
     #[tokio::test]

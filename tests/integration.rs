@@ -377,7 +377,7 @@ async fn test_repair_yields_to_operator_and_rechecks_stale_candidate() {
                     ..Default::default()
                 },
                 action_type: ActionType::Discard,
-                action_params: ActionParams { rate_bps: None },
+                action_params: ActionParams::default(),
                 ttl_seconds: 600,
                 reason: "test".into(),
             },
@@ -489,7 +489,7 @@ async fn test_authenticated_single_and_bulk_withdrawals_record_session_actor() {
                     ..Default::default()
                 },
                 action_type: ActionType::Discard,
-                action_params: ActionParams { rate_bps: None },
+                action_params: ActionParams::default(),
                 ttl_seconds: 600,
                 reason: "test".into(),
             },
@@ -651,7 +651,7 @@ async fn test_foreign_pop_cannot_delete_local_rule_or_receive_local_repair() {
                 ..Default::default()
             },
             action_type: ActionType::Discard,
-            action_params: ActionParams { rate_bps: None },
+            action_params: ActionParams::default(),
             ttl_seconds: 600,
             reason: "local".into(),
         },
@@ -833,7 +833,7 @@ async fn test_disjoint_detector_ports_reject_without_mutating_mitigations_or_spe
                                 ..Default::default()
                             },
                             action_type: ActionType::Discard,
-                            action_params: ActionParams { rate_bps: None },
+                            action_params: ActionParams::default(),
                             ttl_seconds: 30,
                             reason: "existing owner".into(),
                         },
@@ -935,7 +935,7 @@ async fn test_canonical_owner_preflight_preserves_existing_rule_and_reuses_detec
                 ..Default::default()
             },
             action_type: ActionType::Discard,
-            action_params: ActionParams { rate_bps: None },
+            action_params: ActionParams::default(),
             ttl_seconds: 30,
             reason: "original".into(),
         },
@@ -2674,7 +2674,7 @@ async fn test_mitigation_cursor_preserves_ties_and_nanosecond_positions() {
                     ..Default::default()
                 },
                 action_type: ActionType::Discard,
-                action_params: ActionParams { rate_bps: None },
+                action_params: ActionParams::default(),
                 ttl_seconds: 300,
                 reason: "cursor fixture".into(),
             },
@@ -11985,7 +11985,7 @@ mod list_filter_validation {
                     ..Default::default()
                 },
                 action_type: ActionType::Discard,
-                action_params: ActionParams { rate_bps: None },
+                action_params: ActionParams::default(),
                 ttl_seconds: 300,
                 reason: "filter fixture".into(),
             },
@@ -12666,7 +12666,7 @@ mod reason_and_bulk_validation {
                             ..Default::default()
                         },
                         action_type: ActionType::Discard,
-                        action_params: ActionParams { rate_bps: None },
+                        action_params: ActionParams::default(),
                         ttl_seconds: 300,
                         reason: "seed reason".into(),
                     },
@@ -13205,7 +13205,7 @@ mod query_router_validator_boundaries {
                         ..Default::default()
                     },
                     action_type: ActionType::Discard,
-                    action_params: ActionParams { rate_bps: None },
+                    action_params: ActionParams::default(),
                     ttl_seconds: 300,
                     reason: "query boundary fixture".into(),
                 },
@@ -14088,7 +14088,7 @@ fn dry_run_row(ttl_seconds: u32) -> prefixd::domain::Mitigation {
                 ..Default::default()
             },
             action_type: ActionType::Discard,
-            action_params: ActionParams { rate_bps: None },
+            action_params: ActionParams::default(),
             ttl_seconds,
             reason: "simulated".into(),
         },

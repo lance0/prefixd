@@ -1710,6 +1710,7 @@ pub async fn create_mitigation(
         action_type,
         action_params: ActionParams {
             rate_bps: req.rate_bps,
+            ..Default::default()
         },
         ttl_seconds: req.ttl_seconds,
         reason: req.reason,
@@ -2357,7 +2358,7 @@ mod tests {
                             ..Default::default()
                         },
                         action_type: ActionType::Discard,
-                        action_params: ActionParams { rate_bps: None },
+                        action_params: ActionParams::default(),
                         ttl_seconds: 60,
                         reason: "test".into(),
                     },

@@ -1,6 +1,8 @@
 mod blackhole;
 
-pub use blackhole::{admit_blackhole, check_blackhole_startup, extend_blackhole};
+pub use blackhole::{
+    BlackholeAdmission, admit_blackhole, check_blackhole_startup, extend_blackhole,
+};
 
 use std::net::IpAddr;
 
@@ -258,7 +260,7 @@ mod tests {
                 ..Default::default()
             },
             action_type: ActionType::Police,
-            action_params: ActionParams { rate_bps: None },
+            action_params: ActionParams::default(),
             ttl_seconds: 60,
             reason: "action validation".into(),
         };

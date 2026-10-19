@@ -414,7 +414,7 @@ pub async fn run_action_reconciliation_contract(
                     ..Default::default()
                 },
                 action_type: prefixd::domain::ActionType::Discard,
-                action_params: ActionParams { rate_bps: None },
+                action_params: ActionParams::default(),
                 ttl_seconds: 300,
                 reason: "action drift qualification".into(),
             },

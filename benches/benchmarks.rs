@@ -52,7 +52,7 @@ fn make_mitigation(i: usize) -> Mitigation {
             ..Default::default()
         },
         action_type: ActionType::Discard,
-        action_params: ActionParams { rate_bps: None },
+        action_params: ActionParams::default(),
         status: MitigationStatus::Active,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),

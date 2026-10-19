@@ -198,6 +198,7 @@ async fn released_peer_restart_reconciles_original_desired_state_without_extra_r
                 action_type: action.action_type,
                 action_params: ActionParams {
                     rate_bps: action.rate_bps,
+                    ..Default::default()
                 },
                 ttl_seconds: 300,
                 reason: "owned peer restart recovery".into(),

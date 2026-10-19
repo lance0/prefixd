@@ -31,6 +31,9 @@ pub struct MockRepository {
     mitigation_reads: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pending_reads: std::sync::atomic::AtomicUsize,
+    /// Every safelist lookup fails, as an unavailable database does.
+    #[cfg(test)]
+    pub fail_safelist: std::sync::atomic::AtomicBool,
     mitigations: Mutex<Vec<Mitigation>>,
     withdrawals: Mutex<Vec<WithdrawalRequest>>,
     safelist: Mutex<Vec<SafelistEntry>>,
@@ -73,6 +76,8 @@ impl MockRepository {
             mitigation_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             pending_reads: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            fail_safelist: Default::default(),
             mitigations: Mutex::new(Vec::new()),
             withdrawals: Mutex::new(Vec::new()),
             safelist: Mutex::new(Vec::new()),
@@ -685,6 +690,13 @@ impl RepositoryTrait for MockRepository {
         use ipnet::{Ipv4Net, Ipv6Net};
         use std::net::IpAddr;
         use std::str::FromStr;
+
+        #[cfg(test)]
+        if self.fail_safelist.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(crate::error::PrefixdError::Internal(
+                "safelist unavailable".into(),
+            ));
+        }
 
         let entries = self.safelist.lock().unwrap();
         let ip_addr: IpAddr = match IpAddr::from_str(ip) {

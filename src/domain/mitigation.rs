@@ -65,7 +65,7 @@ impl std::str::FromStr for MitigationStatus {
 pub enum ActionType {
     Police,
     Discard,
-    /// Unicast host route, not a FlowSpec action (ADR 027). Nothing creates one yet.
+    /// Unicast host route, not a FlowSpec action (ADR 027).
     Blackhole,
 }
 
@@ -205,10 +205,14 @@ pub(crate) fn blackhole_identity(prefix: &str) -> String {
     hex::encode(&hasher.finalize()[..16])
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActionParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_bps: Option<u64>,
+    /// A blackhole's route, frozen at admission (ADR 027). Absent for FlowSpec,
+    /// so FlowSpec rows serialize byte for byte as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blackhole: Option<super::BlackholeRule>,
 }
 
 /// Intent produced by policy engine, before guardrails
@@ -353,7 +357,7 @@ impl Mitigation {
                     row.mitigation_id, e
                 ))
             })?,
-            None => ActionParams { rate_bps: None },
+            None => ActionParams::default(),
         };
 
         let vector = row.vector.parse().map_err(|_| {

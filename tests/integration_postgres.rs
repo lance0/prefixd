@@ -426,7 +426,7 @@ async fn test_authenticated_withdrawal_audit_success_and_failure_boundaries() {
                     ..Default::default()
                 },
                 action_type: ActionType::Discard,
-                action_params: ActionParams { rate_bps: None },
+                action_params: ActionParams::default(),
                 ttl_seconds: 600,
                 reason: "audit fixture".into(),
             },
@@ -1006,6 +1006,7 @@ async fn test_timeseries_non_hour_bucket_alignment() {
         action_type: ActionType::Police,
         action_params: ActionParams {
             rate_bps: Some(10_000_000),
+            ..Default::default()
         },
         status: MitigationStatus::Active,
         created_at: base + Duration::minutes(4),
@@ -1113,6 +1114,7 @@ async fn test_ttl_expiry() {
         action_type: ActionType::Police,
         action_params: ActionParams {
             rate_bps: Some(10_000_000),
+            ..Default::default()
         },
         status: MitigationStatus::Active, // Active but expired
         created_at: now - Duration::seconds(120),
@@ -1731,7 +1733,7 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
                 ..Default::default()
             },
             action_type: ActionType::Discard,
-            action_params: ActionParams { rate_bps: None },
+            action_params: ActionParams::default(),
             ttl_seconds: 600,
             reason: "test".into(),
         },
@@ -2125,7 +2127,7 @@ async fn test_legacy_canonical_owners_finish_ttl_cleanup_after_last_live_owner()
                 ..Default::default()
             },
             action_type: ActionType::Discard,
-            action_params: ActionParams { rate_bps: None },
+            action_params: ActionParams::default(),
             ttl_seconds: 60,
             reason: "legacy".into(),
         },
@@ -2316,7 +2318,7 @@ async fn test_documented_retention_preserves_live_intent_and_referenced_history(
                     ..Default::default()
                 },
                 action_type: ActionType::Discard,
-                action_params: ActionParams { rate_bps: None },
+                action_params: ActionParams::default(),
                 ttl_seconds: 60,
                 reason: name.into(),
             },
@@ -2612,7 +2614,7 @@ fn inventory_mitigation(
                 ..Default::default()
             },
             action_type: ActionType::Discard,
-            action_params: ActionParams { rate_bps: None },
+            action_params: ActionParams::default(),
             ttl_seconds: 3600,
             reason: "inventory correctness fixture".into(),
         },
@@ -5234,7 +5236,7 @@ async fn test_blackhole_quota_concurrent_controllers_cannot_overshoot() {
 }
 
 #[tokio::test]
-async fn test_blackhole_dry_run_admission_persists_without_rpc() {
+async fn test_blackhole_admission_dry_run_sends_nothing_and_enforced_adds_the_frozen_route() {
     use prefixd::bgp::FlowSpecAnnouncer;
     let context = TestContext::new().await;
     let mut settings = context.state.settings.clone();
@@ -5268,7 +5270,7 @@ async fn test_blackhole_dry_run_admission_persists_without_rpc() {
             ..Default::default()
         },
         action_type: prefixd::domain::ActionType::Blackhole,
-        action_params: prefixd::domain::ActionParams { rate_bps: None },
+        action_params: prefixd::domain::ActionParams::default(),
         ttl_seconds: 600,
         reason: "manual blackhole".into(),
     };
@@ -5278,12 +5280,15 @@ async fn test_blackhole_dry_run_admission_persists_without_rpc() {
         &inventory,
         intent("203.0.113.10/32"),
         &fixture_actor(),
+        &speaker,
+        None,
     )
     .await
     .unwrap();
+    assert!(!admitted.unconfirmed);
     let stored = context
         .repo
-        .get_mitigation(admitted.mitigation_id)
+        .get_mitigation(admitted.mitigation.mitigation_id)
         .await
         .unwrap()
         .unwrap();
@@ -5301,8 +5306,8 @@ async fn test_blackhole_dry_run_admission_persists_without_rpc() {
     .await
     .unwrap();
     assert_eq!(audit, 1);
-    let speaker: &dyn FlowSpecAnnouncer = &speaker;
-    let blackholes = speaker
+    let announcer: &dyn FlowSpecAnnouncer = &speaker;
+    let blackholes = announcer
         .blackhole()
         .unwrap()
         .list_blackholes()
@@ -5310,22 +5315,88 @@ async fn test_blackhole_dry_run_admission_persists_without_rpc() {
         .unwrap();
     assert!(blackholes.routes.is_empty());
     assert_eq!(
-        speaker.reader().unwrap().list_active().await.unwrap().len(),
+        announcer
+            .reader()
+            .unwrap()
+            .list_active()
+            .await
+            .unwrap()
+            .len(),
         0
     );
-    // Negative control: enforced mode refuses before persistence.
+
+    // Enforced mode persists the frozen route, then adds exactly it.
     settings.mode = prefixd::config::OperationMode::Enforced;
-    let error = prefixd::guardrails::admit_blackhole(
+    let admitted = prefixd::guardrails::admit_blackhole(
         context.repo.as_ref(),
         &settings,
         &inventory,
         intent("203.0.113.11/32"),
         &fixture_actor(),
+        &speaker,
+        None,
     )
     .await
-    .unwrap_err();
-    assert!(error.to_string().contains("enforced"), "{error}");
-    assert_eq!(context.repo.count_active_global().await.unwrap(), 1);
+    .unwrap();
+    assert!(!admitted.unconfirmed);
+    let stored = context
+        .repo
+        .get_mitigation(admitted.mitigation.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let frozen = prefixd::domain::blackhole_rule(&stored).unwrap();
+    assert_eq!(frozen.next_hop.to_string(), "192.0.2.66");
+    assert_eq!(frozen.owner, "");
+    let routes = announcer
+        .blackhole()
+        .unwrap()
+        .list_blackholes()
+        .await
+        .unwrap()
+        .routes;
+    assert_eq!(routes, [frozen.route().unwrap()]);
+
+    // Withdrawal intent persists the blackhole kind and route, then deletes it.
+    let request = prefixd::domain::request_withdrawal(
+        context.repo.as_ref(),
+        &stored,
+        false,
+        "operator",
+        "admin",
+        "test".into(),
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    let (kind, rule_json): (String, String) = sqlx::query_as(
+        "SELECT rule_kind, rule_json FROM withdrawal_requests WHERE operation_id = $1",
+    )
+    .bind(request.operation_id)
+    .fetch_one(&context.pool)
+    .await
+    .unwrap();
+    assert_eq!(kind, "blackhole");
+    assert_eq!(
+        serde_json::from_str::<prefixd::domain::BlackholeRule>(&rule_json).unwrap(),
+        frozen
+    );
+    let withdrawn =
+        prefixd::domain::execute_withdrawal(context.repo.as_ref(), &speaker, false, &request, None)
+            .await
+            .unwrap();
+    assert_eq!(withdrawn.status, MitigationStatus::Withdrawn);
+    assert!(
+        announcer
+            .blackhole()
+            .unwrap()
+            .list_blackholes()
+            .await
+            .unwrap()
+            .routes
+            .is_empty()
+    );
 }
 
 #[tokio::test]

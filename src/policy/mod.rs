@@ -71,6 +71,7 @@ impl PolicyEngine {
         let action_type = action.action_type;
         let action_params = ActionParams {
             rate_bps: action.rate_bps,
+            ..Default::default()
         };
 
         let ttl = if step.ttl_seconds > 0 {

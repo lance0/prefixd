@@ -138,6 +138,111 @@ impl PeerObserver for MockAnnouncer {
     }
 }
 
+/// Test speaker with injectable blackhole faults; FlowSpec passes through.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct FaultyBlackholes {
+    pub inner: MockAnnouncer,
+    /// Every blackhole read fails, as an aborted or partial walk does.
+    pub fail_reads: std::sync::atomic::AtomicBool,
+    /// Every FlowSpec read fails.
+    pub fail_flowspec_reads: std::sync::atomic::AtomicBool,
+    /// Every add fails without changing the speaker.
+    pub fail_adds: std::sync::atomic::AtomicBool,
+    /// 1: a delete is rejected before removal; 2: removed, then the reply is lost.
+    pub withdraw_fault: std::sync::atomic::AtomicUsize,
+    /// Well-formed local routes that are not prefixd-shaped.
+    pub unrecognized: std::sync::Mutex<Vec<super::UnrecognizedRoute>>,
+    pub adds: std::sync::atomic::AtomicUsize,
+    pub deletes: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl FaultyBlackholes {
+    pub async fn routes(&self) -> Vec<BlackholeRoute> {
+        self.inner.list_blackholes().await.unwrap().routes
+    }
+}
+
+#[cfg(test)]
+impl FlowSpecAnnouncer for FaultyBlackholes {
+    fn backend(&self) -> &'static str {
+        "mock"
+    }
+    fn reader(&self) -> Option<&dyn FlowSpecReader> {
+        Some(self)
+    }
+    fn blackhole(&self) -> Option<&dyn BlackholeSpeaker> {
+        Some(self)
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl FlowSpecWriter for FaultyBlackholes {
+    async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.inner.announce(rule).await
+    }
+    async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.inner.withdraw(rule).await
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl FlowSpecReader for FaultyBlackholes {
+    async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
+        if self
+            .fail_flowspec_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::error::PrefixdError::BgpAnnouncementFailed(
+                "FlowSpec read failed".into(),
+            ));
+        }
+        self.inner.list_active().await
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl BlackholeSpeaker for FaultyBlackholes {
+    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.adds.fetch_add(1, SeqCst);
+        if self.fail_adds.load(SeqCst) {
+            return Err(crate::error::PrefixdError::BgpAnnouncementFailed(
+                "add failed".into(),
+            ));
+        }
+        self.inner.announce_blackhole(route).await
+    }
+    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet) -> Result<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.deletes.fetch_add(1, SeqCst);
+        let fault = self.withdraw_fault.load(SeqCst);
+        if fault == 2 {
+            self.inner.withdraw_blackhole(prefix).await?;
+        }
+        if fault != 0 {
+            return Err(crate::error::PrefixdError::BgpWithdrawalFailed(
+                "delete outcome unknown".into(),
+            ));
+        }
+        self.inner.withdraw_blackhole(prefix).await
+    }
+    async fn list_blackholes(&self) -> Result<BlackholeInventory> {
+        if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(crate::error::PrefixdError::BgpAnnouncementFailed(
+                "ABORTED: local intent changed during the read".into(),
+            ));
+        }
+        let mut inventory = self.inner.list_blackholes().await?;
+        inventory.unrecognized = self.unrecognized.lock().unwrap().clone();
+        Ok(inventory)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

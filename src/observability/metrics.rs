@@ -127,6 +127,19 @@ pub static RECONCILIATION_REPAIRS: Lazy<CounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Serializes unit tests that assert on these process-global series.
+#[cfg(test)]
+pub(crate) static METRICS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub static UNKNOWN_LOCAL_ROUTES: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_unknown_local_routes",
+        "Local speaker routes prefixd does not own, reported and never modified, from the last successful read",
+        &["kind"]
+    )
+    .unwrap()
+});
+
 pub static RECONCILIATION_ACTIVE_COUNT: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!(
         "prefixd_reconciliation_active_count",
@@ -348,6 +361,7 @@ pub fn init_metrics() {
         RECONCILIATION_REPAIRS.with_label_values(&[status]);
     }
     Lazy::force(&RECONCILIATION_ACTIVE_COUNT);
+    Lazy::force(&UNKNOWN_LOCAL_ROUTES);
     Lazy::force(&CONFIG_RELOADS);
     Lazy::force(&ESCALATIONS_TOTAL);
     Lazy::force(&ROW_PARSE_ERRORS);

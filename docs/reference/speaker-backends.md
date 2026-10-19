@@ -36,7 +36,8 @@ it without touching it. `ABORTED` mid-walk, a changed page version, any other
 error or a malformed row fails the whole read. A malformed row has a non-local
 peer, an unparseable prefix, next hop or large community, host bits or a
 family mismatch. GoBGP returns `None`, which is unsupported rather than empty.
-Nothing in the controller calls the capability yet.
+The controller uses it for the
+[blackhole lifecycle](#blackhole-lifecycle-and-reconciliation).
 
 `match_support()` reports which [ADR 028](../adr/028-amplification-matches.md)
 match components the adapter encodes: UDP source ports (type 6), a non-first
@@ -381,6 +382,47 @@ sharing a description retain separate metric series.
 This is a fixed-target, single-controller contract. Drain pending requests before
 changing targets or downgrading; see [the upgrade guide](../how-to/upgrading.md#pending-withdrawals-and-rollback).
 Application status and local speaker intent do not prove router enforcement.
+
+## Blackhole lifecycle and reconciliation
+
+Blackhole host routes ([ADR 027](../adr/027-blackhole-mitigations.md)) are
+unleased: until the rustbgpd injection lease ships, prefixd owns a route only
+through its database ledger, meaning an enforced row or pending withdrawal for
+this POP and target. Admission freezes the configured next hop and communities
+into the row; repair and withdrawal use that frozen route, so a configuration
+change affects only new blackholes.
+
+Enforced admission returns `409` without persisting or adding when the prefix
+already has a live owner, has a pending withdrawal, or holds a local route that
+the ledger does not own. A pre-read of the speaker detects that untracked route,
+whether prefixd-shaped or unrecognized, including another `path_id` at the
+prefix; a failed pre-read persists nothing. Otherwise the row is persisted
+first, then added. Immediately before every add, at admission and on each
+repair, prefixd rechecks the safelist under the lifecycle mutex. A failed
+lookup sends nothing. A victim safelisted since admission gets a system
+withdrawal with the reason `safelisted after admission` instead of an add.
+
+Withdrawal intent records `rule_kind` `blackhole` and the frozen route with an
+empty owner. Detector unban, operator withdrawal, TTL expiry and the safelist
+withdrawal delete through `DeletePath`, where `NOT_FOUND` means absent. A
+failed or ambiguous delete stays pending with its original actor, reason and
+operation ID, and its key blocks repair until the deletion is confirmed. A
+pending blackhole withdrawal does not block FlowSpec admission or repair, and
+the reverse.
+
+Reconciliation compares the blackhole desired set with `list_blackholes` in a
+stage separate from FlowSpec, so a failed read of one family never stops the
+other. It runs when `blackhole.enabled` is true or the ledger holds a
+blackhole. Only live, unexpired, enforced-origin intent of this POP with a
+single owner and no pending withdrawal is repaired, with the safelist recheck.
+A failed or partial read repairs nothing and gives no unknown-route verdict;
+withdrawal cleanup continues. A route at a desired prefix whose next hop or
+communities differ from the frozen route is replaced. A desired prefix that
+also holds an unrecognized local row is reported as a repair error and left
+alone. Recognized routes outside the ledger, including other POPs' routes, and
+every unrecognized row are logged and counted in
+`prefixd_unknown_local_routes{kind="blackhole"}`, never modified. The FlowSpec
+stage sets `kind="flowspec"` for the unknown local rules it already logs.
 
 ## Remaining backend work
 

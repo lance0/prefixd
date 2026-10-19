@@ -7,7 +7,7 @@ use crate::bgp::FlowSpecAnnouncer;
 use crate::correlation::{CorrelationEngine, SignalGroupStatus};
 use crate::db::RepositoryTrait;
 use crate::domain::{
-    FlowSpecRule, MitigationRoute, MitigationStatus, execute_withdrawal, ownership_key,
+    ActionType, FlowSpecRule, MitigationRoute, MitigationStatus, execute_withdrawal, ownership_key,
     request_withdrawal,
 };
 use crate::state::AppState;
@@ -26,19 +26,13 @@ fn wire_action(rule: &FlowSpecRule) -> crate::error::Result<u32> {
         .map_err(|error| crate::error::PrefixdError::BgpAnnouncementFailed(error.to_string()))
 }
 
+/// Keys blocked by pending deletions of either kind; unreadable intent fails the caller.
 fn pending_ownership_keys(
     requests: &[crate::domain::WithdrawalRequest],
-) -> anyhow::Result<std::collections::HashSet<String>> {
+) -> crate::error::Result<std::collections::HashSet<String>> {
     requests
         .iter()
-        .map(|request| {
-            let rule = request.flowspec_rule()?;
-            anyhow::ensure!(
-                rule.nlri_hash() == request.nlri_hash,
-                "withdrawal rule identity does not match persisted intent"
-            );
-            Ok(ownership_key(&rule))
-        })
+        .map(crate::domain::WithdrawalRequest::ownership_key)
         .collect()
 }
 
@@ -217,6 +211,7 @@ impl ReconciliationLoop {
             ("corroborator cache", self.sweep_corroborator_cache().await),
             ("confidence", self.refresh_decayed_confidence().await),
             ("announcements", self.sync_announcements().await),
+            ("blackholes", self.sync_blackholes().await),
         ] {
             if let Err(error) = result {
                 tracing::warn!(stage, error = %error, "reconciliation stage failed");
@@ -547,8 +542,10 @@ impl ReconciliationLoop {
 
         let now = chrono::Utc::now();
         // Simulations are never desired speaker state, even after a mode switch.
+        // Blackholes reconcile in their own stage against their own read.
         active.retain(|mitigation| {
-            !mitigation.is_dry_run_origin()
+            mitigation.action_type != ActionType::Blackhole
+                && !mitigation.is_dry_run_origin()
                 && mitigation.expires_at > now
                 && !pending_keys.contains(&MitigationRoute::of(mitigation).ownership_key())
         });
@@ -730,8 +727,10 @@ impl ReconciliationLoop {
             .map(|rule| rule.nlri_hash())
             .collect();
 
+        let mut unknown = 0.0;
         for rule in &announced {
             if !desired_hashes.contains(&rule.nlri_hash()) {
+                unknown += 1.0;
                 tracing::warn!(
                     nlri_hash = %rule.nlri_hash(),
                     dst_prefix = %rule.nlri.dst_prefix,
@@ -739,7 +738,202 @@ impl ReconciliationLoop {
                 );
             }
         }
+        crate::observability::metrics::UNKNOWN_LOCAL_ROUTES
+            .with_label_values(&["flowspec"])
+            .set(unknown);
 
+        match repair_error {
+            Some(error) => Err(error.into()),
+            None => Ok(()),
+        }
+    }
+
+    /// Blackhole desired set against retained local intent (ADR 027 §5). It is a
+    /// separate stage, so a failed blackhole read never stops FlowSpec repair or
+    /// the reverse. Unknown and unrecognized routes are reported, never touched.
+    async fn sync_blackholes(&self) -> anyhow::Result<()> {
+        use std::collections::{HashMap, HashSet};
+
+        let binding = self.verified_speaker_binding()?;
+        let pop = self.owning_pop();
+        let pending = self.repo.pending_withdrawals(pop).await?;
+        let pending_keys = pending_ownership_keys(&pending)?;
+        // The ledger: every enforced-origin row of this POP and pending blackhole deletions.
+        let mut owned: HashSet<String> = pending
+            .iter()
+            .filter(|request| request.rule_kind == ActionType::Blackhole.as_str())
+            .map(|request| request.nlri_hash.clone())
+            .collect();
+        let mut owner_counts = HashMap::<String, usize>::new();
+        let mut desired = Vec::new();
+        let now = chrono::Utc::now();
+        for mitigation in self.repo.active_mitigation_inventory(pop).await? {
+            if mitigation.action_type != ActionType::Blackhole
+                || mitigation.is_dry_run_origin()
+                || pop.is_some_and(|pop| mitigation.pop != pop)
+            {
+                continue;
+            }
+            let key = MitigationRoute::of(&mitigation).ownership_key();
+            owned.insert(key.clone());
+            *owner_counts.entry(key.clone()).or_default() += 1;
+            if matches!(
+                mitigation.status,
+                MitigationStatus::Active | MitigationStatus::Escalated
+            ) && mitigation.expires_at > now
+                && !pending_keys.contains(&key)
+            {
+                desired.push((key, mitigation));
+            }
+        }
+        let enabled = self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.settings.blackhole.enabled);
+        let Some(speaker) = self.announcer.blackhole() else {
+            anyhow::ensure!(
+                desired.is_empty(),
+                "blackhole intent needs a blackhole-capable speaker"
+            );
+            return Ok(());
+        };
+        if owned.is_empty() && !enabled {
+            return Ok(());
+        }
+        // A failed or partial read is an error: no repair and no unknown-route verdicts.
+        let inventory = speaker.list_blackholes().await?;
+        let identity =
+            |prefix: &ipnet::IpNet| crate::domain::blackhole_identity(&prefix.to_string());
+        let mut unknown = 0.0;
+        for route in &inventory.routes {
+            if !owned.contains(&identity(&route.prefix())) {
+                unknown += 1.0;
+                tracing::warn!(prefix = %route.prefix(), "unknown blackhole route in local RIB; left untouched");
+            }
+        }
+        for row in &inventory.unrecognized {
+            unknown += 1.0;
+            tracing::warn!(prefix = %row.prefix, reason = row.reason,
+                "unrecognized local unicast route; left untouched");
+        }
+        crate::observability::metrics::UNKNOWN_LOCAL_ROUTES
+            .with_label_values(&["blackhole"])
+            .set(unknown);
+
+        let mut repair_error = None;
+        for (key, candidate) in &desired {
+            // A row without a usable frozen route fails its own repair; others continue.
+            let (rule, wanted) = match crate::domain::blackhole_rule(candidate)
+                .and_then(|rule| Ok((rule.route()?, rule)))
+            {
+                Ok((route, rule)) => (rule, route),
+                Err(error) => {
+                    repair_error = Some(error);
+                    continue;
+                }
+            };
+            if owner_counts[key] != 1 {
+                repair_error = Some(crate::error::PrefixdError::Conflict(
+                    "blackhole route has multiple active owners".into(),
+                ));
+                continue;
+            }
+            // An unrecognized row may hold the same key; it is never overwritten.
+            if inventory
+                .unrecognized
+                .iter()
+                .any(|row| row.prefix == rule.prefix)
+            {
+                repair_error = Some(crate::error::PrefixdError::Conflict(format!(
+                    "unrecognized local route at desired blackhole {}",
+                    rule.prefix
+                )));
+                continue;
+            }
+            if inventory.routes.contains(&wanted) {
+                continue;
+            }
+            let _guard = match &self.state {
+                Some(state) => Some(state.mitigation_lock.lock().await),
+                None => None,
+            };
+            let mitigation = match self.repo.get_mitigation(candidate.mitigation_id).await {
+                Ok(Some(mitigation))
+                    if mitigation.pop == candidate.pop
+                        && matches!(
+                            mitigation.status,
+                            MitigationStatus::Active | MitigationStatus::Escalated
+                        )
+                        && mitigation.expires_at > chrono::Utc::now()
+                        && !mitigation.is_dry_run_origin()
+                        && pop.is_none_or(|pop| mitigation.pop == pop) =>
+                {
+                    mitigation
+                }
+                Ok(_) => continue,
+                Err(error) => {
+                    repair_error = Some(error);
+                    continue;
+                }
+            };
+            // The frozen route, never the current configuration.
+            if crate::domain::blackhole_rule(&mitigation).ok().as_ref() != Some(&rule) {
+                continue;
+            }
+            let current_pending = self.repo.pending_withdrawals(pop).await?;
+            if pending_ownership_keys(&current_pending)?.contains(key)
+                || current_pending
+                    .iter()
+                    .any(|request| request.mitigation_id == mitigation.mitigation_id)
+            {
+                continue;
+            }
+            self.verified_speaker_binding()?;
+            tracing::warn!(
+                mitigation_id = %mitigation.mitigation_id,
+                prefix = %rule.prefix,
+                reason = if inventory.routes.iter().any(|route| route.prefix() == rule.prefix) { "drift" } else { "missing" },
+                "repairing local blackhole route"
+            );
+            if self.dry_run {
+                continue;
+            }
+            match crate::domain::announce_blackhole(
+                self.repo.as_ref(),
+                self.announcer.as_ref(),
+                &mitigation,
+                binding,
+            )
+            .await
+            {
+                Ok(crate::domain::BlackholeAnnouncement::Announced) => {
+                    crate::observability::metrics::RECONCILIATION_REPAIRS
+                        .with_label_values(&["success"])
+                        .inc();
+                }
+                Ok(crate::domain::BlackholeAnnouncement::Withdrawn(withdrawn)) => {
+                    if let Some(tx) = &self.ws_broadcast {
+                        let _ = tx.send(WsMessage::MitigationWithdrawn {
+                            mitigation_id: withdrawn.mitigation_id.to_string(),
+                        });
+                    }
+                    if let Some(alerting) = &self.alerting {
+                        alerting
+                            .read()
+                            .await
+                            .notify(crate::alerting::Alert::mitigation_withdrawn(&withdrawn));
+                    }
+                }
+                Err(error) => {
+                    crate::observability::metrics::RECONCILIATION_REPAIRS
+                        .with_label_values(&["error"])
+                        .inc();
+                    tracing::error!(mitigation_id = %mitigation.mitigation_id, error = %error,
+                        "failed to repair blackhole route");
+                    repair_error = Some(error);
+                }
+            }
+        }
         match repair_error {
             Some(error) => Err(error.into()),
             None => Ok(()),
@@ -781,7 +975,10 @@ impl ReconciliationLoop {
 mod tests {
     use super::*;
     use crate::{
-        bgp::{FlowSpecReader, FlowSpecWriter, MockAnnouncer, PeerObserver, PeerStatus},
+        bgp::{
+            BlackholeSpeaker, FaultyBlackholes, FlowSpecReader, FlowSpecWriter, MockAnnouncer,
+            PeerObserver, PeerStatus,
+        },
         db::MockRepository,
         domain::{
             ActionParams, ActionType, AttackVector, FlowSpecAction, MatchCriteria, Mitigation,
@@ -792,7 +989,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
     // Reconciliation resets process-global Prometheus gauges.
-    static RECONCILIATION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    use crate::observability::metrics::METRICS_TEST_LOCK as RECONCILIATION_TEST_LOCK;
 
     struct FailingWithdrawal {
         inner: MockAnnouncer,
@@ -896,7 +1093,7 @@ mod tests {
                     ..Default::default()
                 },
                 action_type: ActionType::Discard,
-                action_params: ActionParams { rate_bps: None },
+                action_params: ActionParams::default(),
                 ttl_seconds: 30,
                 reason: "test".into(),
             },
@@ -2026,7 +2223,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blackhole_rows_fail_closed_in_reconciliation_without_rpc() {
+    async fn blackhole_rows_without_a_frozen_route_fail_closed_without_rpc() {
         let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
         let repo = Arc::new(MockRepository::new());
         let speaker = Arc::new(FailingWithdrawal {
@@ -2054,7 +2251,7 @@ mod tests {
             repo.insert_mitigation(mitigation).await.unwrap();
         }
         let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
-        // Expiry and repair fail for the blackhole rows; the FlowSpec row still repairs.
+        // Rows without a frozen route fail their own expiry and repair; FlowSpec still repairs.
         assert!(reconciler.reconcile().await.is_err());
         assert_eq!(speaker.announcements.load(SeqCst), 1);
         let announced = speaker.inner.list_active().await.unwrap();
@@ -2078,7 +2275,7 @@ mod tests {
         );
         assert!(wire_action(&coerced).is_err());
 
-        // Pending blackhole intent stops cleanup and repair before any RPC.
+        // Unreadable pending intent (a FlowSpec rule labelled blackhole) blocks repair before any RPC.
         let mut request = crate::domain::WithdrawalRequest::new(
             &flowspec,
             false,
@@ -2101,5 +2298,495 @@ mod tests {
                 .unwrap()
                 .is_active()
         );
+    }
+
+    fn blackhole_config(next_hop: &str, community: &str) -> crate::config::BlackholeConfig {
+        crate::config::BlackholeConfig {
+            enabled: true,
+            next_hop_ipv4: Some(next_hop.parse().unwrap()),
+            next_hop_ipv6: Some("2001:db8:ffff::66".parse().unwrap()),
+            communities: vec![community.into()],
+            ..Default::default()
+        }
+    }
+
+    /// Enforced, live blackhole intent frozen with next hop 192.0.2.66 and 64512:1.
+    fn blackhole_row(ip: &str) -> Mitigation {
+        let address: std::net::IpAddr = ip.parse().unwrap();
+        let prefix = ipnet::IpNet::from(address);
+        let rule = crate::domain::BlackholeRule::from_config(
+            &blackhole_config("192.0.2.66", "64512:1"),
+            prefix,
+        )
+        .unwrap();
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: "test".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: prefix.to_string(),
+                    ..Default::default()
+                },
+                action_type: ActionType::Blackhole,
+                action_params: ActionParams {
+                    blackhole: Some(rule),
+                    ..Default::default()
+                },
+                ttl_seconds: 600,
+                reason: "test".into(),
+            },
+            ip.into(),
+            AttackVector::Unknown,
+        );
+        mitigation.activate();
+        mitigation.origin_mode = Some(crate::config::OperationMode::Enforced);
+        mitigation
+    }
+
+    fn frozen(mitigation: &Mitigation) -> crate::bgp::BlackholeRoute {
+        crate::domain::blackhole_rule(mitigation)
+            .unwrap()
+            .route()
+            .unwrap()
+    }
+
+    /// A POP-scoped loop whose current configuration is `config`.
+    fn blackhole_reconciler(
+        repo: Arc<MockRepository>,
+        speaker: Arc<FaultyBlackholes>,
+        config: crate::config::BlackholeConfig,
+        dry_run: bool,
+    ) -> ReconciliationLoop {
+        let mut settings: crate::config::Settings =
+            crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+        settings.pop = "test".into();
+        settings.bgp.mode = crate::config::BgpMode::Mock;
+        settings.http.auth.mode = crate::config::AuthMode::None;
+        settings.mode = crate::config::OperationMode::Enforced;
+        settings.blackhole = config;
+        let state = AppState::new(
+            settings,
+            crate::config::Inventory::new(vec![]),
+            crate::config::Playbooks { playbooks: vec![] },
+            repo.clone(),
+            speaker.clone(),
+            ".".into(),
+        )
+        .unwrap();
+        ReconciliationLoop::new(repo, speaker, 30, dry_run).with_app_state(state)
+    }
+
+    fn live_config() -> crate::config::BlackholeConfig {
+        blackhole_config("192.0.2.66", "64512:1")
+    }
+
+    async fn status(repo: &MockRepository, mitigation: &Mitigation) -> MitigationStatus {
+        repo.get_mitigation(mitigation.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+    }
+
+    #[tokio::test]
+    async fn blackhole_ambiguous_delete_stays_pending_and_is_never_reannounced() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        // Rejection before removal, and removal with a lost reply.
+        for fault in [1, 2] {
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let reconciler =
+                blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), false);
+            let withdrawn = blackhole_row("192.0.2.1");
+            let mut expired = blackhole_row("192.0.2.2");
+            expired.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+            for mitigation in [&withdrawn, &expired] {
+                repo.insert_mitigation(mitigation).await.unwrap();
+                speaker
+                    .inner
+                    .announce_blackhole(&frozen(mitigation))
+                    .await
+                    .unwrap();
+            }
+            speaker.withdraw_fault.store(fault, SeqCst);
+            let request = request_withdrawal(
+                repo.as_ref(),
+                &withdrawn,
+                false,
+                "operator",
+                "alice",
+                "attack over".into(),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(request.rule_kind, "blackhole");
+            assert!(
+                execute_withdrawal(repo.as_ref(), speaker.as_ref(), false, &request, None)
+                    .await
+                    .is_err()
+            );
+            for _ in 0..2 {
+                // Operator retry and TTL expiry both fail; the missing route is never re-added.
+                assert!(reconciler.reconcile().await.is_err(), "fault={fault}");
+                assert_eq!(speaker.adds.load(SeqCst), 0, "fault={fault}");
+                for mitigation in [&withdrawn, &expired] {
+                    assert!(status(&repo, mitigation).await.is_active());
+                }
+                let pending = repo.pending_withdrawals(None).await.unwrap();
+                assert_eq!(pending.len(), 2);
+                let kept = pending
+                    .iter()
+                    .find(|pending| pending.mitigation_id == withdrawn.mitigation_id)
+                    .unwrap();
+                assert_eq!(
+                    (
+                        kept.operation_id,
+                        kept.actor.as_str(),
+                        kept.reason.as_str(),
+                        kept.rule_kind.as_str(),
+                        kept.rule_json.as_str()
+                    ),
+                    (
+                        request.operation_id,
+                        "alice",
+                        "attack over",
+                        "blackhole",
+                        request.rule_json.as_str()
+                    )
+                );
+            }
+            assert_eq!(speaker.routes().await.len(), if fault == 1 { 2 } else { 0 });
+            speaker.withdraw_fault.store(0, SeqCst);
+            reconciler.reconcile().await.unwrap();
+            assert_eq!(status(&repo, &withdrawn).await, MitigationStatus::Withdrawn);
+            assert_eq!(status(&repo, &expired).await, MitigationStatus::Expired);
+            assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+            assert!(speaker.routes().await.is_empty());
+            assert_eq!(speaker.adds.load(SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn blackhole_failed_read_repairs_nothing_and_families_stay_independent() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let reconciler = blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), false);
+        let missing = blackhole_row("192.0.2.1");
+        let mut expired = blackhole_row("192.0.2.2");
+        expired.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        let flowspec = action_mitigation("192.0.2.3/32", FlowSpecAction::discard());
+        for mitigation in [&missing, &expired, &flowspec] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        speaker
+            .inner
+            .announce_blackhole(&frozen(&expired))
+            .await
+            .unwrap();
+        speaker
+            .unrecognized
+            .lock()
+            .unwrap()
+            .push(crate::bgp::UnrecognizedRoute {
+                prefix: "198.51.100.1/32".parse().unwrap(),
+                reason: "nonzero path_id",
+            });
+        let unknown =
+            crate::observability::metrics::UNKNOWN_LOCAL_ROUTES.with_label_values(&["blackhole"]);
+        unknown.set(7.0);
+        speaker.fail_reads.store(true, SeqCst);
+        assert!(reconciler.reconcile().await.is_err());
+        // No repair and no unknown-route verdict from a failed read.
+        assert_eq!(speaker.adds.load(SeqCst), 0);
+        assert_eq!(unknown.get(), 7.0);
+        // FlowSpec repair and blackhole expiry cleanup continue.
+        assert_eq!(speaker.inner.announced_count().await, 1);
+        assert_eq!(status(&repo, &expired).await, MitigationStatus::Expired);
+        assert!(speaker.routes().await.is_empty());
+
+        // The reverse: a failed FlowSpec read leaves blackhole repair running.
+        speaker.fail_reads.store(false, SeqCst);
+        speaker.fail_flowspec_reads.store(true, SeqCst);
+        speaker
+            .inner
+            .withdraw(&crate::domain::mitigation_rule(&flowspec).unwrap())
+            .await
+            .unwrap();
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(speaker.adds.load(SeqCst), 1);
+        assert_eq!(speaker.routes().await, [frozen(&missing)]);
+        assert_eq!(speaker.inner.announced_count().await, 0);
+        assert_eq!(unknown.get(), 1.0);
+    }
+
+    #[tokio::test]
+    async fn blackhole_unknown_unrecognized_and_foreign_pop_routes_are_untouched() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let reconciler = blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), false);
+        let desired = blackhole_row("192.0.2.1");
+        // An unrecognized row holds this desired key, so it is reported, not overwritten.
+        let blocked = blackhole_row("192.0.2.2");
+        let foreign = |ip| {
+            let mut mitigation = blackhole_row(ip);
+            mitigation.pop = "another-target".into();
+            mitigation
+        };
+        let foreign_missing = foreign("192.0.2.3");
+        let foreign_present = foreign("192.0.2.4");
+        let mut foreign_expired = foreign("192.0.2.5");
+        foreign_expired.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        for mitigation in [
+            &desired,
+            &blocked,
+            &foreign_missing,
+            &foreign_present,
+            &foreign_expired,
+        ] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        let unknown_route = crate::bgp::BlackholeRoute::new(
+            "198.51.100.1/32".parse().unwrap(),
+            "192.0.2.99".parse().unwrap(),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        for route in [
+            frozen(&foreign_present),
+            frozen(&foreign_expired),
+            unknown_route.clone(),
+        ] {
+            speaker.inner.announce_blackhole(&route).await.unwrap();
+        }
+        let unrecognized = [
+            crate::bgp::UnrecognizedRoute {
+                prefix: "192.0.2.2/32".parse().unwrap(),
+                reason: "unexpected path attributes",
+            },
+            crate::bgp::UnrecognizedRoute {
+                prefix: "198.51.100.2/32".parse().unwrap(),
+                reason: "nonzero path_id",
+            },
+        ];
+        *speaker.unrecognized.lock().unwrap() = unrecognized.to_vec();
+        for _ in 0..2 {
+            assert!(reconciler.reconcile().await.is_err());
+            assert_eq!(speaker.adds.load(SeqCst), 1);
+            assert_eq!(speaker.deletes.load(SeqCst), 0);
+            let routes = speaker.routes().await;
+            assert_eq!(routes.len(), 4);
+            for route in [
+                frozen(&desired),
+                frozen(&foreign_present),
+                frozen(&foreign_expired),
+                unknown_route.clone(),
+            ] {
+                assert!(routes.contains(&route));
+            }
+            assert_eq!(*speaker.unrecognized.lock().unwrap(), unrecognized);
+            assert!(status(&repo, &foreign_expired).await.is_active());
+            // Other POPs' routes and the unknown route, plus both unrecognized rows.
+            assert_eq!(
+                crate::observability::metrics::UNKNOWN_LOCAL_ROUTES
+                    .with_label_values(&["blackhole"])
+                    .get(),
+                5.0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn safelisted_blackhole_is_withdrawn_rather_than_repaired() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let (tx, mut rx) = broadcast::channel(8);
+        let reconciler = blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), false)
+            .with_ws_broadcast(tx);
+        let victim = blackhole_row("192.0.2.1");
+        // Negative control: an unsafelisted victim in the same pass is repaired.
+        let other = blackhole_row("192.0.2.9");
+        for mitigation in [&victim, &other] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        repo.insert_safelist("192.0.2.0/30", "admin", None)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            reconciler.reconcile().await.unwrap();
+            assert_eq!(speaker.adds.load(SeqCst), 1);
+            assert_eq!(speaker.routes().await, [frozen(&other)]);
+        }
+        assert_eq!(status(&repo, &victim).await, MitigationStatus::Withdrawn);
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            WsMessage::MitigationWithdrawn { mitigation_id } if mitigation_id == victim.mitigation_id.to_string()
+        ));
+        let audit = repo
+            .list_audit(&crate::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let entry = audit
+            .iter()
+            .find(|entry| entry.target_id.as_deref() == Some(&victim.mitigation_id.to_string()))
+            .unwrap();
+        assert_eq!(entry.action, "withdraw");
+        assert!(matches!(
+            entry.actor_type,
+            crate::observability::ActorType::System
+        ));
+        assert_eq!(
+            entry.details["reason"],
+            crate::domain::SAFELISTED_AFTER_ADMISSION
+        );
+    }
+
+    #[tokio::test]
+    async fn blackhole_safelist_lookup_failure_sends_nothing() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let reconciler = blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), false);
+        let missing = blackhole_row("192.0.2.1");
+        repo.insert_mitigation(&missing).await.unwrap();
+        let errors =
+            crate::observability::metrics::RECONCILIATION_REPAIRS.with_label_values(&["error"]);
+        let before = errors.get();
+        repo.fail_safelist.store(true, SeqCst);
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(speaker.adds.load(SeqCst), 0);
+        assert!(speaker.routes().await.is_empty());
+        assert!(status(&repo, &missing).await.is_active());
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+        assert_eq!(errors.get(), before + 1.0);
+        // Negative control: once the lookup works, the same row is repaired.
+        repo.fail_safelist.store(false, SeqCst);
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.routes().await, [frozen(&missing)]);
+    }
+
+    #[tokio::test]
+    async fn blackhole_repair_and_withdrawal_use_the_frozen_route_after_config_change() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        // The configuration changed after both rows were admitted.
+        let changed = blackhole_config("192.0.2.77", "64512:2");
+        let missing = blackhole_row("192.0.2.1");
+        let drifted = blackhole_row("192.0.2.2");
+        for mitigation in [&missing, &drifted] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        let current =
+            crate::domain::BlackholeRule::from_config(&changed, "192.0.2.2/32".parse().unwrap())
+                .unwrap()
+                .route()
+                .unwrap();
+        speaker.inner.announce_blackhole(&current).await.unwrap();
+        // Dry-run reports and sends nothing.
+        blackhole_reconciler(repo.clone(), speaker.clone(), changed.clone(), true)
+            .reconcile()
+            .await
+            .unwrap();
+        assert_eq!(speaker.adds.load(SeqCst), 0);
+        let reconciler = blackhole_reconciler(repo.clone(), speaker.clone(), changed, false);
+        for _ in 0..2 {
+            reconciler.reconcile().await.unwrap();
+            assert_eq!(speaker.adds.load(SeqCst), 2);
+            let routes = speaker.routes().await;
+            assert_eq!(routes.len(), 2);
+            for mitigation in [&missing, &drifted] {
+                assert!(routes.contains(&frozen(mitigation)));
+                assert_eq!(frozen(mitigation).next_hop().to_string(), "192.0.2.66");
+            }
+        }
+        let request = request_withdrawal(
+            repo.as_ref(),
+            &missing,
+            false,
+            "operator",
+            "alice",
+            "test".into(),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<crate::domain::BlackholeRule>(&request.rule_json).unwrap(),
+            crate::domain::blackhole_rule(&missing).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_blackhole_withdrawal_does_not_block_flowspec_admission_or_repair() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let blackhole = blackhole_row("192.0.2.1");
+        repo.insert_mitigation(&blackhole).await.unwrap();
+        speaker
+            .inner
+            .announce_blackhole(&frozen(&blackhole))
+            .await
+            .unwrap();
+        speaker.withdraw_fault.store(1, SeqCst);
+        let request = request_withdrawal(
+            repo.as_ref(),
+            &blackhole,
+            false,
+            "operator",
+            "alice",
+            "test".into(),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            execute_withdrawal(repo.as_ref(), speaker.as_ref(), false, &request, None)
+                .await
+                .is_err()
+        );
+        // A FlowSpec rule on the same host is a separate, unblocked identity.
+        let flowspec = action_mitigation("192.0.2.1/32", FlowSpecAction::discard());
+        repo.insert_mitigation(&flowspec).await.unwrap();
+        let owner = |mitigation: &Mitigation| {
+            let route = MitigationRoute::of(mitigation);
+            let scope = mitigation.scope_hash.clone();
+            let repo = repo.clone();
+            async move {
+                crate::domain::find_mitigation_owner(repo.as_ref(), "test", &route, &scope).await
+            }
+        };
+        assert_eq!(
+            owner(&flowspec)
+                .await
+                .unwrap()
+                .map(|found| found.mitigation_id),
+            Some(flowspec.mitigation_id)
+        );
+        let candidate = action_mitigation("192.0.2.7/32", FlowSpecAction::discard());
+        assert!(owner(&candidate).await.unwrap().is_none());
+        // The blackhole itself still reports its pending withdrawal.
+        assert!(matches!(
+            owner(&blackhole).await,
+            Err(PrefixdError::Conflict(_))
+        ));
+        let reconciler = blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), false);
+        reconciler.sync_announcements().await.unwrap();
+        assert_eq!(speaker.inner.announced_count().await, 1);
+        assert_eq!(speaker.adds.load(SeqCst), 0);
     }
 }
