@@ -127,6 +127,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   blackhole persists past its TTL while prefixd is stopped. The interop lab's
   rustbgpd peer now also negotiates unicast and sets `local_ipv6_nexthop`,
   which rustbgpd needs to send IPv6 routes over IPv4 transport.
+- `just interop-frr-amplification` qualifies amplification rules at FRR
+  10.7.1 through rustbgpd 0.78.0 and GoBGP 4.10.0, over IPv4 and IPv6
+  FlowSpec. The
+  [dated receipt](docs/reference/qualification/amplification-frr-2026-10-19.md)
+  shows FRR receiving source-port discard rules, with and without a
+  packet-length range, and the IsF fragment police rule with exactly the
+  expected components, then removal on detector unban and TTL expiry and
+  return through prefixd repair after a speaker restart. FRR installed none of
+  them as a filter. It also records that FRR accepts at most five values per
+  component and resets the session on a rule with more, which the default
+  `guardrails.max_ports: 8` allows: use 5 or lower toward FRR.
 
 - Fence duplicate controllers with a PostgreSQL session advisory lock (ADR
   027). Each controller derives an owner from its POP and registered speaker

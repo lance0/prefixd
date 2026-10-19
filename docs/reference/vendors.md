@@ -26,14 +26,20 @@ control-plane evidence.
 | **Multiple FlowSpec rules** | Verified | Expected | Expected | Expected | Verified |
 | **Destination port matching** | Verified | Verified | Expected | Expected | Verified |
 | **Protocol matching** | Verified | Verified | Expected | Expected | Verified |
-| **Source port matching** | Expected | Expected | Expected | Expected | Expected |
-| **Packet length matching** | Expected | Expected (needs a TCAM length field) | Expected | Expected | Expected |
-| **Non-first fragment matching** | Expected (enhanced-ip MPCs) | Expected (IPv4 only) | Expected (IPv4 only) | Expected | Expected |
+| **Source port matching** | Expected | Expected | Expected | Expected | Verified, at most 5 ports per rule ([receipt](qualification/amplification-frr-2026-10-19.md)) |
+| **Packet length matching** | Expected | Expected (needs a TCAM length field) | Expected | Expected | Verified ([receipt](qualification/amplification-frr-2026-10-19.md)) |
+| **Non-first fragment matching** | Expected (enhanced-ip MPCs) | Expected (IPv4 only) | Expected (IPv4 only) | Expected | Verified, IPv4 and IPv6 ([receipt](qualification/amplification-frr-2026-10-19.md)) |
 
 The last three rows are the [ADR 028](../adr/028-amplification-matches.md)
 amplification components. They come from vendor documentation, summarized in
-[ADR 028 section 7](../adr/028-amplification-matches.md#7-router-reality); no
-router has a prefixd receipt for them yet, and the FRR receipt is planned.
+[ADR 028 section 7](../adr/028-amplification-matches.md#7-router-reality). Only
+FRR has a prefixd receipt for them: the
+[FRR amplification receipt](qualification/amplification-frr-2026-10-19.md)
+shows FRR 10.7.1 receiving each component with the expected action from
+rustbgpd 0.78.0 and GoBGP 4.10.0, in both families. FRR accepts at most five
+values per component: a rule with more makes it reset the session, so keep
+`guardrails.max_ports` at 5 or lower toward FRR. FRR installed none of these
+rules as a filter.
 prefixd keeps source-port and fragment matches in separate rules, which EOS
 requires, and matches only IsF (non-first fragments), the one fragment bit every
 documented platform supports for IPv4. Expect IOS-XR and EOS to reject or
@@ -147,7 +153,18 @@ rustbgpd 0.78.0 to FRR 10.7.1 over unicast, with an import route-map that
 rewrites BLACKHOLE routes to a static discard next hop. It covers FRR's BGP
 table, zebra RIB and the container's kernel FIB, not packet forwarding.
 
+Amplification rules ([ADR 028](../adr/028-amplification-matches.md)) have a
+separate [FRR amplification receipt](qualification/amplification-frr-2026-10-19.md):
+rustbgpd 0.78.0 and GoBGP 4.10.0 to FRR 10.7.1, IPv4 and IPv6. FRR received
+source-port discard rules, with and without a packet-length range, and IsF
+fragment police rules, with the exact components. They were removed on
+detector unban and TTL expiry and restored by prefixd repair after a speaker
+restart. It is BGP-table evidence only.
+
 **Known quirks:**
+- FRR 10.7.1 accepts at most five values in one FlowSpec component. A rule with more (prefixd's default `max_ports: 8` allows eight source ports) makes FRR send NOTIFICATION 3/9 and reset the session, dropping every route on it.
+- FRR's FlowSpec text and JSON omit the AND bit, so `>=1000 AND <=65535` and an OR list render alike.
+- With `local-install` set at runtime, FRR 10.7.1 in the lab container still reported every amplification rule `not installed in PBR`.
 - FRR FlowSpec support is control-plane only by default — it receives and installs routes in the BGP table but does not program iptables/nftables rules without additional configuration. The lab output shows `not installed in PBR`.
 - FRR renders discard as `FS:rate 0.000000` and IPv6 destinations with an offset, for example `2001:db8:113::10/128/off 0`.
 - Useful for protocol-level testing but not for dataplane enforcement without extra setup.

@@ -6,7 +6,11 @@ Accepted 2026-10-19, with the owner decisions recorded below. Slices 1 to 6
 are implemented: the match model and identity, speaker encoding and
 capability, guardrails, the vector and multi-rule policy, detector adapters,
 and operator surfaces (manual API fields, dashboard, playbook editors and CLI).
-Slice 7, the FRR qualification receipt, is not done yet. Extends
+Slice 7 is done: the
+[FRR amplification receipt](../reference/qualification/amplification-frr-2026-10-19.md)
+qualifies FRR 10.7.1's control plane for both speakers and families. It found
+that FRR accepts at most five values per component and resets the session on
+more, which the default `max_ports: 8` can produce. Extends
 [ADR 012](012-playbook-policy-engine.md),
 [ADR 019](019-signal-adapter-architecture.md) and
 [ADR 025](025-pluggable-speaker-backends.md). It follows the identity

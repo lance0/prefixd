@@ -125,8 +125,10 @@ to the abused service instead of all UDP to the victim:
 - **Visibility** - The dashboard, API, WebSocket messages and `prefixdctl`
   show each rule's source ports, fragment and packet-length matches.
 
-Both bundled speakers encode all three components. Router support varies, and
-no router qualification receipt exists for them yet.
+Both bundled speakers encode all three components. Router support varies.
+FRR 10.7.1 is qualified in the control plane only, and accepts at most five
+values per component; see the
+[FRR amplification receipt](docs/reference/qualification/amplification-frr-2026-10-19.md).
 
 ---
 

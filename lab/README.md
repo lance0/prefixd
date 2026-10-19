@@ -116,6 +116,41 @@ FIB evidence inside the FRR container; no packets are forwarded. The dated
 [FRR blackhole receipt](../docs/reference/qualification/blackhole-frr-2026-10-19.md)
 records the results.
 
+### Amplification scenario
+
+`just interop-frr-amplification` runs `run-frr.sh <speaker> amplification` for
+rustbgpd and GoBGP. It qualifies [ADR 028](../docs/adr/028-amplification-matches.md)
+source-port, packet-length and fragment rules at FRR. The lab configs enable
+`allow_fragment_match` and `allow_packet_length_match`. The lab playbooks
+discard the event's reflector source ports and police non-first fragments at
+20 Mbit/s. Events with `top_dst_ports` select a 30 s variant that adds
+`packet_length: {min: 1000, max: 65535}`. `interop/amplification_frr.py` sends
+FastNetMon-shaped `udp_amplification` events through `POST /v1/events` and
+uses the FlowSpec oracle, which compares every component FRR reports. The
+steps are:
+
+1. NTP plus memcached (`top_src_ports: [11211, 123]`) for 203.0.113.60 and
+   2001:db8:113::60: one source-port discard and one IsF police rule per
+   family. Near-miss expectations (another port set, an extra rule, no
+   fragment rule) must not match.
+2. Detector unban withdraws both rules per family.
+3. Negative result: at prefixd's default `max_ports: 8`, a 20-port report gives
+   8-value source-port rules. FRR 10.7.1 accepts at most five values per
+   component, so it resets the session (NOTIFICATION 3/9), then the step
+   unbans.
+4. prefixd restarts with `max_ports: 5`.
+5. The 20-port report becomes four 5-port rules plus the fragment rule per family.
+6. Speaker restart: prefixd repair restores all ten rules.
+7. Unban withdraws them.
+8. Packet length: the 30 s variant's rules arrive, then expire.
+9. Negative control: a second prefixd whose configuration copy sets
+   `allow_fragment_match: false` refuses the playbooks at startup.
+
+The driver also sets FRR's `local-install eth1` at runtime and saves what FRR
+reports; FRR 10.7.1 installed none of these rules. The dated
+[FRR amplification receipt](../docs/reference/qualification/amplification-frr-2026-10-19.md)
+records the results.
+
 ## Nokia
 
 **SR Linux.** `interop/srlinux-probe.clab.yml` peers SR Linux 25.10.1 with

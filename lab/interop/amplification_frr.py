@@ -287,6 +287,8 @@ class AmplificationLab(Lab):
             )
         }
         record["connectionsDroppedBefore"] = before.get("connectionsDropped")
+        # FRR sends UPDATE Message Error / Optional Attribute Error for the refused NLRI.
+        assert record["lastErrorCodeSubcode"] == "0309", record
         self.steps[-1]["session_reset"] = record
         self.withdraw(victims, "over")()
         self.wait_ready()
