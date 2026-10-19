@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configurations use 8, and GoBGP is unaffected.
 - Migration 017 adds the nullable `events.top_src_ports_json` column. Replay
   leaves every existing event's value `NULL` and rewrites no other row.
+- Migration 018 replaces the `events` constraint
+  `UNIQUE(source, external_event_id)` with a unique index over ban events
+  only, so an unban can share its ban's external ID. Existing rows already
+  satisfy the index, and replay rewrites no row. Earlier releases run with the
+  index and do not restore the constraint.
 - Earlier releases refuse a playbooks.yaml with a `udp_amplification`
   playbook or a multi-rule step, by design: a release that ignored the step
   would widen the rule. Before downgrading, remove such playbooks and withdraw
@@ -288,6 +293,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the dump sent a UDP flood as `syn_flood` or `ack_flood`, so the
   mitigation was a TCP rule that missed the attack. Without a usable
   protocol line, the script infers the vector from tokens as before.
+- A detector unban is now stored in event history as its own `unban` event,
+  with the ban's source and external event ID. Before, every unban from any
+  source logged `failed to insert unban event` and was dropped, although the
+  withdrawal succeeded. A repeated identical ban is still rejected with
+  `409 DuplicateEvent`.
 
 ## [0.20.0] - 2026-10-19
 

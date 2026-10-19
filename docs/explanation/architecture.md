@@ -103,8 +103,10 @@ proves that a router is applying the rule.
 ### Withdrawal and expiry
 
 Detector unban looks up the original ban by source and external event ID, then
-its active mitigation. Operator single/bulk withdrawal and TTL expiry share the
-same durable deletion path:
+its active mitigation, and records the unban as its own event with the same
+source and external ID. Only bans are unique per source and external ID.
+Operator single/bulk withdrawal and TTL expiry share the same durable deletion
+path:
 
 1. Validate the current canonical owner and immutable speaker binding.
 2. Persist an immutable withdrawal request containing the original rule, target,

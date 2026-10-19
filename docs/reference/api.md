@@ -199,7 +199,10 @@ When no reported port is in the library, or no `udp_amplification` playbook is
 configured, the event is evaluated exactly as `udp_flood`: the mitigation's
 vector is `udp_flood` and its reason ends with
 `[udp_amplification fallback: ...]`. An unban by `event_id` withdraws every
-live mitigation the original ban created.
+live mitigation the original ban created. The unban is stored as its own event
+with `"action": "unban"` and the ban's source and `external_event_id`; the
+response's `event_id` is that unban event. An unban with no active mitigation
+stores nothing. Only bans are deduplicated by source and `event_id`.
 
 When a new mitigation is needed, prefixd commits its Active desired row before
 calling the speaker. A persistence failure sends no announcement. If intent

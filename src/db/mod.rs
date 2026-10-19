@@ -115,6 +115,11 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
             "event_top_src_ports",
             include_str!("../../migrations/017_event_top_src_ports.sql"),
         ),
+        (
+            18,
+            "event_ban_dedup_index",
+            include_str!("../../migrations/018_event_ban_dedup_index.sql"),
+        ),
     ];
 
     // Bootstrap: run all migrations first (they use IF NOT EXISTS)

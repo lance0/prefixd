@@ -917,6 +917,138 @@ async fn test_duplicate_event_extends_ttl() {
 }
 
 #[tokio::test]
+async fn test_detector_unban_is_recorded_beside_its_ban() {
+    let ctx = TestContext::new().await;
+    // Simulate a database from before migration 018, with a stored ban.
+    sqlx::raw_sql(
+        "DROP INDEX IF EXISTS events_source_external_ban_key;
+         ALTER TABLE events DROP CONSTRAINT IF EXISTS events_source_external_event_id_key;
+         ALTER TABLE events ADD CONSTRAINT events_source_external_event_id_key
+             UNIQUE (source, external_event_id);
+         INSERT INTO events (event_id, external_event_id, source, event_timestamp, ingested_at,
+             victim_ip, vector, top_dst_ports_json, action)
+         VALUES (gen_random_uuid(), 'old-1', 'replay', now(), now(), '203.0.113.30',
+             'udp_flood', '[]', 'ban');",
+    )
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
+    let history = || {
+        let pool = ctx.pool.clone();
+        async move {
+            sqlx::query_as::<_, (uuid::Uuid, String, String)>(
+                "SELECT event_id, external_event_id, action FROM events ORDER BY ingested_at",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let before = history().await;
+    // Replay is repeatable, keeps history and swaps the constraint for the ban index.
+    for _ in 0..2 {
+        prefixd::db::init_postgres_pool(&ctx.state.settings.storage.connection_string)
+            .await
+            .unwrap();
+    }
+    assert_eq!(history().await, before);
+    let constraint: Option<String> = sqlx::query_scalar(
+        "SELECT conname::text FROM pg_constraint
+         WHERE conname = 'events_source_external_event_id_key'",
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(constraint, None);
+
+    let app = ctx.router().await;
+    let post = |external: &str, action: &str| {
+        let app = app.clone();
+        let body = serde_json::json!({
+            "event_id": external, "action": action, "timestamp": "2026-01-17T10:00:00Z",
+            "source": "fastnetmon", "victim_ip": "203.0.113.10", "vector": "udp_flood",
+            "bps": 500000000, "pps": 100000, "top_dst_ports": [53], "confidence": 0.95
+        });
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/events")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            (status, json)
+        }
+    };
+    let stored = |external: &'static str| {
+        let pool = ctx.pool.clone();
+        async move {
+            sqlx::query_as::<_, (uuid::Uuid, String)>(
+                "SELECT event_id, action FROM events
+                 WHERE source = 'fastnetmon' AND external_event_id = $1 ORDER BY ingested_at",
+            )
+            .bind(external)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let actions = |rows: Vec<(uuid::Uuid, String)>| -> Vec<String> {
+        rows.into_iter().map(|(_, action)| action).collect()
+    };
+
+    let (status, ban) = post("fnm-1", "ban").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(ban["status"], "accepted");
+    let (status, unban) = post("fnm-1", "unban").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(unban["status"], "withdrawn");
+    assert_eq!(unban["mitigation_id"], ban["mitigation_id"]);
+    // The unban is its own event, correlated with the ban by source and ID.
+    let rows = stored("fnm-1").await;
+    assert_eq!(actions(rows.clone()), ["ban", "unban"]);
+    assert_eq!(rows[1].0.to_string(), unban["event_id"].as_str().unwrap());
+
+    // A repeated unban is idempotent: no error, withdrawal or extra row.
+    let (status, repeat) = post("fnm-1", "unban").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(repeat["status"], "no_active_mitigation");
+    assert_eq!(actions(stored("fnm-1").await), ["ban", "unban"]);
+
+    // Repeated identical bans stay deduplicated after the unban.
+    let (status, _) = post("fnm-1", "ban").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(actions(stored("fnm-1").await), ["ban", "unban"]);
+
+    // Ban, unban, ban: a new attack ID mitigates again and unbans cleanly.
+    let (status, reban) = post("fnm-2", "ban").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(reban["status"], "accepted");
+    assert_ne!(reban["mitigation_id"], ban["mitigation_id"]);
+    let (status, unban) = post("fnm-2", "unban").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(unban["mitigation_id"], reban["mitigation_id"]);
+    assert_eq!(actions(stored("fnm-2").await), ["ban", "unban"]);
+    let mitigation_id = reban["mitigation_id"].as_str().unwrap().parse().unwrap();
+    let mitigation = ctx
+        .repo
+        .get_mitigation(mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(mitigation.status, MitigationStatus::Withdrawn);
+}
+
+#[tokio::test]
 async fn test_migration_applies_cleanly() {
     // This test verifies that migrations apply cleanly to a fresh database
     // The TestContext::new() already runs migrations, so if we get here without panic, it worked
