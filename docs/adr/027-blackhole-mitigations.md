@@ -351,8 +351,17 @@ blackholes.
 
 - **Owner identity.** Each controller has one stable owner, derived from its
   POP and the UUID of its verified speaker target, and unchanged across
-  restarts. The owner must be 1 to 64 bytes of `[A-Za-z0-9._-]` (ADR-0141 §3),
-  and startup refuses a POP that cannot form a valid owner. Within one
+  restarts. The owner is `prefixd.` + a sanitized POP prefix + `.` + the first
+  16 lowercase hex characters of SHA-256 over the POP, a NUL byte and the
+  target UUID in canonical lowercase hyphenated form. The POP prefix keeps
+  `[A-Za-z0-9_-]`, maps every other character to `-`, and is truncated so the
+  whole owner is at most 64 bytes. For example, POP `fra1` gives an owner of
+  the form `prefixd.fra1.3f9c2a7b1e04d5c6`. The owner is deterministic across
+  restarts, always valid under ADR-0141's 1 to 64 bytes of `[A-Za-z0-9._-]`
+  (§3), and readable as a metric label. The hash keeps two POPs distinct even
+  when sanitizing or truncation makes their prefixes identical. Changing the
+  POP or the speaker target changes the owner, so both follow the
+  [upgrade guide](../how-to/upgrading.md#drained-target-transfer). Within one
   database, a target belongs to exactly one POP, so two owners cannot collide.
   A collision across databases means two controllers are configured with the
   same POP against one speaker, which is a misconfiguration. Startup refuses
@@ -633,6 +642,9 @@ Each slice is a separate draft PR that passes `just gate`.
      intent, never a reported success.
    - Every delete passes the owner recorded in the request's `rule_json`, and
      none sets `override_owner`.
+   - A unit test pins one owner derivation and covers a POP name that needs
+     sanitizing, and every derived owner is at most 64 bytes of
+     `[A-Za-z0-9._-]`.
    - `blackhole.lease_seconds` outside 5..=3600 is refused at startup, and
      every leased add and renewal in the fake carries the configured value.
    - Rows of other owners and rows without an owner are untouched.
