@@ -110,6 +110,21 @@ pub async fn try_acquire(options: &PgConnectOptions, key: i64) -> Result<Option<
     Ok(None)
 }
 
+/// One-shot maintenance takes the fence once and refuses while a controller holds
+/// it. Closing the returned session releases the lock.
+pub async fn acquire_for_maintenance(
+    options: &PgConnectOptions,
+    owner: &str,
+) -> Result<PgConnection> {
+    try_acquire(options, fence_lock_key(owner))
+        .await?
+        .ok_or_else(|| {
+            PrefixdError::Conflict(format!(
+                "another controller holds the fence for owner {owner}; stop it first"
+            ))
+        })
+}
+
 /// Hold the fence, or poll for it, for the life of the process. Process exit
 /// closes the session and releases the lock, so a graceful drain stays fenced.
 /// On a failed check the controller enters standby at once and later reacquires

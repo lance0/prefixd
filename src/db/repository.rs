@@ -282,6 +282,15 @@ impl RepositoryTrait for Repository {
         ))
     }
 
+    async fn registered_speaker_target_id(
+        &self,
+        target: &crate::domain::SpeakerTarget,
+    ) -> Result<Option<Uuid>> {
+        Ok(sqlx::query_scalar("SELECT target_id FROM speaker_targets WHERE backend = $1 AND endpoint = $2 AND routing_namespace = $3")
+            .bind(target.backend).bind(&target.endpoint).bind(target.namespace)
+            .fetch_optional(&self.pool).await?)
+    }
+
     async fn tag_unknown_origin(
         &self,
         pop: &str,

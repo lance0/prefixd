@@ -169,6 +169,18 @@ impl RepositoryTrait for MockRepository {
         ))
     }
 
+    async fn registered_speaker_target_id(
+        &self,
+        target: &crate::domain::SpeakerTarget,
+    ) -> Result<Option<Uuid>> {
+        let bindings = self.speaker_bindings.lock().unwrap();
+        Ok(bindings
+            .targets
+            .iter()
+            .find(|(_, known)| known == target)
+            .map(|(id, _)| *id))
+    }
+
     async fn tag_unknown_origin(
         &self,
         pop: &str,

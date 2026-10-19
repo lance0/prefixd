@@ -15,6 +15,7 @@ use prefixd::db;
 use prefixd::fence;
 use prefixd::observability::init_tracing;
 use prefixd::scheduler::ReconciliationLoop;
+use sqlx::Connection;
 use sqlx::postgres::PgConnectOptions;
 use std::str::FromStr;
 
@@ -79,14 +80,31 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::init_postgres_pool(&connection_string).await?;
     let repo: Arc<dyn db::RepositoryTrait> = Arc::new(db::Repository::new(pool.clone()));
 
+    let fence_options = PgConnectOptions::from_str(&connection_string)?;
     // Bind before even connecting: configuration changes must not redirect old intent.
     let target = prefixd::domain::SpeakerTarget::from_config(&config.settings.bgp)?;
+    // Adoption writes during registration, so it takes the fence first. A target
+    // that was never registered has no owner a controller could be holding.
+    let mut maintenance_fence = None;
+    if cli.adopt_legacy_speaker
+        && let Some(target_id) = repo.registered_speaker_target_id(&target).await?
+    {
+        let owner = prefixd::domain::controller_owner(&config.settings.pop, target_id);
+        maintenance_fence = Some(fence::acquire_for_maintenance(&fence_options, &owner).await?);
+    }
     let binding = repo
         .register_speaker_target(&config.settings.pop, &target, cli.adopt_legacy_speaker)
         .await?;
     if cli.adopt_legacy_speaker {
+        if let Some(session) = maintenance_fence {
+            let _ = session.close().await;
+        }
         tracing::info!("speaker ownership adoption complete; no speaker connection attempted");
         return Ok(());
+    }
+    if cli.retire_dry_run_intent {
+        maintenance_fence =
+            Some(fence::acquire_for_maintenance(&fence_options, &binding.owner()).await?);
     }
     // Rows from before origin tracking take this startup's mode; upgrade without changing mode.
     let tagged = repo
@@ -106,6 +124,9 @@ async fn main() -> anyhow::Result<()> {
             Some(&binding),
         )
         .await?;
+        if let Some(session) = maintenance_fence {
+            let _ = session.close().await;
+        }
         tracing::info!(
             retired,
             "dry-run intent retired locally; no speaker connection attempted"
@@ -116,7 +137,6 @@ async fn main() -> anyhow::Result<()> {
         prefixd::domain::check_enforced_startup(repo.as_ref(), &config.settings.pop).await?;
     }
     // Fence before any speaker connection: without the lock, run in standby (ADR 027).
-    let fence_options = PgConnectOptions::from_str(&connection_string)?;
     let owner = binding.owner();
     let fence_key = fence::fence_lock_key(&owner);
     let held = fence::try_acquire(&fence_options, fence_key).await?;

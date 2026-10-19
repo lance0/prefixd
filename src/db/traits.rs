@@ -104,6 +104,17 @@ pub trait RepositoryTrait: Send + Sync {
         ))
     }
 
+    /// Read-only lookup of an already registered target's ID, so one-shot
+    /// maintenance can take the controller fence before registration writes.
+    async fn registered_speaker_target_id(
+        &self,
+        _target: &crate::domain::SpeakerTarget,
+    ) -> Result<Option<uuid::Uuid>> {
+        Err(crate::error::PrefixdError::Config(
+            "speaker target lookup is unsupported by this repository".into(),
+        ))
+    }
+
     /// Record `mode` as the origin of this POP's live rows that predate origin
     /// tracking, with one system audit entry. Never changes `updated_at`, so
     /// pending withdrawals keep matching. Returns the number of rows tagged.

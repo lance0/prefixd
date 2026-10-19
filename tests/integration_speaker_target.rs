@@ -1495,3 +1495,109 @@ async fn withdrawal_rule_kind_replay_keeps_every_request_flowspec() {
     assert_eq!(done.status, MitigationStatus::Withdrawn);
     assert_eq!(speaker.announced_count().await, 0);
 }
+
+#[tokio::test]
+async fn one_shot_maintenance_refuses_while_another_instance_holds_the_fence() {
+    use sqlx::Connection;
+    use std::{str::FromStr, time::Duration};
+    let ctx = common::TestContext::new().await;
+    let mut config = settings("maintenance", "http://127.0.0.1:1");
+    config.http.listen = "127.0.0.1:0".into();
+    let binding = ctx
+        .repo
+        .register_speaker_target(
+            "maintenance",
+            &SpeakerTarget::from_config(&config.bgp).unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+    let mut simulated = mitigation("maintenance", "203.0.113.10");
+    simulated.origin_mode = Some(OperationMode::DryRun);
+    ctx.repo.insert_mitigation(&simulated).await.unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    for (name, yaml) in [
+        ("prefixd.yaml", serde_saphyr::to_string(&config).unwrap()),
+        (
+            "inventory.yaml",
+            serde_saphyr::to_string(&common::test_inventory()).unwrap(),
+        ),
+        (
+            "playbooks.yaml",
+            serde_saphyr::to_string(&common::test_playbooks()).unwrap(),
+        ),
+    ] {
+        common::write_yaml(directory.path(), name, &yaml);
+    }
+    let run = async |flag: &str| {
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixd"))
+                .arg("--config")
+                .arg(directory.path())
+                .arg(flag)
+                .env(
+                    "DATABASE_URL",
+                    &ctx.state.settings.storage.connection_string,
+                )
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    };
+    let options =
+        sqlx::postgres::PgConnectOptions::from_str(&ctx.state.settings.storage.connection_string)
+            .unwrap();
+    let owner = binding.owner();
+    let key = prefixd::fence::fence_lock_key(&owner);
+    // Another instance holds this owner's fence.
+    let holder = prefixd::fence::try_acquire(&options, key)
+        .await
+        .unwrap()
+        .expect("test instance takes the fence");
+    for flag in ["--retire-dry-run-intent", "--adopt-legacy-speaker"] {
+        let output = run(flag).await;
+        assert!(!output.status.success(), "{flag} ran beside a fence holder");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "another controller holds the fence for owner {owner}"
+            )) && stderr.contains("stop it first"),
+            "{flag}: {stderr}"
+        );
+    }
+    let untouched = ctx
+        .repo
+        .get_mitigation(simulated.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(untouched.status, MitigationStatus::Active);
+
+    // Once the holder stops, both modes run and release the fence on exit.
+    holder.close().await.unwrap();
+    for flag in ["--retire-dry-run-intent", "--adopt-legacy-speaker"] {
+        let output = run(flag).await;
+        assert!(
+            output.status.success(),
+            "{flag}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let retired = ctx
+        .repo
+        .get_mitigation(simulated.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retired.status, MitigationStatus::Withdrawn);
+    assert!(
+        prefixd::fence::try_acquire(&options, key)
+            .await
+            .unwrap()
+            .is_some(),
+        "one-shot modes release the fence when they exit"
+    );
+}
