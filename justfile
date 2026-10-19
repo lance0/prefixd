@@ -1,6 +1,7 @@
 # Local verification. Tool installation, publication and browser fixtures are separate.
 export RUSTUP_AUTO_INSTALL := "0"
 msrv_toolchain := "1.89.0"
+ruff_version := "0.16.0"
 
 # Show the focused checks.
 default:
@@ -9,6 +10,7 @@ default:
 # Run substantive code pre-PR checks sequentially; Docker is required.
 gate:
     just fmt
+    just python
     just clippy
     just test
     just msrv
@@ -21,6 +23,11 @@ gate:
 # Check formatting without rewriting source.
 fmt:
     cargo fmt --all -- --check
+
+# Lint and format-check every Python file against ruff.toml; uvx fetches the pinned ruff.
+python:
+    uvx ruff@{{ruff_version}} check .
+    uvx ruff@{{ruff_version}} format --check .
 
 clippy-gobgp:
     cargo clippy --locked --no-default-features --all-targets -- -D warnings

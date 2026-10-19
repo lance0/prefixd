@@ -178,6 +178,15 @@ jobs:
       - name: Check formatting
         run: just fmt
 
+      # setup-uv publishes no floating major tag, so pin its exact release.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: false
+
+      - name: Lint and format-check Python
+        run: just python
+
       - name: Lint GoBGP fallback
         run: just clippy-gobgp
 

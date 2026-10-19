@@ -12,6 +12,7 @@ Thanks for your interest in contributing!
 - protobuf compiler (`protoc`)
 - [just](https://just.systems/), `cargo-audit` and `cargo-deny`
 - Bun 1.4.3 and native Node.js 26.12.0 for the dashboard
+- [uv](https://docs.astral.sh/uv/) for `just python`, which runs the pinned ruff
 
 CI checks the locked dependency graph on Linux with Rust 1.89.0, including
 development dependencies, alongside the current stable tests and lints. To
@@ -71,15 +72,15 @@ scripts/test-gobgp.sh
 ### Local verification
 
 Run `just gate` before opening a PR with substantive code changes. It runs
-formatting, both locked Rust test
+Rust and Python formatting, Python lint, both locked Rust test
 and Clippy feature combinations, minimum-compiler checks, the release build,
 frozen dashboard install/types/tests/build, advisory checks and the owned GoBGP
 and rustbgpd 0.76.0/0.77.0/0.78.0 fixtures, sequentially. It needs Docker and the tools
 listed above; it does not install missing tools or Rust toolchains.
 Prose-only changes need affected-link checks and `git diff --check`.
 
-Use `just --list` for focused checks such as `just fmt`, `just clippy`,
-`just test-fast`, `just msrv` or `just frontend`. Recipes expose ordinary
+Use `just --list` for focused checks such as `just fmt`, `just python`,
+`just clippy`, `just test-fast`, `just msrv` or `just frontend`. Recipes expose ordinary
 commands, and CI shares them while retaining separate jobs and speaker versions.
 The Rust advisory recipe keeps CI's explicit unfixed `rsa` exception; warnings
 remain visible.
@@ -179,8 +180,8 @@ prek install --hook-type pre-commit --hook-type pre-push
 pre-commit install --hook-type pre-commit --hook-type pre-push
 ```
 
-Commit hooks check formatting without rewriting files and run locked all-feature
-Clippy for Rust inputs. Push hooks run locked all-feature library and binary
+Commit hooks check formatting without rewriting files, run ruff for Python inputs
+and run locked all-feature Clippy for Rust inputs. Push hooks run locked all-feature library and binary
 unit tests. Manifests, lockfiles, protobufs and Cargo/toolchain configuration
 also trigger lint/tests; prose-only changes skip Rust builds. These quick hooks
 do not run Docker, MSRV or frontend checks and do not replace `just gate`.

@@ -131,6 +131,7 @@ CPU and job budget:
 | Released rustbgpd fixtures | `scripts/test-rustbgpd.sh` and `PREFIXD_RUSTBGPD_TEST_VERSION=0.76.0 scripts/test-rustbgpd.sh` |
 | Frontend checks, in `frontend/` | `bun install --frozen-lockfile`, `bun run test`, `bun run build`, `bun audit` |
 | Rust dependency advisories | `cargo audit`; compare findings with the documented CI exceptions |
+| Python lint and format | `just python` |
 | Patch hygiene | `git diff --check` |
 
 PostgreSQL tests use disposable containers; external speaker tests need their

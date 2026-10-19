@@ -12,6 +12,15 @@ repos:
         pass_filenames: false
         stages: [pre-commit]
 
+      - id: ruff
+        name: ruff check and format check
+        entry: just python
+        language: system
+        files: '\.py$|^ruff\.toml$'
+        types: [file]
+        pass_filenames: false
+        stages: [pre-commit]
+
       - id: cargo-clippy
         name: cargo clippy
         entry: just clippy-all
