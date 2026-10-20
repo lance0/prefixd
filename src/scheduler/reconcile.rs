@@ -1313,9 +1313,15 @@ impl ReconciliationLoop {
                         "export observation budget for this pass exhausted".into(),
                     ))
                 });
-            let evidence = BlackholeExportEvidence::from_read(&read, sessions, now);
+            let mut evidence = BlackholeExportEvidence::from_read(&read, sessions, now);
             if let Some(error) = &evidence.error {
                 tracing::warn!(%prefix, error, "blackhole export read failed; export unknown");
+                // Keep the last complete read's warning, so a transient read
+                // error does not clear degraded health or the unexported alert.
+                evidence.warning = state
+                    .export_evidence
+                    .get(id)
+                    .and_then(|previous| previous.warning);
             }
             if let Some(warning) = &evidence.warning {
                 tracing::warn!(%prefix, reason = warning.reason,
@@ -2851,6 +2857,90 @@ mod tests {
             assert!(speaker.routes().await.is_empty());
             assert_eq!(speaker.adds.load(SeqCst), 0);
         }
+    }
+
+    /// A stalled export read spends the pass's budget and no more: expiry has
+    /// run, the lifecycle mutex is free during the stall, the pass returns,
+    /// and every unread blackhole is an error (unknown export), keeping its
+    /// last complete read's warning, never empty or committed.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_export_read_is_cut_off_by_the_budget() {
+        use crate::bgp::{ExportDisposition, PeerExport};
+        use crate::domain::ExportObservation;
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let reconciler = Arc::new(blackhole_reconciler(
+            repo.clone(),
+            speaker.clone(),
+            live_config(),
+            false,
+        ));
+        let rows = [blackhole_row("192.0.2.1"), blackhole_row("192.0.2.2")];
+        for mitigation in &rows {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        let export = |disposition, reason: &str| {
+            Ok(vec![PeerExport {
+                peer_address: "192.0.2.10".into(),
+                disposition,
+                reason: reason.into(),
+                explain_code: String::new(),
+                detail: String::new(),
+                advertised_path_id: 0,
+            }])
+        };
+        speaker.inner.set_exports(
+            frozen(&rows[0]).prefix(),
+            export(ExportDisposition::Withheld, "export_policy"),
+        );
+        speaker.inner.set_exports(
+            frozen(&rows[1]).prefix(),
+            export(ExportDisposition::Committed, ""),
+        );
+        reconciler.reconcile().await.unwrap();
+        let state = reconciler.state.clone().unwrap();
+        assert_eq!(state.export_evidence.summary().unexported.len(), 1);
+
+        let expired = expired_mitigation("192.0.2.9");
+        repo.insert_mitigation(&expired).await.unwrap();
+        speaker.inner.stall_exports.store(true, SeqCst);
+        let pass = tokio::spawn({
+            let reconciler = reconciler.clone();
+            async move { reconciler.reconcile().await }
+        });
+        tokio::time::sleep(EXPORT_OBSERVATION_BUDGET / 2).await;
+        assert!(!pass.is_finished(), "the read is stalled");
+        assert!(
+            state.mitigation_lock.try_lock().is_ok(),
+            "no lifecycle lock is held while reading"
+        );
+        assert_eq!(status(&repo, &expired).await, MitigationStatus::Expired);
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(EXPORT_OBSERVATION_BUDGET * 6, pass)
+            .await
+            .expect("the budget ends a stalled read")
+            .unwrap()
+            .unwrap();
+        assert!(started.elapsed() <= EXPORT_OBSERVATION_BUDGET);
+
+        let evidence =
+            |mitigation: &Mitigation| state.export_evidence.get(mitigation.mitigation_id).unwrap();
+        for row in &rows {
+            let evidence = evidence(row);
+            assert_eq!(evidence.status, ExportObservation::Error);
+            assert!(evidence.peers.is_empty());
+            assert_eq!(evidence.counts.committed, 0);
+        }
+        assert_eq!(evidence(&rows[0]).warning.unwrap().reason, "export_policy");
+        assert_eq!(evidence(&rows[1]).warning, None);
+        let summary = state.export_evidence.summary();
+        assert_eq!((summary.blackholes, summary.errors), (2, 2));
+        assert_eq!(
+            summary.unexported.len(),
+            1,
+            "a stall does not clear degraded"
+        );
     }
 
     /// One export read per active enforced blackhole per pass, never a write;

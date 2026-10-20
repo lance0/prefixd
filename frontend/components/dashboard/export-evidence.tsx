@@ -53,7 +53,7 @@ export function ExportEvidenceCard({ evidence, now }: { evidence: BlackholeExpor
           <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
             <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
             <span>
-              No Established peer has this blackhole in its Adj-RIB-Out, so no router is sent it. {evidence.warning.message}{" "}
+              {evidence.status === "error" ? "At the last complete read, no Established peer had" : "No Established peer has"} this blackhole in its Adj-RIB-Out, so no router is sent it. {evidence.warning.message}{" "}
               <span className="font-mono">({evidence.warning.reason})</span>
             </span>
           </div>

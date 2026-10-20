@@ -3361,7 +3361,6 @@ mod tests {
             );
         }
 
-        /// Refused blackholes count under blackhole-specific reasons and save nothing.
         /// Detail and health read the reconciler's export snapshot: not observed
         /// before a pass, then per-peer dispositions joined with sessions, and an
         /// unexported blackhole degrades health with its reason. A speaker
@@ -3473,23 +3472,51 @@ mod tests {
                     .contains("RPKI-Invalid")
             );
 
-            // A failed read is unknown export: no warning and not an empty list.
-            speaker.set_exports(
-                "203.0.113.10/32".parse().unwrap(),
-                Err("ListPathExportDispositions RPC failed: Unavailable".into()),
-            );
+            // A failed read is unknown export, not an empty list; it keeps the
+            // last complete read's warning, so health and the alert do not flap.
+            let failed = || {
+                speaker.set_exports(
+                    "203.0.113.10/32".parse().unwrap(),
+                    Err("ListPathExportDispositions RPC failed: Unavailable".into()),
+                )
+            };
+            failed();
             reconciler.reconcile().await.unwrap();
             let (_, detail) = get(&app, &path).await;
             assert_eq!(detail["export_evidence"]["status"], "error");
-            assert!(detail["export_evidence"]["warning"].is_null());
+            assert_eq!(detail["export_evidence"]["peers"], json!([]));
+            assert_eq!(
+                detail["export_evidence"]["warning"]["reason"],
+                "export_policy"
+            );
             let (_, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(health["status"], "degraded", "{health}");
             assert_eq!(health["speaker"]["blackhole_exports"]["errors"], 1);
             assert_eq!(
                 crate::observability::metrics::BLACKHOLE_UNEXPORTED
                     .with_label_values(&["export_policy"])
                     .get(),
-                0.0
+                1.0
             );
+
+            // A failed read after a committed one stays healthy.
+            speaker.set_exports(
+                "203.0.113.10/32".parse().unwrap(),
+                Ok(vec![PeerExport {
+                    peer_address: "192.0.2.10".into(),
+                    disposition: ExportDisposition::Committed,
+                    reason: String::new(),
+                    explain_code: String::new(),
+                    detail: String::new(),
+                    advertised_path_id: 0,
+                }]),
+            );
+            reconciler.reconcile().await.unwrap();
+            failed();
+            reconciler.reconcile().await.unwrap();
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(health["status"], "healthy", "{health}");
+            assert_eq!(health["speaker"]["blackhole_exports"]["errors"], 1);
 
             // GoBGP cannot report export: unsupported, and health omits the summary.
             let gobgp = state_with_gobgp(repo.clone());
@@ -3507,6 +3534,7 @@ mod tests {
             )
         }
 
+        /// Refused blackholes count under blackhole-specific reasons and save nothing.
         #[tokio::test]
         async fn manual_blackhole_rejections_are_counted_by_reason() {
             let _metrics = METRICS_TEST_LOCK.lock().await;

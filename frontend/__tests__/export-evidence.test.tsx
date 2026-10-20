@@ -85,6 +85,13 @@ describe("export evidence card", () => {
     expect(screen.queryByText(/Exported to no peer|Committed to/)).not.toBeInTheDocument()
   })
 
+  it("labels a warning kept through a failed read as the last complete read's", () => {
+    render(<ExportEvidenceCard evidence={evidence({ status: "error", observed_at: observedAt, not_established_peers: null, error: "read failed", warning: { reason: "export_policy", message: "Export policy denies it." } })} />)
+    expect(screen.getByText("Export unknown")).toHaveAttribute("data-tone", "danger")
+    const [warning] = screen.getAllByRole("alert")
+    expect(warning).toHaveTextContent("At the last complete read, no Established peer had this blackhole")
+  })
+
   it.each([
     ["unsupported", "Not reported by this speaker", "neutral"],
     ["not_observed", "Not observed yet", "neutral"],

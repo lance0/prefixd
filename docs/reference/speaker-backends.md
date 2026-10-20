@@ -544,7 +544,9 @@ enforced-origin blackhole of this POP (the stage's repair candidates), keyed
 on its host prefix and `path_id` 0, and walks every page. It also uses the
 pass's `ListNeighbors` read. The reads run one at a time within a 10-second
 budget per pass, so a stalled speaker cannot hold up expiry; a read the budget
-cuts off reports an error. The pass keeps the result in memory. The mitigation
+cuts off reports an error. A failed or cut-off read keeps the blackhole's
+warning from its last complete read, so a transient error neither clears nor
+raises degraded health. The pass keeps the result in memory. The mitigation
 detail API, health detail and metrics read that snapshot and never call the
 speaker. The read is observation only: it sends no route mutation and adds no
 writer behavior, and a standby controller reads nothing because it runs no

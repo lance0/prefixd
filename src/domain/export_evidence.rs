@@ -150,6 +150,7 @@ pub struct BlackholeExportEvidence {
     pub not_established_peers: Option<Vec<NotEstablishedPeer>>,
     pub counts: DispositionCounts,
     /// Present when an observed route is committed to no Established peer.
+    /// On `error`, the last complete read's warning, kept so health does not flap.
     pub warning: Option<ExportWarning>,
     pub error: Option<String>,
 }

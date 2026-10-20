@@ -31,6 +31,8 @@ pub struct MockAnnouncer {
     /// Test seam: export reads for these prefixes return this instead; `Err`
     /// fails the read.
     export_overrides: std::sync::Mutex<ExportOverrides>,
+    /// Test seam: every export read stalls and never completes.
+    pub stall_exports: std::sync::atomic::AtomicBool,
 }
 
 type ExportOverrides =
@@ -49,6 +51,7 @@ impl MockAnnouncer {
             }],
             no_match_support: false,
             export_overrides: Default::default(),
+            stall_exports: Default::default(),
         }
     }
 
@@ -60,6 +63,7 @@ impl MockAnnouncer {
             peers,
             no_match_support: false,
             export_overrides: Default::default(),
+            stall_exports: Default::default(),
         }
     }
 
@@ -291,6 +295,9 @@ impl InjectionLeases for MockAnnouncer {
 #[async_trait]
 impl ExportObserver for MockAnnouncer {
     async fn blackhole_exports(&self, prefix: &ipnet::IpNet) -> Result<Option<Vec<PeerExport>>> {
+        if self.stall_exports.load(std::sync::atomic::Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         if let Some(exports) = self.export_overrides.lock().unwrap().get(prefix) {
             return exports.clone().map(Some).map_err(PrefixdError::Internal);
         }
