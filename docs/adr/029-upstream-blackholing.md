@@ -251,6 +251,27 @@ controls. Add a bounded packet test through FRR to distinguish control-plane
 discard from forwarding, including an unaffected destination and recovery
 after withdrawal. No FRR result claims commercial-provider acceptance.
 
+## Open questions
+
+These need an owner decision before the ADR is accepted:
+
+1. **Profile defaults.** The proposed two active victims, 600-second maximum
+   TTL and ten new admissions per minute are unmeasured product choices.
+   FastNetMon Community's 1900-second ban needs an explicit profile override
+   or a shorter detector ban.
+2. **Generic BLACKHOLE on transit.** The injected route still carries
+   `65535:666`, as ADR 027 requires. Whether egress keeps it toward a transit
+   profile that wants only a provider community, such as `2914:666`, is open.
+   Recommendation, pending the owner's decision: the profile's community set
+   replaces the generic one at egress, and a profile may list `65535:666`
+   explicitly.
+3. **First-version scope.** Withdrawal covers the whole target set only, and
+   profiles may not overlap on a peer. Per-provider withdrawal and overlap
+   are deferred.
+4. **Stale-route bound.** Requiring a stated, verified GR/LLGR stale-route
+   maximum deliberately blocks enforcement toward providers that will not
+   state one.
+
 ## Consequences and delivery
 
 This gives operators a deliberate escape hatch for uplink saturation while
