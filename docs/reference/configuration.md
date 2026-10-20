@@ -175,7 +175,12 @@ owner's whole deadline. `blackhole.leased` is not required.
 - **Startup.** Refused unless the speaker answers the injection lease probe
   (rustbgpd 0.79.0 or later). Refused when the speaker holds live FlowSpec
   rules under this owner that the database neither desires nor is
-  withdrawing.
+  withdrawing. rustbgpd caps one injection owner at 16,384 keys, unicast and
+  FlowSpec together (rustbgpd ADR-0141 §7), so startup also refuses when
+  `quotas.max_active_per_pop` (for leased FlowSpec) plus
+  `blackhole.max_active_per_pop` (for leased blackholes) exceeds 16,384, and
+  when a pending withdrawal's recorded rule cannot be read, since its owner
+  is then unknown.
 - **No fallback.** A failed leased add leaves the rule unconfirmed and is
   retried only as a leased add, never as `AddFlowSpec`. If another owner, or
   no owner, holds the rule's match, the rule gets `409`, the new row is

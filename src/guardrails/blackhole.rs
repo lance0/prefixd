@@ -76,6 +76,22 @@ async fn ledger_owners(repo: &dyn RepositoryTrait, pop: &str) -> Result<Vec<(Str
     Ok(owners)
 }
 
+/// A pending withdrawal whose recorded route cannot be read might hold leased
+/// intent: refuse rather than validate the lease settings without it.
+fn readable(request: &crate::domain::WithdrawalRequest) -> Result<()> {
+    request.ownership_key().map(drop).map_err(|error| {
+        PrefixdError::Config(format!(
+            "pending withdrawal {} (mitigation {}) at POP {} has an unreadable recorded rule ({error}), \
+             so its injection owner is unknown; repair or complete it before changing lease settings",
+            request.operation_id, request.mitigation_id, request.pop
+        ))
+    })
+}
+
+/// rustbgpd's cap on keys one injection owner may hold, unicast and FlowSpec
+/// together (rustbgpd ADR-0141 §7). A leased add past it is refused.
+pub const MAX_KEYS_PER_OWNER: u32 = 16_384;
+
 /// Whether `route` exactly matches the frozen route, owner included, of a
 /// terminal, enforced-origin blackhole row of `pop`: a route prefixd left
 /// behind, which reconciliation's orphan cleanup deletes. Same match as
@@ -141,6 +157,25 @@ pub async fn check_lease_startup(
         .rustbgpd
         .as_ref()
         .is_some_and(|rustbgpd| rustbgpd.leased_flowspec);
+    // Every leased key counts against one owner's cap, so the quotas of the
+    // leased kinds must fit under it.
+    let blackholes_leased = config.enabled && config.leased;
+    let keys = u32::from(leased_flowspec) * settings.quotas.max_active_per_pop
+        + u32::from(blackholes_leased) * config.max_active_per_pop;
+    if keys > MAX_KEYS_PER_OWNER {
+        return Err(PrefixdError::Config(format!(
+            "leased intent at POP {pop} can reach {keys} keys (quotas.max_active_per_pop for leased \
+             FlowSpec plus blackhole.max_active_per_pop for leased blackholes), above rustbgpd's \
+             {MAX_KEYS_PER_OWNER} keys per injection owner; lower the quotas"
+        )));
+    }
+    // Where leased intent can exist, an unreadable pending withdrawal fails
+    // closed: its owner might make the settings below unsafe to change.
+    if speaker.injection_leases().is_some() || blackholes_leased || leased_flowspec {
+        for request in repo.pending_withdrawals(Some(pop)).await? {
+            readable(&request)?;
+        }
+    }
     let ledger = ledger_owners(repo, pop).await?;
     let leased = ledger.iter().filter(|(_, owner)| !owner.is_empty()).count();
     if leased > 0 && !(config.enabled && config.leased) {
@@ -1640,5 +1675,92 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("203.0.113.20/32"), "{error}");
+    }
+
+    /// Leasing refuses quotas that could exceed rustbgpd's per-owner key cap.
+    #[tokio::test]
+    async fn lease_startup_refuses_quotas_above_the_owner_key_cap() {
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        speaker.inner.live_lease(OWNER).await.unwrap();
+        let mut settings = enforced();
+        settings.blackhole.leased = true;
+        settings.bgp.rustbgpd = Some(crate::config::RustBgpdConfig {
+            leased_flowspec: true,
+            ..Default::default()
+        });
+        settings.quotas.max_active_per_pop =
+            MAX_KEYS_PER_OWNER - settings.blackhole.max_active_per_pop;
+        check_lease_startup(&settings, &speaker, &repo, OWNER)
+            .await
+            .unwrap();
+        settings.quotas.max_active_per_pop += 1;
+        let error = check_lease_startup(&settings, &speaker, &repo, OWNER)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("16384"), "{error}");
+        // Only the leased kinds count.
+        settings.bgp.rustbgpd = Some(Default::default());
+        check_lease_startup(&settings, &speaker, &repo, OWNER)
+            .await
+            .unwrap();
+    }
+
+    /// An unreadable pending withdrawal might hold leased intent, so lease
+    /// startup refuses with or without the setting instead of failing open.
+    #[tokio::test]
+    async fn an_unreadable_pending_withdrawal_refuses_lease_startup() {
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        speaker.inner.live_lease(OWNER).await.unwrap();
+        let mut row = Mitigation::from_intent(
+            MitigationIntent {
+                match_criteria: MatchCriteria {
+                    dst_prefix: "203.0.113.10/32".into(),
+                    protocol: Some(17),
+                    ..Default::default()
+                },
+                action_type: ActionType::Discard,
+                ..intent("203.0.113.10/32")
+            },
+            "203.0.113.10".into(),
+            AttackVector::UdpFlood,
+        );
+        row.action_params.injection_owner = OWNER.into();
+        row.activate();
+        repo.insert_mitigation(&row).await.unwrap();
+        let mut request = crate::domain::WithdrawalRequest::new(
+            &row,
+            false,
+            "operator",
+            "alice",
+            "attack over".into(),
+            true,
+        )
+        .unwrap();
+        request.rule_json = "{not json".into();
+        repo.begin_withdrawal(&request).await.unwrap();
+        let settings = enforced();
+        for leased_flowspec in [false, true] {
+            let mut settings = settings.clone();
+            settings.bgp.rustbgpd = Some(crate::config::RustBgpdConfig {
+                leased_flowspec,
+                ..Default::default()
+            });
+            let error = check_lease_startup(&settings, &speaker, &repo, OWNER)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("unreadable"), "{error}");
+        }
+        // A backend that cannot hold leased intent skips the readability check
+        // (the live leased row still refuses, for its own reason).
+        let other = crate::bgp::GoBgpAnnouncer::new("http://127.0.0.1:1".into());
+        let error = check_lease_startup(&settings, &other, &repo, OWNER)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("unreadable"), "{error}");
     }
 }

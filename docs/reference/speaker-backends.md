@@ -507,7 +507,11 @@ and never `override_owner`. The FlowSpec read sets each rule's owner from
 `injection_owner`, so a desired rule matches only under its recorded owner,
 and drops leased rows with `lease_remaining_ms` 0 as lost. Another owner's
 rule at a desired match is a repair error, counted as unknown and never
-touched. One requested re-add covers both kinds in the same pass.
+touched. A requested re-add is taken once per pass and applied by both
+stages: the FlowSpec stage runs first, then the blackhole stage. A loss that
+the blackhole stage detects later in the same pass, such as an expired row,
+forces the blackhole re-add at once; that re-add adopts the new generation
+and requests another pass immediately, which re-adds the FlowSpec rules.
 
 The lease probe, adds and renewals run against rustbgpd 0.79.0 and later.
 `scripts/test-rustbgpd.sh` runs the leased lifecycle for blackholes and

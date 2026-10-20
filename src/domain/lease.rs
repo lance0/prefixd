@@ -493,6 +493,20 @@ mod tests {
                 .await,
             Err(PrefixdError::Standby)
         ));
+        // One owner lease covers leased FlowSpec too: its adds stay fenced as well.
+        let rule = crate::domain::FlowSpecRule::new(
+            crate::domain::FlowSpecNlri {
+                dst_prefix: "192.0.2.1/32".into(),
+                protocol: Some(17),
+                ..Default::default()
+            },
+            crate::domain::FlowSpecAction::discard(),
+        )
+        .with_owner(OWNER);
+        assert!(matches!(
+            crate::bgp::FlowSpecWriter::announce_leased(&fenced, &rule, 60).await,
+            Err(PrefixdError::Standby)
+        ));
     }
 
     /// Dry-run reports the recovered lease honestly and never renews it.
