@@ -1428,8 +1428,13 @@ async fn handle_ban(
                         } else {
                             "other"
                         };
+                        let action_label = action_type.to_string();
                         crate::observability::metrics::EVENT_RULE_QUOTA_REJECTIONS
-                            .with_label_values(&[quota_type, rule_kind, &action_type.to_string()])
+                            .with_label_values(&[
+                                quota_type.as_str(),
+                                rule_kind,
+                                action_label.as_str(),
+                            ])
                             .inc();
                         let entry = crate::observability::AuditEntry::new(
                             crate::observability::ActorType::Detector,
