@@ -1,5 +1,5 @@
 import { Suspense } from "react"
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
+import { act, fireEvent, screen, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import MitigationDetailPage from "@/app/(dashboard)/mitigations/[id]/page"
 import { MitigationsContentLive } from "@/components/dashboard/mitigations-content-live"
@@ -7,6 +7,19 @@ import type { BulkWithdrawResponse, Mitigation } from "@/lib/api"
 import { deferred, json, operatorResponse, renderApp, settle, signIn, useFakeController, type ApiHandler } from "./support/fake-controller"
 
 const controller = useFakeController()
+
+/** Flush UI timers without letting slow wall-clock execution trigger a 5 s SWR poll. */
+async function waitFor<T>(read: () => T): Promise<T> {
+  // Advance 20 ms per wait, never once per assertion retry: a missing
+  // mutation refresh must not become a successful background poll.
+  await act(() => vi.advanceTimersByTimeAsync(20))
+
+  return vi.waitFor(async () => {
+    await act(() => vi.advanceTimersByTimeAsync(0))
+
+    return read()
+  }, { interval: 0 })
+}
 
 const createdAt = new Date(Date.now() - 60_000).toISOString()
 
@@ -89,12 +102,12 @@ async function renderView(view: "list" | "detail") {
 
 async function openSingle(view: "list" | "detail") {
   const trigger = view === "list"
-    ? (await screen.findAllByRole("button", { name: "Withdraw mitigation" }))[0]
-    : await screen.findByRole("button", { name: "Withdraw" })
+    ? (await waitFor(() => screen.getAllByRole("button", { name: "Withdraw mitigation" })))[0]
+    : await waitFor(() => screen.getByRole("button", { name: "Withdraw" }))
 
   act(() => trigger.focus())
   fireEvent.click(trigger)
-  const dialog = await screen.findByRole("alertdialog", { name: "Withdraw Mitigation" })
+  const dialog = await waitFor(() => screen.getByRole("alertdialog", { name: "Withdraw Mitigation" }))
 
   return { trigger, dialog }
 }
@@ -104,7 +117,7 @@ async function openBulk() {
   const trigger = screen.getByRole("button", { name: "Withdraw all" })
   act(() => trigger.focus())
   fireEvent.click(trigger)
-  const dialog = await screen.findByRole("alertdialog", { name: "Bulk Withdraw Mitigations" })
+  const dialog = await waitFor(() => screen.getByRole("alertdialog", { name: "Bulk Withdraw Mitigations" }))
 
   return { trigger, dialog }
 }
@@ -118,6 +131,7 @@ function bulkSuccess(ids: string[]): BulkWithdrawResponse {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers()
   vi.stubGlobal("matchMedia", vi.fn((media: string) => ({
     media,
     matches: true,
@@ -134,11 +148,16 @@ beforeEach(() => {
   serveMitigations(targets, targets[0])
 })
 
-afterEach(() => {
+afterEach(async () => {
+  // Radix defers focus-scope cleanup until after the tree unmounts.
+  await act(() => vi.advanceTimersByTimeAsync(0))
+  vi.clearAllTimers()
+  vi.useRealTimers()
   vi.unstubAllGlobals()
 })
 
-describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", (view) => {
+// Full-page integration budget on throttled runners; see CONTRIBUTING.md.
+describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", { timeout: 10_000 }, (view) => {
   it("stays open while pending, blocks duplicates and dismissal, then closes on local completion", async () => {
     const pending = deferred<void>()
     withdrawals(() => pending.promise.then(() => completed()))
@@ -252,7 +271,7 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
   })
 })
 
-describe("bulk withdrawal confirmation", () => {
+describe("bulk withdrawal confirmation", { timeout: 10_000 }, () => {
   it("preserves partial results and reason, retries only failures, and blocks duplicate pending requests", async () => {
     const pending = deferred<BulkWithdrawResponse>()
     bulkWithdrawals(() => pending.promise.then(json), () => json(bulkSuccess([targets[1].mitigation_id])))
@@ -301,7 +320,7 @@ describe("bulk withdrawal confirmation", () => {
     const reason = within(dialog).getByLabelText("Reason (optional)")
     fireEvent.change(reason, { target: { value: "retry whole request" } })
     fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw 2" }))
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Request failed")
+    expect(await waitFor(() => within(dialog).getByRole("alert"))).toHaveTextContent("Request failed")
     expect(reason).toHaveValue("retry whole request")
     expect(refreshes("list")).toBe(0)
     fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw 2" }))

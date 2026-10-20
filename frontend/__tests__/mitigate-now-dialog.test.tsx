@@ -24,7 +24,8 @@ function toastOf(text: string) {
   return screen.getByText(text).closest("[data-sonner-toast]")
 }
 
-describe("manual mitigation creation outcome", () => {
+// Real Radix form interactions on throttled runners; see CONTRIBUTING.md.
+describe("manual mitigation creation outcome", { timeout: 10_000 }, () => {
   it.each([undefined, "unconfirmed"] as const)("opens saved intent and reports request outcome %s", async outcome => {
     controller.route("POST", "/v1/events", () => json({ event_id: "event", mitigation_id: "saved-intent", status: "accepted", announcement_outcome: outcome }))
     const close = vi.fn()

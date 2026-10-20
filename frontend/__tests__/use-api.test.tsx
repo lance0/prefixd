@@ -17,6 +17,25 @@ describe("real API hooks", () => {
     vi.useRealTimers()
   })
 
+  it("polls mitigations only when the five-second refresh clock advances", async () => {
+    controller.route("GET", "/v1/mitigations", () => json({ mitigations: [], count: 0, next_cursor: null, has_more: false }))
+    vi.useFakeTimers()
+    const view = renderHook(() => useMitigations(), wrapper())
+
+    try {
+      await act(() => vi.advanceTimersByTimeAsync(0))
+      expect(controller.calls("GET", "/v1/mitigations")).toHaveLength(1)
+      await act(() => vi.advanceTimersByTimeAsync(4999))
+      expect(controller.calls("GET", "/v1/mitigations")).toHaveLength(1)
+      await act(() => vi.advanceTimersByTimeAsync(1))
+      expect(controller.calls("GET", "/v1/mitigations")).toHaveLength(2)
+    } finally {
+      view.unmount()
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
   it("forwards mitigation filters to the API", async () => {
     controller.route("GET", "/v1/mitigations", () => json({ mitigations: [], count: 0, next_cursor: null, has_more: false }))
     const filters = { status: ["active"], customer_id: "customer-a", limit: 10 }

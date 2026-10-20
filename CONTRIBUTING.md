@@ -247,6 +247,38 @@ scripts/test-rustbgpd.sh
 scripts/test-gobgp.sh
 ```
 
+### Dashboard tests
+
+Run `bun run test` in `frontend/`. Pure validation, formatting and API tests
+that do not use the DOM select `// @vitest-environment node`; interaction tests
+keep jsdom and the real React components, providers and Radix controls. Avoid
+paying for a browser environment in tests that do not need one.
+
+The fake controller's `settle()` flushes resolved responses and React effects
+with async `act`. It does not wait for a real timer or advance polling clocks;
+tests of expiry and retries must control those clocks explicitly.
+
+Withdrawal interaction tests control the clock so their exact mutation-refresh
+counts cannot include an unrelated five-second SWR poll during a slow render.
+Their waits advance UI timers inside `act`; a separate API-hook test verifies
+the real hook polls at five seconds. Keep those polling assertions separate
+from withdrawal request, duplicate-submission and retry assertions.
+
+For slow-runner investigation, set `VITEST_MAX_WORKERS=1` and restrict CPU
+availability as well. On Linux, `taskset -c 0 bun run test` pins execution to
+CPU 0 when that CPU is allowed; an owned container's `--cpus` quota can simulate
+a smaller CPU share. A worker limit alone does not throttle execution. Compare
+the same runtime, lockfile, quota and selected tests, and retain failing results
+before changing either the tests or their time budgets.
+
+The speaker-health, withdrawal-confirmation, manual-mitigation and notification
+preferences form suites use a local 10-second test budget. Their cold React and
+Radix renders plus accessibility queries can exceed Vitest's 5-second default
+under a 0.125-CPU quota, including after removing unnecessary fixture timers.
+These suites retain full components, request assertions, focus checks and
+failure/retry coverage. Other suites keep Vitest's default budget; do not raise
+the global timeout to compensate for a slow integration file.
+
 ### Test Coverage
 
 ```bash

@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { describe, it, expect } from "vitest"
 
 function isValidIPv4(ip: string): boolean {

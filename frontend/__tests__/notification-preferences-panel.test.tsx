@@ -8,7 +8,8 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe("notification preferences with a legacy escalated mute", () => {
+// Real Radix form interactions on throttled runners; see CONTRIBUTING.md.
+describe("notification preferences with a legacy escalated mute", { timeout: 10_000 }, () => {
   it("hides the escalated option and keeps the saved mute on save", async () => {
     const stored = { muted_events: ["mitigation.escalated"], quiet_hours_start: null, quiet_hours_end: null }
 

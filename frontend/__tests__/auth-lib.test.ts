@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { login, getCurrentUser, type OperatorResponse } from "@/lib/auth"
 

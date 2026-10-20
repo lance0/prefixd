@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { describe, expect, it } from "vitest"
 import { MISSING, formatBps, formatPps, formatRelative, formatTimeRemaining, formatUtc, formatUtcTick } from "@/lib/format"
 

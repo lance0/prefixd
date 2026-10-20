@@ -88,13 +88,15 @@ const peerCases: PeerCase[] = [
   { status: "connected", peers: { router: "idle" }, badge: "down", detail: "router" },
 ]
 
-describe("speaker observation UI", () => {
+// Full-page integration budget on throttled runners; see CONTRIBUTING.md.
+describe("speaker observation UI", { timeout: 10_000 }, () => {
   it.each(peerCases)("renders $status with $peers peers distinctly in both views", async ({ status, peers, badge, detail }) => {
     // Older servers omit additive speaker metadata.
     served = health(status, peers)
-    await show(<BgpSessionStatus />)
+    const strip = await show(<BgpSessionStatus />)
     expect(screen.getByText(badge)).toBeInTheDocument()
     expect(screen.getByLabelText("Speaker and controller health")).toHaveTextContent(`Peers ${badge}`)
+    strip.unmount()
     await show(<AdminPage />)
     expect(screen.getByText(detail)).toBeInTheDocument()
     expect(screen.queryByText(/FlowSpec announcements are active/)).not.toBeInTheDocument()

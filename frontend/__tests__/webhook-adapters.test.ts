@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { describe, it, expect } from "vitest"
 import { validateAdapter } from "@/components/dashboard/correlation/webhook-adapters"
 import type { WebhookAdapter } from "@/lib/api"

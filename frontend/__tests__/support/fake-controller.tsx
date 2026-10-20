@@ -103,7 +103,7 @@ export function useFakeController(): FakeController {
 
 /** Lets settled responses reach React: resolved fetches, SWR updates and effects. */
 export async function settle() {
-  await act(() => new Promise<void>((resolve) => { setTimeout(resolve, 0) }))
+  await act(async () => {})
 }
 
 export function operatorResponse(role: Operator["role"], username = "alice"): OperatorResponse {
