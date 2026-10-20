@@ -104,6 +104,7 @@ describe("export evidence card", () => {
 describe("mitigation detail", () => {
   it("puts export evidence first for an active blackhole", async () => {
     const createdAt = new Date(Date.now() - 60_000).toISOString()
+
     const blackhole: Mitigation = {
       mitigation_id: "00000000-0000-4000-8000-000000000077",
       scope_hash: "scope-blackhole",
@@ -131,6 +132,7 @@ describe("mitigation detail", () => {
       blackhole: { next_hop: "192.0.2.66", communities: ["65535:666"], large_communities: [] },
       export_evidence: mixed,
     }
+
     controller.route("GET", "/v1/config/inventory", () => json({ customers: [], total_customers: 0, total_services: 0, total_assets: 0, loaded_at: createdAt }))
     controller.route("GET", "/v1/mitigations", () => json({ mitigations: [blackhole], count: 1, next_cursor: null, has_more: false }))
     controller.route("GET", `/v1/mitigations/${blackhole.mitigation_id}`, () => json(blackhole))

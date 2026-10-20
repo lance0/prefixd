@@ -5,14 +5,20 @@ import { StatusPill, type StatusTone } from "@/components/dashboard/status-pill"
 import { formatUtc } from "@/lib/format"
 import type { BlackholeExportEvidence, ExportDisposition } from "@/lib/api"
 
+/** A labelled status pill. */
+interface Pill {
+  label: string
+  tone: StatusTone
+}
+
 /** Committed is the speaker's Adj-RIB-Out for that peer, never router state. */
-export const DISPOSITION_LABEL: Record<ExportDisposition, { label: string; tone: StatusTone }> = {
+export const DISPOSITION_LABEL: Record<ExportDisposition, Pill> = {
   committed: { label: "Committed", tone: "success" },
   withheld: { label: "Withheld", tone: "danger" },
   pending: { label: "Pending", tone: "warning" },
 }
 
-function summary(evidence: BlackholeExportEvidence): { label: string; tone: StatusTone } {
+function summary(evidence: BlackholeExportEvidence): Pill {
   const listed = evidence.peers.length
 
   switch (evidence.status) {
@@ -82,7 +88,7 @@ export function ExportEvidenceCard({ evidence, now }: { evidence: BlackholeExpor
               </TableHeader>
               <TableBody>
                 {evidence.peers.map((peer) => {
-                  const disposition = DISPOSITION_LABEL[peer.disposition] ?? { label: peer.disposition, tone: "neutral" as const }
+                  const disposition = DISPOSITION_LABEL[peer.disposition] ?? ({ label: peer.disposition, tone: "neutral" } satisfies Pill)
 
                   return (
                     <TableRow key={peer.peer_address}>
