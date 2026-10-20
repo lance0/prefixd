@@ -332,8 +332,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The rustbgpd controller stubs are now generated from the unmodified
   `rustbgpd.proto` asset of the rustbgpd v0.79.0 release, pinned by its
   published sha256, instead of an unversioned copy. `just proto`, part of
-  `just gate` and CI lint, checks the file offline. Requests are byte-for-byte
-  unchanged: prefixd sets none of the newer fields.
+  `just gate` and CI lint, checks the file offline.
+
+- Blackholes adopt rustbgpd 0.79.0's unicast injection contract. `DeletePath`
+  sets `allow_missing`, so `NOT_PRESENT` completes a withdrawal that a retry,
+  a controller restart or a speaker restart already overtook, with its
+  original actor, reason and operation ID; `NOT_FOUND` from the speaker is now
+  an error instead of absence. Each accepted `AddPath` or `AddLeasedPath`
+  writes an `announce` audit entry with the speaker's outcome (`created`,
+  `replaced`, `unchanged`, or `unknown` when none is reported), so a leased
+  re-add after a controller restart reads `unchanged` rather than as a new
+  announcement. A `replaced` outcome on an unleased admission is logged as an
+  error. `0.0.0.0` and `::`, which rustbgpd now reads as next-hop self, stay
+  refused as blackhole next hops.
 
 - `POST /v1/safelist` now withdraws every live blackhole on this POP whose
   victim falls inside the new entry, under the lifecycle mutex, with the

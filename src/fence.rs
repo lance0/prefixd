@@ -15,9 +15,9 @@ use sqlx::postgres::{PgConnectOptions, PgConnection};
 use tokio::sync::watch;
 
 use crate::bgp::{
-    BlackholeInventory, BlackholeRoute, BlackholeSpeaker, DaemonHealthObserver, FlowSpecAnnouncer,
-    FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, InjectionLeases, LeaseGeneration,
-    PeerObserver,
+    AddOutcome, BlackholeInventory, BlackholeRoute, BlackholeSpeaker, DaemonHealthObserver,
+    FlowSpecAnnouncer, FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, InjectionLeases,
+    LeaseGeneration, PeerObserver,
 };
 use crate::domain::{FlowSpecNlri, FlowSpecRule};
 use crate::error::{PrefixdError, Result};
@@ -287,7 +287,7 @@ impl InjectionLeases for FencedAnnouncer {
 
 #[async_trait]
 impl BlackholeSpeaker for FencedAnnouncer {
-    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<()> {
+    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<AddOutcome> {
         self.fence.ensure_active()?;
         self.inner_blackhole()?.announce_blackhole(route).await
     }
@@ -296,7 +296,7 @@ impl BlackholeSpeaker for FencedAnnouncer {
         &self,
         route: &BlackholeRoute,
         lease_seconds: u32,
-    ) -> Result<LeaseGeneration> {
+    ) -> Result<(LeaseGeneration, AddOutcome)> {
         self.fence.ensure_active()?;
         self.inner_blackhole()?
             .announce_leased_blackhole(route, lease_seconds)
@@ -420,7 +420,11 @@ mod tests {
                 .blackhole_lease
         );
         fence.set(true);
-        let generation = fenced.announce_leased_blackhole(&leased, 60).await.unwrap();
+        let generation = fenced
+            .announce_leased_blackhole(&leased, 60)
+            .await
+            .unwrap()
+            .0;
         // Renewal is not a fenced mutation: standby, or a database outage that
         // forces it, must not drop the leased routes.
         fence.set(false);

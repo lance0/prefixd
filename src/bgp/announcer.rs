@@ -245,6 +245,19 @@ pub trait InjectionLeases: Send + Sync {
     fn lease_confirmed(&self) -> bool;
 }
 
+/// What an add did to the speaker's local route at its key (rustbgpd
+/// `PathInjectOutcome`). Local RPC acceptance only, never export or enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddOutcome {
+    Created,
+    Replaced,
+    /// An identical local route was already held; nothing was redistributed.
+    Unchanged,
+    /// Accepted, but the speaker reported no outcome.
+    Unknown,
+}
+
 /// Optional unicast blackhole capability (ADR 027). Reading is mandatory: an
 /// unreadable speaker cannot prove absence. Success is the backend's local RPC
 /// acceptance or retained local intent, never export or router enforcement.
@@ -252,7 +265,7 @@ pub trait InjectionLeases: Send + Sync {
 pub trait BlackholeSpeaker: Send + Sync {
     /// Unleased upsert keyed on the host prefix; retrying after an ambiguous
     /// response is safe. A route with an owner is refused before any RPC.
-    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<()>;
+    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<AddOutcome>;
     /// Leased upsert under the route's owner, returning the owner's live
     /// generation. It never falls back to the unleased add: an unowned route is
     /// refused, and a failed leased add is an error with nothing created.
@@ -260,7 +273,7 @@ pub trait BlackholeSpeaker: Send + Sync {
         &self,
         route: &BlackholeRoute,
         lease_seconds: u32,
-    ) -> Result<LeaseGeneration>;
+    ) -> Result<(LeaseGeneration, AddOutcome)>;
     /// Idempotent delete passing the owner the route was added under (`""`
     /// unleased), never an override: an absent route is success.
     async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()>;

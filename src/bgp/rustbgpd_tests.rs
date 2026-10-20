@@ -944,6 +944,12 @@ const PRECONDITION: usize = 9;
 const LEASE_EXPIRED: usize = 10;
 /// A leased row without its generation.
 const LEASE_INCONSISTENT: usize = 11;
+/// Adds answer OK without an outcome (UNSPECIFIED, or no leased `result`).
+const ADD_UNSPECIFIED: usize = 12;
+/// Adds answer OK with an outcome value the contract does not define.
+const ADD_UNKNOWN_VALUE: usize = 13;
+/// Deletes answer OK with outcome UNSPECIFIED.
+const DELETE_UNSPECIFIED: usize = 14;
 const FOREIGN_BASE: usize = 100;
 
 fn same_key(left: &pb::AddPathRequest, prefix: &str, length: u32) -> bool {
@@ -951,7 +957,8 @@ fn same_key(left: &pb::AddPathRequest, prefix: &str, length: u32) -> bool {
 }
 
 impl UnicastFake {
-    fn insert(&self, request: pb::AddPathRequest) {
+    /// Upserts and returns the daemon's outcome against the previous local route.
+    fn insert(&self, request: pb::AddPathRequest) -> pb::AddPathResponse {
         assert_eq!((request.origin, request.path_id), (0, 0));
         assert!(request.as_path.is_empty() && request.extended_communities.is_empty());
         assert!(request.local_pref.is_none() && request.med.is_none());
@@ -961,8 +968,23 @@ impl UnicastFake {
                 .contains(&crate::bgp::BLACKHOLE_COMMUNITY)
         );
         let mut paths = self.paths.lock().unwrap();
+        let outcome = match paths
+            .iter()
+            .find(|old| same_key(old, &request.prefix, request.prefix_length))
+        {
+            None => pb::PathInjectOutcome::Created,
+            Some(old) if *old == request => pb::PathInjectOutcome::Unchanged,
+            Some(_) => pb::PathInjectOutcome::Replaced,
+        } as i32;
         paths.retain(|old| !same_key(old, &request.prefix, request.prefix_length));
         paths.push(request);
+        pb::AddPathResponse {
+            outcome: match self.mode.load(SeqCst) {
+                ADD_UNSPECIFIED => pb::PathInjectOutcome::Unspecified as i32,
+                ADD_UNKNOWN_VALUE => 99,
+                _ => outcome,
+            },
+        }
     }
 }
 
@@ -977,8 +999,7 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
             return Err(Status::failed_precondition("key is held by owner"));
         }
         self.plain_adds.fetch_add(1, SeqCst);
-        self.insert(request.into_inner());
-        Ok(Response::new(pb::AddPathResponse::default()))
+        Ok(Response::new(self.insert(request.into_inner())))
     }
 
     async fn add_leased_path(
@@ -998,11 +1019,9 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
             .lock()
             .unwrap()
             .insert(path.prefix.clone(), request.lease.unwrap().owner);
-        self.insert(path);
+        let result = self.insert(path);
         Ok(Response::new(pb::AddLeasedPathResponse {
-            result: Some(pb::AddPathResponse {
-                outcome: pb::PathInjectOutcome::Created as i32,
-            }),
+            result: (self.mode.load(SeqCst) != ADD_UNSPECIFIED).then_some(result),
             generation: Some(LIVE),
         }))
     }
@@ -1063,10 +1082,8 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
         auth(&request)?;
         let request = request.into_inner();
         assert_eq!(request.path_id, 0);
-        assert!(
-            !request.allow_missing && !request.override_owner,
-            "prefixd never overrides the owner"
-        );
+        assert!(request.allow_missing, "deletes are idempotent");
+        assert!(!request.override_owner, "prefixd never overrides the owner");
         self.deletes_seen.lock().unwrap().push(request.clone());
         match self.mode.load(SeqCst) {
             DELETE_NOT_FOUND => return Err(Status::not_found("absent")),
@@ -1078,11 +1095,16 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
         let mut paths = self.paths.lock().unwrap();
         let before = paths.len();
         paths.retain(|old| !same_key(old, &request.prefix, request.prefix_length));
-        if paths.len() == before {
-            // prefixd sets no allow_missing: a missing path is NOT_FOUND.
-            return Err(Status::not_found("no injected path"));
-        }
-        Ok(Response::new(pb::DeletePathResponse::default()))
+        let outcome = if self.mode.load(SeqCst) == DELETE_UNSPECIFIED {
+            pb::PathDeleteOutcome::Unspecified
+        } else if paths.len() == before {
+            pb::PathDeleteOutcome::NotPresent
+        } else {
+            pb::PathDeleteOutcome::Deleted
+        };
+        Ok(Response::new(pb::DeletePathResponse {
+            outcome: outcome as i32,
+        }))
     }
 }
 
@@ -1173,7 +1195,7 @@ const COMMUNITIES: &str = "missing BLACKHOLE or non-canonical communities";
 const NEXT_HOP: &str = "next hop is not a same-family unicast address";
 
 /// Well-formed local rows that are not prefixd-shaped, with the reported reason.
-const FOREIGN_ROWS: [(usize, &str); 16] = [
+const FOREIGN_ROWS: [(usize, &str); 17] = [
     (100, ATTRIBUTES),
     (101, ATTRIBUTES),
     (102, ATTRIBUTES),
@@ -1190,6 +1212,8 @@ const FOREIGN_ROWS: [(usize, &str); 16] = [
     (113, "not a host route"),
     (114, NEXT_HOP),
     (115, NEXT_HOP),
+    // rustbgpd reads an unspecified next hop as next-hop self, never an RTBH discard.
+    (116, NEXT_HOP),
 ];
 
 /// Rows the daemon cannot produce for this view; the read cannot be trusted.
@@ -1227,6 +1251,7 @@ fn mutate_row(route: &mut pb::Route, case: usize) {
         }
         114 => route.next_hop = if ipv4 { "2001:db8::66" } else { "192.0.2.66" }.into(),
         115 => route.next_hop = if ipv4 { "224.0.0.1" } else { "ff02::1" }.into(),
+        116 => route.next_hop = if ipv4 { "0.0.0.0" } else { "::" }.into(),
         200 => route.peer_address = "192.0.2.9".into(),
         201 => route.large_communities = vec!["1:2".into()],
         202 => route.prefix_length = 24,
@@ -1382,10 +1407,11 @@ async fn blackhole_malformed_local_rows_fail_the_whole_read() {
 }
 
 #[tokio::test]
-async fn blackhole_delete_not_found_is_absent_and_other_codes_are_errors() {
+async fn blackhole_delete_is_idempotent_and_not_found_is_an_error() {
     let (speaker, fake, server) = unicast_speaker().await;
     let routes = seed_blackholes(&speaker).await;
     let v4 = routes[0].prefix();
+    // DELETED removes the route.
     speaker.withdraw_blackhole(&v4, "").await.unwrap();
     assert!(
         !speaker
@@ -1396,24 +1422,85 @@ async fn blackhole_delete_not_found_is_absent_and_other_codes_are_errors() {
             .iter()
             .any(|route| route.prefix() == v4)
     );
-    // The daemon now answers NOT_FOUND for the same key.
+    // NOT_PRESENT for the same key, as after a retry or a daemon restart, is absent.
     speaker.withdraw_blackhole(&v4, "").await.unwrap();
-    fake.mode.store(DELETE_NOT_FOUND, SeqCst);
-    speaker.withdraw_blackhole(&v4, "").await.unwrap();
+    assert!(
+        fake.deletes_seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|d| d.allow_missing)
+    );
+    // With allow_missing a 0.79.0 daemon never answers NOT_FOUND: it is an error,
+    // as are other codes and a reply without an outcome.
     let v6 = routes[2].prefix();
-    for mode in [DELETE_DENIED, DELETE_INTERNAL] {
+    for mode in [
+        DELETE_NOT_FOUND,
+        DELETE_DENIED,
+        DELETE_INTERNAL,
+        DELETE_UNSPECIFIED,
+    ] {
         fake.mode.store(mode, SeqCst);
-        assert!(speaker.withdraw_blackhole(&v6, "").await.is_err());
+        assert!(
+            speaker.withdraw_blackhole(&v6, "").await.is_err(),
+            "mode {mode}"
+        );
     }
     fake.mode.store(0, SeqCst);
-    assert_eq!(speaker.list_blackholes().await.unwrap().routes.len(), 4);
+    assert_eq!(speaker.list_blackholes().await.unwrap().routes.len(), 3);
     assert!(
         speaker
             .withdraw_blackhole(&"2001:db8::/64".parse().unwrap(), "")
             .await
             .is_err()
     );
-    assert_eq!(speaker.list_blackholes().await.unwrap().routes.len(), 4);
+    assert_eq!(speaker.list_blackholes().await.unwrap().routes.len(), 3);
+    server.abort();
+}
+
+#[tokio::test]
+async fn blackhole_adds_report_the_daemon_outcome() {
+    let (speaker, fake, server) = unicast_speaker().await;
+    let route = blackhole("192.0.2.1/32", "192.0.2.66", 1);
+    let replaced = blackhole("192.0.2.1/32", "192.0.2.67", 1);
+    for (route, outcome) in [
+        (&route, AddOutcome::Created),
+        (&route, AddOutcome::Unchanged),
+        (&replaced, AddOutcome::Replaced),
+    ] {
+        assert_eq!(speaker.announce_blackhole(route).await.unwrap(), outcome);
+    }
+    let leased = blackhole("192.0.2.2/32", "192.0.2.66", 1).with_owner(LEASE_OWNER);
+    for outcome in [AddOutcome::Created, AddOutcome::Unchanged] {
+        assert_eq!(
+            speaker
+                .announce_leased_blackhole(&leased, 60)
+                .await
+                .unwrap(),
+            (live(), outcome)
+        );
+    }
+    // No outcome is still an accepted add; an undefined value is an error.
+    fake.mode.store(ADD_UNSPECIFIED, SeqCst);
+    assert_eq!(
+        speaker.announce_blackhole(&route).await.unwrap(),
+        AddOutcome::Unknown
+    );
+    assert_eq!(
+        speaker
+            .announce_leased_blackhole(&leased, 60)
+            .await
+            .unwrap(),
+        (live(), AddOutcome::Unknown)
+    );
+    fake.mode.store(ADD_UNKNOWN_VALUE, SeqCst);
+    assert!(speaker.announce_blackhole(&route).await.is_err());
+    assert!(
+        speaker
+            .announce_leased_blackhole(&leased, 60)
+            .await
+            .is_err()
+    );
     server.abort();
 }
 
@@ -1527,7 +1614,11 @@ async fn leased_blackhole_add_read_renew_and_delete_carry_the_owner() {
     );
     assert!(fake.paths.lock().unwrap().is_empty());
 
-    let generation = speaker.announce_leased_blackhole(&route, 45).await.unwrap();
+    let generation = speaker
+        .announce_leased_blackhole(&route, 45)
+        .await
+        .unwrap()
+        .0;
     assert_eq!(generation, live());
     let sent = fake.leased.lock().unwrap()[0].lease.clone().unwrap();
     assert_eq!((sent.owner.as_str(), sent.lease_seconds), (LEASE_OWNER, 45));

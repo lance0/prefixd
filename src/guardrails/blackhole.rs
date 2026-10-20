@@ -5,7 +5,7 @@ use std::net::IpAddr;
 
 use uuid::Uuid;
 
-use crate::bgp::FlowSpecAnnouncer;
+use crate::bgp::{AddOutcome, FlowSpecAnnouncer};
 use crate::config::{
     BlackholeConfig, Inventory, OperationMode, PlaybookAction, Playbooks, Settings,
 };
@@ -499,10 +499,23 @@ pub async fn admit_blackhole(
     }
     Ok(
         match announce_blackhole(repo, announcer, &mitigation, binding, lease).await {
-            Ok(BlackholeAnnouncement::Announced) => BlackholeAdmission {
-                mitigation,
-                unconfirmed: false,
-            },
+            Ok(BlackholeAnnouncement::Announced(outcome)) => {
+                // The unleased pre-read found no local route, so a replace means
+                // another tool's route at the prefix was overwritten (ADR 027 §5).
+                let unleased = mitigation
+                    .action_params
+                    .blackhole
+                    .as_ref()
+                    .is_some_and(|rule| rule.owner.is_empty());
+                if unleased && outcome == AddOutcome::Replaced {
+                    tracing::error!(mitigation_id = %mitigation.mitigation_id, %prefix,
+                        "blackhole add replaced an untracked local route at the prefix");
+                }
+                BlackholeAdmission {
+                    mitigation,
+                    unconfirmed: false,
+                }
+            }
             Ok(BlackholeAnnouncement::Withdrawn(mitigation)) => BlackholeAdmission {
                 mitigation: *mitigation,
                 unconfirmed: true,
@@ -1413,6 +1426,84 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(*speaker.delete_owners.lock().unwrap(), [OWNER]);
+    }
+
+    /// Outcomes of `announce` audit entries for one mitigation, oldest first.
+    async fn announce_outcomes(repo: &MockRepository, mitigation: &Mitigation) -> Vec<String> {
+        let mut entries: Vec<_> = repo
+            .list_audit(&crate::db::ListParams {
+                limit: 1000,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                e.action == "announce" && e.target_id == Some(mitigation.mitigation_id.to_string())
+            })
+            .collect();
+        entries.sort_by_key(|e| e.timestamp);
+        entries
+            .iter()
+            .map(|e| e.details["outcome"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Each accepted add audits what the speaker did at its key, so a re-add of
+    /// a route it still holds, as after a controller restart, reads `unchanged`.
+    #[tokio::test]
+    async fn every_accepted_add_audits_the_speaker_outcome() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        let unleased = admit_enforced(&repo, &speaker, intent("203.0.113.10/32"))
+            .await
+            .unwrap()
+            .mitigation;
+        announce_blackhole(&repo, &speaker, &unleased, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            announce_outcomes(&repo, &unleased).await,
+            ["created", "unchanged"]
+        );
+        let lease = LeaseKeeper::new(OWNER.into(), 60);
+        let leased = admit_leased(&repo, &speaker, Some(&lease), "203.0.113.11/32")
+            .await
+            .unwrap()
+            .mitigation;
+        announce_blackhole(&repo, &speaker, &leased, None, Some(&lease))
+            .await
+            .unwrap();
+        assert_eq!(
+            announce_outcomes(&repo, &leased).await,
+            ["created", "unchanged"]
+        );
+        let entry = repo
+            .list_audit(&crate::db::ListParams {
+                limit: 1000,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|e| {
+                e.action == "announce" && e.target_id == Some(leased.mitigation_id.to_string())
+            })
+            .unwrap();
+        assert_eq!(entry.actor_id.as_deref(), Some("speaker"));
+        assert_eq!(entry.details["prefix"], "203.0.113.11/32");
+        assert_eq!(entry.details["owner"], OWNER);
+        // A failed add audits nothing.
+        speaker.fail_adds.store(true, SeqCst);
+        assert!(
+            announce_blackhole(&repo, &speaker, &unleased, None, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(announce_outcomes(&repo, &unleased).await.len(), 2);
     }
 
     /// A key another owner, or no owner, holds refuses the leased add. The new

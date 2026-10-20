@@ -27,9 +27,12 @@ complete read-back of retained local intent for both families. Only rustbgpd
 provides it. It injects with unleased `AddPath` (ORIGIN IGP, empty AS_PATH,
 `path_id` 0, BLACKHOLE `65535:666` plus the route's communities), or with
 `AddLeasedPath` for a route recorded under an injection owner. It never sends
-one after the other fails. It deletes with `DeletePath` passing the recorded
-owner and never `override_owner`, where `NOT_FOUND` means absent and
-`FAILED_PRECONDITION` (another owner, or none, holds the key) is an error, and
+one after the other fails. Each add records rustbgpd's outcome (`created`,
+`replaced`, `unchanged`, or `unknown` when the daemon reports none) in an
+`announce` audit entry and the log. It deletes with `DeletePath` passing the
+recorded owner, `allow_missing` and never `override_owner`: `DELETED` and
+`NOT_PRESENT` are success, while `NOT_FOUND`, an unreported outcome and
+`FAILED_PRECONDITION` (another owner, or none, holds the key) are errors, and
 reads `ListReceivedRoutes(neighbor 0.0.0.0)` for each unicast family to the
 last page. Each route carries its `injection_owner`, so a desired route
 matches only a row held by its recorded owner. A leased row with
@@ -412,6 +415,14 @@ and owner (empty for an unleased route) into the row; repair and withdrawal
 use that frozen route, so a configuration change affects only new
 blackholes.
 
+The add outcome compares the add with the speaker's previous local route at
+the key. It is local RPC acceptance, not export or enforcement. A re-add of a
+route the speaker still holds, such as the leased re-add after a controller
+restart, is audited as `unchanged`, not as a new announcement; after a speaker
+restart the same re-add is `created`. A `replaced` outcome on an unleased
+admission means a local route appeared at the prefix after the pre-read; it is
+logged as an error and the audit entry records it.
+
 Enforced admission returns `409` without persisting or adding when the prefix
 already has a live owner or has a pending withdrawal. Unleased admission also
 returns `409` when the prefix holds a local route that the ledger does not
@@ -429,8 +440,9 @@ admission` instead of an add.
 
 Withdrawal intent records `rule_kind` `blackhole` and the frozen route with
 its owner. Detector unban, operator withdrawal, TTL expiry and the safelist
-withdrawal delete through `DeletePath` with that owner, where `NOT_FOUND`
-means absent. A
+withdrawal delete through `DeletePath` with that owner and `allow_missing`,
+where `NOT_PRESENT` means absent, so a retry, a controller restart or a
+speaker restart completes the withdrawal. A
 failed or ambiguous delete stays pending with its original actor, reason and
 operation ID, and its key blocks repair until the deletion is confirmed. A
 pending blackhole withdrawal does not block FlowSpec admission or repair, and
@@ -445,7 +457,7 @@ route listing, which shows the owner. If it is another controller using this
 POP's owner, stop that controller. If an operator or another tool added the
 route, decide whether it should stay: to remove it, delete it on the speaker
 with its own owner (or, deliberately, `rbgp`'s `--override-owner`). The next
-pass then sees `NOT_FOUND` and completes the withdrawal with its original
+pass then sees `NOT_PRESENT` and completes the withdrawal with its original
 actor, reason and operation ID. Do not edit the withdrawal row.
 
 Reconciliation compares the blackhole desired set with `list_blackholes` in a
@@ -532,8 +544,9 @@ IPv6), so the router's import policy
 must match BLACKHOLE (`65535:666`) and set a discard next hop itself. The
 [FRR blackhole receipt](qualification/blackhole-frr-2026-10-19.md) shows both.
 prefixd refuses `0.0.0.0` and `::` as configured next hops, which speakers
-commonly read as next-hop-self: RTBH needs the discard next hop that the edge
-routers map to null.
+commonly read as next-hop-self, as `AddPath` does from rustbgpd 0.79.0: RTBH
+needs the discard next hop that the edge routers map to null. A local row with
+an unspecified next hop is reported as unrecognized, never adopted.
 
 **RPKI export filters.** A blackhole `/32` or `/128` is longer than its
 covering ROA's maxLength, so it is almost always RPKI-Invalid. If your speaker

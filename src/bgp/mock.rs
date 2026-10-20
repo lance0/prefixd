@@ -3,9 +3,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::{
-    BlackholeInventory, BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer, FlowSpecMatchSupport,
-    FlowSpecReader, FlowSpecWriter, InjectionLeases, LeaseGeneration, PeerObserver, PeerStatus,
-    SessionState,
+    AddOutcome, BlackholeInventory, BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer,
+    FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, InjectionLeases, LeaseGeneration,
+    PeerObserver, PeerStatus, SessionState,
 };
 use crate::domain::FlowSpecRule;
 use crate::error::{PrefixdError, Result};
@@ -192,9 +192,21 @@ impl FlowSpecReader for MockAnnouncer {
         Ok(self.rules.read().await.clone())
     }
 }
+/// The daemon's upsert, reporting the outcome against the previous local route.
+fn upsert_blackhole(routes: &mut Vec<BlackholeRoute>, route: &BlackholeRoute) -> AddOutcome {
+    let outcome = match routes.iter().find(|r| r.prefix() == route.prefix()) {
+        None => AddOutcome::Created,
+        Some(old) if old == route => AddOutcome::Unchanged,
+        Some(_) => AddOutcome::Replaced,
+    };
+    routes.retain(|r| r.prefix() != route.prefix());
+    routes.push(route.clone());
+    outcome
+}
+
 #[async_trait]
 impl BlackholeSpeaker for MockAnnouncer {
-    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<()> {
+    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<AddOutcome> {
         let mut routes = self.blackholes.write().await;
         if !route.owner().is_empty()
             || routes
@@ -203,15 +215,13 @@ impl BlackholeSpeaker for MockAnnouncer {
         {
             return Err(Self::owner_mismatch("AddPath"));
         }
-        routes.retain(|r| r.prefix() != route.prefix());
-        routes.push(route.clone());
-        Ok(())
+        Ok(upsert_blackhole(&mut routes, route))
     }
     async fn announce_leased_blackhole(
         &self,
         route: &BlackholeRoute,
         _lease_seconds: u32,
-    ) -> Result<LeaseGeneration> {
+    ) -> Result<(LeaseGeneration, AddOutcome)> {
         let mut routes = self.blackholes.write().await;
         if route.owner().is_empty()
             || routes
@@ -221,9 +231,7 @@ impl BlackholeSpeaker for MockAnnouncer {
             return Err(Self::owner_mismatch("AddLeasedPath"));
         }
         let generation = self.join_lease(route.owner());
-        routes.retain(|r| r.prefix() != route.prefix());
-        routes.push(route.clone());
-        Ok(generation)
+        Ok((generation, upsert_blackhole(&mut routes, route)))
     }
     async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()> {
         super::require_host_route(prefix)?;
@@ -410,7 +418,7 @@ impl FlowSpecReader for FaultyBlackholes {
 #[cfg(test)]
 #[async_trait]
 impl BlackholeSpeaker for FaultyBlackholes {
-    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<()> {
+    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<AddOutcome> {
         use std::sync::atomic::Ordering::SeqCst;
         self.adds.fetch_add(1, SeqCst);
         if self.fail_adds.load(SeqCst) {
@@ -424,7 +432,7 @@ impl BlackholeSpeaker for FaultyBlackholes {
         &self,
         route: &BlackholeRoute,
         lease_seconds: u32,
-    ) -> Result<LeaseGeneration> {
+    ) -> Result<(LeaseGeneration, AddOutcome)> {
         use std::sync::atomic::Ordering::SeqCst;
         self.leased_adds.fetch_add(1, SeqCst);
         self.lease_seconds.lock().unwrap().push(lease_seconds);

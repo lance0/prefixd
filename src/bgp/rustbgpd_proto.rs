@@ -103,7 +103,7 @@ mod tests {
         assert_eq!(pb::AddressFamily::Ipv4Unicast as i32, 1);
         assert_eq!(pb::AddressFamily::Ipv6Unicast as i32, 2);
 
-        // upsert keyed on (prefix, prefix_length, path_id); prefixd does not read the outcome yet
+        // upsert keyed on (prefix, prefix_length, path_id), reporting its outcome
         let add = pb::AddPathRequest {
             prefix: "192.0.2.1".into(),
             prefix_length: 32,
@@ -118,18 +118,25 @@ mod tests {
             path_id: 0,
         };
         assert_eq!(add.path_id, 0);
-        let _: pb::AddPathResponse = pb::AddPathResponse::default();
+        let add_reply = pb::AddPathResponse {
+            outcome: pb::PathInjectOutcome::Unchanged as i32,
+        };
+        assert_eq!(add_reply.outcome, 3);
 
-        // allow_missing stays unset: a missing path is NOT_FOUND
+        // allow_missing: a missing path is OK with NOT_PRESENT, not NOT_FOUND
         let delete = pb::DeletePathRequest {
             prefix: add.prefix,
             prefix_length: 32,
             path_id: 0,
+            allow_missing: true,
             ..Default::default()
         };
-        assert!(!delete.allow_missing);
+        assert!(delete.allow_missing);
         assert_eq!(delete.prefix_length, 32);
-        let _: pb::DeletePathResponse = pb::DeletePathResponse::default();
+        let delete_reply = pb::DeletePathResponse {
+            outcome: pb::PathDeleteOutcome::NotPresent as i32,
+        };
+        assert_eq!(delete_reply.outcome, 2);
 
         // "0.0.0.0" selects retained local injections; the view is paged.
         let list = pb::ListRoutesRequest {

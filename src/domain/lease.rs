@@ -364,7 +364,8 @@ mod tests {
         let generation = speaker
             .announce_leased_blackhole(&route(), keeper.lease_seconds())
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         keeper.observe_add(generation);
         assert!(!keeper.take_readd(), "a first add adopts without a re-add");
         for _ in 0..3 {
@@ -387,7 +388,8 @@ mod tests {
         let generation = speaker
             .announce_leased_blackhole(&route(), 60)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         keeper.observe_add(generation);
         // The daemon restarted: renewal is refused and never resurrects the lease.
         speaker.inner.restart().await;
@@ -403,7 +405,8 @@ mod tests {
         let next = speaker
             .announce_leased_blackhole(&route(), 60)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert_ne!(next, generation);
         keeper.observe_add(next);
         assert!(
@@ -421,7 +424,8 @@ mod tests {
         let generation = speaker
             .announce_leased_blackhole(&route(), 60)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         keeper.observe_add(generation);
         keeper.observe_add(generation);
         assert!(!keeper.take_readd(), "the same generation joins the lease");
@@ -429,7 +433,8 @@ mod tests {
         let next = speaker
             .announce_leased_blackhole(&route(), 60)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         keeper.observe_add(next);
         assert!(keeper.take_readd());
         // A late renewal of the old generation cannot undo the adopted one.
@@ -444,7 +449,8 @@ mod tests {
         let generation = speaker
             .announce_leased_blackhole(&route(), 5)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         keeper.observe_add(generation);
         speaker.fail_renewals.store(true, SeqCst);
         keeper.renew_once(&speaker).await;
@@ -475,7 +481,8 @@ mod tests {
                 .unwrap()
                 .announce_leased_blackhole(&route(), 60)
                 .await
-                .unwrap(),
+                .unwrap()
+                .0,
         );
         fence.set(false);
         for _ in 0..3 {
@@ -535,7 +542,8 @@ mod tests {
         let generation = speaker
             .announce_leased_blackhole(&route(), 60)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         let restarted = LeaseKeeper::new(OWNER.into(), 60);
         assert!(restarted.recover(&speaker).await.unwrap());
         assert_eq!(restarted.generation(), Some(generation));
@@ -546,7 +554,8 @@ mod tests {
             speaker
                 .announce_leased_blackhole(&route(), 60)
                 .await
-                .unwrap(),
+                .unwrap()
+                .0,
         );
         assert!(!restarted.take_readd());
     }
@@ -592,7 +601,8 @@ mod tests {
             .inner
             .announce_leased_blackhole(&route(), 60)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         keeper.observe_add(first);
         let readd = async {
             speaker.entered.notified().await;
@@ -601,7 +611,8 @@ mod tests {
                 .inner
                 .announce_leased_blackhole(&route(), 60)
                 .await
-                .unwrap();
+                .unwrap()
+                .0;
             keeper.observe_add(next);
             assert!(keeper.take_readd(), "the changed generation re-adds once");
             speaker.release.notify_one();

@@ -121,8 +121,17 @@ async fn live_rustbgpd_blackhole_inject_read_delete_and_restart_loss() {
         route("192.0.2.240/32", "192.0.2.66", 1),
         route("2001:db8::240/128", "2001:db8::66", 1),
     ];
+    use prefixd::bgp::AddOutcome;
     for expected in &routes {
-        blackhole.announce_blackhole(expected).await.unwrap();
+        assert_eq!(
+            blackhole.announce_blackhole(expected).await.unwrap(),
+            AddOutcome::Created
+        );
+        // A re-add of the held route, as after a controller restart.
+        assert_eq!(
+            blackhole.announce_blackhole(expected).await.unwrap(),
+            AddOutcome::Unchanged
+        );
         // Retained local intent: the exact prefix, next hop and communities.
         assert!(
             blackhole
@@ -138,7 +147,10 @@ async fn live_rustbgpd_blackhole_inject_read_delete_and_restart_loss() {
             "2001:db8::67"
         };
         let replaced = route(&expected.prefix().to_string(), next_hop, 2);
-        blackhole.announce_blackhole(&replaced).await.unwrap();
+        assert_eq!(
+            blackhole.announce_blackhole(&replaced).await.unwrap(),
+            AddOutcome::Replaced
+        );
         let listed = blackhole.list_blackholes().await.unwrap();
         assert_eq!(
             listed
@@ -153,7 +165,7 @@ async fn live_rustbgpd_blackhole_inject_read_delete_and_restart_loss() {
             .await
             .unwrap();
         assert_eq!(blackhole.list_blackholes().await.unwrap(), empty);
-        // The daemon reports NOT_FOUND for the absent path.
+        // A double withdraw succeeds: allow_missing turns NOT_FOUND into NOT_PRESENT.
         blackhole
             .withdraw_blackhole(&expected.prefix(), "")
             .await
@@ -221,6 +233,17 @@ async fn live_rustbgpd_blackhole_inject_read_delete_and_restart_loss() {
     fixture.container.start().await.unwrap();
     fixture.ready().await;
     assert_eq!(blackhole.list_blackholes().await.unwrap(), empty);
+    // A withdrawal the restart overtook completes, and a re-add is a new route.
+    for expected in &routes {
+        blackhole
+            .withdraw_blackhole(&expected.prefix(), "")
+            .await
+            .unwrap();
+        assert_eq!(
+            blackhole.announce_blackhole(expected).await.unwrap(),
+            AddOutcome::Created
+        );
+    }
 }
 
 #[tokio::test]

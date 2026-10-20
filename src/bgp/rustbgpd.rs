@@ -1,7 +1,8 @@
 use super::{
-    BlackholeInventory, BlackholeRoute, BlackholeSpeaker, DaemonHealth, DaemonHealthObserver,
-    FlowSpecAnnouncer, FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, InjectionLeases,
-    LeaseGeneration, PeerObserver, PeerStatus, SessionState, UnrecognizedRoute, rustbgpd_pb as pb,
+    AddOutcome, BlackholeInventory, BlackholeRoute, BlackholeSpeaker, DaemonHealth,
+    DaemonHealthObserver, FlowSpecAnnouncer, FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter,
+    InjectionLeases, LeaseGeneration, PeerObserver, PeerStatus, SessionState, UnrecognizedRoute,
+    rustbgpd_pb as pb,
 };
 use crate::{
     config::RustBgpdConfig,
@@ -566,6 +567,23 @@ fn encode_blackhole(route: &BlackholeRoute) -> pb::AddPathRequest {
     }
 }
 
+/// A reply without an outcome is still an accepted add; an unknown value is not.
+fn path_add_outcome(operation: &str, response: Option<pb::AddPathResponse>) -> Result<AddOutcome> {
+    match response.map(|response| pb::PathInjectOutcome::try_from(response.outcome)) {
+        Some(Ok(pb::PathInjectOutcome::Created)) => Ok(AddOutcome::Created),
+        Some(Ok(pb::PathInjectOutcome::Replaced)) => Ok(AddOutcome::Replaced),
+        Some(Ok(pb::PathInjectOutcome::Unchanged)) => Ok(AddOutcome::Unchanged),
+        None | Some(Ok(pb::PathInjectOutcome::Unspecified)) => {
+            tracing::warn!(
+                operation,
+                "rustbgpd accepted the add without reporting an outcome"
+            );
+            Ok(AddOutcome::Unknown)
+        }
+        Some(Err(_)) => Err(invalid("unsupported rustbgpd injection outcome")),
+    }
+}
+
 /// Malformed rows make the view untrustworthy and fail the whole read. A
 /// well-formed local row that is not prefixd-shaped is returned as unrecognized.
 fn decode_blackhole(
@@ -825,27 +843,28 @@ impl FlowSpecReader for RustBgpdAnnouncer {
 }
 #[async_trait]
 impl BlackholeSpeaker for RustBgpdAnnouncer {
-    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<()> {
+    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<AddOutcome> {
         if !route.owner().is_empty() {
             return Err(invalid("a leased route needs AddLeasedPath"));
         }
         let payload = encode_blackhole(route);
-        // OK is local Adj-RIB-In acceptance only; prefixd does not read the outcome yet.
-        self.call("AddPath", || async {
-            pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                .add_path(self.request(payload.clone()))
-                .await
-        })
-        .await
-        .map_err(|status| self.mutation_error("AddPath", &status))?;
-        Ok(())
+        // OK is local Adj-RIB-In acceptance only.
+        let response = self
+            .call("AddPath", || async {
+                pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                    .add_path(self.request(payload.clone()))
+                    .await
+            })
+            .await
+            .map_err(|status| self.mutation_error("AddPath", &status))?;
+        path_add_outcome("AddPath", Some(response))
     }
 
     async fn announce_leased_blackhole(
         &self,
         route: &BlackholeRoute,
         lease_seconds: u32,
-    ) -> Result<LeaseGeneration> {
+    ) -> Result<(LeaseGeneration, AddOutcome)> {
         // Never AddPath: a rejected leased add creates nothing and never falls back.
         if route.owner().is_empty() {
             return Err(invalid("a leased add needs an injection owner"));
@@ -865,17 +884,8 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
             })
             .await
             .map_err(|status| self.mutation_error("AddLeasedPath", &status))?;
-        match response
-            .result
-            .map(|result| pb::PathInjectOutcome::try_from(result.outcome))
-        {
-            Some(Ok(
-                pb::PathInjectOutcome::Created
-                | pb::PathInjectOutcome::Replaced
-                | pb::PathInjectOutcome::Unchanged,
-            )) => generation(response.generation),
-            _ => Err(invalid("unsupported rustbgpd leased injection outcome")),
-        }
+        let outcome = path_add_outcome("AddLeasedPath", response.result)?;
+        Ok((generation(response.generation)?, outcome))
     }
 
     async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()> {
@@ -885,27 +895,28 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
             prefix: prefix.addr().to_string(),
             prefix_length: prefix.prefix_len().into(),
             path_id: 0,
+            allow_missing: true,
             owner: owner.into(),
             ..Default::default()
         };
-        self.call("DeletePath", || {
-            let mut client =
-                pb::injection_service_client::InjectionServiceClient::new(self.channel.clone());
-            let request = self.request(payload.clone());
-            async move {
-                // Without allow_missing, NOT_FOUND is the only "absent" reply.
-                match client.delete_path(request).await {
-                    Err(status) if status.code() == Code::NotFound => {
-                        tracing::debug!("rustbgpd blackhole route already absent");
-                        Ok(tonic::Response::new(pb::DeletePathResponse::default()))
-                    }
-                    result => result,
-                }
+        let response = self
+            .call("DeletePath", || async {
+                pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                    .delete_path(self.request(payload.clone()))
+                    .await
+            })
+            .await
+            .map_err(|status| self.mutation_error("DeletePath", &status))?;
+        // allow_missing makes an absent route OK with NOT_PRESENT, so a retry or a
+        // withdrawal after a daemon restart completes; NOT_FOUND is now an error.
+        match pb::PathDeleteOutcome::try_from(response.outcome) {
+            Ok(pb::PathDeleteOutcome::Deleted) => Ok(()),
+            Ok(pb::PathDeleteOutcome::NotPresent) => {
+                tracing::debug!(%prefix, "rustbgpd blackhole route already absent");
+                Ok(())
             }
-        })
-        .await
-        .map_err(|status| self.mutation_error("DeletePath", &status))?;
-        Ok(())
+            _ => Err(invalid("unsupported rustbgpd deletion outcome")),
+        }
     }
 
     async fn list_blackholes(&self) -> Result<BlackholeInventory> {

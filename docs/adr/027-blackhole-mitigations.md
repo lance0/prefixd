@@ -50,6 +50,16 @@ supersedes "standby never renews" below; and a dry-run controller never
 renews, so switching an enforced leased controller to dry-run lets its leased
 routes lapse within one lease.
 
+Status note 2026-10-20 (unicast injection contract): rustbgpd 0.79.0 also
+ships requirements (a), (b) and (c), and prefixd now requires 0.79.0. Deletes
+set `allow_missing` and treat `NOT_PRESENT` as absent; `NOT_FOUND` is an
+error. Each accepted add records `CREATED`, `REPLACED` or `UNCHANGED` in an
+`announce` audit entry. By the owner's decision, `UNSPECIFIED` (and a leased
+reply without `result`) is accepted with outcome `unknown` and a warning,
+rather than the error requirement (a) asked for. A `replaced` outcome on an
+unleased admission is logged as an error. prefixd keeps refusing
+`0.0.0.0` and `::`, which (c) made next-hop self.
+
 ## Date
 
 2026-10-19
@@ -319,7 +329,7 @@ The rustbgpd mapping is:
 | upsert, unleased | `AddPath(prefix, prefix_length, next_hop, origin=0, communities, large_communities, path_id=0)` |
 | upsert, leased | `AddLeasedPath(path=<the same AddPathRequest>, lease=InjectionLease{owner, lease_seconds})`, returning the owner's `LeaseGeneration` (rustbgpd ADR-0141 §3) |
 | renew | `RenewLease(owner, generation, lease_seconds)` from the renewal task (ADR-0141 §2) |
-| delete | `DeletePath(prefix, prefix_length, path_id=0, owner=<owner recorded in rule_json>)`, never with `override_owner`; `NOT_FOUND` means absent until `allow_missing` exists |
+| delete | `DeletePath(prefix, prefix_length, path_id=0, owner=<owner recorded in rule_json>)`, never with `override_owner`, with `allow_missing`; `DELETED` and `NOT_PRESENT` mean absent |
 | read | `ListReceivedRoutes(neighbor_address="0.0.0.0")` per unicast family, following `next_page_token` to the end; rows carry `injection_owner`, `lease_generation` and `lease_remaining_ms` (ADR-0141 §3) |
 | lease | `ListInjectionLeases(owner)` (`sensitive_read`) for the capability check and to learn the live generation after a prefixd restart (ADR-0141 §3, §8) |
 

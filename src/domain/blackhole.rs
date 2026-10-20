@@ -5,7 +5,7 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bgp::{BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer};
+use crate::bgp::{AddOutcome, BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer};
 use crate::config::BlackholeConfig;
 use crate::db::RepositoryTrait;
 use crate::error::{PrefixdError, Result};
@@ -123,7 +123,7 @@ pub async fn refuse_untracked_route(
 #[derive(Debug)]
 pub enum BlackholeAnnouncement {
     /// The speaker accepted the add (local RPC acceptance, not router enforcement).
-    Announced,
+    Announced(AddOutcome),
     /// The victim is safelisted now: nothing was added and the row was withdrawn.
     Withdrawn(Box<Mitigation>),
 }
@@ -154,8 +154,8 @@ pub async fn announce_blackhole(
         return Ok(BlackholeAnnouncement::Withdrawn(Box::new(withdrawn)));
     }
     let start = std::time::Instant::now();
-    if rule.owner.is_empty() {
-        speaker.announce_blackhole(&route).await?;
+    let outcome = if rule.owner.is_empty() {
+        speaker.announce_blackhole(&route).await?
     } else {
         let lease = lease
             .filter(|lease| lease.owner() == rule.owner)
@@ -166,16 +166,48 @@ pub async fn announce_blackhole(
                     rule.prefix, rule.owner
                 ))
             })?;
-        let generation = speaker
+        let (generation, outcome) = speaker
             .announce_leased_blackhole(&route, lease.lease_seconds())
             .await?;
         lease.observe_add(generation);
-    }
+        outcome
+    };
     crate::observability::metrics::ANNOUNCEMENTS_TOTAL
         .with_label_values(&["announced"])
         .inc();
     crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(start.elapsed().as_secs_f64());
-    Ok(BlackholeAnnouncement::Announced)
+    record_announcement(repo, mitigation, &rule, outcome).await;
+    Ok(BlackholeAnnouncement::Announced(outcome))
+}
+
+/// Audits what the add did at the speaker's local route, so a re-add of a
+/// route the speaker still held reads `unchanged`, not as a fresh announcement.
+/// The route is already accepted: a failed audit write is logged, not returned.
+async fn record_announcement(
+    repo: &dyn RepositoryTrait,
+    mitigation: &Mitigation,
+    rule: &BlackholeRule,
+    outcome: AddOutcome,
+) {
+    tracing::info!(mitigation_id = %mitigation.mitigation_id, prefix = %rule.prefix, ?outcome,
+        "blackhole route accepted by the speaker");
+    let entry = crate::observability::AuditEntry::new(
+        crate::observability::ActorType::System,
+        Some("speaker".into()),
+        "announce",
+        Some("mitigation"),
+        Some(mitigation.mitigation_id.to_string()),
+        serde_json::json!({
+            "prefix": rule.prefix.to_string(),
+            "next_hop": rule.next_hop.to_string(),
+            "owner": rule.owner,
+            "outcome": outcome,
+        }),
+    );
+    if let Err(error) = repo.insert_audit(&entry).await {
+        tracing::warn!(mitigation_id = %mitigation.mitigation_id, error = %error,
+            "failed to audit the blackhole add outcome");
+    }
 }
 
 /// Caller holds the lifecycle mutex. Audited system withdrawal of a blackhole

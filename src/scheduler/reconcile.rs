@@ -1106,7 +1106,7 @@ impl ReconciliationLoop {
             )
             .await
             {
-                Ok(crate::domain::BlackholeAnnouncement::Announced) => {
+                Ok(crate::domain::BlackholeAnnouncement::Announced(_)) => {
                     crate::observability::metrics::RECONCILIATION_REPAIRS
                         .with_label_values(&["success"])
                         .inc();
