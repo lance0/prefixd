@@ -76,18 +76,44 @@ async fn ledger_owners(repo: &dyn RepositoryTrait, pop: &str) -> Result<Vec<(Str
     Ok(owners)
 }
 
-/// Lease refusals at startup (ADR 027, "Owner and lease"). Leased intent that
-/// is live or awaiting withdrawal needs `blackhole.leased`, or nothing renews
-/// it. With the lease on, the speaker must not hold live routes under this
-/// controller's owner that the ledger neither desires nor is withdrawing: that
-/// is a second controller with the same POP against this speaker.
-pub async fn check_lease_startup(
-    config: &BlackholeConfig,
-    speaker: &dyn FlowSpecAnnouncer,
+/// FlowSpec counterpart of `ledger_owners`: (identity, recorded owner).
+async fn flowspec_ledger_owners(
     repo: &dyn RepositoryTrait,
     pop: &str,
+) -> Result<Vec<(String, String)>> {
+    let mut owners = Vec::new();
+    for mitigation in repo.active_mitigations_for_pop(pop).await? {
+        if let MitigationRoute::FlowSpec(rule) = MitigationRoute::of(&mitigation) {
+            owners.push((rule.nlri_hash(), rule.owner));
+        }
+    }
+    for request in repo.pending_withdrawals(Some(pop)).await? {
+        if let Ok(rule) = request.flowspec_rule() {
+            owners.push((rule.nlri_hash(), rule.owner));
+        }
+    }
+    Ok(owners)
+}
+
+/// Lease refusals at startup (ADR 027, "Owner and lease"). Leased intent that
+/// is live or awaiting withdrawal needs its lease setting (`blackhole.leased`
+/// or `bgp.rustbgpd.leased_flowspec`), or nothing renews it. Leased FlowSpec
+/// needs the speaker's lease. With a lease on, the speaker must not hold live
+/// routes or rules under this controller's owner that the ledger neither
+/// desires nor is withdrawing: that is a second controller with the same POP
+/// against this speaker.
+pub async fn check_lease_startup(
+    settings: &Settings,
+    speaker: &dyn FlowSpecAnnouncer,
+    repo: &dyn RepositoryTrait,
     owner: &str,
 ) -> Result<()> {
+    let (config, pop) = (&settings.blackhole, settings.pop.as_str());
+    let leased_flowspec = settings
+        .bgp
+        .rustbgpd
+        .as_ref()
+        .is_some_and(|rustbgpd| rustbgpd.leased_flowspec);
     let ledger = ledger_owners(repo, pop).await?;
     let leased = ledger.iter().filter(|(_, owner)| !owner.is_empty()).count();
     if leased > 0 && !(config.enabled && config.leased) {
@@ -96,7 +122,49 @@ pub async fn check_lease_startup(
              keep blackhole.enabled and blackhole.leased until they are withdrawn or expire"
         )));
     }
-    if !(config.enabled && config.leased && speaker.capabilities().blackhole_lease) {
+    let flowspec_ledger = flowspec_ledger_owners(repo, pop).await?;
+    let leased_rules = flowspec_ledger
+        .iter()
+        .filter(|(_, owner)| !owner.is_empty())
+        .count();
+    if leased_rules > 0 && !leased_flowspec {
+        return Err(PrefixdError::Config(format!(
+            "{leased_rules} leased FlowSpec rule(s) at POP {pop} are active or awaiting withdrawal; \
+             keep bgp.rustbgpd.leased_flowspec until they are withdrawn or expire"
+        )));
+    }
+    let lease = speaker.capabilities().blackhole_lease;
+    if leased_flowspec && !lease {
+        return Err(PrefixdError::Config(format!(
+            "bgp.rustbgpd.leased_flowspec requires the rustbgpd injection lease (0.79.0 or later), \
+             which the {} speaker does not provide",
+            speaker.backend()
+        )));
+    }
+    if leased_flowspec && let Some(reader) = speaker.reader() {
+        // A failed read refuses startup; it is never an empty speaker.
+        let unexplained: Vec<_> = reader
+            .list_active()
+            .await?
+            .into_iter()
+            .filter(|rule| {
+                rule.owner == owner
+                    && !flowspec_ledger.iter().any(|(identity, recorded)| {
+                        recorded == owner && *identity == rule.nlri_hash()
+                    })
+            })
+            .map(|rule| rule.nlri.dst_prefix)
+            .collect();
+        if !unexplained.is_empty() {
+            return Err(PrefixdError::Config(format!(
+                "the speaker holds FlowSpec rules under injection owner {owner} that this \
+                 controller's ledger neither desires nor is withdrawing (for {}); another \
+                 controller with POP {pop} may be using this speaker. Stop it, or let its lease expire",
+                unexplained.join(", ")
+            )));
+        }
+    }
+    if !(config.enabled && config.leased && lease) {
         return Ok(());
     }
     let Some(blackholes) = speaker.blackhole() else {
@@ -1338,6 +1406,12 @@ mod tests {
         assert_eq!(speaker.adds.load(SeqCst), 0);
     }
 
+    fn lease_settings(config: &BlackholeConfig) -> Settings {
+        let mut settings = enforced();
+        settings.blackhole = config.clone();
+        settings
+    }
+
     /// Startup refuses to drop the lease under outstanding leased intent, and
     /// refuses routes under this owner that the ledger cannot explain.
     #[tokio::test]
@@ -1350,7 +1424,7 @@ mod tests {
         speaker.inner.live_lease(OWNER).await.unwrap();
         let mut config = enforced().blackhole;
         config.leased = true;
-        check_lease_startup(&config, &speaker, &repo, "pop-a", OWNER)
+        check_lease_startup(&lease_settings(&config), &speaker, &repo, OWNER)
             .await
             .unwrap();
         let lease = LeaseKeeper::new(OWNER.into(), 60);
@@ -1377,7 +1451,7 @@ mod tests {
             .announce_blackhole(&route("203.0.113.31/32"))
             .await
             .unwrap();
-        check_lease_startup(&config, &speaker, &repo, "pop-a", OWNER)
+        check_lease_startup(&lease_settings(&config), &speaker, &repo, OWNER)
             .await
             .unwrap();
         for disabled in [
@@ -1390,7 +1464,7 @@ mod tests {
                 ..config.clone()
             },
         ] {
-            let error = check_lease_startup(&disabled, &speaker, &repo, "pop-a", OWNER)
+            let error = check_lease_startup(&lease_settings(&disabled), &speaker, &repo, OWNER)
                 .await
                 .unwrap_err()
                 .to_string();
@@ -1414,14 +1488,14 @@ mod tests {
             ..config.clone()
         };
         assert!(
-            check_lease_startup(&disabled, &speaker, &repo, "pop-a", OWNER)
+            check_lease_startup(&lease_settings(&disabled), &speaker, &repo, OWNER)
                 .await
                 .is_err()
         );
         crate::domain::execute_withdrawal(&repo, &speaker, false, &request, None)
             .await
             .unwrap();
-        check_lease_startup(&disabled, &speaker, &repo, "pop-a", OWNER)
+        check_lease_startup(&lease_settings(&disabled), &speaker, &repo, OWNER)
             .await
             .unwrap();
         // A route under this owner that no row desires or withdraws: a collision.
@@ -1430,7 +1504,7 @@ mod tests {
             .announce_leased_blackhole(&route("203.0.113.40/32").with_owner(OWNER), 60)
             .await
             .unwrap();
-        let error = check_lease_startup(&config, &speaker, &repo, "pop-a", OWNER)
+        let error = check_lease_startup(&lease_settings(&config), &speaker, &repo, OWNER)
             .await
             .unwrap_err()
             .to_string();
@@ -1439,9 +1513,75 @@ mod tests {
         speaker.inner.expire_lease(OWNER).await;
         speaker.fail_reads.store(true, SeqCst);
         assert!(
-            check_lease_startup(&config, &speaker, &repo, "pop-a", OWNER)
+            check_lease_startup(&lease_settings(&config), &speaker, &repo, OWNER)
                 .await
                 .is_err()
         );
+    }
+
+    /// Leased FlowSpec: refused without the speaker's lease, refused when
+    /// disabled under outstanding leased rules, and refused for an owned rule
+    /// the ledger cannot explain.
+    #[tokio::test]
+    async fn leased_flowspec_startup_refusals() {
+        use crate::bgp::{FlowSpecReader, FlowSpecWriter};
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        let mut settings = enforced();
+        settings.bgp.rustbgpd = Some(crate::config::RustBgpdConfig {
+            leased_flowspec: true,
+            ..Default::default()
+        });
+        // An older daemon: the probe never confirmed the lease.
+        let error = check_lease_startup(&settings, &speaker, &repo, OWNER)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("0.79.0"), "{error}");
+        speaker.inner.live_lease(OWNER).await.unwrap();
+        check_lease_startup(&settings, &speaker, &repo, OWNER)
+            .await
+            .unwrap();
+        let mut row = Mitigation::from_intent(
+            MitigationIntent {
+                match_criteria: MatchCriteria {
+                    dst_prefix: "203.0.113.10/32".into(),
+                    protocol: Some(17),
+                    ..Default::default()
+                },
+                action_type: ActionType::Discard,
+                ..intent("203.0.113.10/32")
+            },
+            "203.0.113.10".into(),
+            AttackVector::UdpFlood,
+        );
+        row.action_params.injection_owner = OWNER.into();
+        row.activate();
+        repo.insert_mitigation(&row).await.unwrap();
+        let rule = crate::domain::mitigation_rule(&row).unwrap();
+        speaker.announce_leased(&rule, 60).await.unwrap();
+        check_lease_startup(&settings, &speaker, &repo, OWNER)
+            .await
+            .unwrap();
+        let mut disabled = settings.clone();
+        disabled.bgp.rustbgpd = Some(Default::default());
+        let error = check_lease_startup(&disabled, &speaker, &repo, OWNER)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("leased_flowspec"), "{error}");
+        // An owned rule no row desires or withdraws: a second controller.
+        let mut stray = rule.clone();
+        stray.nlri.dst_prefix = "203.0.113.20/32".into();
+        speaker.announce_leased(&stray, 60).await.unwrap();
+        assert_eq!(speaker.list_active().await.unwrap().len(), 2);
+        let error = check_lease_startup(&settings, &speaker, &repo, OWNER)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("203.0.113.20/32"), "{error}");
     }
 }

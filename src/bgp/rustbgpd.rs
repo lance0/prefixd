@@ -396,6 +396,11 @@ fn numbers(value: &str) -> Result<Vec<u16>> {
 }
 
 fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
+    // Leased rows carry an owner, generation and remaining time together (rustbgpd ADR-0141 §3).
+    let leased = !route.injection_owner.is_empty();
+    if leased != route.lease_generation.is_some() || leased != route.lease_remaining_ms.is_some() {
+        return Err(invalid("inconsistent local rule lease fields"));
+    }
     if route.peer_address != "0.0.0.0"
         || route.afi_safi != family
         || !route.communities.is_empty()
@@ -498,7 +503,7 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
     } else {
         FlowSpecAction::police(bps as u64)
     };
-    let rule = FlowSpecRule::new(nlri, action);
+    let rule = FlowSpecRule::new(nlri, action).with_owner(route.injection_owner);
     encode(&rule)?;
     Ok(rule)
 }
@@ -644,14 +649,18 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
     }
 
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+        if !rule.owner.is_empty() {
+            return Err(invalid("a leased rule needs AddLeasedFlowSpec"));
+        }
         let payload = encode(rule)?;
         let response = self
-            .rpc("AddFlowSpec", || async {
+            .call("AddFlowSpec", || async {
                 pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
                     .add_flow_spec(self.request(payload.clone()))
                     .await
             })
-            .await?;
+            .await
+            .map_err(|status| self.mutation_error("AddFlowSpec", &status))?;
         match pb::FlowSpecInjectOutcome::try_from(response.outcome) {
             Ok(
                 pb::FlowSpecInjectOutcome::Created
@@ -664,17 +673,56 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
             _ => Err(invalid("unsupported rustbgpd injection outcome")),
         }
     }
+
+    async fn announce_leased(
+        &self,
+        rule: &FlowSpecRule,
+        lease_seconds: u32,
+    ) -> Result<LeaseGeneration> {
+        // Never AddFlowSpec: an older daemon answers UNIMPLEMENTED and creates nothing.
+        if rule.owner.is_empty() {
+            return Err(invalid("a leased add needs an injection owner"));
+        }
+        let payload = pb::AddLeasedFlowSpecRequest {
+            rule: Some(encode(rule)?),
+            lease: Some(pb::InjectionLease {
+                owner: rule.owner.clone(),
+                lease_seconds,
+            }),
+        };
+        let response = self
+            .call("AddLeasedFlowSpec", || async {
+                pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                    .add_leased_flow_spec(self.request(payload.clone()))
+                    .await
+            })
+            .await
+            .map_err(|status| self.mutation_error("AddLeasedFlowSpec", &status))?;
+        match response
+            .result
+            .map(|result| pb::FlowSpecInjectOutcome::try_from(result.outcome))
+        {
+            Some(Ok(
+                pb::FlowSpecInjectOutcome::Created
+                | pb::FlowSpecInjectOutcome::Replaced
+                | pb::FlowSpecInjectOutcome::Unchanged,
+            )) => generation(response.generation),
+            _ => Err(invalid("unsupported rustbgpd leased injection outcome")),
+        }
+    }
+
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
         let (afi_safi, components) = encode_match(&rule.nlri)?;
+        // The recorded owner and never override_owner: a mismatch is FAILED_PRECONDITION.
         let payload = pb::DeleteFlowSpecRequest {
             afi_safi,
             components,
             allow_missing: true,
-            // Unowned: owner and override_owner (0.79.0+) stay off the wire.
+            owner: rule.owner.clone(),
             ..Default::default()
         };
         let response = self
-            .rpc("DeleteFlowSpec", || {
+            .call("DeleteFlowSpec", || {
                 let mut client =
                     pb::injection_service_client::InjectionServiceClient::new(self.channel.clone());
                 let request = self.request(payload.clone());
@@ -689,7 +737,8 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
                     }
                 }
             })
-            .await?;
+            .await
+            .map_err(|status| self.mutation_error("DeleteFlowSpec", &status))?;
         match pb::FlowSpecDeleteOutcome::try_from(response.outcome) {
             Ok(pb::FlowSpecDeleteOutcome::Deleted | pb::FlowSpecDeleteOutcome::NotPresent) => {
                 tracing::debug!(outcome = response.outcome, "rustbgpd withdrawal accepted");
@@ -722,10 +771,13 @@ impl FlowSpecReader for RustBgpdAnnouncer {
                 if !matches!(row.validation, 1 | 3) || row.path_id != 0 || !row.reason.is_empty() {
                     return Err(invalid("invalid local intent row"));
                 }
-                rules.push(decode(
-                    row.route.ok_or_else(|| invalid("missing local route"))?,
-                    family,
-                )?);
+                let route = row.route.ok_or_else(|| invalid("missing local route"))?;
+                // Zero remaining means expired with its withdrawal pending: lost, not retained.
+                let expired = route.lease_remaining_ms == Some(0);
+                let rule = decode(route, family)?;
+                if !expired {
+                    rules.push(rule);
+                }
             }
         }
         Ok(rules)

@@ -97,6 +97,7 @@ fn go_received(path: &go::Path, afi: i32, peer: &str) -> FlowSpecRule {
     FlowSpecRule {
         nlri: result,
         actions,
+        owner: String::new(),
     }
 }
 

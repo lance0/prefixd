@@ -5,6 +5,9 @@ use std::sync::{
 };
 use tonic::{Response, Status};
 
+/// Match components of a leased rule and the owner holding it.
+type HeldOwner = (Vec<pb::FlowSpecComponent>, String);
+
 #[derive(Clone, Default)]
 struct Fake {
     rules: Arc<Mutex<Vec<pb::AddFlowSpecRequest>>>,
@@ -13,6 +16,26 @@ struct Fake {
     deletes: Arc<AtomicUsize>,
     health_calls: Arc<AtomicUsize>,
     families: Arc<Mutex<Vec<i32>>>,
+    /// Injection owner per leased rule, by match components.
+    owners: Arc<Mutex<Vec<HeldOwner>>>,
+    leased: Arc<Mutex<Vec<pb::AddLeasedFlowSpecRequest>>>,
+    delete_owners: Arc<Mutex<Vec<String>>>,
+}
+
+/// FlowSpec fake modes for the lease: an older daemon, and leased rows with no time left.
+const FLOWSPEC_LEASE_UNIMPLEMENTED: usize = 30;
+const FLOWSPEC_LEASE_EXPIRED: usize = 31;
+
+impl Fake {
+    fn owner_of(&self, components: &[pb::FlowSpecComponent]) -> String {
+        self.owners
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(held, _)| held.as_slice() == components)
+            .map(|(_, owner)| owner.clone())
+            .unwrap_or_default()
+    }
 }
 
 fn auth<T>(request: &Request<T>) -> std::result::Result<(), Status> {
@@ -151,6 +174,30 @@ impl pb::injection_service_server::InjectionService for Fake {
         Ok(Response::new(pb::AddFlowSpecResponse { outcome }))
     }
 
+    async fn add_leased_flow_spec(
+        &self,
+        request: Request<pb::AddLeasedFlowSpecRequest>,
+    ) -> std::result::Result<Response<pb::AddLeasedFlowSpecResponse>, Status> {
+        auth(&request)?;
+        if self.mode.load(SeqCst) == FLOWSPEC_LEASE_UNIMPLEMENTED {
+            return Err(Status::unimplemented("older daemon"));
+        }
+        let request = request.into_inner();
+        self.leased.lock().unwrap().push(request.clone());
+        let rule = request.rule.unwrap();
+        self.owners
+            .lock()
+            .unwrap()
+            .push((rule.components.clone(), request.lease.unwrap().owner));
+        let mut rules = self.rules.lock().unwrap();
+        rules.retain(|old| old.afi_safi != rule.afi_safi || old.components != rule.components);
+        rules.push(rule);
+        Ok(Response::new(pb::AddLeasedFlowSpecResponse {
+            result: Some(pb::AddFlowSpecResponse { outcome: 1 }),
+            generation: Some(LIVE),
+        }))
+    }
+
     async fn delete_flow_spec(
         &self,
         request: Request<pb::DeleteFlowSpecRequest>,
@@ -159,8 +206,21 @@ impl pb::injection_service_server::InjectionService for Fake {
         auth(&request)?;
         let request = request.into_inner();
         assert!(request.allow_missing);
-        // prefixd injects unowned rules, so the lease fields stay unset.
-        assert!(request.owner.is_empty() && !request.override_owner);
+        assert!(!request.override_owner, "prefixd never overrides the owner");
+        self.delete_owners
+            .lock()
+            .unwrap()
+            .push(request.owner.clone());
+        if self
+            .rules
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|old| old.components == request.components)
+            && self.owner_of(&request.components) != request.owner
+        {
+            return Err(Status::failed_precondition("key is held by another owner"));
+        }
         match self.mode.load(SeqCst) {
             4 => return Err(Status::not_found("absent")),
             5 => return Ok(Response::new(pb::DeleteFlowSpecResponse { outcome: 0 })),
@@ -207,6 +267,8 @@ impl pb::rib_service_server::RibService for Fake {
                         ..Default::default()
                     });
                 }
+                let owner = self.owner_of(&rule.components);
+                let leased = !owner.is_empty();
                 pb::ReceivedFlowSpecRouteEntry {
                     route: Some(pb::FlowSpecRouteEntry {
                         components,
@@ -216,6 +278,15 @@ impl pb::rib_service_server::RibService for Fake {
                         extended_communities: vec![
                             (0x8006_u64 << 48) | u64::from(rate.rate.to_bits()),
                         ],
+                        injection_owner: owner,
+                        lease_generation: leased.then_some(LIVE),
+                        lease_remaining_ms: leased.then_some(
+                            if self.mode.load(SeqCst) == FLOWSPEC_LEASE_EXPIRED {
+                                0
+                            } else {
+                                59_000
+                            },
+                        ),
                         ..Default::default()
                     }),
                     selected: false,
@@ -1491,5 +1562,100 @@ async fn leased_read_back_reports_expired_rows_and_rejects_partial_lease_fields(
     assert_eq!(speaker.live_lease(LEASE_OWNER).await.unwrap(), Some(None));
     fake.mode.store(LEASE_INCONSISTENT, SeqCst);
     assert!(speaker.list_blackholes().await.is_err());
+    server.abort();
+}
+
+async fn flowspec_speaker() -> (RustBgpdAnnouncer, Fake, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fake = Fake::default();
+    let incoming = futures_util::stream::unfold(listener, |listener| async {
+        Some((listener.accept().await.map(|(stream, _)| stream), listener))
+    });
+    let server = tonic::transport::Server::builder()
+        .add_service(pb::injection_service_server::InjectionServiceServer::new(
+            fake.clone(),
+        ))
+        .add_service(pb::rib_service_server::RibServiceServer::new(fake.clone()))
+        .serve_with_incoming(incoming);
+    let server = tokio::spawn(async move { server.await.unwrap() });
+    let config = RustBgpdConfig {
+        endpoint: format!("http://{address}"),
+        bearer_token_env: "unused".into(),
+        ..Default::default()
+    };
+    let speaker = RustBgpdAnnouncer::connect_with_token(&config, "test-secret")
+        .await
+        .unwrap();
+    (speaker, fake, server)
+}
+
+#[tokio::test]
+async fn leased_flowspec_adds_reads_and_deletes_under_the_recorded_owner() {
+    let (speaker, fake, server) = flowspec_speaker().await;
+    let leased = rule("192.0.2.1/32", 0).with_owner(LEASE_OWNER);
+    // Each add refuses the other kind before any RPC.
+    assert!(speaker.announce(&leased).await.is_err());
+    assert!(
+        speaker
+            .announce_leased(&rule("192.0.2.2/32", 0), 60)
+            .await
+            .is_err()
+    );
+    assert_eq!(fake.attempts.load(SeqCst), 0);
+
+    let generation = speaker.announce_leased(&leased, 45).await.unwrap();
+    assert_eq!(generation, live());
+    let sent = fake.leased.lock().unwrap()[0].clone();
+    let lease = sent.lease.unwrap();
+    assert_eq!(
+        (lease.owner.as_str(), lease.lease_seconds),
+        (LEASE_OWNER, 45)
+    );
+    assert_eq!(sent.rule.unwrap(), encode(&leased).unwrap());
+    assert_eq!(fake.attempts.load(SeqCst), 0, "no AddFlowSpec");
+    // An unleased rule beside it keeps the plain RPC and an empty owner.
+    let unleased = rule("192.0.2.3/32", 0);
+    speaker.announce(&unleased).await.unwrap();
+    let mut owners: Vec<_> = speaker
+        .list_active()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|rule| (rule.nlri.dst_prefix, rule.owner))
+        .collect();
+    owners.sort();
+    assert_eq!(
+        owners,
+        [
+            ("192.0.2.1/32".to_string(), LEASE_OWNER.to_string()),
+            ("192.0.2.3/32".to_string(), String::new()),
+        ]
+    );
+    // A leased row with no time left is lost intent, not a retained rule.
+    fake.mode.store(FLOWSPEC_LEASE_EXPIRED, SeqCst);
+    let remaining = speaker.list_active().await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert!(remaining[0].owner.is_empty());
+    fake.mode.store(0, SeqCst);
+    // Deletes pass the recorded owner; a mismatch is the daemon's refusal.
+    assert!(matches!(
+        speaker.withdraw(&rule("192.0.2.1/32", 0)).await,
+        Err(PrefixdError::InjectionOwnerMismatch(_))
+    ));
+    speaker.withdraw(&leased).await.unwrap();
+    speaker.withdraw(&unleased).await.unwrap();
+    assert_eq!(*fake.delete_owners.lock().unwrap(), ["", LEASE_OWNER, ""]);
+    server.abort();
+}
+
+#[tokio::test]
+async fn older_daemon_leased_flowspec_creates_nothing_and_never_falls_back() {
+    let (speaker, fake, server) = flowspec_speaker().await;
+    fake.mode.store(FLOWSPEC_LEASE_UNIMPLEMENTED, SeqCst);
+    let leased = rule("192.0.2.1/32", 0).with_owner(LEASE_OWNER);
+    assert!(speaker.announce_leased(&leased, 60).await.is_err());
+    assert_eq!(fake.attempts.load(SeqCst), 0, "no AddFlowSpec fallback");
+    assert!(fake.rules.lock().unwrap().is_empty());
     server.abort();
 }

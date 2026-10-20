@@ -230,6 +230,11 @@ impl FlowSpecAction {
 pub struct FlowSpecRule {
     pub nlri: FlowSpecNlri,
     pub actions: Vec<FlowSpecAction>,
+    /// Injection owner the rule was added under (ADR 027); `""` for an unleased
+    /// rule. Absent from unleased rule JSON, so persisted rules are unchanged.
+    /// Not part of the rule's identity.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner: String,
 }
 
 impl FlowSpecRule {
@@ -237,7 +242,14 @@ impl FlowSpecRule {
         Self {
             nlri,
             actions: vec![action],
+            owner: String::new(),
         }
+    }
+
+    /// The same rule held under an injection owner.
+    pub fn with_owner(mut self, owner: impl Into<String>) -> Self {
+        self.owner = owner.into();
+        self
     }
 
     pub fn nlri_hash(&self) -> String {
@@ -274,6 +286,33 @@ impl std::fmt::Display for AnnouncementStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Unleased rules serialize exactly as before the owner existed; the owner
+    /// never changes a rule's identity.
+    #[test]
+    fn rule_owner_is_absent_from_unleased_json_and_outside_identity() {
+        let rule = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "192.0.2.1/32".into(),
+                protocol: Some(17),
+                ..Default::default()
+            },
+            FlowSpecAction::discard(),
+        );
+        let json = serde_json::to_string(&rule).unwrap();
+        assert!(!json.contains("owner"), "{json}");
+        let legacy: FlowSpecRule = serde_json::from_str(&json).unwrap();
+        assert!(legacy.owner.is_empty());
+        let leased = rule.clone().with_owner("prefixd.pop.0123456789abcdef");
+        let json = serde_json::to_string(&leased).unwrap();
+        assert!(
+            json.ends_with(r#","owner":"prefixd.pop.0123456789abcdef"}"#),
+            "{json}"
+        );
+        let parsed: FlowSpecRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.owner, leased.owner);
+        assert_eq!(leased.nlri_hash(), rule.nlri_hash());
+    }
 
     #[test]
     fn traffic_rate_preserves_exact_bit_rates_and_rejects_invalid_actions() {

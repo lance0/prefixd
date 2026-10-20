@@ -433,6 +433,12 @@ impl FlowSpecAnnouncer for GoBgpAnnouncer {
 #[async_trait]
 impl FlowSpecWriter for GoBgpAnnouncer {
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+        // GoBGP has no injection lease; a leased rule never becomes an unleased one.
+        if !rule.owner.is_empty() {
+            return Err(PrefixdError::Config(
+                "GoBGP cannot add a leased FlowSpec rule".into(),
+            ));
+        }
         let path = self.build_flowspec_path(rule)?;
         let nlri_hash = rule.nlri_hash();
         let dst_prefix = rule.nlri.dst_prefix.clone();

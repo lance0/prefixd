@@ -191,6 +191,15 @@ impl FlowSpecWriter for FencedAnnouncer {
         self.inner.announce(rule).await
     }
 
+    async fn announce_leased(
+        &self,
+        rule: &FlowSpecRule,
+        lease_seconds: u32,
+    ) -> Result<LeaseGeneration> {
+        self.fence.ensure_active()?;
+        self.inner.announce_leased(rule, lease_seconds).await
+    }
+
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
         self.fence.ensure_active()?;
         self.inner.withdraw(rule).await

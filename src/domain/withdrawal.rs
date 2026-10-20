@@ -25,13 +25,16 @@ pub enum MitigationRoute {
 impl MitigationRoute {
     pub fn new(action_type: ActionType, criteria: &MatchCriteria, params: &ActionParams) -> Self {
         match action_type {
-            ActionType::Police | ActionType::Discard => Self::FlowSpec(FlowSpecRule::new(
-                FlowSpecNlri::from(criteria),
-                FlowSpecAction {
-                    action_type,
-                    rate_bps: params.rate_bps,
-                },
-            )),
+            ActionType::Police | ActionType::Discard => Self::FlowSpec(
+                FlowSpecRule::new(
+                    FlowSpecNlri::from(criteria),
+                    FlowSpecAction {
+                        action_type,
+                        rate_bps: params.rate_bps,
+                    },
+                )
+                .with_owner(params.injection_owner.clone()),
+            ),
             ActionType::Blackhole => Self::Blackhole {
                 prefix: criteria.dst_prefix.clone(),
             },

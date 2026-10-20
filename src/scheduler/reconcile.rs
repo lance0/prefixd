@@ -229,19 +229,39 @@ impl ReconciliationLoop {
         }
         self.verified_speaker_binding()?;
         let mut failure = None;
+        // One requested full leased re-add covers both route kinds; taken
+        // before the reads, so a loss signalled meanwhile is not dropped.
+        let lease = self.lease();
+        let readd = lease.is_some_and(crate::domain::LeaseKeeper::take_readd);
+        let (mut flowspec_readd_failed, mut blackhole_readd_failed) = (readd, readd);
+        let mut blackhole_readd = readd;
         // Each stage is independent; a speaker failure must not stop expiry or health updates.
         for (stage, result) in [
             ("withdrawals", self.expire_mitigations().await),
             ("signal groups", self.expire_signal_groups().await),
             ("corroborator cache", self.sweep_corroborator_cache().await),
             ("confidence", self.refresh_decayed_confidence().await),
-            ("announcements", self.sync_announcements().await),
-            ("blackholes", self.sync_blackholes().await),
+            (
+                "announcements",
+                self.sync_announcements_with(readd, &mut flowspec_readd_failed)
+                    .await,
+            ),
+            (
+                "blackholes",
+                self.sync_blackholes_with(&mut blackhole_readd, &mut blackhole_readd_failed)
+                    .await,
+            ),
         ] {
             if let Err(error) = result {
                 tracing::warn!(stage, error = %error, "reconciliation stage failed");
                 failure = Some(error);
             }
+        }
+        // A partial re-add stays pending, so the next pass re-adds everything again.
+        if (flowspec_readd_failed || blackhole_readd_failed)
+            && let Some(lease) = lease
+        {
+            lease.retry_readd();
         }
         self.update_bgp_session_metrics().await;
         match failure {
@@ -513,7 +533,18 @@ impl ReconciliationLoop {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn sync_announcements(&self) -> anyhow::Result<()> {
+        self.sync_announcements_with(false, &mut false).await
+    }
+
+    /// FlowSpec desired set against the local rule view. `readd` re-adds every
+    /// leased rule even when present; `readd_failed` reports whether it completed.
+    async fn sync_announcements_with(
+        &self,
+        readd: bool,
+        readd_failed: &mut bool,
+    ) -> anyhow::Result<()> {
         use std::collections::{HashMap, HashSet};
 
         self.verified_speaker_binding()?;
@@ -580,6 +611,7 @@ impl ReconciliationLoop {
                 backend = self.announcer.backend(),
                 "rule observation unsupported; repair skipped"
             );
+            *readd_failed = false;
             return Ok(());
         };
         let announced = reader.list_active().await?;
@@ -597,6 +629,7 @@ impl ReconciliationLoop {
 
         // Upsert only uniquely owned missing or differing-action intent.
         let mut repair_error = None;
+        let mut forced_failure = false;
         for candidate in &active {
             // A non-FlowSpec row fails its own repair; other rows still repair.
             let candidate_rule = match self.build_flowspec_rule(candidate) {
@@ -623,6 +656,8 @@ impl ReconciliationLoop {
                     continue;
                 }
             };
+            // A full leased re-add treats every leased rule as missing.
+            let forced = readd && !candidate_rule.owner.is_empty();
             if let Some((observed, observed_action)) = announced_actions.get(&nlri_hash) {
                 match self
                     .announcer
@@ -640,7 +675,16 @@ impl ReconciliationLoop {
                         continue;
                     }
                 }
-                if observed_action == &action {
+                // Another owner's rule, or an unowned one where ours is leased, is never touched.
+                if observed.owner != candidate_rule.owner {
+                    repair_error =
+                        Some(crate::error::PrefixdError::InjectionOwnerMismatch(format!(
+                            "FlowSpec rule for {} is held by injection owner {:?}",
+                            candidate_rule.nlri.dst_prefix, observed.owner
+                        )));
+                    continue;
+                }
+                if !forced && observed_action == &action {
                     continue;
                 }
             }
@@ -707,21 +751,39 @@ impl ReconciliationLoop {
             if mitigation.expires_at <= chrono::Utc::now() {
                 continue;
             }
-            if announced_actions.get(&nlri_hash).map(|(_, action)| action) != Some(&action) {
-                tracing::warn!(
-                    mitigation_id = %mitigation.mitigation_id,
-                    nlri_hash = %rule.nlri_hash(),
-                    reason = if announced_actions.contains_key(&nlri_hash) { "action_drift" } else { "missing" },
-                    "repairing local announcement"
-                );
+            if forced
+                || announced_actions.get(&nlri_hash).map(|(_, action)| action) != Some(&action)
+            {
+                let reason = if forced {
+                    "lease re-add"
+                } else if announced_actions.contains_key(&nlri_hash) {
+                    "action_drift"
+                } else {
+                    "missing"
+                };
+                if forced {
+                    tracing::info!(mitigation_id = %mitigation.mitigation_id,
+                        nlri_hash = %rule.nlri_hash(), reason, "re-adding leased FlowSpec rule");
+                } else {
+                    tracing::warn!(mitigation_id = %mitigation.mitigation_id,
+                        nlri_hash = %rule.nlri_hash(), reason, "repairing local announcement");
+                }
 
                 if !self.dry_run {
                     let start = std::time::Instant::now();
                     let announced = match self.announcer.match_support().require(&rule.nlri) {
-                        Ok(()) => self.announcer.announce(&rule).await,
+                        Ok(()) => {
+                            crate::domain::announce_flowspec(
+                                self.announcer.as_ref(),
+                                &rule,
+                                self.lease(),
+                            )
+                            .await
+                        }
                         Err(error) => Err(error),
                     };
                     if let Err(e) = announced {
+                        forced_failure |= forced;
                         crate::observability::metrics::RECONCILIATION_REPAIRS
                             .with_label_values(&["error"])
                             .inc();
@@ -745,16 +807,18 @@ impl ReconciliationLoop {
             }
         }
 
-        // Alert on unknown routes (routes in BGP not tracked by us)
+        *readd_failed = forced_failure;
+        // Alert on unknown routes (routes in BGP not tracked by us), including
+        // another injection owner's rule at a desired key.
         let desired_hashes: HashSet<_> = active
             .iter()
             .filter_map(|m| self.build_flowspec_rule(m).ok())
-            .map(|rule| rule.nlri_hash())
+            .map(|rule| (rule.nlri_hash(), rule.owner))
             .collect();
 
         let mut unknown = 0.0;
         for rule in &announced {
-            if !desired_hashes.contains(&rule.nlri_hash()) {
+            if !desired_hashes.contains(&(rule.nlri_hash(), rule.owner.clone())) {
                 unknown += 1.0;
                 tracing::warn!(
                     nlri_hash = %rule.nlri_hash(),
@@ -776,21 +840,8 @@ impl ReconciliationLoop {
     /// Blackhole desired set against retained local intent (ADR 027 §5). It is a
     /// separate stage, so a failed blackhole read never stops FlowSpec repair or
     /// the reverse. Unknown and unrecognized routes are reported, never touched.
-    /// A requested full leased re-add that does not complete stays pending.
-    async fn sync_blackholes(&self) -> anyhow::Result<()> {
-        let lease = self.lease();
-        // Taken before the read, so a loss signalled meanwhile is not dropped.
-        let mut readd = lease.is_some_and(crate::domain::LeaseKeeper::take_readd);
-        let mut readd_failed = readd;
-        let result = self
-            .sync_blackholes_with(&mut readd, &mut readd_failed)
-            .await;
-        if readd_failed && let Some(lease) = lease {
-            lease.retry_readd();
-        }
-        result
-    }
-
+    /// `readd` re-adds every leased route even when present; `readd_failed`
+    /// reports whether it completed.
     async fn sync_blackholes_with(
         &self,
         readd: &mut bool,
@@ -839,9 +890,12 @@ impl ReconciliationLoop {
                 desired.is_empty(),
                 "blackhole intent needs a blackhole-capable speaker"
             );
+            // Nothing leased to re-add, so no re-add stays pending.
+            *readd_failed = false;
             return Ok(());
         };
         if owned.is_empty() && !enabled {
+            *readd_failed = false;
             return Ok(());
         }
         let lease = self.lease();
@@ -3366,5 +3420,158 @@ mod tests {
         assert!(reconciler.reconcile().await.is_err());
         assert_eq!(speaker.adds.load(SeqCst), 0);
         assert_eq!(speaker.leased_adds.load(SeqCst), 0);
+    }
+
+    /// Live leased FlowSpec intent recorded under `LEASE_OWNER`.
+    fn leased_rule_row(prefix: &str) -> Mitigation {
+        let mut mitigation = action_mitigation(prefix, FlowSpecAction::discard());
+        mitigation.action_params.injection_owner = LEASE_OWNER.into();
+        mitigation
+    }
+
+    /// Leased FlowSpec shares the controller's lease with blackholes: one
+    /// generation, and a refused renewal re-adds both kinds at once, never
+    /// through `AddFlowSpec`.
+    #[tokio::test]
+    async fn leased_flowspec_shares_the_lease_and_is_re_added_after_a_refused_renewal() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let lease = Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60));
+        let reconciler = leased_reconciler(repo.clone(), speaker.clone(), lease.clone());
+        let rule_row = leased_rule_row("192.0.2.10/32");
+        let unleased_rule = action_mitigation("192.0.2.11/32", FlowSpecAction::discard());
+        let blackhole = leased_row("192.0.2.1");
+        for mitigation in [&rule_row, &unleased_rule, &blackhole] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        let counts = || {
+            (
+                speaker.flowspec_adds.load(SeqCst),
+                speaker.leased_flowspec_adds.load(SeqCst),
+                speaker.leased_adds.load(SeqCst),
+            )
+        };
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(counts(), (1, 1, 1));
+        let generation = lease.generation().unwrap();
+        assert!(!lease.take_readd(), "both kinds joined one generation");
+        let rules = speaker.inner.list_active().await.unwrap();
+        let owner = |prefix: &str| {
+            rules
+                .iter()
+                .find(|rule| rule.nlri.dst_prefix == prefix)
+                .map(|rule| rule.owner.clone())
+        };
+        assert_eq!(owner("192.0.2.10/32").as_deref(), Some(LEASE_OWNER));
+        assert_eq!(owner("192.0.2.11/32").as_deref(), Some(""));
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(counts(), (1, 1, 1), "converged");
+
+        speaker.inner.restart().await;
+        lease.renew_once(speaker.as_ref()).await;
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(counts(), (2, 2, 2));
+        assert_ne!(lease.generation().unwrap(), generation);
+        assert!(!lease.take_readd());
+
+        // Deletes pass the recorded owner.
+        for mitigation in [&rule_row, &unleased_rule] {
+            let request = request_withdrawal(
+                repo.as_ref(),
+                mitigation,
+                false,
+                "operator",
+                "alice",
+                "attack over".into(),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                request.flowspec_rule().unwrap().owner,
+                mitigation.action_params.injection_owner
+            );
+            execute_withdrawal(repo.as_ref(), speaker.as_ref(), false, &request, None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            *speaker.flowspec_delete_owners.lock().unwrap(),
+            [LEASE_OWNER, ""]
+        );
+    }
+
+    /// A requested full re-add sends every leased rule again, present ones
+    /// included; unleased rules are left alone.
+    #[tokio::test]
+    async fn a_full_readd_re_adds_present_leased_flowspec_rules() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let lease = Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60));
+        let reconciler = leased_reconciler(repo.clone(), speaker.clone(), lease.clone());
+        for mitigation in [
+            leased_rule_row("192.0.2.10/32"),
+            leased_rule_row("192.0.2.12/32"),
+            action_mitigation("192.0.2.11/32", FlowSpecAction::discard()),
+        ] {
+            repo.insert_mitigation(&mitigation).await.unwrap();
+        }
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 2);
+        lease.request_readd();
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 4);
+        assert_eq!(speaker.flowspec_adds.load(SeqCst), 1);
+        assert!(!lease.take_readd());
+
+        // Leased FlowSpec without blackholes: the idle blackhole stage must not
+        // keep the completed re-add pending.
+        let reconciler =
+            blackhole_reconciler(repo.clone(), speaker.clone(), Default::default(), false)
+                .with_lease(lease.clone());
+        lease.request_readd();
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 6);
+        assert!(!lease.take_readd(), "a completed re-add is not retried");
+    }
+
+    /// Another owner's rule at a desired key, and a desired leased rule held
+    /// unowned, are reported and never touched or overwritten.
+    #[tokio::test]
+    async fn foreign_and_unowned_flowspec_rules_at_desired_keys_stay_untouched() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let lease = Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60));
+        let reconciler = leased_reconciler(repo.clone(), speaker.clone(), lease.clone());
+        lease.take_readd();
+        let foreign_key = leased_rule_row("192.0.2.10/32");
+        let unowned_key = leased_rule_row("192.0.2.12/32");
+        for mitigation in [&foreign_key, &unowned_key] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        let foreign = crate::domain::mitigation_rule(&foreign_key)
+            .unwrap()
+            .with_owner("other.owner");
+        speaker.inner.announce_leased(&foreign, 60).await.unwrap();
+        let unowned = crate::domain::mitigation_rule(&unowned_key)
+            .unwrap()
+            .with_owner("");
+        speaker.inner.announce(&unowned).await.unwrap();
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 0);
+        assert_eq!(speaker.flowspec_adds.load(SeqCst), 0);
+        let rules = speaker.inner.list_active().await.unwrap();
+        assert_eq!(rules.len(), 2);
+        assert!(rules.iter().any(|rule| rule.owner == "other.owner"));
+        assert_eq!(
+            crate::observability::metrics::UNKNOWN_LOCAL_ROUTES
+                .with_label_values(&["flowspec"])
+                .get(),
+            2.0
+        );
     }
 }

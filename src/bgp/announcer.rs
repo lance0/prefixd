@@ -63,7 +63,21 @@ pub trait FlowSpecWriter: Send + Sync {
             && left.packet_length == right.packet_length)
     }
 
+    /// Unleased upsert; a rule with an owner is refused before any RPC.
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()>;
+    /// Leased upsert under the rule's owner, returning the owner's live
+    /// generation (ADR 027). It never falls back to `announce`. Backends
+    /// without the injection lease refuse it.
+    async fn announce_leased(
+        &self,
+        _rule: &FlowSpecRule,
+        _lease_seconds: u32,
+    ) -> Result<LeaseGeneration> {
+        Err(crate::error::PrefixdError::Config(
+            "the speaker has no leased FlowSpec injection".into(),
+        ))
+    }
+    /// Idempotent delete; passes the rule's recorded owner where supported.
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()>;
 }
 

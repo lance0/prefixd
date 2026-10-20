@@ -213,6 +213,11 @@ pub struct ActionParams {
     /// so FlowSpec rows serialize byte for byte as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blackhole: Option<super::BlackholeRule>,
+    /// Injection owner a leased FlowSpec rule was added under (ADR 027),
+    /// snapshotted at admission; absent for an unleased rule, so existing rows
+    /// serialize byte for byte as before.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub injection_owner: String,
 }
 
 /// Intent produced by policy engine, before guardrails

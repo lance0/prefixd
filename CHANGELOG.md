@@ -79,6 +79,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Leased FlowSpec (ADR 027 amendment): with `bgp.rustbgpd.leased_flowspec`
+  (off by default, rustbgpd 0.79.0 or later), new enforced FlowSpec rules use
+  `AddLeasedFlowSpec` under the same injection owner, lease and renewal as
+  leased blackholes, so rustbgpd removes them within one lease if prefixd
+  stops. The owner is recorded per rule, deletes pass it, read-back matches
+  it, and a failed leased add never falls back to `AddFlowSpec`. Existing
+  unleased rules stay unleased. Startup refuses the setting without the
+  speaker's lease, refuses turning it off while leased rules are outstanding,
+  and refuses owned rules the database cannot explain. Unleased rules are
+  stored and sent exactly as before.
 - Leased blackholes (ADR 027): with `blackhole.leased`, enforced manual and
   detector blackholes use `AddLeasedPath` under the controller's injection
   owner and never fall back to `AddPath`. A renewal task sends `RenewLease`

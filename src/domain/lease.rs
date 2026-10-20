@@ -262,6 +262,33 @@ impl LeaseKeeper {
     }
 }
 
+/// Sends one FlowSpec rule by its recorded owner: `AddLeasedFlowSpec` under
+/// the controller's lease for an owned rule, `AddFlowSpec` for an unleased one.
+/// A failure never switches between them.
+pub async fn announce_flowspec(
+    announcer: &dyn FlowSpecAnnouncer,
+    rule: &crate::domain::FlowSpecRule,
+    lease: Option<&LeaseKeeper>,
+) -> Result<()> {
+    if rule.owner.is_empty() {
+        return announcer.announce(rule).await;
+    }
+    let lease = lease
+        .filter(|lease| lease.owner() == rule.owner)
+        .ok_or_else(|| {
+            PrefixdError::Config(format!(
+                "FlowSpec rule {} was added under injection owner {}, which this controller does not renew; \
+                 it needs bgp.rustbgpd.leased_flowspec and the same POP and speaker target",
+                rule.nlri.dst_prefix, rule.owner
+            ))
+        })?;
+    let generation = announcer
+        .announce_leased(rule, lease.lease_seconds())
+        .await?;
+    lease.observe_add(generation);
+    Ok(())
+}
+
 /// The dedicated renewal task: about every `lease_seconds / 3` while a
 /// generation is held, for the life of the process. It never waits for
 /// reconciliation, the lifecycle mutex or the database.

@@ -149,8 +149,46 @@ to literal loopback addresses. The listener identity needs the `operator` role;
 prefixd's ASN, router ID and neighbor fields do not configure rustbgpd's sessions.
 
 Existing YAML may omit the client identity fields. Rust callers constructing
-`RustBgpdConfig` literals must add the two optional fields or use
-`..Default::default()` for omitted transport options.
+`RustBgpdConfig` literals must add the optional fields, including
+`leased_flowspec`, or use `..Default::default()` for omitted options.
+
+#### Leased FlowSpec
+
+```yaml
+bgp:
+  backend: rustbgpd
+  rustbgpd:
+    endpoint: "unix:///run/rustbgpd/grpc.sock"
+    # Off by default. Needs rustbgpd 0.79.0 or later.
+    leased_flowspec: true
+```
+
+With `bgp.rustbgpd.leased_flowspec: true`, new enforced FlowSpec rules are
+added with `AddLeasedFlowSpec` under the controller's injection owner
+([ADR 027](../adr/027-blackhole-mitigations.md#amendment-leased-flowspec)). If
+prefixd stops while rustbgpd keeps running, rustbgpd removes them within one
+lease instead of keeping them until prefixd returns. They share the owner,
+`blackhole.lease_seconds`, the renewal task and the generation with
+[leased blackholes](#leased-blackholes), because any leased add moves the
+owner's whole deadline. `blackhole.leased` is not required.
+
+- **Startup.** Refused unless the speaker answers the injection lease probe
+  (rustbgpd 0.79.0 or later). Refused when the speaker holds live FlowSpec
+  rules under this owner that the database neither desires nor is
+  withdrawing.
+- **No fallback.** A failed leased add leaves the rule unconfirmed and is
+  retried only as a leased add, never as `AddFlowSpec`.
+- **Recorded owner.** Each rule keeps the owner it was added under; repair and
+  deletion use it and never override another owner. A rule added unleased
+  stays unleased until it is withdrawn or expires. Startup refuses
+  `leased_flowspec: false` while leased FlowSpec rules are active or awaiting
+  withdrawal.
+- **Lost lease.** A refused renewal, a changed lease generation or a speaker
+  restart re-adds every active leased FlowSpec rule and leased blackhole at
+  once. Lease expiry is never recorded as a withdrawal.
+- **Unknown rules.** Another owner's rule at a desired match is reported in
+  `prefixd_unknown_local_routes{kind="flowspec"}` as a repair error and never
+  touched.
 
 Speaker selection and credentials are startup configuration, not hot-reloaded.
 The settings API retains the existing `bgp.mode` representation and omits

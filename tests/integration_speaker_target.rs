@@ -234,6 +234,7 @@ async fn target_registration_serializes_aliases_and_rejects_foreign_assignments(
         ca_cert_path: Some("/old.pem".into()),
         client_cert_path: Some("/old-client.pem".into()),
         client_key_path: Some("/old-key.pem".into()),
+        leased_flowspec: false,
     });
     let old = ctx
         .repo

@@ -481,11 +481,22 @@ complete stays pending for the next pass. Lease expiry removes rustbgpd's
 local intent only and is not a prefixd withdrawal; the rows stay active until
 their TTL, an unban or an operator withdraws them.
 
+With `bgp.rustbgpd.leased_flowspec`
+([configuration](configuration.md#leased-flowspec)), FlowSpec rules use the
+same lease: `AddLeasedFlowSpec` for rules recorded under the owner, never
+`AddFlowSpec` after a failure, and `DeleteFlowSpec` with the recorded owner
+and never `override_owner`. The FlowSpec read sets each rule's owner from
+`injection_owner`, so a desired rule matches only under its recorded owner,
+and drops leased rows with `lease_remaining_ms` 0 as lost. Another owner's
+rule at a desired match is a repair error, counted as unknown and never
+touched. One requested re-add covers both kinds in the same pass.
+
 The lease probe, adds and renewals run against rustbgpd 0.79.0 and later.
-`scripts/test-rustbgpd.sh` runs the leased lifecycle (add and renew, a
-prefixd restart within the lease, expiry after prefixd stops, and a rustbgpd
-restart) only when `PREFIXD_RUSTBGPD_TEST_VERSION` is 0.79.0 or later, and
-proves the refused startup on earlier releases.
+`scripts/test-rustbgpd.sh` runs the leased lifecycle for blackholes and
+FlowSpec (add and renew, a prefixd restart within the lease, expiry after
+prefixd stops, and a rustbgpd restart) only when
+`PREFIXD_RUSTBGPD_TEST_VERSION` is 0.79.0 or later, and proves the refused
+startup on earlier releases.
 
 ### Router and speaker requirements
 

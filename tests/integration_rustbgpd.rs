@@ -880,10 +880,9 @@ impl LeasedHarness {
         .await
         .unwrap();
         prefixd::guardrails::check_lease_startup(
-            &self.settings.blackhole,
+            &self.settings,
             self.speaker.as_ref(),
             self.repo.as_ref(),
-            &self.settings.pop,
             &self.binding.owner(),
         )
         .await
@@ -1236,6 +1235,19 @@ async fn live_rustbgpd_without_lease_refuses_leased_startup() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("injection lease"), "{error}");
+    // Leased FlowSpec is refused the same way, and its leased add creates nothing.
+    let mut settings = fixture_settings(&fixture, "older-lease");
+    settings.bgp.rustbgpd.as_mut().unwrap().leased_flowspec = true;
+    let error =
+        prefixd::guardrails::check_lease_startup(&settings, &speaker, &repo, keeper.owner())
+            .await
+            .unwrap_err()
+            .to_string();
+    assert!(error.contains("0.79.0"), "{error}");
+    let mut leased_rule = rule().with_owner(keeper.owner());
+    leased_rule.nlri.dst_prefix = "192.0.2.243/32".into();
+    assert!(speaker.announce_leased(&leased_rule, 60).await.is_err());
+    assert!(speaker.list_active().await.unwrap().is_empty());
     let route = prefixd::bgp::BlackholeRoute::new(
         "192.0.2.242/32".parse().unwrap(),
         "192.0.2.66".parse().unwrap(),
@@ -1249,4 +1261,244 @@ async fn live_rustbgpd_without_lease_refuses_leased_startup() {
         speaker.list_blackholes().await.unwrap(),
         prefixd::bgp::BlackholeInventory::default()
     );
+}
+
+/// Leased FlowSpec on the released daemon: rules join the same owner lease and
+/// generation as blackholes; a prefixd restart within the lease adopts it with
+/// no duplicate state; a prefixd stop past the lease lets the daemon expire
+/// the rules without any recorded withdrawal, and the restart re-adds them; a
+/// rustbgpd restart refuses the renewal and the re-add adopts the new
+/// generation. Another owner's rule and an unowned rule stay untouched.
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
+async fn live_rustbgpd_leased_flowspec_renewal_restart_and_expiry() {
+    use prefixd::{
+        db::RepositoryTrait,
+        domain::{
+            ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
+            MitigationStatus,
+        },
+    };
+    use std::time::Duration;
+    let Some(mut harness) = LeasedHarness::start().await else {
+        return;
+    };
+    harness
+        .settings
+        .bgp
+        .rustbgpd
+        .as_mut()
+        .unwrap()
+        .leased_flowspec = true;
+    let owner = harness.binding.owner();
+    let row = |prefix: &str| {
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: harness.settings.pop.clone(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: prefix.into(),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                    ..Default::default()
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams {
+                    injection_owner: owner.clone(),
+                    ..Default::default()
+                },
+                ttl_seconds: 600,
+                reason: "live leased FlowSpec".into(),
+            },
+            prefix.split('/').next().unwrap().into(),
+            AttackVector::UdpFlood,
+        );
+        mitigation.activate();
+        mitigation.origin_mode = Some(prefixd::config::OperationMode::Enforced);
+        mitigation
+    };
+    let desired = [row("192.0.2.245/32"), row("2001:db8::245/128")];
+    for mitigation in &desired {
+        harness.repo.insert_mitigation(mitigation).await.unwrap();
+    }
+    // Another controller's leased rule and an unowned rule: never modified.
+    let other = |prefix: &str| {
+        FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: prefix.into(),
+                protocol: Some(6),
+                dst_ports: vec![80],
+                ..Default::default()
+            },
+            FlowSpecAction::discard(),
+        )
+    };
+    let seed_foreign = || async {
+        harness
+            .speaker
+            .announce_leased(
+                &other("192.0.2.250/32").with_owner("other.controller"),
+                3600,
+            )
+            .await
+            .unwrap();
+        harness
+            .speaker
+            .announce(&other("192.0.2.251/32"))
+            .await
+            .unwrap();
+    };
+    seed_foreign().await;
+    let rows = |owner: String| {
+        let fixture = &harness.fixture;
+        async move {
+            let mut rows = Vec::new();
+            for family in [3, 4] {
+                for row in fixture
+                    .received_flow_spec(family, "0.0.0.0")
+                    .await
+                    .received_routes
+                {
+                    let route = row.route.unwrap();
+                    if route.injection_owner == owner {
+                        let generation = route.lease_generation.unwrap();
+                        rows.push((
+                            route.components[0].prefix.clone(),
+                            (generation.incarnation, generation.sequence),
+                            route.lease_remaining_ms.unwrap(),
+                        ));
+                    }
+                }
+            }
+            rows.sort();
+            rows
+        }
+    };
+    let foreign = || async {
+        let mut rules: Vec<_> = harness
+            .speaker
+            .list_active()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|rule| rule.nlri.dst_prefix.starts_with("192.0.2.25"))
+            .map(|rule| (rule.nlri.dst_prefix, rule.owner))
+            .collect();
+        rules.sort();
+        rules
+    };
+    let expected_foreign = vec![
+        ("192.0.2.250/32".to_string(), "other.controller".to_string()),
+        ("192.0.2.251/32".to_string(), String::new()),
+    ];
+
+    // Startup re-adds the leased intent under the controller's lease, then renews.
+    let keeper = harness.controller().await;
+    harness.reconciler(&keeper).reconcile().await.unwrap();
+    let generation = keeper.generation().expect("adopted from the first add");
+    let ours = rows(owner.clone()).await;
+    assert_eq!(ours.len(), 2);
+    assert!(
+        ours.iter()
+            .all(|row| row.1 == (generation.incarnation, generation.sequence))
+    );
+    keeper.renew_once(harness.speaker.as_ref()).await;
+    assert_eq!(keeper.health().last_renewal_result, Some("success"));
+    assert_eq!(foreign().await, expected_foreign);
+
+    // prefixd restarts within the lease: same generation, no duplicate state.
+    let restarted = harness.controller().await;
+    assert_eq!(restarted.generation(), Some(generation));
+    harness.reconciler(&restarted).reconcile().await.unwrap();
+    assert!(!restarted.take_readd());
+    assert_eq!(restarted.generation(), Some(generation));
+    assert_eq!(rows(owner.clone()).await.len(), 2);
+    assert_eq!(harness.speaker.list_active().await.unwrap().len(), 4);
+
+    // prefixd stops past the lease: the daemon expires the owner's rules only.
+    tokio::time::sleep(Duration::from_secs(u64::from(TEST_LEASE_SECONDS) + 3)).await;
+    assert!(
+        rows(owner.clone()).await.is_empty(),
+        "lease expiry removed the rules"
+    );
+    assert_eq!(foreign().await, expected_foreign);
+    assert!(
+        harness
+            .repo
+            .pending_withdrawals(None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for mitigation in &desired {
+        let stored = harness
+            .repo
+            .get_mitigation(mitigation.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, MitigationStatus::Active);
+    }
+    let returned = harness.controller().await;
+    assert_eq!(returned.generation(), None);
+    harness.reconciler(&returned).reconcile().await.unwrap();
+    let readded = returned.generation().unwrap();
+    assert_ne!(readded, generation);
+    assert_eq!(rows(owner.clone()).await.len(), 2);
+
+    // rustbgpd restarts: the renewal is refused and the re-add adopts the new generation.
+    harness
+        .fixture
+        .container
+        .stop_with_timeout(Some(0))
+        .await
+        .unwrap();
+    harness.fixture.container.start().await.unwrap();
+    harness.fixture.ready().await;
+    returned.renew_once(harness.speaker.as_ref()).await;
+    assert_eq!(returned.health().last_renewal_result, Some("not_live"));
+    harness.reconciler(&returned).reconcile().await.unwrap();
+    let after_restart = returned.generation().unwrap();
+    assert_ne!(after_restart.incarnation, readded.incarnation);
+    let ours = rows(owner.clone()).await;
+    assert_eq!(ours.len(), 2);
+    assert!(
+        ours.iter()
+            .all(|row| row.1 == (after_restart.incarnation, after_restart.sequence))
+    );
+
+    // Withdrawal deletes under the recorded owner.
+    for mitigation in &desired {
+        let current = harness
+            .repo
+            .get_mitigation(mitigation.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let request = prefixd::domain::request_withdrawal(
+            harness.repo.as_ref(),
+            &current,
+            false,
+            "operator",
+            "alice",
+            "attack over".into(),
+            true,
+            Some(&harness.binding),
+        )
+        .await
+        .unwrap();
+        assert_eq!(request.flowspec_rule().unwrap().owner, owner);
+        prefixd::domain::execute_withdrawal(
+            harness.repo.as_ref(),
+            harness.speaker.as_ref(),
+            false,
+            &request,
+            Some(&harness.binding),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(rows(owner).await.is_empty());
 }

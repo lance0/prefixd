@@ -71,6 +71,19 @@ impl MockAnnouncer {
     pub async fn expire_lease(&self, owner: &str) {
         self.leases.lock().unwrap().live.remove(owner);
         self.blackholes.write().await.retain(|r| r.owner() != owner);
+        self.rules.write().await.retain(|r| r.owner != owner);
+    }
+
+    /// Join the owner's live lease or start the next generation.
+    fn join_lease(&self, owner: &str) -> LeaseGeneration {
+        let mut leases = self.leases.lock().unwrap();
+        let next = LeaseGeneration {
+            incarnation: leases.incarnation,
+            sequence: leases.sequence + 1,
+        };
+        let generation = *leases.live.entry(owner.into()).or_insert(next);
+        leases.sequence = leases.sequence.max(generation.sequence);
+        generation
     }
 
     /// A daemon restart loses every route, rule and lease; generations start over.
@@ -121,6 +134,13 @@ impl FlowSpecWriter for MockAnnouncer {
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
         let mut rules = self.rules.write().await;
         let hash = rule.nlri_hash();
+        if !rule.owner.is_empty()
+            || rules
+                .iter()
+                .any(|r| r.nlri_hash() == hash && !r.owner.is_empty())
+        {
+            return Err(Self::owner_mismatch("AddFlowSpec"));
+        }
 
         // Remove existing rule with same NLRI if present
         rules.retain(|r| r.nlri_hash() != hash);
@@ -129,9 +149,34 @@ impl FlowSpecWriter for MockAnnouncer {
         tracing::debug!(nlri_hash = %hash, "mock: announced flowspec rule");
         Ok(())
     }
+    async fn announce_leased(
+        &self,
+        rule: &FlowSpecRule,
+        _lease_seconds: u32,
+    ) -> Result<LeaseGeneration> {
+        let mut rules = self.rules.write().await;
+        let hash = rule.nlri_hash();
+        if rule.owner.is_empty()
+            || rules
+                .iter()
+                .any(|r| r.nlri_hash() == hash && r.owner != rule.owner)
+        {
+            return Err(Self::owner_mismatch("AddLeasedFlowSpec"));
+        }
+        let generation = self.join_lease(&rule.owner);
+        rules.retain(|r| r.nlri_hash() != hash);
+        rules.push(rule.clone());
+        Ok(generation)
+    }
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
         let mut rules = self.rules.write().await;
         let hash = rule.nlri_hash();
+        if rules
+            .iter()
+            .any(|r| r.nlri_hash() == hash && r.owner != rule.owner)
+        {
+            return Err(Self::owner_mismatch("DeleteFlowSpec"));
+        }
         let before = rules.len();
         rules.retain(|r| r.nlri_hash() != hash);
 
@@ -175,16 +220,7 @@ impl BlackholeSpeaker for MockAnnouncer {
         {
             return Err(Self::owner_mismatch("AddLeasedPath"));
         }
-        let generation = {
-            let mut leases = self.leases.lock().unwrap();
-            let next = LeaseGeneration {
-                incarnation: leases.incarnation,
-                sequence: leases.sequence + 1,
-            };
-            let generation = *leases.live.entry(route.owner().into()).or_insert(next);
-            leases.sequence = leases.sequence.max(generation.sequence);
-            generation
-        };
+        let generation = self.join_lease(route.owner());
         routes.retain(|r| r.prefix() != route.prefix());
         routes.push(route.clone());
         Ok(generation)
@@ -263,6 +299,11 @@ pub struct FaultyBlackholes {
     /// Every renewal fails with a transport error.
     pub fail_renewals: std::sync::atomic::AtomicBool,
     pub renewals: std::sync::atomic::AtomicUsize,
+    /// Plain `AddFlowSpec` and leased FlowSpec adds, counted apart.
+    pub flowspec_adds: std::sync::atomic::AtomicUsize,
+    pub leased_flowspec_adds: std::sync::atomic::AtomicUsize,
+    /// The owner every FlowSpec delete passed, in order.
+    pub flowspec_delete_owners: std::sync::Mutex<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -321,9 +362,31 @@ impl InjectionLeases for FaultyBlackholes {
 #[async_trait]
 impl FlowSpecWriter for FaultyBlackholes {
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.flowspec_adds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.announce(rule).await
     }
+    async fn announce_leased(
+        &self,
+        rule: &FlowSpecRule,
+        lease_seconds: u32,
+    ) -> Result<LeaseGeneration> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.leased_flowspec_adds.fetch_add(1, SeqCst);
+        self.lease_seconds.lock().unwrap().push(lease_seconds);
+        if self.fail_adds.load(SeqCst) {
+            // As UNIMPLEMENTED from an older daemon: nothing is created.
+            return Err(PrefixdError::BgpAnnouncementFailed(
+                "AddLeasedFlowSpec RPC failed: Unimplemented".into(),
+            ));
+        }
+        self.inner.announce_leased(rule, lease_seconds).await
+    }
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.flowspec_delete_owners
+            .lock()
+            .unwrap()
+            .push(rule.owner.clone());
         self.inner.withdraw(rule).await
     }
 }

@@ -502,7 +502,8 @@ blackholes. The owner identity also keys the
   unleased and the unleased route is not deleted.
 - **FlowSpec.** Leasing FlowSpec rules too, through `AddLeasedFlowSpec`, would
   close the AGENTS.md gap that rules can persist if prefixd stops. That is a
-  later decision and is outside every slice below.
+  later decision and is outside every slice below; it is now made in the
+  [leased FlowSpec amendment](#amendment-leased-flowspec).
 
 ### Controller fence
 
@@ -570,6 +571,45 @@ enabled. The owner name is derived as above in every deployment.
   dead controller and cannot choose between two live ones. A "last renewing
   credential" field in `ListInjectionLeases` is not requested now; it remains
   possible future diagnostics.
+
+### Amendment: leased FlowSpec
+
+Amended 2026-10-20 by the owner's decision to exercise the lease for FlowSpec
+as well, which closes the AGENTS.md gap that FlowSpec rules persist while
+prefixd is stopped and the speaker runs. It replaces the "later decision" in
+the FlowSpec bullet of [Owner and lease](#owner-and-lease) and the
+corresponding slice 9 item.
+
+- **Opt-in.** `bgp.rustbgpd.leased_flowspec`, default false and independent
+  of `blackhole.leased`. Startup refuses it unless
+  `SpeakerCapabilities.blackhole_lease` is true; 0.76.0 to 0.78.0 answer the
+  probe with `UNIMPLEMENTED`.
+- **One lease.** New enforced FlowSpec rules use `AddLeasedFlowSpec` with the
+  same owner, `blackhole.lease_seconds`, renewal task and generation as
+  blackholes. Any leased add moves the owner's whole deadline, so a second
+  owner or length would let one kind shorten the other's lease.
+- **Never fall back.** A failed leased add, including `UNIMPLEMENTED`, keeps
+  the rule unconfirmed and retries it as a leased add only.
+- **Owner per rule.** The owner is snapshotted at admission into the row's
+  action parameters (`injection_owner`) and into the immutable withdrawal
+  `rule_json` (`owner`). Both are omitted when empty, so unleased rows and
+  requests serialize exactly as before and need no migration. The owner is
+  not part of the rule's identity or hash. Repair and deletion use the
+  recorded owner (`DeleteFlowSpecRequest.owner`) and never `override_owner`.
+  Read-back matches `injection_owner` exactly; another owner's rule at a
+  desired key is a repair error and is never touched, and unowned rows the
+  ledger does not hold stay unknown.
+- **No conversion.** An unleased rule stays unleased until it is withdrawn or
+  expires, so there is no delete-then-add gap. Startup refuses to turn the
+  setting off while leased FlowSpec intent is active or awaiting withdrawal,
+  and refuses live rules under this owner that the ledger cannot explain.
+- **Loss.** A refused renewal, a changed generation, or a lost rule re-adds
+  all leased intent of both kinds at once; a leased FlowSpec row with
+  `lease_remaining_ms` 0 is lost intent. Lease expiry is never a prefixd
+  withdrawal.
+- **Remaining gap.** Expiry removes rustbgpd's local rule only. A received
+  rule with the same key keeps filtering (rustbgpd ADR-0141 §5), and routers
+  acting as Graceful Restart helpers retain it for their stale timers.
 
 ## rustbgpd requirements before the v1.0 freeze
 

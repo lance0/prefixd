@@ -609,6 +609,28 @@ async fn persist_new_mitigation(
     mitigation: &mut Mitigation,
     actor: &CreationActor,
 ) -> crate::error::Result<Option<AnnouncementOutcome>> {
+    // Leased FlowSpec (ADR 027): new enforced rules are recorded under the
+    // controller's owner and added only through AddLeasedFlowSpec.
+    if !state.is_dry_run()
+        && mitigation.action_type != ActionType::Blackhole
+        && state
+            .settings
+            .bgp
+            .rustbgpd
+            .as_ref()
+            .is_some_and(|config| config.leased_flowspec)
+    {
+        mitigation.action_params.injection_owner = state
+            .lease
+            .as_ref()
+            .ok_or_else(|| {
+                PrefixdError::Config(
+                    "bgp.rustbgpd.leased_flowspec needs the controller's injection lease".into(),
+                )
+            })?
+            .owner()
+            .into();
+    }
     // Fail closed before persistence: only a FlowSpec rule can be announced here,
     // and only with components the selected speaker encodes, in dry-run too.
     let rule = mitigation_rule(mitigation)?;
@@ -649,7 +671,10 @@ async fn persist_new_mitigation(
             "mitigation expired during persistence; announcement skipped");
         return Ok(Some(AnnouncementOutcome::Unconfirmed));
     }
-    if let Err(error) = state.announcer.announce(&rule).await {
+    if let Err(error) =
+        crate::domain::announce_flowspec(state.announcer.as_ref(), &rule, state.lease.as_deref())
+            .await
+    {
         tracing::warn!(mitigation_id = %mitigation.mitigation_id, error = %error,
             "mitigation intent retained after unconfirmed BGP announcement");
         return Ok(Some(AnnouncementOutcome::Unconfirmed));
@@ -3600,6 +3625,65 @@ mod tests {
             assert_eq!(reported["lease_seconds"], 60);
             assert_eq!(reported["last_renewal_result"], "success");
             assert!(reported["generation"]["sequence"].is_u64());
+        }
+
+        /// With leased FlowSpec, a detector rule is recorded under the
+        /// controller's owner and added only through `AddLeasedFlowSpec`; a
+        /// failed leased add stays unconfirmed and never becomes `AddFlowSpec`.
+        #[tokio::test]
+        async fn leased_flowspec_admission_records_the_owner_and_never_falls_back() {
+            use crate::bgp::FlowSpecReader;
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let owner = "prefixd.test1.0123456789abcdef";
+            let mut state =
+                detector_state(OperationMode::Enforced, repo.clone(), speaker.clone()).await;
+            Arc::get_mut(&mut state).unwrap().settings.bgp.rustbgpd =
+                Some(crate::config::RustBgpdConfig {
+                    leased_flowspec: true,
+                    ..Default::default()
+                });
+            *state.playbooks.write().await = crate::config::parse_yaml(
+                "playbooks:\n  - name: drop\n    match: {vector: udp_flood}\n    steps:\n      - {action: discard, ttl_seconds: 600}\n",
+            )
+            .unwrap();
+            let lease = Arc::new(crate::domain::LeaseKeeper::new(owner.into(), 60));
+            let state = state.with_lease(lease.clone()).unwrap();
+            let app = crate::api::create_test_router(state);
+            let (status, body) = send(
+                &app,
+                "/v1/events",
+                None,
+                fastnetmon_ban("fastnetmon", "203.0.113.10"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 1);
+            assert_eq!(speaker.flowspec_adds.load(SeqCst), 0);
+            let id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+            let stored = repo.get_mitigation(id).await.unwrap().unwrap();
+            assert_eq!(stored.action_params.injection_owner, owner);
+            assert_eq!(speaker.inner.list_active().await.unwrap()[0].owner, owner);
+            assert!(lease.generation().is_some());
+
+            speaker.fail_adds.store(true, SeqCst);
+            let (status, body) = send(
+                &app,
+                "/v1/events",
+                None,
+                fastnetmon_ban("fastnetmon", "203.0.113.11"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(body["announcement_outcome"], "unconfirmed", "{body}");
+            assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 2);
+            assert_eq!(
+                speaker.flowspec_adds.load(SeqCst),
+                0,
+                "no AddFlowSpec fallback"
+            );
+            assert_eq!(speaker.inner.list_active().await.unwrap().len(), 1);
         }
 
         /// The enforced gate on playbook save and reload: refused without the lease or

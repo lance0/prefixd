@@ -216,6 +216,10 @@ pub struct RustBgpdConfig {
     pub client_cert_path: Option<String>,
     #[serde(default)]
     pub client_key_path: Option<String>,
+    /// Add new enforced FlowSpec rules under the controller's injection lease
+    /// (rustbgpd 0.79.0 or later), with `blackhole.lease_seconds`.
+    #[serde(default)]
+    pub leased_flowspec: bool,
 }
 
 impl RustBgpdConfig {

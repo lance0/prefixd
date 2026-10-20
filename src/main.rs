@@ -183,7 +183,13 @@ async fn main() -> anyhow::Result<()> {
     // The lease probe is the capability check and recovers a live generation
     // after a restart (ADR 027); it is asked only when the lease is configured.
     let blackhole = &config.settings.blackhole;
-    let lease = if blackhole.enabled && blackhole.leased {
+    let leased_flowspec = config
+        .settings
+        .bgp
+        .rustbgpd
+        .as_ref()
+        .is_some_and(|rustbgpd| rustbgpd.leased_flowspec);
+    let lease = if (blackhole.enabled && blackhole.leased) || leased_flowspec {
         let keeper = Arc::new(prefixd::domain::LeaseKeeper::new(
             owner.clone(),
             blackhole.lease_seconds,
@@ -203,10 +209,9 @@ async fn main() -> anyhow::Result<()> {
     prefixd::guardrails::check_blackhole_startup(blackhole, announcer.as_ref(), repo.as_ref())
         .await?;
     prefixd::guardrails::check_lease_startup(
-        blackhole,
+        &config.settings,
         announcer.as_ref(),
         repo.as_ref(),
-        &config.settings.pop,
         &owner,
     )
     .await?;

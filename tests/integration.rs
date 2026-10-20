@@ -1561,6 +1561,7 @@ async fn test_rustbgpd_config_credentials_are_not_exposed() {
         ca_cert_path: Some("/private/speaker-ca.pem".into()),
         client_cert_path: Some("/private/client.pem".into()),
         client_key_path: Some("/private/client-key.pem".into()),
+        leased_flowspec: false,
     });
     let state = AppState::new(
         settings,
