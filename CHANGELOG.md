@@ -287,6 +287,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upgrade. A rustbgpd config with an `[event_history]` section no longer
   loads.
 
+- The rustbgpd controller stubs are now generated from the unmodified
+  `rustbgpd.proto` asset of the rustbgpd v0.79.0 release, pinned by its
+  published sha256, instead of an unversioned copy. `just proto`, part of
+  `just gate` and CI lint, checks the file offline. Requests are byte-for-byte
+  unchanged: prefixd sets none of the newer fields, and 0.76.0 remains the
+  minimum daemon.
+
 - `POST /v1/safelist` now withdraws every live blackhole on this POP whose
   victim falls inside the new entry, under the lifecycle mutex, with the
   audited system reason `safelisted after admission`. Dry-run blackholes are

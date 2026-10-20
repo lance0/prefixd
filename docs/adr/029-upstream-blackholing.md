@@ -45,7 +45,7 @@ The [existing FRR receipt](../reference/qualification/blackhole-frr-2026-10-19.m
 already separates local RPC success from router discard, demonstrates eBGP
 next-hop rewriting and records stale blackholes while the controller is down.
 It does not qualify provider selection, a route-server topology or leased
-expiry. The vendored proto and adapter currently use unleased `AddPath`.
+expiry. The adapter currently uses unleased `AddPath`.
 
 ## Proposed decision
 

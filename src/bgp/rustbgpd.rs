@@ -597,6 +597,8 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
             afi_safi,
             components,
             allow_missing: true,
+            // Unowned: owner and override_owner (0.79.0+) stay off the wire.
+            ..Default::default()
         };
         let response = self
             .rpc("DeleteFlowSpec", || {
@@ -660,7 +662,8 @@ impl FlowSpecReader for RustBgpdAnnouncer {
 impl BlackholeSpeaker for RustBgpdAnnouncer {
     async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<()> {
         let payload = encode_blackhole(route);
-        // AddPathResponse carries no outcome yet: OK is local Adj-RIB-In acceptance only.
+        // OK is local Adj-RIB-In acceptance only. The response outcome (0.79.0+) is
+        // ignored: 0.76.0 to 0.78.0 leave it unset.
         self.rpc("AddPath", || async {
             pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
                 .add_path(self.request(payload.clone()))
@@ -676,17 +679,19 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
             prefix: prefix.addr().to_string(),
             prefix_length: prefix.prefix_len().into(),
             path_id: 0,
+            // allow_missing and owner are 0.79.0+; left unset, they stay off the wire.
+            ..Default::default()
         };
         self.rpc("DeletePath", || {
             let mut client =
                 pb::injection_service_client::InjectionServiceClient::new(self.channel.clone());
             let request = self.request(payload.clone());
             async move {
-                // DeletePath has no allow_missing; NOT_FOUND is its only "absent" reply.
+                // Before 0.79.0 DeletePath has no allow_missing; NOT_FOUND means absent.
                 match client.delete_path(request).await {
                     Err(status) if status.code() == Code::NotFound => {
                         tracing::debug!("rustbgpd blackhole route already absent");
-                        Ok(tonic::Response::new(pb::DeletePathResponse {}))
+                        Ok(tonic::Response::new(pb::DeletePathResponse::default()))
                     }
                     result => result,
                 }

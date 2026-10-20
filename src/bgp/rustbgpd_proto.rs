@@ -1,8 +1,19 @@
 //! Generated rustbgpd client stubs (ADR 023).
 //!
-//! The proto is vendored from rustbgpd (`proto/rustbgpd.proto`, package
-//! `rustbgpd.v1`) and is compiled only when the `bgp-rustbgpd` feature is on, so
-//! the GoBGP and rustbgpd backends can coexist while the swap is validated.
+//! `proto/rustbgpd.proto` (package `rustbgpd.v1`) is the unmodified
+//! `rustbgpd.proto` asset of the rustbgpd v0.79.0 release,
+//! <https://github.com/lance0/rustbgpd/releases/download/v0.79.0/rustbgpd.proto>,
+//! sha256 `21a7f5ca199184a0d4cf94414ed8dcfa49c660c1fbb8b4c79e076b9d7685dd62`.
+//! `proto/rustbgpd.proto.sha256` is that release's checksum asset, and
+//! `just proto` checks the file against it offline. To move the pin, download
+//! both assets of the new release, run `sha256sum --check` on them, copy both
+//! here and update this comment.
+//!
+//! The generated stubs follow the pinned release, but the controller contract
+//! does not: v0.76.0 is still the minimum daemon. Fields and RPCs newer than
+//! that stay unset and unused until a change adopts them behind a version or
+//! capability check. The stubs are compiled only when the `bgp-rustbgpd`
+//! feature is on, so the GoBGP and rustbgpd backends can coexist.
 #[cfg(feature = "bgp-rustbgpd")]
 pub mod rustbgpd_pb {
     #![allow(
@@ -46,6 +57,7 @@ mod tests {
             afi_safi: afi,
             components: Vec::new(),
             allow_missing: true,
+            ..Default::default()
         };
         assert!(delete.allow_missing);
         assert_eq!(pb::FlowSpecDeleteOutcome::Deleted as i32, 1);
@@ -91,7 +103,7 @@ mod tests {
         assert_eq!(pb::AddressFamily::Ipv4Unicast as i32, 1);
         assert_eq!(pb::AddressFamily::Ipv6Unicast as i32, 2);
 
-        // upsert keyed on (prefix, prefix_length, path_id); the reply has no outcome yet
+        // upsert keyed on (prefix, prefix_length, path_id); before 0.79.0 the reply has no outcome
         let add = pb::AddPathRequest {
             prefix: "192.0.2.1".into(),
             prefix_length: 32,
@@ -106,16 +118,18 @@ mod tests {
             path_id: 0,
         };
         assert_eq!(add.path_id, 0);
-        let _: pb::AddPathResponse = pb::AddPathResponse {};
+        let _: pb::AddPathResponse = pb::AddPathResponse::default();
 
-        // no allow_missing: a missing path is NOT_FOUND
+        // allow_missing is 0.79.0+ and stays unset: a missing path is NOT_FOUND
         let delete = pb::DeletePathRequest {
             prefix: add.prefix,
             prefix_length: 32,
             path_id: 0,
+            ..Default::default()
         };
+        assert!(!delete.allow_missing);
         assert_eq!(delete.prefix_length, 32);
-        let _: pb::DeletePathResponse = pb::DeletePathResponse {};
+        let _: pb::DeletePathResponse = pb::DeletePathResponse::default();
 
         // "0.0.0.0" selects retained local injections; the view is paged.
         let list = pb::ListRoutesRequest {

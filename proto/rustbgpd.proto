@@ -20,6 +20,11 @@ enum AddressFamily {
   ADDRESS_FAMILY_L2VPN_EVPN = 5;
   ADDRESS_FAMILY_BGP_LS = 6;
   ADDRESS_FAMILY_BGP_LS_VPN = 7;
+  ADDRESS_FAMILY_L3VPN_IPV4_UNICAST = 8;
+  ADDRESS_FAMILY_L3VPN_IPV6_UNICAST = 9;
+  ADDRESS_FAMILY_IPV4_LABELED_UNICAST = 10;
+  ADDRESS_FAMILY_IPV6_LABELED_UNICAST = 11;
+  ADDRESS_FAMILY_IPV4_RT_CONSTRAIN = 12;
 }
 
 enum SessionState {
@@ -147,6 +152,9 @@ service ConfigService {
   // redacted and never includes candidate config contents.
   rpc GetConfigTransactionStatus(GetConfigTransactionStatusRequest) returns (ConfigTransactionStatusResponse);
 
+  // Return the latest process-local SIGHUP result. Empty before the first reload.
+  rpc GetLastSighupReload(GetLastSighupReloadRequest) returns (GetLastSighupReloadResponse);
+
   // Return the daemon's effective running config as normalized TOML with
   // per-neighbor defaults materialized (peer-group inheritance and computed
   // defaults such as hold_time / send_hold_time resolved to the values the
@@ -164,6 +172,12 @@ service ConfigService {
   // source identity, but do not archive those external bytes.
   rpc ListConfigHistory(ListConfigHistoryRequest) returns (ListConfigHistoryResponse);
 
+  // Read-only, redacted rollback plan for a retained history row. Resolves and
+  // verifies the same payload and external-source provenance as rollback, but
+  // never applies, persists, or opens a confirmation window. This as-of plan
+  // does not reserve the numeric index for a subsequent rollback. Outside v1.
+  rpc PreviewConfigRollback(PreviewConfigRollbackRequest) returns (ConfigTransactionPlanResponse);
+
   // Roll back to a provenance-verified v2 row (index >= 1). The daemon
   // resolves it server-side and routes it through the exact same transaction
   // executor as ApplyConfigTransaction — same plan/impact classification,
@@ -173,6 +187,12 @@ service ConfigService {
 }
 
 message ListConfigHistoryRequest {}
+
+message PreviewConfigRollbackRequest {
+  // Must be >= 1, like RollbackConfigTransaction. Missing, unreadable and
+  // metadata-only rows fail; they never produce an empty successful plan.
+  uint32 index = 1;
+}
 
 enum ConfigHistoryProvenanceStatus {
   CONFIG_HISTORY_PROVENANCE_STATUS_UNSPECIFIED = 0;
@@ -256,7 +276,9 @@ message DiffRuntimeConfigResponse {
   // values follow the same redaction policy as `rustbgpd --diff`.
   string human_text = 6;
   // Pretty-printed JSON object using the same schema as
-  // `rustbgpd --diff --json`.
+  // `rustbgpd --diff --json`. The document is unversioned and explicitly
+  // unstable: its keys may change between releases. Use the boolean summary
+  // fields above for automation.
   string diff_json = 7;
 }
 
@@ -463,6 +485,54 @@ message ConfigTransactionStatusResponse {
   string human_text = 2;
 }
 
+message GetLastSighupReloadRequest {}
+
+message SighupReloadEffect {
+  string bucket = 1;
+  string target = 2;
+}
+
+message SighupReloadRecord {
+  uint64 started_unix_millis = 1;
+  uint64 finished_unix_millis = 2;
+  // complete, rejected_no_effect, known_partial, task_failed, ignored_in_flight.
+  string outcome = 3;
+  // generation or sequential; empty if the reload stopped before classification.
+  string route = 4;
+  string reason_code = 5;
+  string failure_bucket = 6;
+  string failure_target = 7;
+  uint64 applied_count = 8;
+  repeated SighupReloadEffect applied = 9;
+  uint64 applied_omitted = 10;
+  uint64 unapplied_count = 11;
+  repeated SighupReloadEffect unapplied = 12;
+  uint64 unapplied_omitted = 13;
+}
+
+// RIB-side outbound convergence of the export view the latest SIGHUP
+// committed, measured when the request is served. It counts every peer with
+// a RIB outbound resync pending, whatever marked it dirty: each resync hands
+// the transport the current view, so a later generation joins a pending
+// resync instead of queueing a second one. It does not confirm receipt:
+// transport processing and socket writes may still be pending.
+message SighupReloadConvergence {
+  // applied: the reload committed its export view, and the RIB has not
+  // reported outbound state within the read deadline.
+  // converging: pending_peers peers still have a RIB outbound resync pending.
+  // converged: no RIB outbound resync is pending.
+  string state = 1;
+  uint64 pending_peers = 2;
+  // Whole seconds since the oldest pending resync began; 0 unless converging.
+  uint64 oldest_pending_seconds = 3;
+}
+
+message GetLastSighupReloadResponse {
+  SighupReloadRecord record = 1;
+  // Set only when record.outcome is complete.
+  SighupReloadConvergence convergence = 2;
+}
+
 // ---------------------------------------------------------------------------
 // NeighborService — Peer lifecycle and state
 // ---------------------------------------------------------------------------
@@ -531,7 +601,9 @@ message NeighborConfig {
   uint32 add_path_send_max = 12;
   // Optional interface name for IPv6 link-local / unnumbered neighbors.
   string interface = 13;
-  // Local BGP Role for RFC 9234 route-leak protection. Empty = disabled.
+  // Local BGP Role for RFC 9234 route-leak protection, spelled as in config:
+  // provider, route_server, route_server_client, customer, or peer. Empty =
+  // disabled. Requests also accept the config aliases rs and rs-client.
   string role = 14;
   // Require the peer to advertise a compatible BGP Role capability.
   bool strict_role = 15;
@@ -596,7 +668,7 @@ message NeighborState {
   // not an observed Idle/down state. Clients must check this flag before
   // treating `state` as authoritative; a stale row remains in the inventory.
   bool stale = 13;
-  // Locally configured BGP Role. Empty when disabled.
+  // Locally configured BGP Role, in the `role` spelling. Empty when disabled.
   string local_role = 14;
   // Remote BGP Role advertised in OPEN. Empty when absent or unknown.
   string remote_role = 15;
@@ -615,8 +687,10 @@ message NeighborState {
   // Live outbound update-group membership: "group:N" for shared staging, or
   // the private-path reason
   // ("policy_peer_context", "add_path_send", "per_client_best",
-  // "orr_vantage", "orf_installed", "slow_peer"). Empty when the peer has no
-  // outbound registration.
+  // "orr_vantage", "orf_installed", "conditional_advertisement", "slow_peer").
+  // Empty when the peer has no outbound registration. Diagnostic and
+  // explicitly unstable: N is a process-local identifier and the reason set
+  // may change. Compare membership with update_group_comparison instead.
   string update_group = 22;
   // Total BGP messages received/sent, all types (OPEN, KEEPALIVE,
   // UPDATE, NOTIFICATION, ROUTE-REFRESH). Mirrors the
@@ -637,6 +711,9 @@ message NeighborState {
   AuthenticationMode authentication = 27;
   // Best-effort query-time Linux TCP-AO inspection; absent when not AO or when
   // no live snapshot is available (including disconnect or inspection failure).
+  // The TCP-AO fields (tcp_ao, tcp_ao_health, and tcp_ao_desired_generation
+  // through tcp_ao_rotation_error) follow the alpha TCP-AO lifecycle and are
+  // explicitly unstable.
   TcpAoState tcp_ao = 28;
   // Health derived from the effective protection identity and query-time
   // inspection. UNAVAILABLE means TCP-AO protection is expected but no socket
@@ -652,7 +729,7 @@ message NeighborState {
   // coordinator and the generation fully applied to this peer session.
   uint64 tcp_ao_desired_generation = 32;
   uint64 tcp_ao_applied_generation = 33;
-  // Stable values: idle, add_only, add_only_failed, selecting,
+  // Current values: idle, add_only, add_only_failed, selecting,
   // awaiting_peer, selection_failed, deleting, delete_failed.
   string tcp_ao_rotation_phase = 34;
   // Secret-free actionable rotation failure. Empty when the phase is healthy.
@@ -674,19 +751,14 @@ message NeighborState {
   UpdateGroupComparison update_group_comparison = 40;
   // Authoritative O(1) unique-prefix accounting from the session actor.
   // prefixes_received remains the aggregate across every counted family;
-  // these two fields are the IPv4/IPv6 unicast subsets.
+  // these two fields are the IPv4/IPv6 unicast subsets. Max-prefix limits
+  // and headroom are reported per scope in inbound_prefix_limits.
   uint64 prefixes_received_ipv4 = 41;
   uint64 prefixes_received_ipv6 = 42;
-  // Effective finite max-prefix bounds. Absence means unlimited, including
-  // for aggregate max_prefixes (whose legacy NeighborConfig field uses 0).
-  optional uint32 effective_max_prefixes = 43;
-  optional uint32 effective_max_prefixes_ipv4 = 44;
-  optional uint32 effective_max_prefixes_ipv6 = 45;
-  // Remaining capacity before each finite bound is exceeded. Absent when the
-  // corresponding limit is unlimited or this NeighborState is stale.
-  optional uint32 max_prefix_headroom = 46;
-  optional uint32 max_prefix_headroom_ipv4 = 47;
-  optional uint32 max_prefix_headroom_ipv6 = 48;
+  reserved 43 to 48;
+  reserved "effective_max_prefixes", "effective_max_prefixes_ipv4",
+      "effective_max_prefixes_ipv6", "max_prefix_headroom",
+      "max_prefix_headroom_ipv4", "max_prefix_headroom_ipv6";
   // Presence distinguishes an older daemon that does not expose negotiation
   // state from a current daemon reporting no Established session.
   optional bool negotiation_available = 49;
@@ -724,6 +796,63 @@ message NeighborState {
   // enforcement order. Empty from an older daemon, a stale peer-session
   // snapshot, or a peer with no finite bound.
   repeated InboundPrefixLimitState inbound_prefix_limits = 58;
+  // RFC 4724 / RFC 9494 helper-side stale-route retention, one row per family
+  // the RIB tracks in a GR or LLGR phase. Present while the session is down;
+  // empty when nothing is retained.
+  repeated GracefulRestartRetentionState gr_retention = 59;
+  // Presence distinguishes an older daemon that does not expose retention
+  // from a current daemon whose empty gr_retention means nothing is retained.
+  optional bool gr_retention_available = 60;
+  // Present and true on a row synthesized for an address that has no
+  // neighbor-inventory entry but whose GR/LLGR stale routes the RIB still
+  // retains, such as a dynamic neighbor whose session went idle. Such a row
+  // carries config.address, config.remote_asn (the ASN the RIB last
+  // recorded, 0 if unknown), state IDLE, and the RIB-owned fields including
+  // gr_retention; every other configuration and session field is its
+  // default. The row disappears when retention ends. Absent on ordinary rows
+  // and from older daemons.
+  optional bool retention_only = 61;
+  // True while this peer missed outbound delivery and waits for the RIB's
+  // full export resync (retried every second). Absence means an older daemon.
+  optional bool outbound_resync_pending = 62;
+  // Whole seconds the current outbound resync has been pending. Present only
+  // while outbound_resync_pending is true.
+  optional uint64 outbound_dirty_seconds = 63;
+  // Update-group recovery fallback cause recorded for the current session:
+  // "peer_limit", "daemon_limit", "allocation_failure", or "missing_proof",
+  // the cause label of bgp_update_group_recovery_fallback_total. While set,
+  // the member's resync withdraws every candidate prefix it might have
+  // advertised instead of only the ones it is known to have advertised.
+  // Empty when no fallback is recorded. Update-group internal; explicitly
+  // unstable.
+  string update_group_recovery_fallback = 64;
+  // True while prefixes_sent is the update group's desired count for a
+  // member whose delivery is unconfirmed (a grouped member awaiting resync),
+  // not the routes the peer is known to hold. Absence means an older daemon.
+  // Update-group internal; explicitly unstable.
+  optional bool prefixes_sent_pending = 65;
+}
+
+// Stale routes one family of a neighbor still holds for GR or LLGR.
+message GracefulRestartRetentionState {
+  // Family label, for example "ipv4_unicast".
+  string family = 1;
+  // "gr_restart" (session down, restart timer running), "gr_awaiting_eor"
+  // (session re-established, waiting for End-of-RIB), or "llgr" (RFC 9494
+  // long-lived stale phase).
+  string phase = 2;
+  // Whole seconds, rounded up, until the RIB's next retention deadline for
+  // this family: GR timer expiry (sweep, or promotion to LLGR when
+  // negotiated) or the LLGR sweep, whichever comes first. Absent when no
+  // deadline is armed.
+  optional uint64 remaining_seconds = 3;
+  // Routes of this family still held GR- or LLGR-stale, from counters the
+  // RIB maintains as routes are marked, re-advertised, withdrawn and swept.
+  // Reported by both ListNeighbors and GetNeighborState; absent from older
+  // daemons, and from ListNeighbors on daemons that counted only for a
+  // single neighbor. Zero while End-of-RIB is still awaited after every
+  // stale route was re-advertised.
+  optional uint64 stale_routes = 4;
 }
 
 message AcceptedDynamicNeighborRange {
@@ -791,10 +920,20 @@ message OutboundPrefixLimitState {
 // One finite inbound max-prefix bound's live capacity for a neighbor
 // (ADR-0108 amendment).
 message InboundPrefixLimitState {
-  // "aggregate", "ipv4_unicast", "ipv6_unicast", "ipv4_unicast_received", or
-  // "ipv6_unicast_received".
-  string scope = 1;
-  // The session actor's enforcement count for the scope.
+  // The joined scope string ("ipv4_unicast_received") was replaced by
+  // family + stage, the labels of the bgp_max_prefix_* metrics.
+  reserved 1;
+  reserved "scope";
+  // "aggregate" for the neighbor-wide max_prefixes, or the bound's canonical
+  // family label: "ipv4_unicast", "ipv6_unicast", "l3vpn_ipv4_unicast",
+  // "l3vpn_ipv6_unicast", "ipv4_labeled_unicast", "ipv6_labeled_unicast",
+  // "l2vpn_evpn", "ipv4_flowspec", "ipv6_flowspec" or "rtc".
+  string family = 7;
+  // "accepted" (counted after import policy) or "received" (counted before
+  // it, the max_prefixes_received_* bounds); only the unicast families have a
+  // "received" row.
+  string stage = 8;
+  // The session actor's enforcement count for the bound.
   uint64 usage = 2;
   // Configured bound.
   uint32 limit = 3;
@@ -864,6 +1003,7 @@ enum UpdateGroupComparisonMembership {
   UPDATE_GROUP_COMPARISON_MEMBERSHIP_ORR_VANTAGE = 6;
   UPDATE_GROUP_COMPARISON_MEMBERSHIP_ORF_INSTALLED = 7;
   UPDATE_GROUP_COMPARISON_MEMBERSHIP_SLOW_PEER = 8;
+  UPDATE_GROUP_COMPARISON_MEMBERSHIP_CONDITIONAL_ADVERTISEMENT = 9;
 }
 
 enum UpdateGroupComparisonDifference {
@@ -883,11 +1023,15 @@ message SelectionDeferralFamilyState {
   uint32 safi = 2;
   bool active = 3;
   string waiter_state = 4;
+  // Process-local session stamp; explicitly unstable.
   optional uint64 waiter_session_id = 5;
   uint64 blocking_waiters = 6;
   uint64 remaining_millis = 7;
   // Empty while active; "all_eor" or "timer" after release.
   string release_reason = 8;
+  // Canonical family label for afi/safi, for example "ipv4_unicast", using
+  // the configuration spelling. Empty from an older daemon.
+  string family = 9;
 }
 
 enum EffectiveDistributionMode {
@@ -1105,7 +1249,7 @@ service PolicyService {
   // eval site. The cache is bounded, process-local, and resets on
   // peer session reset — see ADR-0073 ("Import policy explain via
   // per-session decision cache") for the contract, including the
-  // "not durable event history" scope and the operator-facing knob
+  // "not a persistent event log" scope and the operator-facing knob
   // [policy.explain] cache_size.
   //
   // Side-effect free read. Does not touch RIB, does not increment
@@ -1149,6 +1293,22 @@ service PolicyService {
   // unicast routes.
   rpc TestPolicy(TestPolicyRequest) returns (TestPolicyResponse);
 
+  // ComparePolicy — compare a candidate .rpol export chain with the
+  // export chain installed for one peer, over the same version-fenced walk
+  // of Loc-RIB best routes, and report only the routes whose verdict or
+  // resulting attributes differ. The candidate is either a whole chain or
+  // one policy replacing one named member of the installed chain. The
+  // installed chain is read when the walk starts, from the peer's live
+  // outbound registration; a peer without one returns FAILED_PRECONDITION.
+  // Compile, paging, ABORTED and UNAVAILABLE behavior match TestPolicy.
+  //
+  // Policy chains only: native egress steps (split horizon, iBGP and
+  // route-reflector rules, RS control communities, OTC, NO_EXPORT, ORF,
+  // sendable families) apply to neither side, so a count can include
+  // routes those steps withhold from the peer. Side-effect free; no
+  // counters move. Outside the v1 inventory.
+  rpc ComparePolicy(ComparePolicyRequest) returns (ComparePolicyResponse);
+
   // GetPolicyStats — live per-term guard-hit counters for installed
   // policy chains (ADR-0096 Decision 3.3, the IOS-XR "show pcl" idea).
   // Counters accumulate on the live evaluation path since a chain
@@ -1166,6 +1326,8 @@ service PolicyService {
   // import and dataset backend waits share one absolute 2 s deadline, including
   // admission; the budget is not reset between stages. A backend reply observed
   // at or after that deadline fails, and errors return no partial rows.
+  // Fleet import/both requests may opt in with allow_partial to skipping only
+  // exited selected sessions, identified in incomplete_peer_addresses.
   //
   // Side-effect free read; does not reset any counter. Explain queries
   // and TestPolicy dry runs never move these counters either — only
@@ -1177,6 +1339,15 @@ service PolicyService {
   // This is a bounded disposition proof, not a readiness or forwarding-state
   // assertion.
   rpc GetValidationPolicyPosture(GetValidationPolicyPostureRequest) returns (GetValidationPolicyPostureResponse);
+
+  // ListConditionalAdvertisements — per-definition state of the installed
+  // conditional advertisements (ADR-0137): condition, applied gate, settle
+  // timer, and attached neighbors. Lists only definitions attached to at
+  // least one static neighbor; an unattached definition is not installed.
+  // Side-effect free read from the RIB with a bounded 2 s deadline
+  // (DEADLINE_EXCEEDED); it has no priority over route work. Alpha, outside
+  // the v1 inventory.
+  rpc ListConditionalAdvertisements(ListConditionalAdvertisementsRequest) returns (ListConditionalAdvertisementsResponse);
 }
 
 service PeerGroupService {
@@ -1300,7 +1471,7 @@ message PolicyStatement {
   optional uint32 match_med_le = 21;
   optional string match_next_hop = 22;
   optional string match_aspa_validation = 23;
-  // RFC 7432 / RFC 9136 EVPN route type match (1-5). u32 wire-shape because
+  // Supported EVPN route type match (1-6). u32 wire-shape because
   // proto3 lacks u8; only the low byte is consumed. 0 / unset = no match.
   optional uint32 match_evpn_route_type = 24;
 }
@@ -1563,9 +1734,9 @@ message ExplainImportPolicyRequest {
   string prefix = 3;
   uint32 prefix_length = 4;
   // Add-Path path identifier (RFC 7911). When absent, the response
-  // returns every matching path_id for the prefix — useful when the
-  // caller doesn't know which path they're asking about, or when
-  // Add-Path is not negotiated and the implicit path_id is 0.
+  // returns every matching path_id for the prefix, up to 4096 matches.
+  // A larger answer fails with RESOURCE_EXHAUSTED; specify path_id
+  // to inspect one path. Without Add-Path the implicit path_id is 0.
   optional uint32 path_id = 5;
 }
 
@@ -1600,8 +1771,7 @@ message ImportExplainMatch {
   // operator parity.
   ExplainModifications modifications = 10;
 
-  // Evaluation wall-clock time as Unix nanoseconds — matches the
-  // durable event outbox's `timestamp_ns` convention rather than a
+  // Evaluation wall-clock time as Unix nanoseconds rather than a
   // string, so collectors don't have to parse. Zero for NOT_SEEN /
   // EVICTED outcomes (no decision was recorded).
   int64 evaluated_at_unix_ns   = 11;
@@ -1700,8 +1870,21 @@ message ExplainImportPolicyResponse {
   // empty fields beyond the echoed request. When the request
   // specifies `path_id` the response has exactly one element;
   // when it does not, every matching path_id appears (Add-Path
-  // disambiguation).
+  // disambiguation), or the RPC fails with RESOURCE_EXHAUSTED if
+  // more than 4096 matches exist.
   repeated ImportExplainMatch matches = 6;
+
+  // The session's per-peer decision-cache cap
+  // ([policy.explain] cache_size). Present only when a live session
+  // with an enabled cache answered; absent for CACHE_DISABLED,
+  // NO_SESSION, or a daemon that predates the field.
+  optional uint64 cache_size = 7;
+
+  // Decisions pushed out by that cap since the session's last reset.
+  // Present under the same conditions as cache_size; present zero means
+  // every decision recorded on this session is still cached. An evicted
+  // prefix answers EVICTED, not NOT_SEEN, however large this count is.
+  optional uint64 evictions_since_reset = 8;
 }
 
 message ListRejectedRoutesRequest {
@@ -1757,8 +1940,7 @@ message RejectedRoute {
   // snake_case string: "valid", "invalid", "unknown", "unverified".
   string aspa_validation = 12;
 
-  // Rejection wall-clock time as Unix nanoseconds (the durable event
-  // outbox's timestamp_ns convention).
+  // Rejection wall-clock time as Unix nanoseconds.
   int64 rejected_at_unix_ns = 13;
 }
 
@@ -1815,6 +1997,78 @@ message TestPolicyRequest {
   // Maximum before/after attribute diffs to return (routes the policy
   // accepted with modifications). 0 = none.
   uint32 show_changes = 7;
+  // Candidate dataset file contents supplied by the client, matched to
+  // declarations in rpol_source. At most 16 bindings; missing, duplicate,
+  // undeclared, or malformed bindings are invalid. The encoded request is
+  // limited to 4 MiB. No daemon-side file reads or mutation.
+  repeated TestPolicyDataset datasets = 8;
+  // Maximum rejected-route samples (up to 1,000). 0 = none.
+  uint32 show_rejected = 9;
+}
+
+message ComparePolicyRequest {
+  // Full .rpol source text; compiled server-side. Compile diagnostics
+  // fail the comparison with compiled=false and rendered diagnostics.
+  string rpol_source = 1;
+  // Candidate policies from rpol_source, in chain order: bare names or
+  // call forms such as "customer-in(200)". Without replace_member they
+  // form the whole candidate chain (at most 64 members).
+  repeated string policies = 2;
+  // Installed chain member, by its exact configured name, that the single
+  // entry in policies replaces; every other installed member, including
+  // daemon-appended members, stays in place. Empty compares whole chains.
+  string replace_member = 3;
+  // Required managed peer: its installed export chain is the baseline,
+  // and its address, ASN and peer group are the evaluation context.
+  string peer = 4;
+  // UNSPECIFIED compares IPv4 + IPv6 unicast.
+  AddressFamily afi_safi = 5;
+  // Maximum routes to evaluate across all pages; 0 = the whole walk.
+  uint32 limit = 6;
+  // Maximum samples per class (up to 1,000), in canonical
+  // (prefix, peer, path_id) order. 0 = counts only.
+  uint32 max_samples = 7;
+  // Candidate dataset bindings, as in TestPolicyRequest.datasets.
+  repeated TestPolicyDataset datasets = 8;
+}
+
+// One route the installed and candidate chains treat differently.
+message ComparePolicyRoute {
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  // Source peer of the Loc-RIB best route.
+  string peer = 3;
+  // Attribute changes each chain applies to an accepted route, rendered
+  // like TestPolicyDiff.changes. Empty on the side that rejects.
+  repeated string installed_changes = 4;
+  repeated string candidate_changes = 5;
+}
+
+message ComparePolicyResponse {
+  // False when the source failed to compile; diagnostics carries the
+  // rendered error report and every count is zero.
+  bool compiled = 1;
+  string diagnostics = 2;
+  // Member names in evaluation order. An empty installed_chain means no
+  // export chain applies: every route is accepted unmodified.
+  repeated string installed_chain = 3;
+  repeated string candidate_chain = 4;
+  uint64 routes_evaluated = 5;
+  // Accepted by the installed chain, rejected by the candidate.
+  uint64 newly_rejected = 6;
+  // Rejected by the installed chain, accepted by the candidate.
+  uint64 newly_accepted = 7;
+  // Accepted by both with different resulting attributes or next hop.
+  uint64 attributes_changed = 8;
+  // Up to request.max_samples routes per class.
+  repeated ComparePolicyRoute newly_rejected_routes = 9;
+  repeated ComparePolicyRoute newly_accepted_routes = 10;
+  repeated ComparePolicyRoute attributes_changed_routes = 11;
+}
+
+message TestPolicyDataset {
+  string name = 1;
+  string entries = 2;
 }
 
 // Per-term guard-hit counter (the IOS-XR "show pcl" idea): how many
@@ -1837,6 +2091,12 @@ message TestPolicyDiff {
   repeated string changes = 4;
 }
 
+message TestPolicyRejectedRoute {
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  string peer = 3;
+}
+
 message GetPolicyStatsRequest {
   // Optional managed-peer filter (IPv4 or IPv6 literal). Empty =
   // every peer with an installed chain. An unknown peer returns
@@ -1846,6 +2106,11 @@ message GetPolicyStatsRequest {
   // "both". "both" returns export chains first, then import chains,
   // each block sorted by peer address.
   string direction = 2;
+  // Opt in to skipping selected import sessions that exit during collection.
+  // Valid only with an empty peer_address and direction "import" or "both";
+  // other combinations return INVALID_ARGUMENT before backend work.
+  // Deadlines, unavailable counters, export and dataset errors still fail whole.
+  bool allow_partial = 3;
 }
 
 // One term's live hit counter within an installed chain.
@@ -1909,6 +2174,67 @@ message GetPolicyStatsResponse {
   // dataset declared in the loaded rpol files; empty when the config
   // declares none.
   repeated PolicyDatasetStatus datasets = 2;
+  // Sorted unique IP addresses of selected import sessions that exited.
+  // Nonempty means partial; emitted only for allow_partial fleet requests.
+  // An all-gone fleet may succeed with no import rows and this list populated.
+  repeated string incomplete_peer_addresses = 3;
+}
+
+message ListConditionalAdvertisementsRequest {}
+
+message ListConditionalAdvertisementsResponse {
+  // Installed definitions, sorted by name.
+  repeated ConditionalAdvertisementStatus definitions = 1;
+}
+
+// One condition entry and its own current observation.
+message ConditionalAdvertisementCondition {
+  // Unicast condition prefix in CIDR form: the exact prefix, or the base of
+  // a range when ge or le is set.
+  string prefix = 1;
+  // "present", "absent", or "unknown" (a condition_policy evaluation error
+  // and no clean match for any prefix in this entry).
+  string state = 2;
+  // Range minimum prefix length (inclusive), when configured.
+  optional uint32 ge = 3;
+  // Range maximum prefix length (inclusive), when configured.
+  optional uint32 le = 4;
+  // Number of prefixes in this entry that are currently present. At most 1
+  // for an exact entry.
+  uint64 present_prefix_count = 5;
+  // The first present prefixes in address order, at most 8; see
+  // present_prefix_count for the total.
+  repeated string present_prefixes = 6;
+}
+
+// State of one installed conditional-advertisement definition.
+message ConditionalAdvertisementStatus {
+  // Configured definition name.
+  string name = 1;
+  // Configured mode: "present" or "absent".
+  string advertise_if = 2;
+  // Configured condition prefixes in order, each with its own observation.
+  repeated ConditionalAdvertisementCondition conditions = 3;
+  // Tracked observation of the whole condition: "present", "absent", or
+  // "unknown".
+  string observed = 4;
+  // Milliseconds since the tracked observation last changed, or since the
+  // definition was installed.
+  uint64 observed_for_ms = 5;
+  // Applied gate state: "pending" (not yet settled; suppresses),
+  // "advertise", or "suppress".
+  string applied = 6;
+  // Configured settle_time in seconds.
+  uint32 settle_time_seconds = 7;
+  // True while a settle timer is armed to apply the observation.
+  bool settle_pending = 8;
+  // Milliseconds left on the armed settle timer; 0 when none is armed.
+  uint64 settle_remaining_ms = 9;
+  // True while RFC 4724 selection deferral holds a condition prefix's
+  // family; no settle timer is armed until it is released.
+  bool selection_deferred = 10;
+  // Static neighbor addresses with this definition attached, sorted.
+  repeated string attached_peers = 11;
 }
 
 // Operator-facing status of one external policy dataset (LAN-305).
@@ -1945,6 +2271,9 @@ message TestPolicyResponse {
   // Up to request.show_changes samples, in canonical
   // (prefix, peer, path_id) order across the whole walk.
   repeated TestPolicyDiff diffs = 8;
+  // Up to request.show_rejected samples from currently retained,
+  // post-policy routes, in the same canonical order as diffs.
+  repeated TestPolicyRejectedRoute rejected_routes = 9;
 }
 
 // ---------------------------------------------------------------------------
@@ -1973,9 +2302,12 @@ service RibService {
   rpc ListFibTables(ListFibTablesRequest) returns (ListFibTablesResponse);
   rpc ListRouteEvents(ListRouteEventsRequest) returns (ListRouteEventsResponse);
   // Live route deltas stream through EventService.WatchEvents
-  // (EVENT_CATEGORY_ROUTE); durable replay through SubscribeFromEvent.
+  // (EVENT_CATEGORY_ROUTE).
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
-  rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse);
+  // Deprecated whole-table best view; use bounded ListBestEvpnRoutes.
+  rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse) {
+    option deprecated = true;
+  }
   // Accepted post-policy EVPN Adj-RIB-In for one source neighbor.
   rpc ListReceivedEvpnRoutes(ListPeerEvpnRoutesRequest) returns (ListPeerEvpnRoutesResponse);
   // Committed EVPN Adj-RIB-Out for one destination neighbor. Each row's
@@ -1983,17 +2315,53 @@ service RibService {
   rpc ListAdvertisedEvpnRoutes(ListPeerEvpnRoutesRequest) returns (ListPeerEvpnRoutesResponse);
   // Exact typed EVPN selection and export diagnostics; outside narrow v1.
   rpc ExplainEvpnRoute(ExplainEvpnRouteRequest) returns (ExplainEvpnRouteResponse);
-  rpc ListBgpLsRoutes(ListBgpLsRequest) returns (ListBgpLsResponse);
-  rpc ListVpnRoutes(ListVpnRoutesRequest) returns (ListVpnRoutesResponse);
-  rpc ListLabeledRoutes(ListLabeledRoutesRequest) returns (ListLabeledRoutesResponse);
-  rpc ListRtcRoutes(ListRtcRoutesRequest) returns (ListRtcRoutesResponse);
+  // Deprecated whole-table best view; use bounded ListBgpLsRibRoutes.
+  rpc ListBgpLsRoutes(ListBgpLsRequest) returns (ListBgpLsResponse) {
+    option deprecated = true;
+  }
+  // Deprecated whole-table best view; use bounded ListVpnRibRoutes.
+  rpc ListVpnRoutes(ListVpnRoutesRequest) returns (ListVpnRoutesResponse) {
+    option deprecated = true;
+  }
+  // Deprecated whole-table best view; use bounded ListLabeledRibRoutes.
+  rpc ListLabeledRoutes(ListLabeledRoutesRequest) returns (ListLabeledRoutesResponse) {
+    option deprecated = true;
+  }
+  // Deprecated whole-table best view; use bounded ListRtcRibRoutes.
+  rpc ListRtcRoutes(ListRtcRoutesRequest) returns (ListRtcRoutesResponse) {
+    option deprecated = true;
+  }
+  // Bounded, mutation-fenced VPN route query within the scoped RR-only role.
+  // Group-owned advertised state returns FAILED_PRECONDITION during resync.
+  rpc ListVpnRibRoutes(ListVpnRibRoutesRequest) returns (ListVpnRibRoutesResponse);
+  // Bounded, mutation-fenced labeled route query within the scoped RR-only role.
+  rpc ListLabeledRibRoutes(ListLabeledRibRoutesRequest) returns (ListLabeledRibRoutesResponse);
+  // Bounded, mutation-fenced RTC route query within the scoped RR-only role.
+  rpc ListRtcRibRoutes(ListRtcRibRoutesRequest) returns (ListRtcRibRoutesResponse);
+  // Bounded, mutation-fenced BGP-LS route query within the scoped RR-only role.
+  rpc ListBgpLsRibRoutes(ListBgpLsRibRoutesRequest) returns (ListBgpLsRibRoutesResponse);
+  // Bounded, mutation-fenced EVPN best query; scoped RR-only for Types 1–5.
+  rpc ListBestEvpnRoutes(ListBestEvpnRoutesRequest) returns (ListBestEvpnRoutesResponse);
+
   // RFC 9107 ORR topology graph, built on demand from every peer's BGP-LS
   // Adj-RIB-In (the union view, not Loc-RIB best-only). Nodes are keyed by
   // canonical descriptor bytes; links carry the IGP Metric (TLV 1095) that
   // the SPF engine uses. Links without an IGP Metric are unusable and are
   // not listed, but their endpoint nodes still appear.
-  rpc ListTopologyNodes(ListTopologyNodesRequest) returns (ListTopologyNodesResponse);
-  rpc ListTopologyLinks(ListTopologyLinksRequest) returns (ListTopologyLinksResponse);
+  // Deprecated whole-graph node view; use bounded ListOrrTopologyNodes.
+  rpc ListTopologyNodes(ListTopologyNodesRequest) returns (ListTopologyNodesResponse) {
+    option deprecated = true;
+  }
+  // Deprecated whole-graph link view; use bounded ListOrrTopologyLinks.
+  rpc ListTopologyLinks(ListTopologyLinksRequest) returns (ListTopologyLinksResponse) {
+    option deprecated = true;
+  }
+  // Bounded, mutation-fenced ORR topology nodes ordered by canonical key,
+  // within the scoped RR-only role.
+  rpc ListOrrTopologyNodes(ListOrrTopologyNodesRequest) returns (ListOrrTopologyNodesResponse);
+  // Bounded, mutation-fenced usable ORR topology links ordered by local key,
+  // remote key and Link NLRI identity, within the scoped RR-only role.
+  rpc ListOrrTopologyLinks(ListOrrTopologyLinksRequest) returns (ListOrrTopologyLinksResponse);
   // RFC 9107 ORR status: per configured vantage, its resolution against the
   // BGP-LS topology, SPF reach, and the peers bound to it, plus topology
   // node/link totals. Config + derived state only — the per-vantage best-path
@@ -2188,27 +2556,6 @@ service EventService {
   rpc ListSessionEvents(ListSessionEventsRequest) returns (ListSessionEventsResponse);
   rpc ListPolicyEvents(ListPolicyEventsRequest) returns (ListPolicyEventsResponse);
 
-  // SubscribeFromEvent — durable cursor replay then live (ADR-0072).
-  // Replays events with event_id > from_event_id, then transitions to
-  // live broadcast. The handoff is actor-ordered inside the daemon's
-  // EventHistoryManager: live subscriber registered first, high-water
-  // captured next, replay drained, live forwarded with the cursor floor
-  // enforced. The same payload bytes go to both halves of the stream
-  // (the byte-equality invariant from ADR-0072).
-  //
-  // The `from_event_id` field uses proto3 explicit-presence: absent ⇒ attach
-  // to the durable committed live tail without replay; value 0 ⇒ replay
-  // everything retained, then live (fresh-collector case); value N > 0 ⇒
-  // replay event_id > N, then live (normal reconnect case). Empty filters use
-  // SubscribeFromEvent semantics (all EHM-fed categories), not WatchEvents
-  // live-stream defaults.
-  //
-  // Returns FAILED_PRECONDITION at admission when durable history is disabled
-  // or startup fell back to live-only operation, and UNAVAILABLE at admission
-  // once the event-history storage has stopped. Replay storage interruption
-  // ends the stream with UNAVAILABLE unless post-admission producer loss takes
-  // DATA_LOSS precedence. Admission is checked before category/type validation.
-  rpc SubscribeFromEvent(SubscribeFromEventRequest) returns (stream BgpEvent);
 }
 
 message ListRoutesRequest {
@@ -2298,8 +2645,8 @@ message ExplainAdvertisedRouteRequest {
   string peer_address = 1;
   string prefix = 2;
   uint32 prefix_length = 3;
-  // Optional Route Distinguisher ("asn:nn" or "ip:nn"). When set, the
-  // explain runs the VPNv4/VPNv6 (SAFI 128) export ladder for the
+  // Optional Route Distinguisher (structured text or 0x/0X plus 16 hex digits).
+  // When set, explain runs the VPNv4/VPNv6 (SAFI 128) export ladder for the
   // (rd, prefix) identity - including the RFC 4684 RT-Constrain
   // membership gate - instead of the unicast ladder. Empty = unicast.
   string rd = 4;
@@ -2426,8 +2773,8 @@ message ExplainAdvertisedRouteResponse {
   // holds the route (a peer treating updates as withdrawn per RFC 7606
   // stays Established with none of them).
   bool already_advertised = 15;
-  // Route Distinguisher echoed back for a VPN explain; empty for
-  // unicast.
+  // Lossless RD text echoed back for VPN explain; small-ASN Type 2 uses raw
+  // 0x plus 16 hex digits. Empty for unicast.
   string rd = 16;
   // Echo of the requested Adj-RIB-In source identity. Absent for the
   // legacy winner-oriented query. `path_id` above remains the independently
@@ -2805,6 +3152,14 @@ message Route {
   RouteAggregator aggregator = 21;
   // True when the route carries the RFC 4271 ATOMIC_AGGREGATE attribute.
   bool atomic_aggregate = 22;
+  // For a route injected with AddLeasedPath (source peer 0.0.0.0): its lease
+  // owner, the generation it is tagged with, and the time to the owner's
+  // deadline, where 0 means expired and withdrawal pending. Set on received
+  // and best rows only: advertised rows carry an outbound path_id, so they
+  // leave these unset. Unset for every other route.
+  string injection_owner = 23;
+  LeaseGeneration lease_generation = 24;
+  optional uint32 lease_remaining_ms = 25;
 }
 
 enum RouteEventType {
@@ -2825,7 +3180,7 @@ message RouteEvent {
   uint32 prefix_length = 3;
   string peer_address = 4;
   AddressFamily afi_safi = 5;
-  // Unix epoch seconds.
+  // Deprecated: use timestamp_unix_ms. Unix epoch seconds as a decimal string.
   string timestamp = 6;
   string previous_peer_address = 7;
   // Add-Path path identifier (RFC 7911). 0 = no Add-Path.
@@ -2837,6 +3192,10 @@ message RouteEvent {
   string target_peer_address = 10;
   // Stable operator-facing reason, e.g. "policy_denied".
   string reason = 11;
+  // Event time in Unix epoch milliseconds, captured when the event is
+  // recorded. The deprecated timestamp string is this value truncated to
+  // whole seconds.
+  int64 timestamp_unix_ms = 12;
 }
 
 enum EventCategory {
@@ -2865,10 +3224,10 @@ enum BgpEventType {
   BGP_EVENT_TYPE_NOTIFICATION_SENT = 20;
   BGP_EVENT_TYPE_NOTIFICATION_RECEIVED = 21;
   BGP_EVENT_TYPE_POLICY_CHANGED = 22;
-  // OTC route-leak rule (RFC 9234 §5) blocked one or more unicast
-  // routes at either an ingress or egress decision site. Payload
-  // is OtcRouteBlockedEvent. Category: EVENT_CATEGORY_POLICY.
-  BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED = 23;
+  // 23 was BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED, produced only by the removed
+  // durable event history.
+  reserved 23;
+  reserved "BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED";
   BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED = 30;
   BGP_EVENT_TYPE_DATAPLANE_ROUTE_INSTALLED = 31;
   BGP_EVENT_TYPE_DATAPLANE_ROUTE_WITHDRAWN = 32;
@@ -2884,8 +3243,7 @@ enum BgpEventType {
   // max_prefix_action = "warning"); emitted once per crossing, no teardown.
   BGP_EVENT_TYPE_MAX_PREFIX_WARNING = 53;
   // A stream gap: WatchEvents reports a bounded-source gap and identifies
-  // that source category; SubscribeFromEvent reports a global committed-stream
-  // gap with both category and source_category UNSPECIFIED.
+  // that source category.
   BGP_EVENT_TYPE_STREAM_LAGGED = 100;
 }
 
@@ -2907,13 +3265,6 @@ message WatchEventsRequest {
   // those streams. Add EVENT_CATEGORY_POLICY or EVENT_CATEGORY_DATAPLANE
   // explicitly to combine them with the default route + session
   // categories.
-  //
-  // BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED is NOT served by this RPC: the
-  // OTC route-leak decision is published only through the durable
-  // outbox (ADR-0072). Filtering for it here would produce an empty
-  // live stream. Use SubscribeFromEvent with
-  // categories=[EVENT_CATEGORY_POLICY] and
-  // event_types=[BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED].
   repeated EventCategory categories = 1;
   // Empty = all event types for the selected categories.
   repeated BgpEventType event_types = 2;
@@ -2936,52 +3287,6 @@ message WatchEventsRequest {
   uint32 prefix_length = 6;
 }
 
-// SubscribeFromEvent cursor request (ADR-0072).
-//
-// Carries the same filter field surface as WatchEventsRequest, plus
-// an explicit-presence cursor field. See the RPC doc on EventService
-// for the presence semantics.
-message SubscribeFromEventRequest {
-  // Explicit-presence cursor. proto3 `optional` distinguishes
-  // "field absent on the wire" (live-only subscription) from
-  // "value = 0" (replay all retained events, then live).
-  // See ADR-0072 § "Cursor API" for the contract.
-  optional uint64 from_event_id = 1;
-
-  // Filters. All set filters are AND-combined.
-  // Repeated categories/types are OR-matched within their dimension;
-  // combinations with no durable producer return INVALID_ARGUMENT.
-  //
-  // Default-filter semantics diverge from WatchEventsRequest on
-  // purpose: SubscribeFromEvent treats an empty `categories` +
-  // empty `event_types` as **all categories** — the natural
-  // default for a durable replay client that wants to see
-  // everything the outbox emits. WatchEventsRequest's empty-
-  // filter default of "route + session only" exists for
-  // historical live-stream ergonomics and would surprise a
-  // cursor-driven collector that loses non-route/non-session
-  // events on first connect. Clients that want to scope the
-  // stream name the categories explicitly.
-  //
-  // This default applies regardless of whether `from_event_id`
-  // is set. The cursor field above only changes replay behavior
-  // (absent ⇒ live-only, present ⇒ replay-then-live); it does
-  // NOT swap in WatchEventsRequest's category default for the
-  // live half of an absent-cursor subscription. Empty filters
-  // select all categories for this RPC in every case.
-  //
-  // An empty `categories` filter selects every EHM-fed category:
-  // route, EVPN, session, policy, BFD, and dataplane. All six are
-  // produced through the durable outbox when
-  // `[event_history].enabled = true`.
-  repeated EventCategory categories = 2;
-  repeated BgpEventType event_types = 3;
-  string neighbor_address = 4;
-  AddressFamily afi_safi = 5;
-  string prefix = 6;
-  uint32 prefix_length = 7;
-}
-
 message ListEvpnEventsRequest {
   // Optional neighbor address filter. Matches both current and previous
   // best-path peer so peer-scoped queries include withdraws and best-path
@@ -2995,9 +3300,10 @@ message ListEvpnEventsRequest {
   // are clamped to the same 4096-event ceiling. Responses contain the most
   // recent matching events, ordered oldest-to-newest within that window.
   uint32 limit = 3;
-  // RFC 7432/9136 EVPN route type filter (1..=5). 0 = no filter.
+  // Supported EVPN route type filter (1..=6). 0 = no filter.
   uint32 route_type_filter = 4;
-  // Route Distinguisher filter in display format. Empty = no filter.
+  // Exact Route Distinguisher: structured text or 0x/0X plus 16 hex digits.
+  // Empty = no filter.
   string rd_filter = 5;
 }
 
@@ -3062,12 +3368,9 @@ message SessionEvent {
 
 message StreamLagEvent {
   // WatchEvents mirrors the bounded source into this field and the top-level
-  // BgpEvent.category. SubscribeFromEvent uses UNSPECIFIED because its gap is
-  // global across the committed stream and bypasses the category filter.
+  // BgpEvent.category.
   EventCategory source_category = 1;
   // WatchEvents counts skipped source events before filtering.
-  // SubscribeFromEvent counts skipped committed global-outbox events, not the
-  // filtered subset.
   uint64 missed_count = 2;
   // Stable operator-facing reason/summary string for this event.
   string reason = 3;
@@ -3150,9 +3453,9 @@ message EvpnRouteEvent {
   string previous_peer_address = 3;
   // Unix epoch seconds, matching existing RouteEvent timestamp shape.
   string timestamp = 4;
-  // RFC 7432 route type (1..=5).
+  // Supported EVPN route type (1..=6).
   uint32 route_type = 5;
-  // Route Distinguisher in display format.
+  // Lossless RD text; small-ASN Type 2 RDs use 0x plus 16 hex digits.
   string rd = 6;
   // Stable operator-facing key summary, derived from the EVPN route key.
   string route_key = 7;
@@ -3179,56 +3482,13 @@ message BfdSessionEvent {
   string reason = 7;
 }
 
-// Emitted whenever an OTC route-leak rule (RFC 9234 §5) blocks one
-// or more unicast routes at either an ingress or egress decision
-// site. The legacy `bgp_otc_routes_blocked_total{peer, reason}`
-// counter and the `otc_routes_blocked` scalar on NeighborState remain the
-// compatibility surfaces. Ingress remains per rejected UPDATE decision; egress
-// events emit once per peer/route transition into the blocked disposition
-// and re-arm after permit, withdrawal, or session reset.
-message OtcRouteBlockedEvent {
-  BgpEventType event_type = 1;
-  string peer_address = 2;
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
-  string timestamp = 3;
-  // "ingress" | "egress" — which decision site fired.
-  string direction = 4;
-  // Bounded reason vocabulary, matching the
-  // `bgp_otc_routes_blocked_total{reason=…}` label:
-  //   - "ingress_from_customer_rsclient"
-  //   - "ingress_peer_mismatch"
-  //   - "malformed_length"
-  //   - "egress_to_upstream_via_otc"
-  string reason = 5;
-  // Wire-format prefix strings ("203.0.113.0/24"). For ingress this
-  // is every announced unicast prefix in the rejected UPDATE; for
-  // egress this is a single prefix (the loop runs per route).
-  repeated string prefixes = 6;
-  // Convenience count — `prefixes.size()` would also work, but
-  // collectors that filter on count without parsing the array benefit
-  // from the explicit field.
-  uint32 count = 7;
-  // Local BGP role at the moment of the decision (RFC 9234 §4 names:
-  // "provider", "route_server", "route_server_client", "customer",
-  // "peer"). Empty when no local role is configured.
-  string local_role = 8;
-  // Peer's negotiated BGP role. Empty when the peer did not advertise
-  // the Role capability.
-  string remote_role = 9;
-  // The OTC attribute value (ASN). Omitted on the malformed_length
-  // path because the attribute couldn't be decoded.
-  optional uint32 otc_value = 10;
-  // AS_PATH in the same wire-string form used by gRPC matchers
-  // (`{…}` notation preserves AS_SET / confederation segments).
-  // Empty when the UPDATE / route carried no AS_PATH attribute.
-  string as_path = 11;
-  // Stable operator-facing reason/summary string for this event.
-  string summary = 12;
-}
-
 message BgpEvent {
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
+  // Deprecated: use timestamp_unix_ms. Unix epoch seconds as a decimal string.
   string timestamp = 1;
+  // Event time in Unix epoch milliseconds, captured when the event is
+  // recorded. The deprecated timestamp string is this value truncated to
+  // whole seconds.
+  int64 timestamp_unix_ms = 23;
   // Common fields are duplicated from the category-specific payload on purpose:
   // category-agnostic consumers can filter/render without unpacking the oneof,
   // while payloads preserve the full source event shape for category-specific
@@ -3246,21 +3506,10 @@ message BgpEvent {
   // export-policy filtering. Empty for ordinary source-peer route events.
   string target_peer_address = 19;
 
-  // Durable monotonic event_id (ADR-0072). Carried at the envelope
-  // level rather than duplicated onto every nested payload — see
-  // the ADR's "Envelope strategy" section for the rationale.
-  //
-  // `optional uint64` (proto3 explicit-presence) so clients can tell whether
-  // the daemon emitted a committed SubscribeFromEvent envelope. Every
-  // committed envelope on that RPC sets the field. Synthetic durable lag
-  // frames and legacy WatchEvents / List*Events responses omit it. The
-  // allocator starts at 0 and the first committed event gets id 1, so a
-  // present-but-zero value should never appear on an emitted BgpEvent.
-  //
-  // RouteEvent.event_id continues to mirror this value for wire
-  // backwards-compatibility with route-only consumers, but the
-  // envelope-level field is the source of truth.
-  optional uint64 event_id = 21;
+  // 21 was the durable event_id and 22 the OTC route-blocked payload, both
+  // produced only by the removed durable event history.
+  reserved 21, 22;
+  reserved "event_id", "otc_route_blocked";
 
   oneof payload {
     RouteEvent route = 11;
@@ -3272,9 +3521,6 @@ message BgpEvent {
     EvpnRouteEvent evpn = 17;
     DataplaneRouteEvent dataplane_route = 18;
     BfdSessionEvent bfd = 20;
-    // Tag 21 is reserved at the message level for `event_id`; the
-    // next free oneof variant tag is 22.
-    OtcRouteBlockedEvent otc_route_blocked = 22;
   }
 }
 
@@ -3283,8 +3529,42 @@ message BgpEvent {
 // ---------------------------------------------------------------------------
 
 service InjectionService {
+  // Inject or replace a locally originated unicast route. The route is an
+  // upsert keyed on (prefix, prefix_length, path_id): repeating an identical
+  // request is idempotent, and a request with the same key but a different
+  // next hop or attributes replaces the local route. The response reports
+  // which of these happened. OK confirms that the route was accepted into
+  // the local Adj-RIB-In (peer 0.0.0.0). Selection and outbound distribution
+  // normally run in the same RIB turn, before the reply, but are deferred
+  // while Graceful Restart selection deferral is active for the family. OK
+  // does not mean any peer received or installed the route, and a received
+  // route for the same prefix can out-select it. Injected routes are
+  // process-local and lost on a daemon restart, so a controller reconciles
+  // periodically and after every reconnect by re-adding its desired routes
+  // (an UNCHANGED re-add is cheap). A lower ControlService.GetHealth
+  // uptime_seconds is an extra trigger, not a reliable restart detector.
   rpc AddPath(AddPathRequest) returns (AddPathResponse);
+  // Withdraw a locally injected unicast route by its (prefix, prefix_length,
+  // path_id) key. Only routes added through AddPath are affected; routes
+  // received from peers are never removed. A key with no local route returns
+  // NOT_FOUND unless allow_missing is set. As for AddPath, OK confirms the
+  // change to the local Adj-RIB-In; selection and distribution follow in the
+  // same RIB turn unless Graceful Restart selection deferral is active.
   rpc DeletePath(DeletePathRequest) returns (DeletePathResponse);
+  // Per-peer export disposition of one locally injected unicast route,
+  // identified by its exact AddPath key (prefix, prefix_length, path_id).
+  // A route for the same prefix from another peer, or under another local
+  // path_id, never counts as this route's export. Rows cover Established
+  // peers only: each peer registered for outbound updates gets exactly one
+  // disposition, in peer-address order and paged by page_size and
+  // page_token. A configured peer without a session is absent from the list,
+  // and absent does not mean withheld: cross-check NeighborService
+  // ListNeighbors to find peers that receive nothing because they are not
+  // Established. COMMITTED means the
+  // route sits in that peer's Adj-RIB-Out: committed to its outbound path,
+  // not received, accepted or installed by the peer, which BGP does not
+  // report. A key with no local route returns NOT_FOUND.
+  rpc ListPathExportDispositions(ListPathExportDispositionsRequest) returns (ListPathExportDispositionsResponse);
   // Inject or replace a locally originated FlowSpec rule. The rule is an
   // upsert keyed on (afi_safi, components): repeating an identical request
   // is idempotent, and a request with the same key but different actions or
@@ -3305,6 +3585,42 @@ service InjectionService {
   // in the same RIB turn unless Graceful Restart selection deferral is
   // active.
   rpc DeleteFlowSpec(DeleteFlowSpecRequest) returns (DeleteFlowSpecResponse);
+  // Owner-scoped leases (ADR-0141). A leased add is AddPath or AddFlowSpec
+  // with the same request, outcome and validation, plus an owner and a
+  // lease. Every entry an owner adds shares that owner's one lease; when the
+  // lease's deadline passes without a renewal or a further leased add, the
+  // daemon withdraws all of the owner's routes and rules in one batch.
+  // Expiry removes local intent only: an equal or better route, or a
+  // received FlowSpec rule with the same key, keeps applying, and the daemon
+  // promises no remote acceptance or enforcement. The lease bounds how long
+  // a stopped controller's state outlives it; it does not cover the daemon
+  // itself stopping.
+  //
+  // A leased add joins the owner's live lease and extends its deadline to
+  // max(current, now + lease_seconds), never shortening it, or starts a new
+  // generation. The response returns the owner's live generation; a
+  // generation other than the one the controller holds means its previous
+  // state may be gone and it must re-add its full desired state. A leased
+  // add on a key held by another owner, or by no owner, returns
+  // FAILED_PRECONDITION: convert an unleased entry by deleting it first, or
+  // add under a fresh key such as another path_id. A 65th live owner, or an
+  // owner's 16,385th key, returns RESOURCE_EXHAUSTED. Both leave everything
+  // unchanged. A daemon without
+  // these RPCs answers UNIMPLEMENTED and creates nothing; never retry a
+  // failed leased add through AddPath or AddFlowSpec.
+  rpc AddLeasedPath(AddLeasedPathRequest) returns (AddLeasedPathResponse);
+  rpc AddLeasedFlowSpec(AddLeasedFlowSpecRequest) returns (AddLeasedFlowSpecResponse);
+  // Set the owner's lease deadline to exactly now + lease_seconds, which may
+  // shorten it. Served from the lease table, never behind RIB work. Returns
+  // FAILED_PRECONDITION, changing nothing, unless generation is the owner's
+  // live lease: an unknown owner, an expired lease (a renewal at exactly the
+  // deadline loses) or a superseded generation, including one from before a
+  // daemon restart. A renewal never creates or resurrects a lease; on
+  // FAILED_PRECONDITION the controller re-adds its full desired state, and
+  // the first leased add starts a new generation.
+  rpc RenewLease(RenewLeaseRequest) returns (RenewLeaseResponse);
+  // The lease table, optionally for one owner.
+  rpc ListInjectionLeases(ListInjectionLeasesRequest) returns (ListInjectionLeasesResponse);
   // Inject a locally-originated EVPN route (RFC 7432). SDN controllers
   // push Type 2 / Type 5 / etc. routes to the RR's Loc-RIB, and the RR
   // reflects them to iBGP peers negotiating L2VPN/EVPN.
@@ -3315,6 +3631,26 @@ service InjectionService {
 message AddPathRequest {
   string prefix = 1;
   uint32 prefix_length = 2;
+  // Next hop of the injected route. An unspecified address ("0.0.0.0" or
+  // "::", for either prefix family) means next-hop self: the daemon
+  // advertises the route with its own address on each session, resolved
+  // per session at export like `set next-hop self` in export policy, and
+  // an explicit export-policy next-hop action still wins. An IPv4 prefix
+  // takes the session's local IPv4 address (the router ID on an IPv6-only
+  // session without Extended Next Hop), or the session's local address in
+  // MP_REACH_NLRI when Extended Next Hop (RFC 8950) is negotiated. An IPv6
+  // prefix takes the neighbor's local_ipv6_nexthop, else the session's
+  // local IPv6 address; a session with neither refuses the route with
+  // the exact-export reason missing_ipv6_next_hop rather than sending an
+  // unusable next hop. GoBGP (v3.37.0, v4.10.0) also resolves an unspecified
+  // next hop to the session's local address for eBGP and iBGP peers, but
+  // sends it unchanged to route-server clients; rustbgpd resolves it for
+  // every peer type, route-server clients included. The route is stored
+  // with the unspecified next hop, so route listings, BMP and MRT show it
+  // as such, and FIB installation drops it with reason
+  // next_hop_unspecified.
+  // Any other address is used as given; an IPv6 prefix requires an IPv6
+  // next hop, and multicast or broadcast addresses are rejected.
   string next_hop = 3;
   repeated uint32 as_path = 4;
   // ORIGIN path attribute: 0 = IGP, 1 = EGP, 2 = INCOMPLETE.
@@ -3332,6 +3668,21 @@ message AddPathRequest {
 
 message AddPathResponse {
   reserved 1;
+  // Compared with the local route previously held for this key. A received
+  // route for the same prefix does not affect it.
+  PathInjectOutcome outcome = 2;
+}
+
+enum PathInjectOutcome {
+  // Not reported; a daemon that predates this field leaves it unset.
+  PATH_INJECT_OUTCOME_UNSPECIFIED = 0;
+  // No local route had this (prefix, prefix_length, path_id) key.
+  PATH_INJECT_OUTCOME_CREATED = 1;
+  // A local route had this key with a different next hop or attributes;
+  // the new route replaced it.
+  PATH_INJECT_OUTCOME_REPLACED = 2;
+  // An identical local route already existed. Nothing was redistributed.
+  PATH_INJECT_OUTCOME_UNCHANGED = 3;
 }
 
 message DeletePathRequest {
@@ -3340,9 +3691,84 @@ message DeletePathRequest {
   reserved 3;
   // Add-Path path identifier (RFC 7911). 0 = delete the default path.
   uint32 path_id = 4;
+  // When true, a key with no local route returns OK with outcome NOT_PRESENT
+  // instead of NOT_FOUND, so a controller's withdraw is idempotent across
+  // retries and daemon restarts. A daemon that predates this field ignores
+  // it: a missing route returns NOT_FOUND and a present route is deleted
+  // with outcome UNSPECIFIED.
+  bool allow_missing = 5;
+  // Owner the caller expects the route to have; "" means unowned. A
+  // mismatch, including "" on an owned route, returns FAILED_PRECONDITION
+  // unless override_owner is set. A delete does not renew a lease.
+  string owner = 6;
+  // Delete regardless of the route's owner (operator override).
+  bool override_owner = 7;
 }
 
-message DeletePathResponse {}
+message DeletePathResponse {
+  PathDeleteOutcome outcome = 1;
+}
+
+enum PathDeleteOutcome {
+  // Not reported. Only a daemon that predates this field leaves it unset,
+  // and such a daemon returns OK only after removing a local route.
+  PATH_DELETE_OUTCOME_UNSPECIFIED = 0;
+  // A local route with this key was removed from the local Adj-RIB-In.
+  PATH_DELETE_OUTCOME_DELETED = 1;
+  // No local route had this key; returned only when allow_missing is set.
+  PATH_DELETE_OUTCOME_NOT_PRESENT = 2;
+}
+
+message ListPathExportDispositionsRequest {
+  // The local route's AddPath key.
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  uint32 path_id = 3;
+  // Peers per page: 0 selects 100, and larger values are capped at 1000.
+  uint32 page_size = 4;
+  // next_page_token of the previous page; empty for the first page.
+  string page_token = 5;
+}
+
+enum PathExportDisposition {
+  PATH_EXPORT_DISPOSITION_UNSPECIFIED = 0;
+  // The route is in the peer's Adj-RIB-Out, committed to its outbound
+  // path. Remote receipt is outside this guarantee.
+  PATH_EXPORT_DISPOSITION_COMMITTED = 1;
+  // The route is not exported to this peer; reason says why.
+  PATH_EXPORT_DISPOSITION_WITHHELD = 2;
+  // Export to this peer has not settled; reason names what is outstanding.
+  PATH_EXPORT_DISPOSITION_PENDING = 3;
+}
+
+message PathExportDispositionEntry {
+  string peer_address = 1;
+  PathExportDisposition disposition = 2;
+  // Bounded reason code; empty for COMMITTED. WITHHELD: family_suppressed
+  // plus a colon and the exact-export reason for a negotiated family the
+  // session withholds (e.g. family_suppressed:missing_ipv6_next_hop),
+  // family_not_negotiated, not_selected (another path is this peer's
+  // selected route, or the path ranks beyond Add-Path send_max),
+  // export_policy, outbound_prefix_limit, exact_export_rejected (optionally
+  // a colon and the exact-export reason, e.g.
+  // exact_export_rejected:missing_ipv6_next_hop), export_rule (any other
+  // export gate; explain_code names it). PENDING: selection_deferred,
+  // outbound_resync, orf_pending, not_yet_committed. New codes may be added.
+  string reason = 3;
+  // Stop code of the export explain ladder behind the reason, in the
+  // ExplainAdvertisedRoute gate vocabulary; empty when none applies.
+  string explain_code = 4;
+  // Human-readable detail; not a stable string.
+  string detail = 5;
+  // Outbound Add-Path path identifier when COMMITTED; 0 on single-best.
+  uint32 advertised_path_id = 6;
+}
+
+message ListPathExportDispositionsResponse {
+  repeated PathExportDispositionEntry peers = 1;
+  // Empty when no peers remain.
+  string next_page_token = 2;
+}
 
 // FlowSpec match component (RFC 8955).
 message FlowSpecComponent {
@@ -3364,11 +3790,22 @@ message FlowSpecAction {
     FlowSpecTrafficAction traffic_action = 2;
     FlowSpecTrafficMarking traffic_marking = 3;
     FlowSpecRedirect redirect = 4;
+    // In the v1 FlowSpec controller inventory (API shape only; no forwarding
+    // or enforcement guarantee). A client built against an older proto
+    // still finds the action community in
+    // FlowSpecRouteEntry.extended_communities.
+    FlowSpecTrafficRatePackets traffic_rate_packets = 5;
   }
 }
 
+// Traffic-rate-bytes (RFC 8955 §7.1, type 0x8006).
 message FlowSpecTrafficRate {
   float rate = 1; // bytes/sec; 0.0 = drop
+}
+
+// Traffic-rate-packets (RFC 8955 §7.1, type 0x800c).
+message FlowSpecTrafficRatePackets {
+  float rate = 1; // packets/sec; 0.0 = drop
 }
 
 message FlowSpecTrafficAction {
@@ -3385,8 +3822,16 @@ message FlowSpecTrafficMarking {
   uint32 dscp = 1;
 }
 
+// Redirect to a VRF (RFC 8955 §7.4, RFC 7674). The route_target form selects
+// the extended community, as for a Route Target:
+//   "ASN:value", ASN <= 65535, 32-bit value: 2-octet AS (type 0x8008)
+//   "a.b.c.d:value", 16-bit value: IPv4 address (type 0x8108)
+//   "ASN:value", ASN > 65535, 16-bit value: 4-octet AS (type 0x8208)
+//   "high.low:value" (RFC 5396 asdot+), 16-bit value: 4-octet AS for any ASN
+// Listings render a 4-octet-AS redirect whose ASN fits in 16 bits in asdot+
+// as "0.ASN:value", so a read and re-inject keeps the 4-octet-AS encoding.
+// Any other string returns INVALID_ARGUMENT.
 message FlowSpecRedirect {
-  // Route target string: "ASN:value" (e.g. "65001:100").
   string route_target = 1;
 }
 
@@ -3400,7 +3845,16 @@ message FlowSpecRouteEntry {
   AddressFamily afi_safi = 4;
   repeated uint32 as_path = 5;
   repeated uint32 communities = 6;
+  // Every extended community on the rule, raw, including the action
+  // communities that also appear typed in actions. Unknown or unmodelled
+  // communities appear only here.
   repeated uint64 extended_communities = 7;
+  // Same as Route.injection_owner, lease_generation and lease_remaining_ms,
+  // for a rule injected with AddLeasedFlowSpec. Set only in the
+  // received_peer_address "0.0.0.0" view of ListFlowSpecRoutes.
+  string injection_owner = 8;
+  LeaseGeneration lease_generation = 9;
+  optional uint32 lease_remaining_ms = 10;
 }
 
 message AddFlowSpecRequest {
@@ -3414,6 +3868,9 @@ message AddFlowSpecRequest {
   repeated FlowSpecComponent components = 2;
   repeated FlowSpecAction actions = 3;
   repeated uint32 communities = 4;
+  // Raw extended communities, sent alongside those built from actions.
+  // AddFlowSpec does not deduplicate the two lists: give an action either
+  // typed in actions or raw here, not both.
   repeated uint64 extended_communities = 5;
 }
 
@@ -3445,6 +3902,84 @@ message DeleteFlowSpecRequest {
   // rule returns NOT_FOUND and a present rule is deleted with outcome
   // UNSPECIFIED.
   bool allow_missing = 3;
+  // Same as DeletePathRequest.owner.
+  string owner = 4;
+  // Same as DeletePathRequest.override_owner.
+  bool override_owner = 5;
+}
+
+// An owner's lease (ADR-0141).
+message InjectionLease {
+  // 1-64 bytes of [A-Za-z0-9._-]; used verbatim as a metric label and in
+  // logs. Malformed is INVALID_ARGUMENT.
+  string owner = 1;
+  // 5..=3600. Starting a lease sets its deadline to now + lease_seconds;
+  // joining a live lease extends it to max(current, now + lease_seconds).
+  // Out of range is INVALID_ARGUMENT.
+  uint32 lease_seconds = 2;
+}
+
+// One lease generation. Only a leased add starts one; a renewal must match
+// both fields. incarnation is drawn at random once per process, so a
+// generation never survives a daemon restart.
+message LeaseGeneration {
+  fixed64 incarnation = 1;
+  uint64 sequence = 2;
+}
+
+message AddLeasedPathRequest {
+  AddPathRequest path = 1;
+  // Required.
+  InjectionLease lease = 2;
+}
+
+message AddLeasedPathResponse {
+  AddPathResponse result = 1;
+  // The owner's live generation after this add.
+  LeaseGeneration generation = 2;
+}
+
+message AddLeasedFlowSpecRequest {
+  AddFlowSpecRequest rule = 1;
+  // Required.
+  InjectionLease lease = 2;
+}
+
+message AddLeasedFlowSpecResponse {
+  AddFlowSpecResponse result = 1;
+  // The owner's live generation after this add.
+  LeaseGeneration generation = 2;
+}
+
+message RenewLeaseRequest {
+  string owner = 1;
+  LeaseGeneration generation = 2;
+  // 5..=3600; the deadline becomes exactly now + lease_seconds.
+  uint32 lease_seconds = 3;
+}
+
+message RenewLeaseResponse {
+  LeaseGeneration generation = 1;
+  // Time to the new deadline, from the daemon's monotonic clock.
+  uint32 lease_remaining_ms = 2;
+}
+
+message ListInjectionLeasesRequest {
+  // Empty lists every owner.
+  string owner = 1;
+}
+
+message InjectionLeaseEntry {
+  string owner = 1;
+  LeaseGeneration generation = 2;
+  // The lease_seconds that last set the deadline.
+  uint32 lease_seconds = 3;
+  // Time to the deadline; 0 means expired, withdrawal pending.
+  uint32 lease_remaining_ms = 4;
+}
+
+message ListInjectionLeasesResponse {
+  repeated InjectionLeaseEntry leases = 1;
 }
 
 message DeleteFlowSpecResponse {
@@ -3572,11 +4107,12 @@ message Srv6SidStructure {
   uint32 transposition_offset = 6;
 }
 
-// EVPN route entry in the RIB (any of 5 RFC 7432 route types).
+// EVPN route entry in the RIB (Types 1–5 and reflector-only Type 6 SMET).
 message EvpnRouteEntry {
-  // RFC 7432 route type (1..=5).
+  // EVPN route type (1..=6).
   uint32 route_type = 1;
-  // Route Distinguisher (RFC 4364) in "asn:value" / "ip:value" display format.
+  // Lossless RD text: "asn:value" / "ip:value", or 0x plus 16 hex digits
+  // for a Type 2 RD whose ASN also fits in Type 0. Accepted by RD selectors.
   string rd = 2;
   // Ethernet Segment Identifier (hex-coded 10 bytes separated by ':') —
   // empty for Type 3 IMET, which has no ESI.
@@ -3610,15 +4146,35 @@ message EvpnRouteEntry {
   uint32 tunnel_type = 16;
   // Present only when the retained route has a Prefix-SID path attribute.
   PrefixSidView prefix_sid = 17;
+  // Present for Type 6 only. RD/tag remain in their existing fields above.
+  EvpnSmetView smet = 18;
+}
+
+// Explicit wildcard or exact host address; never inferred from originator AF.
+message EvpnSmetAddress {
+  oneof address {
+    // Must be true when selected.
+    bool wildcard = 1;
+    string ip = 2;
+  }
+}
+
+message EvpnSmetView {
+  EvpnSmetAddress source = 1;
+  EvpnSmetAddress group = 2;
+  string originator_ip = 3;
+  // Complete octet (0..255), including reserved bits.
+  uint32 flags = 4;
 }
 
 // Filter EVPN route listings. All filters are optional.
 message ListEvpnRequest {
-  // Only routes matching this route type (1..=5). 0 = no filter.
+  // Only routes matching this route type (1..=6). 0 = no filter.
   uint32 route_type_filter = 1;
   // Only routes from this peer, empty = any.
   string peer_filter = 2;
-  // Only routes with this Route Distinguisher (display format). Empty = any.
+  // Exact Route Distinguisher: structured text or 0x/0X plus 16 hex digits.
+  // Empty = any.
   string rd_filter = 3;
 }
 
@@ -3628,18 +4184,27 @@ message ListEvpnResponse {
 
 // Bounded EVPN peer-table query. These methods are separate from unicast
 // listings so older servers return UNIMPLEMENTED instead of the wrong family.
+// For any MAC/ESI/VNI filter, require the response metadata acknowledgement
+// x-rustbgpd-evpn-peer-filters: mac,esi,vni before using rows or counts:
+// older servers can silently ignore these additive request fields.
 message ListPeerEvpnRoutesRequest {
   // Required source (received) or destination (advertised) neighbor IP.
   string neighbor_address = 1;
-  // 0 = all supported types; otherwise 1..=5.
+  // 0 = all supported types; otherwise 1..=6.
   uint32 route_type_filter = 2;
-  // Route Distinguisher display format. Empty = any.
+  // Exact typed RD: structured text or 0x/0X plus 16 raw hex digits. Empty = any.
   string rd_filter = 3;
-  // 0 defaults to 100. Values above 1000 are rejected.
+  // 0 defaults to 100. Values above 1000 are clamped to 1000.
   uint32 page_size = 4;
   // Opaque process-local continuation, bound to scope, filters, and version.
   // Restart with an empty token after ABORTED (a table mutation).
   string page_token = 5;
+  // Exact Type 2 MAC; types without a MAC do not match. Outside current v1.
+  string mac_filter = 6;
+  // Exact 10-byte ESI; types without an ESI do not match. Outside current v1.
+  string esi_filter = 7;
+  // VXLAN (tunnel type 8), NLRI/PMSI VNI, 0..16777215. Outside current v1.
+  optional uint32 vni_filter = 8;
 }
 
 message ListPeerEvpnRoutesResponse {
@@ -3653,6 +4218,7 @@ message ListPeerEvpnRoutesResponse {
 // are payload and do not belong to the identity. Type 2's omitted IP means
 // MAC-only, distinct from the same MAC with a host IP.
 message EvpnRouteSelector {
+  // Required RD: structured text or 0x/0X plus 16 hex digits.
   string rd = 1;
   oneof route {
     EvpnEadSelector ead_per_es = 2;
@@ -3661,6 +4227,7 @@ message EvpnRouteSelector {
     EvpnImetSelector imet = 5;
     EvpnEsSelector es = 6;
     EvpnIpPrefixSelector ip_prefix = 7;
+    EvpnSmetSelector smet = 8;
   }
 }
 
@@ -3693,6 +4260,14 @@ message EvpnIpPrefixSelector {
   string prefix = 2;
 }
 
+// Flags are mutable payload and cannot be selected as part of the key.
+message EvpnSmetSelector {
+  uint32 ethernet_tag = 1;
+  EvpnSmetAddress source = 2;
+  EvpnSmetAddress group = 3;
+  string originator_ip = 4;
+}
+
 message ExplainEvpnRouteRequest {
   EvpnRouteSelector key = 1;
   // Optional accepted-source lookup. Absence of retained state is not an
@@ -3700,6 +4275,12 @@ message ExplainEvpnRouteRequest {
   string received_from = 2;
   // Optional destination for current export eligibility and committed state.
   string advertised_to = 3;
+  // Optional RFC 9819 inspection, only for an IMET key. Select one exact
+  // Ethernet A-D per ES key (MAX_ET, nonzero ESI); its RD may differ from IMET.
+  // Both routes use the same scope: received_from, committed advertised_to,
+  // or installed best when neither is set. The two peer filters cannot both
+  // be set for this inspection. No selection or forwarding state is changed.
+  EvpnRouteSelector srv6_argument_companion = 4;
 }
 
 message ExplainEvpnRouteResponse {
@@ -3716,6 +4297,36 @@ message ExplainEvpnRouteResponse {
   ExplainReason selection_reason = 8;
   bool selection_deferred = 9;
   ExplainEvpnExport export = 10;
+  // Present only when an explicit companion was requested. Primary provenance
+  // is in received, best, or export.advertised according to this view's scope.
+  ExplainSrv6Argument srv6_argument = 11;
+}
+
+enum Srv6ArgumentStatus {
+  SRV6_ARGUMENT_STATUS_UNSPECIFIED = 0;
+  SRV6_ARGUMENT_STATUS_COMPOSED = 1;
+  SRV6_ARGUMENT_STATUS_LOC_FUNC_ONLY = 2;
+  SRV6_ARGUMENT_STATUS_CONFLICT = 3;
+  SRV6_ARGUMENT_STATUS_UNAVAILABLE = 4;
+  SRV6_ARGUMENT_STATUS_AMBIGUOUS = 5;
+}
+
+// Alpha, read-only RFC 9819 section 3.3 inspection of one selected pair.
+// This does not assert forwarding, installation, or remote receipt.
+message ExplainSrv6Argument {
+  EvpnRouteSelector companion_key = 1;
+  EvpnRouteEntry companion = 2;
+  // "best", "received", or "advertised". Both routes were read in one actor turn.
+  string scope = 3;
+  string scope_peer = 4;
+  Srv6ArgumentStatus status = 5;
+  string detail = 6;
+  // Present only for COMPOSED or LOC_FUNC_ONLY; raw SID fields are unchanged.
+  optional string sid = 7;
+  // "caller_selected": computed for the explicitly requested pair. Original
+  // egress identity is not established by retained peer/RD/next-hop metadata.
+  // The caller must select the applicable same-egress Ethernet Segment route.
+  string association = 8;
 }
 
 message ExplainEvpnExport {
@@ -3878,6 +4489,117 @@ message ListRtcRoutesResponse {
   repeated RtcRouteEntry routes = 1;
 }
 
+// Family-specific page views. Received is accepted post-policy input;
+// advertised is committed local export state, not proof of remote receipt.
+enum FamilyRouteView {
+  FAMILY_ROUTE_VIEW_UNSPECIFIED = 0; // Invalid: select a view explicitly.
+  FAMILY_ROUTE_VIEW_BEST = 1;
+  FAMILY_ROUTE_VIEW_RECEIVED = 2;
+  FAMILY_ROUTE_VIEW_ADVERTISED = 3;
+}
+
+message ListVpnRibRoutesRequest {
+  FamilyRouteView view = 1;
+  // Required source/destination neighbor for received/advertised; invalid for best.
+  string neighbor_address = 2;
+  // 0 defaults to 100; values above 1000 clamp. Tokens bind scope, filters and version.
+  uint32 page_size = 3;
+  string page_token = 4;
+  AddressFamily afi_safi = 5; // UNSPECIFIED selects both VPN address families.
+  string prefix_filter = 6; // IP address; empty selects all prefixes.
+  string rd_filter = 7; // Exact typed RD: structured text or 0x/0X plus 16 raw hex digits.
+  string source_peer_filter = 8; // Optional winner source in best; invalid for peer views.
+  uint32 prefix_filter_length = 9;
+  bool longer_prefixes = 10; // Longer-or-equal match, as in unicast listings.
+}
+
+message ListVpnRibRoutesResponse {
+  repeated VpnRouteEntry routes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
+}
+
+message ListLabeledRibRoutesRequest {
+  FamilyRouteView view = 1;
+  // Required source/destination neighbor for received/advertised; invalid for best.
+  string neighbor_address = 2;
+  // 0 defaults to 100; values above 1000 clamp. Tokens bind scope, filters and version.
+  uint32 page_size = 3;
+  string page_token = 4;
+  AddressFamily afi_safi = 5; // UNSPECIFIED selects both labeled address families.
+  string prefix_filter = 6; // IP address; empty selects all prefixes.
+  string source_peer_filter = 7; // Optional winner source in best; invalid for peer views.
+  uint32 prefix_filter_length = 8;
+  bool longer_prefixes = 9; // Longer-or-equal match, as in unicast listings.
+}
+
+message ListLabeledRibRoutesResponse {
+  repeated LabeledRouteEntry routes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
+}
+
+message ListRtcRibRoutesRequest {
+  FamilyRouteView view = 1;
+  // Required source/destination neighbor for received/advertised; invalid for best.
+  string neighbor_address = 2;
+  // 0 defaults to 100; values above 1000 clamp. Tokens bind scope, filters and version.
+  uint32 page_size = 3;
+  string page_token = 4;
+  optional uint32 origin_as_filter = 5;
+  string route_target_filter = 6; // Exact /96 RT: display form or 0x plus 16 raw hex digits.
+  string source_peer_filter = 7; // Optional winner source in best; invalid for peer views.
+  AddressFamily afi_safi = 8; // UNSPECIFIED or IPV4_RT_CONSTRAIN.
+}
+
+message ListRtcRibRoutesResponse {
+  repeated RtcRouteEntry routes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
+}
+
+message ListBgpLsRibRoutesRequest {
+  FamilyRouteView view = 1;
+  // Required source/destination neighbor for received/advertised; invalid for best.
+  string neighbor_address = 2;
+  // 0 defaults to 100; values above 1000 clamp. Tokens bind scope, filters and version.
+  uint32 page_size = 3;
+  string page_token = 4;
+  AddressFamily afi_safi = 5; // UNSPECIFIED selects both BGP-LS and BGP-LS VPN.
+  uint32 nlri_type_filter = 6; // Raw NLRI type; 0 selects all types.
+  string source_peer_filter = 7; // Optional winner source in best; invalid for peer views.
+}
+
+message ListBgpLsRibRoutesResponse {
+  // Ordered by family, raw NLRI type, Route Distinguisher, NLRI bytes, source and path.
+  repeated BgpLsRouteEntry routes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
+}
+
+message ListBestEvpnRoutesRequest {
+  uint32 route_type_filter = 1; // 0 = all, otherwise 1..=6.
+  string source_peer_filter = 2; // Optional winner source; unknown sources return an empty page.
+  string rd_filter = 3; // Exact typed RD: structured text or 0x/0X plus 16 raw hex digits.
+  string mac_filter = 4; // Exact Type 2 MAC; other types do not match.
+  string esi_filter = 5; // Exact 10-byte ESI; types without an ESI do not match.
+  optional uint32 vni_filter = 6; // VXLAN (tunnel type 8), NLRI/PMSI VNI, 0..16777215.
+  // 0 defaults to 100; values above 1000 clamp to 1000.
+  uint32 page_size = 7;
+  string page_token = 8;
+}
+
+message ListBestEvpnRoutesResponse {
+  repeated EvpnRouteEntry routes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
+}
+
 message ListTopologyNodesRequest {}
 
 // One ORR topology node (RFC 9107 over RFC 9552 BGP-LS).
@@ -3920,6 +4642,32 @@ message TopologyLinkEntry {
 
 message ListTopologyLinksResponse {
   repeated TopologyLinkEntry links = 1;
+}
+
+message ListOrrTopologyNodesRequest {
+  // 0 defaults to 100; values above 1000 clamp. Tokens bind the view and version.
+  uint32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListOrrTopologyNodesResponse {
+  repeated TopologyNodeEntry nodes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
+}
+
+message ListOrrTopologyLinksRequest {
+  // 0 defaults to 100; values above 1000 clamp. Tokens bind the view and version.
+  uint32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListOrrTopologyLinksResponse {
+  repeated TopologyLinkEntry links = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
 }
 
 message ListOrrStatusRequest {}
@@ -3977,7 +4725,7 @@ message AddEvpnRouteRequest {
   // EVPN route type. Only 2, 3, and 5 are accepted; other values
   // return INVALID_ARGUMENT.
   uint32 route_type = 1;
-  // Route Distinguisher, "asn:value" / "ip:value". Required.
+  // Required RD: structured text or 0x/0X plus 16 hex digits.
   string rd = 2;
   // Ethernet Tag ID (decimal). Default 0. Must be 0 for Type 5 injection.
   uint32 ethernet_tag = 3;
@@ -4027,6 +4775,7 @@ message DeleteEvpnRouteRequest {
   // ethernet_tag + MAC + optional IP (Type 2), originator IP (Type 3),
   // or IP prefix (Type 5).
   uint32 route_type = 1;
+  // Required RD: structured text or 0x/0X plus 16 hex digits.
   string rd = 2;
   // Ethernet Tag ID (decimal). Must be 0 for Type 5 withdrawals.
   uint32 ethernet_tag = 3;
@@ -4046,6 +4795,11 @@ service ControlService {
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
   // Answers only that the authenticated gRPC handler is serving; no actor readiness or topology.
   rpc CheckLiveness(CheckLivenessRequest) returns (CheckLivenessResponse);
+  // Fails UNAVAILABLE when a core actor misses the 200 ms probe deadline. The
+  // miss may be transient (busy, as while a reload settles) or persistent (a
+  // wedged actor): retry once and treat a repeated miss as a failure. Other
+  // core snapshot failures (closed actor channel, dropped reply, stalled
+  // readiness transition or release) fail INTERNAL.
   rpc GetHealth(HealthRequest) returns (HealthResponse);
   rpc GetMetrics(MetricsRequest) returns (MetricsResponse);
   rpc TriggerMrtDump(TriggerMrtDumpRequest) returns (TriggerMrtDumpResponse);
@@ -4193,6 +4947,8 @@ message EvpnRuntimeState {
   string message = 8;
 }
 
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
 enum EvpnRuntimeLifecycle {
   EVPN_RUNTIME_LIFECYCLE_UNKNOWN = 0;
   EVPN_RUNTIME_LIFECYCLE_ACTIVE = 1;
@@ -4201,6 +4957,9 @@ enum EvpnRuntimeLifecycle {
   EVPN_RUNTIME_LIFECYCLE_DEGRADED = 4;
 }
 
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+// buf:lint:ignore ENUM_VALUE_PREFIX
 enum EvpnRuntimeMutationState {
   EVPN_RUNTIME_MUTATION_UNKNOWN = 0;
   EVPN_RUNTIME_MUTATION_DISABLED = 1;
@@ -4213,6 +4972,9 @@ message ListEvpnInstancesRequest {}
 
 message ListEvpnInstancesResponse {
   repeated EvpnInstanceState instances = 1;
+  // Host-wide L2 apply failures (BUM, AC, managed netdev), including when no EVI exists.
+  uint64 unscoped_apply_failure_count = 2;
+  string latest_unscoped_permanent_apply_error = 3;
 }
 
 message ListManagedNetdevsRequest {}
@@ -4221,6 +4983,8 @@ message ListManagedNetdevsResponse {
   repeated ManagedNetdevState netdevs = 1;
 }
 
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
 enum ManagedNetdevClass {
   MANAGED_NETDEV_CLASS_UNKNOWN = 0;
   MANAGED_NETDEV_CLASS_BRIDGE = 1;
@@ -4231,6 +4995,9 @@ enum ManagedNetdevClass {
   MANAGED_NETDEV_CLASS_SVD_VXLAN = 6;
 }
 
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+// buf:lint:ignore ENUM_VALUE_PREFIX
 enum ManagedNetdevLifecycleState {
   MANAGED_NETDEV_STATE_UNKNOWN = 0;
   MANAGED_NETDEV_STATE_DESIRED_ABSENT = 1;
@@ -4333,10 +5100,13 @@ message EthernetSegmentState {
   // Configured DF algorithm (`default-modulo`, `hrw`,
   // `highest-preference`, or `lowest-preference`).
   string df_algorithm = 4;
-  // Configured DF preference value advertised for preference-based
-  // DF election.
+  // Administrative (configured) DF preference for preference-based DF
+  // election. While RFC 9785 non-revertive recovery inherits another PE's
+  // preference, `advertised_df_preference` differs from this field.
   uint32 df_preference = 5;
-  // RFC 9785 Don't-Preempt bit configured for this segment.
+  // Administrative RFC 9785 Don't-Preempt bit configured for this segment.
+  // `advertised_df_dont_preempt` is cleared while an inherited preference
+  // is in use.
   bool df_dont_preempt = 6;
   // Configured local Type 4 originator IP.
   string originator_ip = 7;
@@ -4360,6 +5130,22 @@ message EthernetSegmentState {
   uint32 fdb_nexthop_groups_count = 13;
   // MAC refs across those owned FDB nexthop groups.
   uint32 fdb_nexthop_ref_macs_count = 14;
+  // DF preference the local Type 4 route carries. Differs from
+  // `df_preference` while RFC 9785 non-revertive recovery inherits another
+  // PE's preference. During Don't-Preempt recovery, Type 4 publication waits
+  // and this shows the configured value until a preference is inherited.
+  // Other algorithms advertise their configured value during the DF wait.
+  uint32 advertised_df_preference = 15;
+  // Don't-Preempt bit the local Type 4 route carries. False while a
+  // preference is inherited. During Don't-Preempt recovery, Type 4 publication
+  // waits and this shows the configured value.
+  bool advertised_df_dont_preempt = 16;
+  // True while the local PE holds NonDf during its initial DF wait. All
+  // algorithms wait; only RFC 9785 Don't-Preempt recovery also delays Type 4.
+  bool df_recovery_pending = 17;
+  // Milliseconds left in that wait when the response was built; 0 when none
+  // is pending. The boot wait can extend it until EVPN sessions have synced.
+  uint64 df_recovery_remaining_ms = 18;
 }
 
 message EthernetSegmentMemberState {
@@ -4477,6 +5263,9 @@ message ApplyEvpnRuntimeResponse {
   string message = 4;
 }
 
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+// buf:lint:ignore ENUM_VALUE_PREFIX
 enum EvpnRuntimeApplyOutcome {
   EVPN_RUNTIME_APPLY_UNKNOWN = 0;
   EVPN_RUNTIME_APPLY_VALIDATED = 1;
@@ -4513,7 +5302,7 @@ message IpVrfState {
   string name = 1;
   // L3VNI (RFC 9136 §4.4.2 symmetric Interface-less IRB).
   uint32 vni = 2;
-  // Route Distinguisher in canonical textual form (RFC 4364 §4.2).
+  // Lossless RD text; small-ASN Type 2 RDs use 0x plus 16 hex digits.
   string rd = 3;
   // Bidirectional Route Targets (import + export).
   repeated string route_targets = 4;
@@ -4570,6 +5359,10 @@ message IpVrfState {
 
 // Coarse readiness verdict for an IP-VRF. The detailed predicate
 // failures are surfaced as `not_ready_reasons` on `IpVrfState`.
+//
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+// buf:lint:ignore ENUM_VALUE_PREFIX
 enum IpVrfReadinessState {
   // No probe verdict is on file yet. The two real cases:
   // (a) cold start — the daemon-side snapshot reader has not yet
@@ -4591,6 +5384,10 @@ enum IpVrfReadinessState {
 // `instance_status` report when one exists. Bound instances with no
 // report yet surface as UNKNOWN; unbound instances are UNBOUND even
 // before the reconciler reports.
+//
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+// buf:lint:ignore ENUM_VALUE_PREFIX
 enum EvpnInstanceReadinessState {
   // No dataplane verdict is on file for this bound instance yet. The
   // usual cases are cold start before the first reconcile report, or
@@ -4615,7 +5412,7 @@ enum EvpnInstanceReadinessState {
 message EvpnInstanceState {
   // 24-bit VNI (RFC 8365 §5).
   uint32 vni = 1;
-  // Route Distinguisher in canonical textual form (RFC 4364 §4.2).
+  // Lossless RD text; small-ASN Type 2 RDs use 0x plus 16 hex digits.
   string rd = 2;
   // Bidirectional Route Targets — RFC 4360 §4 / RFC 5668 §2 textual form.
   repeated string route_targets = 3;
@@ -4642,7 +5439,32 @@ message EvpnInstanceState {
   string not_ready_reason = 9;
   // Optional local Linux bridge VLAN selector (`1..=4094`) configured
   // by `[[evpn_instances]].bridge_vlan`. This is a dataplane
-  // attribution key only; EVPN Ethernet Tag ID remains zero in the
-  // ADR-0089 v1 service model.
+  // attribution key only, never the EVPN Ethernet Tag (`ethernet_tag`).
   optional uint32 bridge_vlan = 10;
+  // Current remote Type 1 EAD-per-EVI, Type 2 and Type 3 IMET routes that
+  // select this instance (by VNI and route target, or for a VLAN-aware
+  // bundle member by route target and Ethernet Tag) but that the VTEP does
+  // not program, by reason, sorted by reason. Omitted reasons are zero.
+  // Mirrors `evpn_l2_remote_route_drops{vni,reason}`; the routes stay in
+  // Adj-RIB-In and are still reflected.
+  repeated EvpnInstanceRemoteRouteDropCount remote_route_drop_counts = 11;
+  // EVPN service interface (ADR-0092): "vlan_based" or "vlan_aware_bundle",
+  // as configured by `[[evpn_instances]].service_interface`.
+  string service_interface = 12;
+  // EVPN Ethernet Tag this instance originates and imports L2 routes under:
+  // 0 for "vlan_based", the member tag for "vlan_aware_bundle".
+  uint32 ethernet_tag = 13;
+  // Still-current Linux L2 apply failures for this VNI, including operations
+  // suppressed after a permanent error or waiting for transient backoff.
+  uint64 current_apply_failure_count = 14;
+  // Latest still-current permanent apply error for this VNI (bounded). Empty
+  // when no permanent failure remains. Host-wide operations are excluded.
+  string latest_permanent_apply_error = 15;
+}
+
+message EvpnInstanceRemoteRouteDropCount {
+  // Stable bounded projection reason label, e.g. "ethernet_tag_mismatch".
+  string reason = 1;
+  // Current number of remote routes dropped for `reason`.
+  uint64 count = 2;
 }

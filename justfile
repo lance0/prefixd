@@ -11,6 +11,7 @@ default:
 gate:
     just fmt
     just python
+    just proto
     just clippy
     just test
     just msrv
@@ -28,6 +29,11 @@ fmt:
 python:
     uvx ruff@{{ruff_version}} check .
     uvx ruff@{{ruff_version}} format --check .
+
+# Offline: the pinned rustbgpd proto must match its release checksum asset.
+[working-directory: "proto"]
+proto:
+    sha256sum --check --strict rustbgpd.proto.sha256
 
 clippy-gobgp:
     cargo clippy --locked --no-default-features --all-targets -- -D warnings

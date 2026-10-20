@@ -159,6 +159,8 @@ impl pb::injection_service_server::InjectionService for Fake {
         auth(&request)?;
         let request = request.into_inner();
         assert!(request.allow_missing);
+        // prefixd injects unowned rules, so the lease fields stay unset.
+        assert!(request.owner.is_empty() && !request.override_owner);
         match self.mode.load(SeqCst) {
             4 => return Err(Status::not_found("absent")),
             5 => return Ok(Response::new(pb::DeleteFlowSpecResponse { outcome: 0 })),
@@ -805,7 +807,7 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
         let mut paths = self.paths.lock().unwrap();
         paths.retain(|old| !same_key(old, &request.prefix, request.prefix_length));
         paths.push(request);
-        Ok(Response::new(pb::AddPathResponse {}))
+        Ok(Response::new(pb::AddPathResponse::default()))
     }
 
     async fn delete_path(
@@ -815,6 +817,8 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
         auth(&request)?;
         let request = request.into_inner();
         assert_eq!(request.path_id, 0);
+        // Every qualified release must see the same request: no 0.79.0+ field is set.
+        assert!(!request.allow_missing && request.owner.is_empty() && !request.override_owner);
         match self.mode.load(SeqCst) {
             DELETE_NOT_FOUND => return Err(Status::not_found("absent")),
             DELETE_DENIED => return Err(Status::permission_denied("denied")),
@@ -828,7 +832,7 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
             // The released daemon has no allow_missing: a missing path is NOT_FOUND.
             return Err(Status::not_found("no injected path"));
         }
-        Ok(Response::new(pb::DeletePathResponse {}))
+        Ok(Response::new(pb::DeletePathResponse::default()))
     }
 }
 

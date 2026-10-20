@@ -241,9 +241,14 @@ namespace owner. Selecting a different profile on existing state requires the
 Initial network connections and TLS handshakes have a ten-second budget;
 complete RPC attempts are bounded separately.
 
-The relevant vendored controller message fields were checked against rustbgpd
-`v0.79.0`. This is a protocol baseline, not proof that an arbitrary binary
-reporting that version has passed the deployment or router tests.
+`proto/rustbgpd.proto` is the unmodified `rustbgpd.proto` asset of the
+rustbgpd `v0.79.0` release, checked offline against the release's sha256 by
+`just proto`. The controller message fields prefixd uses were checked against
+it. This is a protocol baseline, not proof that an arbitrary binary reporting
+that version has passed the deployment or router tests. The stubs follow the
+pinned release, but v0.76.0 remains the minimum daemon: prefixd leaves fields
+and RPCs added after it unset and unused until a change adopts them behind a
+version or capability check.
 
 ## Released controller qualification
 
