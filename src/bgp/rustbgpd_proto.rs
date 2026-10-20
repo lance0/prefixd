@@ -9,11 +9,11 @@
 //! both assets of the new release, run `shasum -a 256 --check` on them, copy both
 //! here and update this comment.
 //!
-//! The generated stubs follow the pinned release, but the controller contract
-//! does not: v0.76.0 is still the minimum daemon. Fields and RPCs newer than
-//! that stay unset and unused until a change adopts them behind a version or
-//! capability check. The stubs are compiled only when the `bgp-rustbgpd`
-//! feature is on, so the GoBGP and rustbgpd backends can coexist.
+//! The generated stubs follow the pinned release. v0.79.0 is the minimum
+//! daemon, and `RustBgpdAnnouncer::connect` refuses anything older. Fields and
+//! RPCs newer than the minimum stay unset and unused until a change adopts
+//! them and raises the minimum. The stubs are compiled only when the
+//! `bgp-rustbgpd` feature is on, so the GoBGP and rustbgpd backends can coexist.
 #[cfg(feature = "bgp-rustbgpd")]
 pub mod rustbgpd_pb {
     #![allow(
@@ -103,7 +103,7 @@ mod tests {
         assert_eq!(pb::AddressFamily::Ipv4Unicast as i32, 1);
         assert_eq!(pb::AddressFamily::Ipv6Unicast as i32, 2);
 
-        // upsert keyed on (prefix, prefix_length, path_id); before 0.79.0 the reply has no outcome
+        // upsert keyed on (prefix, prefix_length, path_id); prefixd does not read the outcome yet
         let add = pb::AddPathRequest {
             prefix: "192.0.2.1".into(),
             prefix_length: 32,
@@ -120,7 +120,7 @@ mod tests {
         assert_eq!(add.path_id, 0);
         let _: pb::AddPathResponse = pb::AddPathResponse::default();
 
-        // allow_missing is 0.79.0+ and stays unset: a missing path is NOT_FOUND
+        // allow_missing stays unset: a missing path is NOT_FOUND
         let delete = pb::DeletePathRequest {
             prefix: add.prefix,
             prefix_length: 32,

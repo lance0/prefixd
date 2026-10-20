@@ -148,9 +148,6 @@ Check these on the release candidate before opening the release PR:
       `just speakers`. To rerun them alone:
 
       ```bash
-      PREFIXD_RUSTBGPD_TEST_VERSION=0.76.0 scripts/test-rustbgpd.sh
-      PREFIXD_RUSTBGPD_TEST_VERSION=0.77.0 scripts/test-rustbgpd.sh
-      PREFIXD_RUSTBGPD_TEST_VERSION=0.78.0 scripts/test-rustbgpd.sh
       PREFIXD_RUSTBGPD_TEST_VERSION=0.79.0 scripts/test-rustbgpd.sh
       ```
 

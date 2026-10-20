@@ -128,7 +128,7 @@ CPU and job budget:
 | Strict Rust lint | `cargo clippy --locked --all-targets --all-features -- -D warnings` |
 | GoBGP-only backend tests | `cargo test --locked --no-default-features --features test-utils` |
 | All-feature backend tests | `cargo test --locked --all-features` |
-| Released rustbgpd fixtures | `scripts/test-rustbgpd.sh` and `PREFIXD_RUSTBGPD_TEST_VERSION=0.76.0 scripts/test-rustbgpd.sh` |
+| Released rustbgpd fixtures | `scripts/test-rustbgpd.sh` (the 0.79.0 minimum and pin) |
 | Frontend checks, in `frontend/` | `bun install --frozen-lockfile`, `bun run test`, `bun run build`, `bun audit` |
 | Rust dependency advisories | `cargo audit`; compare findings with the documented CI exceptions |
 | Python lint and format | `just python` |

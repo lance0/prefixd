@@ -831,16 +831,9 @@ struct LeasedHarness {
 }
 
 impl LeasedHarness {
-    async fn start() -> Option<Self> {
+    async fn start() -> Self {
         use prefixd::db::RepositoryTrait;
         let fixture = fixture::Speaker::start().await;
-        if !fixture.has_injection_lease() {
-            eprintln!(
-                "rustbgpd {} has no injection lease; leased test skipped",
-                fixture.version()
-            );
-            return None;
-        }
         let speaker = std::sync::Arc::new(fixture.connect().await);
         let repo = std::sync::Arc::new(prefixd::db::MockRepository::new());
         let mut settings = fixture_settings(&fixture, "leased-live");
@@ -856,13 +849,13 @@ impl LeasedHarness {
         repo.insert_safelist("198.18.0.0/15", "config", None)
             .await
             .unwrap();
-        Some(Self {
+        Self {
             fixture,
             speaker,
             repo,
             settings,
             binding,
-        })
+        }
     }
 
     /// What a controller does at startup: probe, adopt and refuse collisions.
@@ -954,9 +947,7 @@ async fn live_rustbgpd_leased_blackhole_renewal_restart_and_expiry() {
         domain::{ActionParams, ActionType, MatchCriteria, MitigationIntent, MitigationStatus},
     };
     use std::time::Duration;
-    let Some(harness) = LeasedHarness::start().await else {
-        return;
-    };
+    let harness = LeasedHarness::start().await;
     let owner = harness.binding.owner();
     let inventory = Inventory::new(vec![Customer {
         customer_id: "leased-live".into(),
@@ -1204,65 +1195,6 @@ async fn live_rustbgpd_leased_blackhole_renewal_restart_and_expiry() {
     assert!(harness.ours().await.is_empty());
 }
 
-/// Before 0.79.0 the lease probe reports no capability, a leased configuration
-/// refuses startup, and a leased add creates nothing and never falls back.
-#[tokio::test]
-#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
-async fn live_rustbgpd_without_lease_refuses_leased_startup() {
-    use prefixd::bgp::BlackholeSpeaker;
-    let fixture = fixture::Speaker::start().await;
-    if fixture.has_injection_lease() {
-        eprintln!(
-            "rustbgpd {} has the injection lease; older-daemon test skipped",
-            fixture.version()
-        );
-        return;
-    }
-    let speaker = fixture.connect().await;
-    let repo = prefixd::db::MockRepository::new();
-    prefixd::db::RepositoryTrait::insert_safelist(&repo, "198.18.0.0/15", "config", None)
-        .await
-        .unwrap();
-    let keeper = prefixd::domain::LeaseKeeper::new("prefixd.old.0123456789abcdef".into(), 60);
-    assert!(!keeper.recover(&speaker).await.unwrap());
-    assert!(
-        !(&speaker as &dyn FlowSpecAnnouncer)
-            .capabilities()
-            .blackhole_lease
-    );
-    let error = prefixd::guardrails::check_blackhole_startup(&leased_config(), &speaker, &repo)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("injection lease"), "{error}");
-    // Leased FlowSpec is refused the same way, and its leased add creates nothing.
-    let mut settings = fixture_settings(&fixture, "older-lease");
-    settings.bgp.rustbgpd.as_mut().unwrap().leased_flowspec = true;
-    let error =
-        prefixd::guardrails::check_lease_startup(&settings, &speaker, &repo, keeper.owner())
-            .await
-            .unwrap_err()
-            .to_string();
-    assert!(error.contains("0.79.0"), "{error}");
-    let mut leased_rule = rule().with_owner(keeper.owner());
-    leased_rule.nlri.dst_prefix = "192.0.2.243/32".into();
-    assert!(speaker.announce_leased(&leased_rule, 60).await.is_err());
-    assert!(speaker.list_active().await.unwrap().is_empty());
-    let route = prefixd::bgp::BlackholeRoute::new(
-        "192.0.2.242/32".parse().unwrap(),
-        "192.0.2.66".parse().unwrap(),
-        vec![],
-        vec![],
-    )
-    .unwrap()
-    .with_owner(keeper.owner());
-    assert!(speaker.announce_leased_blackhole(&route, 60).await.is_err());
-    assert_eq!(
-        speaker.list_blackholes().await.unwrap(),
-        prefixd::bgp::BlackholeInventory::default()
-    );
-}
-
 /// Leased FlowSpec on the released daemon: rules join the same owner lease and
 /// generation as blackholes; a prefixd restart within the lease adopts it with
 /// no duplicate state; a prefixd stop past the lease lets the daemon expire
@@ -1280,9 +1212,7 @@ async fn live_rustbgpd_leased_flowspec_renewal_restart_and_expiry() {
         },
     };
     use std::time::Duration;
-    let Some(mut harness) = LeasedHarness::start().await else {
-        return;
-    };
+    let mut harness = LeasedHarness::start().await;
     harness
         .settings
         .bgp

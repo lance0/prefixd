@@ -3,6 +3,7 @@
 ## Status
 
 Accepted; refreshed 2026-10-18. Updates [ADR 001](001-gobgp-sidecar.md).
+The minimum controller version rose to rustbgpd v0.79.0 on 2026-10-20.
 GoBGP remains supported under [ADR 025](025-pluggable-speaker-backends.md).
 
 ## Date
@@ -65,11 +66,13 @@ listing modes. Existing pre-v1 compatibility rules apply during 0.x. This does
 not promote receive-side diagnostics/validation, `Config.flowspec`, or general
 GR/LLGR guarantees into that controller contract.
 
-The release gate for the controller promotion is resolved: v0.76.0, v0.77.0,
-v0.78.0 and v0.79.0 contain ADR 0139. The minimum controller version is v0.76.0;
-the current qualification pin is v0.79.0. Immutable image identities live in
+The release gate for the controller promotion is resolved: v0.79.0 contains
+ADR 0139 and adds the injection lease (rustbgpd ADR-0141). It is the minimum
+controller version and the current qualification pin. prefixd reads the daemon
+version from `GetHealth` at startup and refuses an older or unreadable one. The
+immutable image identity lives in
 [the release fixture](../../tests/fixtures/rustbgpd/releases.json), and CI runs
-local lifecycle/TTL/restart checks on each release. Owner-only UDS and verified
+local lifecycle/TTL/restart checks on it. Owner-only UDS and verified
 client-certificate mTLS are implemented. Both secure deployment profiles have
 [dated qualification](../reference/qualification/speaker-profiles-2026-10-18.md).
 This does not qualify router enforcement.

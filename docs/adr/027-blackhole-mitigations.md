@@ -589,8 +589,9 @@ corresponding slice 9 item.
 
 - **Opt-in.** `bgp.rustbgpd.leased_flowspec`, default false and independent
   of `blackhole.leased`. Startup refuses it unless
-  `SpeakerCapabilities.blackhole_lease` is true; 0.76.0 to 0.78.0 answer the
-  probe with `UNIMPLEMENTED`.
+  `SpeakerCapabilities.blackhole_lease` is true; releases before 0.79.0
+  answer the probe with `UNIMPLEMENTED`, and startup now refuses them
+  outright.
 - **One lease.** New enforced FlowSpec rules use `AddLeasedFlowSpec` with the
   same owner, `blackhole.lease_seconds`, renewal task and generation as
   blackholes. Any leased add moves the owner's whole deadline, so a second

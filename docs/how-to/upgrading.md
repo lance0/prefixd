@@ -164,6 +164,23 @@ External Rust implementations must implement `FlowSpecWriter` and
 facade accessors where supported. Import those traits for concrete adapter calls.
 A production write-only backend remains gated on a durable announcement ledger.
 
+## rustbgpd minimum version
+
+prefixd requires rustbgpd 0.79.0 or later. At startup it reads the version
+that rustbgpd's `GetHealth` reports and exits before reading or writing any
+intent if the daemon is older or reports no readable version:
+
+```text
+rustbgpd 0.78.0 is older than the minimum 0.79.0; upgrade the speaker first
+```
+
+Upgrade rustbgpd before prefixd. A rustbgpd restart drops its injected rules;
+the running controller re-adds desired rules on its next reconciliation poll.
+Then upgrade prefixd as usual. Don't roll rustbgpd back below 0.79.0 under a
+newer prefixd: the next start refuses, and a running controller treats the
+lease RPCs as unsupported, so leased adds fail and create nothing. GoBGP is
+unaffected.
+
 ## Controller fence and rolling deploys
 
 Each controller derives a stable owner, `prefixd.<pop>.<hash>`, from its POP and

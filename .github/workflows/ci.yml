@@ -117,7 +117,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ["0.76.0", "0.77.0", "0.78.0", "0.79.0"]
+        version: ["0.79.0"]
     env:
       PREFIXD_RUSTBGPD_TEST_VERSION: ${{ matrix.version }}
     steps:
