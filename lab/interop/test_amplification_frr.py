@@ -11,7 +11,7 @@ import json
 import unittest
 from pathlib import Path
 
-from amplification_frr import LENGTH, LIBRARY, over_limit, response, source_rule
+from amplification_frr import LENGTH, LIBRARY, admission, over_limit, response, source_rule
 from flowspec_frr import ordered, parse_frr
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "amplification"
@@ -66,6 +66,19 @@ class OracleTests(unittest.TestCase):
         self.assertEqual(over_limit(CHUNKED), [])
         # The lab configuration's max_ports 8 produces rules FRR 10.7.1 refuses.
         self.assertEqual(len(over_limit(response("203.0.113.61", LIBRARY, 8))), 2)
+
+    def test_admission_reorders_without_changing_rules(self):
+        # Step 05 ranks the library highest port first (ADR 028 admission order).
+        ranked = admission(CHUNKED, list(reversed(LIBRARY)))
+        self.assertEqual(ordered(ranked), ordered(CHUNKED))
+        self.assertEqual(
+            [r.get("srcp", "frag").split(",")[0] for r in ranked],
+            ["=5683", "frag", "=1434", "=137", "=17"],
+        )
+        # Negative control: playbook order is no longer what prefixd returns.
+        self.assertNotEqual(ranked, CHUNKED)
+        # One chunk: the rule order is unchanged.
+        self.assertEqual(admission(NTP_MEMCACHED, [11211, 123]), NTP_MEMCACHED)
 
     def test_different_source_port_set_is_a_diff(self):
         for ports in ([123], [123, 11211, 53], [124, 11211]):
