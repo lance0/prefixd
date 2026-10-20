@@ -759,17 +759,19 @@ receiving router's import policy or the speaker's export policy, not with
 blackhole keeps the next hop and communities it was admitted with, so a
 configuration change affects only new blackholes.
 
-`next_hop_ipv4` and `next_hop_ipv6` refuse `0.0.0.0` and `::`, which speakers
-commonly read as next-hop-self: RTBH needs the discard next hop that the edge
-routers map to null.
+`next_hop_ipv4` and `next_hop_ipv6` refuse `0.0.0.0` and `::`, which speakers,
+including rustbgpd from 0.79.0, read as next-hop-self: RTBH needs the discard
+next hop that the edge routers map to null.
 
-> **RPKI export filters.** A blackhole `/32` or `/128` is longer than its
-> covering ROA's maxLength, so it is almost always RPKI-Invalid. If your
-> speaker validates locally injected routes, or a router on the path
-> validates them, an export policy that drops RPKI-Invalid routes toward the
-> RTBH peers drops every blackhole silently: the add succeeds and nothing
-> reaches the edge. Exempt the blackhole community or the RTBH peers from
-> RPKI-Invalid filtering on export, then test one ban end to end.
+> **RPKI filters.** A blackhole `/32` or `/128` is longer than its covering
+> ROA's maxLength, so wherever it is validated with an origin AS it is
+> RPKI-Invalid. rustbgpd 0.79.0 rates prefixd's injected routes NotFound,
+> because they carry no AS_PATH, but a router that receives them rates them
+> Invalid with the speaker's AS as origin. A policy there that drops
+> RPKI-Invalid before it accepts BLACKHOLE drops every blackhole silently:
+> the add succeeds and nothing reaches the edge. Match BLACKHOLE ahead of any
+> Invalid filter, or exempt the RTBH sessions, then test one ban end to end
+> ([RPKI blackhole receipt](qualification/blackhole-rpki-frr-2026-10-20.md)).
 
 Blackhole guardrails are stricter than FlowSpec's and do not use the
 `guardrails` prefix bounds or the `timers` TTL bounds. A blackhole is an IPv4

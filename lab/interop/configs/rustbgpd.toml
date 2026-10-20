@@ -29,6 +29,21 @@ prefixd-lab = "operator"
 [flowspec]
 validation = "off"
 
+# The rtr node's lab ROAs. retry_interval keeps the start order loose.
+[rpki]
+[[rpki.cache_servers]]
+address = "127.0.0.1:8282"
+retry_interval = 5
+
+# Export drops RPKI-Invalid routes, as operators commonly configure. prefixd's
+# blackholes carry no AS_PATH, so rustbgpd rates them NotFound and they pass.
+[policy.definitions.reject-rpki-invalid]
+default_action = "permit"
+
+[[policy.definitions.reject-rpki-invalid.statements]]
+match_rpki_validation = "invalid"
+action = "deny"
+
 [policy.definitions.reject-edge-routes]
 default_action = "deny"
 
@@ -37,7 +52,7 @@ default_action = "permit"
 
 [policy]
 import_chain = ["reject-edge-routes"]
-export_chain = ["distribute-mitigation"]
+export_chain = ["reject-rpki-invalid", "distribute-mitigation"]
 
 [[neighbors]]
 address = "10.0.0.2"

@@ -1,0 +1,20 @@
+{
+  "metadata": {
+    "generated": 1760918400,
+    "valid": 1760918400
+  },
+  "roas": [
+    {
+      "asn": "AS65010",
+      "prefix": "203.0.113.0/24",
+      "maxLength": 24,
+      "ta": "prefixd-lab"
+    },
+    {
+      "asn": "AS65010",
+      "prefix": "2001:db8:113::/48",
+      "maxLength": 48,
+      "ta": "prefixd-lab"
+    }
+  ]
+}

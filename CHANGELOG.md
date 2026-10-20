@@ -320,10 +320,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the minimum and the only version CI tests. Every controller field prefixd
   reads or writes is unchanged in 0.79.0.
 
-- rustbgpd 0.79.0 changes for operators: it validates a blackhole route
-  against RPKI when prefixd adds it, so an export policy that drops
-  RPKI-Invalid routes now drops a `/32` or `/128` blackhole at once instead
-  of after the next VRP change. Its Prometheus series rename the `afi_safi`
+- rustbgpd 0.79.0 changes for operators: it validates an injected route
+  against RPKI when it is added, but prefixd's blackholes carry no AS_PATH,
+  so rustbgpd rates them NotFound and its own Invalid export filters pass
+  them. A router that validates them rates them Invalid with the speaker's AS
+  as origin; see the
+  [RPKI blackhole receipt](docs/reference/qualification/blackhole-rpki-frr-2026-10-20.md).
+  Its Prometheus series rename the `afi_safi`
   and `scope` labels to `family` (plus `stage` on max-prefix series) with no
   overlap, so update your own rustbgpd dashboards and alerts with the
   upgrade. A rustbgpd config with an `[event_history]` section no longer

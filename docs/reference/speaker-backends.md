@@ -548,13 +548,18 @@ commonly read as next-hop-self, as `AddPath` does from rustbgpd 0.79.0: RTBH
 needs the discard next hop that the edge routers map to null. A local row with
 an unspecified next hop is reported as unrecognized, never adopted.
 
-**RPKI export filters.** A blackhole `/32` or `/128` is longer than its
-covering ROA's maxLength, so it is almost always RPKI-Invalid. If your speaker
-validates locally injected routes, or a router on the path validates them, an
-export policy that drops RPKI-Invalid routes toward the RTBH peers drops every
-blackhole silently: the add succeeds and nothing reaches the edge. Exempt the
-blackhole community or the RTBH peers from RPKI-Invalid filtering on export,
-then test one ban end to end.
+**RPKI filters.** A blackhole `/32` or `/128` is longer than its covering
+ROA's maxLength, so wherever it is validated with an origin AS it is
+RPKI-Invalid. rustbgpd 0.79.0 validates injected routes, but prefixd injects
+with an empty AS_PATH, which has no origin AS, so rustbgpd stores them as
+NotFound and its own Invalid export filters pass them. A router that
+receives the route validates it with the speaker's AS as origin, and a
+policy there that drops RPKI-Invalid before it accepts BLACKHOLE drops every
+blackhole silently: the add succeeds and nothing reaches the edge. Match
+BLACKHOLE ahead of any Invalid filter, or exempt the RTBH sessions, on every
+validating hop, then test one ban end to end. The
+[RPKI blackhole receipt](qualification/blackhole-rpki-frr-2026-10-20.md)
+shows each case at rustbgpd 0.79.0 and FRR 10.7.1.
 
 ## Remaining backend work
 

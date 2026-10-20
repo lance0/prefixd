@@ -42,6 +42,22 @@ topology:
         - configs/rustbgpd.toml:/etc/rustbgpd/config.toml:ro
         - .run/prefixd-frr-rustbgpd/rustbgpd.token:/run/lab/rustbgpd.token:ro
 
+    # RTR cache (StayRTR 0.6.4) serving the lab customer's ROAs on port 8282
+    # in the shared namespace: rustbgpd connects over loopback and FRR, in the
+    # blackhole scenario's RPKI steps, over 10.0.0.1.
+    rtr:
+      kind: linux
+      image: rpki/stayrtr@sha256:cdb93c0b661d97179a5525e00caf7d9e693a04da3b9002f7e24bebb194d9a77b
+      network-mode: container:postgres
+      stages:
+        create:
+          wait-for:
+            - node: postgres
+              stage: create
+      cmd: -cache /data/vrps.json -bind :8282 -checktime=false -refresh 30
+      binds:
+        - configs/rpki-vrps.json:/data/vrps.json:ro
+
     # Started by run-frr.sh once the database and speaker are ready.
     # Not named "prefixd": containerlab 0.74.3 then fails to resolve the
     # network-mode container, apparently because the lab name has that prefix.

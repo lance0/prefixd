@@ -11,7 +11,12 @@ watched host route is in an exact state at FRR:
   blackhole, and a kernel route of type blackhole.
 - absent: no BGP path, no BGP route in zebra and no kernel route.
 
-Anything else is "other". The receipt directory gets receipt.json, summary.md,
+Anything else is "other". The RPKI steps add the rtr node's ROAs for the lab
+customer (203.0.113.0/24 and 2001:db8:113::/48, maxLength 24 and 48, AS 65010),
+so every blackhole host route is RPKI-Invalid for that origin. They check a ban
+under a speaker export chain that drops Invalid, under an FRR import policy that
+exempts BLACKHOLE from its Invalid filter, and under one that drops Invalid
+first. The receipt directory gets receipt.json, summary.md,
 commands.log and the raw FRR and kernel JSON of every step. Secrets are never
 written to it. This is control-plane evidence at FRR only: no packets are
 forwarded and no vendor forwarding is claimed.
@@ -40,6 +45,11 @@ CONTROLLER_START = (
     "echo $$ >/tmp/prefixd.pid; exec prefixd --config /etc/prefixd >>/tmp/prefixd.log 2>&1"
 )
 ADMIN = "interop-admin"
+# rbgp in the speaker container, over the lab's loopback gRPC listener. The
+# token stays in its file; only the path appears in the command log.
+RBGP = ("rbgp", "-s", "http://127.0.0.1:50051", "--token-file", "/run/lab/rustbgpd.token", "-j")
+RTR = "rpki cache tcp 10.0.0.1 8282 preference 1"
+SPEAKER_ASN = 65010
 
 
 def family(prefix):
@@ -53,6 +63,23 @@ def host(victim):
 def _community(value):
     """FRR names RFC 7999 BLACKHOLE "blackhole"; compare numerically."""
     return "65535:666" if value == "blackhole" else value
+
+
+def find(value, key):
+    """Every value of key anywhere in a JSON document, depth first."""
+    if isinstance(value, dict):
+        for name, item in value.items():
+            if name == key:
+                yield item
+            yield from find(item, key)
+    elif isinstance(value, list):
+        for item in value:
+            yield from find(item, key)
+
+
+def frr_rpki_states(bgp):
+    """FRR's per-path RPKI state, from `show bgp <afi> unicast <prefix> json`."""
+    return [path.get("rpkiValidationState") for path in bgp.get("paths") or []]
 
 
 def classify(prefix, bgp, rib, fib, communities=FRR_COMMUNITIES):
@@ -267,6 +294,61 @@ class BlackholeLab(Lab):
             assert time.monotonic() < deadline, "prefixd did not stop within 30s"
             time.sleep(1)
 
+    def rbgp(self, *args):
+        """rbgp's JSON output; a failure reports rbgp's own error."""
+        command = ("docker", "exec", self.args.speaker_container, *RBGP, *args)
+        self.log("$ " + " ".join(command))
+        result = subprocess.run(command, text=True, capture_output=True, timeout=60)
+        assert result.returncode == 0, f"{' '.join(args)}: {result.stderr.strip()}"
+        return json.loads(result.stdout or "null")
+
+    def frr_configure(self, *lines):
+        command = ["docker", "exec", self.args.frr, "vtysh", "-c", "configure terminal"]
+        for line in lines:
+            command += ["-c", line]
+        self.run(*command)
+
+    def soft_in(self):
+        for afi in ROUTE_MAPS:
+            self.run(
+                "docker",
+                "exec",
+                self.args.frr,
+                "vtysh",
+                "-c",
+                f"clear bgp {afi} unicast {SPEAKER_ADDRESS} soft in",
+            )
+
+    def rpki_filter(self, seq, present):
+        """Add or remove `deny <seq> match rpki invalid` in both import route-maps."""
+        for name in ROUTE_MAPS.values():
+            if present:
+                self.frr_configure(f"route-map {name} deny {seq}", "match rpki invalid", "exit")
+            else:
+                self.frr_configure(f"no route-map {name} deny {seq}")
+        self.soft_in()
+
+    def frr_rpki(self, prefixes):
+        """{prefix: FRR RPKI states of its paths}."""
+        return {
+            prefix: frr_rpki_states(
+                json.loads(self.vtysh(f"show bgp {family(prefix)} unicast {prefix} json") or "{}")
+            )
+            for prefix in prefixes
+        }
+
+    def announce_outcomes(self, ids):
+        """{mitigation_id: [audited speaker add outcomes, oldest first]}."""
+        entries = self.api("GET", "/v1/audit?limit=1000")["entries"]
+        return {
+            m: [
+                e["details"]["outcome"]
+                for e in reversed(entries)
+                if e["action"] == "announce" and e["target_id"] == m
+            ]
+            for m in ids
+        }
+
     def start_controller(self):
         self.run("docker", "exec", "-d", self.args.controller, "sh", "-c", CONTROLLER_START)
         self.wait_ready()
@@ -339,7 +421,14 @@ class BlackholeLab(Lab):
         assert repaired >= 2, (
             f"expected prefixd to repair 2 blackholes, repairs metric moved {repaired}"
         )
-        self.steps[-1].update(reconciliation_repairs=repaired, timeline_after_start=timeline)
+        # The restart lost the routes, so each repair is a new local route again.
+        outcomes = self.announce_outcomes(ids)
+        assert all(o[0] == "created" and o[-1] == "created" for o in outcomes.values()), outcomes
+        self.steps[-1].update(
+            reconciliation_repairs=repaired,
+            timeline_after_start=timeline,
+            audited_add_outcomes=outcomes,
+        )
 
         self.bstep(
             "withdraw",
@@ -398,7 +487,94 @@ class BlackholeLab(Lab):
             seconds=90,
         )
         assert [self.status(m) for m in created] == ["expired", "expired"]
+
+        self.rpki_steps()
         self.wait_states(f"{self.step_no:02d}-end", {**gone, **never})
+
+    def rpki_steps(self):
+        victims = ("203.0.113.53", "2001:db8:113::53")
+        held = {host(v): "discard" for v in victims}
+        dropped = {prefix: "absent" for prefix in held}
+        caches = self.rbgp("rpki", "caches")
+        (self.receipt / "rpki-speaker-caches.json").write_text(json.dumps(caches, indent=2) + "\n")
+
+        # The speaker's export chain drops RPKI-Invalid routes for the whole run
+        # (configs/rustbgpd.toml). Control: the same host route injected with an
+        # AS_PATH has an origin to validate, so the speaker withholds it.
+        control = host("203.0.113.54")
+
+        def speaker_drops_invalid():
+            self.rbgp(
+                "rib",
+                "add",
+                control,
+                "--next-hop",
+                NEXT_HOPS["ipv4"],
+                "--as-path",
+                str(SPEAKER_ASN),
+                "--communities",
+                "65010:666,BLACKHOLE",
+            )
+            return [self.blackhole(v, 600) for v in victims]
+
+        ids = self.bstep(
+            "rpki-speaker-drops-invalid", speaker_drops_invalid, {**held, control: "absent"}
+        )
+        # Give the control route time to be exported, if the filter let it through.
+        time.sleep(3)
+        self.wait_states(f"{self.step_no:02d}-rpki-control-withheld", {control: "absent"}, 1)
+        speaker = {}
+        for prefix in [*held, control]:
+            afi = f"{family(prefix)}_unicast"
+            speaker[prefix] = {
+                # The speaker's own VRP table for this prefix with the lab origin.
+                "validate_origin_65010": self.rbgp("rpki", "validate", prefix, str(SPEAKER_ASN)),
+                # The state it stores for the local route.
+                "local_validation_state": list(
+                    find(
+                        self.rbgp("rib", "received", "0.0.0.0", "-a", afi, "-p", prefix),
+                        "validation_state",
+                    )
+                ),
+            }
+        for prefix in held:
+            assert speaker[prefix]["local_validation_state"] == ["not_found"], speaker
+        assert speaker[control]["local_validation_state"] == ["invalid"], speaker
+        self.steps[-1].update(
+            speaker_export_chain=self.rbgp("policy", "chain", "show"),
+            speaker_rpki=speaker,
+            audited_add_outcomes=self.announce_outcomes(ids),
+        )
+        self.rbgp("rib", "delete", control, "--allow-missing")
+
+        # FRR validates with the speaker as origin. Its Invalid filter sits behind
+        # the BLACKHOLE permit (seq 10), so blackholes are exempt from it.
+        def router_exempts_blackhole():
+            self.frr_configure("rpki", RTR, "exit")
+            self.rpki_filter(15, present=True)
+            deadline = time.monotonic() + 60
+            while True:
+                states = self.frr_rpki(held)
+                if all(s == ["invalid"] for s in states.values()):
+                    return states
+                assert time.monotonic() < deadline, f"FRR RPKI states {states}"
+                time.sleep(1)
+
+        states = self.bstep("rpki-router-exempts-blackhole", router_exempts_blackhole, held)
+        self.steps[-1]["frr_rpki_states"] = states
+
+        # Negative control: an Invalid filter ahead of the exemption drops every ban.
+        self.bstep("rpki-router-drops-invalid", lambda: self.rpki_filter(5, present=True), dropped)
+        self.bstep("rpki-router-filter-removed", lambda: self.rpki_filter(5, present=False), held)
+        self.bstep(
+            "rpki-withdraw",
+            lambda: [
+                self.api("POST", f"/v1/mitigations/{m}/withdraw", {"reason": "interop withdrawal"})
+                for m in ids
+            ],
+            dropped,
+        )
+        assert [self.status(m) for m in ids] == ["withdrawn", "withdrawn"]
 
 
 def main():

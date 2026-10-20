@@ -17,3 +17,6 @@ bfdd=no
 fabricd=no
 vrrpd=no
 pathd=no
+# Loads the RPKI module; it validates nothing until the blackhole scenario's
+# RPKI step configures a cache.
+bgpd_options="   -A 127.0.0.1 -M rpki"

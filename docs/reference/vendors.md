@@ -153,6 +153,10 @@ separate [FRR blackhole receipt](qualification/blackhole-frr-2026-10-19.md):
 rustbgpd 0.78.0 to FRR 10.7.1 over unicast, with an import route-map that
 rewrites BLACKHOLE routes to a static discard next hop. It covers FRR's BGP
 table, zebra RIB and the container's kernel FIB, not packet forwarding.
+The [RPKI blackhole receipt](qualification/blackhole-rpki-frr-2026-10-20.md)
+repeats it on rustbgpd 0.79.0 with an RTR cache: a ban passes the speaker's
+Invalid export filter, FRR rates it Invalid, and an FRR Invalid filter drops
+it unless BLACKHOLE is matched first.
 
 Amplification rules ([ADR 028](../adr/028-amplification-matches.md)) have a
 separate [FRR amplification receipt](qualification/amplification-frr-2026-10-19.md):

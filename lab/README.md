@@ -109,12 +109,23 @@ IPv6 routes are suppressed. The steps are:
    its expiry while prefixd is stopped and the speaker is up. Manual blackholes
    are unleased, so nothing expires them without the controller. Restarting
    prefixd expires and removes them.
+8. RPKI: the `rtr` node (StayRTR) serves ROAs that make every lab host route
+   RPKI-Invalid for AS 65010, and rustbgpd's export chain drops Invalid. A
+   ban still reaches FRR as discard, because rustbgpd rates prefixd's
+   routes, which carry no AS_PATH, NotFound; a control route injected with
+   an AS_PATH is rated Invalid and withheld.
+9. FRR then validates against the same cache and rates the ban Invalid. An
+   Invalid filter after the BLACKHOLE permit keeps it as discard; one ahead
+   of the permit (negative control) removes it, and removing that filter
+   restores it.
 
 The receipt lands in `target/interop/frr-rustbgpd-blackhole-<UTC stamp>/`, with
 raw BGP, zebra and kernel JSON per prefix under `frr/`. It is control-plane and
 FIB evidence inside the FRR container; no packets are forwarded. The dated
 [FRR blackhole receipt](../docs/reference/qualification/blackhole-frr-2026-10-19.md)
-records the results.
+records the results, and the
+[RPKI blackhole receipt](../docs/reference/qualification/blackhole-rpki-frr-2026-10-20.md)
+records the RPKI steps.
 
 ### Amplification scenario
 

@@ -176,13 +176,14 @@ shows both. prefixd refuses `0.0.0.0` and `::` as next hops, which speakers
 commonly read as next-hop-self: RTBH needs the discard next hop that the edge
 routers map to null.
 
-**RPKI export filters.** A blackhole `/32` or `/128` is longer than its
-covering ROA's maxLength, so it is almost always RPKI-Invalid. If your speaker
-validates locally injected routes, or a router on the path validates them, an
-export policy that drops RPKI-Invalid routes toward the RTBH peers drops every
-blackhole silently: the ban succeeds in prefixd and nothing reaches the edge.
-Exempt the blackhole community or the RTBH peers from RPKI-Invalid filtering on
-export, then test one ban end to end.
+**RPKI filters.** A blackhole `/32` or `/128` is longer than its covering
+ROA's maxLength, so a router that validates it with the speaker's AS as
+origin rates it RPKI-Invalid. A policy there that drops Invalid before it
+accepts BLACKHOLE drops every blackhole silently: the ban succeeds in prefixd
+and nothing reaches the edge. Match BLACKHOLE ahead of any Invalid filter, or
+exempt the RTBH sessions, then test one ban end to end; the
+[RPKI blackhole receipt](../../reference/qualification/blackhole-rpki-frr-2026-10-20.md)
+shows both orders at FRR.
 
 #### Blackhole TTL
 
