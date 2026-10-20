@@ -65,12 +65,14 @@ const WebSocketContext = createContext<WebSocketContextValue | null>(null)
 export function WebSocketProvider({ children }: { children: React.ReactNode }) {
   const reconnectInterval = 3000
   const maxReconnectAttempts = 10
+  const connectionTimeout = 10000
 
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected")
   const [lastMessage, setLastMessage] = useState<WsMessage | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectAttemptsRef = useRef(0)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const { mutate } = useSWRConfig()
 
   const { data: notifPrefs } = useSWR<NotificationPreferences>(
@@ -83,22 +85,67 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { notifPrefsRef.current = notifPrefs }, [notifPrefs])
 
   const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+    if (wsRef.current && wsRef.current.readyState <= WebSocket.OPEN) {
       return
     }
 
-    setConnectionState("connecting")
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current)
+      reconnectTimeoutRef.current = null
+    }
+
+    setConnectionState(reconnectAttemptsRef.current === 0 ? "connecting" : "polling")
+
+    const scheduleReconnect = () => {
+      if (reconnectAttemptsRef.current < maxReconnectAttempts) {
+        reconnectAttemptsRef.current++
+        const delay = reconnectInterval * Math.min(reconnectAttemptsRef.current, 5)
+        const jitter = Math.random() * reconnectInterval
+        reconnectTimeoutRef.current = setTimeout(connect, delay + jitter)
+      }
+    }
 
     try {
       const ws = new WebSocket(`${getWsBase()}/v1/ws/feed`)
       wsRef.current = ws
 
+      const usePolling = () => {
+        if (wsRef.current !== ws) return
+        wsRef.current = null
+
+        if (connectionTimeoutRef.current) {
+          clearTimeout(connectionTimeoutRef.current)
+          connectionTimeoutRef.current = null
+        }
+
+        // Retire this attempt before closing: late events must not replace a newer socket.
+        ws.onopen = null
+        ws.onmessage = null
+        ws.onclose = null
+        ws.onerror = null
+        ws.close()
+        setConnectionState("polling")
+        scheduleReconnect()
+      }
+
+      // An origin without an upgrade route can also leave the handshake pending.
+      connectionTimeoutRef.current = setTimeout(usePolling, connectionTimeout)
+
       ws.onopen = () => {
+        if (wsRef.current !== ws) return
+
+        if (connectionTimeoutRef.current) {
+          clearTimeout(connectionTimeoutRef.current)
+          connectionTimeoutRef.current = null
+        }
+
         setConnectionState("connected")
         reconnectAttemptsRef.current = 0
       }
 
       ws.onmessage = (event) => {
+        if (wsRef.current !== ws) return
+
         try {
           const message: WsMessage = JSON.parse(event.data)
           setLastMessage(message)
@@ -166,25 +213,12 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
-      ws.onclose = () => {
-        setConnectionState("disconnected")
-        wsRef.current = null
-
-        // Attempt reconnection
-        if (reconnectAttemptsRef.current < maxReconnectAttempts) {
-          reconnectAttemptsRef.current++
-          const delay = reconnectInterval * Math.min(reconnectAttemptsRef.current, 5)
-          const jitter = Math.random() * reconnectInterval
-          reconnectTimeoutRef.current = setTimeout(connect, delay + jitter)
-        }
-      }
-
-      ws.onerror = () => {
-        setConnectionState("error")
-      }
+      ws.onclose = usePolling
+      ws.onerror = usePolling
     } catch (e) {
       console.error("Failed to create WebSocket:", e)
-      setConnectionState("error")
+      setConnectionState("polling")
+      scheduleReconnect()
     }
   }, [maxReconnectAttempts, mutate])
 
@@ -194,10 +228,16 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
       reconnectTimeoutRef.current = null
     }
 
+    if (connectionTimeoutRef.current) {
+      clearTimeout(connectionTimeoutRef.current)
+      connectionTimeoutRef.current = null
+    }
+
     reconnectAttemptsRef.current = maxReconnectAttempts // Prevent auto-reconnect
-    wsRef.current?.close()
+    const ws = wsRef.current
     wsRef.current = null
-    setConnectionState("disconnected")
+    ws?.close()
+    setConnectionState("polling")
   }, [maxReconnectAttempts])
 
   // Auto-connect on mount

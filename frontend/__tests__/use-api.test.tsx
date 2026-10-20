@@ -1,5 +1,5 @@
-import { act, renderHook, waitFor } from "@testing-library/react"
-import { describe, expect, it } from "vitest"
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { useEvents, useMitigation, useMitigations, useSignalGroupDetail, useSignalGroupsPaginated } from "@/hooks/use-api"
 import { appWrapper, json, settle, useFakeController } from "./support/fake-controller"
 
@@ -12,6 +12,11 @@ function query(method: string, path: string) {
 }
 
 describe("real API hooks", () => {
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+  })
+
   it("forwards mitigation filters to the API", async () => {
     controller.route("GET", "/v1/mitigations", () => json({ mitigations: [], count: 0, next_cursor: null, has_more: false }))
     const filters = { status: ["active"], customer_id: "customer-a", limit: 10 }
@@ -45,5 +50,27 @@ describe("real API hooks", () => {
     expect(query("GET", "/v1/signal-groups")).toContainEqual({ status: "open", limit: "2", cursor: "next-page" })
     await act(async () => { await result.current.setSize(3) })
     expect(result.current.data?.length).toBe(2)
+  })
+
+  it("polls every loaded signal-group page without a live feed", async () => {
+    controller.route("GET", "/v1/signal-groups", ({ query: params }) => json({
+      groups: [], count: 0, next_cursor: params.get("cursor") ? null : "next-page", has_more: !params.get("cursor"),
+    }))
+    vi.useFakeTimers()
+
+    const { result } = renderHook(() => {
+      const { data, setSize } = useSignalGroupsPaginated({ limit: 2 })
+
+      return { data, setSize }
+    }, wrapper())
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    await act(async () => { await result.current.setSize(2) })
+    expect(result.current.data).toHaveLength(2)
+    const before = query("GET", "/v1/signal-groups").length
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(query("GET", "/v1/signal-groups").slice(before)).toEqual([
+      { limit: "2" }, { limit: "2", cursor: "next-page" },
+    ])
   })
 })

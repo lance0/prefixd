@@ -302,6 +302,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The dashboard labels an unavailable realtime feed as **Polling**, explains
+  the same-origin WebSocket proxy requirement and the limits of HTTP fallback,
+  and keeps the update mode visible on small screens. Next.js development,
+  production and standalone servers retain polling without claiming that live
+  event toasts work. Stalled handshakes time out, retries retire stale sockets,
+  and paginated signal groups now refresh every five seconds like other live
+  lists. The supplied nginx deployment continues to provide the live feed.
 - `scripts/prefixd-fastnetmon.sh` now takes the vector from FastNetMon's own
   `Attack protocol:` line (the protocol with the most packets) before looking
   for tokens. `udp` gives `udp_flood`, then the amplification refinement;

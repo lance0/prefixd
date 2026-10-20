@@ -29,4 +29,4 @@ export interface WsMessage {
   event?: EventResponse
 }
 
-export type ConnectionState = "connecting" | "connected" | "disconnected" | "error"
+export type ConnectionState = "connecting" | "connected" | "polling" | "disconnected" | "error"

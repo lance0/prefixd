@@ -262,6 +262,8 @@ export function useSignalGroupsPaginated(params?: {
       }
 
   return useSWRInfinite(getKey, fetcher, {
+    refreshInterval: REFRESH_INTERVAL,
+    revalidateAll: true,
     revalidateOnFocus: true,
   })
 }

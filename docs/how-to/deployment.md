@@ -159,6 +159,38 @@ The proxy forwards only normalized `/v1/` API paths; it does not expose the
 private metrics scrape endpoint. The OpenAPI spec remains available directly
 through nginx at `/openapi.json`.
 
+### Realtime and polling
+
+The browser opens the feed at `/v1/ws/feed` on the dashboard's own origin,
+using `wss:` for HTTPS and `ws:` for HTTP, with the same session cookies.
+The supplied nginx configuration forwards WebSocket upgrades to the controller.
+Access the Compose stack through nginx (port 80, or your HTTPS ingress) for
+realtime updates. A custom ingress must forward `/v1/ws/feed` upgrades and
+preserve authentication; see [the nginx example](../../configs/nginx.conf).
+
+Next.js by itself cannot upgrade this connection: this includes `bun run dev`,
+`bun run start` and the standalone dashboard container accessed without nginx.
+`PREFIXD_API` configures the server-side HTTP API proxy, not a browser WebSocket
+destination. Setting it does not add a feed upgrade route to Next.js.
+
+The top bar shows **Live** when the feed is connected and **Polling** while
+connecting or when it is unavailable. Focus or hover the status for the feed
+requirements and fallback details. Failed handshakes, including ones pending
+for 10 seconds, switch to polling while the feed retries up to ten times with
+backoff. Returning to the tab starts another attempt. Network and authentication
+failures can also interrupt a correctly proxied feed; browsers do not expose
+the failed handshake's HTTP status to the dashboard.
+
+HTTP polling remains active in both modes. While the tab is visible and the API
+is reachable, mitigations (list and detail), events, stats, health and signal
+groups (including loaded paginated groups) refresh every 5 seconds. POPs,
+time series and signal sources refresh every 30 seconds; configuration and
+operator pages refresh on focus or explicit actions. Hidden or offline tabs
+pause periodic refresh, and failed API requests retain their page's error state.
+**Polling** names the update mode, not a successful API response. Neither mode
+proves router enforcement. Live event toasts are unavailable without the feed, and
+polling does not replay missed notifications.
+
 ### Docker Compose
 
 The dashboard container uses the `PREFIXD_API` environment variable to locate the backend:
@@ -205,12 +237,9 @@ export PREFIXD_API=http://localhost:8080
 bun run dev
 ```
 
-The dev server does not serve the live feed. The browser opens
-`ws://localhost:3000/v1/ws/feed`, which Next.js cannot upgrade, so the top bar
-shows the connection as disconnected. Mitigations, events and stats still
-refresh by polling every 5 seconds. To test the live feed, open the Compose
-stack through nginx at `http://localhost` (port 80), which proxies
-`/v1/ws/feed` to the controller.
+The dev server uses the **Polling** fallback described above because Next.js
+cannot upgrade `/v1/ws/feed`. To test the live feed, open the Compose stack
+through nginx at `http://localhost` (port 80).
 
 ---
 
