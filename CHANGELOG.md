@@ -7,14 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-20
+
+prefixd 0.21.0 adds blackhole host routes on rustbgpd, created by Admins or by
+allowlisted detectors, with frozen routes, separate quotas, safelist rechecks,
+per-peer export evidence and optional injection leases that let rustbgpd
+remove prefixd's routes when the controller stops. It adds amplification-aware
+FlowSpec matches on source ports, non-first fragments and packet length,
+driven by a new `udp_amplification` vector and detector source-port reports.
+A PostgreSQL advisory lock keeps a second controller for the same POP in
+standby, and the new `GET /v1/ready` tells load balancers which controller
+holds it. rustbgpd 0.79.0 is now required: upgrade it before prefixd.
+
 ### Upgrade notes
 
+- Follow
+  [v0.20.0 → 0.21.0](https://github.com/lance0/prefixd/blob/v0.21.0/docs/how-to/upgrading.md#v0200--0210)
+  in the upgrade guide: upgrade rustbgpd first, then replace the controller.
+  Migrations 016–018 apply on first start, and no adoption step is needed.
+  Leased modes stay off until you set them.
 - rustbgpd 0.79.0 is now the minimum speaker version. Upgrade rustbgpd to
   0.79.0 before upgrading prefixd: with the rustbgpd backend, startup reads
   the daemon version and refuses an older or unreadable one ("upgrade the
   speaker first"). CI and `just speakers` test only 0.79.0. GoBGP is
   unchanged. See
-  [rustbgpd minimum version](docs/how-to/upgrading.md#rustbgpd-minimum-version).
+  [rustbgpd minimum version](https://github.com/lance0/prefixd/blob/v0.21.0/docs/how-to/upgrading.md#rustbgpd-minimum-version).
 - With rustbgpd, `GET /v1/health/detail` now also reports `degraded` while an
   active blackhole is committed to no Established peer, including when the
   speaker has no Established peer at all. Automation that treats `degraded`
@@ -45,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   balancers and detector routing at `GET /v1/ready`, not `GET /v1/health`.
   `--adopt-legacy-speaker` and `--retire-dry-run-intent` now refuse while a
   controller for the POP holds the fence; stop it first. See
-  [controller fence and rolling deploys](docs/how-to/upgrading.md#controller-fence-and-rolling-deploys).
+  [controller fence and rolling deploys](https://github.com/lance0/prefixd/blob/v0.21.0/docs/how-to/upgrading.md#controller-fence-and-rolling-deploys).
 - With the rustbgpd backend, a `guardrails.max_ports` above 8, the encoder's
   per-list limit, now fails configuration load at startup and names both
   values. Before, rules over 8 ports were saved and then refused at
@@ -55,7 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configurations now set 5. FRR 10.7.1 accepts at most five values in one
   FlowSpec component and resets the whole session on a rule with more,
   dropping every route on it; see the
-  [FRR amplification receipt](docs/reference/qualification/amplification-frr-2026-10-19.md).
+  [FRR amplification receipt](https://github.com/lance0/prefixd/blob/v0.21.0/docs/reference/qualification/amplification-frr-2026-10-19.md).
   Where `max_ports` is unset, manual and API requests with six to eight ports
   in one list now return `422`, and a detector's `from_event` source ports
   split into rules of at most five: a 20-port amplification report becomes
@@ -67,6 +84,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expire and are withdrawn as before. A detector re-report after the upgrade
   splits at five, so it creates new rules instead of extending the stored
   ones, which leave at their TTL.
+- Migration 016 adds `withdrawal_requests.rule_kind`, `flowspec` or
+  `blackhole`. Existing requests become `flowspec`, which every earlier
+  request was; replay rewrites no mitigation row.
 - Migration 017 adds the nullable `events.top_src_ports_json` column. Replay
   leaves every existing event's value `NULL` and rewrites no other row.
 - Migration 018 replaces the `events` constraint
@@ -84,9 +104,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source-port, fragment or packet-length match and drain its withdrawals.
   Those releases ignore the new keys and would withdraw with the wider rule,
   orphaning the real one on the speaker. See
-  [amplification matches and downgrade](docs/how-to/upgrading.md#amplification-matches-and-downgrade).
+  [amplification matches and downgrade](https://github.com/lance0/prefixd/blob/v0.21.0/docs/how-to/upgrading.md#amplification-matches-and-downgrade).
+- Before downgrading to 0.20.0 or earlier, also withdraw every blackhole and
+  every leased FlowSpec rule and drain their withdrawals. Those releases
+  understand neither blackhole rows nor injection owners. See
+  [downgrading to 0.20.0](https://github.com/lance0/prefixd/blob/v0.21.0/docs/how-to/upgrading.md#downgrading-to-0200).
+- Before enabling blackholes, check the receiving routers' import policy. A
+  `/32` or `/128` blackhole is RPKI-Invalid wherever it is validated with an
+  origin AS, so a policy that drops RPKI-Invalid before it matches BLACKHOLE
+  drops every blackhole silently. See
+  [RPKI filters](https://github.com/lance0/prefixd/blob/v0.21.0/docs/reference/configuration.md#blackhole).
 - A `PUT /v1/config/playbooks` body that does not decode now returns `400`
   with `{"errors": [reason]}` instead of an empty body.
+
+### Known limitations
+
+- A `201` means prefixd saved intent and the speaker accepted the local
+  request. Blackhole export evidence `committed` means the peer's
+  Adj-RIB-Out, not router receipt or enforcement, and FlowSpec rules have no
+  export evidence. Router enforcement of a blackhole depends on the router's
+  RTBH policy, which prefixd does not verify.
+- TTL expiry needs the running controller. Unleased FlowSpec rules and
+  blackholes stay announced if prefixd stops while the speaker stays up. The
+  leased modes, which bound that to one lease, are opt-in and rustbgpd-only.
+- Blackholes and injection leases need rustbgpd; GoBGP reports both as
+  unsupported.
+- The controller fence sees only controllers that share one database and
+  needs a direct or session-mode connection. It does not stop other tools
+  writing to the speaker.
+- FRR 10.7.1 received the amplification rules but installed none of them as
+  a filter, and accepts at most five values per FlowSpec component. Vendor
+  forwarding qualification remains open.
+- `guardrails.allow_src_prefix_match` and `guardrails.allow_tcp_flags_match`
+  are reserved and have no effect.
+- Unsupported unrelated local rules on a GoBGP speaker fail the complete
+  observation and block reconciliation until an operator removes them. GoBGP
+  process metadata is unsupported in health detail.
+- Release binaries are Linux amd64 only.
+
+### Security
+
+- **rustls-webpki** — Updated 0.103.15 → 0.103.16, which rejects certificate
+  paths through distrusted emSign intermediates (RUSTSEC-2026-0382).
+- **webpki-roots**, **webpki-root-certs** — Updated 1.0.5 → 1.0.10, which drop
+  the `emSign ECC Root CA - G3` root (RUSTSEC-2026-0381, RUSTSEC-2026-0383).
 
 ### Added
 
@@ -107,7 +168,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Adj-RIB-Out, not router receipt or enforcement. A failed or partial read is
   reported as unknown export, never as no peers. The reads mutate nothing,
   and FlowSpec rules have no export evidence. See
-  [export evidence](docs/reference/speaker-backends.md#export-evidence).
+  [export evidence](https://github.com/lance0/prefixd/blob/v0.21.0/docs/reference/speaker-backends.md#export-evidence).
 - Leased FlowSpec (ADR 027 amendment): with `bgp.rustbgpd.leased_flowspec`
   (off by default, rustbgpd 0.79.0 or later), new enforced FlowSpec rules use
   `AddLeasedFlowSpec` under the same injection owner, lease and renewal as
@@ -163,7 +224,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The rustbgpd adapter can inject, delete and read back unicast blackhole
   host routes (ADR 027), and health detail reports
   `speaker.capabilities.blackhole` and `blackhole_lease`. GoBGP reports the
-  capability as unsupported, and `blackhole_lease` is false for every backend.
+  capability as unsupported. `blackhole_lease` is true only for rustbgpd 0.79.0
+  or later with a leased mode configured, since prefixd probes the lease only
+  then.
 - An optional `blackhole` block in `prefixd.yaml` configures RTBH host routes
   (ADR 027): `enabled` (default `false`), `next_hop_ipv4`, `next_hop_ipv6`,
   `communities`, `large_communities`, `max_ttl_seconds` (default 3600),
@@ -180,7 +243,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `speaker.capabilities.flowspec_match` with `source_ports`, `fragment` and
   `packet_length`; all three are true for rustbgpd, GoBGP and the mock. The controller refuses a rule with a component the selected
   speaker cannot encode before persisting it or sending any RPC, in dry-run
-  too. Nothing creates these matches yet.
+  too.
 - Blackhole lifecycle and reconciliation (ADR 027), used by the manual
   creation path below. Enforced admission freezes the
   next hop and communities into the row, returns `409` for a live owner, a
@@ -200,8 +263,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request needs the Admin role (Operator and Viewer sessions and every bearer
   token get `403`), a nonempty `reason`, and `confirm_victim_ip` exactly equal
   to `victim_ip` (`400` otherwise, with no row or audit entry). It takes no
-  protocol, ports, rate or `expires_at_cap`. Manual blackholes are unleased
-  and rustbgpd-only: one stays on the speaker if prefixd stops, and router
+  protocol, ports, rate or `expires_at_cap`. Manual blackholes are
+  rustbgpd-only and, unless `blackhole.leased` is set, unleased: one stays on
+  the speaker if prefixd stops. Router
   enforcement depends on the router's RTBH policy, which prefixd does not
   verify; FRR 10.7.1 is qualified below. Mitigation responses and WebSocket
   messages gain an optional `blackhole` object (`next_hop`, `communities`,
@@ -217,7 +281,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `just interop-frr-blackhole` qualifies manual blackholes at FRR 10.7.1
   through rustbgpd 0.78.0 over IPv4 and IPv6 unicast, with an import
   route-map that rewrites BLACKHOLE routes to a static discard next hop. The
-  [dated receipt](docs/reference/qualification/blackhole-frr-2026-10-19.md)
+  [dated receipt](https://github.com/lance0/prefixd/blob/v0.21.0/docs/reference/qualification/blackhole-frr-2026-10-19.md)
   shows receipt with the expected communities, discard installation in zebra
   and the container kernel, removal on withdrawal and TTL expiry, and return
   through prefixd repair after a speaker restart. It also records that a
@@ -227,7 +291,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `just interop-frr-amplification` qualifies amplification rules at FRR
   10.7.1 through rustbgpd 0.78.0 and GoBGP 4.10.0, over IPv4 and IPv6
   FlowSpec. The
-  [dated receipt](docs/reference/qualification/amplification-frr-2026-10-19.md)
+  [dated receipt](https://github.com/lance0/prefixd/blob/v0.21.0/docs/reference/qualification/amplification-frr-2026-10-19.md)
   shows FRR receiving source-port discard rules, with and without a
   packet-length range, and the IsF fragment police rule with exactly the
   expected components, then removal on detector unban and TTL expiry and
@@ -272,16 +336,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Startup, playbook reload and `PUT /v1/config/playbooks` refuse a blackhole
   step when `blackhole.enabled` is false or the step TTL exceeds the cap, and
   in enforced mode unless the speaker provides the rustbgpd injection lease or
-  `detector_sources` is nonempty. Dry-run is not gated. No rustbgpd release
-  provides the lease, so enforced detector blackholes run unleased: startup
-  logs a warning, health detail reports the new `speaker.detector_unleased`
-  and the new `prefixd_blackhole_detector_unleased` gauge is `1`. If prefixd
-  stays down while rustbgpd keeps running, these blackholes stay announced
-  until prefixd returns or an operator withdraws them.
+  `detector_sources` is nonempty. Dry-run is not gated. Without the lease
+  (`blackhole.leased`, below), enforced detector blackholes run unleased:
+  startup logs a warning, health detail reports the new
+  `speaker.detector_unleased` and the new `prefixd_blackhole_detector_unleased`
+  gauge is `1`. If prefixd stays down while rustbgpd keeps running, these
+  blackholes stay announced until prefixd returns or an operator withdraws
+  them.
 - `blackhole.leased` (default `false`) and `blackhole.lease_seconds`
-  (default `60`, `5..=3600`) reserve the injection-lease settings. Startup
-  refuses `leased: true` while the speaker lacks the lease, and a route
-  recorded under a lease owner is never added through the unleased `AddPath`.
+  (default `60`, `5..=3600`) configure the injection lease described above.
+  Startup refuses `leased: true` while the speaker lacks the lease, and a
+  route recorded under a lease owner is never added through the unleased
+  `AddPath`.
 - Blackhole reconciliation, at startup and on every pass, deletes a local
   route that exactly matches the frozen route of a terminal, enforced-origin
   blackhole of this POP with no live row or pending withdrawal, and audits it
@@ -349,7 +415,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so rustbgpd rates them NotFound and its own Invalid export filters pass
   them. A router that validates them rates them Invalid with the speaker's AS
   as origin; see the
-  [RPKI blackhole receipt](docs/reference/qualification/blackhole-rpki-frr-2026-10-20.md).
+  [RPKI blackhole receipt](https://github.com/lance0/prefixd/blob/v0.21.0/docs/reference/qualification/blackhole-rpki-frr-2026-10-20.md).
   Its Prometheus series rename the `afi_safi`
   and `scope` labels to `family` (plus `stage` on max-prefix series) with no
   overlap, so update your own rustbgpd dashboards and alerts with the
@@ -399,8 +465,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PacketLengthMatchNotAllowed`, `InvalidMatch` and `TooManySourcePorts`.
   `guardrails.allow_src_prefix_match` and `guardrails.allow_tcp_flags_match`
   are reserved: setting either to `true` logs a startup warning and has no
-  effect. Nothing creates these matches yet, so rules without them and
-  shipped configurations behave as before.
+  effect. Rules without these components and shipped configurations behave
+  as before.
 
 - Releases publish themselves. Once `ci.yml` passes on the `main` commit that
   sets a new Cargo.toml version with a dated CHANGELOG section, the release
@@ -433,12 +499,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   withdrawal succeeded. A repeated identical ban is still rejected with
   `409 DuplicateEvent`.
 
-### Security
+### Documentation
 
-- **rustls-webpki** — Updated 0.103.15 → 0.103.16, which rejects certificate
-  paths through distrusted emSign intermediates (RUSTSEC-2026-0382).
-- **webpki-roots**, **webpki-root-certs** — Updated 1.0.5 → 1.0.10, which drop
-  the `emSign ECC Root CA - G3` root (RUSTSEC-2026-0381, RUSTSEC-2026-0383).
+- The FastNetMon guide drops `notify_script_pass_details`, which FastNetMon
+  Community does not have: `notify_script_path` is its only notify-script
+  setting, and the script must exist when FastNetMon starts.
+- ADR 027 (blackhole mitigations and the controller fence) and ADR 028
+  (amplification matches) record the design behind this release. ADR 029
+  proposes provider-scoped upstream blackholing; nothing implements it yet.
 
 ## [0.20.0] - 2026-10-19
 
@@ -2043,7 +2111,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/lance0/prefixd/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/lance0/prefixd/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/lance0/prefixd/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/lance0/prefixd/compare/v0.18.1...v0.19.0

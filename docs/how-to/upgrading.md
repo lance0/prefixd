@@ -1,6 +1,7 @@
 # Upgrade Guide
 
-Upgrading a v0.19.1 deployment? Follow [v0.19.1 → 0.20.0](#v0191--0200).
+Upgrading a v0.20.0 deployment? Follow [v0.20.0 → 0.21.0](#v0200--0210).
+From v0.19.1, follow [v0.19.1 → 0.20.0](#v0191--0200) first.
 
 ## General Principles
 
@@ -535,6 +536,147 @@ prefixdctl migrations
 ---
 
 ## Version-Specific Notes
+
+### v0.20.0 → 0.21.0
+
+This upgrade needs rustbgpd 0.79.0 and applies migrations 016–018. It needs
+no adoption step. Keep the POP, speaker target and `mode` unchanged, and
+upgrade rustbgpd before prefixd. GoBGP deployments skip the rustbgpd step.
+
+#### Before you start
+
+1. **Back up PostgreSQL** and keep the 0.20.0 image or binaries and a copy of
+   the configuration for the [rollback rules](#rollback).
+2. **Review the configuration.** An unchanged 0.20.0 `prefixd.yaml` loads,
+   with these exceptions and changed defaults:
+   - With rustbgpd, `guardrails.max_ports` above 8 fails startup. The default
+     is now 5, because FRR resets the session on a FlowSpec component with
+     more than five values; an explicit value is kept.
+   - The default `quotas.max_active_per_customer` rises from 5 to 20; an
+     explicit value is kept. Active quotas now count only FlowSpec rules, and
+     blackholes have their own `blackhole.max_active_per_pop` and
+     `max_active_global`.
+   - The new `blackhole` and `amplification` sections are optional. Blackholes
+     stay off until `blackhole.enabled: true`.
+   - The leased modes, `blackhole.leased` and `bgp.rustbgpd.leased_flowspec`,
+     are off by default. Turn them on as a separate change after this upgrade
+     is verified; see [leased blackholes](../reference/configuration.md#leased-blackholes)
+     and [leased FlowSpec](../reference/configuration.md#leased-flowspec).
+     Rules added before the change stay unleased.
+3. **Prepare for the controller fence.** The database connection must be
+   direct or through a session-mode pooler, and load balancers and detector
+   routing should use `GET /v1/ready`; see
+   [controller fence and rolling deploys](#controller-fence-and-rolling-deploys).
+4. **Prepare rustbgpd.** Remove any `[event_history]` section from its
+   configuration, which 0.79.0 no longer loads, and update your own rustbgpd
+   dashboards and alerts for its renamed `family` labels. If you will use
+   blackholes, check the receiving routers' RPKI policy first; see the
+   [RPKI filters](../reference/configuration.md#blackhole) warning.
+
+#### Compose
+
+Run these in the deployment's checkout, keeping your configuration files and
+image references. Step 3 leaves the 0.20.0 controller running:
+
+```bash
+# 1. Back up the database
+docker compose exec -T postgres pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+
+# 2. Update the checkout; it pins rustbgpd 0.79.0
+git fetch --tags && git checkout v0.21.0
+
+# 3. Upgrade only rustbgpd
+docker compose --profile rustbgpd pull rustbgpd
+docker compose --profile rustbgpd up -d --no-deps rustbgpd
+```
+
+The new rustbgpd process starts with an empty local RIB. The running 0.20.0
+controller repairs every active rule on its next reconciliation pass, within
+`timers.reconciliation_interval_seconds` (30 by default), and logs
+`repairing local announcement` for each. Rules are not announced until then.
+Wait for that pass and check that the local RIB holds your active rules
+([commands below](#check-the-upgrade)) before you continue:
+
+```bash
+# 4. Pin and pull the 0.21.0 controller and dashboard
+export PREFIXD_IMAGE=ghcr.io/lance0/prefixd:0.21.0
+export PREFIXD_DASHBOARD_IMAGE=ghcr.io/lance0/prefixd-dashboard:0.21.0
+docker compose --profile rustbgpd pull prefixd-rustbgpd dashboard
+
+# 5. Replace the controller and dashboard; rustbgpd keeps its routes
+docker compose --profile rustbgpd up -d --no-deps --no-build prefixd-rustbgpd dashboard
+```
+
+Keep both variables set for later Compose commands, or put them in `.env`.
+Recreate Prometheus as well to load the new alert rules.
+
+#### Bare metal
+
+Upgrade rustbgpd to 0.79.0 as its release notes describe and wait for one
+reconciliation pass of the running 0.20.0 controller, as above. Then:
+
+```bash
+pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+git fetch --tags && git checkout v0.21.0
+cargo build --release --locked
+sudo systemctl stop prefixd
+sudo cp target/release/prefixd target/release/prefixdctl /usr/local/bin/
+sudo systemctl start prefixd
+```
+
+#### Check the upgrade
+
+Check these before you resume detector input. Compose commands are shown; on
+bare metal, run `prefixdctl`, `psql` and `rbgp` directly.
+
+```bash
+# Startup: migrations applied, fence held, no errors
+docker compose logs prefixd-rustbgpd
+# Expect: database migrations applied, versions: [1, ..., 18]
+#         controller fence acquired
+
+# Migrations 016-018 are listed
+docker compose exec prefixd-rustbgpd prefixdctl migrations
+
+# Health: status healthy, not standby; daemon version 0.79.0;
+# peer observation connected
+docker compose exec prefixd-rustbgpd prefixdctl --api http://127.0.0.1:8080 status
+
+# The same mitigation IDs are still active
+docker compose exec -T postgres psql -U prefixd -d prefixd -c \
+  "SELECT mitigation_id, victim_ip, status FROM mitigations WHERE status IN ('pending', 'active', 'escalated');"
+
+# Reconciliation: after one interval, no repairs and no failures
+docker compose logs prefixd-rustbgpd | grep -E 'repairing local announcement|reconciliation (stage )?failed'
+
+# rustbgpd's local FlowSpec intent matches the active mitigations
+docker compose exec rustbgpd rbgp --addr unix:///run/rustbgpd/grpc.sock \
+  --json flowspec received 0.0.0.0 --family ipv4_flowspec
+```
+
+The grep should print nothing from the 0.21.0 controller. `prefixdctl status`
+needs `auth.mode: none` or a bearer token in `PREFIXD_API_TOKEN`, as before.
+
+#### Downgrading to 0.20.0
+
+0.20.0 understands neither blackhole rows, injection owners nor amplification
+matches. Before you downgrade, pause detectors, remove blackhole and
+`udp_amplification` playbooks, withdraw every blackhole, every leased
+FlowSpec rule and every
+[amplification rule](#amplification-matches-and-downgrade), and drain their
+withdrawals on the original speaker target with 0.21.0 still running. This
+must return no rows:
+
+```sql
+SELECT mitigation_id, action_type, status
+FROM mitigations
+WHERE status IN ('pending', 'active', 'escalated')
+  AND (action_type = 'blackhole' OR match_json::jsonb ?| array['src_ports', 'fragment', 'packet_length']);
+```
+
+Turn the leased modes off, then follow the [rollback](#rollback) steps. A
+downgraded controller needs rustbgpd 0.78.0 or later; 0.20.0 does not check
+the version and works with 0.79.0.
 
 ### v0.19.1 → 0.20.0
 

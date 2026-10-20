@@ -24,9 +24,10 @@ to announce a FlowSpec rule with a mandatory TTL. No detector speaks BGP.
 > [Why rustbgpd](#pairs-with-rustbgpd)
 
 **Status:** pre-1.0, and the API can change before 1.0. The latest release,
-[v0.20.0](https://github.com/lance0/prefixd/releases/tag/v0.20.0), is the first
-with the rustbgpd backend and Compose profiles. Upgrading from v0.19.1 needs one
-maintenance step; follow the [upgrade guide](docs/how-to/upgrading.md#v0191--0200).
+[v0.21.0](https://github.com/lance0/prefixd/releases/tag/v0.21.0), adds
+blackhole host routes on rustbgpd, amplification-aware FlowSpec matches and a
+fence against duplicate controllers, and requires rustbgpd 0.79.0. Upgrade rustbgpd before prefixd;
+follow the [upgrade guide](docs/how-to/upgrading.md#v0200--0210).
 
 ## Choose your path
 
