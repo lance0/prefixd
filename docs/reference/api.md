@@ -2552,7 +2552,7 @@ gauges count database state, not router enforcement. A refused
 | `reason` | Refusal |
 | --- | --- |
 | `BlackholeDisabled` | `blackhole.enabled` is false |
-| `BlackholeQuotaExceeded` | `blackhole.max_active_per_pop`, `blackhole.max_active_global` is full |
+| `BlackholeQuotaExceeded` | `blackhole.max_active_per_pop` or `blackhole.max_active_global` is full |
 | `BlackholeNotOwned` | The victim is not in inventory |
 | `BlackholeSafelisted` | The victim is safelisted |
 | `InvalidBlackhole` | The victim is not a usable host address or is a configured next hop, or its family has no next hop |
