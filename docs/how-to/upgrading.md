@@ -352,6 +352,13 @@ scheduler completes them locally.
 prefixd reads `mode` only at startup. `POST /v1/config/reload` doesn't change
 it, so every mode switch passes through this check.
 
+With [leased blackholes](../reference/configuration.md#leased-blackholes), a
+dry-run controller never renews the injection lease, because renewal is a
+speaker mutation. Switching an enforced leased controller to dry-run
+therefore lets its leased blackholes lapse at the speaker within
+`blackhole.lease_seconds`, while the enforced rows stay in the database.
+Withdraw them first, then switch the mode.
+
 Downgrading below this release removes the protection: an older binary ignores
 `origin_mode`, and in enforced mode its reconciliation announces unexpired
 dry-run mitigations. Retire dry-run intent before you downgrade. Rows an older

@@ -1120,7 +1120,10 @@ impl ReconciliationLoop {
                         .inc();
                     tracing::error!(mitigation_id = %mitigation.mitigation_id, error = %error,
                         "failed to repair blackhole route");
-                    forced_failure |= forced;
+                    // An ownership refusal will not clear by re-adding everything
+                    // again: report it each pass without re-triggering the re-add.
+                    forced_failure |= forced
+                        && !matches!(error, crate::error::PrefixdError::InjectionOwnerMismatch(_));
                     repair_error = Some(error);
                 }
             }
@@ -3656,5 +3659,36 @@ mod tests {
         reconciler.reconcile().await.unwrap();
         assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 1, "converged");
         assert_eq!(speaker.flowspec_adds.load(SeqCst), 0);
+    }
+
+    /// A leased row whose key another owner, or no owner, holds keeps failing
+    /// with an ownership refusal. It stays reported each pass but does not
+    /// re-trigger the full re-add every interval.
+    #[tokio::test]
+    async fn an_ownership_refusal_does_not_keep_the_full_readd_pending() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let lease = Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60));
+        let reconciler = leased_reconciler(repo.clone(), speaker.clone(), lease.clone());
+        let held = leased_row("192.0.2.1");
+        let fine = leased_row("192.0.2.2");
+        for mitigation in [&held, &fine] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        let unowned = frozen(&held).with_owner("");
+        speaker.inner.announce_blackhole(&unowned).await.unwrap();
+        // The startup re-add: one refused, one added.
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(speaker.leased_adds.load(SeqCst), 2);
+        assert!(
+            !lease.take_readd(),
+            "a refusal must not keep the re-add pending"
+        );
+        // Still reported on later passes, and the unowned route is untouched.
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(speaker.routes().await.len(), 2);
+        assert!(speaker.routes().await.contains(&unowned));
+        assert_eq!(speaker.deletes.load(SeqCst), 0);
     }
 }

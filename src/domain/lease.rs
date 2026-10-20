@@ -22,10 +22,19 @@ pub enum LeaseState {
     RenewalFailing,
     /// The daemon refused the generation, or renewals failed for a whole lease.
     Expired,
+    /// Dry-run: renewal is a speaker mutation, so the lease is never renewed
+    /// and leased routes lapse within one lease.
+    NotRenewing,
 }
 
 impl LeaseState {
-    pub const ALL: [Self; 4] = [Self::None, Self::Live, Self::RenewalFailing, Self::Expired];
+    pub const ALL: [Self; 5] = [
+        Self::None,
+        Self::Live,
+        Self::RenewalFailing,
+        Self::Expired,
+        Self::NotRenewing,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -33,6 +42,7 @@ impl LeaseState {
             Self::Live => "live",
             Self::RenewalFailing => "renewal_failing",
             Self::Expired => "expired",
+            Self::NotRenewing => "not_renewing",
         }
     }
 }
@@ -68,6 +78,8 @@ pub struct LeaseKeeper {
     held: Mutex<Held>,
     readd: AtomicBool,
     readd_requested: tokio::sync::Notify,
+    /// False in dry-run, which sends no speaker mutation.
+    renewing: bool,
 }
 
 impl LeaseKeeper {
@@ -85,9 +97,17 @@ impl LeaseKeeper {
             }),
             readd: AtomicBool::new(true),
             readd_requested: tokio::sync::Notify::new(),
+            renewing: true,
         };
         keeper.publish(LeaseState::None);
         keeper
+    }
+
+    /// Dry-run: the keeper probes and reports, but never renews.
+    pub fn without_renewal(mut self) -> Self {
+        self.renewing = false;
+        self.publish(LeaseState::NotRenewing);
+        self
     }
 
     pub fn owner(&self) -> &str {
@@ -121,7 +141,7 @@ impl LeaseKeeper {
                 held.state = LeaseState::Live;
                 held.live_at = Some(Instant::now());
                 drop(held);
-                self.publish(LeaseState::Live);
+                self.publish(self.state());
                 tracing::info!(owner = %self.owner, ?generation, "adopted the live injection lease");
             }
         }
@@ -137,7 +157,7 @@ impl LeaseKeeper {
             held.live_at = Some(Instant::now());
             held.generation.replace(generation)
         };
-        self.publish(LeaseState::Live);
+        self.publish(self.state());
         if previous.is_some_and(|previous| previous != generation) {
             tracing::warn!(owner = %self.owner, ?previous, ?generation,
                 "injection lease generation changed; re-adding all active leased intent");
@@ -168,6 +188,9 @@ impl LeaseKeeper {
     /// touches no database, and it never resurrects: a refused generation is
     /// dropped and a full re-add requested. A late reply is never a success.
     pub async fn renew_once(&self, leases: &dyn InjectionLeases) {
+        if !self.renewing {
+            return;
+        }
         let Some(generation) = self.generation() else {
             return;
         };
@@ -179,7 +202,7 @@ impl LeaseKeeper {
         let outcome = match result {
             Ok(Ok(true)) => "success",
             Ok(Ok(false)) => "not_live",
-            // Standby never renews; the fence holder does.
+            // Not reached through the fenced speaker, which does not gate renewal.
             Ok(Err(PrefixdError::Standby)) => return,
             Ok(Err(error)) => {
                 tracing::warn!(owner = %self.owner, error = %error, "injection lease renewal failed");
@@ -226,6 +249,9 @@ impl LeaseKeeper {
     }
 
     fn state(&self) -> LeaseState {
+        if !self.renewing {
+            return LeaseState::NotRenewing;
+        }
         let held = self.held.lock().unwrap();
         let lease = Duration::from_secs(u64::from(self.lease_seconds));
         match held.state {
@@ -411,7 +437,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_renewals_report_failing_then_expired_and_standby_skips() {
+    async fn failed_renewals_report_failing_then_expired() {
         let speaker = FaultyBlackholes::default();
         let keeper = LeaseKeeper::new(OWNER.into(), 5);
         keeper.take_readd();
@@ -432,19 +458,58 @@ mod tests {
         keeper.held.lock().unwrap().live_at = Some(Instant::now() - Duration::from_secs(5));
         assert_eq!(keeper.health().state, LeaseState::Expired);
         assert_eq!(keeper.generation(), Some(generation));
+    }
 
-        let fence = std::sync::Arc::new(crate::fence::ControllerFence::new(false));
-        let fenced = crate::fence::FencedAnnouncer::new(
-            std::sync::Arc::new(crate::bgp::MockAnnouncer::new()),
-            fence,
+    /// Renewal never waits on the database or the fence: with the controller
+    /// in standby, as a database outage forces it, the lease stays live.
+    #[tokio::test]
+    async fn renewal_continues_in_standby_and_without_the_database() {
+        let inner = std::sync::Arc::new(crate::bgp::MockAnnouncer::new());
+        let fence = std::sync::Arc::new(crate::fence::ControllerFence::new(true));
+        let fenced = crate::fence::FencedAnnouncer::new(inner.clone(), fence.clone());
+        let keeper = LeaseKeeper::new(OWNER.into(), 60);
+        keeper.take_readd();
+        keeper.observe_add(
+            fenced
+                .blackhole()
+                .unwrap()
+                .announce_leased_blackhole(&route(), 60)
+                .await
+                .unwrap(),
         );
-        let before = keeper.health().last_renewal_at;
-        keeper.renew_once(fenced.injection_leases().unwrap()).await;
-        assert_eq!(
-            keeper.health().last_renewal_at,
-            before,
-            "standby never renews"
-        );
+        fence.set(false);
+        for _ in 0..3 {
+            keeper.renew_once(fenced.injection_leases().unwrap()).await;
+            let health = keeper.health();
+            assert_eq!(health.last_renewal_result, Some("success"), "{health:?}");
+            assert_eq!(health.state, LeaseState::Live);
+        }
+        // Adds stay fenced.
+        assert!(matches!(
+            fenced
+                .blackhole()
+                .unwrap()
+                .announce_leased_blackhole(&route(), 60)
+                .await,
+            Err(PrefixdError::Standby)
+        ));
+    }
+
+    /// Dry-run reports the recovered lease honestly and never renews it.
+    #[tokio::test]
+    async fn dry_run_keeper_reports_not_renewing_and_sends_no_renewal() {
+        let speaker = FaultyBlackholes::default();
+        speaker
+            .inner
+            .announce_leased_blackhole(&route(), 60)
+            .await
+            .unwrap();
+        let keeper = LeaseKeeper::new(OWNER.into(), 60).without_renewal();
+        assert!(keeper.recover(&speaker).await.unwrap());
+        assert!(keeper.generation().is_some());
+        keeper.renew_once(&speaker).await;
+        assert_eq!(speaker.renewals.load(SeqCst), 0);
+        assert_eq!(keeper.health().state, LeaseState::NotRenewing);
     }
 
     #[tokio::test]

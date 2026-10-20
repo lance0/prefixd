@@ -434,6 +434,18 @@ operation ID, and its key blocks repair until the deletion is confirmed. A
 pending blackhole withdrawal does not block FlowSpec admission or repair, and
 the reverse.
 
+A delete that rustbgpd refuses with `FAILED_PRECONDITION` found the route held
+by another injection owner, or by none. prefixd never overrides the owner, so
+the withdrawal stays pending: each reconciliation pass retries it and logs the
+failure, `prefixd_reconciliation_runs_total{status="error"}` increases, and the
+victim's key stays blocked. To resolve it, read the holder with `rbgp`'s local
+route listing, which shows the owner. If it is another controller using this
+POP's owner, stop that controller. If an operator or another tool added the
+route, decide whether it should stay: to remove it, delete it on the speaker
+with its own owner (or, deliberately, `rbgp`'s `--override-owner`). The next
+pass then sees `NOT_FOUND` and completes the withdrawal with its original
+actor, reason and operation ID. Do not edit the withdrawal row.
+
 Reconciliation compares the blackhole desired set with `list_blackholes` in a
 stage separate from FlowSpec, so a failed read of one family never stops the
 other. It runs when `blackhole.enabled` is true or the ledger holds a
@@ -466,8 +478,14 @@ a live generation; a lease with no time left is not adopted. Every leased add
 returns the owner's live generation, which prefixd holds in memory. A
 dedicated task sends `RenewLease(owner, generation, lease_seconds)` about
 every `lease_seconds / 3`, each with that interval as its deadline. It takes
-no lifecycle mutex and no database access, and standby never renews. A late
-reply counts as a failed renewal.
+no lifecycle mutex and no database access, and it is not gated by the
+controller fence: renewal only extends routes this owner already holds and
+can never add or resurrect one, so a database outage that puts the controller
+in standby does not let leased blackholes lapse mid-attack. Adds, deletes and
+re-adds stay fenced. A late reply counts as a failed renewal. In dry-run the
+controller never renews, because `RenewLease` is a speaker mutation; health
+reports the lease as `not_renewing`, and routes left by an enforced run lapse
+within one lease.
 
 `FAILED_PRECONDITION` from `RenewLease` means the generation is not live: the
 lease expired or rustbgpd restarted. prefixd drops the generation and wakes

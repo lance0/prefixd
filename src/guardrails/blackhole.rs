@@ -76,6 +76,33 @@ async fn ledger_owners(repo: &dyn RepositoryTrait, pop: &str) -> Result<Vec<(Str
     Ok(owners)
 }
 
+/// Whether `route` exactly matches the frozen route, owner included, of a
+/// terminal, enforced-origin blackhole row of `pop`: a route prefixd left
+/// behind, which reconciliation's orphan cleanup deletes. Same match as
+/// `ReconciliationLoop::withdraw_orphan`, over the newest 100 rows per victim.
+async fn is_terminal_leftover(
+    repo: &dyn RepositoryTrait,
+    pop: &str,
+    route: &crate::bgp::BlackholeRoute,
+) -> Result<bool> {
+    Ok(repo
+        .list_mitigations_by_ip(&route.prefix().addr().to_string(), 100)
+        .await?
+        .iter()
+        .any(|row| {
+            row.action_type == ActionType::Blackhole
+                && matches!(
+                    row.status,
+                    crate::domain::MitigationStatus::Withdrawn
+                        | crate::domain::MitigationStatus::Expired
+                )
+                && !row.is_dry_run_origin()
+                && row.pop == pop
+                && crate::domain::blackhole_rule(row)
+                    .is_ok_and(|rule| rule.route().is_ok_and(|frozen| frozen == *route))
+        }))
+}
+
 /// FlowSpec counterpart of `ledger_owners`: (identity, recorded owner).
 async fn flowspec_ledger_owners(
     repo: &dyn RepositoryTrait,
@@ -171,21 +198,20 @@ pub async fn check_lease_startup(
         return Ok(());
     };
     // A failed read refuses startup; it is never an empty speaker.
-    let unexplained: Vec<_> = blackholes
-        .list_blackholes()
-        .await?
-        .routes
-        .into_iter()
-        .filter(|route| {
-            route.owner() == owner
-                && !ledger.iter().any(|(identity, recorded)| {
-                    recorded == owner
-                        && *identity
-                            == crate::domain::blackhole_identity(&route.prefix().to_string())
-                })
-        })
-        .map(|route| route.prefix().to_string())
-        .collect();
+    let mut unexplained = Vec::new();
+    for route in blackholes.list_blackholes().await?.routes {
+        if route.owner() != owner
+            || ledger.iter().any(|(identity, recorded)| {
+                recorded == owner
+                    && *identity == crate::domain::blackhole_identity(&route.prefix().to_string())
+            })
+            // Our own leftover of a terminal row: reconciliation deletes it.
+            || is_terminal_leftover(repo, pop, &route).await?
+        {
+            continue;
+        }
+        unexplained.push(route.prefix().to_string());
+    }
     if !unexplained.is_empty() {
         return Err(PrefixdError::Config(format!(
             "the speaker holds routes under injection owner {owner} that this controller's ledger \
@@ -1496,6 +1522,37 @@ mod tests {
             .await
             .unwrap();
         check_lease_startup(&lease_settings(&disabled), &speaker, &repo, OWNER)
+            .await
+            .unwrap();
+        // Our own leftover of a terminal row is an orphan for reconciliation,
+        // not a collision: a withdrawal completed locally left the route.
+        let leftover = admit_leased(&repo, &speaker, Some(&lease), "203.0.113.41/32")
+            .await
+            .unwrap()
+            .mitigation;
+        let request = crate::domain::request_withdrawal(
+            &repo,
+            &leftover,
+            false,
+            "system",
+            "test",
+            "local only".into(),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        crate::domain::complete_local_withdrawal(&repo, &request, None)
+            .await
+            .unwrap();
+        assert!(
+            speaker
+                .routes()
+                .await
+                .iter()
+                .any(|route| route.prefix().to_string() == "203.0.113.41/32")
+        );
+        check_lease_startup(&lease_settings(&config), &speaker, &repo, OWNER)
             .await
             .unwrap();
         // A route under this owner that no row desires or withdraws: a collision.
