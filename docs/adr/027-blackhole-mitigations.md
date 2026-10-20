@@ -589,7 +589,13 @@ corresponding slice 9 item.
   blackholes. Any leased add moves the owner's whole deadline, so a second
   owner or length would let one kind shorten the other's lease.
 - **Never fall back.** A failed leased add, including `UNIMPLEMENTED`, keeps
-  the rule unconfirmed and retries it as a leased add only.
+  the rule unconfirmed and retries it as a leased add only. An ownership
+  refusal at admission (`FAILED_PRECONDITION`: another owner, or none, holds
+  the key) changed nothing, so it is handled as for blackholes: the request
+  gets `409`, the new row is withdrawn locally with the audit reason
+  `untracked local route at admission`, and the other rule is never deleted.
+  Kept active, the row could never be withdrawn, because a delete under its
+  owner is refused while the other rule exists.
 - **Owner per rule.** The owner is snapshotted at admission into the row's
   action parameters (`injection_owner`) and into the immutable withdrawal
   `rule_json` (`owner`). Both are omitted when empty, so unleased rows and

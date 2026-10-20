@@ -267,7 +267,7 @@ add reports `"announcement_outcome": "unconfirmed"` as above.
 |--------|--------|
 | 400 | Invalid request body |
 | 401 | Authentication required |
-| 409 | Duplicate event, or in enforced mode the rule is owned by a dry-run mitigation (when every rule is refused before admission, the event is not stored); for a blackhole, a pending withdrawal or an untracked local route at the prefix |
+| 409 | Duplicate event, or in enforced mode the rule is owned by a dry-run mitigation (when every rule is refused before admission, the event is not stored); for a blackhole, a pending withdrawal or an untracked local route at the prefix; for a FlowSpec rule, another injection owner, or none, holding its match at the speaker |
 | 422 | Missing required field, including `protocol` for `"discard"` or `"police"`; guardrail rejection (safelist, quotas, new mitigation rate, prefix length, blackhole source allowlist and victim checks, etc.) |
 | 429 | Rate limited |
 
@@ -659,7 +659,7 @@ TTL while the controller is stopped.
 | 400 | Invalid request (bad IP, invalid protocol or protocol/address-family mismatch, missing/zero/inexact police rate, discard with a rate, a match component the speaker cannot encode, blackhole confirmation mismatch or match fields, etc.) |
 | 401 | Authentication required |
 | 403 | A blackhole was requested without the Admin role, including every bearer token |
-| 409 | Scope already has an active canonical owner or pending withdrawal, or an untracked local route holds a blackhole's prefix |
+| 409 | Scope already has an active canonical owner or pending withdrawal, or an untracked local route holds a blackhole's prefix, or another injection owner, or none, holds a FlowSpec rule's match |
 | 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length, amplification match invariants and opt-ins, blackhole disabled, victim, TTL and quota checks, etc.) |
 
 Canonical ownership ignores equivalent IPv6 spelling and duplicate destination

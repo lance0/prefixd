@@ -88,7 +88,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unleased rules stay unleased. Startup refuses the setting without the
   speaker's lease, refuses turning it off while leased rules are outstanding,
   and refuses owned rules the database cannot explain. Unleased rules are
-  stored and sent exactly as before.
+  stored and sent exactly as before. When the speaker refuses a new rule
+  because another owner, or none, holds its match, the rule gets `409` and
+  its row is withdrawn locally with the audit reason `untracked local route
+  at admission`, as for blackholes; nothing is deleted.
 - Leased blackholes (ADR 027): with `blackhole.leased`, enforced manual and
   detector blackholes use `AddLeasedPath` under the controller's injection
   owner and never fall back to `AddPath`. A renewal task sends `RenewLease`

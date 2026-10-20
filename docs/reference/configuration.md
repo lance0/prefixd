@@ -177,7 +177,10 @@ owner's whole deadline. `blackhole.leased` is not required.
   rules under this owner that the database neither desires nor is
   withdrawing.
 - **No fallback.** A failed leased add leaves the rule unconfirmed and is
-  retried only as a leased add, never as `AddFlowSpec`.
+  retried only as a leased add, never as `AddFlowSpec`. If another owner, or
+  no owner, holds the rule's match, the rule gets `409`, the new row is
+  withdrawn locally with the audit reason `untracked local route at
+  admission`, and nothing is deleted.
 - **Recorded owner.** Each rule keeps the owner it was added under; repair and
   deletion use it and never override another owner. A rule added unleased
   stays unleased until it is withdrawn or expires. Startup refuses
