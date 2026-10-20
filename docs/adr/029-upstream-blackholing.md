@@ -16,18 +16,19 @@ that capacity. Upstream RTBH trades reachability of one victim for capacity
 for the rest of the network. It drops legitimate traffic to that victim too;
 it is not a clean-pipe service. Other ingress paths may remain attacked.
 
-Wanguard separates router filtering, upstream blackholing and diversion to
-scrubbers. Its BGP Connector also exposes prefix restrictions, capacity limits
-and an announcement archive. The useful pattern for prefixd is an explicit,
-auditable choice of mitigation and target, with bounded scope. Scrubbing and
-detection stay external. See the
-[Wanguard 9.0 BGP Connector guide](https://docs.andrisoft.com/wanguard/latest/Configuration__Components__BGP_Connector.html).
+Commercial DDoS controllers commonly separate router filtering, upstream
+blackholing and diversion to scrubbers, with per-target prefix restrictions,
+capacity limits and an announcement archive. The useful pattern for prefixd is
+an explicit, auditable choice of mitigation and target, with bounded scope.
+Scrubbing and detection stay external.
 
 The service contract differs between upstreams:
 
-- [RFC 7999 sections 3 and 6](https://www.rfc-editor.org/rfc/rfc7999.html)
-  define BLACKHOLE as an advisory community. Neighbors must agree to the
-  service, restrict who can announce a victim and limit propagation.
+- [RFC 7999](https://www.rfc-editor.org/rfc/rfc7999.html) defines BLACKHOLE
+  (`65535:666`). Its sections 3 and 6 leave honoring it to each operator,
+  require prior agreement on a bilateral session, and have the receiver check
+  that the announcer is authorized for a covering prefix and limit
+  propagation, normally by adding `NO_EXPORT` or `NO_ADVERTISE` itself.
 - [NTT's routing policy](https://www.gin.ntt.net/support-center/policies-procedures/routing/)
   documents `2914:666` for host routes covered by the customer's ingress
   filter. The service is not enabled by default.
@@ -92,17 +93,18 @@ Each profile records:
 | Authorized space | Inventory-owned covering prefixes that the upstream has agreed to accept; no detector can expand them |
 | Prefix bounds | Minimum and maximum length per family; the first implementation still requires `/32` or `/128` |
 | Communities | Provider-specific standard/large communities and explicit handling of propagation communities at egress |
-| Next hop | Operator-reviewed egress rewrite or next-hop-self behavior and its tested family/transport combinations |
+| Next hop | Operator-reviewed egress rewrite or next-hop-self behavior and its tested family/transport combinations; the injected next hop stays ADR 027's nonzero discard address |
 | Policy binding | A unique internal selector and a separately installed speaker export policy revision |
-| Limits | Profile active cap, maximum TTL and new-admission rate, all nonzero |
+| Limits | Profile active cap, maximum TTL and new-admission rate, all nonzero; the cap must fit within the provider session's agreed max-prefix headroom |
 | Qualification | Service activation reference, dated policy verification and lab receipt for that profile's topology |
 
 A provider accepting only `/24` or `/48` is incompatible with this host-only
 feature. Refuse it; never aggregate the victim and sacrifice unrelated hosts.
 ROA/IRR and upstream authorization checks need an agreed blackhole exception
 where appropriate. Do not recommend broadly increasing ROA `maxLength` to make
-host blackholes pass; see [RFC 9319 section 6](https://www.rfc-editor.org/rfc/rfc9319.html#section-6)
-and [the RPKI warning](027-blackhole-mitigations.md).
+host blackholes pass; [RFC 9319 section 6](https://www.rfc-editor.org/rfc/rfc9319.html#section-6)
+says not to create non-minimal ROAs for RTBH routes. See also the
+[RPKI export-filter warning](../reference/speaker-backends.md#router-and-speaker-requirements).
 
 prefixd must not mutate speaker policy on each attack. Inject one owner-leased
 host route with internal selectors for its frozen target set. Each peer's
@@ -115,6 +117,12 @@ preinstalled export chain must:
 3. Apply the qualified next-hop and propagation behavior for this peer.
 4. Deny these routes to all other peers, including customers, other POPs and
    ordinary transit peers. An unmatched selector must fail closed.
+
+Host routes count toward the provider's maximum-prefix limit on that session,
+and exceeding it usually tears the session down, dropping all transit or
+peering traffic on it. Record the provider's configured limit in the profile
+and refuse a profile whose active cap plus the session's normal announcement
+count would not stay below it with agreed margin.
 
 Profiles may not overlap on a peer in the first version. Reserve selectors
 outside every public trigger set and prevent other injectors from supplying
