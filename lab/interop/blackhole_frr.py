@@ -556,6 +556,8 @@ class BlackholeLab(Lab):
             while True:
                 states = self.frr_rpki(held)
                 if all(s == ["invalid"] for s in states.values()):
+                    # Re-run the import route-maps now that the paths are Invalid.
+                    self.soft_in()
                     return states
                 assert time.monotonic() < deadline, f"FRR RPKI states {states}"
                 time.sleep(1)

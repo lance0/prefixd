@@ -12,8 +12,8 @@ other router or speaker.
 
 | Item | Value |
 | --- | --- |
-| Run | 2026-10-20T21:30:43Z, local, Linux 7.0.0-30-generic, containerlab 0.74.3, lab nodes pinned to eight CPUs |
-| prefixd | 0.20.0, local image `sha256:0977fe14515521ad519c78c1d9c1b3c810b0e5c36d192e7a2bf6ee92841962d8` built from commit `bb9658c`, which adds the add-outcome audit and `allow_missing` deletes |
+| Run | 2026-10-20T21:47:39Z, local, Linux 7.0.0-30-generic, containerlab 0.74.3, lab nodes pinned to eight CPUs |
+| prefixd | 0.20.0, local image `sha256:0977fe14515521ad519c78c1d9c1b3c810b0e5c36d192e7a2bf6ee92841962d8` built from this change's adapter commit, which adds the add-outcome audit and `allow_missing` deletes; lab files as committed with this receipt |
 | Speaker | rustbgpd 0.79.0, `ghcr.io/lance0/rustbgpd:0.79.0@sha256:b2054d0ce98f3c8299b8de5be1920cd88a1ab2c85e02766927e487be0c60f8ff` |
 | Router | FRR 10.7.1, `quay.io/frrouting/frr:10.7.1@sha256:e995beaa50fdc9edb35eadcfefa29b7f062cc06f2b812613789b68fa541554d2`, bgpd loaded with `-M rpki` |
 | RTR cache | StayRTR 0.6.4, `rpki/stayrtr@sha256:cdb93c0b661d97179a5525e00caf7d9e693a04da3b9002f7e24bebb194d9a77b`, serving [`rpki-vrps.json`](../../../lab/interop/configs/rpki-vrps.json): 203.0.113.0/24 maxLength 24 and 2001:db8:113::/48 maxLength 48, both AS 65010 |
@@ -30,7 +30,7 @@ listing showed one IPv4 and one IPv6 VRP, connected.
 
 ## Results
 
-All thirteen steps passed in one run. Steps 01 to 08 repeat the 2026-10-19
+All thirteen steps passed in one run, as they had in an earlier run at 21:30:43Z without the re-evaluation below. Steps 01 to 08 repeat the 2026-10-19
 scenario on rustbgpd 0.79.0 with RPKI and the Invalid export filter active at
 the speaker, and passed with the same expected states.
 
@@ -39,7 +39,7 @@ the speaker, and passed with the same expected states.
 | A ban passes a speaker export filter that drops Invalid | 203.0.113.53/32 discard | 2001:db8:113::53/128 discard | Step 09. rustbgpd stores both injected routes as `not_found`, not `invalid`: prefixd injects with an empty AS_PATH, and rustbgpd 0.79.0 takes the origin AS from the AS_PATH, so there is no origin to validate. Each route's audit entry recorded `created` |
 | The speaker filter is live | 203.0.113.54/32 absent | — | Step 09 control: the same host route with BLACKHOLE, added with `rbgp rib add --as-path 65010`, was stored as `invalid` and never reached FRR, including 3 s after the ban routes arrived |
 | FRR rates the received ban Invalid | Yes | Yes | Step 10: `rpkiValidationState: "invalid"` on the path from 10.0.0.1, AS_PATH `65010` |
-| A ban survives an Invalid filter placed after the BLACKHOLE permit | discard | discard | Step 10: `route-map RTBH-IN-V4/V6 deny 15` with `match rpki invalid`, after `permit 10` that matches `65535:666` |
+| A ban survives an Invalid filter placed after the BLACKHOLE permit | discard | discard | Step 10: `route-map RTBH-IN-V4/V6 deny 15` with `match rpki invalid`, after `permit 10` that matches `65535:666`; the route-maps were re-run with `soft in` once both paths were Invalid |
 | **Negative control:** an Invalid filter ahead of the BLACKHOLE permit drops the ban | absent | absent | Step 11: `deny 5` with `match rpki invalid`; both prefixes left the BGP table, zebra and the kernel |
 | Removing that filter restores the ban | discard | discard | Step 12 |
 | Withdrawal | absent | absent | Step 13, API status `withdrawn` |
