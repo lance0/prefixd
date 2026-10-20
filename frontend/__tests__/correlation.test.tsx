@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from "vitest"
-import { screen, waitFor } from "@testing-library/react"
+import { describe, it, expect, beforeEach, vi } from "vitest"
+import { act, fireEvent, screen, waitFor } from "@testing-library/react"
 import { SignalsTab } from "@/components/dashboard/correlation/signals-tab"
 import { GroupsTab } from "@/components/dashboard/correlation/groups-tab"
 import { ConfigTab } from "@/components/dashboard/correlation/config-tab"
@@ -248,6 +248,31 @@ describe("GroupsTab", () => {
     await show(<GroupsTab />, "/v1/signal-groups")
 
     expect(screen.getByText("Load more")).toBeInTheDocument()
+  })
+
+  it("keeps Load more usable while a background poll revalidates loaded pages", async () => {
+    controller.route("GET", "/v1/signal-groups", ({ query }) => {
+      const group = sampleGroups[query.get("cursor") ? 1 : 0]
+
+      return json({ groups: [group], count: 1, next_cursor: group.group_id, has_more: true })
+    })
+    vi.useFakeTimers()
+
+    try {
+      renderApp(<GroupsTab />, { url: "/correlation" })
+      await act(() => vi.advanceTimersByTimeAsync(0))
+      fireEvent.click(screen.getByRole("button", { name: "Load more" }))
+      await act(() => vi.advanceTimersByTimeAsync(0))
+      expect(screen.getByText("198.51.100.25")).toBeInTheDocument()
+      const loaded = controller.calls("GET", "/v1/signal-groups").length
+      serveGroups("pending")
+      await act(() => vi.advanceTimersByTimeAsync(5000))
+      expect(controller.calls("GET", "/v1/signal-groups").length).toBeGreaterThan(loaded)
+      expect(screen.getByRole("button", { name: "Load more" })).toBeEnabled()
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
   })
 })
 
