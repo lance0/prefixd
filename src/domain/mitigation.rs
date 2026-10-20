@@ -60,7 +60,7 @@ impl std::str::FromStr for MitigationStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionType {
     Police,
@@ -99,7 +99,7 @@ impl std::str::FromStr for ActionType {
 }
 
 /// Unknown keys fail closed: ignoring a match key would widen the rule (ADR 028).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MatchCriteria {
     pub dst_prefix: String,

@@ -76,11 +76,12 @@ export function GroupsTab() {
     limit: 25,
   }
 
-  const { data, error, isLoading, isValidating, size, setSize, mutate } = useSignalGroupsPaginated(filterParams)
+  const { data, error, isLoading, size, setSize, mutate } = useSignalGroupsPaginated(filterParams)
 
   const groups = data ? data.flatMap((page) => page.groups) : []
   const hasMore = data ? data[data.length - 1]?.has_more ?? false : false
-  const isLoadingMore = isValidating && size > 1
+  // A background poll also validates; only a requested page that has not arrived is loading more.
+  const isLoadingMore = !error && size > (data?.length ?? 0)
 
   return (
     <section aria-label="Signal groups" className="overflow-hidden rounded-md border bg-card">

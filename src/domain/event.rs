@@ -90,7 +90,7 @@ pub struct AttackEventInput {
     pub pps: Option<i64>,
     #[serde(default)]
     pub top_dst_ports: Option<Vec<u16>>,
-    /// UDP source ports ranked by the detector, at most 64. Policy uses only
+    /// UDP source ports ranked by descending share by the detector, at most 64. Policy uses only
     /// ports in the reflector-port library (ADR 028).
     #[serde(default)]
     #[schema(max_items = 64)]

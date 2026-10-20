@@ -149,8 +149,8 @@ pub trait RepositoryTrait: Send + Sync {
     /// Raw persistence for fixtures/imports; bypasses quota admission and audit.
     /// Production creation must use `admit_mitigation`.
     async fn insert_mitigation(&self, m: &Mitigation) -> Result<()>;
-    /// Atomically check customer, POP, then global active quotas, then for a
-    /// blackhole its POP and global blackhole quotas, then the POP's
+    /// Atomically check FlowSpec customer/POP/global quotas or blackhole
+    /// POP/global quotas, then the POP's shared
     /// `max_new_per_minute` rate, and persist new intent with its `create` audit entry.
     async fn admit_mitigation(
         &self,
@@ -177,6 +177,10 @@ pub trait RepositoryTrait: Send + Sync {
     async fn count_active_by_customer(&self, customer_id: &str) -> Result<u32>;
     async fn count_active_by_pop(&self, pop: &str) -> Result<u32>;
     async fn count_active_global(&self) -> Result<u32>;
+    /// Active FlowSpec rows only, for preflight; admission rechecks under its lock.
+    async fn count_active_flowspec_by_customer(&self, customer_id: &str) -> Result<u32>;
+    async fn count_active_flowspec_by_pop(&self, pop: &str) -> Result<u32>;
+    async fn count_active_flowspec_global(&self) -> Result<u32>;
     async fn find_expired_mitigations(&self) -> Result<Vec<Mitigation>>;
     /// Strict complete expiry inventory; `None` requests all POPs for standalone reconciliation.
     /// Legacy enumeration cannot promise strict decoding or SQL-level POP isolation.

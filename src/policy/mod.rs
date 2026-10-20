@@ -153,7 +153,7 @@ impl PolicyEngine {
         )?]))
     }
 
-    /// One intent per rule of a `rules` step, in playbook order. A `from_event`
+    /// One intent per rule of a `rules` step, in admission priority. A `from_event`
     /// rule yields one intent per chunk of at most `max_ports` sorted library
     /// ports, so a repeated port set maps to the same identities.
     #[allow(
@@ -171,6 +171,7 @@ impl PolicyEngine {
         service: &str,
     ) -> Result<Option<Vec<MitigationIntent>>> {
         let event_ports = self.library_ports(event);
+        let ranked_ports = event.top_src_ports();
         let mut intents = Vec::new();
         for (k, rule) in step.rules.iter().enumerate() {
             let port_sets = match &rule.match_criteria.src_ports {
@@ -187,17 +188,52 @@ impl PolicyEngine {
                     "{} to {} (playbook: {}, rule {})",
                     vector, service, playbook.name, k
                 );
-                intents.push(self.intent(
+                let rank = ports
+                    .iter()
+                    .filter_map(|port| ranked_ports.iter().position(|ranked| ranked == port))
+                    .min()
+                    .unwrap_or(usize::MAX);
+                let from_event = matches!(
+                    rule.match_criteria.src_ports,
+                    Some(SrcPortsSpec::FromEvent(_))
+                );
+                let fragment = rule.match_criteria.fragment.is_some();
+                let intent = self.intent(
                     event,
                     context,
                     rule.match_for(dst_prefix.clone(), ports),
                     rule.flowspec_action(),
                     step,
                     reason,
-                )?);
+                )?;
+                let original = intents.len();
+                intents.push((intent, from_event, fragment, rank, original));
             }
         }
-        Ok(Some(intents))
+        // Rank the already-canonical chunks, never repartition them by share:
+        // a repeated port set must extend the same stored identities.
+        let dominant = intents
+            .iter()
+            .filter(|(_, from_event, _, _, _)| *from_event)
+            .map(|(_, _, _, rank, original)| (*rank, *original))
+            .min();
+        if let Some((_, dominant)) = dominant {
+            intents.sort_by_key(|(_, from_event, fragment, rank, original)| {
+                if *original == dominant {
+                    (0, *rank)
+                } else if *fragment {
+                    (1, 0)
+                } else if *from_event {
+                    (2, *rank)
+                } else {
+                    // Stable sort preserves static rules' relative playbook order.
+                    (3, 0)
+                }
+            });
+        }
+        Ok(Some(
+            intents.into_iter().map(|(intent, ..)| intent).collect(),
+        ))
     }
 
     /// The event's source ports in the reflector-port library, sorted and
@@ -700,6 +736,75 @@ mod tests {
     }
 
     #[test]
+    fn ranked_admission_preserves_static_order_and_canonical_chunk_identities() {
+        let playbooks: Playbooks = crate::config::parse_yaml(
+            r#"
+playbooks:
+  - name: amp
+    match: {vector: udp_amplification}
+    steps:
+      - ttl_seconds: 120
+        rules:
+          - match: {src_ports: [11211]}
+            action: discard
+          - match: {src_ports: from_event}
+            action: discard
+          - match: {src_ports: [1900]}
+            action: discard
+          - match: {fragment: non_first}
+            action: police
+            rate_bps: 20000000
+"#,
+        )
+        .unwrap();
+        let engine = PolicyEngine::new(playbooks.clone(), "iad1".into(), 120)
+            .with_amplification(vec![17, 19, 53, 123, 389], 2);
+        let mut event = make_event("203.0.113.10", "udp_amplification", &[]);
+        event.top_src_ports_json = Some("[4444,389,389,53,17,123,19]".into());
+        let first = engine.evaluate(&event, None).unwrap().intents;
+        assert_eq!(
+            first
+                .iter()
+                .map(|i| i.match_criteria.src_ports.clone())
+                .collect::<Vec<_>>(),
+            [
+                vec![389],
+                vec![],
+                vec![53, 123],
+                vec![17, 19],
+                vec![11211],
+                vec![1900]
+            ]
+        );
+        assert_eq!(
+            first[1].match_criteria.fragment,
+            Some(crate::domain::FragmentMatch::NonFirst)
+        );
+        let hashes = |intents: &[MitigationIntent]| {
+            let mut hashes = intents
+                .iter()
+                .map(|i| i.match_criteria.scope_hash_for(i.action_type))
+                .collect::<Vec<_>>();
+            hashes.sort();
+            hashes
+        };
+        event.top_src_ports_json = Some("[17,19,53,123,389]".into());
+        let reranked = engine.evaluate(&event, None).unwrap().intents;
+        assert_eq!(reranked[0].match_criteria.src_ports, [17, 19]);
+        assert_eq!(hashes(&first), hashes(&reranked));
+
+        // Without detector chunks, all static rules retain playbook order,
+        // including the fragment rule.
+        let mut static_only = playbooks;
+        static_only.playbooks[0].steps[0].rules.remove(1);
+        let static_engine = PolicyEngine::new(static_only, "iad1".into(), 120);
+        let static_intents = static_engine.evaluate(&event, None).unwrap().intents;
+        assert_eq!(static_intents[0].match_criteria.src_ports, [11211]);
+        assert_eq!(static_intents[1].match_criteria.src_ports, [1900]);
+        assert!(static_intents[2].match_criteria.fragment.is_some());
+    }
+
+    #[test]
     fn rules_steps_chunk_by_max_ports_and_keep_static_lists_whole() {
         let playbooks: Playbooks = crate::config::parse_yaml(
             "playbooks:\n  - name: amp\n    match: {vector: udp_amplification}\n    steps:\n      - ttl_seconds: 0\n        rules:\n          - match: {src_ports: from_event}\n            action: discard\n          - match: {src_ports: [11211, 11211], packet_length: {min: 1000, max: 65535}}\n            action: discard\n",
@@ -716,7 +821,7 @@ mod tests {
             .iter()
             .map(|i| i.match_criteria.src_ports.clone())
             .collect();
-        assert_eq!(ports, [vec![17, 19], vec![53, 123], vec![389], vec![11211]]);
+        assert_eq!(ports, [vec![389], vec![53, 123], vec![17, 19], vec![11211]]);
         for (k, intent) in decision.intents.iter().enumerate() {
             // Reflection rules never match the spoofed destination ports.
             assert!(intent.match_criteria.dst_ports.is_empty());

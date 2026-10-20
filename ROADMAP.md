@@ -65,6 +65,11 @@ the remedy: the speaker would remove them when the controller stops renewing.
 
 ## Later work
 
+Provider-scoped upstream RTBH for saturated transit or exchange ports is
+proposed in [ADR 029](docs/adr/029-upstream-blackholing.md). It requires
+owner-leased injection, explicit per-provider export policy and separate
+transit/route-server qualification before enforcement can be enabled.
+
 ExaBGP and other write-only adapters need durable desired/acknowledged state and
 verified restart replay before support can be claimed. An empty observed RIB
 cannot stand in for unavailable observation. Additional integrations, match or
