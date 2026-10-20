@@ -275,8 +275,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Qualify rustbgpd 0.79.0: Compose and the interop lab pin it; CI tests 0.76.0
-  (minimum), 0.77.0, 0.78.0 and 0.79.0. prefixd keeps its vendored controller
-  proto; every field it reads or writes is unchanged in 0.79.0.
+  (minimum), 0.77.0, 0.78.0 and 0.79.0. Every controller field prefixd reads or
+  writes is unchanged in 0.79.0.
 
 - rustbgpd 0.79.0 changes for operators: it validates a blackhole route
   against RPKI when prefixd adds it, so an export policy that drops

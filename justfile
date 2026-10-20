@@ -33,7 +33,7 @@ python:
 # Offline: the pinned rustbgpd proto must match its release checksum asset.
 [working-directory: "proto"]
 proto:
-    sha256sum --check --strict rustbgpd.proto.sha256
+    shasum -a 256 --check --strict rustbgpd.proto.sha256
 
 clippy-gobgp:
     cargo clippy --locked --no-default-features --all-targets -- -D warnings
