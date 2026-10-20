@@ -594,10 +594,11 @@ peer is withheld or pending or none is Established, is exported to no router.
 Health detail lists it under `speaker.blackhole_exports.unexported` with a
 bounded reason and degrades `status`; `prefixd_blackhole_unexported{reason}`
 counts it and the shipped `PrefixdBlackholeNotExported` alert fires after five
-minutes. rustbgpd has no RPKI-specific reason: an export policy that drops
-RPKI-Invalid routes, which a blackhole `/32` or `/128` almost always is, shows
-as `withheld` with reason `export_policy` and explain code `policy_denied`,
-and `detail` names the policy. prefixd's reason `export_policy` says so.
+minutes. A speaker export policy that denies the route shows as `withheld`
+with reason `export_policy` and explain code `policy_denied`, and `detail`
+names the policy. rustbgpd has no RPKI-specific reason, and at 0.79.0 an
+RPKI-Invalid filter does not cause it for prefixd's blackholes, which carry
+no AS_PATH and validate NotFound (see [RPKI filters](#router-and-speaker-requirements)).
 
 FlowSpec has no equivalent RPC, so FlowSpec rules carry no export evidence.
 

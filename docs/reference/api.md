@@ -778,7 +778,7 @@ the controller's snapshot and never calls the speaker.
 | `peers` | One row per Established peer. `disposition` is `committed` (in that peer's Adj-RIB-Out, not proof of receipt, installation or enforcement), `withheld` or `pending`; `reason` and `explain_code` are rustbgpd's bounded codes and `detail` its unstable text |
 | `not_established_peers` | Configured peers without an Established session, which are sent nothing. `null` when the session read failed or is unsupported |
 | `counts` | Peer rows by disposition |
-| `warning` | Present when an observed blackhole is committed to no Established peer: a bounded `reason` (`no_established_peer`, `export_policy`, `family_suppressed`, `family_not_negotiated`, `not_selected`, `outbound_prefix_limit`, `exact_export_rejected`, `export_rule`, `pending`, `mixed` or `other`) and a `message`. `export_policy` names the RPKI-Invalid export filter case. With `status` `error`, it is the last complete read's warning, kept so a transient read error does not clear degraded health |
+| `warning` | Present when an observed blackhole is committed to no Established peer: a bounded `reason` (`no_established_peer`, `export_policy`, `family_suppressed`, `family_not_negotiated`, `not_selected`, `outbound_prefix_limit`, `exact_export_rejected`, `export_rule`, `pending`, `mixed` or `other`) and a `message`. `export_policy` means a speaker export policy denied the route. With `status` `error`, it is the last complete read's warning, kept so a transient read error does not clear degraded health |
 | `error` | The read error when `status` is `error` |
 
 ### Withdraw Mitigation

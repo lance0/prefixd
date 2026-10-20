@@ -102,8 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `prefixd_blackhole_export_peers{disposition}`,
   `prefixd_blackhole_unexported{reason}` and
   `prefixd_blackhole_export_read_errors`, and the shipped alerts add
-  `PrefixdBlackholeNotExported`. An export policy that drops RPKI-Invalid
-  routes shows as reason `export_policy`. `committed` means the peer's
+  `PrefixdBlackholeNotExported`. A speaker export policy that denies the
+  route shows as reason `export_policy`. `committed` means the peer's
   Adj-RIB-Out, not router receipt or enforcement. A failed or partial read is
   reported as unknown export, never as no peers. The reads mutate nothing,
   and FlowSpec rules have no export evidence. See

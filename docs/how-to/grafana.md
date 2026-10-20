@@ -129,7 +129,7 @@ rustbgpd deployments:
 
 | Alert | Fires when | Why it matters |
 | --- | --- | --- |
-| `PrefixdBlackholeNotExported` | `prefixd_blackhole_unexported{reason}` is above zero for 5 minutes | An active blackhole is committed to no Established peer, so no router is sent it. The `reason` label says why; `export_policy` is usually an export filter that drops RPKI-Invalid routes, which a blackhole `/32` or `/128` almost always is |
+| `PrefixdBlackholeNotExported` | `prefixd_blackhole_unexported{reason}` is above zero for 5 minutes | An active blackhole is committed to no Established peer, so no router is sent it. The `reason` label says why; `export_policy` is a speaker export filter that denies the route. At rustbgpd 0.79.0 an RPKI-Invalid filter does not cause it, because prefixd's blackholes validate NotFound there; a downstream router's RPKI filter never shows here |
 
 Health detail lists each such blackhole under `speaker.blackhole_exports`, and
 its mitigation detail shows every peer. The rule detects missing export only:
