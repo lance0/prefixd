@@ -79,6 +79,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Blackhole export evidence (rustbgpd): once per reconciliation pass, prefixd
+  reads `ListPathExportDispositions` for each active enforced blackhole, to
+  the last page, and joins it with `ListNeighbors`. Mitigation detail adds
+  `export_evidence` (each Established peer's `committed`, `withheld` or
+  `pending` disposition with `reason` and `explain_code`, plus configured
+  peers that are not Established), and the dashboard shows it first on a
+  blackhole's page. Health detail adds `speaker.capabilities.blackhole_export`
+  and `speaker.blackhole_exports`, and reports `degraded` while an active
+  blackhole is committed to no Established peer. Metrics add
+  `prefixd_blackhole_export_peers{disposition}`,
+  `prefixd_blackhole_unexported{reason}` and
+  `prefixd_blackhole_export_read_errors`, and the shipped alerts add
+  `PrefixdBlackholeNotExported`. An export policy that drops RPKI-Invalid
+  routes shows as reason `export_policy`. `committed` means the peer's
+  Adj-RIB-Out, not router receipt or enforcement. A failed or partial read is
+  reported as unknown export, never as no peers. The reads mutate nothing,
+  and FlowSpec rules have no export evidence. See
+  [export evidence](docs/reference/speaker-backends.md#export-evidence).
 - Leased FlowSpec (ADR 027 amendment): with `bgp.rustbgpd.leased_flowspec`
   (off by default, rustbgpd 0.79.0 or later), new enforced FlowSpec rules use
   `AddLeasedFlowSpec` under the same injection owner, lease and renewal as

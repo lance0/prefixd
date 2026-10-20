@@ -1,7 +1,8 @@
 use super::{
     BlackholeInventory, BlackholeRoute, BlackholeSpeaker, DaemonHealth, DaemonHealthObserver,
-    FlowSpecAnnouncer, FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, InjectionLeases,
-    LeaseGeneration, PeerObserver, PeerStatus, SessionState, UnrecognizedRoute, rustbgpd_pb as pb,
+    ExportDisposition, ExportObserver, FlowSpecAnnouncer, FlowSpecMatchSupport, FlowSpecReader,
+    FlowSpecWriter, InjectionLeases, LeaseGeneration, PeerExport, PeerObserver, PeerStatus,
+    SessionState, UnrecognizedRoute, rustbgpd_pb as pb,
 };
 use crate::{
     config::RustBgpdConfig,
@@ -636,6 +637,9 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
     fn peer_observer(&self) -> Option<&dyn PeerObserver> {
         Some(self)
     }
+    fn export_observer(&self) -> Option<&dyn ExportObserver> {
+        Some(self)
+    }
     fn match_support(&self) -> FlowSpecMatchSupport {
         // Types 6, 10 and 12 parse and render alike in every pinned release (0.76.0 to 0.79.0).
         FlowSpecMatchSupport::ALL
@@ -1003,6 +1007,77 @@ impl DaemonHealthObserver for RustBgpdAnnouncer {
             uptime_seconds: response.uptime_seconds,
             ready: response.healthy,
         })
+    }
+}
+
+fn decode_export(entry: pb::PathExportDispositionEntry) -> Result<PeerExport> {
+    entry
+        .peer_address
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| invalid("invalid export peer address"))?;
+    let disposition = match pb::PathExportDisposition::try_from(entry.disposition) {
+        Ok(pb::PathExportDisposition::Committed) => ExportDisposition::Committed,
+        Ok(pb::PathExportDisposition::Withheld) => ExportDisposition::Withheld,
+        Ok(pb::PathExportDisposition::Pending) => ExportDisposition::Pending,
+        _ => return Err(invalid("unknown export disposition")),
+    };
+    Ok(PeerExport {
+        peer_address: entry.peer_address,
+        disposition,
+        reason: entry.reason,
+        explain_code: entry.explain_code,
+        detail: entry.detail,
+        advertised_path_id: entry.advertised_path_id,
+    })
+}
+
+#[async_trait]
+impl ExportObserver for RustBgpdAnnouncer {
+    async fn blackhole_exports(&self, prefix: &ipnet::IpNet) -> Result<Option<Vec<PeerExport>>> {
+        let mut peers: Vec<PeerExport> = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            let request = pb::ListPathExportDispositionsRequest {
+                prefix: prefix.addr().to_string(),
+                prefix_length: prefix.prefix_len().into(),
+                path_id: 0,
+                page_size: ROUTE_PAGE_SIZE,
+                page_token: page_token.clone(),
+            };
+            let response = match self
+                .call("ListPathExportDispositions", || async {
+                    pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                        .list_path_export_dispositions(self.request(request.clone()))
+                        .await
+                })
+                .await
+            {
+                Ok(response) => response,
+                // No local route at the key. Mid-walk the route went away, so the
+                // pages read so far are partial: that is an error, not absence.
+                Err(status) if status.code() == Code::NotFound && page_token.is_empty() => {
+                    return Ok(None);
+                }
+                Err(status) => return Err(failed("ListPathExportDispositions", &status)),
+            };
+            for entry in response.peers {
+                let peer = decode_export(entry)?;
+                if peers
+                    .iter()
+                    .any(|seen| seen.peer_address == peer.peer_address)
+                {
+                    return Err(invalid("export disposition read repeated a peer"));
+                }
+                peers.push(peer);
+            }
+            if response.next_page_token.is_empty() {
+                return Ok(Some(peers));
+            }
+            if response.next_page_token == page_token {
+                return Err(invalid("export disposition read did not advance"));
+            }
+            page_token = response.next_page_token;
+        }
     }
 }
 

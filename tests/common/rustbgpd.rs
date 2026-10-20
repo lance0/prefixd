@@ -18,6 +18,12 @@ use testcontainers::{
     runners::AsyncRunner,
 };
 
+/// Host route the unicast peered fixture's export policy denies, as an
+/// RPKI-Invalid export filter would deny a blackhole.
+pub const EXPORT_DENIED: &str = "203.0.113.99/32";
+/// A configured neighbor with no listener behind it.
+pub const UNREACHABLE_PEER: &str = "192.0.2.250";
+
 pub struct Speaker {
     pub container: ContainerAsync<GenericImage>,
     pub endpoint: String,
@@ -35,17 +41,25 @@ impl Speaker {
     }
 
     pub async fn start_secure(transport: &str) -> Self {
-        Self::start_configured(transport, None, None).await
+        Self::start_configured(transport, None, None, false).await
     }
 
     pub async fn start_peered(network: &str, peer: &str, peer_asn: u32) -> Self {
-        Self::start_configured("bearer", Some((peer, peer_asn)), Some(network)).await
+        Self::start_configured("bearer", Some((peer, peer_asn)), Some(network), false).await
+    }
+
+    /// The peer also negotiates IPv4/IPv6 unicast. Export policy denies
+    /// [`EXPORT_DENIED`], and [`UNREACHABLE_PEER`] is configured but never
+    /// Established.
+    pub async fn start_peered_unicast(network: &str, peer: &str, peer_asn: u32) -> Self {
+        Self::start_configured("bearer", Some((peer, peer_asn)), Some(network), true).await
     }
 
     async fn start_configured(
         transport: &str,
         peer: Option<(&str, u32)>,
         network: Option<&str>,
+        unicast: bool,
     ) -> Self {
         let bridged = network.is_some();
         let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.79.0".into());
@@ -162,6 +176,7 @@ action = "permit"
 set_local_pref = 200
 [policy.definitions.lab-export]
 default_action = "permit"
+{export_statements}
 [policy]
 import_chain = ["lab-import"]
 export_chain = ["lab-export"]
@@ -169,9 +184,30 @@ export_chain = ["lab-export"]
 address = "{address}"
 remote_asn = {asn}
 description = "owned GoBGP peer"
-families = ["ipv4_flowspec", "ipv6_flowspec"]
+families = [{families}]
 hold_time = 9
-"#
+{unicast_neighbors}
+"#,
+                    families = if unicast {
+                        r#""ipv4_flowspec", "ipv6_flowspec", "ipv4_unicast", "ipv6_unicast""#
+                    } else {
+                        r#""ipv4_flowspec", "ipv6_flowspec""#
+                    },
+                    export_statements = if unicast {
+                        format!(
+                            "[[policy.definitions.lab-export.statements]]\nprefix = \"{EXPORT_DENIED}\"\naction = \"deny\""
+                        )
+                    } else {
+                        String::new()
+                    },
+                    // IPv6 unicast over IPv4 eBGP is exported only with an IPv6 next hop.
+                    unicast_neighbors = if unicast {
+                        format!(
+                            "local_ipv6_nexthop = \"2001:db8:0:1::1\"\n[[neighbors]]\naddress = \"{UNREACHABLE_PEER}\"\nremote_asn = 64999\ndescription = \"configured, never Established\"\nfamilies = [\"ipv4_unicast\"]\nhold_time = 9"
+                        )
+                    } else {
+                        String::new()
+                    },
                 )
             })
             .unwrap_or_default();

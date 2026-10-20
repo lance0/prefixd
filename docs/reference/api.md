@@ -748,6 +748,39 @@ GET /v1/mitigations/{id}
 | `contributing_sources` | array | List of source names that contributed |
 | `explanation` | string | Human-readable explanation of the correlation decision |
 
+An active (or escalated) blackhole admitted in enforced mode also carries
+`export_evidence`: per-peer export from the last reconciliation pass
+([export evidence](speaker-backends.md#export-evidence)). It is absent from list
+responses, FlowSpec rules, dry-run blackholes and terminal rows. The request reads
+the controller's snapshot and never calls the speaker.
+
+```json
+"export_evidence": {
+  "status": "observed",
+  "observed_at": "2026-10-20T12:00:00Z",
+  "peers": [
+    {"peer_address": "192.0.2.10", "disposition": "committed", "reason": "",
+     "explain_code": "", "detail": "in the peer's Adj-RIB-Out", "advertised_path_id": 0},
+    {"peer_address": "192.0.2.11", "disposition": "withheld", "reason": "export_policy",
+     "explain_code": "policy_denied", "detail": "export policy \"rtbh-out\" denied this route",
+     "advertised_path_id": 0}
+  ],
+  "not_established_peers": [{"peer_address": "192.0.2.12", "state": "active"}],
+  "counts": {"committed": 1, "withheld": 1, "pending": 0},
+  "warning": null,
+  "error": null
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `status` | `observed` (read to the last page), `no_local_route` (the speaker holds no local route at the key), `error` (the read failed or was partial: export unknown, `peers` empty), `unsupported` (GoBGP) or `not_observed` (no pass has read it yet) |
+| `peers` | One row per Established peer. `disposition` is `committed` (in that peer's Adj-RIB-Out, not proof of receipt, installation or enforcement), `withheld` or `pending`; `reason` and `explain_code` are rustbgpd's bounded codes and `detail` its unstable text |
+| `not_established_peers` | Configured peers without an Established session, which are sent nothing. `null` when the session read failed or is unsupported |
+| `counts` | Peer rows by disposition |
+| `warning` | Present when an observed blackhole is committed to no Established peer: a bounded `reason` (`no_established_peer`, `export_policy`, `family_suppressed`, `family_not_negotiated`, `not_selected`, `outbound_prefix_limit`, `exact_export_rejected`, `export_rule`, `pending`, `mixed` or `other`) and a `message`. `export_policy` names the RPKI-Invalid export filter case |
+| `error` | The read error when `status` is `error` |
+
 ### Withdraw Mitigation
 
 ```http
@@ -1870,6 +1903,7 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
       "daemon_health": true,
       "blackhole": true,
       "blackhole_lease": false,
+      "blackhole_export": true,
       "flowspec_match": {
         "source_ports": true,
         "fragment": true,
@@ -1884,6 +1918,14 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
       "generation": {"incarnation": 1311768467294899695, "sequence": 4},
       "last_renewal_at": "2026-10-18T12:00:00Z",
       "last_renewal_result": "success"
+    },
+    "blackhole_exports": {
+      "observed_at": "2026-10-18T12:00:00Z",
+      "blackholes": 2,
+      "counts": {"committed": 3, "withheld": 1, "pending": 0},
+      "errors": 0,
+      "no_local_route": 0,
+      "unexported": []
     },
     "daemon": {
       "status": "observed",
@@ -1900,7 +1942,7 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
 | Status | Meaning |
 |--------|---------|
 | `healthy` | Database and supported observations succeeded; observed daemon is ready |
-| `degraded` | Database or supported observation failed, or observed daemon is not ready |
+| `degraded` | Database or supported observation failed, observed daemon is not ready, or an active blackhole is committed to no Established peer |
 | `standby` | Another controller holds this POP's fence; this one mutates nothing (overrides the other values) |
 
 `speaker` is additive metadata: backend identity plus observation availability.
@@ -1922,6 +1964,17 @@ renewal succeeded for a whole lease) or `not_renewing` (dry-run, which never
 renews). `generation` is held in memory and
 changes after a speaker restart. `last_renewal_result` is `success`,
 `not_live` or `error`. Health performs no rule inventory probe.
+
+`blackhole_exports` is present when `blackhole_export` is true (rustbgpd). It
+summarizes the last reconciliation pass's
+[export evidence](speaker-backends.md#export-evidence) for active enforced
+blackholes, read from the controller's snapshot: `observed_at` (null before the
+first pass), `blackholes`, peer `counts` by disposition, `errors` (reads that
+failed, so export is unknown), `no_local_route`, and `unexported`. Each
+`unexported` entry is an observed blackhole committed to no Established peer,
+with `mitigation_id`, `prefix`, a bounded `reason` and a `message`; any entry
+makes `status` `degraded`. A committed disposition is the peer's Adj-RIB-Out,
+not router receipt or enforcement.
 
 Top-level `version` and `uptime_seconds` describe prefixd. `speaker.daemon`
 independently reports authenticated speaker process metadata: `observed`, `error`
@@ -2589,6 +2642,17 @@ gauges count database state, not router enforcement. A refused
 
 `prefixd_unknown_local_routes{kind}` counts local speaker routes prefixd does
 not own, by `kind` (`blackhole` or `flowspec`), from the last successful read.
+
+[Export evidence](speaker-backends.md#export-evidence) (rustbgpd) sets three
+gauges after each reconciliation pass, with bounded labels only, never a peer
+or prefix: `prefixd_blackhole_export_peers{disposition}` sums Established-peer
+rows of active enforced blackholes by `committed`, `withheld` and `pending`;
+`prefixd_blackhole_unexported{reason}` counts blackholes committed to no
+Established peer by the `warning.reason` values above; and
+`prefixd_blackhole_export_read_errors` counts blackholes whose read failed.
+`committed` is Adj-RIB-Out state, not enforcement. The shipped
+[`PrefixdBlackholeNotExported`](../how-to/grafana.md#export-alerts) alert uses
+the reason gauge.
 
 See [FEATURES.md](../../FEATURES.md#prometheus-metrics) for full metric list.
 

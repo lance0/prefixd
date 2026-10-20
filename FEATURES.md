@@ -271,6 +271,13 @@ FastNetMon Community ban, into a blackhole for the victim
   [availability alerts](docs/how-to/grafana.md#availability-alerts) page when
   prefixd is down, has no active controller, or was holding blackholes when it
   stopped.
+- **Export evidence.** With rustbgpd, each reconciliation pass reads which
+  Established peers have each active blackhole in their Adj-RIB-Out, and why
+  others are withheld or pending. Mitigation detail, health detail, metrics
+  and the dashboard show it, and `PrefixdBlackholeNotExported` fires when a
+  blackhole reaches no peer, for example through an RPKI-Invalid export
+  filter. Committed export is not router enforcement. See
+  [export evidence](docs/reference/speaker-backends.md#export-evidence).
 
 ---
 

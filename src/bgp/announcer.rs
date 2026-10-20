@@ -107,6 +107,60 @@ pub trait DaemonHealthObserver: Send + Sync {
     async fn daemon_health(&self) -> Result<DaemonHealth>;
 }
 
+/// A local unicast route's export state toward one Established peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportDisposition {
+    /// In the peer's Adj-RIB-Out. Not proof that the peer received, accepted,
+    /// installed or enforces the route: BGP reports none of these.
+    Committed,
+    /// Not exported to this peer; `reason` says why.
+    Withheld,
+    /// Export has not settled; `reason` names what is outstanding.
+    Pending,
+}
+
+impl ExportDisposition {
+    pub const ALL: [Self; 3] = [Self::Committed, Self::Withheld, Self::Pending];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Committed => "committed",
+            Self::Withheld => "withheld",
+            Self::Pending => "pending",
+        }
+    }
+}
+
+/// One Established peer's export disposition, as the speaker reports it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+pub struct PeerExport {
+    #[schema(example = "192.0.2.10")]
+    pub peer_address: String,
+    pub disposition: ExportDisposition,
+    /// Bounded speaker reason code; empty when committed.
+    #[schema(example = "export_policy")]
+    pub reason: String,
+    /// Stop code of the speaker's export explain ladder; empty when none applies.
+    #[schema(example = "policy_denied")]
+    pub explain_code: String,
+    /// Speaker text; not a stable string.
+    pub detail: String,
+    /// Outbound Add-Path identifier when committed; 0 on single-best.
+    pub advertised_path_id: u32,
+}
+
+/// Optional, read-only export observation of local unicast routes. It is
+/// separate from every writer and mutates nothing.
+#[async_trait]
+pub trait ExportObserver: Send + Sync {
+    /// Every Established peer's disposition of the blackhole at `prefix`
+    /// (`path_id` 0), read to the last page. `None` when the speaker holds no
+    /// local route at that key. Configured peers without a session are absent.
+    /// A failed or partial read is an error, never an empty list.
+    async fn blackhole_exports(&self, prefix: &ipnet::IpNet) -> Result<Option<Vec<PeerExport>>>;
+}
+
 /// RFC 7999 BLACKHOLE, 65535:666. Every blackhole route carries it.
 pub const BLACKHOLE_COMMUNITY: u32 = 0xFFFF_029A;
 
@@ -294,6 +348,10 @@ pub trait FlowSpecAnnouncer: FlowSpecWriter {
         None
     }
 
+    fn export_observer(&self) -> Option<&dyn ExportObserver> {
+        None
+    }
+
     /// ADR 028 components this adapter encodes. Defaults to none, so an adapter
     /// that has not opted in is refused instead of silently dropping a component.
     fn match_support(&self) -> FlowSpecMatchSupport {
@@ -364,6 +422,10 @@ pub struct SpeakerCapabilities {
     /// `ListInjectionLeases`, which prefixd asks only when `blackhole.leased` is set.
     #[serde(default)]
     pub blackhole_lease: bool,
+    /// Per-peer export dispositions of blackhole routes (rustbgpd
+    /// `ListPathExportDispositions`); availability, not export.
+    #[serde(default)]
+    pub blackhole_export: bool,
     /// ADR 028 match components the adapter encodes; all false when absent.
     #[serde(default)]
     pub flowspec_match: FlowSpecMatchSupport,
@@ -379,6 +441,7 @@ impl dyn FlowSpecAnnouncer + '_ {
             blackhole_lease: self
                 .injection_leases()
                 .is_some_and(|leases| leases.lease_confirmed()),
+            blackhole_export: self.export_observer().is_some(),
             flowspec_match: self.match_support(),
         }
     }
