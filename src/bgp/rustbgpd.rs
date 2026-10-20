@@ -22,6 +22,21 @@ pub struct RustBgpdAnnouncer {
     lease_confirmed: std::sync::atomic::AtomicBool,
 }
 
+/// The oldest daemon prefixd runs against: 0.79.0 adds the injection lease
+/// (rustbgpd ADR-0141) and the add and delete outcomes prefixd reads.
+const MINIMUM_DAEMON_VERSION: [u64; 3] = [0, 79, 0];
+
+/// `major.minor.patch`, ignoring any pre-release or build suffix.
+fn parse_version(version: &str) -> Option<[u64; 3]> {
+    let core = version.split(['-', '+']).next()?;
+    let parts: Vec<u64> = core
+        .split('.')
+        .map(str::parse)
+        .collect::<std::result::Result<_, _>>()
+        .ok()?;
+    parts.try_into().ok()
+}
+
 fn invalid(message: &str) -> PrefixdError {
     PrefixdError::Internal(format!("rustbgpd: {message}"))
 }
@@ -35,7 +50,32 @@ impl RustBgpdAnnouncer {
                 anyhow::anyhow!("rustbgpd bearer token environment variable is missing")
             })?
         };
-        Self::connect_with_token(config, &token).await
+        let speaker = Self::connect_with_token(config, &token).await?;
+        speaker.require_minimum_version().await?;
+        Ok(speaker)
+    }
+
+    /// Startup contract check: refuse a daemon older than 0.79.0, or one whose
+    /// version cannot be read, before any intent is read or written.
+    async fn require_minimum_version(&self) -> anyhow::Result<()> {
+        let version = self
+            .daemon_health()
+            .await
+            .map_err(|error| anyhow::anyhow!("cannot read the rustbgpd version: {error}"))?
+            .version
+            .unwrap_or_default();
+        let minimum = MINIMUM_DAEMON_VERSION
+            .map(|part| part.to_string())
+            .join(".");
+        match parse_version(&version) {
+            Some(parsed) if parsed >= MINIMUM_DAEMON_VERSION => Ok(()),
+            Some(_) => anyhow::bail!(
+                "rustbgpd {version} is older than the minimum {minimum}; upgrade the speaker first"
+            ),
+            None => anyhow::bail!(
+                "rustbgpd reported no readable version ({version:?}); prefixd requires {minimum} or later"
+            ),
+        }
     }
 
     async fn connect_with_token(config: &RustBgpdConfig, token: &str) -> anyhow::Result<Self> {
@@ -637,7 +677,7 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
         Some(self)
     }
     fn match_support(&self) -> FlowSpecMatchSupport {
-        // Types 6, 10 and 12 parse and render alike in every pinned release (0.76.0 to 0.79.0).
+        // Types 6, 10 and 12 parse and render alike in every supported release.
         FlowSpecMatchSupport::ALL
     }
 }
@@ -679,7 +719,7 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
         rule: &FlowSpecRule,
         lease_seconds: u32,
     ) -> Result<LeaseGeneration> {
-        // Never AddFlowSpec: an older daemon answers UNIMPLEMENTED and creates nothing.
+        // Never AddFlowSpec: a rejected leased add creates nothing and never falls back.
         if rule.owner.is_empty() {
             return Err(invalid("a leased add needs an injection owner"));
         }
@@ -790,7 +830,7 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
             return Err(invalid("a leased route needs AddLeasedPath"));
         }
         let payload = encode_blackhole(route);
-        // OK is local Adj-RIB-In acceptance only; 0.76.0 to 0.78.0 report no outcome.
+        // OK is local Adj-RIB-In acceptance only; prefixd does not read the outcome yet.
         self.call("AddPath", || async {
             pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
                 .add_path(self.request(payload.clone()))
@@ -806,7 +846,7 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
         route: &BlackholeRoute,
         lease_seconds: u32,
     ) -> Result<LeaseGeneration> {
-        // Never AddPath: an older daemon answers UNIMPLEMENTED and creates nothing.
+        // Never AddPath: a rejected leased add creates nothing and never falls back.
         if route.owner().is_empty() {
             return Err(invalid("a leased add needs an injection owner"));
         }

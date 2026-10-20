@@ -22,7 +22,7 @@ struct Fake {
     delete_owners: Arc<Mutex<Vec<String>>>,
 }
 
-/// FlowSpec fake modes for the lease: an older daemon, and leased rows with no time left.
+/// FlowSpec fake modes for the lease: a rolled-back daemon, and leased rows with no time left.
 const FLOWSPEC_LEASE_UNIMPLEMENTED: usize = 30;
 const FLOWSPEC_LEASE_EXPIRED: usize = 31;
 
@@ -72,13 +72,84 @@ impl pb::control_service_server::ControlService for Fake {
             }
             _ => {}
         }
+        let daemon_version = match self.mode.load(SeqCst) {
+            23 => "0.78.0",
+            24 => "0.79.0",
+            25 => "0.80.0-dev",
+            _ => "observed-daemon-version",
+        };
         Ok(Response::new(pb::HealthResponse {
             healthy: true,
             uptime_seconds: 123,
-            daemon_version: "observed-daemon-version".into(),
+            daemon_version: daemon_version.into(),
             ..Default::default()
         }))
     }
+}
+
+#[test]
+fn daemon_versions_parse_as_major_minor_patch() {
+    assert_eq!(parse_version("0.79.0"), Some([0, 79, 0]));
+    assert_eq!(parse_version("1.2.3-rc.1+build"), Some([1, 2, 3]));
+    for bad in ["", "0.79", "0.79.0.1", "v0.79.0", "observed-daemon-version"] {
+        assert_eq!(parse_version(bad), None, "{bad}");
+    }
+    assert!(parse_version("0.100.0").unwrap() > MINIMUM_DAEMON_VERSION);
+}
+
+#[tokio::test]
+async fn startup_refuses_a_daemon_older_than_the_minimum_contract() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fake = Fake::default();
+    let incoming = futures_util::stream::unfold(listener, |listener| async {
+        Some((listener.accept().await.map(|(stream, _)| stream), listener))
+    });
+    let server = tokio::spawn(
+        tonic::transport::Server::builder()
+            .add_service(pb::control_service_server::ControlServiceServer::new(
+                fake.clone(),
+            ))
+            .serve_with_incoming(incoming),
+    );
+    let config = RustBgpdConfig {
+        endpoint: format!("http://{address}"),
+        bearer_token_env: "unused".into(),
+        ..Default::default()
+    };
+    let speaker = RustBgpdAnnouncer::connect_with_token(&config, "test-secret")
+        .await
+        .unwrap();
+    for mode in [24, 25] {
+        fake.mode.store(mode, SeqCst);
+        speaker.require_minimum_version().await.unwrap();
+    }
+    fake.mode.store(23, SeqCst);
+    let error = speaker
+        .require_minimum_version()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        "rustbgpd 0.78.0 is older than the minimum 0.79.0; upgrade the speaker first"
+    );
+    // No version, an unreadable one or a failed read refuses too, without upstream detail.
+    for (mode, expected) in [
+        (22, "no readable version"),
+        (0, "no readable version"),
+        (21, "cannot read the rustbgpd version"),
+    ] {
+        fake.mode.store(mode, SeqCst);
+        let error = speaker
+            .require_minimum_version()
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("secret"), "{error}");
+    }
+    server.abort();
 }
 
 #[tokio::test]
@@ -865,7 +936,7 @@ const DELETE_INTERNAL: usize = 4;
 const LIST_UNIMPLEMENTED: usize = 5;
 const VERSION_CHANGES: usize = 6;
 const REPEATED_TOKEN: usize = 7;
-/// A daemon before 0.79.0: every lease RPC is UNIMPLEMENTED.
+/// A daemon rolled back below 0.79.0 after startup: every lease RPC is UNIMPLEMENTED.
 const LEASE_UNIMPLEMENTED: usize = 8;
 /// Ownership refusals on adds and deletes; renewal of a dead generation.
 const PRECONDITION: usize = 9;
@@ -1008,7 +1079,7 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
         let before = paths.len();
         paths.retain(|old| !same_key(old, &request.prefix, request.prefix_length));
         if paths.len() == before {
-            // The released daemon has no allow_missing: a missing path is NOT_FOUND.
+            // prefixd sets no allow_missing: a missing path is NOT_FOUND.
             return Err(Status::not_found("no injected path"));
         }
         Ok(Response::new(pb::DeletePathResponse::default()))

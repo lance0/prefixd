@@ -105,9 +105,6 @@ test-rustbgpd-speaker:
 
 speakers:
     just test-gobgp-speaker
-    PREFIXD_RUSTBGPD_TEST_VERSION=0.76.0 just test-rustbgpd-speaker
-    PREFIXD_RUSTBGPD_TEST_VERSION=0.77.0 just test-rustbgpd-speaker
-    PREFIXD_RUSTBGPD_TEST_VERSION=0.78.0 just test-rustbgpd-speaker
     PREFIXD_RUSTBGPD_TEST_VERSION=0.79.0 just test-rustbgpd-speaker
 
 # Needs Docker and containerlab; set CLAB="sudo containerlab" outside clab_admins. Not in gate.

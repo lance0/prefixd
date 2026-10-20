@@ -59,7 +59,6 @@ cargo test --locked --features test-utils
 
 # Released rustbgpd controller and receiving-peer fixtures
 scripts/test-rustbgpd.sh
-PREFIXD_RUSTBGPD_TEST_VERSION=0.76.0 scripts/test-rustbgpd.sh
 
 # GoBGP fixtures
 scripts/test-gobgp.sh
@@ -76,7 +75,7 @@ Rust and Python formatting, Python lint, the pinned rustbgpd proto checksum,
 both locked Rust test
 and Clippy feature combinations, minimum-compiler checks, the release build,
 frozen dashboard install/types/tests/build, advisory checks and the owned GoBGP
-and rustbgpd 0.76.0/0.77.0/0.78.0/0.79.0 fixtures, sequentially. It needs Docker and the tools
+and rustbgpd 0.79.0 fixtures, sequentially. It needs Docker and the tools
 listed above; it does not install missing tools or Rust toolchains.
 Prose-only changes need affected-link checks and `git diff --check`.
 

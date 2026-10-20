@@ -375,7 +375,7 @@ impl FlowSpecWriter for FaultyBlackholes {
         self.leased_flowspec_adds.fetch_add(1, SeqCst);
         self.lease_seconds.lock().unwrap().push(lease_seconds);
         if self.fail_adds.load(SeqCst) {
-            // As UNIMPLEMENTED from an older daemon: nothing is created.
+            // As UNIMPLEMENTED from a rolled-back daemon: nothing is created.
             return Err(PrefixdError::BgpAnnouncementFailed(
                 "AddLeasedFlowSpec RPC failed: Unimplemented".into(),
             ));
@@ -429,7 +429,7 @@ impl BlackholeSpeaker for FaultyBlackholes {
         self.leased_adds.fetch_add(1, SeqCst);
         self.lease_seconds.lock().unwrap().push(lease_seconds);
         if self.fail_adds.load(SeqCst) {
-            // As UNIMPLEMENTED from an older daemon: nothing is created.
+            // As UNIMPLEMENTED from a rolled-back daemon: nothing is created.
             return Err(crate::error::PrefixdError::BgpAnnouncementFailed(
                 "AddLeasedPath RPC failed: Unimplemented".into(),
             ));

@@ -257,16 +257,19 @@ rustbgpd `v0.79.0` release, checked offline against the release's sha256 by
 `just proto`. The controller message fields prefixd uses were checked against
 it. This is a protocol baseline, not proof that an arbitrary binary reporting
 that version has passed the deployment or router tests. The stubs follow the
-pinned release, but v0.76.0 remains the minimum daemon: prefixd leaves fields
-and RPCs added after it unset and unused until a change adopts them behind a
-version or capability check.
+pinned release, and v0.79.0 is the minimum daemon. At startup prefixd reads
+the version that `GetHealth` reports and refuses a daemon older than v0.79.0,
+or one that reports no readable version, with "upgrade the speaker first".
+Fields and RPCs added after the minimum stay unset and unused until a change
+adopts them and raises the minimum. A daemon rolled back while prefixd runs is
+still caught at runtime: an `UNIMPLEMENTED` lease RPC withdraws the lease
+capability and the leased add creates nothing.
 
 ## Released controller qualification
 
-The scoped controller promotion is released: v0.76.0 is the minimum controller
-contract version, and v0.79.0 is the current qualification pin. CI runs the
-lifecycle, TTL and restart suite against the v0.76.0, v0.77.0, v0.78.0 and
-v0.79.0 immutable image references in
+The scoped controller promotion is released: v0.79.0 is the minimum controller
+contract version and the current qualification pin. CI runs the lifecycle, TTL
+and restart suite against the v0.79.0 immutable image reference in
 [releases.json](../../tests/fixtures/rustbgpd/releases.json). Image OCI source
 revisions match the dereferenced release-tag commits. This qualifies the local
 controller boundary on Linux amd64, independently of router interoperability.
@@ -275,7 +278,6 @@ Run the same isolated suite locally with Docker available:
 
 ```bash
 scripts/test-rustbgpd.sh
-PREFIXD_RUSTBGPD_TEST_VERSION=0.76.0 scripts/test-rustbgpd.sh
 ```
 
 Fixtures bind ephemeral loopback ports, create an owner-only bearer token, and
@@ -586,7 +588,6 @@ Run the real fixtures on Linux with Docker:
 ```sh
 scripts/test-gobgp.sh
 scripts/test-rustbgpd.sh
-PREFIXD_RUSTBGPD_TEST_VERSION=0.76.0 scripts/test-rustbgpd.sh
 ```
 
 The GoBGP fixture pins image digest

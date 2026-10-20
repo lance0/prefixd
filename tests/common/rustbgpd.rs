@@ -350,21 +350,6 @@ prefixd-test = "operator"
         .expect("bounded authenticated daemon readiness");
     }
 
-    /// The released daemon version this fixture runs.
-    pub fn version(&self) -> &str {
-        &self.version
-    }
-
-    /// Whether the release has the injection lease RPCs (rustbgpd ADR-0141, 0.79.0).
-    pub fn has_injection_lease(&self) -> bool {
-        let parts: Vec<u32> = self
-            .version
-            .split('.')
-            .map(|part| part.parse().unwrap())
-            .collect();
-        parts >= vec![0, 79, 0]
-    }
-
     async fn raw_injection(
         &self,
     ) -> pb::injection_service_client::InjectionServiceClient<tonic::transport::Channel> {

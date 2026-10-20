@@ -9,14 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- rustbgpd 0.79.0 is now the minimum speaker version. Upgrade rustbgpd to
+  0.79.0 before upgrading prefixd: with the rustbgpd backend, startup reads
+  the daemon version and refuses an older or unreadable one ("upgrade the
+  speaker first"). CI and `just speakers` test only 0.79.0. GoBGP is
+  unchanged. See
+  [rustbgpd minimum version](docs/how-to/upgrading.md#rustbgpd-minimum-version).
 - `blackhole.leased: true` is now accepted with rustbgpd 0.79.0 or later.
   New enforced blackholes are then added under the controller's owner-scoped
   injection lease, and rustbgpd removes them within `blackhole.lease_seconds`
   if prefixd stops. Blackholes added before the change stay unleased until
   they are withdrawn or expire. Once leased blackholes exist, startup refuses
-  `blackhole.leased: false` until they are withdrawn or expire, and refuses
-  rustbgpd releases before 0.79.0. The vendored rustbgpd proto is now the
-  0.79.0 release; requests to 0.76.0 through 0.78.0 are unchanged.
+  `blackhole.leased: false` until they are withdrawn or expire. The vendored
+  rustbgpd proto is now the 0.79.0 release.
 - The default and shipped `quotas.max_active_per_customer` rise from 5 to 20;
   explicit configured limits are preserved. Active customer/POP/global quotas
   now count only FlowSpec rules. Blackholes use their independent POP/global
@@ -149,8 +154,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   port, non-first fragment and packet-length FlowSpec matches in both
   families (ADR 028). Health detail reports
   `speaker.capabilities.flowspec_match` with `source_ports`, `fragment` and
-  `packet_length`; all three are true for rustbgpd 0.76.0 to 0.78.0, GoBGP
-  and the mock. The controller refuses a rule with a component the selected
+  `packet_length`; all three are true for rustbgpd, GoBGP and the mock. The controller refuses a rule with a component the selected
   speaker cannot encode before persisting it or sending any RPC, in dry-run
   too. Nothing creates these matches yet.
 - Blackhole lifecycle and reconciliation (ADR 027), used by the manual
@@ -312,9 +316,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Qualify rustbgpd 0.79.0: Compose and the interop lab pin it; CI tests 0.76.0
-  (minimum), 0.77.0, 0.78.0 and 0.79.0. Every controller field prefixd reads or
-  writes is unchanged in 0.79.0.
+- Qualify rustbgpd 0.79.0: Compose and the interop lab pin it, and it is now
+  the minimum and the only version CI tests. Every controller field prefixd
+  reads or writes is unchanged in 0.79.0.
 
 - rustbgpd 0.79.0 changes for operators: it validates a blackhole route
   against RPKI when prefixd adds it, so an export policy that drops
@@ -329,8 +333,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rustbgpd.proto` asset of the rustbgpd v0.79.0 release, pinned by its
   published sha256, instead of an unversioned copy. `just proto`, part of
   `just gate` and CI lint, checks the file offline. Requests are byte-for-byte
-  unchanged: prefixd sets none of the newer fields, and 0.76.0 remains the
-  minimum daemon.
+  unchanged: prefixd sets none of the newer fields.
 
 - `POST /v1/safelist` now withdraws every live blackhole on this POP whose
   victim falls inside the new entry, under the lifecycle mutex, with the
