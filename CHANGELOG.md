@@ -32,7 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   split into rules of at most five: a 20-port amplification report becomes
   four source-port rules instead of three, each counting toward quotas. A
   configuration that sets `max_ports: 8`, as earlier shipped files did, keeps
-  it. Raise it only for routers known to accept longer lists.
+  it. Raise it only for routers known to accept longer lists. Existing rules
+  are unaffected: the cap applies only to new admissions, so stored rules with
+  six to eight ports stay announced, are repaired after a speaker restart,
+  expire and are withdrawn as before. A detector re-report after the upgrade
+  splits at five, so it creates new rules instead of extending the stored
+  ones, which leave at their TTL.
 - Migration 017 adds the nullable `events.top_src_ports_json` column. Replay
   leaves every existing event's value `NULL` and rewrites no other row.
 - Migration 018 replaces the `events` constraint

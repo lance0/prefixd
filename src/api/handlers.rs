@@ -3586,6 +3586,18 @@ playbooks:
     }
 
     fn fixture(mode: OperationMode, tweak: impl FnOnce(&mut Settings, &mut Playbooks)) -> Fixture {
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(MockAnnouncer::new());
+        fixture_on(repo, speaker, mode, tweak)
+    }
+
+    /// A controller over existing state, as after a restart or upgrade.
+    fn fixture_on(
+        repo: Arc<MockRepository>,
+        speaker: Arc<MockAnnouncer>,
+        mode: OperationMode,
+        tweak: impl FnOnce(&mut Settings, &mut Playbooks),
+    ) -> Fixture {
         let mut settings: Settings =
             crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
         settings.bgp.mode = BgpMode::Mock;
@@ -3597,8 +3609,6 @@ playbooks:
         let parsed: Inventory =
             crate::config::parse_yaml(include_str!("../../configs/inventory.yaml")).unwrap();
         let inventory = Inventory::new(parsed.customers);
-        let repo = Arc::new(MockRepository::new());
-        let speaker = Arc::new(MockAnnouncer::new());
         let state = AppState::new(
             settings,
             inventory,
@@ -3754,6 +3764,87 @@ playbooks:
         assert_eq!(again.mitigation_ids, first.mitigation_ids);
         assert_eq!(rows(&f).await.len(), 5);
         assert_eq!(f.speaker.announced_count().await, 5);
+    }
+
+    #[tokio::test]
+    async fn stored_eight_port_rules_outlive_a_lower_max_ports() {
+        // Enforced admissions move process-global announcement series.
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        use crate::bgp::{FlowSpecReader, FlowSpecWriter};
+        use crate::scheduler::ReconciliationLoop;
+        // Before the upgrade: max_ports 8 stores 8-port source lists.
+        let before = fixture(OperationMode::Enforced, |settings, _| {
+            settings.guardrails.max_ports = 8;
+        });
+        let library: Vec<u16> = DEFAULT_REFLECTOR_PORTS.iter().map(|(p, _)| *p).collect();
+        let banned = ban(&before, event("old", "udp_amplification", Some(&library)))
+            .await
+            .unwrap();
+        let ids = banned.mitigation_ids.clone();
+        assert_eq!(ids.len(), 4);
+        assert_eq!(get(&before, ids[0]).await.match_criteria.src_ports.len(), 8);
+        assert_eq!(get(&before, ids[1]).await.match_criteria.src_ports.len(), 8);
+
+        // After the upgrade: the default cap of 5, the same database and speaker.
+        let f = fixture_on(
+            before.repo.clone(),
+            before.speaker.clone(),
+            OperationMode::Enforced,
+            |_, _| {},
+        );
+        assert_eq!(f.state.settings.guardrails.max_ports, 5);
+        let reconciler = ReconciliationLoop::new(f.repo.clone(), f.speaker.clone(), 30, false)
+            .with_app_state(f.state.clone());
+
+        // A speaker restart loses every rule; repair re-announces them whole.
+        for rule in f.speaker.list_active().await.unwrap() {
+            f.speaker.withdraw(&rule).await.unwrap();
+        }
+        assert_eq!(f.speaker.announced_count().await, 0);
+        reconciler.reconcile().await.unwrap();
+        let announced = f.speaker.list_active().await.unwrap();
+        assert_eq!(announced.len(), 4);
+        assert_eq!(
+            announced
+                .iter()
+                .filter(|rule| rule.nlri.src_ports.len() == 8)
+                .count(),
+            2
+        );
+
+        // TTL expiry withdraws an 8-port rule.
+        let mut expiring = get(&f, ids[0]).await;
+        expiring.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        f.repo.update_mitigation(&expiring).await.unwrap();
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(get(&f, ids[0]).await.status, MitigationStatus::Expired);
+
+        // An operator withdrawal removes the other 8-port rule.
+        let operator = super::withdraw_and_notify(
+            &f.state,
+            &get(&f, ids[1]).await,
+            "operator",
+            "op",
+            "op: upgrade".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(operator.status, MitigationStatus::Withdrawn);
+
+        // The detector unban withdraws what the ban created and is still live.
+        let mut unban = event("old", "udp_amplification", None);
+        unban.action = "unban".into();
+        let (_, axum::Json(response)) = handle_unban(f.state.clone(), unban)
+            .await
+            .map_err(|AppError(error)| error)
+            .unwrap();
+        assert_eq!(response.status, "withdrawn");
+        for id in &ids[2..] {
+            assert_eq!(get(&f, *id).await.status, MitigationStatus::Withdrawn);
+        }
+        assert_eq!(f.speaker.announced_count().await, 0);
     }
 
     #[tokio::test]
