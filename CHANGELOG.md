@@ -391,6 +391,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   withdrawal succeeded. A repeated identical ban is still rejected with
   `409 DuplicateEvent`.
 
+### Security
+
+- **rustls-webpki** — Updated 0.103.15 → 0.103.16, which rejects certificate
+  paths through distrusted emSign intermediates (RUSTSEC-2026-0382).
+- **webpki-roots**, **webpki-root-certs** — Updated 1.0.5 → 1.0.10, which drop
+  the `emSign ECC Root CA - G3` root (RUSTSEC-2026-0381, RUSTSEC-2026-0383).
+
 ## [0.20.0] - 2026-10-19
 
 ### Upgrade notes
