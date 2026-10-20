@@ -26,8 +26,8 @@ exceptions = [
     # These exact releases package Mozilla/CCADB root certificate data under
     # CDLA-Permissive-2.0; their Cargo manifests and LICENSE state this license.
     # Reassess the data license when either package version changes.
-    { crate = "webpki-root-certs@1.0.5", allow = ["CDLA-Permissive-2.0"] },
-    { crate = "webpki-roots@1.0.5", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "webpki-root-certs@1.0.10", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "webpki-roots@1.0.10", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [bans]
