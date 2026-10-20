@@ -99,6 +99,16 @@ pub static GUARDRAIL_REJECTIONS: Lazy<CounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Bounded rule categories; exact scopes belong in responses and audit entries.
+pub static EVENT_RULE_QUOTA_REJECTIONS: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "prefixd_event_rule_quota_rejections_total",
+        "Event rules refused by active quotas, by quota, match kind and action",
+        &["quota_type", "rule_kind", "action_type"]
+    )
+    .unwrap()
+});
+
 // Controller fence metrics (ADR 027)
 pub static CONTROLLER_FENCE_ACTIVE: Lazy<Gauge> = Lazy::new(|| {
     register_gauge!(
@@ -362,6 +372,7 @@ pub fn init_metrics() {
     Lazy::force(&ANNOUNCEMENTS_LATENCY);
     Lazy::force(&BGP_SESSION_UP);
     Lazy::force(&GUARDRAIL_REJECTIONS);
+    Lazy::force(&EVENT_RULE_QUOTA_REJECTIONS);
     Lazy::force(&CONTROLLER_FENCE_ACTIVE);
     Lazy::force(&BLACKHOLE_DETECTOR_UNLEASED);
     Lazy::force(&RECONCILIATION_RUNS);

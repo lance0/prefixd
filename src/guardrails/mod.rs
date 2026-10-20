@@ -205,7 +205,7 @@ impl Guardrails {
     ) -> Result<()> {
         // Customer quota
         if let Some(ref cid) = intent.customer_id {
-            let count = repo.count_active_by_customer(cid).await?;
+            let count = repo.count_active_flowspec_by_customer(cid).await?;
             if count >= self.quotas.max_active_per_customer {
                 return Err(PrefixdError::GuardrailViolation(
                     GuardrailError::QuotaExceeded {
@@ -218,7 +218,7 @@ impl Guardrails {
         }
 
         // POP quota
-        let pop_count = repo.count_active_by_pop(&intent.pop).await?;
+        let pop_count = repo.count_active_flowspec_by_pop(&intent.pop).await?;
         if pop_count >= self.quotas.max_active_per_pop {
             return Err(PrefixdError::GuardrailViolation(
                 GuardrailError::QuotaExceeded {
@@ -230,7 +230,7 @@ impl Guardrails {
         }
 
         // Global quota
-        let global_count = repo.count_active_global().await?;
+        let global_count = repo.count_active_flowspec_global().await?;
         if global_count >= self.quotas.max_active_global {
             return Err(PrefixdError::GuardrailViolation(
                 GuardrailError::QuotaExceeded {

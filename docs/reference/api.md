@@ -111,7 +111,7 @@ Content-Type: application/json
 | `pps` | integer | no | Packets per second |
 | `confidence` | float | no | Finite 0.0–1.0 inclusive, or null; invalid values return 400 |
 | `top_dst_ports` | array | no | Destination ports involved (max 8) |
-| `top_src_ports` | array | no | UDP source ports, ranked by the detector; at most 64, otherwise 400. Used by `udp_amplification` playbooks |
+| `top_src_ports` | array | no | UDP source ports, ranked by descending share by the detector; at most 64, otherwise 400. Used by `udp_amplification` playbooks |
 | `action` | string | no | `"ban"` (default) or `"unban"` |
 | `event_id` | string | no | External event ID (for dedup / unban correlation) |
 | `raw_details` | object | no | Raw detector payload for forensics |
@@ -142,9 +142,9 @@ prefix, port, TTL, quota and safelist checks still apply.
 ```
 
 `mitigation_ids` lists every mitigation the request created, extended or
-withdrew, in playbook rule order; it is `[]` when there are none.
+withdrew, in admission priority order; it is `[]` when there are none.
 `mitigation_id` is its first entry, kept for existing callers. `rules` reports
-each rule a ban evaluated, in playbook order, with `outcome` `created`,
+each rule a ban evaluated, in admission priority order, with `outcome` `created`,
 `extended` or `rejected` (with a `reason`); it is omitted when no rule was
 evaluated, for example on the unban path or with no playbook.
 
@@ -174,10 +174,19 @@ again extends the same rules. A changed set is a new rule; the old one runs out
 its TTL. Reflection rules match UDP to the victim host with no destination
 ports.
 
+Admission starts with the chunk containing the detector's highest-ranked
+source port, then fragment rules, then the remaining chunks by their highest
+ranked member. Other static rules retain their relative playbook order.
+`mitigation_ids` and `rules` follow this admission order. Chunk contents and
+scope identities remain unchanged when detector rankings change.
+
 Each rule is admitted on its own: guardrails, quotas and the new-mitigation
 rate apply per rule, so one rule can be created while another is rejected. The
 response is `202` when at least one rule was created or extended; otherwise it
-is the first rule's error, as for a single rule. `status` is `accepted` when any
+is the first rule's error, as for a single rule. Each rule outcome includes
+`scope_hash`, the canonical `scope` and `action_type`; a quota refusal also
+includes `quota_type` (`customer`, `pop`, `global`, `blackhole_pop` or
+`blackhole_global`). `status` is `accepted` when any
 rule was created and `extended` otherwise, and `announcement_outcome` is
 `unconfirmed` when any created rule's announcement was.
 
@@ -188,8 +197,21 @@ rule was created and `extended` otherwise, and `announcement_outcome` is
   "mitigation_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d",
   "mitigation_ids": ["7f72a903-63d1-4a4a-a5db-0517e0a7df1d"],
   "rules": [
-    { "outcome": "created", "mitigation_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d" },
-    { "outcome": "rejected", "reason": "quota exceeded: pop (200/200)" }
+    {
+      "outcome": "created",
+      "scope_hash": "81d7d997c8cc5f1281d7d997c8cc5f12",
+      "scope": { "dst_prefix": "203.0.113.10/32", "protocol": 17, "dst_ports": [], "src_ports": [123, 389] },
+      "action_type": "discard",
+      "mitigation_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d"
+    },
+    {
+      "outcome": "rejected",
+      "scope_hash": "07453c9718eff9a007453c9718eff9a0",
+      "scope": { "dst_prefix": "203.0.113.10/32", "protocol": 17, "dst_ports": [], "fragment": "non_first" },
+      "action_type": "police",
+      "quota_type": "pop",
+      "reason": "quota exceeded: pop (200/200)"
+    }
   ],
   "status": "accepted"
 }
@@ -1998,7 +2020,7 @@ Returns the running daemon configuration with sensitive fields redacted (allowli
     "http": { "listen": "0.0.0.0:8080", "auth": { "mode": "bearer" }, "rate_limit": { "events_per_second": 100, "burst": 500 } },
     "bgp": { "mode": "sidecar", "local_asn": 65010, "neighbors": [{ "name": "172.30.30.3", "address": "172.30.30.3", "peer_asn": 65001, "afi_safi": ["ipv4-flowspec"] }] },
     "guardrails": { "require_ttl": true, "dst_prefix_minlen": 32, "dst_prefix_maxlen": 32, "max_ports": 5 },
-    "quotas": { "max_active_per_customer": 5, "max_active_global": 500 },
+    "quotas": { "max_active_per_customer": 20, "max_active_global": 500 },
     "timers": { "default_ttl_seconds": 120, "reconciliation_interval_seconds": 30 },
     "storage": { "connection_string": "[redacted]" },
     "observability": { "log_format": "json", "log_level": "info" },
@@ -2474,7 +2496,16 @@ as `actor_id` (the adapter name for a generic webhook) and the triggering
 A repeat event that extends an existing mitigation's TTL is not a creation and
 writes no audit entry; the mitigation's `last_event_id` and `expires_at` record
 it. Rejected admissions, including guardrail, quota and
-`max_new_per_minute` rejections, write no `create` entry.
+`max_new_per_minute` rejections, write no `create` entry. Event rules refused
+by an active quota write `reject_rule` entries targeting their event, with
+`scope`, `scope_hash`, `action_type`, `quota_type`, `current`, `max` and
+`reason`. These also cover refusals within a partially admitted event.
+Audit write failures are logged; admitted rules remain visible in the response.
+
+`prefixd_event_rule_quota_rejections_total{quota_type,rule_kind,action_type}`
+counts each event rule refused by an active quota. `rule_kind` is
+`source_ports`, `fragment` or `other`; exact scopes are in responses and audit
+entries, avoiding per-victim metric labels.
 
 ---
 
@@ -2521,7 +2552,7 @@ gauges count database state, not router enforcement. A refused
 | `reason` | Refusal |
 | --- | --- |
 | `BlackholeDisabled` | `blackhole.enabled` is false |
-| `BlackholeQuotaExceeded` | `blackhole.max_active_per_pop`, `blackhole.max_active_global` or a general quota is full |
+| `BlackholeQuotaExceeded` | `blackhole.max_active_per_pop`, `blackhole.max_active_global` is full |
 | `BlackholeNotOwned` | The victim is not in inventory |
 | `BlackholeSafelisted` | The victim is safelisted |
 | `InvalidBlackhole` | The victim is not a usable host address or is a configured next hop, or its family has no next hop |
