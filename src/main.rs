@@ -56,14 +56,6 @@ async fn main() -> anyhow::Result<()> {
         config.settings.observability.log_format,
         &config.settings.observability.log_level,
     );
-    for deprecation in &config.deprecations {
-        tracing::warn!(
-            key = deprecation.key,
-            rejected_in = prefixd::config::DEPRECATED_CONFIG_REJECTED_IN,
-            "deprecated configuration: {}",
-            deprecation.message
-        );
-    }
     for key in config.settings.guardrails.reserved_flags_set() {
         tracing::warn!(
             key,

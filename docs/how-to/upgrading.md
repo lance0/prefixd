@@ -711,15 +711,18 @@ WARN prefixd: deprecated configuration: removed configuration key is ignored; de
 Error: conflict: legacy speaker state requires explicit original-target adoption with --adopt-legacy-speaker
 ```
 
-Edit the file before adoption so that 0.21.0 also loads it:
+0.21.0 and later fail to load a file that contains a removed key, or that sets
+`gobgp_grpc` without `bgp.backend` or `bgp.mode`. Edit the file before
+adoption so that later releases also load it:
 
 - Delete `escalation`, `http.auth.ldap`, `http.auth.radius`,
   `timers.correlation_window_seconds`, `observability.audit_log_path`,
   `observability.metrics_listen` and `shutdown.preserve_announcements`.
 - Replace `bgp.mode: sidecar` with `bgp.backend: gobgp`, or add
   `backend: gobgp` if `bgp` has no `mode`. Both spellings are the same speaker
-  identity. Without either, a file with `gobgp_grpc` still resolves to GoBGP,
-  with a `bgp.backend` warning; see [backend resolution](../reference/configuration.md#bgp).
+  identity. Without either, 0.20.0 resolves a file with `gobgp_grpc` to GoBGP
+  with a `bgp.backend` warning, and 0.21.0 and later refuse to load it; see
+  [backend resolution](../reference/configuration.md#bgp).
 - Leave `pop`, `mode`, `bgp.gobgp_grpc` and everything else as they are.
 
 For the shipped v0.19.1 file the change is:
@@ -850,8 +853,8 @@ GoBGP RIB with the active mitigations:
 docker compose exec -T gobgp gobgp global rib -a ipv4-flowspec
 ```
 
-Remove the deprecated keys now if you haven't already, since 0.21.0 rejects
-them.
+Remove the deprecated keys now if you haven't already: 0.21.0 and later fail
+to load a file that contains them.
 
 #### Switching to rustbgpd later
 

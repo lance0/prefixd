@@ -123,16 +123,17 @@ The internal `bgp.mode` field and settings API representation remain unchanged;
 YAML also accepts `mode` as a field alias. Specify only one selector: duplicate
 `backend`/`mode` fields and unknown values are rejected.
 
-Always set `bgp.backend`. When it is unset, the configured endpoint decides, so
+Always set `bgp.backend`. It is required whenever `bgp.gobgp_grpc` is set, so
 an existing speaker is never switched silently:
 
-| `bgp.gobgp_grpc` | `bgp.rustbgpd` | Resolved backend |
+| `bgp.gobgp_grpc` | `bgp.rustbgpd` | Resolved backend when `bgp.backend` is unset |
 | --- | --- | --- |
-| set | absent | `gobgp`, with a deprecation warning (v0.19.1 defaulted to GoBGP) |
-| set | set | startup error: `bgp.backend is required` |
+| set | any | startup error: `bgp.backend is required when bgp.gobgp_grpc is set; add bgp.backend: gobgp to keep the GoBGP speaker` |
 | empty or absent | any | `rustbgpd` |
 
-0.21.0 will require `bgp.backend` whenever `bgp.gobgp_grpc` is set.
+v0.19.1 defaulted to GoBGP and 0.20.0 resolved a file with only
+`bgp.gobgp_grpc` to GoBGP with a warning. Add `bgp.backend: gobgp` to keep that
+speaker.
 
 ```yaml
 bgp:
@@ -389,8 +390,8 @@ observability:
 ```
 
 Only these logging settings are accepted in `observability`; unknown keys fail
-configuration loading, except the removed v0.19.1 keys listed under
-[removed keys](#removed-keys). Audit records are stored in PostgreSQL and available
+configuration loading, and the [removed keys](#removed-keys) fail it with a
+message naming them. Audit records are stored in PostgreSQL and available
 through the dashboard or `GET /v1/audit`.
 
 Prometheus scrapes unauthenticated `/metrics` on the same `http.listen` API
@@ -693,7 +694,8 @@ the independent speaker. Controller-driven TTL cleanup requires the controller
 to run; rules can remain while prefixd is stopped.
 
 Only `drain_timeout_seconds` is accepted in `shutdown`; unknown fields cause a
-configuration error, except the removed `preserve_announcements` key below.
+configuration error. The removed `preserve_announcements` key below fails
+with a message naming it.
 
 ### Blackhole
 
@@ -930,9 +932,11 @@ meets it. The Community notify script takes the same default from
 
 ### Removed keys
 
-These v0.19.1 keys have no effect. This release still loads them, ignores them
-and logs one warning for each, with the key and `rejected_in: "0.21.0"`.
-From 0.21.0 they are unknown keys. Delete them:
+These v0.19.1 keys had no effect and were removed in 0.20.0, which ignored them
+with a warning. Settings now fail to load while any of them is present. The
+error names each key found, not its value, for example
+``remove `escalation`, `observability.audit_log_path`: configuration keys
+removed in 0.20.0 are no longer accepted``. Delete them:
 
 | Key | Notes |
 | --- | --- |

@@ -116,6 +116,11 @@ holds it. rustbgpd 0.79.0 is now required: upgrade it before prefixd.
   [RPKI filters](https://github.com/lance0/prefixd/blob/v0.21.0/docs/reference/configuration.md#blackhole).
 - A `PUT /v1/config/playbooks` body that does not decode now returns `400`
   with `{"errors": [reason]}` instead of an empty body.
+- `prefixd.yaml` now fails to load if it contains a key removed in 0.20.0, or
+  sets `bgp.gobgp_grpc` without `bgp.backend` (or `bgp.mode`). 0.20.0 ignored
+  both with a warning. Before upgrading, delete the removed keys and add
+  `bgp.backend: gobgp` where needed; see
+  [removed keys](docs/reference/configuration.md#removed-keys).
 
 ### Known limitations
 
@@ -405,6 +410,24 @@ holds it. rustbgpd 0.79.0 is now required: upgrade it before prefixd.
   nonempty.
 
 ### Changed
+
+- Reject the configuration keys removed in 0.20.0 (`escalation`,
+  `http.auth.ldap`, `http.auth.radius`, `timers.correlation_window_seconds`,
+  `observability.audit_log_path`, `observability.metrics_listen` and
+  `shutdown.preserve_announcements`) instead of ignoring them with a warning.
+  Startup and reload fail with an error that names each key present, for
+  example ``remove `escalation`: configuration keys removed in 0.20.0 are no
+  longer accepted``, without its value. Startup log lines with
+  `rejected_in: "0.21.0"` no longer appear. Rust library users:
+  `Settings::load_with_deprecations`, `ConfigDeprecation`,
+  `DEPRECATED_CONFIG_REJECTED_IN` and `AppConfig::deprecations` are removed;
+  use `Settings::load`.
+
+- Require `bgp.backend` whenever `bgp.gobgp_grpc` is set. A configuration with
+  `bgp.gobgp_grpc` and neither `bgp.backend` nor `bgp.mode` now fails to load
+  with `bgp.backend is required when bgp.gobgp_grpc is set; add bgp.backend:
+  gobgp to keep the GoBGP speaker`, instead of resolving to GoBGP with a
+  warning. An empty or absent `bgp.gobgp_grpc` still resolves to rustbgpd.
 
 - Qualify rustbgpd 0.79.0: Compose and the interop lab pin it, and it is now
   the minimum and the only version CI tests. Every controller field prefixd
