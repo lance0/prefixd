@@ -828,6 +828,11 @@ mod tests {
             let mut settings = settings();
             settings.blackhole.max_active_per_pop = per_pop;
             settings.blackhole.max_active_global = global;
+            // A full customer, POP and global FlowSpec budget must still allow
+            // a blackhole. Before quota separation this fails at customer.
+            settings.quotas.max_active_per_customer = 1;
+            settings.quotas.max_active_per_pop = 1;
+            settings.quotas.max_active_global = 1;
             let repo = MockRepository::new();
             // A FlowSpec row never uses a blackhole slot.
             let mut flowspec = Mitigation::from_intent(
@@ -844,6 +849,7 @@ mod tests {
                 "203.0.113.9".into(),
                 AttackVector::UdpFlood,
             );
+            flowspec.customer_id = Some("customer-a".into());
             flowspec.activate();
             repo.admit_mitigation(&flowspec, &settings.quotas, &settings.blackhole, &actor())
                 .await
@@ -871,11 +877,21 @@ mod tests {
                 }) => assert_eq!(observed, quota_type),
                 error => panic!("expected {quota_type}, got {error}"),
             }
-            // FlowSpec admission is unaffected by a full blackhole quota.
+            // Negative control: another FlowSpec rule still hits its own full
+            // budget, while a released FlowSpec slot ignores the blackholes.
             let mut second = flowspec.clone();
             second.mitigation_id = Uuid::new_v4();
             second.match_criteria.dst_prefix = "203.0.113.8/32".into();
             second.scope_hash = second.match_criteria.compute_scope_hash();
+            assert!(matches!(
+                repo.admit_mitigation(&second, &settings.quotas, &settings.blackhole, &actor())
+                    .await,
+                Err(PrefixdError::GuardrailViolation(
+                    GuardrailError::QuotaExceeded { .. }
+                ))
+            ));
+            flowspec.withdraw(Some("release FlowSpec slot".into()));
+            repo.update_mitigation(&flowspec).await.unwrap();
             repo.admit_mitigation(&second, &settings.quotas, &settings.blackhole, &actor())
                 .await
                 .unwrap();

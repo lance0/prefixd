@@ -555,17 +555,19 @@ impl RepositoryTrait for Repository {
             // new admissions; lifecycle updates and withdrawals do not take this lock.
             sqlx::query("SELECT pg_advisory_xact_lock(1886545528, 1903522164)")
                 .execute(&mut *tx).await?;
-            if let Some(customer_id) = &m.customer_id {
-                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE customer_id = $1 AND status IN ('pending', 'active', 'escalated')")
-                    .bind(customer_id).fetch_one(&mut *tx).await?;
-                check_active_quota("customer", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_per_customer)?;
+            if m.action_type != ActionType::Blackhole {
+                if let Some(customer_id) = &m.customer_id {
+                    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND customer_id = $1 AND status IN ('pending', 'active', 'escalated')")
+                        .bind(customer_id).fetch_one(&mut *tx).await?;
+                    check_active_quota("customer", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_per_customer)?;
+                }
+                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND pop = $1 AND status IN ('pending', 'active', 'escalated')")
+                    .bind(&m.pop).fetch_one(&mut *tx).await?;
+                check_active_quota("pop", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_per_pop)?;
+                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND status IN ('pending', 'active', 'escalated')")
+                    .fetch_one(&mut *tx).await?;
+                check_active_quota("global", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_global)?;
             }
-            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE pop = $1 AND status IN ('pending', 'active', 'escalated')")
-                .bind(&m.pop).fetch_one(&mut *tx).await?;
-            check_active_quota("pop", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_per_pop)?;
-            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE status IN ('pending', 'active', 'escalated')")
-                .fetch_one(&mut *tx).await?;
-            check_active_quota("global", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_global)?;
             if m.action_type == ActionType::Blackhole {
                 let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE action_type = 'blackhole' AND pop = $1 AND status IN ('pending', 'active', 'escalated')")
                     .bind(&m.pop).fetch_one(&mut *tx).await?;
@@ -776,6 +778,35 @@ impl RepositoryTrait for Repository {
     async fn count_active_global(&self) -> Result<u32> {
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM mitigations WHERE status IN ('pending', 'active', 'escalated')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0 as u32)
+    }
+
+    async fn count_active_flowspec_by_customer(&self, customer_id: &str) -> Result<u32> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND customer_id = $1 AND status IN ('pending', 'active', 'escalated')",
+        )
+        .bind(customer_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0 as u32)
+    }
+
+    async fn count_active_flowspec_by_pop(&self, pop: &str) -> Result<u32> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND pop = $1 AND status IN ('pending', 'active', 'escalated')",
+        )
+        .bind(pop)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0 as u32)
+    }
+
+    async fn count_active_flowspec_global(&self) -> Result<u32> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND status IN ('pending', 'active', 'escalated')",
         )
         .fetch_one(&self.pool)
         .await?;

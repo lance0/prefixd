@@ -36,5 +36,6 @@ Format follows [Michael Nygard's template](https://cognitect.com/blog/2011/11/15
 | [026](026-facelift-framework-scope.md) | Defer framework migration during the facelift | Accepted | 2026-10-17 |
 | [027](027-blackhole-mitigations.md) | Remotely triggered blackhole host routes as a second mitigation kind | Accepted | 2026-10-19 |
 | [028](028-amplification-matches.md) | Amplification-aware FlowSpec matches | Accepted | 2026-10-19 |
+| [029](029-upstream-blackholing.md) | Provider-scoped upstream blackholing | Proposed | 2026-10-20 |
 
 ADRs are numbered sequentially as written. Retroactive ADRs (009-013) were documented on 2026-02-18 but dated to when the decision was originally made.

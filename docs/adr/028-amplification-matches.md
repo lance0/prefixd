@@ -294,7 +294,15 @@ existing data. *Rejected:* (a) for the reasons in the table; (b) as redundant.
 Consequences of (c):
 
 - **Admission.** Each rule goes through guardrails and `admit_mitigation`
-  independently, in playbook order. Admission is per rule, not all or
+  independently. Amended 2026-10-20: admission first takes the canonical
+  `from_event` chunk containing the detector's highest-share source port,
+  then fragment rules, then remaining chunks by their highest-share member.
+  `top_src_ports` carries detector ranks in descending share order, not
+  numeric share values. Sorting chunk contents numerically before splitting
+  still defines identity; only admission order changes. Other static rules
+  retain their relative playbook order. The default customer FlowSpec quota
+  rises to 20, one tenth of the POP cap, so the five rules for one 20-port
+  report do not exhaust a customer's entire budget. Admission is per rule, not all or
   nothing. Partial admission is accepted: every
   admitted rule is narrower than the all-UDP alternative and stands on its
   own. The event response lists the outcome of each rule (created, extended
@@ -302,6 +310,14 @@ Consequences of (c):
   created or extended. If none was, it returns the first rule's error, as
   today. `EventResponse` gains `mitigation_ids`. `mitigation_id` remains the
   first created or extended rule, for existing callers.
+  Each outcome now includes its canonical `scope`, `scope_hash` and
+  `action_type`; quota refusals also include `quota_type`. Refused rules
+  write `reject_rule` event audits naming the same scope and quota, current
+  usage and limit. The bounded metric
+  `prefixd_event_rule_quota_rejections_total{quota_type,rule_kind,action_type}`
+  identifies the exhausted quota and refused match category without creating
+  a time series per victim or scope. Audit write failures are logged and do
+  not disguise already admitted rules as a failed request.
 - **Extension.** A refresh event extends whichever rules it reproduces exactly.
   If the reported port set changes, the new set is a new scope and becomes a
   new mitigation; the old rule runs out its TTL. Quotas and `max_new_per_minute`

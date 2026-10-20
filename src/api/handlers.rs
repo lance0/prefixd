@@ -162,10 +162,10 @@ pub struct EventResponse {
     pub status: String,
     /// The first mitigation this request created, extended or withdrew, if any.
     pub mitigation_id: Option<Uuid>,
-    /// Every mitigation this request created, extended or withdrew, in playbook
-    /// rule order; the first equals `mitigation_id` (ADR 028).
+    /// Every mitigation this request created, extended or withdrew, in admission
+    /// order; the first equals `mitigation_id` (ADR 028).
     pub mitigation_ids: Vec<Uuid>,
-    /// Outcome of each rule policy produced for a ban, in playbook order.
+    /// Outcome of each rule policy produced for a ban, in admission order.
     /// Omitted when no rule was evaluated.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<EventRuleOutcome>,
@@ -202,6 +202,13 @@ pub enum RuleOutcome {
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct EventRuleOutcome {
     pub outcome: RuleOutcome,
+    /// Stable identity and canonical scope, including for refused rules.
+    pub scope_hash: String,
+    pub scope: MatchCriteria,
+    pub action_type: ActionType,
+    /// The exhausted quota, when this rule was refused by an active quota.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_type: Option<String>,
     /// The created or extended mitigation; absent when rejected.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mitigation_id: Option<Uuid>,
@@ -1289,12 +1296,15 @@ async fn handle_ban(
         .map_err(AppError)?;
     let actor = CreationActor::Detector(event.source.clone());
 
-    // Each rule is admitted on its own, in playbook order (ADR 028): every
+    // Each rule is admitted on its own, in policy priority order (ADR 028): every
     // admitted rule is narrower than the all-UDP alternative and stands alone.
     let mut rules = Vec::with_capacity(decision.intents.len());
     let mut first_error = None;
     let mut created_any = false;
     for (intent, owner) in decision.intents.into_iter().zip(owners) {
+        let scope = intent.match_criteria.clone();
+        let scope_hash = scope.scope_hash_for(intent.action_type);
+        let action_type = intent.action_type;
         let admitted = async {
             if let Some(mut existing) = owner? {
                 // A blackhole extension is capped at now + max_ttl_seconds.
@@ -1320,6 +1330,10 @@ async fn handle_ban(
                 );
                 return Ok(EventRuleOutcome {
                     outcome: RuleOutcome::Extended,
+                    scope_hash: scope_hash.clone(),
+                    scope: scope.clone(),
+                    action_type: existing.action_type,
+                    quota_type: None,
                     mitigation_id: Some(existing.mitigation_id),
                     reason: None,
                     announcement_outcome: None,
@@ -1384,6 +1398,10 @@ async fn handle_ban(
             );
             Ok(EventRuleOutcome {
                 outcome: RuleOutcome::Created,
+                scope_hash: scope_hash.clone(),
+                scope: scope.clone(),
+                action_type,
+                quota_type: None,
                 mitigation_id: Some(mitigation.mitigation_id),
                 reason: None,
                 announcement_outcome,
@@ -1396,8 +1414,59 @@ async fn handle_ban(
                 rules.push(outcome);
             }
             Err(error) => {
+                let quota_type =
+                    if let PrefixdError::GuardrailViolation(GuardrailError::QuotaExceeded {
+                        quota_type,
+                        current,
+                        max,
+                    }) = &error
+                    {
+                        let rule_kind = if scope.fragment.is_some() {
+                            "fragment"
+                        } else if !scope.src_ports.is_empty() {
+                            "source_ports"
+                        } else {
+                            "other"
+                        };
+                        let action_label = action_type.to_string();
+                        crate::observability::metrics::EVENT_RULE_QUOTA_REJECTIONS
+                            .with_label_values(&[
+                                quota_type.as_str(),
+                                rule_kind,
+                                action_label.as_str(),
+                            ])
+                            .inc();
+                        let entry = crate::observability::AuditEntry::new(
+                            crate::observability::ActorType::Detector,
+                            Some(event.source.clone()),
+                            "reject_rule",
+                            Some("event"),
+                            Some(event.event_id.to_string()),
+                            serde_json::json!({
+                                "pop": state.settings.pop,
+                                "scope_hash": scope_hash,
+                                "scope": scope,
+                                "action_type": action_type,
+                                "quota_type": quota_type,
+                                "current": current,
+                                "max": max,
+                                "reason": error.to_string(),
+                            }),
+                        );
+                        if let Err(audit_error) = state.repo.insert_audit(&entry).await {
+                            tracing::error!(event_id = %event.event_id, %scope_hash,
+                            error = %audit_error, "failed to audit refused event rule");
+                        }
+                        Some(quota_type.clone())
+                    } else {
+                        None
+                    };
                 rules.push(EventRuleOutcome {
                     outcome: RuleOutcome::Rejected,
+                    scope_hash,
+                    scope,
+                    action_type,
+                    quota_type,
                     mitigation_id: None,
                     reason: Some(error.to_string()),
                     announcement_outcome: None,
@@ -3741,9 +3810,13 @@ playbooks:
             [Created, Created, Created, Created, Created]
         );
         let mut chunks = Vec::new();
-        for id in &first.mitigation_ids[..4] {
-            chunks.push(get(&f, *id).await.match_criteria.src_ports);
+        for id in &first.mitigation_ids {
+            let ports = get(&f, *id).await.match_criteria.src_ports;
+            if !ports.is_empty() {
+                chunks.push(ports);
+            }
         }
+        chunks.sort();
         // Sorted, then split at the default max_ports (5), FRR's per-component
         // limit: twenty library ports make four source-port rules.
         let expected: Vec<Vec<u16>> = library.chunks(5).map(<[u16]>::to_vec).collect();
@@ -3761,7 +3834,11 @@ playbooks:
             outcomes(&again),
             [Extended, Extended, Extended, Extended, Extended]
         );
-        assert_eq!(again.mitigation_ids, first.mitigation_ids);
+        let mut repeated_ids = again.mitigation_ids.clone();
+        let mut original_ids = first.mitigation_ids.clone();
+        repeated_ids.sort();
+        original_ids.sort();
+        assert_eq!(repeated_ids, original_ids);
         assert_eq!(rows(&f).await.len(), 5);
         assert_eq!(f.speaker.announced_count().await, 5);
     }
@@ -3782,7 +3859,16 @@ playbooks:
         let banned = ban(&before, event("old", "udp_amplification", Some(&library)))
             .await
             .unwrap();
-        let ids = banned.mitigation_ids.clone();
+        let mut ids = Vec::new();
+        let mut fragment_ids = Vec::new();
+        for id in banned.mitigation_ids {
+            if get(&before, id).await.match_criteria.fragment.is_some() {
+                fragment_ids.push(id);
+            } else {
+                ids.push(id);
+            }
+        }
+        ids.extend(fragment_ids);
         assert_eq!(ids.len(), 4);
         assert_eq!(get(&before, ids[0]).await.match_criteria.src_ports.len(), 8);
         assert_eq!(get(&before, ids[1]).await.match_criteria.src_ports.len(), 8);
@@ -3845,6 +3931,208 @@ playbooks:
             assert_eq!(get(&f, *id).await.status, MitigationStatus::Withdrawn);
         }
         assert_eq!(f.speaker.announced_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn extended_rule_outcome_reports_the_retained_action() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let before = fixture(OperationMode::DryRun, |_, _| {});
+        ban(
+            &before,
+            event("original-action", "udp_amplification", Some(&[123])),
+        )
+        .await
+        .unwrap();
+        let changed = fixture_on(
+            before.repo.clone(),
+            before.speaker.clone(),
+            OperationMode::DryRun,
+            |_, playbooks| {
+                let rule = &mut playbooks.playbooks[1].steps[0].rules[0];
+                rule.action = crate::config::PlaybookAction::Police;
+                rule.rate_bps = Some(1_000_000);
+            },
+        );
+        let extended = ban(
+            &changed,
+            event("changed-action", "udp_amplification", Some(&[123])),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcomes(&extended),
+            [RuleOutcome::Extended, RuleOutcome::Extended]
+        );
+        assert_eq!(extended.rules[0].action_type, ActionType::Discard);
+        assert_eq!(
+            get(&changed, extended.mitigation_ids[0]).await.action_type,
+            ActionType::Discard
+        );
+    }
+
+    #[tokio::test]
+    async fn flowspec_preflight_ignores_active_blackhole_capacity() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let f = fixture(OperationMode::DryRun, |settings, _| {
+            settings.quotas.max_active_per_customer = 1;
+            settings.quotas.max_active_per_pop = 1;
+            settings.quotas.max_active_global = 1;
+        });
+        // Seed an existing blackhole as a prior admission would. Health totals
+        // still include it, while every FlowSpec budget remains empty.
+        let mut host = Mitigation::from_intent(
+            crate::domain::MitigationIntent {
+                event_id: Uuid::new_v4(),
+                customer_id: Some("cust_example".into()),
+                service_id: None,
+                pop: f.state.settings.pop.clone(),
+                match_criteria: crate::domain::MatchCriteria {
+                    dst_prefix: "203.0.113.11/32".into(),
+                    ..Default::default()
+                },
+                action_type: ActionType::Blackhole,
+                action_params: Default::default(),
+                ttl_seconds: 600,
+                reason: "existing blackhole".into(),
+            },
+            "203.0.113.11".into(),
+            AttackVector::Unknown,
+        );
+        host.activate();
+        f.repo.insert_mitigation(&host).await.unwrap();
+        assert_eq!(f.repo.count_active_global().await.unwrap(), 1);
+        let response = ban(&f, event("flowspec-after-blackhole", "udp_flood", None))
+            .await
+            .unwrap();
+        assert_eq!(outcomes(&response), [RuleOutcome::Created]);
+        assert_eq!(f.repo.count_active_global().await.unwrap(), 2);
+        assert_eq!(f.repo.count_active_flowspec_global().await.unwrap(), 1);
+        // A second distinct FlowSpec still exhausts its own budget.
+        let mut second = event("flowspec-full", "udp_flood", None);
+        second.victim_ip = "203.0.113.12".into();
+        assert!(matches!(
+            ban(&f, second).await,
+            Err(PrefixdError::GuardrailViolation(
+                crate::error::GuardrailError::QuotaExceeded { .. }
+            ))
+        ));
+        assert_eq!(f.speaker.announced_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn tight_quota_keeps_dominant_chunk_and_fragments_with_refusal_evidence() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let f = fixture(OperationMode::Enforced, |settings, _| {
+            settings.guardrails.max_ports = 2;
+            settings.quotas.max_active_per_pop = 2;
+        });
+        let metric = crate::observability::metrics::EVENT_RULE_QUOTA_REJECTIONS
+            .with_label_values(&["pop", "source_ports", "discard"]);
+        let before = metric.get();
+        let response = ban(
+            &f,
+            event(
+                "priority",
+                "udp_amplification",
+                Some(&[389, 53, 17, 123, 19]),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcomes(&response),
+            [
+                RuleOutcome::Created,
+                RuleOutcome::Created,
+                RuleOutcome::Rejected,
+                RuleOutcome::Rejected
+            ]
+        );
+        // Numeric chunking puts the highest-share port last under the old
+        // admission order; with a quota of two, the old code loses both this
+        // chunk and the fragment rule.
+        assert_eq!(
+            get(&f, response.mitigation_ids[0])
+                .await
+                .match_criteria
+                .src_ports,
+            [389]
+        );
+        assert_eq!(
+            get(&f, response.mitigation_ids[1])
+                .await
+                .match_criteria
+                .fragment,
+            Some(FragmentMatch::NonFirst)
+        );
+        assert_eq!(response.rules[2].scope.src_ports, [53, 123]);
+        assert_eq!(response.rules[3].scope.src_ports, [17, 19]);
+        for rule in &response.rules[2..] {
+            assert_eq!(rule.quota_type.as_deref(), Some("pop"));
+            assert_eq!(rule.scope_hash, rule.scope.scope_hash_for(rule.action_type));
+        }
+        assert_eq!(metric.get(), before + 2.0);
+        let audit = f
+            .repo
+            .list_audit(&crate::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let rejected: Vec<_> = audit
+            .iter()
+            .filter(|entry| entry.action == "reject_rule")
+            .collect();
+        assert_eq!(rejected.len(), 2);
+        for rule in &response.rules[2..] {
+            assert!(
+                rejected
+                    .iter()
+                    .any(|entry| entry.details["scope_hash"] == rule.scope_hash
+                        && entry.details["quota_type"] == "pop"
+                        && entry.details["scope"]["src_ports"]
+                            == serde_json::json!(rule.scope.src_ports))
+            );
+        }
+        assert_eq!(f.speaker.announced_count().await, 2);
+
+        // Negative control: a fresh controller with enough slots admits every
+        // canonical chunk and the fragment rule in the same priority order.
+        let open = fixture(OperationMode::Enforced, |settings, _| {
+            settings.guardrails.max_ports = 2;
+        });
+        let complete = ban(
+            &open,
+            event("open", "udp_amplification", Some(&[389, 53, 17, 123, 19])),
+        )
+        .await
+        .unwrap();
+        assert!(
+            complete
+                .rules
+                .iter()
+                .all(|rule| rule.outcome == RuleOutcome::Created)
+        );
+        assert_eq!(
+            complete
+                .rules
+                .iter()
+                .map(|rule| &rule.scope_hash)
+                .collect::<Vec<_>>(),
+            response
+                .rules
+                .iter()
+                .map(|rule| &rule.scope_hash)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(metric.get(), before + 2.0);
     }
 
     #[tokio::test]

@@ -167,9 +167,16 @@ new mitigations, never live routes.
   this check.
 - **Separate quota.** Add `max_active_per_pop` (default 10) and
   `max_active_global` (default 50) for blackholes. They are checked inside the
-  existing `admit_mitigation` transaction and advisory lock, in addition to the
-  existing per-customer/POP/global quotas and `max_new_per_minute`. Concurrent
-  admissions therefore cannot overshoot.
+  existing `admit_mitigation` transaction and advisory lock. The original
+  decision also applied the general per-customer/POP/global limits, without
+  recording a separate rationale. Amended 2026-10-20: those limits budget
+  FlowSpec filters, so only FlowSpec rows count toward them and blackholes
+  use only their own POP/global caps. A full FlowSpec budget must leave the
+  last-resort blackhole available. There is no per-customer blackhole cap:
+  the POP cap of 10 already bounds it below the FlowSpec customer default of
+  20. The creation-rate limit `max_new_per_minute` remains shared. All quota
+  checks retain the same transaction and lock, so concurrent admissions
+  cannot overshoot either family's caps.
 - **Mandatory, capped TTL.** A nonzero TTL is required.
   `blackhole.max_ttl_seconds` defaults to 3600 and bounds playbook steps, manual
   requests and detector extensions (`extend_ttl` is capped at

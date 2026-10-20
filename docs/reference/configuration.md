@@ -250,13 +250,13 @@ the flag has no effect.
 
 ```yaml
 quotas:
-  # Max active mitigations per customer
-  max_active_per_customer: 5
+  # Max active FlowSpec rules per customer
+  max_active_per_customer: 20
   
-  # Max active mitigations per POP
+  # Max active FlowSpec rules per POP
   max_active_per_pop: 200
   
-  # Max active mitigations globally
+  # Max active FlowSpec rules globally
   max_active_global: 500
   
   # Max new mitigations created at this POP in any trailing 60 seconds
@@ -266,8 +266,8 @@ quotas:
   max_announcements_per_peer: 100
 ```
 
-New mitigation admission checks customer, POP, then global quotas atomically in
-PostgreSQL across controllers sharing the database. Pending, active and escalated
+FlowSpec admission checks customer, POP, then global quotas atomically in
+PostgreSQL across controllers sharing the database. Only FlowSpec pending, active and escalated
 rows count, including active rows whose TTL has passed but whose lifecycle has not
 yet completed. A mitigation without a customer skips the customer quota. Existing
 owner extensions do not consume a new slot. Admission has a fixed five-second
@@ -279,6 +279,24 @@ A controller holds its local lifecycle mutex during this
 wait, so local lifecycle operations can wait behind admission. Other controllers'
 withdrawals do not acquire the admission lock. The per-peer setting above is
 separate from these admission limits.
+
+The customer default is 20, one tenth of the POP budget of 200: a 20-port
+amplification report with `max_ports: 5` needs four source-port rules and one
+fragment rule, so a single victim must not consume the whole customer budget.
+Explicit limits keep their configured values. Blackholes consume only their
+own POP/global budgets below, because they use no FlowSpec filter capacity;
+there is no per-customer blackhole quota. The creation-rate limit remains
+shared by both route kinds.
+
+For a multi-rule event, admission starts with the canonical chunk containing
+the detector's highest-ranked source port, then fragment coverage, then the
+remaining chunks by their highest-ranked member. The detector supplies
+`top_src_ports` in descending share order; prefixd receives ranks, not share
+values. Chunk contents stay numerically sorted, preserving existing identities.
+Other static rules keep their relative playbook order. Partial responses and
+`reject_rule` audit entries identify refused scopes and the exhausted quota;
+`prefixd_event_rule_quota_rejections_total` groups them by quota, match kind
+and action without per-victim metric labels.
 
 The same admission transaction then enforces `max_new_per_minute` per POP,
 under the admission lock and inside the deadline, before the insert. It counts
@@ -658,7 +676,7 @@ blackhole:
   # A nonzero TTL is required and capped here, on creation and on extension.
   max_ttl_seconds: 3600
 
-  # Active blackholes, on top of the quotas section's limits.
+  # Active blackholes, separate from the FlowSpec active quotas.
   max_active_per_pop: 10
   max_active_global: 50
 
@@ -714,8 +732,10 @@ owned in inventory, even for a manual request, and must not be safelisted,
 unspecified, loopback, multicast, link-local, IPv4 broadcast, IPv4-mapped
 IPv6 or a configured next hop. The blackhole quotas are checked in the same
 locked admission transaction as the [quotas](#quotas), so concurrent
-admissions cannot exceed them; the general quotas and `max_new_per_minute`
-still apply. A quota rejection names `blackhole_pop` or `blackhole_global`.
+admissions cannot exceed them. FlowSpec active quotas do not apply to
+blackholes, and blackholes do not consume FlowSpec slots. The shared
+`max_new_per_minute` still applies. A quota rejection names `blackhole_pop`
+or `blackhole_global`.
 
 #### Blackhole steps
 

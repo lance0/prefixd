@@ -44,7 +44,7 @@ guardrails:
   allow_src_prefix_match: false
 
 quotas:
-  max_active_per_customer: 5
+  max_active_per_customer: 20
   max_active_per_pop: 200
   max_active_global: 500
   max_new_per_minute: 30

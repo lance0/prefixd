@@ -360,7 +360,7 @@ pub struct QuotasConfig {
 }
 
 fn default_max_per_customer() -> u32 {
-    5
+    20
 }
 fn default_max_per_pop() -> u32 {
     200
@@ -477,7 +477,7 @@ pub struct BlackholeConfig {
     pub large_communities: Vec<String>,
     /// Bounds manual requests and extensions; a nonzero TTL is always required.
     pub max_ttl_seconds: u32,
-    /// Active blackholes at this POP, in addition to the general quotas.
+    /// Active blackholes at this POP, separate from FlowSpec active quotas.
     pub max_active_per_pop: u32,
     /// Active blackholes across all POPs sharing the database.
     pub max_active_global: u32,
@@ -901,11 +901,24 @@ mod tests {
             assert!(yaml.contains("\nbgp:\n") && yaml.contains("\n  backend: "));
             assert!(deprecations.is_empty(), "{deprecations:?}");
             assert_eq!(settings.http.auth.mode, AuthMode::Credentials);
+            assert_eq!(settings.quotas.max_active_per_customer, 20);
             assert_eq!(
                 serde_json::to_value(settings.shutdown).unwrap(),
                 serde_json::json!({ "drain_timeout_seconds": 30 })
             );
         }
+    }
+
+    #[test]
+    fn customer_quota_defaults_to_twenty_but_explicit_limits_survive() {
+        let defaults: QuotasConfig = crate::config::parse_yaml("{}").unwrap();
+        assert_eq!(defaults.max_active_per_customer, 20);
+        assert_eq!(defaults.max_active_per_pop, 200);
+        assert_eq!(defaults.max_active_global, 500);
+        assert_eq!(defaults.max_new_per_minute, 30);
+        let explicit: QuotasConfig =
+            crate::config::parse_yaml("max_active_per_customer: 5").unwrap();
+        assert_eq!(explicit.max_active_per_customer, 5);
     }
 
     /// Minimal valid YAML for a Settings struct (no correlation section).

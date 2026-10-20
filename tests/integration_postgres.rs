@@ -4850,6 +4850,177 @@ fn assert_quota_error(result: prefixd::error::Result<()>, kind: &str, current: u
 }
 
 #[tokio::test]
+async fn test_blackhole_global_quota_serializes_across_pop_admissions() {
+    use prefixd::domain::ActionType;
+    let context = TestContext::new().await;
+    let mut quotas = common::test_settings().quotas;
+    quotas.max_active_per_customer = 0;
+    quotas.max_active_per_pop = 0;
+    quotas.max_active_global = 0;
+    let mut blackhole = common::test_settings().blackhole;
+    blackhole.max_active_global = 1;
+    let candidate = |prefix: &str, pop: &str| {
+        let mut m = inventory_mitigation(prefix, pop, chrono::Utc::now(), MitigationStatus::Active);
+        m.action_type = ActionType::Blackhole;
+        m.match_criteria.protocol = None;
+        m.match_criteria.dst_ports.clear();
+        m.scope_hash = m.match_criteria.scope_hash_for(ActionType::Blackhole);
+        m
+    };
+    sqlx::raw_sql("CREATE FUNCTION gate_blackhole_insert() RETURNS trigger AS $$ BEGIN PERFORM pg_advisory_xact_lock(7355, 2362); RETURN NEW; END; $$ LANGUAGE plpgsql; CREATE TRIGGER gate_blackhole_insert BEFORE INSERT ON mitigations FOR EACH ROW EXECUTE FUNCTION gate_blackhole_insert();")
+        .execute(&context.pool).await.unwrap();
+    let mut gate = context.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(7355, 2362)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let spawn = |m| {
+        let repo = context.repo.clone();
+        let quotas = quotas.clone();
+        let blackhole = blackhole.clone();
+        tokio::spawn(async move {
+            repo.admit_mitigation(&m, &quotas, &blackhole, &fixture_actor())
+                .await
+        })
+    };
+    let first = spawn(candidate("203.0.113.10/32", "blackhole-a"));
+    wait_quota_lock(&context.pool, false, 1).await;
+    let second = spawn(candidate("203.0.113.11/32", "blackhole-b"));
+    wait_quota_lock(&context.pool, true, 1).await;
+    gate.commit().await.unwrap();
+    first.await.unwrap().unwrap();
+    assert_quota_error(second.await.unwrap(), "blackhole_global", 1, 1);
+    assert_eq!(context.repo.count_active_global().await.unwrap(), 1);
+    assert_eq!(
+        context.repo.count_active_flowspec_global().await.unwrap(),
+        0
+    );
+    // Independent POPs share the cap; withdrawing the first row releases it.
+    let admitted = context
+        .repo
+        .active_mitigations_for_pop("blackhole-a")
+        .await
+        .unwrap();
+    let mut admitted = admitted[0].clone();
+    admitted.withdraw(Some("release blackhole slot".into()));
+    context.repo.update_mitigation(&admitted).await.unwrap();
+    context
+        .repo
+        .admit_mitigation(
+            &candidate("203.0.113.11/32", "blackhole-b"),
+            &quotas,
+            &blackhole,
+            &fixture_actor(),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_quota_families_postgres_mock_separate_capacity_and_blackhole_caps() {
+    use prefixd::domain::ActionType;
+    let context = TestContext::new().await;
+    for (quota, per_pop, global) in [("blackhole_pop", 1, 5), ("blackhole_global", 5, 1)] {
+        sqlx::query("DELETE FROM mitigations")
+            .execute(&context.pool)
+            .await
+            .unwrap();
+        let mock: std::sync::Arc<dyn prefixd::db::RepositoryTrait> =
+            std::sync::Arc::new(prefixd::db::MockRepository::new());
+        for repo in [&context.repo, &mock] {
+            let mut quotas = common::test_settings().quotas;
+            quotas.max_active_per_customer = 1;
+            quotas.max_active_per_pop = 1;
+            quotas.max_active_global = 1;
+            let mut blackhole = common::test_settings().blackhole;
+            blackhole.max_active_per_pop = per_pop;
+            blackhole.max_active_global = global;
+            let mut flowspec = inventory_mitigation(
+                "203.0.113.10/32",
+                "quota-a",
+                chrono::Utc::now(),
+                MitigationStatus::Active,
+            );
+            flowspec.customer_id = Some("customer-a".into());
+            repo.admit_mitigation(&flowspec, &quotas, &blackhole, &fixture_actor())
+                .await
+                .unwrap();
+            let mut host = inventory_mitigation(
+                "203.0.113.11/32",
+                "quota-a",
+                chrono::Utc::now(),
+                MitigationStatus::Active,
+            );
+            host.customer_id = flowspec.customer_id.clone();
+            host.action_type = ActionType::Blackhole;
+            host.match_criteria.protocol = None;
+            host.match_criteria.dst_ports.clear();
+            host.scope_hash = host.match_criteria.scope_hash_for(ActionType::Blackhole);
+            // This used to fail at the full FlowSpec customer quota.
+            repo.admit_mitigation(&host, &quotas, &blackhole, &fixture_actor())
+                .await
+                .unwrap();
+            assert_eq!(repo.count_active_global().await.unwrap(), 2);
+            assert_eq!(
+                repo.count_active_flowspec_by_customer("customer-a")
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                repo.count_active_flowspec_by_pop("quota-a").await.unwrap(),
+                1
+            );
+            assert_eq!(repo.count_active_flowspec_global().await.unwrap(), 1);
+            // Negative controls: each family's own cap still refuses another row.
+            let mut second = host.clone();
+            second.mitigation_id = uuid::Uuid::new_v4();
+            second.victim_ip = "203.0.113.12".into();
+            second.match_criteria.dst_prefix = "203.0.113.12/32".into();
+            second.scope_hash = second.match_criteria.scope_hash_for(ActionType::Blackhole);
+            assert_quota_error(
+                repo.admit_mitigation(&second, &quotas, &blackhole, &fixture_actor())
+                    .await,
+                quota,
+                1,
+                1,
+            );
+            second.action_type = ActionType::Discard;
+            second.match_criteria.protocol = Some(17);
+            second.scope_hash = second.match_criteria.scope_hash_for(ActionType::Discard);
+            assert_quota_error(
+                repo.admit_mitigation(&second, &quotas, &blackhole, &fixture_actor())
+                    .await,
+                "customer",
+                1,
+                1,
+            );
+            flowspec.withdraw(Some("release FlowSpec slot".into()));
+            repo.update_mitigation(&flowspec).await.unwrap();
+            // A full blackhole budget does not consume the freed FlowSpec slot.
+            repo.admit_mitigation(&second, &quotas, &blackhole, &fixture_actor())
+                .await
+                .unwrap();
+            assert_eq!(repo.count_active_flowspec_global().await.unwrap(), 1);
+            host.withdraw(Some("release blackhole slot".into()));
+            repo.update_mitigation(&host).await.unwrap();
+            // The minute-rate remains shared even with independent active quotas.
+            quotas.max_new_per_minute = 3;
+            second.mitigation_id = uuid::Uuid::new_v4();
+            second.action_type = ActionType::Blackhole;
+            second.match_criteria.protocol = None;
+            second.scope_hash = second.match_criteria.scope_hash_for(ActionType::Blackhole);
+            assert_rate_error(
+                repo.admit_mitigation(&second, &quotas, &blackhole, &fixture_actor())
+                    .await,
+                3,
+                3,
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
     let context = TestContext::new().await;
     for status in [

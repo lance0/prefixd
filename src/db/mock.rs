@@ -402,37 +402,48 @@ impl RepositoryTrait for MockRepository {
         actor: &crate::observability::CreationActor,
     ) -> Result<()> {
         let mut mitigations = self.mitigations.lock().unwrap();
-        if let Some(customer_id) = &m.customer_id {
+        if m.action_type != crate::domain::ActionType::Blackhole {
+            if let Some(customer_id) = &m.customer_id {
+                let count = mitigations
+                    .iter()
+                    .filter(|existing| {
+                        existing.is_active()
+                            && existing.action_type != crate::domain::ActionType::Blackhole
+                            && existing.customer_id.as_ref() == Some(customer_id)
+                    })
+                    .count();
+                super::repository::check_active_quota(
+                    "customer",
+                    u32::try_from(count).unwrap_or(u32::MAX),
+                    quotas.max_active_per_customer,
+                )?;
+            }
             let count = mitigations
                 .iter()
                 .filter(|existing| {
-                    existing.is_active() && existing.customer_id.as_ref() == Some(customer_id)
+                    existing.is_active()
+                        && existing.action_type != crate::domain::ActionType::Blackhole
+                        && existing.pop == m.pop
                 })
                 .count();
             super::repository::check_active_quota(
-                "customer",
+                "pop",
                 u32::try_from(count).unwrap_or(u32::MAX),
-                quotas.max_active_per_customer,
+                quotas.max_active_per_pop,
+            )?;
+            let count = mitigations
+                .iter()
+                .filter(|existing| {
+                    existing.is_active()
+                        && existing.action_type != crate::domain::ActionType::Blackhole
+                })
+                .count();
+            super::repository::check_active_quota(
+                "global",
+                u32::try_from(count).unwrap_or(u32::MAX),
+                quotas.max_active_global,
             )?;
         }
-        let count = mitigations
-            .iter()
-            .filter(|existing| existing.is_active() && existing.pop == m.pop)
-            .count();
-        super::repository::check_active_quota(
-            "pop",
-            u32::try_from(count).unwrap_or(u32::MAX),
-            quotas.max_active_per_pop,
-        )?;
-        let count = mitigations
-            .iter()
-            .filter(|existing| existing.is_active())
-            .count();
-        super::repository::check_active_quota(
-            "global",
-            u32::try_from(count).unwrap_or(u32::MAX),
-            quotas.max_active_global,
-        )?;
         if m.action_type == crate::domain::ActionType::Blackhole {
             let blackholes = || {
                 mitigations.iter().filter(|existing| {
@@ -648,6 +659,56 @@ impl RepositoryTrait for MockRepository {
                         | MitigationStatus::Active
                         | MitigationStatus::Escalated
                 )
+            })
+            .count() as u32)
+    }
+
+    async fn count_active_flowspec_by_customer(&self, customer_id: &str) -> Result<u32> {
+        let mitigations = self.mitigations.lock().unwrap();
+        Ok(mitigations
+            .iter()
+            .filter(|m| {
+                m.action_type != crate::domain::ActionType::Blackhole
+                    && m.customer_id.as_deref() == Some(customer_id)
+                    && matches!(
+                        m.status,
+                        MitigationStatus::Pending
+                            | MitigationStatus::Active
+                            | MitigationStatus::Escalated
+                    )
+            })
+            .count() as u32)
+    }
+
+    async fn count_active_flowspec_by_pop(&self, pop: &str) -> Result<u32> {
+        let mitigations = self.mitigations.lock().unwrap();
+        Ok(mitigations
+            .iter()
+            .filter(|m| {
+                m.action_type != crate::domain::ActionType::Blackhole
+                    && m.pop == pop
+                    && matches!(
+                        m.status,
+                        MitigationStatus::Pending
+                            | MitigationStatus::Active
+                            | MitigationStatus::Escalated
+                    )
+            })
+            .count() as u32)
+    }
+
+    async fn count_active_flowspec_global(&self) -> Result<u32> {
+        let mitigations = self.mitigations.lock().unwrap();
+        Ok(mitigations
+            .iter()
+            .filter(|m| {
+                m.action_type != crate::domain::ActionType::Blackhole
+                    && matches!(
+                        m.status,
+                        MitigationStatus::Pending
+                            | MitigationStatus::Active
+                            | MitigationStatus::Escalated
+                    )
             })
             .count() as u32)
     }

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- The default and shipped `quotas.max_active_per_customer` rise from 5 to 20;
+  explicit configured limits are preserved. Active customer/POP/global quotas
+  now count only FlowSpec rules. Blackholes use their independent POP/global
+  caps, while `max_new_per_minute` remains shared by both route kinds.
+- Multi-rule event results now follow admission priority: the chunk containing
+  the detector's highest-ranked source port, fragment coverage, remaining
+  chunks by rank, then other static rules in their relative playbook order.
+  Chunk contents and rule identities are unchanged. Event outcomes include
+  canonical scopes and quota names for refusals, backed by `reject_rule`
+  audits and `prefixd_event_rule_quota_rejections_total` metrics.
 - A second controller for the same POP and speaker target that shares the
   database now starts in standby instead of mutating the speaker. The
   database connection must be direct or through a session-mode pooler:
