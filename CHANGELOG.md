@@ -91,6 +91,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and metrics add `prefixd_injection_lease_renewals_total{result}` and
   `prefixd_injection_lease_state{state}`. Startup refuses routes under this
   controller's owner that the database neither desires nor is withdrawing.
+  Renewal needs neither the database nor the controller fence, so a
+  PostgreSQL outage does not drop leased blackholes; a dry-run controller
+  never renews, so its health reports `not_renewing` and leased routes from
+  an enforced run lapse within one lease. A refused withdrawal of a key
+  another owner holds stays pending until an operator resolves it.
 - `POST /v1/mitigations` accepts optional `src_ports`, `fragment` and
   `packet_length` for discard and police rules (ADR 028). They pass the same
   invariants, `max_ports`, `allow_fragment_match` and

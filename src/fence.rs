@@ -226,7 +226,8 @@ impl FlowSpecAnnouncer for FencedAnnouncer {
             .map(|_| self as &dyn BlackholeSpeaker)
     }
 
-    /// Never the inner handle: standby never renews.
+    /// Never the inner handle, so leased adds stay behind the fence. Renewal
+    /// is deliberately not fenced (see `renew_lease`).
     fn injection_leases(&self) -> Option<&dyn InjectionLeases> {
         self.inner
             .injection_leases()
@@ -254,13 +255,16 @@ impl InjectionLeases for FencedAnnouncer {
         self.inner_leases()?.live_lease(owner).await
     }
 
+    /// Not fenced: renewal only extends what this owner already holds and can
+    /// never add or resurrect anything, and a second process with the same owner
+    /// renewing is harmless. Gating it on the fence would tie it to the database,
+    /// so an outage longer than the lease would drop every leased blackhole.
     async fn renew_lease(
         &self,
         owner: &str,
         generation: LeaseGeneration,
         lease_seconds: u32,
     ) -> Result<bool> {
-        self.fence.ensure_active()?;
         self.inner_leases()?
             .renew_lease(owner, generation, lease_seconds)
             .await
@@ -408,11 +412,15 @@ mod tests {
         );
         fence.set(true);
         let generation = fenced.announce_leased_blackhole(&leased, 60).await.unwrap();
+        // Renewal is not a fenced mutation: standby, or a database outage that
+        // forces it, must not drop the leased routes.
         fence.set(false);
-        assert!(matches!(
-            leases.renew_lease(leased.owner(), generation, 60).await,
-            Err(PrefixdError::Standby)
-        ));
+        assert!(
+            leases
+                .renew_lease(leased.owner(), generation, 60)
+                .await
+                .unwrap()
+        );
         fence.set(true);
         assert!(
             leases

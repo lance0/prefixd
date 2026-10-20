@@ -42,6 +42,13 @@ slice 8 also deletes a leftover route under its recorded owner, since the
 lease cannot expire routes that a running controller keeps renewing; and
 startup refuses outstanding leased intent when either `blackhole.enabled` or
 `blackhole.leased` is off, because either one stops the renewal.
+Two decisions on review, 2026-10-20: renewal is not gated by the controller
+fence, so a database outage that forces standby cannot drop leased routes
+(renewal only extends what the owner holds, and a second process renewing the
+same owner is harmless; adds, deletes and re-adds stay fenced), which
+supersedes "standby never renews" below; and a dry-run controller never
+renews, so switching an enforced leased controller to dry-run lets its leased
+routes lapse within one lease.
 
 ## Date
 

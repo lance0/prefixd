@@ -184,10 +184,16 @@ async fn main() -> anyhow::Result<()> {
     // after a restart (ADR 027); it is asked only when the lease is configured.
     let blackhole = &config.settings.blackhole;
     let lease = if blackhole.enabled && blackhole.leased {
-        let keeper = Arc::new(prefixd::domain::LeaseKeeper::new(
-            owner.clone(),
-            blackhole.lease_seconds,
-        ));
+        let keeper = prefixd::domain::LeaseKeeper::new(owner.clone(), blackhole.lease_seconds);
+        // RenewLease is a speaker mutation, so dry-run never renews: leased
+        // routes left by an enforced run lapse within one lease.
+        let keeper = Arc::new(
+            if config.settings.mode == prefixd::config::OperationMode::Enforced {
+                keeper
+            } else {
+                keeper.without_renewal()
+            },
+        );
         if let Some(leases) = announcer.injection_leases() {
             match keeper.recover(leases).await {
                 Ok(true) => tracing::info!(owner = %owner, generation = ?keeper.generation(),
@@ -210,7 +216,9 @@ async fn main() -> anyhow::Result<()> {
         &owner,
     )
     .await?;
-    if let Some(keeper) = &lease {
+    if let Some(keeper) = &lease
+        && config.settings.mode == prefixd::config::OperationMode::Enforced
+    {
         tokio::spawn(prefixd::domain::run_lease_renewals(
             keeper.clone(),
             announcer.clone(),

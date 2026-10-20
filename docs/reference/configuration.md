@@ -824,6 +824,15 @@ routes the network holds can still apply.
   route. A blackhole added unleased stays unleased until it is withdrawn or
   expires; extending it sends no add. Startup refuses `leased: false` while
   leased blackholes are active or awaiting withdrawal.
+- **Dry-run.** `RenewLease` is a speaker mutation, so a dry-run controller
+  probes and reports the lease but never renews it; health reports
+  `not_renewing`. Switching an enforced leased controller to dry-run lets its
+  leased routes lapse within `lease_seconds`. Withdraw live blackholes before
+  changing the mode, as the
+  [upgrade guide](../how-to/upgrading.md#mitigation-origin-mode) already asks.
+- **Database outages.** Renewal needs no database and no controller fence, so
+  a PostgreSQL outage that puts the controller in standby does not drop leased
+  blackholes. New adds and withdrawals wait for the fence.
 - **Visibility.** Health detail reports `speaker.lease` (owner, state,
   generation and the last renewal), and
   [metrics](api.md#metrics) count renewals and report the lease state.

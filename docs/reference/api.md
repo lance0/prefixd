@@ -1917,8 +1917,9 @@ when enforced detector blackholes run without the injection lease
 announced until prefixd returns or an operator withdraws them. `lease` is
 present only with `blackhole.leased`: `state` is `none` (no generation held
 yet), `live`, `renewal_failing` (the last renewal failed but the lease may
-still be live) or `expired` (the speaker refused the generation, or no
-renewal succeeded for a whole lease). `generation` is held in memory and
+still be live), `expired` (the speaker refused the generation, or no
+renewal succeeded for a whole lease) or `not_renewing` (dry-run, which never
+renews). `generation` is held in memory and
 changes after a speaker restart. `last_renewal_result` is `success`,
 `not_live` or `error`. Health performs no rule inventory probe.
 
@@ -2563,7 +2564,8 @@ With [leased blackholes](configuration.md#leased-blackholes),
 `prefixd_injection_lease_renewals_total{result}` counts renewals by `success`,
 `not_live` (the speaker refused the generation, which triggers a full
 re-add) and `error`. `prefixd_injection_lease_state{state}` is `1` for the
-current state (`none`, `live`, `renewal_failing` or `expired`) and `0` for
+current state (`none`, `live`, `renewal_failing`, `expired` or
+`not_renewing`) and `0` for
 the others, matching health detail's `speaker.lease.state` after each
 renewal. Both series exist with zero values in every deployment.
 
