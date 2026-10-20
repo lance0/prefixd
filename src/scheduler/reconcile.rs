@@ -861,6 +861,16 @@ impl ReconciliationLoop {
             );
             *readd = true;
         }
+        // Our live row while no generation is held is renewed by nothing, such
+        // as an add whose reply was lost: re-add to learn the generation.
+        if lease.is_some_and(|lease| lease.generation().is_none())
+            && inventory
+                .routes
+                .iter()
+                .any(|route| route.owner() == our_owner)
+        {
+            *readd = true;
+        }
         let identity =
             |prefix: &ipnet::IpNet| crate::domain::blackhole_identity(&prefix.to_string());
         let mut repair_error = None;
@@ -3366,5 +3376,38 @@ mod tests {
         assert!(reconciler.reconcile().await.is_err());
         assert_eq!(speaker.adds.load(SeqCst), 0);
         assert_eq!(speaker.leased_adds.load(SeqCst), 0);
+    }
+
+    /// A leased add whose reply was lost but which the daemon committed leaves
+    /// a desired route under our owner while no generation is held, so nothing
+    /// renews it. Reconciliation re-adds it to learn the generation instead of
+    /// letting the speaker expire it one lease later.
+    #[tokio::test]
+    async fn a_present_leased_route_without_a_held_generation_is_re_added() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let lease = Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60));
+        let reconciler = leased_reconciler(repo.clone(), speaker.clone(), lease.clone());
+        // The startup re-add with nothing leased yet.
+        reconciler.reconcile().await.unwrap();
+        assert!(!lease.take_readd());
+        let desired = leased_row("192.0.2.1");
+        repo.insert_mitigation(&desired).await.unwrap();
+        speaker
+            .inner
+            .announce_leased_blackhole(&frozen(&desired), 60)
+            .await
+            .unwrap();
+        assert_eq!(lease.generation(), None);
+        reconciler.reconcile().await.unwrap();
+        assert!(
+            lease.generation().is_some(),
+            "a desired leased route that nothing renews"
+        );
+        assert_eq!(speaker.leased_adds.load(SeqCst), 1);
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.leased_adds.load(SeqCst), 1, "converged");
+        assert_eq!(speaker.adds.load(SeqCst), 0);
     }
 }

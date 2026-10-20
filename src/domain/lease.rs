@@ -444,4 +444,67 @@ mod tests {
         );
         assert!(!restarted.take_readd());
     }
+
+    /// A renewal of g1 in flight while an add adopts g2: g1's late refusal
+    /// neither drops g2 nor requests a second re-add.
+    #[tokio::test]
+    async fn a_late_refusal_of_a_superseded_generation_keeps_the_new_one() {
+        struct Gated {
+            inner: crate::bgp::MockAnnouncer,
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait::async_trait]
+        impl InjectionLeases for Gated {
+            async fn live_lease(&self, owner: &str) -> Result<Option<Option<LeaseGeneration>>> {
+                self.inner.live_lease(owner).await
+            }
+            async fn renew_lease(
+                &self,
+                owner: &str,
+                generation: LeaseGeneration,
+                lease_seconds: u32,
+            ) -> Result<bool> {
+                self.entered.notify_one();
+                self.release.notified().await;
+                self.inner
+                    .renew_lease(owner, generation, lease_seconds)
+                    .await
+            }
+            fn lease_confirmed(&self) -> bool {
+                true
+            }
+        }
+        let speaker = Gated {
+            inner: crate::bgp::MockAnnouncer::new(),
+            entered: Default::default(),
+            release: Default::default(),
+        };
+        let keeper = LeaseKeeper::new(OWNER.into(), 60);
+        keeper.take_readd();
+        let first = speaker
+            .inner
+            .announce_leased_blackhole(&route(), 60)
+            .await
+            .unwrap();
+        keeper.observe_add(first);
+        let readd = async {
+            speaker.entered.notified().await;
+            speaker.inner.expire_lease(OWNER).await;
+            let next = speaker
+                .inner
+                .announce_leased_blackhole(&route(), 60)
+                .await
+                .unwrap();
+            keeper.observe_add(next);
+            assert!(keeper.take_readd(), "the changed generation re-adds once");
+            speaker.release.notify_one();
+            next
+        };
+        let ((), next) = tokio::join!(keeper.renew_once(&speaker), readd);
+        assert_ne!(next, first);
+        assert_eq!(keeper.generation(), Some(next));
+        assert_eq!(keeper.health().state, LeaseState::Live);
+        assert!(!keeper.take_readd());
+    }
 }
