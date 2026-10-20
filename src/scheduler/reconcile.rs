@@ -615,6 +615,13 @@ impl ReconciliationLoop {
             return Ok(());
         };
         let announced = reader.list_active().await?;
+        // Our live rule while no generation is held is renewed by nothing, such
+        // as an add whose reply was lost: re-add to learn the generation.
+        let readd = readd
+            || self.lease().is_some_and(|lease| {
+                lease.generation().is_none()
+                    && announced.iter().any(|rule| rule.owner == lease.owner())
+            });
         let mut announced_actions = HashMap::new();
         // Complete validation precedes every repair, including unknown local rows.
         for rule in &announced {
@@ -3616,5 +3623,38 @@ mod tests {
         reconciler.reconcile().await.unwrap();
         assert_eq!(speaker.leased_adds.load(SeqCst), 1, "converged");
         assert_eq!(speaker.adds.load(SeqCst), 0);
+    }
+    /// The FlowSpec side of a lost add reply: a desired rule under our owner
+    /// while no generation is held is renewed by nothing, with no leased
+    /// blackhole to notice it. Reconciliation re-adds it to learn the generation.
+    #[tokio::test]
+    async fn a_present_leased_flowspec_rule_without_a_held_generation_is_re_added() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let lease = Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60));
+        // Leased FlowSpec without blackholes.
+        let reconciler =
+            blackhole_reconciler(repo.clone(), speaker.clone(), Default::default(), false)
+                .with_lease(lease.clone());
+        reconciler.reconcile().await.unwrap();
+        assert!(!lease.take_readd());
+        let desired = leased_rule_row("192.0.2.10/32");
+        repo.insert_mitigation(&desired).await.unwrap();
+        speaker
+            .inner
+            .announce_leased(&crate::domain::mitigation_rule(&desired).unwrap(), 60)
+            .await
+            .unwrap();
+        assert_eq!(lease.generation(), None);
+        reconciler.reconcile().await.unwrap();
+        assert!(
+            lease.generation().is_some(),
+            "a desired leased rule that nothing renews"
+        );
+        assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 1);
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 1, "converged");
+        assert_eq!(speaker.flowspec_adds.load(SeqCst), 0);
     }
 }
