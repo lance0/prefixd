@@ -180,8 +180,9 @@ pub async fn announce_blackhole(
     Ok(BlackholeAnnouncement::Announced(outcome))
 }
 
-/// Audits what the add did at the speaker's local route, so a re-add of a
-/// route the speaker still held reads `unchanged`, not as a fresh announcement.
+/// Audits what the add did at the speaker's local route. An `unchanged` re-add
+/// changed nothing and is only logged: a leased re-add that keeps retrying
+/// re-adds every held route each pass and would otherwise flood the audit log.
 /// The route is already accepted: a failed audit write is logged, not returned.
 async fn record_announcement(
     repo: &dyn RepositoryTrait,
@@ -191,6 +192,9 @@ async fn record_announcement(
 ) {
     tracing::info!(mitigation_id = %mitigation.mitigation_id, prefix = %rule.prefix, ?outcome,
         "blackhole route accepted by the speaker");
+    if outcome == AddOutcome::Unchanged {
+        return;
+    }
     let entry = crate::observability::AuditEntry::new(
         crate::observability::ActorType::System,
         Some("speaker".into()),

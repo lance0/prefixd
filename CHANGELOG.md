@@ -366,10 +366,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a controller restart or a speaker restart already overtook, with its
   original actor, reason and operation ID; `NOT_FOUND` from the speaker is now
   an error instead of absence. Each accepted `AddPath` or `AddLeasedPath`
-  writes an `announce` audit entry with the speaker's outcome (`created`,
-  `replaced`, `unchanged`, or `unknown` when none is reported), so a leased
-  re-add after a controller restart reads `unchanged` rather than as a new
-  announcement. A `replaced` outcome on an unleased admission is logged as an
+  logs the speaker's outcome (`created`, `replaced`, `unchanged`, or `unknown`
+  when none is reported) and, unless it is `unchanged`, writes an `announce`
+  audit entry with it, so a leased re-add of routes the speaker still holds,
+  as after a controller restart or on each retry of a partial re-add, adds no
+  audit entries. A `replaced` outcome on an unleased admission is logged as an
   error. `0.0.0.0` and `::`, which rustbgpd now reads as next-hop self, stay
   refused as blackhole next hops.
 

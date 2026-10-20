@@ -53,8 +53,9 @@ routes lapse within one lease.
 Status note 2026-10-20 (unicast injection contract): rustbgpd 0.79.0 also
 ships requirements (a), (b) and (c), and prefixd now requires 0.79.0. Deletes
 set `allow_missing` and treat `NOT_PRESENT` as absent; `NOT_FOUND` is an
-error. Each accepted add records `CREATED`, `REPLACED` or `UNCHANGED` in an
-`announce` audit entry. By the owner's decision, `UNSPECIFIED` (and a leased
+error. Each accepted add logs `CREATED`, `REPLACED` or `UNCHANGED`, and records
+it in an `announce` audit entry unless it is `UNCHANGED`, so a retried leased
+re-add cannot flood the audit log. By the owner's decision, `UNSPECIFIED` (and a leased
 reply without `result`) is accepted with outcome `unknown` and a warning,
 rather than the error requirement (a) asked for. A `replaced` outcome on an
 unleased admission is logged as an error. prefixd keeps refusing

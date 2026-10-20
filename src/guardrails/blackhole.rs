@@ -1449,8 +1449,9 @@ mod tests {
             .collect()
     }
 
-    /// Each accepted add audits what the speaker did at its key, so a re-add of
-    /// a route it still holds, as after a controller restart, reads `unchanged`.
+    /// Each accepted add that changed the speaker's route audits its outcome. A
+    /// re-add of a route it still holds, as on every pass of a retried leased
+    /// re-add, is `unchanged` and writes no entry, so retries cannot flood the log.
     #[tokio::test]
     async fn every_accepted_add_audits_the_speaker_outcome() {
         let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
@@ -1462,25 +1463,27 @@ mod tests {
             .await
             .unwrap()
             .mitigation;
-        announce_blackhole(&repo, &speaker, &unleased, None, None)
-            .await
-            .unwrap();
-        assert_eq!(
-            announce_outcomes(&repo, &unleased).await,
-            ["created", "unchanged"]
-        );
+        for _ in 0..3 {
+            let readd = announce_blackhole(&repo, &speaker, &unleased, None, None).await;
+            assert!(matches!(
+                readd,
+                Ok(BlackholeAnnouncement::Announced(AddOutcome::Unchanged))
+            ));
+        }
+        assert_eq!(announce_outcomes(&repo, &unleased).await, ["created"]);
         let lease = LeaseKeeper::new(OWNER.into(), 60);
         let leased = admit_leased(&repo, &speaker, Some(&lease), "203.0.113.11/32")
             .await
             .unwrap()
             .mitigation;
-        announce_blackhole(&repo, &speaker, &leased, None, Some(&lease))
-            .await
-            .unwrap();
-        assert_eq!(
-            announce_outcomes(&repo, &leased).await,
-            ["created", "unchanged"]
-        );
+        for _ in 0..3 {
+            let readd = announce_blackhole(&repo, &speaker, &leased, None, Some(&lease)).await;
+            assert!(matches!(
+                readd,
+                Ok(BlackholeAnnouncement::Announced(AddOutcome::Unchanged))
+            ));
+        }
+        assert_eq!(announce_outcomes(&repo, &leased).await, ["created"]);
         let entry = repo
             .list_audit(&crate::db::ListParams {
                 limit: 1000,
@@ -1503,7 +1506,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(announce_outcomes(&repo, &unleased).await.len(), 2);
+        assert_eq!(announce_outcomes(&repo, &unleased).await.len(), 1);
     }
 
     /// A key another owner, or no owner, holds refuses the leased add. The new

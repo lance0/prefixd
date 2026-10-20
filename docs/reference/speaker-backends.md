@@ -27,9 +27,9 @@ complete read-back of retained local intent for both families. Only rustbgpd
 provides it. It injects with unleased `AddPath` (ORIGIN IGP, empty AS_PATH,
 `path_id` 0, BLACKHOLE `65535:666` plus the route's communities), or with
 `AddLeasedPath` for a route recorded under an injection owner. It never sends
-one after the other fails. Each add records rustbgpd's outcome (`created`,
-`replaced`, `unchanged`, or `unknown` when the daemon reports none) in an
-`announce` audit entry and the log. It deletes with `DeletePath` passing the
+one after the other fails. Each add logs rustbgpd's outcome (`created`,
+`replaced`, `unchanged`, or `unknown` when the daemon reports none) and
+records it in an `announce` audit entry unless it is `unchanged`. It deletes with `DeletePath` passing the
 recorded owner, `allow_missing` and never `override_owner`: `DELETED` and
 `NOT_PRESENT` are success, while `NOT_FOUND`, an unreported outcome and
 `FAILED_PRECONDITION` (another owner, or none, holds the key) are errors, and
@@ -421,8 +421,9 @@ blackholes.
 The add outcome compares the add with the speaker's previous local route at
 the key. It is local RPC acceptance, not export or enforcement. A re-add of a
 route the speaker still holds, such as the leased re-add after a controller
-restart, is audited as `unchanged`, not as a new announcement; after a speaker
-restart the same re-add is `created`. A `replaced` outcome on an unleased
+restart or each retry of a partial re-add, is `unchanged`: it is logged but
+writes no audit entry, so retries cannot flood the audit log. After a speaker
+restart the same re-add is `created` and audited. A `replaced` outcome on an unleased
 admission means a local route appeared at the prefix after the pre-read; it is
 logged as an error and the audit entry records it.
 

@@ -2577,10 +2577,11 @@ Every blackhole add the speaker accepts, at admission and on repair or leased
 re-add, writes an `announce` entry targeting the mitigation, with
 `actor_type: "system"`, `actor_id: "speaker"` and `details` `prefix`,
 `next_hop`, `owner` and `outcome`. `outcome` is what the speaker reported
-against its previous local route at the key: `created`, `replaced`,
-`unchanged`, or `unknown` when it reported none. It is local acceptance only,
-not export or router enforcement. A failed add writes no entry, and a failed
-audit write is logged without failing the add.
+against its previous local route at the key: `created`, `replaced`, or
+`unknown` when it reported none. An `unchanged` add, a re-add of a route the
+speaker still held, changed nothing and is logged without an entry. It is
+local acceptance only, not export or router enforcement. A failed add writes
+no entry, and a failed audit write is logged without failing the add.
 
 `prefixd_event_rule_quota_rejections_total{quota_type,rule_kind,action_type}`
 counts each event rule refused by an active quota. `rule_kind` is
