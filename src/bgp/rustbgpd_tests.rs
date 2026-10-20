@@ -805,7 +805,7 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
         let mut paths = self.paths.lock().unwrap();
         paths.retain(|old| !same_key(old, &request.prefix, request.prefix_length));
         paths.push(request);
-        Ok(Response::new(pb::AddPathResponse {}))
+        Ok(Response::new(pb::AddPathResponse::default()))
     }
 
     async fn delete_path(
@@ -828,7 +828,7 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
             // The released daemon has no allow_missing: a missing path is NOT_FOUND.
             return Err(Status::not_found("no injected path"));
         }
-        Ok(Response::new(pb::DeletePathResponse {}))
+        Ok(Response::new(pb::DeletePathResponse::default()))
     }
 }
 

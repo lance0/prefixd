@@ -46,6 +46,7 @@ mod tests {
             afi_safi: afi,
             components: Vec::new(),
             allow_missing: true,
+            ..Default::default()
         };
         assert!(delete.allow_missing);
         assert_eq!(pb::FlowSpecDeleteOutcome::Deleted as i32, 1);
@@ -91,7 +92,7 @@ mod tests {
         assert_eq!(pb::AddressFamily::Ipv4Unicast as i32, 1);
         assert_eq!(pb::AddressFamily::Ipv6Unicast as i32, 2);
 
-        // upsert keyed on (prefix, prefix_length, path_id); the reply has no outcome yet
+        // upsert keyed on (prefix, prefix_length, path_id); 0.76.0 to 0.78.0 leave the outcome unset
         let add = pb::AddPathRequest {
             prefix: "192.0.2.1".into(),
             prefix_length: 32,
@@ -106,16 +107,17 @@ mod tests {
             path_id: 0,
         };
         assert_eq!(add.path_id, 0);
-        let _: pb::AddPathResponse = pb::AddPathResponse {};
+        let _: pb::AddPathResponse = pb::AddPathResponse::default();
 
-        // no allow_missing: a missing path is NOT_FOUND
+        // 0.76.0 to 0.78.0 ignore allow_missing: a missing path is NOT_FOUND
         let delete = pb::DeletePathRequest {
             prefix: add.prefix,
             prefix_length: 32,
             path_id: 0,
+            ..Default::default()
         };
         assert_eq!(delete.prefix_length, 32);
-        let _: pb::DeletePathResponse = pb::DeletePathResponse {};
+        let _: pb::DeletePathResponse = pb::DeletePathResponse::default();
 
         // "0.0.0.0" selects retained local injections; the view is paged.
         let list = pb::ListRoutesRequest {

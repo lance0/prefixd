@@ -597,6 +597,7 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
             afi_safi,
             components,
             allow_missing: true,
+            ..Default::default()
         };
         let response = self
             .rpc("DeleteFlowSpec", || {
@@ -676,6 +677,7 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
             prefix: prefix.addr().to_string(),
             prefix_length: prefix.prefix_len().into(),
             path_id: 0,
+            ..Default::default()
         };
         self.rpc("DeletePath", || {
             let mut client =
@@ -686,7 +688,7 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
                 match client.delete_path(request).await {
                     Err(status) if status.code() == Code::NotFound => {
                         tracing::debug!("rustbgpd blackhole route already absent");
-                        Ok(tonic::Response::new(pb::DeletePathResponse {}))
+                        Ok(tonic::Response::new(pb::DeletePathResponse::default()))
                     }
                     result => result,
                 }
