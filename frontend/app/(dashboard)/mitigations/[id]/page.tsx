@@ -34,6 +34,7 @@ import { Label } from "@/components/ui/label"
 import { usePermissions } from "@/hooks/use-permissions"
 import { formatConfidence } from "@/lib/confidence"
 import { ConfidenceBar } from "@/components/dashboard/confidence-bar"
+import { ExportEvidenceCard } from "@/components/dashboard/export-evidence"
 
 function protocolName(proto: number | null): string {
   if (proto === null) return "any"
@@ -256,6 +257,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           <div className="space-y-6 lg:col-span-2">
+            {mitigation.export_evidence && <ExportEvidenceCard evidence={mitigation.export_evidence} now={now} />}
             {mitigation.action_type === "blackhole" ? <BlackholeRouteCard mitigation={mitigation} /> : (
             <Card>
               <CardHeader className="flex flex-wrap items-center justify-between gap-2">

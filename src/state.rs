@@ -50,6 +50,8 @@ pub struct AppState {
     pub fence: Arc<crate::fence::ControllerFence>,
     /// The controller's injection lease when `blackhole.leased` is on (ADR 027).
     pub lease: Option<Arc<crate::domain::LeaseKeeper>>,
+    /// The last reconciliation pass's blackhole export evidence (observation only).
+    pub export_evidence: crate::domain::ExportEvidenceStore,
     /// Directory containing config files (for hot-reload)
     pub config_dir: PathBuf,
     shutting_down: AtomicBool,
@@ -130,6 +132,7 @@ impl AppState {
             mitigation_lock: tokio::sync::Mutex::new(()),
             fence: Arc::new(crate::fence::ControllerFence::new(true)),
             lease: None,
+            export_evidence: Default::default(),
             db_pool,
             config_dir,
             shutting_down: AtomicBool::new(false),

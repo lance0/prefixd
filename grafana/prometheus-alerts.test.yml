@@ -98,3 +98,28 @@ tests:
       - eval_time: 20m
         alertname: PrefixdDown
         exp_alerts: []
+  # Blackholes exported to no peer for 5 minutes fire per reason; a brief
+  # pending export does not.
+  - interval: 1m
+    input_series:
+      - series: 'prefixd_blackhole_unexported{job="prefixd",instance="a",reason="export_policy"}'
+        values: '0x2 1x10'
+      - series: 'prefixd_blackhole_unexported{job="prefixd",instance="a",reason="no_established_peer"}'
+        values: '0x2 2x10'
+      - series: 'prefixd_blackhole_unexported{job="prefixd",instance="a",reason="pending"}'
+        values: '0x2 1x2 0x8'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PrefixdBlackholeNotExported
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: PrefixdBlackholeNotExported
+        exp_alerts:
+          - exp_labels: {severity: warning, job: prefixd, instance: a, reason: export_policy}
+            exp_annotations:
+              summary: "Active blackhole exported to no peer"
+              description: "1 active blackhole(s) on a are committed to no Established peer, reason export_policy, so no router is sent them. A blackhole /32 or /128 is usually RPKI-Invalid: check for an export filter that drops RPKI-Invalid routes. Health detail lists each blackhole under speaker.blackhole_exports."
+          - exp_labels: {severity: warning, job: prefixd, instance: a, reason: no_established_peer}
+            exp_annotations:
+              summary: "Active blackhole exported to no peer"
+              description: "2 active blackhole(s) on a are committed to no Established peer, reason no_established_peer, so no router is sent them. Health detail lists each blackhole under speaker.blackhole_exports."

@@ -38,6 +38,48 @@ export interface BlackholeRoute {
   large_communities: string[]
 }
 
+/**
+ * A blackhole's export toward one Established peer. `committed` means the
+ * speaker holds it in that peer's Adj-RIB-Out: not receipt, installation or
+ * enforcement, which BGP does not report.
+ */
+export type ExportDisposition = "committed" | "withheld" | "pending"
+
+export interface PeerExport {
+  peer_address: string
+  disposition: ExportDisposition
+  /** Bounded speaker code, e.g. `export_policy`; empty when committed. */
+  reason: string
+  explain_code: string
+  /** Speaker text; not stable. */
+  detail: string
+  advertised_path_id: number
+}
+
+export interface ExportWarning {
+  reason: string
+  message: string
+}
+
+export interface DispositionCounts {
+  committed: number
+  withheld: number
+  pending: number
+}
+
+/** Export evidence for an active enforced blackhole from the last reconciliation pass. */
+export interface BlackholeExportEvidence {
+  /** `error` is unknown export, never an empty peer list. */
+  status: "observed" | "no_local_route" | "error" | "unsupported" | "not_observed"
+  observed_at: string | null
+  peers: PeerExport[]
+  /** Null when sessions were not observed: unknown, not none. */
+  not_established_peers: { peer_address: string; state: string }[] | null
+  counts: DispositionCounts
+  warning: ExportWarning | null
+  error: string | null
+}
+
 export type FragmentMatch = "non_first"
 
 export interface PacketLengthRange {
@@ -82,6 +124,8 @@ export interface Mitigation {
   correlation?: CorrelationContext | null
   /** Present only for a blackhole, which drops all traffic to the victim. */
   blackhole?: BlackholeRoute | null
+  /** Detail endpoint only, on an active enforced blackhole. */
+  export_evidence?: BlackholeExportEvidence | null
 }
 
 export interface PaginatedResponse<T> {
@@ -159,6 +203,16 @@ export interface HealthResponse {
       rule_reader: boolean
       peer_observer: boolean
       daemon_health?: boolean
+      blackhole_export?: boolean
+    }
+    /** Present when the speaker reports blackhole export. */
+    blackhole_exports?: {
+      observed_at: string | null
+      blackholes: number
+      counts: DispositionCounts
+      errors: number
+      no_local_route: number
+      unexported: ({ mitigation_id: string; prefix: string } & ExportWarning)[]
     }
   }
   // True only after successful observation of at least one peer, all established.

@@ -96,7 +96,7 @@ scrape_configs:
 ### Availability alerts
 
 [`grafana/prometheus-alerts.yml`](../../grafana/prometheus-alerts.yml) ships
-three rules, loaded by the Compose Prometheus through `rule_files` in
+three availability rules and one [export rule](#export-alerts), loaded by the Compose Prometheus through `rule_files` in
 `grafana/prometheus.yml`. They expect the scrape job to be named `prefixd`.
 TTL expiry, withdrawals and reconciliation need a running controller that
 holds its POP's fence, so monitor it independently of BGP health:
@@ -121,6 +121,21 @@ docker run --rm -v "$PWD/grafana:/rules:ro" --entrypoint promtool \
 docker run --rm -v "$PWD/grafana:/rules:ro" --entrypoint promtool \
   prom/prometheus:v3.15.0 test rules /rules/prometheus-alerts.test.yml
 ```
+
+### Export alerts
+
+The `prefixd-blackhole-export` group in the same file has one rule, for
+rustbgpd deployments:
+
+| Alert | Fires when | Why it matters |
+| --- | --- | --- |
+| `PrefixdBlackholeNotExported` | `prefixd_blackhole_unexported{reason}` is above zero for 5 minutes | An active blackhole is committed to no Established peer, so no router is sent it. The `reason` label says why; `export_policy` is usually an export filter that drops RPKI-Invalid routes, which a blackhole `/32` or `/128` almost always is |
+
+Health detail lists each such blackhole under `speaker.blackhole_exports`, and
+its mitigation detail shows every peer. The rule detects missing export only:
+a committed route is in a peer's Adj-RIB-Out, which does not prove the router
+installed or enforces it. See
+[export evidence](../reference/speaker-backends.md#export-evidence).
 
 ### Example rules
 

@@ -3,9 +3,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::{
-    AddOutcome, BlackholeInventory, BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer,
-    FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, InjectionLeases, LeaseGeneration,
-    PeerObserver, PeerStatus, SessionState,
+    AddOutcome, BlackholeInventory, BlackholeRoute, BlackholeSpeaker, ExportDisposition,
+    ExportObserver, FlowSpecAnnouncer, FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter,
+    InjectionLeases, LeaseGeneration, PeerExport, PeerObserver, PeerStatus, SessionState,
 };
 use crate::domain::FlowSpecRule;
 use crate::error::{PrefixdError, Result};
@@ -28,7 +28,15 @@ pub struct MockAnnouncer {
     peers: Vec<PeerStatus>,
     /// Test seam: report no ADR 028 match support, like an adapter that has not opted in.
     no_match_support: bool,
+    /// Test seam: export reads for these prefixes return this instead; `Err`
+    /// fails the read.
+    export_overrides: std::sync::Mutex<ExportOverrides>,
+    /// Test seam: every export read stalls and never completes.
+    pub stall_exports: std::sync::atomic::AtomicBool,
 }
+
+type ExportOverrides =
+    std::collections::HashMap<ipnet::IpNet, std::result::Result<Vec<PeerExport>, String>>;
 
 impl MockAnnouncer {
     pub fn new() -> Self {
@@ -42,6 +50,8 @@ impl MockAnnouncer {
                 state: SessionState::Established,
             }],
             no_match_support: false,
+            export_overrides: Default::default(),
+            stall_exports: Default::default(),
         }
     }
 
@@ -52,6 +62,8 @@ impl MockAnnouncer {
             leases: Default::default(),
             peers,
             no_match_support: false,
+            export_overrides: Default::default(),
+            stall_exports: Default::default(),
         }
     }
 
@@ -61,6 +73,18 @@ impl MockAnnouncer {
             no_match_support: true,
             ..Self::new()
         }
+    }
+
+    /// Export reads for `prefix` return `exports`, or fail with the message.
+    pub fn set_exports(
+        &self,
+        prefix: ipnet::IpNet,
+        exports: std::result::Result<Vec<PeerExport>, String>,
+    ) {
+        self.export_overrides
+            .lock()
+            .unwrap()
+            .insert(prefix, exports);
     }
 
     pub async fn announced_count(&self) -> usize {
@@ -118,6 +142,9 @@ impl FlowSpecAnnouncer for MockAnnouncer {
         Some(self)
     }
     fn injection_leases(&self) -> Option<&dyn InjectionLeases> {
+        Some(self)
+    }
+    fn export_observer(&self) -> Option<&dyn ExportObserver> {
         Some(self)
     }
     fn match_support(&self) -> FlowSpecMatchSupport {
@@ -272,6 +299,41 @@ impl InjectionLeases for MockAnnouncer {
         self.leases.lock().unwrap().confirmed
     }
 }
+/// Synthetic: a held route is committed to every Established mock peer.
+#[async_trait]
+impl ExportObserver for MockAnnouncer {
+    async fn blackhole_exports(&self, prefix: &ipnet::IpNet) -> Result<Option<Vec<PeerExport>>> {
+        if self.stall_exports.load(std::sync::atomic::Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        if let Some(exports) = self.export_overrides.lock().unwrap().get(prefix) {
+            return exports.clone().map(Some).map_err(PrefixdError::Internal);
+        }
+        if !self
+            .blackholes
+            .read()
+            .await
+            .iter()
+            .any(|route| route.prefix() == *prefix)
+        {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.peers
+                .iter()
+                .filter(|peer| peer.state.is_established())
+                .map(|peer| PeerExport {
+                    peer_address: peer.address.clone(),
+                    disposition: ExportDisposition::Committed,
+                    reason: String::new(),
+                    explain_code: String::new(),
+                    detail: String::new(),
+                    advertised_path_id: 0,
+                })
+                .collect(),
+        ))
+    }
+}
 #[async_trait]
 impl PeerObserver for MockAnnouncer {
     async fn session_status(&self) -> Result<Vec<PeerStatus>> {
@@ -334,6 +396,9 @@ impl FlowSpecAnnouncer for FaultyBlackholes {
     }
     fn injection_leases(&self) -> Option<&dyn InjectionLeases> {
         Some(self)
+    }
+    fn export_observer(&self) -> Option<&dyn ExportObserver> {
+        self.inner.export_observer()
     }
 }
 

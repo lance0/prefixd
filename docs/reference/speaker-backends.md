@@ -63,8 +63,10 @@ whole read. No API, playbook or detector creates these components yet.
 
 Health detail adds `speaker.backend` and availability booleans under
 `speaker.capabilities`: `rule_reader`, `peer_observer`, `daemon_health`,
-`blackhole`, `blackhole_lease` and the `flowspec_match` object
-(`source_ports`, `fragment`, `packet_length`). `blackhole_lease` is true only
+`blackhole`, `blackhole_lease`, `blackhole_export` and the `flowspec_match`
+object (`source_ports`, `fragment`, `packet_length`). `blackhole_export` is
+true when the adapter reads per-peer [export evidence](#export-evidence),
+which only rustbgpd does. `blackhole_lease` is true only
 after the rustbgpd adapter's `ListInjectionLeases` probe succeeded, which
 prefixd asks only with `blackhole.leased`; an `UNIMPLEMENTED` lease RPC from a
 rolled-back daemon clears it. It is false for GoBGP. The legacy `gobgp`
@@ -84,7 +86,8 @@ also labels daemon metadata explicitly. Uptime is an observation, not a unique
 boot identifier or a restart/replay trigger.
 
 These fields describe API availability and peer observation, not announcement,
-export, or enforcement confirmation.
+export, or enforcement confirmation. Export is reported separately, for
+blackholes only, under `speaker.blackhole_exports`.
 
 `prefixdctl peers` fails explicitly on unsupported or failed peer observation;
 successful JSON remains the peer map. Status and dashboard clients tolerate older
@@ -534,6 +537,76 @@ prefixd stops, and a rustbgpd restart) only when
 `PREFIXD_RUSTBGPD_TEST_VERSION` is 0.79.0 or later, and proves the refused
 startup on earlier releases.
 
+### Export evidence
+
+Each step of this ladder is separate evidence, and none implies the next:
+
+| Step | What shows it | Backends |
+| --- | --- | --- |
+| Desired intent | An active row in prefixd's database | All |
+| Local RPC acceptance | A successful add | All |
+| Retained local intent, or accepted local RIB | The reconciliation read-back | rustbgpd (retained intent), GoBGP (accepted RIB) |
+| Committed to a peer's Adj-RIB-Out | `export_evidence` on the blackhole, `committed` | rustbgpd, blackholes only |
+| Router receipt and installation | Not observed by prefixd; the [FRR receipts](qualification/blackhole-frr-2026-10-19.md) are lab evidence only | None |
+| Router enforcement | Not observed | None |
+
+Once per reconciliation pass, after the blackhole stage, prefixd reads
+rustbgpd's `InjectionService.ListPathExportDispositions` for each active,
+enforced-origin blackhole of this POP (the stage's repair candidates), keyed
+on its host prefix and `path_id` 0, and walks every page. It also uses the
+pass's `ListNeighbors` read. The reads run one at a time within a 10-second
+budget per pass, so a stalled speaker cannot hold up expiry; a read the budget
+cuts off reports an error. A failed or cut-off read keeps the blackhole's
+warning from its last complete read, so a transient error neither clears nor
+raises degraded health. The pass keeps the result in memory. The mitigation
+detail API, health detail and metrics read that snapshot and never call the
+speaker. The read is observation only: it sends no route mutation and adds no
+writer behavior, and a standby controller reads nothing because it runs no
+reconciliation.
+
+rustbgpd lists one row per Established peer:
+
+- `committed`: the route is in that peer's Adj-RIB-Out, committed to its
+  outbound path. BGP carries no acceptance signal, so this does not mean the
+  peer received, accepted, installed or enforces the route. Operator text
+  never calls it installed or enforced.
+- `withheld`: not exported to that peer, with a bounded `reason`
+  (`export_policy`, `family_suppressed:<reason>`, `family_not_negotiated`,
+  `not_selected`, `outbound_prefix_limit`, `exact_export_rejected[:<reason>]`
+  or `export_rule`) and the export explain ladder's `explain_code`.
+- `pending`: export has not settled (`selection_deferred`, `outbound_resync`,
+  `orf_pending` or `not_yet_committed`).
+
+A configured peer without an Established session is absent from that list.
+Absent is not withheld: prefixd joins the list with the session read and
+reports such peers as `not_established_peers`, which is null, not empty, when
+the session read failed.
+
+A failed or partial read is an observation error. `NOT_FOUND` on the first page
+means the speaker holds no local route at the key (`no_local_route`, which
+reconciliation repairs); any error after the first page, a repeated page token
+or peer, or an unknown disposition fails the whole read. An error is never
+reported as no peers or as success, and it is distinct from a successful empty
+list, which means no peer is Established. GoBGP reports `unsupported`.
+
+An observed blackhole committed to no Established peer, because every listed
+peer is withheld or pending or none is Established, is exported to no router.
+Health detail lists it under `speaker.blackhole_exports.unexported` with a
+bounded reason and degrades `status`; `prefixd_blackhole_unexported{reason}`
+counts it and the shipped `PrefixdBlackholeNotExported` alert fires after five
+minutes. rustbgpd has no RPKI-specific reason: an export policy that drops
+RPKI-Invalid routes, which a blackhole `/32` or `/128` almost always is, shows
+as `withheld` with reason `export_policy` and explain code `policy_denied`,
+and `detail` names the policy. prefixd's reason `export_policy` says so.
+
+FlowSpec has no equivalent RPC, so FlowSpec rules carry no export evidence.
+
+`tests/integration_rustbgpd_peer.rs` reads the dispositions from a released
+rustbgpd peered with GoBGP over IPv4 and IPv6 unicast: `committed` for both
+families, `withheld`/`export_policy`/`policy_denied` for a prefix the export
+policy denies, a configured neighbor that never establishes reported as not
+Established rather than withheld, and absence after the delete.
+
 ### Router and speaker requirements
 
 Over an IPv4-transport session, rustbgpd sends IPv6 blackholes to an eBGP peer
@@ -559,7 +632,10 @@ blackhole silently: the add succeeds and nothing reaches the edge. Match
 BLACKHOLE ahead of any Invalid filter, or exempt the RTBH sessions, on every
 validating hop, then test one ban end to end. The
 [RPKI blackhole receipt](qualification/blackhole-rpki-frr-2026-10-20.md)
-shows each case at rustbgpd 0.79.0 and FRR 10.7.1.
+shows each case at rustbgpd 0.79.0 and FRR 10.7.1. With rustbgpd, a speaker
+export filter that withholds a blackhole shows in
+[export evidence](#export-evidence) as `withheld` with reason
+`export_policy`; a filter on a downstream router does not.
 
 ## Remaining backend work
 

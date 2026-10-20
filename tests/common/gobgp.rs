@@ -249,6 +249,18 @@ impl Speaker {
     }
 
     pub async fn add_peer_with_asn(&self, remote_port: u16, passive: bool, peer_asn: u32) {
+        self.add_peer_with_safis(remote_port, passive, peer_asn, &[133])
+            .await;
+    }
+
+    /// Both address families for each SAFI, for example 1 (unicast) and 133 (FlowSpec).
+    pub async fn add_peer_with_safis(
+        &self,
+        remote_port: u16,
+        passive: bool,
+        peer_asn: u32,
+        safis: &[i32],
+    ) {
         self.client()
             .await
             .add_peer(pb::AddPeerRequest {
@@ -273,11 +285,12 @@ impl Speaker {
                         }),
                         ..Default::default()
                     }),
-                    afi_safis: [1, 2]
-                        .into_iter()
-                        .map(|afi| pb::AfiSafi {
+                    afi_safis: safis
+                        .iter()
+                        .flat_map(|&safi| [1, 2].map(|afi| pb::Family { afi, safi }))
+                        .map(|family| pb::AfiSafi {
                             config: Some(pb::AfiSafiConfig {
-                                family: Some(pb::Family { afi, safi: 133 }),
+                                family: Some(family),
                                 enabled: true,
                             }),
                             ..Default::default()

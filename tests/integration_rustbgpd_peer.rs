@@ -321,3 +321,130 @@ async fn released_peer_restart_reconciles_original_desired_state_without_extra_r
     }
     pair.remove().await;
 }
+
+/// Released rustbgpd export dispositions toward one Established peer, joined
+/// with a configured peer that never establishes. Committed is the peer's
+/// Adj-RIB-Out only; this test makes no receipt or enforcement claim.
+#[tokio::test]
+#[ignore = "requires isolated pinned Docker speakers; run scripts/test-rustbgpd.sh"]
+async fn released_blackhole_export_dispositions_join_established_and_configured_peers() {
+    use prefixd::{
+        bgp::{BlackholeRoute, BlackholeSpeaker, ExportDisposition, ExportObserver, PeerObserver},
+        domain::BlackholeExportEvidence,
+    };
+    use std::time::Duration;
+
+    let pair = peer_receipt::Pair::start_unicast().await;
+    let speaker = pair.rust.connect().await;
+    let go_address = pair.rust.peer_address.clone();
+    let sessions = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let sessions = speaker.session_status().await.unwrap();
+            let state = |address: &str| {
+                sessions
+                    .iter()
+                    .find(|peer| peer.address == address)
+                    .map(|peer| peer.state.is_established())
+            };
+            if sessions.len() == 2
+                && state(&go_address) == Some(true)
+                && state(rustbgpd::UNREACHABLE_PEER) == Some(false)
+            {
+                break sessions;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("one Established and one configured peer");
+
+    let route = |prefix: &str, next_hop: &str| {
+        BlackholeRoute::new(
+            prefix.parse().unwrap(),
+            next_hop.parse().unwrap(),
+            vec![],
+            vec![],
+        )
+        .unwrap()
+    };
+    let cases = [
+        (
+            route("192.0.2.240/32", "192.0.2.66"),
+            ExportDisposition::Committed,
+            "",
+            "",
+            None,
+        ),
+        (
+            route("2001:db8::240/128", "2001:db8:ffff::66"),
+            ExportDisposition::Committed,
+            "",
+            "",
+            None,
+        ),
+        // How an RPKI-Invalid export filter reports a blackhole.
+        (
+            route(rustbgpd::EXPORT_DENIED, "192.0.2.66"),
+            ExportDisposition::Withheld,
+            "export_policy",
+            "policy_denied",
+            Some("export_policy"),
+        ),
+    ];
+    for (route, ..) in &cases {
+        speaker.announce_blackhole(route).await.unwrap();
+    }
+    for (route, disposition, reason, explain_code, warning) in &cases {
+        let peers = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let peers = speaker
+                    .blackhole_exports(&route.prefix())
+                    .await
+                    .unwrap()
+                    .expect("local route present");
+                if peers
+                    .iter()
+                    .all(|peer| peer.disposition != ExportDisposition::Pending)
+                {
+                    break peers;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("settled export disposition");
+        eprintln!("export dispositions for {}: {peers:?}", route.prefix());
+        // Only the Established peer is listed; the configured one is absent, not withheld.
+        assert_eq!(peers.len(), 1, "{peers:?}");
+        let peer = &peers[0];
+        assert_eq!(peer.peer_address, go_address);
+        assert_eq!(peer.disposition, *disposition);
+        assert_eq!(peer.reason, *reason);
+        assert_eq!(peer.explain_code, *explain_code);
+        assert_eq!(peer.advertised_path_id, 0);
+        let evidence = BlackholeExportEvidence::from_read(
+            &Ok(Some(peers.clone())),
+            Some(&sessions),
+            chrono::Utc::now(),
+        );
+        assert_eq!(evidence.warning.map(|warning| warning.reason), *warning);
+        let not_established = evidence.not_established_peers.unwrap();
+        assert_eq!(not_established.len(), 1);
+        assert_eq!(not_established[0].peer_address, rustbgpd::UNREACHABLE_PEER);
+    }
+    for (route, ..) in &cases {
+        speaker
+            .withdraw_blackhole(&route.prefix(), "")
+            .await
+            .unwrap();
+    }
+    // No local route at the key is absence, distinct from an empty export list.
+    assert_eq!(
+        speaker
+            .blackhole_exports(&cases[0].0.prefix())
+            .await
+            .unwrap(),
+        None
+    );
+    pair.remove().await;
+}

@@ -58,3 +58,23 @@ groups:
             terminal rows. If you withdraw by hand on the speaker, also
             withdraw in prefixd once it returns, or reconciliation re-announces
             blackholes whose TTL has not passed.
+
+  # Export evidence (rustbgpd only): committed means the route is in a peer's
+  # Adj-RIB-Out, so this rule detects missing export and never proves
+  # enforcement. See docs/reference/speaker-backends.md#export-evidence.
+  - name: prefixd-blackhole-export
+    rules:
+      - alert: PrefixdBlackholeNotExported
+        expr: prefixd_blackhole_unexported > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Active blackhole exported to no peer"
+          description: >-
+            {{ $value }} active blackhole(s) on {{ $labels.instance }} are
+            committed to no Established peer, reason {{ $labels.reason }}, so
+            no router is sent them.{{ if eq $labels.reason "export_policy" }}
+            A blackhole /32 or /128 is usually RPKI-Invalid: check for an
+            export filter that drops RPKI-Invalid routes.{{ end }} Health
+            detail lists each blackhole under speaker.blackhole_exports.

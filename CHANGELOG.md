@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   speaker first"). CI and `just speakers` test only 0.79.0. GoBGP is
   unchanged. See
   [rustbgpd minimum version](docs/how-to/upgrading.md#rustbgpd-minimum-version).
+- With rustbgpd, `GET /v1/health/detail` now also reports `degraded` while an
+  active blackhole is committed to no Established peer, including when the
+  speaker has no Established peer at all. Automation that treats `degraded`
+  as a database or speaker fault should read `speaker.blackhole_exports`.
+  `/v1/ready` and the fence are unchanged. A failed export read keeps the
+  last complete read's result, so it neither raises nor clears `degraded`.
 - `blackhole.leased: true` is now accepted with rustbgpd 0.79.0 or later.
   New enforced blackholes are then added under the controller's owner-scoped
   injection lease, and rustbgpd removes them within `blackhole.lease_seconds`
@@ -84,6 +90,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Blackhole export evidence (rustbgpd): once per reconciliation pass, prefixd
+  reads `ListPathExportDispositions` for each active enforced blackhole, to
+  the last page, and joins it with `ListNeighbors`. Mitigation detail adds
+  `export_evidence` (each Established peer's `committed`, `withheld` or
+  `pending` disposition with `reason` and `explain_code`, plus configured
+  peers that are not Established), and the dashboard shows it first on a
+  blackhole's page. Health detail adds `speaker.capabilities.blackhole_export`
+  and `speaker.blackhole_exports`, and reports `degraded` while an active
+  blackhole is committed to no Established peer. Metrics add
+  `prefixd_blackhole_export_peers{disposition}`,
+  `prefixd_blackhole_unexported{reason}` and
+  `prefixd_blackhole_export_read_errors`, and the shipped alerts add
+  `PrefixdBlackholeNotExported`. An export policy that drops RPKI-Invalid
+  routes shows as reason `export_policy`. `committed` means the peer's
+  Adj-RIB-Out, not router receipt or enforcement. A failed or partial read is
+  reported as unknown export, never as no peers. The reads mutate nothing,
+  and FlowSpec rules have no export evidence. See
+  [export evidence](docs/reference/speaker-backends.md#export-evidence).
 - Leased FlowSpec (ADR 027 amendment): with `bgp.rustbgpd.leased_flowspec`
   (off by default, rustbgpd 0.79.0 or later), new enforced FlowSpec rules use
   `AddLeasedFlowSpec` under the same injection owner, lease and renewal as

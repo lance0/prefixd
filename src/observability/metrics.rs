@@ -147,6 +147,36 @@ pub static INJECTION_LEASE_STATE: Lazy<GaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Established-peer export dispositions summed over active enforced blackholes,
+/// from the last reconciliation pass. Committed is Adj-RIB-Out, not enforcement.
+pub static BLACKHOLE_EXPORT_PEERS: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_blackhole_export_peers",
+        "Established-peer export dispositions (committed, withheld, pending) summed over active blackholes; committed means the peer's Adj-RIB-Out, not router enforcement",
+        &["disposition"]
+    )
+    .unwrap()
+});
+
+/// Active enforced blackholes committed to no Established peer, by bounded reason.
+pub static BLACKHOLE_UNEXPORTED: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_blackhole_unexported",
+        "Active blackholes the speaker committed to no Established peer at the last reconciliation pass, by reason",
+        &["reason"]
+    )
+    .unwrap()
+});
+
+/// Active enforced blackholes whose export read failed at the last pass.
+pub static BLACKHOLE_EXPORT_READ_ERRORS: Lazy<Gauge> = Lazy::new(|| {
+    register_gauge!(
+        "prefixd_blackhole_export_read_errors",
+        "Active blackholes whose export disposition read failed at the last reconciliation pass; their export is unknown"
+    )
+    .unwrap()
+});
+
 // Reconciliation metrics
 pub static RECONCILIATION_RUNS: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
@@ -401,6 +431,13 @@ pub fn init_metrics() {
     for state in crate::domain::LeaseState::ALL {
         INJECTION_LEASE_STATE.with_label_values(&[state.as_str()]);
     }
+    for disposition in crate::bgp::ExportDisposition::ALL {
+        BLACKHOLE_EXPORT_PEERS.with_label_values(&[disposition.as_str()]);
+    }
+    for reason in crate::domain::UNEXPORTED_REASONS {
+        BLACKHOLE_UNEXPORTED.with_label_values(&[reason]);
+    }
+    Lazy::force(&BLACKHOLE_EXPORT_READ_ERRORS);
     Lazy::force(&RECONCILIATION_RUNS);
     Lazy::force(&RECONCILIATION_REPAIRS);
     for status in ["success", "error"] {

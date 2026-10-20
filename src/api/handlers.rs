@@ -314,6 +314,12 @@ pub struct MitigationResponse {
     /// drops all traffic to the victim. This is the saved intent, not router state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blackhole: Option<BlackholeRouteResponse>,
+    /// Detail endpoint only, on an active enforced blackhole: per-peer export
+    /// dispositions from the last reconciliation pass. `committed` means the
+    /// route is in that peer's Adj-RIB-Out, not that a router installed or
+    /// enforces it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export_evidence: Option<crate::domain::BlackholeExportEvidence>,
 }
 
 /// Next hop and communities frozen into a blackhole at admission (ADR 027).
@@ -382,6 +388,7 @@ impl From<&Mitigation> for MitigationResponse {
             // sets it to None — callers enrich it when needed.
             correlation: None,
             blackhole: m.action_params.blackhole.as_ref().map(Into::into),
+            export_evidence: None,
         }
     }
 }
@@ -1850,6 +1857,22 @@ pub async fn get_mitigation(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let mut response = MitigationResponse::from(&mitigation);
+    if mitigation.action_type == ActionType::Blackhole
+        && matches!(
+            mitigation.status,
+            MitigationStatus::Active | MitigationStatus::Escalated
+        )
+        && !mitigation.is_dry_run_origin()
+    {
+        use crate::domain::{BlackholeExportEvidence, ExportObservation};
+        // The reconciler's last snapshot; this request never reads the speaker.
+        response.export_evidence = Some(match state.announcer.export_observer() {
+            None => BlackholeExportEvidence::unobserved(ExportObservation::Unsupported),
+            Some(_) => state.export_evidence.get(id).unwrap_or_else(|| {
+                BlackholeExportEvidence::unobserved(ExportObservation::NotObserved)
+            }),
+        });
+    }
 
     // Enrich with correlation context if signal_group_id is set
     if let Some(group_id) = mitigation.signal_group_id {
@@ -3336,6 +3359,179 @@ mod tests {
                     .contains("pending withdrawal"),
                 "{conflict}"
             );
+        }
+
+        /// Detail and health read the reconciler's export snapshot: not observed
+        /// before a pass, then per-peer dispositions joined with sessions, and an
+        /// unexported blackhole degrades health with its reason. A speaker
+        /// without the read reports unsupported, never an empty peer list.
+        #[tokio::test]
+        async fn blackhole_export_evidence_in_detail_and_health() {
+            use crate::bgp::{
+                ExportDisposition, MockAnnouncer, PeerExport, PeerStatus, SessionState,
+            };
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let peer = |address: &str, state| PeerStatus {
+                name: address.into(),
+                address: address.into(),
+                state,
+            };
+            let speaker = Arc::new(MockAnnouncer::with_peers(vec![
+                peer("192.0.2.10", SessionState::Established),
+                peer("192.0.2.11", SessionState::Active),
+            ]));
+            let state = state(
+                OperationMode::Enforced,
+                repo.clone(),
+                speaker.clone(),
+                AuthMode::None,
+            );
+            let reconciler =
+                crate::scheduler::ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+                    .with_app_state(state.clone());
+            let app = crate::api::create_test_router(state);
+            let (status, created) = send(
+                &app,
+                "/v1/mitigations",
+                None,
+                create("203.0.113.10", Some("203.0.113.10")),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            assert!(created.get("export_evidence").is_none(), "detail only");
+            let path = format!(
+                "/v1/mitigations/{}",
+                created["mitigation_id"].as_str().unwrap()
+            );
+
+            let (_, detail) = get(&app, &path).await;
+            assert_eq!(detail["export_evidence"]["status"], "not_observed");
+            assert_eq!(detail["export_evidence"]["peers"], json!([]));
+
+            reconciler.reconcile().await.unwrap();
+            let (_, detail) = get(&app, &path).await;
+            let evidence = &detail["export_evidence"];
+            assert_eq!(evidence["status"], "observed", "{evidence}");
+            assert_eq!(evidence["peers"][0]["peer_address"], "192.0.2.10");
+            assert_eq!(evidence["peers"][0]["disposition"], "committed");
+            assert_eq!(
+                evidence["not_established_peers"],
+                json!([{"peer_address": "192.0.2.11", "state": "active"}])
+            );
+            assert_eq!(
+                evidence["counts"],
+                json!({"committed": 1, "withheld": 0, "pending": 0})
+            );
+            assert!(evidence["warning"].is_null());
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(health["status"], "healthy", "{health}");
+            assert_eq!(health["speaker"]["capabilities"]["blackhole_export"], true);
+            let exports = &health["speaker"]["blackhole_exports"];
+            assert_eq!(exports["blackholes"], 1);
+            assert_eq!(exports["counts"]["committed"], 1);
+            assert_eq!(exports["unexported"], json!([]));
+
+            // Export policy withholds it from the only Established peer.
+            speaker.set_exports(
+                "203.0.113.10/32".parse().unwrap(),
+                Ok(vec![PeerExport {
+                    peer_address: "192.0.2.10".into(),
+                    disposition: ExportDisposition::Withheld,
+                    reason: "export_policy".into(),
+                    explain_code: "policy_denied".into(),
+                    detail: "export policy denied this route".into(),
+                    advertised_path_id: 0,
+                }]),
+            );
+            reconciler.reconcile().await.unwrap();
+            assert_eq!(
+                crate::observability::metrics::BLACKHOLE_UNEXPORTED
+                    .with_label_values(&["export_policy"])
+                    .get(),
+                1.0
+            );
+            let (_, detail) = get(&app, &path).await;
+            let evidence = &detail["export_evidence"];
+            assert_eq!(evidence["peers"][0]["explain_code"], "policy_denied");
+            assert_eq!(evidence["warning"]["reason"], "export_policy");
+            let text = evidence.to_string().to_lowercase();
+            assert!(
+                !text.contains("enforc") && !text.contains("install"),
+                "{text}"
+            );
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(health["status"], "degraded", "{health}");
+            let unexported = &health["speaker"]["blackhole_exports"]["unexported"][0];
+            assert_eq!(unexported["prefix"], "203.0.113.10/32");
+            assert_eq!(unexported["reason"], "export_policy");
+            assert!(
+                unexported["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("RPKI-Invalid")
+            );
+
+            // A failed read is unknown export, not an empty list; it keeps the
+            // last complete read's warning, so health and the alert do not flap.
+            let failed = || {
+                speaker.set_exports(
+                    "203.0.113.10/32".parse().unwrap(),
+                    Err("ListPathExportDispositions RPC failed: Unavailable".into()),
+                )
+            };
+            failed();
+            reconciler.reconcile().await.unwrap();
+            let (_, detail) = get(&app, &path).await;
+            assert_eq!(detail["export_evidence"]["status"], "error");
+            assert_eq!(detail["export_evidence"]["peers"], json!([]));
+            assert_eq!(
+                detail["export_evidence"]["warning"]["reason"],
+                "export_policy"
+            );
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(health["status"], "degraded", "{health}");
+            assert_eq!(health["speaker"]["blackhole_exports"]["errors"], 1);
+            assert_eq!(
+                crate::observability::metrics::BLACKHOLE_UNEXPORTED
+                    .with_label_values(&["export_policy"])
+                    .get(),
+                1.0
+            );
+
+            // A failed read after a committed one stays healthy.
+            speaker.set_exports(
+                "203.0.113.10/32".parse().unwrap(),
+                Ok(vec![PeerExport {
+                    peer_address: "192.0.2.10".into(),
+                    disposition: ExportDisposition::Committed,
+                    reason: String::new(),
+                    explain_code: String::new(),
+                    detail: String::new(),
+                    advertised_path_id: 0,
+                }]),
+            );
+            reconciler.reconcile().await.unwrap();
+            failed();
+            reconciler.reconcile().await.unwrap();
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(health["status"], "healthy", "{health}");
+            assert_eq!(health["speaker"]["blackhole_exports"]["errors"], 1);
+
+            // GoBGP cannot report export: unsupported, and health omits the summary.
+            let gobgp = state_with_gobgp(repo.clone());
+            let app = crate::api::create_test_router(gobgp);
+            let (_, detail) = get(&app, &path).await;
+            assert_eq!(detail["export_evidence"]["status"], "unsupported");
+        }
+
+        fn state_with_gobgp(repo: Arc<MockRepository>) -> Arc<AppState> {
+            state(
+                OperationMode::Enforced,
+                repo,
+                Arc::new(crate::bgp::GoBgpAnnouncer::new("http://127.0.0.1:1".into())),
+                AuthMode::None,
+            )
         }
 
         /// Refused blackholes count under blackhole-specific reasons and save nothing.

@@ -57,6 +57,10 @@ pub struct SpeakerHealth {
     /// live, renewal_failing or expired, and the last renewal.
     #[serde(skip_serializing_if = "Option::is_none")]
     lease: Option<crate::domain::LeaseHealth>,
+    /// Export evidence of active enforced blackholes from the last
+    /// reconciliation pass; present when the speaker reports export.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blackhole_exports: Option<crate::domain::BlackholeExportSummary>,
     daemon: DaemonHealthObservation,
 }
 
@@ -258,7 +262,16 @@ pub async fn health_detail(
 
     let ((mut status, bgp_map, active, db_status, gobgp_health), daemon) =
         tokio::join!(check_health_status(&state), observe_daemon_health(&state));
-    if daemon.status == "error" || daemon.ready == Some(false) {
+    // Read from the reconciler's snapshot: health never reads export itself.
+    let blackhole_exports = state
+        .announcer
+        .export_observer()
+        .map(|_| state.export_evidence.summary());
+    // An active blackhole committed to no Established peer reaches no router.
+    let unexported = blackhole_exports
+        .as_ref()
+        .is_some_and(|exports| !exports.unexported.is_empty());
+    if daemon.status == "error" || daemon.ready == Some(false) || unexported {
         status = "degraded".into();
     }
     // Another controller holds this POP's fence; this one mutates nothing.
@@ -283,6 +296,7 @@ pub async fn health_detail(
                 state.announcer.capabilities().blackhole_lease,
             ),
             lease: state.lease.as_ref().map(|lease| lease.health()),
+            blackhole_exports,
             daemon,
         },
         auth_mode: resolve_auth_mode(&state),

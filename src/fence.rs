@@ -16,8 +16,8 @@ use tokio::sync::watch;
 
 use crate::bgp::{
     AddOutcome, BlackholeInventory, BlackholeRoute, BlackholeSpeaker, DaemonHealthObserver,
-    FlowSpecAnnouncer, FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, InjectionLeases,
-    LeaseGeneration, PeerObserver,
+    ExportObserver, FlowSpecAnnouncer, FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter,
+    InjectionLeases, LeaseGeneration, PeerObserver,
 };
 use crate::domain::{FlowSpecNlri, FlowSpecRule};
 use crate::error::{PrefixdError, Result};
@@ -221,6 +221,11 @@ impl FlowSpecAnnouncer for FencedAnnouncer {
 
     fn peer_observer(&self) -> Option<&dyn PeerObserver> {
         self.inner.peer_observer()
+    }
+
+    /// Read-only, so not fenced: a standby controller may still observe.
+    fn export_observer(&self) -> Option<&dyn ExportObserver> {
+        self.inner.export_observer()
     }
 
     /// The wrapper must not fall back to the trait default, which supports nothing.

@@ -1821,3 +1821,225 @@ async fn older_daemon_leased_flowspec_creates_nothing_and_never_falls_back() {
     assert!(fake.rules.lock().unwrap().is_empty());
     server.abort();
 }
+
+/// Export dispositions served two peers per page, whatever the request asks.
+#[derive(Clone, Default)]
+struct ExportFake {
+    rows: Arc<Mutex<Vec<pb::PathExportDispositionEntry>>>,
+    mode: Arc<AtomicUsize>,
+    calls: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<pb::ListPathExportDispositionsRequest>>>,
+}
+
+const EXPORT_NO_ROUTE: usize = 1;
+const EXPORT_NO_ROUTE_SECOND_PAGE: usize = 2;
+const EXPORT_UNAVAILABLE: usize = 3;
+const EXPORT_DENIED_SECOND_PAGE: usize = 4;
+const EXPORT_REPEATED_TOKEN: usize = 5;
+const EXPORT_REPEATED_PEER: usize = 6;
+
+#[tonic::async_trait]
+impl pb::injection_service_server::InjectionService for ExportFake {
+    async fn list_path_export_dispositions(
+        &self,
+        request: Request<pb::ListPathExportDispositionsRequest>,
+    ) -> std::result::Result<Response<pb::ListPathExportDispositionsResponse>, Status> {
+        self.calls.fetch_add(1, SeqCst);
+        auth(&request)?;
+        let request = request.into_inner();
+        self.requests.lock().unwrap().push(request.clone());
+        let first = request.page_token.is_empty();
+        let mode = self.mode.load(SeqCst);
+        match mode {
+            EXPORT_NO_ROUTE => return Err(Status::not_found("no local route")),
+            EXPORT_NO_ROUTE_SECOND_PAGE if !first => {
+                return Err(Status::not_found("no local route"));
+            }
+            EXPORT_UNAVAILABLE => return Err(Status::unavailable("speaker restarting")),
+            EXPORT_DENIED_SECOND_PAGE if !first => {
+                return Err(Status::permission_denied("denied"));
+            }
+            _ => {}
+        }
+        let rows = self.rows.lock().unwrap().clone();
+        // A repeated-peer page restarts one row too early.
+        let start = match (first, mode) {
+            (true, _) => 0,
+            (false, EXPORT_REPEATED_PEER) => 1,
+            (false, _) => {
+                rows.iter()
+                    .position(|row| row.peer_address == request.page_token)
+                    .unwrap()
+                    + 1
+            }
+        };
+        let page: Vec<_> = rows.iter().skip(start).take(2).cloned().collect();
+        let more = start + page.len() < rows.len();
+        let next_page_token = match mode {
+            _ if !more => String::new(),
+            EXPORT_REPEATED_TOKEN if !first => request.page_token,
+            _ => page.last().unwrap().peer_address.clone(),
+        };
+        Ok(Response::new(pb::ListPathExportDispositionsResponse {
+            peers: page,
+            next_page_token,
+        }))
+    }
+}
+
+async fn export_speaker() -> (RustBgpdAnnouncer, ExportFake, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fake = ExportFake::default();
+    let incoming = futures_util::stream::unfold(listener, |listener| async {
+        Some((listener.accept().await.map(|(stream, _)| stream), listener))
+    });
+    let server = tonic::transport::Server::builder()
+        .add_service(pb::injection_service_server::InjectionServiceServer::new(
+            fake.clone(),
+        ))
+        .serve_with_incoming(incoming);
+    let server = tokio::spawn(async move { server.await.unwrap() });
+    let config = RustBgpdConfig {
+        endpoint: format!("http://{address}"),
+        bearer_token_env: "unused".into(),
+        ..Default::default()
+    };
+    let speaker = RustBgpdAnnouncer::connect_with_token(&config, "test-secret")
+        .await
+        .unwrap();
+    (speaker, fake, server)
+}
+
+fn export_row(
+    peer: &str,
+    disposition: pb::PathExportDisposition,
+    reason: &str,
+    explain_code: &str,
+) -> pb::PathExportDispositionEntry {
+    pb::PathExportDispositionEntry {
+        peer_address: peer.into(),
+        disposition: disposition as i32,
+        reason: reason.into(),
+        explain_code: explain_code.into(),
+        detail: format!("detail for {peer}"),
+        advertised_path_id: u32::from(disposition == pb::PathExportDisposition::Committed),
+    }
+}
+
+/// Five peers, three pages: committed, two withheld reasons, pending.
+fn export_rows() -> Vec<pb::PathExportDispositionEntry> {
+    use pb::PathExportDisposition::{Committed, Pending, Withheld};
+    vec![
+        export_row("192.0.2.1", Committed, "", ""),
+        export_row("192.0.2.2", Withheld, "export_policy", "policy_denied"),
+        export_row(
+            "192.0.2.3",
+            Withheld,
+            "family_suppressed:missing_ipv6_next_hop",
+            "family_not_sendable",
+        ),
+        export_row("2001:db8::4", Pending, "not_yet_committed", ""),
+        export_row("2001:db8::5", Withheld, "not_selected", ""),
+    ]
+}
+
+#[tokio::test]
+async fn export_dispositions_page_to_completion_and_keep_every_field() {
+    let (speaker, fake, server) = export_speaker().await;
+    assert!(speaker.export_observer().is_some());
+    let expected = export_rows();
+    *fake.rows.lock().unwrap() = expected.clone();
+    let prefix: ipnet::IpNet = "2001:db8::7/128".parse().unwrap();
+    let peers = speaker.blackhole_exports(&prefix).await.unwrap().unwrap();
+    assert_eq!(fake.calls.load(SeqCst), 3, "two peers per page");
+    let requests = fake.requests.lock().unwrap().clone();
+    for (request, token) in requests.iter().zip(["", "192.0.2.2", "2001:db8::4"]) {
+        assert_eq!(
+            (
+                request.prefix.as_str(),
+                request.prefix_length,
+                request.path_id
+            ),
+            ("2001:db8::7", 128, 0)
+        );
+        assert_eq!(request.page_size, ROUTE_PAGE_SIZE);
+        assert_eq!(request.page_token, token);
+    }
+    let dispositions: Vec<_> = peers.iter().map(|peer| peer.disposition).collect();
+    use ExportDisposition::{Committed, Pending, Withheld};
+    assert_eq!(
+        dispositions,
+        [Committed, Withheld, Withheld, Pending, Withheld]
+    );
+    for (peer, row) in peers.iter().zip(&expected) {
+        assert_eq!(peer.peer_address, row.peer_address);
+        assert_eq!(peer.reason, row.reason);
+        assert_eq!(peer.explain_code, row.explain_code);
+        assert_eq!(peer.detail, row.detail);
+        assert_eq!(peer.advertised_path_id, row.advertised_path_id);
+    }
+    server.abort();
+}
+
+/// An empty list is a successful read: no Established peer, not an error.
+/// A missing route is `None`, and every failure is an error, never a list.
+#[tokio::test]
+async fn export_read_distinguishes_empty_absent_and_failed() {
+    let (speaker, fake, server) = export_speaker().await;
+    let prefix: ipnet::IpNet = "192.0.2.7/32".parse().unwrap();
+    assert_eq!(
+        speaker.blackhole_exports(&prefix).await.unwrap(),
+        Some(vec![])
+    );
+    fake.mode.store(EXPORT_NO_ROUTE, SeqCst);
+    assert_eq!(speaker.blackhole_exports(&prefix).await.unwrap(), None);
+
+    *fake.rows.lock().unwrap() = export_rows();
+    for mode in [
+        EXPORT_NO_ROUTE_SECOND_PAGE,
+        EXPORT_DENIED_SECOND_PAGE,
+        EXPORT_REPEATED_TOKEN,
+        EXPORT_REPEATED_PEER,
+    ] {
+        fake.mode.store(mode, SeqCst);
+        let read = speaker.blackhole_exports(&prefix).await;
+        assert!(read.is_err(), "mode {mode}: partial read {read:?}");
+    }
+    fake.mode.store(EXPORT_UNAVAILABLE, SeqCst);
+    let before = fake.calls.load(SeqCst);
+    assert!(speaker.blackhole_exports(&prefix).await.is_err());
+    assert_eq!(fake.calls.load(SeqCst), before + 3, "transient retries");
+
+    fake.mode.store(0, SeqCst);
+    for malformed in [
+        export_row(
+            "not-an-address",
+            pb::PathExportDisposition::Committed,
+            "",
+            "",
+        ),
+        export_row("192.0.2.9", pb::PathExportDisposition::Unspecified, "", ""),
+        pb::PathExportDispositionEntry {
+            disposition: 9,
+            ..export_row("192.0.2.9", pb::PathExportDisposition::Committed, "", "")
+        },
+    ] {
+        *fake.rows.lock().unwrap() = vec![malformed];
+        assert!(speaker.blackhole_exports(&prefix).await.is_err());
+    }
+    // GoBGP has no export read: unsupported, which is neither empty nor failed.
+    let gobgp = crate::bgp::GoBgpAnnouncer::new("http://127.0.0.1:1".into());
+    assert!(gobgp.export_observer().is_none());
+    assert!(
+        !(&gobgp as &dyn FlowSpecAnnouncer)
+            .capabilities()
+            .blackhole_export
+    );
+    assert!(
+        (&speaker as &dyn FlowSpecAnnouncer)
+            .capabilities()
+            .blackhole_export
+    );
+    server.abort();
+}

@@ -14,6 +14,9 @@ use crate::state::AppState;
 use crate::ws::WsMessage;
 use tokio::sync::RwLock;
 
+/// Time allowed for all blackhole export reads in one reconciliation pass.
+const EXPORT_OBSERVATION_BUDGET: Duration = Duration::from_secs(10);
+
 /// Audit reason for a local blackhole route withdrawn because its row is already terminal.
 pub const ORPHANED_AFTER_DOWNTIME: &str = "orphaned after controller downtime";
 
@@ -235,6 +238,7 @@ impl ReconciliationLoop {
         let readd = lease.is_some_and(crate::domain::LeaseKeeper::take_readd);
         let (mut flowspec_readd_failed, mut blackhole_readd_failed) = (readd, readd);
         let mut blackhole_readd = readd;
+        let mut blackholes = None;
         // Each stage is independent; a speaker failure must not stop expiry or health updates.
         for (stage, result) in [
             ("withdrawals", self.expire_mitigations().await),
@@ -248,8 +252,12 @@ impl ReconciliationLoop {
             ),
             (
                 "blackholes",
-                self.sync_blackholes_with(&mut blackhole_readd, &mut blackhole_readd_failed)
-                    .await,
+                self.sync_blackholes_with(
+                    &mut blackhole_readd,
+                    &mut blackhole_readd_failed,
+                    &mut blackholes,
+                )
+                .await,
             ),
         ] {
             if let Err(error) = result {
@@ -263,7 +271,13 @@ impl ReconciliationLoop {
         {
             lease.retry_readd();
         }
-        self.update_bgp_session_metrics().await;
+        let sessions = match self.announcer.peer_observer() {
+            Some(observer) => Some(observer.session_status().await),
+            None => None,
+        };
+        self.update_bgp_session_metrics(sessions.as_ref());
+        self.observe_blackhole_exports(blackholes, sessions.as_ref())
+            .await;
         match failure {
             Some(error) => Err(error),
             None => Ok(()),
@@ -849,10 +863,12 @@ impl ReconciliationLoop {
     /// the reverse. Unknown and unrecognized routes are reported, never touched.
     /// `readd` re-adds every leased route even when present; `readd_failed`
     /// reports whether it completed.
+    /// `observe` receives the active enforced blackholes once they are known.
     async fn sync_blackholes_with(
         &self,
         readd: &mut bool,
         readd_failed: &mut bool,
+        observe: &mut Option<Vec<(uuid::Uuid, ipnet::IpNet)>>,
     ) -> anyhow::Result<()> {
         use std::collections::{HashMap, HashSet};
 
@@ -888,6 +904,17 @@ impl ReconciliationLoop {
                 desired.push((key, mitigation));
             }
         }
+        // A row without a usable frozen route fails its own repair below.
+        *observe = Some(
+            desired
+                .iter()
+                .filter_map(|(_, mitigation)| {
+                    crate::domain::blackhole_rule(mitigation)
+                        .ok()
+                        .map(|rule| (mitigation.mitigation_id, rule.prefix))
+                })
+                .collect(),
+        );
         let enabled = self
             .state
             .as_ref()
@@ -1225,13 +1252,16 @@ impl ReconciliationLoop {
         Ok(true)
     }
 
-    async fn update_bgp_session_metrics(&self) {
-        let Some(observer) = self.announcer.peer_observer() else {
+    fn update_bgp_session_metrics(
+        &self,
+        sessions: Option<&crate::error::Result<Vec<crate::bgp::PeerStatus>>>,
+    ) {
+        let Some(sessions) = sessions else {
             return;
         };
-        match observer.session_status().await {
+        match sessions {
             Ok(peers) => {
-                for peer in &peers {
+                for peer in peers {
                     let value = if peer.state.is_established() {
                         1.0
                     } else {
@@ -1246,6 +1276,77 @@ impl ReconciliationLoop {
                 tracing::warn!(error = %e, "failed to fetch BGP session status for metrics");
             }
         }
+    }
+
+    /// Read-only export evidence for the active enforced blackholes: one
+    /// paginated read each per pass, sequentially, joined with this pass's peer
+    /// read. An unknown blackhole set keeps the last snapshot and metrics.
+    async fn observe_blackhole_exports(
+        &self,
+        blackholes: Option<Vec<(uuid::Uuid, ipnet::IpNet)>>,
+        sessions: Option<&crate::error::Result<Vec<crate::bgp::PeerStatus>>>,
+    ) {
+        use crate::domain::{BlackholeExportEvidence, UNEXPORTED_REASONS};
+        use crate::observability::metrics::{
+            BLACKHOLE_EXPORT_PEERS, BLACKHOLE_EXPORT_READ_ERRORS, BLACKHOLE_UNEXPORTED,
+        };
+        let (Some(state), Some(observer), Some(blackholes)) =
+            (&self.state, self.announcer.export_observer(), blackholes)
+        else {
+            return;
+        };
+        let sessions = match sessions {
+            Some(Ok(peers)) => Some(peers.as_slice()),
+            _ => None,
+        };
+        let now = chrono::Utc::now();
+        // ponytail: one fixed budget per pass, so a stalled speaker cannot hold
+        // up expiry; reads it cuts off report an error. Make it a setting if
+        // large blackhole tables need longer.
+        let deadline = tokio::time::Instant::now() + EXPORT_OBSERVATION_BUDGET;
+        let mut routes = std::collections::HashMap::new();
+        for (id, prefix) in blackholes {
+            let read = tokio::time::timeout_at(deadline, observer.blackhole_exports(&prefix))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(crate::error::PrefixdError::Internal(
+                        "export observation budget for this pass exhausted".into(),
+                    ))
+                });
+            let mut evidence = BlackholeExportEvidence::from_read(&read, sessions, now);
+            if let Some(error) = &evidence.error {
+                tracing::warn!(%prefix, error, "blackhole export read failed; export unknown");
+                // Keep the last complete read's warning, so a transient read
+                // error does not clear degraded health or the unexported alert.
+                evidence.warning = state
+                    .export_evidence
+                    .get(id)
+                    .and_then(|previous| previous.warning);
+            }
+            if let Some(warning) = &evidence.warning {
+                tracing::warn!(%prefix, reason = warning.reason,
+                    "active blackhole is committed to no Established peer");
+            }
+            routes.insert(id, (prefix.to_string(), evidence));
+        }
+        state.export_evidence.replace(now, routes);
+        let summary = state.export_evidence.summary();
+        for disposition in crate::bgp::ExportDisposition::ALL {
+            BLACKHOLE_EXPORT_PEERS
+                .with_label_values(&[disposition.as_str()])
+                .set(summary.counts.get(disposition) as f64);
+        }
+        for reason in UNEXPORTED_REASONS {
+            let count = summary
+                .unexported
+                .iter()
+                .filter(|route| route.warning.reason == reason)
+                .count();
+            BLACKHOLE_UNEXPORTED
+                .with_label_values(&[reason])
+                .set(count as f64);
+        }
+        BLACKHOLE_EXPORT_READ_ERRORS.set(summary.errors as f64);
     }
 
     fn build_flowspec_rule(
@@ -1537,9 +1638,12 @@ mod tests {
         });
         let reconciler =
             ReconciliationLoop::new(Arc::new(MockRepository::new()), speaker.clone(), 30, false);
-        reconciler.update_bgp_session_metrics().await;
+        let observe = || speaker.session_status();
+        reconciler.update_bgp_session_metrics(Some(&observe().await));
         speaker.mode.store(5, SeqCst);
-        reconciler.update_bgp_session_metrics().await;
+        let failed = observe().await;
+        assert!(failed.is_err());
+        reconciler.update_bgp_session_metrics(Some(&failed));
         assert_eq!(
             crate::observability::metrics::BGP_SESSION_UP
                 .with_label_values(&["failed-peer-observation"])
@@ -2753,6 +2857,177 @@ mod tests {
             assert!(speaker.routes().await.is_empty());
             assert_eq!(speaker.adds.load(SeqCst), 0);
         }
+    }
+
+    /// A stalled export read spends the pass's budget and no more: expiry has
+    /// run, the lifecycle mutex is free during the stall, the pass returns,
+    /// and every unread blackhole is an error (unknown export), keeping its
+    /// last complete read's warning, never empty or committed.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_export_read_is_cut_off_by_the_budget() {
+        use crate::bgp::{ExportDisposition, PeerExport};
+        use crate::domain::ExportObservation;
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let reconciler = Arc::new(blackhole_reconciler(
+            repo.clone(),
+            speaker.clone(),
+            live_config(),
+            false,
+        ));
+        let rows = [blackhole_row("192.0.2.1"), blackhole_row("192.0.2.2")];
+        for mitigation in &rows {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        let export = |disposition, reason: &str| {
+            Ok(vec![PeerExport {
+                peer_address: "192.0.2.10".into(),
+                disposition,
+                reason: reason.into(),
+                explain_code: String::new(),
+                detail: String::new(),
+                advertised_path_id: 0,
+            }])
+        };
+        speaker.inner.set_exports(
+            frozen(&rows[0]).prefix(),
+            export(ExportDisposition::Withheld, "export_policy"),
+        );
+        speaker.inner.set_exports(
+            frozen(&rows[1]).prefix(),
+            export(ExportDisposition::Committed, ""),
+        );
+        reconciler.reconcile().await.unwrap();
+        let state = reconciler.state.clone().unwrap();
+        assert_eq!(state.export_evidence.summary().unexported.len(), 1);
+
+        let expired = expired_mitigation("192.0.2.9");
+        repo.insert_mitigation(&expired).await.unwrap();
+        speaker.inner.stall_exports.store(true, SeqCst);
+        let pass = tokio::spawn({
+            let reconciler = reconciler.clone();
+            async move { reconciler.reconcile().await }
+        });
+        tokio::time::sleep(EXPORT_OBSERVATION_BUDGET / 2).await;
+        assert!(!pass.is_finished(), "the read is stalled");
+        assert!(
+            state.mitigation_lock.try_lock().is_ok(),
+            "no lifecycle lock is held while reading"
+        );
+        assert_eq!(status(&repo, &expired).await, MitigationStatus::Expired);
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(EXPORT_OBSERVATION_BUDGET * 6, pass)
+            .await
+            .expect("the budget ends a stalled read")
+            .unwrap()
+            .unwrap();
+        assert!(started.elapsed() <= EXPORT_OBSERVATION_BUDGET);
+
+        let evidence =
+            |mitigation: &Mitigation| state.export_evidence.get(mitigation.mitigation_id).unwrap();
+        for row in &rows {
+            let evidence = evidence(row);
+            assert_eq!(evidence.status, ExportObservation::Error);
+            assert!(evidence.peers.is_empty());
+            assert_eq!(evidence.counts.committed, 0);
+        }
+        assert_eq!(evidence(&rows[0]).warning.unwrap().reason, "export_policy");
+        assert_eq!(evidence(&rows[1]).warning, None);
+        let summary = state.export_evidence.summary();
+        assert_eq!((summary.blackholes, summary.errors), (2, 2));
+        assert_eq!(
+            summary.unexported.len(),
+            1,
+            "a stall does not clear degraded"
+        );
+    }
+
+    /// One export read per active enforced blackhole per pass, never a write;
+    /// bounded metrics by disposition and reason; a read error is unknown,
+    /// not an empty export; dry-run blackholes are not read.
+    #[tokio::test]
+    async fn blackhole_export_observation_is_read_only_bounded_and_per_pass() {
+        use crate::bgp::{ExportDisposition, PeerExport};
+        use crate::domain::ExportObservation;
+        use crate::observability::metrics::{
+            BLACKHOLE_EXPORT_PEERS, BLACKHOLE_EXPORT_READ_ERRORS, BLACKHOLE_UNEXPORTED,
+        };
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let reconciler = blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), false);
+        let rows = [
+            blackhole_row("192.0.2.1"),
+            blackhole_row("192.0.2.2"),
+            blackhole_row("192.0.2.3"),
+        ];
+        let mut simulated = blackhole_row("192.0.2.4");
+        simulated.origin_mode = Some(crate::config::OperationMode::DryRun);
+        for mitigation in rows.iter().chain([&simulated]) {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        let export = |disposition, reason: &str| PeerExport {
+            peer_address: "192.0.2.10".into(),
+            disposition,
+            reason: reason.into(),
+            explain_code: String::new(),
+            detail: String::new(),
+            advertised_path_id: 0,
+        };
+        let prefix = |mitigation: &Mitigation| frozen(mitigation).prefix();
+        speaker.inner.set_exports(
+            prefix(&rows[0]),
+            Ok(vec![export(ExportDisposition::Committed, "")]),
+        );
+        speaker.inner.set_exports(
+            prefix(&rows[1]),
+            Ok(vec![export(ExportDisposition::Withheld, "export_policy")]),
+        );
+        speaker
+            .inner
+            .set_exports(prefix(&rows[2]), Err("speaker unavailable".into()));
+        let label = |reason| BLACKHOLE_UNEXPORTED.with_label_values(&[reason]).get();
+
+        reconciler.reconcile().await.unwrap();
+        let adds = speaker.adds.load(SeqCst);
+        assert_eq!(adds, 3, "repairs, not observation, add the missing routes");
+        let store = &reconciler.state.as_ref().unwrap().export_evidence;
+        let evidence = |mitigation: &Mitigation| store.get(mitigation.mitigation_id).unwrap();
+        assert_eq!(evidence(&rows[0]).counts.committed, 1);
+        assert_eq!(evidence(&rows[0]).warning, None);
+        assert_eq!(evidence(&rows[1]).warning.unwrap().reason, "export_policy");
+        assert_eq!(evidence(&rows[2]).status, ExportObservation::Error);
+        assert!(evidence(&rows[2]).peers.is_empty());
+        assert_eq!(evidence(&rows[2]).warning, None);
+        // No peer observer on this speaker: the session join is unknown, not none.
+        assert_eq!(evidence(&rows[0]).not_established_peers, None);
+        assert!(
+            store.get(simulated.mitigation_id).is_none(),
+            "dry-run origin"
+        );
+        assert_eq!(store.summary().blackholes, 3);
+        assert_eq!(label("export_policy"), 1.0);
+        assert_eq!(label("no_established_peer"), 0.0);
+        assert_eq!(BLACKHOLE_EXPORT_READ_ERRORS.get(), 1.0);
+        for (disposition, expected) in [("committed", 1.0), ("withheld", 1.0), ("pending", 0.0)] {
+            assert_eq!(
+                BLACKHOLE_EXPORT_PEERS
+                    .with_label_values(&[disposition])
+                    .get(),
+                expected
+            );
+        }
+
+        // The next pass replaces the snapshot and resets the reason series.
+        speaker.inner.set_exports(
+            prefix(&rows[1]),
+            Ok(vec![export(ExportDisposition::Committed, "")]),
+        );
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(label("export_policy"), 0.0);
+        assert_eq!(speaker.adds.load(SeqCst), adds, "observation never writes");
+        assert_eq!(speaker.deletes.load(SeqCst), 0);
     }
 
     #[tokio::test]

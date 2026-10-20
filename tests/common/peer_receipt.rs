@@ -253,6 +253,16 @@ pub(crate) struct Pair {
 
 impl Pair {
     pub async fn start() -> Self {
+        Self::start_with(false).await
+    }
+
+    /// Both speakers also negotiate IPv4/IPv6 unicast; see
+    /// [`rustbgpd::Speaker::start_peered_unicast`].
+    pub async fn start_unicast() -> Self {
+        Self::start_with(true).await
+    }
+
+    async fn start_with(unicast: bool) -> Self {
         assert_ne!(
             std::env::var("TESTCONTAINERS_COMMAND").as_deref(),
             Ok("keep"),
@@ -262,11 +272,16 @@ impl Pair {
         eprintln!("owned peer network: {network}");
         let mut go = gobgp::Speaker::on_network(&network).await;
         let go_ip = go.container.get_bridge_ip_address().await.unwrap();
-        let rust = rustbgpd::Speaker::start_peered(&network, &go_ip.to_string(), 65010).await;
+        let rust = if unicast {
+            rustbgpd::Speaker::start_peered_unicast(&network, &go_ip.to_string(), 65010).await
+        } else {
+            rustbgpd::Speaker::start_peered(&network, &go_ip.to_string(), 65010).await
+        };
         let rust_ip = rust.container.get_bridge_ip_address().await.unwrap();
         assert_ne!(rust_ip, go_ip);
         go.peer_address = rust_ip.to_string();
-        go.add_peer_with_asn(179, false, 64512).await;
+        go.add_peer_with_safis(179, false, 64512, if unicast { &[1, 133] } else { &[133] })
+            .await;
         let pair = Self { rust, go, network };
         pair.assert_isolated().await;
         pair
