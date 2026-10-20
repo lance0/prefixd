@@ -159,6 +159,8 @@ impl pb::injection_service_server::InjectionService for Fake {
         auth(&request)?;
         let request = request.into_inner();
         assert!(request.allow_missing);
+        // prefixd injects unowned rules, so the lease fields stay unset.
+        assert!(request.owner.is_empty() && !request.override_owner);
         match self.mode.load(SeqCst) {
             4 => return Err(Status::not_found("absent")),
             5 => return Ok(Response::new(pb::DeleteFlowSpecResponse { outcome: 0 })),
@@ -919,7 +921,10 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
         auth(&request)?;
         let request = request.into_inner();
         assert_eq!(request.path_id, 0);
-        assert!(!request.override_owner, "prefixd never overrides the owner");
+        assert!(
+            !request.allow_missing && !request.override_owner,
+            "prefixd never overrides the owner"
+        );
         self.deletes_seen.lock().unwrap().push(request.clone());
         match self.mode.load(SeqCst) {
             DELETE_NOT_FOUND => return Err(Status::not_found("absent")),

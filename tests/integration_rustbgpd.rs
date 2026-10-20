@@ -43,7 +43,7 @@ async fn live_rustbgpd_controller_roundtrip() {
     let speaker = fixture.connect().await;
     contract::run_readable_contract(&speaker).await.unwrap();
     let health = speaker.daemon_health().await.unwrap();
-    let expected = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.78.0".into());
+    let expected = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.79.0".into());
     assert_eq!(health.version.as_deref(), Some(expected.as_str()));
     assert!(health.ready);
 }
@@ -53,7 +53,7 @@ async fn live_rustbgpd_controller_roundtrip() {
 async fn live_rustbgpd_amplification_components_inject_read_and_delete() {
     let fixture = fixture::Speaker::start().await;
     let speaker = fixture.connect().await;
-    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.78.0".into());
+    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.79.0".into());
     // The daemon's own rendering of the injected components (ADR 028 read-back column).
     let rules = contract::amplification_rules();
     for rule in &rules {

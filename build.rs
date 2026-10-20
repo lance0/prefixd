@@ -14,8 +14,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &["proto/"],
         )?;
 
-    // rustbgpd controller API (ADR 025). Opt-in during qualification; the
-    // proto is vendored from rustbgpd and is self-contained apart from
+    // rustbgpd controller API (ADR 025). The proto is a pinned rustbgpd release
+    // asset (see src/bgp/rustbgpd_proto.rs) and is self-contained apart from
     // google/protobuf/field_mask.proto, which prost-build resolves itself.
     if std::env::var_os("CARGO_FEATURE_BGP_RUSTBGPD").is_some() {
         tonic_prost_build::configure()
