@@ -4,16 +4,27 @@ use tokio::sync::RwLock;
 
 use super::{
     BlackholeInventory, BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer, FlowSpecMatchSupport,
-    FlowSpecReader, FlowSpecWriter, PeerObserver, PeerStatus, SessionState,
+    FlowSpecReader, FlowSpecWriter, InjectionLeases, LeaseGeneration, PeerObserver, PeerStatus,
+    SessionState,
 };
 use crate::domain::FlowSpecRule;
-use crate::error::Result;
+use crate::error::{PrefixdError, Result};
+
+/// Daemon-side lease table (rustbgpd ADR-0141): one live generation per owner.
+#[derive(Debug, Default)]
+struct MockLeases {
+    incarnation: u64,
+    sequence: u64,
+    live: std::collections::HashMap<String, LeaseGeneration>,
+    confirmed: bool,
+}
 
 /// Mock announcer for testing
 #[derive(Debug, Default)]
 pub struct MockAnnouncer {
     rules: Arc<RwLock<Vec<FlowSpecRule>>>,
     blackholes: RwLock<Vec<BlackholeRoute>>,
+    leases: std::sync::Mutex<MockLeases>,
     peers: Vec<PeerStatus>,
     /// Test seam: report no ADR 028 match support, like an adapter that has not opted in.
     no_match_support: bool,
@@ -24,6 +35,7 @@ impl MockAnnouncer {
         Self {
             rules: Arc::new(RwLock::new(Vec::new())),
             blackholes: RwLock::default(),
+            leases: Default::default(),
             peers: vec![PeerStatus {
                 name: "mock-peer".to_string(),
                 address: "127.0.0.1".to_string(),
@@ -37,6 +49,7 @@ impl MockAnnouncer {
         Self {
             rules: Arc::new(RwLock::new(Vec::new())),
             blackholes: RwLock::default(),
+            leases: Default::default(),
             peers,
             no_match_support: false,
         }
@@ -53,6 +66,29 @@ impl MockAnnouncer {
     pub async fn announced_count(&self) -> usize {
         self.rules.read().await.len()
     }
+
+    /// The owner's lease deadline passed: the daemon withdraws everything it added.
+    pub async fn expire_lease(&self, owner: &str) {
+        self.leases.lock().unwrap().live.remove(owner);
+        self.blackholes.write().await.retain(|r| r.owner() != owner);
+    }
+
+    /// A daemon restart loses every route, rule and lease; generations start over.
+    pub async fn restart(&self) {
+        {
+            let mut leases = self.leases.lock().unwrap();
+            leases.live.clear();
+            leases.incarnation += 1;
+        }
+        self.blackholes.write().await.clear();
+        self.rules.write().await.clear();
+    }
+
+    fn owner_mismatch(operation: &str) -> PrefixdError {
+        PrefixdError::InjectionOwnerMismatch(format!(
+            "mock refused {operation}: the key is held by another injection owner or by none"
+        ))
+    }
 }
 
 impl FlowSpecAnnouncer for MockAnnouncer {
@@ -66,6 +102,9 @@ impl FlowSpecAnnouncer for MockAnnouncer {
         Some(self)
     }
     fn blackhole(&self) -> Option<&dyn BlackholeSpeaker> {
+        Some(self)
+    }
+    fn injection_leases(&self) -> Option<&dyn InjectionLeases> {
         Some(self)
     }
     fn match_support(&self) -> FlowSpecMatchSupport {
@@ -112,23 +151,81 @@ impl FlowSpecReader for MockAnnouncer {
 impl BlackholeSpeaker for MockAnnouncer {
     async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<()> {
         let mut routes = self.blackholes.write().await;
+        if !route.owner().is_empty()
+            || routes
+                .iter()
+                .any(|r| r.prefix() == route.prefix() && !r.owner().is_empty())
+        {
+            return Err(Self::owner_mismatch("AddPath"));
+        }
         routes.retain(|r| r.prefix() != route.prefix());
         routes.push(route.clone());
         Ok(())
     }
-    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet) -> Result<()> {
+    async fn announce_leased_blackhole(
+        &self,
+        route: &BlackholeRoute,
+        _lease_seconds: u32,
+    ) -> Result<LeaseGeneration> {
+        let mut routes = self.blackholes.write().await;
+        if route.owner().is_empty()
+            || routes
+                .iter()
+                .any(|r| r.prefix() == route.prefix() && r.owner() != route.owner())
+        {
+            return Err(Self::owner_mismatch("AddLeasedPath"));
+        }
+        let generation = {
+            let mut leases = self.leases.lock().unwrap();
+            let next = LeaseGeneration {
+                incarnation: leases.incarnation,
+                sequence: leases.sequence + 1,
+            };
+            let generation = *leases.live.entry(route.owner().into()).or_insert(next);
+            leases.sequence = leases.sequence.max(generation.sequence);
+            generation
+        };
+        routes.retain(|r| r.prefix() != route.prefix());
+        routes.push(route.clone());
+        Ok(generation)
+    }
+    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()> {
         super::require_host_route(prefix)?;
-        self.blackholes
-            .write()
-            .await
-            .retain(|r| r.prefix() != *prefix);
+        let mut routes = self.blackholes.write().await;
+        if routes
+            .iter()
+            .any(|r| r.prefix() == *prefix && r.owner() != owner)
+        {
+            return Err(Self::owner_mismatch("DeletePath"));
+        }
+        routes.retain(|r| r.prefix() != *prefix);
         Ok(())
     }
     async fn list_blackholes(&self) -> Result<BlackholeInventory> {
         Ok(BlackholeInventory {
             routes: self.blackholes.read().await.clone(),
-            unrecognized: vec![],
+            ..Default::default()
         })
+    }
+}
+#[async_trait]
+impl InjectionLeases for MockAnnouncer {
+    async fn live_lease(&self, owner: &str) -> Result<Option<Option<LeaseGeneration>>> {
+        let mut leases = self.leases.lock().unwrap();
+        leases.confirmed = true;
+        Ok(Some(leases.live.get(owner).copied()))
+    }
+    async fn renew_lease(
+        &self,
+        owner: &str,
+        generation: LeaseGeneration,
+        _lease_seconds: u32,
+    ) -> Result<bool> {
+        Ok(self.leases.lock().unwrap().live.get(owner) == Some(&generation))
+    }
+    /// Like a daemon, confirmed only once probed.
+    fn lease_confirmed(&self) -> bool {
+        self.leases.lock().unwrap().confirmed
     }
 }
 #[async_trait]
@@ -153,8 +250,19 @@ pub struct FaultyBlackholes {
     pub withdraw_fault: std::sync::atomic::AtomicUsize,
     /// Well-formed local routes that are not prefixd-shaped.
     pub unrecognized: std::sync::Mutex<Vec<super::UnrecognizedRoute>>,
+    /// Leased rows reported with no lease time left.
+    pub expired: std::sync::Mutex<Vec<BlackholeRoute>>,
     pub adds: std::sync::atomic::AtomicUsize,
     pub deletes: std::sync::atomic::AtomicUsize,
+    /// Leased adds, counted apart from `adds` (plain `AddPath`).
+    pub leased_adds: std::sync::atomic::AtomicUsize,
+    /// The owner every delete passed, in order.
+    pub delete_owners: std::sync::Mutex<Vec<String>>,
+    /// `lease_seconds` of every leased add and renewal, in order.
+    pub lease_seconds: std::sync::Mutex<Vec<u32>>,
+    /// Every renewal fails with a transport error.
+    pub fail_renewals: std::sync::atomic::AtomicBool,
+    pub renewals: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -174,6 +282,38 @@ impl FlowSpecAnnouncer for FaultyBlackholes {
     }
     fn blackhole(&self) -> Option<&dyn BlackholeSpeaker> {
         Some(self)
+    }
+    fn injection_leases(&self) -> Option<&dyn InjectionLeases> {
+        Some(self)
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl InjectionLeases for FaultyBlackholes {
+    async fn live_lease(&self, owner: &str) -> Result<Option<Option<LeaseGeneration>>> {
+        self.inner.live_lease(owner).await
+    }
+    async fn renew_lease(
+        &self,
+        owner: &str,
+        generation: LeaseGeneration,
+        lease_seconds: u32,
+    ) -> Result<bool> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.renewals.fetch_add(1, SeqCst);
+        self.lease_seconds.lock().unwrap().push(lease_seconds);
+        if self.fail_renewals.load(SeqCst) {
+            return Err(PrefixdError::BgpAnnouncementFailed(
+                "renewal transport failed".into(),
+            ));
+        }
+        self.inner
+            .renew_lease(owner, generation, lease_seconds)
+            .await
+    }
+    fn lease_confirmed(&self) -> bool {
+        self.inner.lease_confirmed()
     }
 }
 
@@ -217,19 +357,38 @@ impl BlackholeSpeaker for FaultyBlackholes {
         }
         self.inner.announce_blackhole(route).await
     }
-    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet) -> Result<()> {
+    async fn announce_leased_blackhole(
+        &self,
+        route: &BlackholeRoute,
+        lease_seconds: u32,
+    ) -> Result<LeaseGeneration> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.leased_adds.fetch_add(1, SeqCst);
+        self.lease_seconds.lock().unwrap().push(lease_seconds);
+        if self.fail_adds.load(SeqCst) {
+            // As UNIMPLEMENTED from an older daemon: nothing is created.
+            return Err(crate::error::PrefixdError::BgpAnnouncementFailed(
+                "AddLeasedPath RPC failed: Unimplemented".into(),
+            ));
+        }
+        self.inner
+            .announce_leased_blackhole(route, lease_seconds)
+            .await
+    }
+    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()> {
         use std::sync::atomic::Ordering::SeqCst;
         self.deletes.fetch_add(1, SeqCst);
+        self.delete_owners.lock().unwrap().push(owner.into());
         let fault = self.withdraw_fault.load(SeqCst);
         if fault == 2 {
-            self.inner.withdraw_blackhole(prefix).await?;
+            self.inner.withdraw_blackhole(prefix, owner).await?;
         }
         if fault != 0 {
             return Err(crate::error::PrefixdError::BgpWithdrawalFailed(
                 "delete outcome unknown".into(),
             ));
         }
-        self.inner.withdraw_blackhole(prefix).await
+        self.inner.withdraw_blackhole(prefix, owner).await
     }
     async fn list_blackholes(&self) -> Result<BlackholeInventory> {
         if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
@@ -239,6 +398,7 @@ impl BlackholeSpeaker for FaultyBlackholes {
         }
         let mut inventory = self.inner.list_blackholes().await?;
         inventory.unrecognized = self.unrecognized.lock().unwrap().clone();
+        inventory.expired = self.expired.lock().unwrap().clone();
         Ok(inventory)
     }
 }
@@ -281,12 +441,12 @@ mod tests {
             assert_eq!(speaker.list_blackholes().await.unwrap().routes, [route]);
         }
         for _ in 0..2 {
-            speaker.withdraw_blackhole(&prefix).await.unwrap();
+            speaker.withdraw_blackhole(&prefix, "").await.unwrap();
         }
         assert!(speaker.list_blackholes().await.unwrap() == BlackholeInventory::default());
         assert!(
             speaker
-                .withdraw_blackhole(&"2001:db8::/64".parse().unwrap())
+                .withdraw_blackhole(&"2001:db8::/64".parse().unwrap(), "")
                 .await
                 .is_err()
         );

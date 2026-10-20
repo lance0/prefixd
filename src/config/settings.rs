@@ -484,8 +484,8 @@ pub struct BlackholeConfig {
     /// Event `source` values allowed to trigger a blackhole playbook step. Empty
     /// refuses every detector; a routing guard, not authorization.
     pub detector_sources: Vec<String>,
-    /// Inject through the owner-scoped rustbgpd injection lease. No speaker
-    /// provides it yet, so startup refuses `true`.
+    /// Inject new enforced blackholes through the owner-scoped rustbgpd
+    /// injection lease (rustbgpd 0.79.0 or later); startup refuses it otherwise.
     pub leased: bool,
     /// Owner lease length in seconds, 5..=3600 (rustbgpd ADR-0141).
     pub lease_seconds: u32,

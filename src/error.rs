@@ -10,6 +10,11 @@ pub enum PrefixdError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// The speaker refused a route mutation because another injection owner, or
+    /// none, holds the key (rustbgpd ADR-0141). Nothing changed.
+    #[error("untracked local route: {0}")]
+    InjectionOwnerMismatch(String),
+
     #[error("rate limited, retry after {retry_after_seconds}s")]
     RateLimited { retry_after_seconds: u32 },
 
@@ -159,7 +164,9 @@ impl PrefixdError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::NotFound(_) | Self::MitigationNotFound(_) => StatusCode::NOT_FOUND,
             Self::ShuttingDown | Self::Standby => StatusCode::SERVICE_UNAVAILABLE,
-            Self::DuplicateEvent { .. } | Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::DuplicateEvent { .. } | Self::Conflict(_) | Self::InjectionOwnerMismatch(_) => {
+                StatusCode::CONFLICT
+            }
             Self::GuardrailViolation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::IpNotOwned(_) | Self::InvalidIpAddress(_) | Self::InvalidPrefix(_) => {
                 StatusCode::BAD_REQUEST

@@ -221,6 +221,15 @@ impl WithdrawalRequest {
         Ok(route)
     }
 
+    /// The persisted blackhole route, with its recorded owner; `None` for
+    /// FlowSpec or unreadable intent.
+    pub fn blackhole_rule(&self) -> Option<super::BlackholeRule> {
+        match self.persisted_route() {
+            Ok(PersistedRoute::Blackhole(rule)) => Some(rule),
+            _ => None,
+        }
+    }
+
     /// The ownership key this pending deletion blocks, for either kind.
     pub fn ownership_key(&self) -> Result<String> {
         Ok(match self.persisted_route()? {
@@ -438,7 +447,7 @@ async fn finish_withdrawal_request(
                 announcer.withdraw(rule).await?
             }
             PersistedRoute::Blackhole(rule) => {
-                rule.require_unleased()?;
+                // The recorded owner, never the current configuration or an override.
                 announcer
                     .blackhole()
                     .ok_or_else(|| {
@@ -447,7 +456,7 @@ async fn finish_withdrawal_request(
                                 .into(),
                         )
                     })?
-                    .withdraw_blackhole(&rule.prefix)
+                    .withdraw_blackhole(&rule.prefix, &rule.owner)
                     .await?
             }
         }

@@ -5591,6 +5591,7 @@ async fn test_blackhole_admission_dry_run_sends_nothing_and_enforced_adds_the_fr
         &fixture_actor(),
         &speaker,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -5645,6 +5646,7 @@ async fn test_blackhole_admission_dry_run_sends_nothing_and_enforced_adds_the_fr
         None,
         &fixture_actor(),
         &speaker,
+        None,
         None,
     )
     .await

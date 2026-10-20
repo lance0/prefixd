@@ -685,8 +685,9 @@ blackhole:
   # detector blackholes without the rustbgpd injection lease.
   detector_sources: [fastnetmon]
 
-  # The owner-scoped rustbgpd injection lease. No speaker provides it yet,
-  # so startup refuses leased: true.
+  # Add new enforced blackholes under the owner-scoped rustbgpd injection
+  # lease (rustbgpd 0.79.0 or later). If prefixd stops while the speaker runs,
+  # the speaker removes them within one lease.
   leased: false
   lease_seconds: 60
 ```
@@ -702,8 +703,8 @@ blackhole:
 | `max_active_per_pop` | `10` | Counted at the configured `pop` |
 | `max_active_global` | `50` | Counted across every POP sharing the database |
 | `detector_sources` | `[]` | Nonempty strings, matched exactly against an event's `source` |
-| `leased` | `false` | Startup refuses `true` while the speaker lacks the rustbgpd injection lease, which no release provides yet |
-| `lease_seconds` | `60` | `5..=3600`, validated even while `leased` is false |
+| `leased` | `false` | Startup refuses `true` unless the speaker answers the rustbgpd injection lease probe (rustbgpd 0.79.0 or later), and refuses `false` while leased blackholes are active or awaiting withdrawal |
+| `lease_seconds` | `60` | `5..=3600`, validated even while `leased` is false. Every leased add and renewal uses it |
 
 prefixd validates every key at load, even when `enabled` is false, and
 unknown keys in `blackhole` fail configuration loading. Scope routes in the
@@ -772,9 +773,9 @@ playbooks:
   false or its TTL exceeds the cap. In enforced mode it is also refused
   unless the speaker provides the rustbgpd injection lease or
   `detector_sources` is nonempty. Dry-run mode is not gated by the lease.
-- **Unleased detector blackholes.** No speaker provides the lease yet, so an
-  enforced deployment with a nonempty `detector_sources` runs detector
-  blackholes unleased. Startup logs a warning, health detail reports
+- **Unleased detector blackholes.** Without `leased`, an enforced deployment
+  with a nonempty `detector_sources` runs detector blackholes unleased.
+  Startup logs a warning, health detail reports
   `speaker.detector_unleased: true`, and `prefixd_blackhole_detector_unleased`
   is `1`. TTL expiry needs the running controller: if prefixd stays down
   while rustbgpd keeps running, detector blackholes stay announced until
@@ -788,6 +789,44 @@ playbooks:
   withdrawal holds it. The deletion is audited with the reason
   `orphaned after controller downtime`. Any other route is reported in
   `prefixd_unknown_local_routes{kind="blackhole"}` and left untouched.
+
+#### Leased blackholes
+
+With `leased: true`, new enforced blackholes, manual and detector, are added
+with `AddLeasedPath` under the controller's injection owner
+([ADR 027](../adr/027-blackhole-mitigations.md#owner-and-lease)). The owner
+is `prefixd.<pop>.<hash>`, derived from the POP and the verified speaker
+target, and stays the same across restarts. A separate task renews the
+owner's lease about every `lease_seconds / 3`. If prefixd stops while
+rustbgpd keeps running, the speaker removes the owner's routes within one
+lease plus its RIB queue lag. That removes rustbgpd's local route only; other
+routes the network holds can still apply.
+
+- **Startup.** prefixd asks the speaker for its lease with
+  `ListInjectionLeases`. A speaker without the RPC (rustbgpd before 0.79.0)
+  refuses startup. A live lease is adopted, and every active leased blackhole
+  is re-added under its recorded owner, with the safelist recheck. Startup
+  also refuses when the speaker holds live routes under this owner that the
+  database neither desires nor is withdrawing: another controller with the
+  same POP is using this speaker.
+- **No fallback.** A failed leased add leaves the blackhole unconfirmed and is
+  retried only as a leased add. If another owner, or no owner, holds the
+  victim's route, the request gets `409`, the new row is withdrawn locally
+  with the audit reason `untracked local route at admission`, and nothing is
+  deleted.
+- **Lost lease.** When a renewal is refused, a leased add returns another
+  generation, or the speaker reports one of this owner's routes with no lease
+  time left, prefixd re-adds every active leased blackhole at once. A speaker
+  restart is detected this way. Lease expiry is never recorded as a
+  withdrawal: the database intent stays as it was.
+- **Recorded owner.** Each blackhole keeps the owner it was added under.
+  Repair and deletion use that owner and never override another owner's
+  route. A blackhole added unleased stays unleased until it is withdrawn or
+  expires; extending it sends no add. Startup refuses `leased: false` while
+  leased blackholes are active or awaiting withdrawal.
+- **Visibility.** Health detail reports `speaker.lease` (owner, state,
+  generation and the last renewal), and
+  [metrics](api.md#metrics) count renewals and report the lease state.
 ### Amplification
 
 UDP reflection handling for the `udp_amplification` vector

@@ -25,9 +25,17 @@ a failed observation also retains the last successful metric values.
 ([ADR 027](../adr/027-blackhole-mitigations.md)): upsert, idempotent delete and
 complete read-back of retained local intent for both families. Only rustbgpd
 provides it. It injects with unleased `AddPath` (ORIGIN IGP, empty AS_PATH,
-`path_id` 0, BLACKHOLE `65535:666` plus the route's communities), deletes with
-`DeletePath`, where `NOT_FOUND` means absent, and reads
-`ListReceivedRoutes(neighbor 0.0.0.0)` for each unicast family to the last page.
+`path_id` 0, BLACKHOLE `65535:666` plus the route's communities), or with
+`AddLeasedPath` for a route recorded under an injection owner. It never sends
+one after the other fails. It deletes with `DeletePath` passing the recorded
+owner and never `override_owner`, where `NOT_FOUND` means absent and
+`FAILED_PRECONDITION` (another owner, or none, holds the key) is an error, and
+reads `ListReceivedRoutes(neighbor 0.0.0.0)` for each unicast family to the
+last page. Each route carries its `injection_owner`, so a desired route
+matches only a row held by its recorded owner. A leased row with
+`lease_remaining_ms` 0 is reported as expired, not retained, and a row whose
+owner, generation and remaining time are not all set or all unset fails the
+read.
 The read returns prefixd-shaped blackholes separately from unrecognized local
 routes. An unrecognized route is well formed but not prefixd-shaped, for
 example another tool's injection, a nonzero `path_id`, a missing BLACKHOLE or
@@ -53,7 +61,10 @@ whole read. No API, playbook or detector creates these components yet.
 Health detail adds `speaker.backend` and availability booleans under
 `speaker.capabilities`: `rule_reader`, `peer_observer`, `daemon_health`,
 `blackhole`, `blackhole_lease` and the `flowspec_match` object
-(`source_ports`, `fragment`, `packet_length`). `blackhole_lease` is false for every backend. The legacy `gobgp`
+(`source_ports`, `fragment`, `packet_length`). `blackhole_lease` is true only
+after the rustbgpd adapter's `ListInjectionLeases` probe succeeded, which
+prefixd asks only with `blackhole.leased`; an `UNIMPLEMENTED` lease RPC from a
+rolled-back daemon clears it. It is false for GoBGP. The legacy `gobgp`
 component reports `unsupported` without an error when peer observation is absent,
 `error` when it fails, and `connected` when it succeeds (even with zero peers).
 `bgp_sessions` remains the same peer-name/state map. Missing optional observation
@@ -386,25 +397,33 @@ Application status and local speaker intent do not prove router enforcement.
 ## Blackhole lifecycle and reconciliation
 
 Blackhole host routes ([ADR 027](../adr/027-blackhole-mitigations.md)) are
-unleased: until the rustbgpd injection lease ships, prefixd owns a route only
-through its database ledger, meaning an enforced row or pending withdrawal for
-this POP and target. Admission freezes the configured next hop and communities
-into the row; repair and withdrawal use that frozen route, so a configuration
-change affects only new blackholes.
+owned through prefixd's database ledger, meaning an enforced row or pending
+withdrawal for this POP and target. With `blackhole.leased`, a route is also
+held under the controller's injection owner, which the speaker checks on
+every add and delete. Admission freezes the configured next hop, communities
+and owner (empty for an unleased route) into the row; repair and withdrawal
+use that frozen route, so a configuration change affects only new
+blackholes.
 
 Enforced admission returns `409` without persisting or adding when the prefix
-already has a live owner, has a pending withdrawal, or holds a local route that
-the ledger does not own. A pre-read of the speaker detects that untracked route,
-whether prefixd-shaped or unrecognized, including another `path_id` at the
-prefix; a failed pre-read persists nothing. Otherwise the row is persisted
-first, then added. Immediately before every add, at admission and on each
-repair, prefixd rechecks the safelist under the lifecycle mutex. A failed
-lookup sends nothing. A victim safelisted since admission gets a system
-withdrawal with the reason `safelisted after admission` instead of an add.
+already has a live owner or has a pending withdrawal. Unleased admission also
+returns `409` when the prefix holds a local route that the ledger does not
+own. A pre-read of the speaker detects that untracked route, whether
+prefixd-shaped or unrecognized, including another `path_id` at the prefix; a
+failed pre-read persists nothing. Leased admission skips the pre-read: the
+speaker refuses a leased add on a key held by another owner or by none
+atomically, and prefixd then returns `409` and withdraws the new row locally,
+audited as `untracked local route at admission`, without a delete. Otherwise
+the row is persisted first, then added. Immediately before every add, at
+admission and on each repair, prefixd rechecks the safelist under the
+lifecycle mutex. A failed lookup sends nothing. A victim safelisted since
+admission gets a system withdrawal with the reason `safelisted after
+admission` instead of an add.
 
-Withdrawal intent records `rule_kind` `blackhole` and the frozen route with an
-empty owner. Detector unban, operator withdrawal, TTL expiry and the safelist
-withdrawal delete through `DeletePath`, where `NOT_FOUND` means absent. A
+Withdrawal intent records `rule_kind` `blackhole` and the frozen route with
+its owner. Detector unban, operator withdrawal, TTL expiry and the safelist
+withdrawal delete through `DeletePath` with that owner, where `NOT_FOUND`
+means absent. A
 failed or ambiguous delete stays pending with its original actor, reason and
 operation ID, and its key blocks repair until the deletion is confirmed. A
 pending blackhole withdrawal does not block FlowSpec admission or repair, and
@@ -419,17 +438,49 @@ A failed or partial read repairs nothing and gives no unknown-route verdict;
 withdrawal cleanup continues. A route at a desired prefix whose next hop or
 communities differ from the frozen route is replaced. A desired prefix that
 also holds an unrecognized local row is reported as a repair error and left
-alone. Recognized routes outside the ledger, including other POPs' routes, and
-every unrecognized row are logged and counted in
-`prefixd_unknown_local_routes{kind="blackhole"}`, never modified. One
-exception: a recognized route that exactly matches the frozen route (prefix,
-next hop and communities) of a terminal, enforced-origin, unleased blackhole
-row of this POP, with no live row or pending withdrawal for the prefix, was
-left behind by prefixd. Enforced reconciliation deletes it and audits the
+alone. Recognized routes outside the ledger, including other POPs' routes,
+routes of other injection owners, and every unrecognized row are logged and
+counted in `prefixd_unknown_local_routes{kind="blackhole"}`, never modified.
+One exception: a recognized route that exactly matches the frozen route
+(prefix, next hop, communities and owner) of a terminal, enforced-origin
+blackhole row of this POP, with no live row or pending withdrawal for the
+prefix, was left behind by prefixd. Enforced reconciliation deletes it under
+its recorded owner and audits the
 deletion with the reason `orphaned after controller downtime`; dry-run only
 reports it. Overdue live rows are expired through the normal withdrawal path
 first. The FlowSpec stage sets `kind="flowspec"` for the unknown local rules
 it already logs.
+
+### Injection lease
+
+With `blackhole.leased` ([configuration](configuration.md#leased-blackholes)),
+the controller holds one owner-scoped lease (rustbgpd ADR-0141), keyed on the
+same owner as the [controller fence](../adr/027-blackhole-mitigations.md#controller-fence).
+At startup `ListInjectionLeases(owner)` is the capability probe and recovers
+a live generation; a lease with no time left is not adopted. Every leased add
+returns the owner's live generation, which prefixd holds in memory. A
+dedicated task sends `RenewLease(owner, generation, lease_seconds)` about
+every `lease_seconds / 3`, each with that interval as its deadline. It takes
+no lifecycle mutex and no database access, and standby never renews. A late
+reply counts as a failed renewal.
+
+`FAILED_PRECONDITION` from `RenewLease` means the generation is not live: the
+lease expired or rustbgpd restarted. prefixd drops the generation and wakes
+reconciliation at once for a full leased re-add of every active, enforced,
+unexpired leased blackhole, with the safelist recheck and treating present
+routes as missing. A leased add that returns a different generation, and a
+read showing one of this owner's rows with `lease_remaining_ms` 0, trigger
+the same re-add. Startup always runs one: each add joins a live lease, which
+is how a restarted prefixd adopts the routes it left. A re-add that does not
+complete stays pending for the next pass. Lease expiry removes rustbgpd's
+local intent only and is not a prefixd withdrawal; the rows stay active until
+their TTL, an unban or an operator withdraws them.
+
+The lease probe, adds and renewals run against rustbgpd 0.79.0 and later.
+`scripts/test-rustbgpd.sh` runs the leased lifecycle (add and renew, a
+prefixd restart within the lease, expiry after prefixd stops, and a rustbgpd
+restart) only when `PREFIXD_RUSTBGPD_TEST_VERSION` is 0.79.0 or later, and
+proves the refused startup on earlier releases.
 
 ### Router and speaker requirements
 

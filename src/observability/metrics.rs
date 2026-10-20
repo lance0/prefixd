@@ -127,6 +127,26 @@ pub static BLACKHOLE_DETECTOR_UNLEASED: Lazy<Gauge> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Injection lease renewals by result: success, not_live (FAILED_PRECONDITION) or error (ADR 027).
+pub static INJECTION_LEASE_RENEWALS: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "prefixd_injection_lease_renewals_total",
+        "RenewLease results for this controller's injection owner: success, not_live or error",
+        &["result"]
+    )
+    .unwrap()
+});
+
+/// One-hot injection lease state: none, live, renewal_failing or expired (ADR 027).
+pub static INJECTION_LEASE_STATE: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_injection_lease_state",
+        "1 for this controller's current injection lease state (none, live, renewal_failing, expired), 0 for the others",
+        &["state"]
+    )
+    .unwrap()
+});
+
 // Reconciliation metrics
 pub static RECONCILIATION_RUNS: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
@@ -375,6 +395,12 @@ pub fn init_metrics() {
     Lazy::force(&EVENT_RULE_QUOTA_REJECTIONS);
     Lazy::force(&CONTROLLER_FENCE_ACTIVE);
     Lazy::force(&BLACKHOLE_DETECTOR_UNLEASED);
+    for result in ["success", "not_live", "error"] {
+        INJECTION_LEASE_RENEWALS.with_label_values(&[result]);
+    }
+    for state in crate::domain::LeaseState::ALL {
+        INJECTION_LEASE_STATE.with_label_values(&[state.as_str()]);
+    }
     Lazy::force(&RECONCILIATION_RUNS);
     Lazy::force(&RECONCILIATION_REPAIRS);
     for status in ["success", "error"] {

@@ -48,6 +48,8 @@ pub struct AppState {
     pub mitigation_lock: tokio::sync::Mutex<()>,
     /// Advisory-lock fence state (ADR 027). Standalone fixtures run unfenced (active).
     pub fence: Arc<crate::fence::ControllerFence>,
+    /// The controller's injection lease when `blackhole.leased` is on (ADR 027).
+    pub lease: Option<Arc<crate::domain::LeaseKeeper>>,
     /// Directory containing config files (for hot-reload)
     pub config_dir: PathBuf,
     shutting_down: AtomicBool,
@@ -127,6 +129,7 @@ impl AppState {
             playbooks_loaded_at: RwLock::new(Utc::now()),
             mitigation_lock: tokio::sync::Mutex::new(()),
             fence: Arc::new(crate::fence::ControllerFence::new(true)),
+            lease: None,
             db_pool,
             config_dir,
             shutting_down: AtomicBool::new(false),
@@ -164,6 +167,20 @@ impl AppState {
             )
         })?;
         state.fence = fence;
+        Ok(self)
+    }
+
+    /// Install the injection lease before sharing state.
+    pub fn with_lease(
+        mut self: Arc<Self>,
+        lease: Arc<crate::domain::LeaseKeeper>,
+    ) -> Result<Arc<Self>> {
+        let state = Arc::get_mut(&mut self).ok_or_else(|| {
+            PrefixdError::Internal(
+                "lease must be installed before sharing application state".into(),
+            )
+        })?;
+        state.lease = Some(lease);
         Ok(self)
     }
 

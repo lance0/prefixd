@@ -546,14 +546,14 @@ async fn complete_rpc_deadline_bounds_stalled_response_body() {
             .serve_with_incoming(incoming),
     );
     // Omit the transport's header timeout so only the complete-RPC bound can end this call.
-    let speaker = RustBgpdAnnouncer {
-        channel: Endpoint::from_shared(format!("http://{address}"))
+    let speaker = RustBgpdAnnouncer::new(
+        Endpoint::from_shared(format!("http://{address}"))
             .unwrap()
             .connect()
             .await
             .unwrap(),
-        token: Some("Bearer test-secret".parse().unwrap()),
-    };
+        Some("Bearer test-secret".parse().unwrap()),
+    );
     tokio::time::pause();
     for daemon in [true, false] {
         headers_sent.store(0, SeqCst);
@@ -771,7 +771,19 @@ struct UnicastFake {
     paths: Arc<Mutex<Vec<pb::AddPathRequest>>>,
     mode: Arc<AtomicUsize>,
     pages: Arc<AtomicUsize>,
+    /// Injection owner per prefix; absent for an unowned path.
+    owners: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    plain_adds: Arc<AtomicUsize>,
+    leased: Arc<Mutex<Vec<pb::AddLeasedPathRequest>>>,
+    deletes_seen: Arc<Mutex<Vec<pb::DeletePathRequest>>>,
+    renewals: Arc<Mutex<Vec<pb::RenewLeaseRequest>>>,
 }
+
+/// The fake daemon's one live generation.
+const LIVE: pb::LeaseGeneration = pb::LeaseGeneration {
+    incarnation: 0xfeed,
+    sequence: 7,
+};
 
 const ABORT_SECOND_PAGE: usize = 1;
 const DELETE_NOT_FOUND: usize = 2;
@@ -780,20 +792,22 @@ const DELETE_INTERNAL: usize = 4;
 const LIST_UNIMPLEMENTED: usize = 5;
 const VERSION_CHANGES: usize = 6;
 const REPEATED_TOKEN: usize = 7;
+/// A daemon before 0.79.0: every lease RPC is UNIMPLEMENTED.
+const LEASE_UNIMPLEMENTED: usize = 8;
+/// Ownership refusals on adds and deletes; renewal of a dead generation.
+const PRECONDITION: usize = 9;
+/// Leased rows and the lease report no time left.
+const LEASE_EXPIRED: usize = 10;
+/// A leased row without its generation.
+const LEASE_INCONSISTENT: usize = 11;
 const FOREIGN_BASE: usize = 100;
 
 fn same_key(left: &pb::AddPathRequest, prefix: &str, length: u32) -> bool {
     left.prefix == prefix && left.prefix_length == length
 }
 
-#[tonic::async_trait]
-impl pb::injection_service_server::InjectionService for UnicastFake {
-    async fn add_path(
-        &self,
-        request: Request<pb::AddPathRequest>,
-    ) -> std::result::Result<Response<pb::AddPathResponse>, Status> {
-        auth(&request)?;
-        let request = request.into_inner();
+impl UnicastFake {
+    fn insert(&self, request: pb::AddPathRequest) {
         assert_eq!((request.origin, request.path_id), (0, 0));
         assert!(request.as_path.is_empty() && request.extended_communities.is_empty());
         assert!(request.local_pref.is_none() && request.med.is_none());
@@ -805,7 +819,97 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
         let mut paths = self.paths.lock().unwrap();
         paths.retain(|old| !same_key(old, &request.prefix, request.prefix_length));
         paths.push(request);
+    }
+}
+
+#[tonic::async_trait]
+impl pb::injection_service_server::InjectionService for UnicastFake {
+    async fn add_path(
+        &self,
+        request: Request<pb::AddPathRequest>,
+    ) -> std::result::Result<Response<pb::AddPathResponse>, Status> {
+        auth(&request)?;
+        if self.mode.load(SeqCst) == PRECONDITION {
+            return Err(Status::failed_precondition("key is held by owner"));
+        }
+        self.plain_adds.fetch_add(1, SeqCst);
+        self.insert(request.into_inner());
         Ok(Response::new(pb::AddPathResponse::default()))
+    }
+
+    async fn add_leased_path(
+        &self,
+        request: Request<pb::AddLeasedPathRequest>,
+    ) -> std::result::Result<Response<pb::AddLeasedPathResponse>, Status> {
+        auth(&request)?;
+        match self.mode.load(SeqCst) {
+            LEASE_UNIMPLEMENTED => return Err(Status::unimplemented("older daemon")),
+            PRECONDITION => return Err(Status::failed_precondition("key is held by no owner")),
+            _ => {}
+        }
+        let request = request.into_inner();
+        self.leased.lock().unwrap().push(request.clone());
+        let path = request.path.unwrap();
+        self.owners
+            .lock()
+            .unwrap()
+            .insert(path.prefix.clone(), request.lease.unwrap().owner);
+        self.insert(path);
+        Ok(Response::new(pb::AddLeasedPathResponse {
+            result: Some(pb::AddPathResponse {
+                outcome: pb::PathInjectOutcome::Created as i32,
+            }),
+            generation: Some(LIVE),
+        }))
+    }
+
+    async fn renew_lease(
+        &self,
+        request: Request<pb::RenewLeaseRequest>,
+    ) -> std::result::Result<Response<pb::RenewLeaseResponse>, Status> {
+        auth(&request)?;
+        match self.mode.load(SeqCst) {
+            LEASE_UNIMPLEMENTED => return Err(Status::unimplemented("older daemon")),
+            PRECONDITION => {
+                return Err(Status::failed_precondition(
+                    "lease generation is not live; re-add the owner's desired state",
+                ));
+            }
+            _ => {}
+        }
+        let request = request.into_inner();
+        self.renewals.lock().unwrap().push(request.clone());
+        Ok(Response::new(pb::RenewLeaseResponse {
+            generation: request.generation,
+            lease_remaining_ms: request.lease_seconds * 1000,
+        }))
+    }
+
+    async fn list_injection_leases(
+        &self,
+        request: Request<pb::ListInjectionLeasesRequest>,
+    ) -> std::result::Result<Response<pb::ListInjectionLeasesResponse>, Status> {
+        auth(&request)?;
+        if self.mode.load(SeqCst) == LEASE_UNIMPLEMENTED {
+            return Err(Status::unimplemented("older daemon"));
+        }
+        let owner = request.into_inner().owner;
+        let held = self.owners.lock().unwrap().values().any(|o| *o == owner);
+        Ok(Response::new(pb::ListInjectionLeasesResponse {
+            leases: held
+                .then(|| pb::InjectionLeaseEntry {
+                    owner,
+                    generation: Some(LIVE),
+                    lease_seconds: 60,
+                    lease_remaining_ms: if self.mode.load(SeqCst) == LEASE_EXPIRED {
+                        0
+                    } else {
+                        59_000
+                    },
+                })
+                .into_iter()
+                .collect(),
+        }))
     }
 
     async fn delete_path(
@@ -815,10 +919,13 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
         auth(&request)?;
         let request = request.into_inner();
         assert_eq!(request.path_id, 0);
+        assert!(!request.override_owner, "prefixd never overrides the owner");
+        self.deletes_seen.lock().unwrap().push(request.clone());
         match self.mode.load(SeqCst) {
             DELETE_NOT_FOUND => return Err(Status::not_found("absent")),
             DELETE_DENIED => return Err(Status::permission_denied("denied")),
             DELETE_INTERNAL => return Err(Status::internal("failed")),
+            PRECONDITION => return Err(Status::failed_precondition("key is held by owner")),
             _ => {}
         }
         let mut paths = self.paths.lock().unwrap();
@@ -882,6 +989,11 @@ impl pb::rib_service_server::RibService for UnicastFake {
                 // Mutate one row per family; the others must still be returned.
                 if mode >= FOREIGN_BASE && route.prefix.ends_with('2') {
                     mutate_row(&mut route, mode);
+                }
+                if let Some(owner) = self.owners.lock().unwrap().get(&path.prefix) {
+                    route.injection_owner = owner.clone();
+                    route.lease_generation = (mode != LEASE_INCONSISTENT).then_some(LIVE);
+                    route.lease_remaining_ms = Some(if mode == LEASE_EXPIRED { 0 } else { 59_000 });
                 }
                 route
             })
@@ -1127,7 +1239,7 @@ async fn blackhole_delete_not_found_is_absent_and_other_codes_are_errors() {
     let (speaker, fake, server) = unicast_speaker().await;
     let routes = seed_blackholes(&speaker).await;
     let v4 = routes[0].prefix();
-    speaker.withdraw_blackhole(&v4).await.unwrap();
+    speaker.withdraw_blackhole(&v4, "").await.unwrap();
     assert!(
         !speaker
             .list_blackholes()
@@ -1138,19 +1250,19 @@ async fn blackhole_delete_not_found_is_absent_and_other_codes_are_errors() {
             .any(|route| route.prefix() == v4)
     );
     // The daemon now answers NOT_FOUND for the same key.
-    speaker.withdraw_blackhole(&v4).await.unwrap();
+    speaker.withdraw_blackhole(&v4, "").await.unwrap();
     fake.mode.store(DELETE_NOT_FOUND, SeqCst);
-    speaker.withdraw_blackhole(&v4).await.unwrap();
+    speaker.withdraw_blackhole(&v4, "").await.unwrap();
     let v6 = routes[2].prefix();
     for mode in [DELETE_DENIED, DELETE_INTERNAL] {
         fake.mode.store(mode, SeqCst);
-        assert!(speaker.withdraw_blackhole(&v6).await.is_err());
+        assert!(speaker.withdraw_blackhole(&v6, "").await.is_err());
     }
     fake.mode.store(0, SeqCst);
     assert_eq!(speaker.list_blackholes().await.unwrap().routes.len(), 4);
     assert!(
         speaker
-            .withdraw_blackhole(&"2001:db8::/64".parse().unwrap())
+            .withdraw_blackhole(&"2001:db8::/64".parse().unwrap(), "")
             .await
             .is_err()
     );
@@ -1241,5 +1353,138 @@ async fn amplification_components_inject_read_back_and_delete_through_rpc() {
     }
     assert!(speaker.list_active().await.unwrap().is_empty());
     assert_eq!(fake.deletes.load(SeqCst), rules.len());
+    server.abort();
+}
+
+const LEASE_OWNER: &str = "prefixd.pop-a.0123456789abcdef";
+
+fn live() -> LeaseGeneration {
+    LeaseGeneration {
+        incarnation: LIVE.incarnation,
+        sequence: LIVE.sequence,
+    }
+}
+
+#[tokio::test]
+async fn leased_blackhole_add_read_renew_and_delete_carry_the_owner() {
+    let (speaker, fake, server) = unicast_speaker().await;
+    let route = blackhole("192.0.2.1/32", "192.0.2.66", 1).with_owner(LEASE_OWNER);
+    // Each add refuses the other kind before any RPC.
+    assert!(speaker.announce_blackhole(&route).await.is_err());
+    let unowned = blackhole("192.0.2.2/32", "192.0.2.66", 1);
+    assert!(
+        speaker
+            .announce_leased_blackhole(&unowned, 60)
+            .await
+            .is_err()
+    );
+    assert!(fake.paths.lock().unwrap().is_empty());
+
+    let generation = speaker.announce_leased_blackhole(&route, 45).await.unwrap();
+    assert_eq!(generation, live());
+    let sent = fake.leased.lock().unwrap()[0].lease.clone().unwrap();
+    assert_eq!((sent.owner.as_str(), sent.lease_seconds), (LEASE_OWNER, 45));
+    assert_eq!(fake.plain_adds.load(SeqCst), 0);
+    // Read-back matches only under the recorded owner.
+    let inventory = speaker.list_blackholes().await.unwrap();
+    assert_eq!(inventory.routes, std::slice::from_ref(&route));
+    assert_ne!(inventory.routes, [route.clone().with_owner("")]);
+
+    assert_eq!(
+        speaker.live_lease(LEASE_OWNER).await.unwrap(),
+        Some(Some(generation))
+    );
+    assert!(speaker.lease_confirmed());
+    assert_eq!(speaker.live_lease("other.owner").await.unwrap(), Some(None));
+    assert!(
+        speaker
+            .renew_lease(LEASE_OWNER, generation, 45)
+            .await
+            .unwrap()
+    );
+    let renewal = fake.renewals.lock().unwrap()[0].clone();
+    assert_eq!(
+        (
+            renewal.owner.as_str(),
+            renewal.lease_seconds,
+            renewal.generation
+        ),
+        (LEASE_OWNER, 45, Some(LIVE))
+    );
+
+    speaker
+        .withdraw_blackhole(&route.prefix(), LEASE_OWNER)
+        .await
+        .unwrap();
+    let delete = fake.deletes_seen.lock().unwrap()[0].clone();
+    assert_eq!(delete.owner, LEASE_OWNER);
+    assert!(!delete.override_owner);
+    server.abort();
+}
+
+#[tokio::test]
+async fn older_daemon_leased_rpcs_create_nothing_and_never_fall_back() {
+    let (speaker, fake, server) = unicast_speaker().await;
+    let route = blackhole("192.0.2.1/32", "192.0.2.66", 1).with_owner(LEASE_OWNER);
+    // Confirmed by a successful probe, then the daemon is rolled back.
+    assert_eq!(speaker.live_lease(LEASE_OWNER).await.unwrap(), Some(None));
+    assert!(speaker.lease_confirmed());
+    fake.mode.store(LEASE_UNIMPLEMENTED, SeqCst);
+    assert!(speaker.announce_leased_blackhole(&route, 60).await.is_err());
+    assert!(
+        !speaker.lease_confirmed(),
+        "UNIMPLEMENTED withdraws the capability"
+    );
+    assert_eq!(fake.plain_adds.load(SeqCst), 0, "no AddPath fallback");
+    assert!(fake.paths.lock().unwrap().is_empty());
+    assert_eq!(speaker.live_lease(LEASE_OWNER).await.unwrap(), None);
+    assert!(speaker.renew_lease(LEASE_OWNER, live(), 60).await.is_err());
+    server.abort();
+}
+
+#[tokio::test]
+async fn ownership_refusals_and_dead_generations_map_by_status_code() {
+    let (speaker, fake, server) = unicast_speaker().await;
+    let route = blackhole("192.0.2.1/32", "192.0.2.66", 1).with_owner(LEASE_OWNER);
+    fake.mode.store(PRECONDITION, SeqCst);
+    for error in [
+        speaker
+            .announce_leased_blackhole(&route, 60)
+            .await
+            .unwrap_err(),
+        speaker
+            .announce_blackhole(&blackhole("192.0.2.2/32", "192.0.2.66", 1))
+            .await
+            .unwrap_err(),
+        speaker
+            .withdraw_blackhole(&route.prefix(), LEASE_OWNER)
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(
+            matches!(error, PrefixdError::InjectionOwnerMismatch(_)),
+            "{error}"
+        );
+    }
+    // The plain add reached the daemon and was refused there; nothing was created.
+    assert!(fake.paths.lock().unwrap().is_empty());
+    // On RenewLease the code means only "that generation is not live".
+    assert!(!speaker.renew_lease(LEASE_OWNER, live(), 60).await.unwrap());
+    server.abort();
+}
+
+#[tokio::test]
+async fn leased_read_back_reports_expired_rows_and_rejects_partial_lease_fields() {
+    let (speaker, fake, server) = unicast_speaker().await;
+    let route = blackhole("192.0.2.1/32", "192.0.2.66", 1).with_owner(LEASE_OWNER);
+    speaker.announce_leased_blackhole(&route, 60).await.unwrap();
+    fake.mode.store(LEASE_EXPIRED, SeqCst);
+    let inventory = speaker.list_blackholes().await.unwrap();
+    assert!(inventory.routes.is_empty());
+    assert_eq!(inventory.expired, [route]);
+    // An expired lease is not adoptable: it cannot be renewed.
+    assert_eq!(speaker.live_lease(LEASE_OWNER).await.unwrap(), Some(None));
+    fake.mode.store(LEASE_INCONSISTENT, SeqCst);
+    assert!(speaker.list_blackholes().await.is_err());
     server.abort();
 }

@@ -2094,6 +2094,7 @@ async fn admit_detector_blackhole(
         &CreationActor::Detector(event.source.clone()),
         state.announcer.as_ref(),
         binding,
+        state.lease.as_deref(),
     )
     .await
     .inspect_err(|error| {
@@ -2180,6 +2181,7 @@ async fn create_blackhole(
         &CreationActor::Operator(operator_id),
         state.announcer.as_ref(),
         binding,
+        state.lease.as_deref(),
     )
     .await
     {
@@ -3555,6 +3557,49 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK, "{withdrawn}");
             assert!(speaker.routes().await.is_empty());
+        }
+
+        /// With the lease, a detector ban adds under the controller's owner and
+        /// authenticated health reports the lease instead of `detector_unleased`.
+        #[tokio::test]
+        async fn enforced_detector_blackhole_uses_the_lease_and_health_reports_it() {
+            use crate::bgp::InjectionLeases;
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let owner = "prefixd.test1.0123456789abcdef";
+            // The startup probe confirms the capability.
+            speaker.live_lease(owner).await.unwrap();
+            let mut state =
+                detector_state(OperationMode::Enforced, repo.clone(), speaker.clone()).await;
+            Arc::get_mut(&mut state).unwrap().settings.blackhole.leased = true;
+            let lease = Arc::new(crate::domain::LeaseKeeper::new(owner.into(), 60));
+            let state = state.with_lease(lease.clone()).unwrap();
+            let app = crate::api::create_test_router(state);
+            let (status, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(status, StatusCode::OK, "{health}");
+            assert_eq!(health["speaker"]["detector_unleased"], false);
+            assert_eq!(health["speaker"]["capabilities"]["blackhole_lease"], true);
+            assert_eq!(health["speaker"]["lease"]["state"], "none");
+            let (status, body) = send(
+                &app,
+                "/v1/events",
+                None,
+                fastnetmon_ban("fastnetmon", "203.0.113.10"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(speaker.adds.load(SeqCst), 0);
+            assert_eq!(speaker.leased_adds.load(SeqCst), 1);
+            assert_eq!(speaker.routes().await[0].owner(), owner);
+            lease.renew_once(speaker.as_ref()).await;
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            let reported = &health["speaker"]["lease"];
+            assert_eq!(reported["state"], "live", "{health}");
+            assert_eq!(reported["owner"], owner);
+            assert_eq!(reported["lease_seconds"], 60);
+            assert_eq!(reported["last_renewal_result"], "success");
+            assert!(reported["generation"]["sequence"].is_u64());
         }
 
         /// The enforced gate on playbook save and reload: refused without the lease or

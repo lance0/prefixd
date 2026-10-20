@@ -145,15 +145,20 @@ creates and audits the blackhole, shows it in the dashboard and API, and sends
 nothing to the speaker.
 
 **Enforced mode and the injection lease.** The rustbgpd injection lease lets
-the speaker remove a dead controller's routes on its own. It has not shipped
-in any rustbgpd release, so enforced detector blackholes run without it.
-Startup and playbook reload or save refuse a blackhole step in enforced mode
-unless `detector_sources` is nonempty; a nonempty list is the opt-in. Startup
-then logs a warning, health detail reports `speaker.detector_unleased: true`
-and `prefixd_blackhole_detector_unleased` is `1`.
+the speaker remove a dead controller's routes on its own. With rustbgpd 0.79.0
+or later, set `blackhole.leased: true`: enforced detector blackholes are then
+added under the controller's lease, and if prefixd stops, rustbgpd removes
+them within `blackhole.lease_seconds` (60 by default). See
+[leased blackholes](../../reference/configuration.md#leased-blackholes).
+Without the lease, startup and playbook reload or save refuse a blackhole step
+in enforced mode unless `detector_sources` is nonempty; a nonempty list is the
+opt-in to unleased detector blackholes. Startup then logs a warning, health
+detail reports `speaker.detector_unleased: true` and
+`prefixd_blackhole_detector_unleased` is `1`.
 
-**The remaining gap.** TTL expiry needs the running controller. If prefixd
-stays down while rustbgpd keeps running, detector blackholes stay announced
+**The remaining gap without the lease.** TTL expiry needs the running
+controller. If prefixd stays down while rustbgpd keeps running, unleased
+detector blackholes stay announced
 until prefixd returns or an operator withdraws them on the speaker, and the
 victim stays unreachable. When prefixd returns, reconciliation expires overdue
 blackholes at once and removes routes left behind by blackholes that already

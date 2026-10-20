@@ -105,6 +105,9 @@ pub struct BlackholeRoute {
     next_hop: std::net::IpAddr,
     communities: Vec<u32>,
     large_communities: Vec<[u32; 3]>,
+    /// Injection owner (ADR 027); `""` for an unleased route. Part of equality,
+    /// so a desired route matches only a row held by its recorded owner.
+    owner: String,
 }
 
 impl BlackholeRoute {
@@ -143,7 +146,18 @@ impl BlackholeRoute {
             next_hop,
             communities,
             large_communities,
+            owner: String::new(),
         })
+    }
+
+    /// The same route held under an injection owner.
+    pub fn with_owner(mut self, owner: impl Into<String>) -> Self {
+        self.owner = owner.into();
+        self
+    }
+
+    pub fn owner(&self) -> &str {
+        &self.owner
     }
 
     pub fn prefix(&self) -> ipnet::IpNet {
@@ -187,6 +201,34 @@ pub struct UnrecognizedRoute {
 pub struct BlackholeInventory {
     pub routes: Vec<BlackholeRoute>,
     pub unrecognized: Vec<UnrecognizedRoute>,
+    /// Leased rows whose lease has expired, withdrawal pending (remaining 0).
+    /// They are lost intent, not retained routes.
+    pub expired: Vec<BlackholeRoute>,
+}
+
+/// An owner's live lease generation (rustbgpd ADR-0141 §2). Held in memory only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+pub struct LeaseGeneration {
+    pub incarnation: u64,
+    pub sequence: u64,
+}
+
+/// Owner-scoped injection lease RPCs (ADR 027). Availability is not success.
+#[async_trait]
+pub trait InjectionLeases: Send + Sync {
+    /// `ListInjectionLeases(owner)`: `None` when the daemon does not implement
+    /// leases, otherwise the owner's live generation if its lease has time left.
+    async fn live_lease(&self, owner: &str) -> Result<Option<Option<LeaseGeneration>>>;
+    /// `RenewLease`: `false` when the generation is not live, which never
+    /// resurrects a lease. Any other failure is an error.
+    async fn renew_lease(
+        &self,
+        owner: &str,
+        generation: LeaseGeneration,
+        lease_seconds: u32,
+    ) -> Result<bool>;
+    /// Whether the last lease probe of the connected daemon succeeded.
+    fn lease_confirmed(&self) -> bool;
 }
 
 /// Optional unicast blackhole capability (ADR 027). Reading is mandatory: an
@@ -194,10 +236,20 @@ pub struct BlackholeInventory {
 /// acceptance or retained local intent, never export or router enforcement.
 #[async_trait]
 pub trait BlackholeSpeaker: Send + Sync {
-    /// Upsert keyed on the host prefix; retrying after an ambiguous response is safe.
+    /// Unleased upsert keyed on the host prefix; retrying after an ambiguous
+    /// response is safe. A route with an owner is refused before any RPC.
     async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<()>;
-    /// Idempotent: an absent route is success.
-    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet) -> Result<()>;
+    /// Leased upsert under the route's owner, returning the owner's live
+    /// generation. It never falls back to the unleased add: an unowned route is
+    /// refused, and a failed leased add is an error with nothing created.
+    async fn announce_leased_blackhole(
+        &self,
+        route: &BlackholeRoute,
+        lease_seconds: u32,
+    ) -> Result<LeaseGeneration>;
+    /// Idempotent delete passing the owner the route was added under (`""`
+    /// unleased), never an override: an absent route is success.
+    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()>;
     /// Complete retained local intent for both families. A failed, partial or
     /// malformed read is an error, never an empty or truncated inventory.
     async fn list_blackholes(&self) -> Result<BlackholeInventory>;
@@ -221,6 +273,10 @@ pub trait FlowSpecAnnouncer: FlowSpecWriter {
     }
 
     fn blackhole(&self) -> Option<&dyn BlackholeSpeaker> {
+        None
+    }
+
+    fn injection_leases(&self) -> Option<&dyn InjectionLeases> {
         None
     }
 
@@ -290,7 +346,8 @@ pub struct SpeakerCapabilities {
     pub daemon_health: bool,
     #[serde(default)]
     pub blackhole: bool,
-    /// Owner-scoped injection lease (ADR 027). No adapter supports it yet.
+    /// Owner-scoped injection lease (ADR 027): the daemon answered
+    /// `ListInjectionLeases`, which prefixd asks only when `blackhole.leased` is set.
     #[serde(default)]
     pub blackhole_lease: bool,
     /// ADR 028 match components the adapter encodes; all false when absent.
@@ -305,7 +362,9 @@ impl dyn FlowSpecAnnouncer + '_ {
             peer_observer: self.peer_observer().is_some(),
             daemon_health: self.daemon_health_observer().is_some(),
             blackhole: self.blackhole().is_some(),
-            blackhole_lease: false,
+            blackhole_lease: self
+                .injection_leases()
+                .is_some_and(|leases| leases.lease_confirmed()),
             flowspec_match: self.match_support(),
         }
     }

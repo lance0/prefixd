@@ -30,6 +30,19 @@ enforced detector blackholes wait for the lease (the requirements table,
 failure modes and consequences), this amendment supersedes it; §2, decision 1
 and slice 8 are updated in place.
 
+Status note 2026-10-20: the rustbgpd injection lease shipped in rustbgpd
+0.79.0 (ADR-0141), and the lease hardening of slice 8 is implemented as
+[Owner and lease](#owner-and-lease) describes, behind `blackhole.leased`.
+The released contract differs from this ADR's wording in one respect: a
+leased add extends the owner's deadline to max(current, now +
+`lease_seconds`) and never shortens it; only `RenewLease` sets the deadline
+exactly. prefixd uses one `lease_seconds` for every add and renewal, so the
+behavior is the same. Two implementation choices: the orphan cleanup of
+slice 8 also deletes a leftover route under its recorded owner, since the
+lease cannot expire routes that a running controller keeps renewing; and
+startup refuses outstanding leased intent when either `blackhole.enabled` or
+`blackhole.leased` is off, because either one stops the renewal.
+
 ## Date
 
 2026-10-19

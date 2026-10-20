@@ -350,8 +350,24 @@ prefixd-test = "operator"
         .expect("bounded authenticated daemon readiness");
     }
 
-    /// Inject a local unicast path as another tool would, bypassing the adapter.
-    pub async fn add_raw_path(&self, path: pb::AddPathRequest) {
+    /// The released daemon version this fixture runs.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// Whether the release has the injection lease RPCs (rustbgpd ADR-0141, 0.79.0).
+    pub fn has_injection_lease(&self) -> bool {
+        let parts: Vec<u32> = self
+            .version
+            .split('.')
+            .map(|part| part.parse().unwrap())
+            .collect();
+        parts >= vec![0, 79, 0]
+    }
+
+    async fn raw_injection(
+        &self,
+    ) -> pb::injection_service_client::InjectionServiceClient<tonic::transport::Channel> {
         let channel = tonic::transport::Endpoint::from_shared(self.endpoint.clone())
             .unwrap()
             .connect_timeout(Duration::from_secs(1))
@@ -359,15 +375,76 @@ prefixd-test = "operator"
             .connect()
             .await
             .unwrap();
-        let mut request = tonic::Request::new(path);
+        pb::injection_service_client::InjectionServiceClient::new(channel)
+    }
+
+    fn authorized<T>(value: T) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(value);
         let token = std::env::var("PREFIXD_RUSTBGPD_TEST_TOKEN").unwrap();
         request
             .metadata_mut()
             .insert("authorization", format!("Bearer {token}").parse().unwrap());
-        pb::injection_service_client::InjectionServiceClient::new(channel)
-            .add_path(request)
+        request
+    }
+
+    /// Inject a local unicast path as another tool would, bypassing the adapter.
+    pub async fn add_raw_path(&self, path: pb::AddPathRequest) {
+        self.raw_injection()
+            .await
+            .add_path(Self::authorized(path))
             .await
             .unwrap();
+    }
+
+    /// Inject a leased path under another controller's owner, bypassing the adapter.
+    pub async fn add_raw_leased_path(
+        &self,
+        path: pb::AddPathRequest,
+        owner: &str,
+        lease_seconds: u32,
+    ) {
+        self.raw_injection()
+            .await
+            .add_leased_path(Self::authorized(pb::AddLeasedPathRequest {
+                path: Some(path),
+                lease: Some(pb::InjectionLease {
+                    owner: owner.into(),
+                    lease_seconds,
+                }),
+            }))
+            .await
+            .unwrap();
+    }
+
+    /// Raw retained local unicast rows for both families, lease fields included.
+    pub async fn raw_local_routes(&self) -> Vec<pb::Route> {
+        let channel = tonic::transport::Endpoint::from_shared(self.endpoint.clone())
+            .unwrap()
+            .connect_timeout(Duration::from_secs(1))
+            .timeout(Duration::from_secs(2))
+            .connect()
+            .await
+            .unwrap();
+        let mut routes = Vec::new();
+        for family in [
+            pb::AddressFamily::Ipv4Unicast as i32,
+            pb::AddressFamily::Ipv6Unicast as i32,
+        ] {
+            routes.extend(
+                pb::rib_service_client::RibServiceClient::new(channel.clone())
+                    .list_received_routes(Self::authorized(pb::ListRoutesRequest {
+                        neighbor_address: "0.0.0.0".into(),
+                        afi_safi: family,
+                        page_size: 1000,
+                        ..Default::default()
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .routes,
+            );
+        }
+        routes
     }
 
     /// Raw retained candidate view for the isolated bearer-authenticated peer fixture.

@@ -215,8 +215,11 @@ owned victim from the dashboard or `POST /v1/mitigations` with
 `"action": "blackhole"` ([ADR 027](docs/adr/027-blackhole-mitigations.md)). It
 drops all traffic to the victim. Current limits:
 
-- **Unleased.** A manual blackhole stays on the speaker if prefixd stops,
-  until prefixd returns and expires it or an Admin deletes it on the speaker.
+- **Unleased unless `blackhole.leased`.** Without the lease, a manual
+  blackhole stays on the speaker if prefixd stops, until prefixd returns and
+  expires it or an Admin deletes it on the speaker. With
+  [leased blackholes](docs/reference/configuration.md#leased-blackholes) on
+  rustbgpd 0.79.0 or later, the speaker removes it within one lease.
 - **rustbgpd only.** GoBGP has no blackhole capability, and startup refuses
   `blackhole.enabled` without it or with an empty safelist.
 - **Admin and typed confirmation.** Operators and bearer tokens get `403`; the
@@ -248,14 +251,20 @@ FastNetMon Community ban, into a blackhole for the victim
   `blackhole.max_ttl_seconds` from now, and the FastNetMon unban withdraws it.
 - **Dry-run first.** In dry-run mode a detector blackhole is recorded and
   audited and sends nothing.
-- **Enforced without the injection lease.** The rustbgpd injection lease has
-  not shipped, so enforced detector blackholes run unleased. They are refused
-  unless `blackhole.detector_sources` is nonempty, and startup logs a warning,
+- **Leased.** With `blackhole.leased` on rustbgpd 0.79.0 or later, enforced
+  detector blackholes are added under the controller's owner-scoped injection
+  lease and renewed by a separate task. If prefixd stops while rustbgpd keeps
+  running, the speaker removes them within one lease (60 s by default). A
+  speaker restart or lost lease triggers a full re-add. Health detail reports
+  the lease state and last renewal.
+- **Enforced without the injection lease.** Without `blackhole.leased`,
+  enforced detector blackholes run unleased. They are refused unless
+  `blackhole.detector_sources` is nonempty, and startup logs a warning,
   health detail reports `speaker.detector_unleased: true` and
   `prefixd_blackhole_detector_unleased` is `1`.
-- **Remaining gap.** If prefixd is down for a long time while rustbgpd keeps
-  running, detector blackholes stay announced until prefixd returns or an
-  operator withdraws them. On return, reconciliation expires overdue
+- **Remaining gap when unleased.** If prefixd is down for a long time while
+  rustbgpd keeps running, unleased detector blackholes stay announced until
+  prefixd returns or an operator withdraws them. On return, reconciliation expires overdue
   blackholes and deletes routes that exactly match blackholes that already
   ended, audited as `orphaned after controller downtime`; unknown routes are
   only reported. The shipped

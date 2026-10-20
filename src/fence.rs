@@ -16,7 +16,8 @@ use tokio::sync::watch;
 
 use crate::bgp::{
     BlackholeInventory, BlackholeRoute, BlackholeSpeaker, DaemonHealthObserver, FlowSpecAnnouncer,
-    FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, PeerObserver,
+    FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, InjectionLeases, LeaseGeneration,
+    PeerObserver,
 };
 use crate::domain::{FlowSpecNlri, FlowSpecRule};
 use crate::error::{PrefixdError, Result};
@@ -224,6 +225,13 @@ impl FlowSpecAnnouncer for FencedAnnouncer {
             .blackhole()
             .map(|_| self as &dyn BlackholeSpeaker)
     }
+
+    /// Never the inner handle: standby never renews.
+    fn injection_leases(&self) -> Option<&dyn InjectionLeases> {
+        self.inner
+            .injection_leases()
+            .map(|_| self as &dyn InjectionLeases)
+    }
 }
 
 impl FencedAnnouncer {
@@ -231,6 +239,36 @@ impl FencedAnnouncer {
         self.inner.blackhole().ok_or_else(|| {
             PrefixdError::Internal("speaker does not support blackhole routes".into())
         })
+    }
+
+    fn inner_leases(&self) -> Result<&dyn InjectionLeases> {
+        self.inner.injection_leases().ok_or_else(|| {
+            PrefixdError::Internal("speaker does not support injection leases".into())
+        })
+    }
+}
+
+#[async_trait]
+impl InjectionLeases for FencedAnnouncer {
+    async fn live_lease(&self, owner: &str) -> Result<Option<Option<LeaseGeneration>>> {
+        self.inner_leases()?.live_lease(owner).await
+    }
+
+    async fn renew_lease(
+        &self,
+        owner: &str,
+        generation: LeaseGeneration,
+        lease_seconds: u32,
+    ) -> Result<bool> {
+        self.fence.ensure_active()?;
+        self.inner_leases()?
+            .renew_lease(owner, generation, lease_seconds)
+            .await
+    }
+
+    fn lease_confirmed(&self) -> bool {
+        self.inner_leases()
+            .is_ok_and(|leases| leases.lease_confirmed())
     }
 }
 
@@ -241,9 +279,22 @@ impl BlackholeSpeaker for FencedAnnouncer {
         self.inner_blackhole()?.announce_blackhole(route).await
     }
 
-    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet) -> Result<()> {
+    async fn announce_leased_blackhole(
+        &self,
+        route: &BlackholeRoute,
+        lease_seconds: u32,
+    ) -> Result<LeaseGeneration> {
         self.fence.ensure_active()?;
-        self.inner_blackhole()?.withdraw_blackhole(prefix).await
+        self.inner_blackhole()?
+            .announce_leased_blackhole(route, lease_seconds)
+            .await
+    }
+
+    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()> {
+        self.fence.ensure_active()?;
+        self.inner_blackhole()?
+            .withdraw_blackhole(prefix, owner)
+            .await
     }
 
     async fn list_blackholes(&self) -> Result<BlackholeInventory> {
@@ -327,11 +378,47 @@ mod tests {
         assert_eq!(stored().await, 1);
         fence.set(false);
         assert!(matches!(
-            fenced.withdraw_blackhole(&route.prefix()).await,
+            fenced.withdraw_blackhole(&route.prefix(), "").await,
             Err(PrefixdError::Standby)
         ));
         assert_eq!(stored().await, 1, "standby withdraw reached the speaker");
         // Reads stay available in standby.
         assert_eq!(fenced.list_blackholes().await.unwrap().routes.len(), 1);
+        // Leased adds and renewals are mutations; the lease probe is a read.
+        let leased = BlackholeRoute::new(
+            "192.0.2.2/32".parse().unwrap(),
+            "192.0.2.66".parse().unwrap(),
+            vec![],
+            vec![],
+        )
+        .unwrap()
+        .with_owner("prefixd.test.0000000000000000");
+        assert!(matches!(
+            fenced.announce_leased_blackhole(&leased, 60).await,
+            Err(PrefixdError::Standby)
+        ));
+        let leases = writer
+            .injection_leases()
+            .expect("lease capability passes through");
+        assert_eq!(leases.live_lease(leased.owner()).await.unwrap(), Some(None));
+        assert!(
+            (&writer as &dyn FlowSpecAnnouncer)
+                .capabilities()
+                .blackhole_lease
+        );
+        fence.set(true);
+        let generation = fenced.announce_leased_blackhole(&leased, 60).await.unwrap();
+        fence.set(false);
+        assert!(matches!(
+            leases.renew_lease(leased.owner(), generation, 60).await,
+            Err(PrefixdError::Standby)
+        ));
+        fence.set(true);
+        assert!(
+            leases
+                .renew_lease(leased.owner(), generation, 60)
+                .await
+                .unwrap()
+        );
     }
 }

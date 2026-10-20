@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- `blackhole.leased: true` is now accepted with rustbgpd 0.79.0 or later.
+  New enforced blackholes are then added under the controller's owner-scoped
+  injection lease, and rustbgpd removes them within `blackhole.lease_seconds`
+  if prefixd stops. Blackholes added before the change stay unleased until
+  they are withdrawn or expire. Once leased blackholes exist, startup refuses
+  `blackhole.leased: false` until they are withdrawn or expire, and refuses
+  rustbgpd releases before 0.79.0. The vendored rustbgpd proto is now the
+  0.79.0 release; requests to 0.76.0 through 0.78.0 are unchanged.
 - The default and shipped `quotas.max_active_per_customer` rise from 5 to 20;
   explicit configured limits are preserved. Active customer/POP/global quotas
   now count only FlowSpec rules. Blackholes use their independent POP/global
@@ -71,6 +79,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Leased blackholes (ADR 027): with `blackhole.leased`, enforced manual and
+  detector blackholes use `AddLeasedPath` under the controller's injection
+  owner and never fall back to `AddPath`. A renewal task sends `RenewLease`
+  about every `lease_seconds / 3`. A refused renewal, a changed lease
+  generation or an expired row triggers an immediate full leased re-add, and a
+  restarted prefixd adopts the live lease through `ListInjectionLeases`.
+  Deletes pass the recorded owner. A route held by another owner, or by none,
+  returns `409` and the new row is withdrawn locally with the audit reason
+  `untracked local route at admission`. Health detail adds `speaker.lease`,
+  and metrics add `prefixd_injection_lease_renewals_total{result}` and
+  `prefixd_injection_lease_state{state}`. Startup refuses routes under this
+  controller's owner that the database neither desires nor is withdrawing.
 - `POST /v1/mitigations` accepts optional `src_ports`, `fragment` and
   `packet_length` for discard and police rules (ADR 028). They pass the same
   invariants, `max_ports`, `allow_fragment_match` and

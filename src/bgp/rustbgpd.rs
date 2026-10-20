@@ -1,7 +1,7 @@
 use super::{
     BlackholeInventory, BlackholeRoute, BlackholeSpeaker, DaemonHealth, DaemonHealthObserver,
-    FlowSpecAnnouncer, FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, PeerObserver,
-    PeerStatus, SessionState, UnrecognizedRoute, rustbgpd_pb as pb,
+    FlowSpecAnnouncer, FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, InjectionLeases,
+    LeaseGeneration, PeerObserver, PeerStatus, SessionState, UnrecognizedRoute, rustbgpd_pb as pb,
 };
 use crate::{
     config::RustBgpdConfig,
@@ -18,6 +18,8 @@ use tonic::{
 pub struct RustBgpdAnnouncer {
     channel: Channel,
     token: Option<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>,
+    /// The daemon last answered `ListInjectionLeases`; an `UNIMPLEMENTED` lease RPC clears it.
+    lease_confirmed: std::sync::atomic::AtomicBool,
 }
 
 fn invalid(message: &str) -> PrefixdError {
@@ -75,7 +77,7 @@ impl RustBgpdAnnouncer {
                     }))
                     .await
                     .map_err(|_| anyhow::anyhow!("rustbgpd Unix connection failed"))?;
-                return Ok(Self { channel, token });
+                return Ok(Self::new(channel, token));
             }
             #[cfg(not(unix))]
             anyhow::bail!("rustbgpd Unix sockets are unsupported on this platform");
@@ -146,7 +148,18 @@ impl RustBgpdAnnouncer {
             .await
             .map_err(|_| anyhow::anyhow!("rustbgpd connection timed out"))?
             .map_err(|_| anyhow::anyhow!("rustbgpd connection failed"))?;
-        Ok(Self { channel, token })
+        Ok(Self::new(channel, token))
+    }
+
+    fn new(
+        channel: Channel,
+        token: Option<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>,
+    ) -> Self {
+        Self {
+            channel,
+            token,
+            lease_confirmed: Default::default(),
+        }
     }
 
     fn request<T>(&self, value: T) -> Request<T> {
@@ -160,7 +173,23 @@ impl RustBgpdAnnouncer {
         request
     }
 
-    async fn rpc<T, F, Fut>(&self, operation: &str, mut call: F) -> Result<T>
+    async fn rpc<T, F, Fut>(&self, operation: &str, call: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
+    {
+        self.call(operation, call)
+            .await
+            .map_err(|status| failed(operation, &status))
+    }
+
+    /// Retries transient failures; the final status is returned so callers can
+    /// branch on its code, never on its message.
+    async fn call<T, F, Fut>(
+        &self,
+        operation: &str,
+        mut call: F,
+    ) -> std::result::Result<T, tonic::Status>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
@@ -178,16 +207,46 @@ impl RustBgpdAnnouncer {
                     tracing::warn!(operation, attempt = attempt + 1, code = ?status.code(), "retrying rustbgpd RPC");
                     tokio::time::sleep(Duration::from_millis(100 << attempt)).await;
                 }
-                Err(status) => {
-                    return Err(invalid(&format!(
-                        "{operation} RPC failed: {:?}",
-                        status.code()
-                    )));
-                }
+                Err(status) => return Err(status),
             }
         }
         unreachable!()
     }
+
+    /// A lease RPC answered `UNIMPLEMENTED`: the daemon was rolled back.
+    fn lease_unsupported(&self, status: &tonic::Status) {
+        if status.code() == Code::Unimplemented {
+            self.lease_confirmed
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Add or delete failure. `FAILED_PRECONDITION` is the daemon's ownership
+    /// refusal (rustbgpd ADR-0141 §3): the key is held by another owner or by
+    /// no owner, and nothing changed.
+    fn mutation_error(&self, operation: &str, status: &tonic::Status) -> PrefixdError {
+        self.lease_unsupported(status);
+        if status.code() == Code::FailedPrecondition {
+            PrefixdError::InjectionOwnerMismatch(format!(
+                "rustbgpd refused {operation}: the key is held by another injection owner or by none"
+            ))
+        } else {
+            failed(operation, status)
+        }
+    }
+}
+
+fn failed(operation: &str, status: &tonic::Status) -> PrefixdError {
+    invalid(&format!("{operation} RPC failed: {:?}", status.code()))
+}
+
+fn generation(value: Option<pb::LeaseGeneration>) -> Result<LeaseGeneration> {
+    value
+        .map(|generation| LeaseGeneration {
+            incarnation: generation.incarnation,
+            sequence: generation.sequence,
+        })
+        .ok_or_else(|| invalid("missing lease generation"))
 }
 
 async fn read_tls_file(path: &str) -> anyhow::Result<Vec<u8>> {
@@ -502,6 +561,11 @@ fn decode_blackhole(
                 .ok_or_else(|| invalid("invalid local route large community"))
         })
         .collect::<Result<Vec<_>>>()?;
+    // Leased rows carry an owner, generation and remaining time together (rustbgpd ADR-0141 §3).
+    let leased = !route.injection_owner.is_empty();
+    if leased != route.lease_generation.is_some() || leased != route.lease_remaining_ms.is_some() {
+        return Err(invalid("inconsistent local route lease fields"));
+    }
     let reason = if route.path_id != 0 {
         "nonzero path_id"
     } else if prefix.prefix_len() != prefix.max_prefix_len() {
@@ -526,7 +590,13 @@ fn decode_blackhole(
                 if decoded.communities() == route.communities
                     && decoded.large_communities() == large =>
             {
-                inventory.routes.push(decoded);
+                let decoded = decoded.with_owner(route.injection_owner);
+                // Zero remaining means expired with its withdrawal pending: lost, not retained.
+                if route.lease_remaining_ms == Some(0) {
+                    inventory.expired.push(decoded);
+                } else {
+                    inventory.routes.push(decoded);
+                }
                 return Ok(());
             }
             Ok(_) => "missing BLACKHOLE or non-canonical communities",
@@ -546,6 +616,9 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
         "rustbgpd"
     }
     fn blackhole(&self) -> Option<&dyn BlackholeSpeaker> {
+        Some(self)
+    }
+    fn injection_leases(&self) -> Option<&dyn InjectionLeases> {
         Some(self)
     }
     fn reader(&self) -> Option<&dyn FlowSpecReader> {
@@ -660,31 +733,74 @@ impl FlowSpecReader for RustBgpdAnnouncer {
 #[async_trait]
 impl BlackholeSpeaker for RustBgpdAnnouncer {
     async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<()> {
+        if !route.owner().is_empty() {
+            return Err(invalid("a leased route needs AddLeasedPath"));
+        }
         let payload = encode_blackhole(route);
-        // AddPathResponse carries no outcome yet: OK is local Adj-RIB-In acceptance only.
-        self.rpc("AddPath", || async {
+        // OK is local Adj-RIB-In acceptance only; 0.76.0 to 0.78.0 report no outcome.
+        self.call("AddPath", || async {
             pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
                 .add_path(self.request(payload.clone()))
                 .await
         })
-        .await?;
+        .await
+        .map_err(|status| self.mutation_error("AddPath", &status))?;
         Ok(())
     }
 
-    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet) -> Result<()> {
+    async fn announce_leased_blackhole(
+        &self,
+        route: &BlackholeRoute,
+        lease_seconds: u32,
+    ) -> Result<LeaseGeneration> {
+        // Never AddPath: an older daemon answers UNIMPLEMENTED and creates nothing.
+        if route.owner().is_empty() {
+            return Err(invalid("a leased add needs an injection owner"));
+        }
+        let payload = pb::AddLeasedPathRequest {
+            path: Some(encode_blackhole(route)),
+            lease: Some(pb::InjectionLease {
+                owner: route.owner().into(),
+                lease_seconds,
+            }),
+        };
+        let response = self
+            .call("AddLeasedPath", || async {
+                pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                    .add_leased_path(self.request(payload.clone()))
+                    .await
+            })
+            .await
+            .map_err(|status| self.mutation_error("AddLeasedPath", &status))?;
+        match response
+            .result
+            .map(|result| pb::PathInjectOutcome::try_from(result.outcome))
+        {
+            Some(Ok(
+                pb::PathInjectOutcome::Created
+                | pb::PathInjectOutcome::Replaced
+                | pb::PathInjectOutcome::Unchanged,
+            )) => generation(response.generation),
+            _ => Err(invalid("unsupported rustbgpd leased injection outcome")),
+        }
+    }
+
+    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()> {
         super::require_host_route(prefix)?;
+        // The recorded owner and never override_owner: a mismatch is FAILED_PRECONDITION.
         let payload = pb::DeletePathRequest {
             prefix: prefix.addr().to_string(),
             prefix_length: prefix.prefix_len().into(),
             path_id: 0,
+            owner: owner.into(),
             ..Default::default()
         };
-        self.rpc("DeletePath", || {
+        self.call("DeletePath", || {
             let mut client =
                 pb::injection_service_client::InjectionServiceClient::new(self.channel.clone());
             let request = self.request(payload.clone());
             async move {
-                // DeletePath has no allow_missing; NOT_FOUND is its only "absent" reply.
+                // Without allow_missing, NOT_FOUND is the only "absent" reply.
                 match client.delete_path(request).await {
                     Err(status) if status.code() == Code::NotFound => {
                         tracing::debug!("rustbgpd blackhole route already absent");
@@ -694,7 +810,8 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
                 }
             }
         })
-        .await?;
+        .await
+        .map_err(|status| self.mutation_error("DeletePath", &status))?;
         Ok(())
     }
 
@@ -737,6 +854,80 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
             }
         }
         Ok(inventory)
+    }
+}
+
+#[async_trait]
+impl InjectionLeases for RustBgpdAnnouncer {
+    async fn live_lease(&self, owner: &str) -> Result<Option<Option<LeaseGeneration>>> {
+        let request = pb::ListInjectionLeasesRequest {
+            owner: owner.into(),
+        };
+        let response = match self
+            .call("ListInjectionLeases", || async {
+                pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                    .list_injection_leases(self.request(request.clone()))
+                    .await
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(status) if status.code() == Code::Unimplemented => {
+                self.lease_unsupported(&status);
+                return Ok(None);
+            }
+            Err(status) => return Err(failed("ListInjectionLeases", &status)),
+        };
+        if response.leases.len() > 1 || response.leases.iter().any(|lease| lease.owner != owner) {
+            return Err(invalid("lease listing ignored the owner filter"));
+        }
+        self.lease_confirmed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Zero remaining is expired, withdrawal pending: not renewable, so not adopted.
+        response
+            .leases
+            .into_iter()
+            .find(|lease| lease.lease_remaining_ms > 0)
+            .map(|lease| generation(lease.generation))
+            .transpose()
+            .map(Some)
+    }
+
+    async fn renew_lease(
+        &self,
+        owner: &str,
+        generation: LeaseGeneration,
+        lease_seconds: u32,
+    ) -> Result<bool> {
+        let request = pb::RenewLeaseRequest {
+            owner: owner.into(),
+            generation: Some(pb::LeaseGeneration {
+                incarnation: generation.incarnation,
+                sequence: generation.sequence,
+            }),
+            lease_seconds,
+        };
+        match self
+            .call("RenewLease", || async {
+                pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                    .renew_lease(self.request(request.clone()))
+                    .await
+            })
+            .await
+        {
+            Ok(_) => Ok(true),
+            // On this RPC the code has one meaning: the generation is not live.
+            Err(status) if status.code() == Code::FailedPrecondition => Ok(false),
+            Err(status) => {
+                self.lease_unsupported(&status);
+                Err(failed("RenewLease", &status))
+            }
+        }
+    }
+
+    fn lease_confirmed(&self) -> bool {
+        self.lease_confirmed
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -840,10 +1031,10 @@ mod tests {
 
     #[tokio::test]
     async fn match_identity_uses_the_same_canonicalization_as_add_and_delete() {
-        let writer = RustBgpdAnnouncer {
-            channel: Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
-            token: None,
-        };
+        let writer = RustBgpdAnnouncer::new(
+            Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            None,
+        );
         for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
             let left = FlowSpecNlri {
                 dst_prefix: prefix.into(),
@@ -998,10 +1189,10 @@ mod tests {
     #[tokio::test]
     async fn amplification_components_encode_per_adr_and_read_back_strictly() {
         use crate::domain::{FragmentMatch, PacketLengthRange};
-        let writer = RustBgpdAnnouncer {
-            channel: Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
-            token: None,
-        };
+        let writer = RustBgpdAnnouncer::new(
+            Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            None,
+        );
         for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
             let udp = FlowSpecNlri {
                 dst_prefix: prefix.into(),

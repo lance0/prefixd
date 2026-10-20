@@ -11,7 +11,8 @@ use crate::db::RepositoryTrait;
 use crate::error::{PrefixdError, Result};
 
 use super::{
-    ActionType, Mitigation, VerifiedSpeakerBinding, execute_withdrawal, request_withdrawal,
+    ActionType, LeaseKeeper, Mitigation, VerifiedSpeakerBinding, execute_withdrawal,
+    request_withdrawal,
 };
 
 /// Reason recorded on the system withdrawal that replaces an add.
@@ -53,28 +54,20 @@ impl BlackholeRule {
         })
     }
 
+    /// The route as the speaker holds it, under its recorded owner.
     pub fn route(&self) -> Result<BlackholeRoute> {
-        BlackholeRoute::new(
+        Ok(BlackholeRoute::new(
             self.prefix,
             self.next_hop,
             self.communities.clone(),
             self.large_communities.clone(),
-        )
+        )?
+        .with_owner(self.owner.clone()))
     }
 
     /// Kind-discriminated identity, equal to the row's ownership key.
     pub fn identity(&self) -> String {
         super::blackhole_identity(&self.prefix.to_string())
-    }
-
-    /// Leased deletion arrives with the injection lease; never delete without the owner.
-    pub(super) fn require_unleased(&self) -> Result<()> {
-        if !self.owner.is_empty() {
-            return Err(PrefixdError::Internal(
-                "leased blackhole routes are not supported by this release".into(),
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -112,6 +105,7 @@ pub async fn refuse_untracked_route(
     if inventory
         .routes
         .iter()
+        .chain(&inventory.expired)
         .any(|route| route.prefix() == prefix)
         || inventory
             .unrecognized
@@ -137,12 +131,15 @@ pub enum BlackholeAnnouncement {
 /// Caller holds the lifecycle mutex, runs in enforced mode and has re-read
 /// `mitigation`. Rechecks the safelist immediately before the add: a failed
 /// lookup sends nothing, and a now-safelisted victim gets an audited system
-/// withdrawal through the immutable withdrawal path instead.
+/// withdrawal through the immutable withdrawal path instead. The recorded
+/// owner picks the add: `AddLeasedPath` under the controller's lease for an
+/// owned route, `AddPath` for an unleased one. A failure never switches between them.
 pub async fn announce_blackhole(
     repo: &dyn RepositoryTrait,
     announcer: &dyn FlowSpecAnnouncer,
     mitigation: &Mitigation,
     binding: Option<&VerifiedSpeakerBinding>,
+    lease: Option<&LeaseKeeper>,
 ) -> Result<BlackholeAnnouncement> {
     let rule = blackhole_rule(mitigation)?;
     let route = rule.route()?;
@@ -156,11 +153,24 @@ pub async fn announce_blackhole(
         let withdrawn = withdraw_safelisted(repo, announcer, false, mitigation, binding).await?;
         return Ok(BlackholeAnnouncement::Withdrawn(Box::new(withdrawn)));
     }
-    // Leased seam: a route recorded under an owner needs AddLeasedPath, which
-    // arrives with the rustbgpd injection lease. It never falls back to AddPath.
-    rule.require_unleased()?;
     let start = std::time::Instant::now();
-    speaker.announce_blackhole(&route).await?;
+    if rule.owner.is_empty() {
+        speaker.announce_blackhole(&route).await?;
+    } else {
+        let lease = lease
+            .filter(|lease| lease.owner() == rule.owner)
+            .ok_or_else(|| {
+                PrefixdError::Config(format!(
+                    "blackhole {} was added under injection owner {}, which this controller does not renew; \
+                     it needs blackhole.leased and the same POP and speaker target",
+                    rule.prefix, rule.owner
+                ))
+            })?;
+        let generation = speaker
+            .announce_leased_blackhole(&route, lease.lease_seconds())
+            .await?;
+        lease.observe_add(generation);
+    }
     crate::observability::metrics::ANNOUNCEMENTS_TOTAL
         .with_label_values(&["announced"])
         .inc();

@@ -53,6 +53,10 @@ pub struct SpeakerHealth {
     /// Enforced detector blackholes run without the rustbgpd injection lease, so
     /// they stay announced if prefixd stops while the speaker runs.
     detector_unleased: bool,
+    /// The controller's injection lease, present while `blackhole.leased` is in use:
+    /// live, renewal_failing or expired, and the last renewal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lease: Option<crate::domain::LeaseHealth>,
     daemon: DaemonHealthObservation,
 }
 
@@ -278,6 +282,7 @@ pub async fn health_detail(
                 &state.settings,
                 state.announcer.capabilities().blackhole_lease,
             ),
+            lease: state.lease.as_ref().map(|lease| lease.health()),
             daemon,
         },
         auth_mode: resolve_auth_mode(&state),

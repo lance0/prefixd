@@ -180,12 +180,42 @@ async fn main() -> anyhow::Result<()> {
     if !playbook_errors.is_empty() {
         anyhow::bail!("playbooks.yaml: {}", playbook_errors.join("; "));
     }
-    prefixd::guardrails::check_blackhole_startup(
-        &config.settings.blackhole,
+    // The lease probe is the capability check and recovers a live generation
+    // after a restart (ADR 027); it is asked only when the lease is configured.
+    let blackhole = &config.settings.blackhole;
+    let lease = if blackhole.enabled && blackhole.leased {
+        let keeper = Arc::new(prefixd::domain::LeaseKeeper::new(
+            owner.clone(),
+            blackhole.lease_seconds,
+        ));
+        if let Some(leases) = announcer.injection_leases() {
+            match keeper.recover(leases).await {
+                Ok(true) => tracing::info!(owner = %owner, generation = ?keeper.generation(),
+                    "speaker provides the injection lease"),
+                Ok(false) => tracing::warn!("speaker does not implement the injection lease"),
+                Err(error) => tracing::warn!(error = %error, "injection lease probe failed"),
+            }
+        }
+        Some(keeper)
+    } else {
+        None
+    };
+    prefixd::guardrails::check_blackhole_startup(blackhole, announcer.as_ref(), repo.as_ref())
+        .await?;
+    prefixd::guardrails::check_lease_startup(
+        blackhole,
         announcer.as_ref(),
         repo.as_ref(),
+        &config.settings.pop,
+        &owner,
     )
     .await?;
+    if let Some(keeper) = &lease {
+        tokio::spawn(prefixd::domain::run_lease_renewals(
+            keeper.clone(),
+            announcer.clone(),
+        ));
+    }
     let blackhole_lease = announcer.capabilities().blackhole_lease;
     let detector_unleased =
         prefixd::guardrails::detector_unleased(&config.settings, blackhole_lease);
@@ -219,6 +249,10 @@ async fn main() -> anyhow::Result<()> {
     )?
     .with_speaker_binding(binding)?
     .with_fence(controller_fence)?;
+    let state = match lease {
+        Some(lease) => state.with_lease(lease)?,
+        None => state,
+    };
 
     // Create auth layer for session-based auth
     // Secure cookies require HTTPS - check if TLS is configured

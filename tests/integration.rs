@@ -14485,6 +14485,7 @@ async fn prefixdctl_lists_gets_and_withdraws_a_blackhole() {
         &prefixd::observability::CreationActor::Operator("admin".into()),
         speaker.as_ref(),
         None,
+        None,
     )
     .await
     .unwrap()
