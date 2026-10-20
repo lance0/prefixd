@@ -12,8 +12,8 @@
 //! The generated stubs follow the pinned release. v0.79.0 is the minimum
 //! daemon, and `RustBgpdAnnouncer::connect` refuses anything older. Fields and
 //! RPCs newer than the minimum stay unset and unused until a change adopts
-//! them and raises the minimum. The stubs are compiled only when the `bgp-rustbgpd`
-//! feature is on, so the GoBGP and rustbgpd backends can coexist.
+//! them and raises the minimum. The stubs are compiled only when the
+//! `bgp-rustbgpd` feature is on, so the GoBGP and rustbgpd backends can coexist.
 #[cfg(feature = "bgp-rustbgpd")]
 pub mod rustbgpd_pb {
     #![allow(

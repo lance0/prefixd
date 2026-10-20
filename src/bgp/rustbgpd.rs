@@ -23,7 +23,7 @@ pub struct RustBgpdAnnouncer {
 }
 
 /// The oldest daemon prefixd runs against: 0.79.0 adds the injection lease
-/// (rustbgpd ADR-0141) and the add and delete outcomes prefixd reads.
+/// (rustbgpd ADR-0141).
 const MINIMUM_DAEMON_VERSION: [u64; 3] = [0, 79, 0];
 
 /// `major.minor.patch`, ignoring any pre-release or build suffix.
