@@ -274,6 +274,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Qualify rustbgpd 0.79.0: Compose and the interop lab pin it; CI tests 0.76.0
+  (minimum), 0.77.0, 0.78.0 and 0.79.0. prefixd keeps its vendored controller
+  proto; every field it reads or writes is unchanged in 0.79.0.
+
+- rustbgpd 0.79.0 changes for operators: it validates a blackhole route
+  against RPKI when prefixd adds it, so an export policy that drops
+  RPKI-Invalid routes now drops a `/32` or `/128` blackhole at once instead
+  of after the next VRP change. Its Prometheus series rename the `afi_safi`
+  and `scope` labels to `family` (plus `stage` on max-prefix series) with no
+  overlap, so update your own rustbgpd dashboards and alerts with the
+  upgrade. A rustbgpd config with an `[event_history]` section no longer
+  loads.
+
 - `POST /v1/safelist` now withdraws every live blackhole on this POP whose
   victim falls inside the new entry, under the lifecycle mutex, with the
   audited system reason `safelisted after admission`. Dry-run blackholes are

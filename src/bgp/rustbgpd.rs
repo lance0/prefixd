@@ -559,7 +559,7 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
         Some(self)
     }
     fn match_support(&self) -> FlowSpecMatchSupport {
-        // Types 6, 10 and 12 parse and render alike in every pinned release (0.76.0 to 0.78.0).
+        // Types 6, 10 and 12 parse and render alike in every pinned release (0.76.0 to 0.79.0).
         FlowSpecMatchSupport::ALL
     }
 }

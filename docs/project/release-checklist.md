@@ -151,6 +151,7 @@ Check these on the release candidate before opening the release PR:
       PREFIXD_RUSTBGPD_TEST_VERSION=0.76.0 scripts/test-rustbgpd.sh
       PREFIXD_RUSTBGPD_TEST_VERSION=0.77.0 scripts/test-rustbgpd.sh
       PREFIXD_RUSTBGPD_TEST_VERSION=0.78.0 scripts/test-rustbgpd.sh
+      PREFIXD_RUSTBGPD_TEST_VERSION=0.79.0 scripts/test-rustbgpd.sh
       ```
 
       Use the pins in ci.yml's `rustbgpd` matrix if they have moved.
