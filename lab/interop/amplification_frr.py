@@ -90,6 +90,20 @@ def response(victim, ports, chunk, length=None):
     return [*sources, fragment_rule(victim)]
 
 
+def admission(rules, ranked):
+    """ADR 028 admission order of response(): the chunk holding the detector's
+    top-ranked port, then the fragment rule, then the other chunks by their
+    best-ranked port. Chunk contents, and so rule identities, do not change.
+    """
+
+    def best(rule):
+        return min(ranked.index(int(port.lstrip("="))) for port in rule["srcp"].split(","))
+
+    chunks = sorted((r for r in rules if "srcp" in r), key=best)
+    fragments = [r for r in rules if "srcp" not in r]
+    return [*chunks[:1], *fragments, *chunks[1:]]
+
+
 def over_limit(rules):
     """Rules whose source-port component has more values than FRR accepts."""
     return [r for r in rules if r.get("srcp", "").count(",") >= FRR_MAX_VALUES]
@@ -144,10 +158,14 @@ class AmplificationLab(Lab):
         return lambda: [self.unban(victim, f"{prefix}-{victim}") for victim in victims]
 
     def check_rules(self, mitigation_ids, expected):
-        """prefixd's view: one mitigation per expected rule, in playbook order, with its action."""
+        """prefixd's view: one mitigation per expected rule, in admission order,
+        with its source ports, fragment match and action."""
         assert len(mitigation_ids) == len(expected), (mitigation_ids, expected)
         for mitigation_id, rule in zip(mitigation_ids, expected, strict=True):
             detail = self.api("GET", f"/v1/mitigations/{mitigation_id}")
+            ports = [int(p.lstrip("=")) for p in rule["srcp"].split(",")] if "srcp" in rule else []
+            assert detail["src_ports"] == ports, (detail, rule)
+            assert detail["fragment"] == ("non_first" if "pktfrag" in rule else None), detail
             assert detail["action_type"] == ("discard" if "srcp" in rule else "police"), detail
 
     def controls(self, label, expected):
@@ -312,7 +330,9 @@ class AmplificationLab(Lab):
         def announce():
             ids = {victim: self.ban(victim, ntp_memcached, f"amp-{victim}") for victim in (v4, v6)}
             for victim, mitigation_ids in ids.items():
-                self.check_rules(mitigation_ids, response(victim, ntp_memcached, 8))
+                self.check_rules(
+                    mitigation_ids, admission(response(victim, ntp_memcached, 8), ntp_memcached)
+                )
             return ids
 
         self.step("ntp-memcached", announce, pair)
@@ -343,13 +363,16 @@ class AmplificationLab(Lab):
             chunked
         )  # 5 + 5 + 5 + 5 source ports, plus the fragment rule, per family
 
+        # Ranked highest port first: admission leads with the 5683-37810 chunk,
+        # while FRR still holds the same four sorted chunks.
+        ranked = list(reversed(LIBRARY))
+
         def chunk():
-            ids = {
-                victim: self.ban(victim, list(reversed(LIBRARY)), f"chunk-{victim}")
-                for victim in (c4, c6)
-            }
+            ids = {victim: self.ban(victim, ranked, f"chunk-{victim}") for victim in (c4, c6)}
             for victim, mitigation_ids in ids.items():
-                self.check_rules(mitigation_ids, response(victim, LIBRARY, FRR_MAX_VALUES))
+                self.check_rules(
+                    mitigation_ids, admission(response(victim, LIBRARY, FRR_MAX_VALUES), ranked)
+                )
 
         self.step("twenty-ports-chunked", chunk, chunked)
 
