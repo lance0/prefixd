@@ -549,6 +549,13 @@ upgrade rustbgpd before prefixd. GoBGP deployments skip the rustbgpd step.
    the configuration for the [rollback rules](#rollback).
 2. **Review the configuration.** An unchanged 0.20.0 `prefixd.yaml` loads,
    with these exceptions and changed defaults:
+   - Startup fails on any [removed key](../reference/configuration.md#removed-keys)
+     that 0.20.0 ignored with a warning: delete `escalation`,
+     `http.auth.ldap`, `http.auth.radius`, `timers.correlation_window_seconds`,
+     `observability.audit_log_path`, `observability.metrics_listen` and
+     `shutdown.preserve_announcements`.
+   - Startup fails when `bgp.gobgp_grpc` is set without `bgp.backend` or
+     `bgp.mode`. Add `bgp.backend: gobgp` to keep the GoBGP speaker.
    - With rustbgpd, `guardrails.max_ports` above 8 fails startup. The default
      is now 5, because FRR resets the session on a FlowSpec component with
      more than five values; an explicit value is kept.

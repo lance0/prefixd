@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.21.0] - 2026-10-20
+## [0.21.0] - 2026-10-21
 
 prefixd 0.21.0 adds blackhole host routes on rustbgpd, created by Admins or by
 allowlisted detectors, with frozen routes, separate quotas, safelist rechecks,
@@ -18,6 +18,8 @@ driven by a new `udp_amplification` vector and detector source-port reports.
 A PostgreSQL advisory lock keeps a second controller for the same POP in
 standby, and the new `GET /v1/ready` tells load balancers which controller
 holds it. rustbgpd 0.79.0 is now required: upgrade it before prefixd.
+Startup now refuses the configuration keys removed in 0.20.0, and requires
+`bgp.backend` whenever `bgp.gobgp_grpc` is set.
 
 ### Upgrade notes
 
@@ -26,6 +28,11 @@ holds it. rustbgpd 0.79.0 is now required: upgrade it before prefixd.
   in the upgrade guide: upgrade rustbgpd first, then replace the controller.
   Migrations 016–018 apply on first start, and no adoption step is needed.
   Leased modes stay off until you set them.
+- `prefixd.yaml` now fails to load if it contains a key removed in 0.20.0, or
+  sets `bgp.gobgp_grpc` without `bgp.backend` (or `bgp.mode`). 0.20.0 ignored
+  both with a warning. Before upgrading, delete the removed keys and add
+  `bgp.backend: gobgp` where needed; see
+  [removed keys](https://github.com/lance0/prefixd/blob/v0.21.0/docs/reference/configuration.md#removed-keys).
 - rustbgpd 0.79.0 is now the minimum speaker version. Upgrade rustbgpd to
   0.79.0 before upgrading prefixd: with the rustbgpd backend, startup reads
   the daemon version and refuses an older or unreadable one ("upgrade the
@@ -116,11 +123,6 @@ holds it. rustbgpd 0.79.0 is now required: upgrade it before prefixd.
   [RPKI filters](https://github.com/lance0/prefixd/blob/v0.21.0/docs/reference/configuration.md#blackhole).
 - A `PUT /v1/config/playbooks` body that does not decode now returns `400`
   with `{"errors": [reason]}` instead of an empty body.
-- `prefixd.yaml` now fails to load if it contains a key removed in 0.20.0, or
-  sets `bgp.gobgp_grpc` without `bgp.backend` (or `bgp.mode`). 0.20.0 ignored
-  both with a warning. Before upgrading, delete the removed keys and add
-  `bgp.backend: gobgp` where needed; see
-  [removed keys](docs/reference/configuration.md#removed-keys).
 
 ### Known limitations
 
