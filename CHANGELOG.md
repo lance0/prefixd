@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Check the Prometheus alert rules and run their promtool unit tests with
+  pinned Prometheus v3.15.0 in `just alerts`, `just gate` and a CI job. Nightly
+  and main-push Interop runs no longer cancel each other; a newer PR commit
+  still cancels its superseded Interop run.
 - Run the FRR blackhole scenario with rustbgpd and amplification scenarios with
   both speakers in Interop CI alongside FlowSpec, retaining separate receipts
   for each speaker, scenario and workflow attempt, including failed runs.

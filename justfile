@@ -2,6 +2,7 @@
 export RUSTUP_AUTO_INSTALL := "0"
 msrv_toolchain := "1.89.0"
 ruff_version := "0.16.0"
+prometheus_image := "prom/prometheus:v3.15.0"
 
 # Show the focused checks.
 default:
@@ -11,6 +12,7 @@ default:
 gate:
     just fmt
     just python
+    just alerts
     just proto
     just clippy
     just test
@@ -29,6 +31,11 @@ fmt:
 python:
     uvx ruff@{{ruff_version}} check .
     uvx ruff@{{ruff_version}} format --check .
+
+# Validate the Prometheus alert rules and run their unit tests with pinned promtool.
+alerts:
+    docker run --rm ${PREFIXD_TEST_CPUSET:+--cpuset-cpus "$PREFIXD_TEST_CPUSET"} -v "$PWD/grafana:/rules:ro" --entrypoint promtool {{prometheus_image}} check rules /rules/prometheus-alerts.yml
+    docker run --rm ${PREFIXD_TEST_CPUSET:+--cpuset-cpus "$PREFIXD_TEST_CPUSET"} -v "$PWD/grafana:/rules:ro" --entrypoint promtool {{prometheus_image}} test rules /rules/prometheus-alerts.test.yml
 
 # Offline: the pinned rustbgpd proto must match its release checksum asset.
 [working-directory: "proto"]

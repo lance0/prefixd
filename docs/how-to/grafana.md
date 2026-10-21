@@ -115,7 +115,8 @@ speaker. Restarting prefixd expires overdue blackholes, and startup
 reconciliation removes routes left behind by terminal rows. A blackhole
 withdrawn by hand on the speaker must also be withdrawn in prefixd once it
 returns, or reconciliation re-announces it until its TTL passes. Check the
-rules and their unit tests with a pinned Prometheus image:
+rules and their unit tests with a pinned Prometheus image. `just alerts`, part
+of `just gate` and CI, runs the same commands:
 
 ```bash
 docker run --rm -v "$PWD/grafana:/rules:ro" --entrypoint promtool \

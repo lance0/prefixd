@@ -196,6 +196,20 @@ jobs:
       - name: Lint all backend features
         run: just clippy-all
 
+  alerts:
+    name: Alert rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
+
+      - name: Check and test Prometheus alert rules
+        run: just alerts
+
   build:
     name: Build
     runs-on: ubuntu-latest
