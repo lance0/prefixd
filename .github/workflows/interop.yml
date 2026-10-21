@@ -45,9 +45,10 @@ on:
     - cron: "23 4 * * *"
   workflow_dispatch:
 
+# Only a newer PR commit supersedes a run; nightly and main pushes never cancel each other.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

@@ -141,9 +141,10 @@ can't be dry-run.
 
 Check these on the release candidate before opening the release PR:
 
-- [ ] `just gate` passes. It runs formatting, both Clippy and test feature sets,
-      MSRV, the release build, the dashboard checks, advisories, cargo-deny and
-      the speaker fixtures. Record the command and its result in the release PR.
+- [ ] `just gate` passes. It runs formatting, the alert rule tests, both Clippy
+      and test feature sets, MSRV, the release build, the dashboard checks,
+      advisories, cargo-deny and the speaker fixtures. Record the command and
+      its result in the release PR.
 - [ ] All rustbgpd fixture pins pass. `just gate` runs them through
       `just speakers`. To rerun them alone:
 

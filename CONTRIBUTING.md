@@ -71,8 +71,8 @@ scripts/test-gobgp.sh
 ### Local verification
 
 Run `just gate` before opening a PR with substantive code changes. It runs
-Rust and Python formatting, Python lint, the pinned rustbgpd proto checksum,
-both locked Rust test
+Rust and Python formatting, Python lint, the Prometheus alert rules and their
+promtool tests, the pinned rustbgpd proto checksum, both locked Rust test
 and Clippy feature combinations, minimum-compiler checks, the release build,
 frozen dashboard install/types/tests/build, advisory checks and the owned GoBGP
 and rustbgpd 0.79.0 fixtures, sequentially. It needs Docker and the tools
@@ -88,7 +88,8 @@ remain visible.
 The gate preserves caller `CARGO_BUILD_JOBS` and `CARGO_TARGET_DIR`. On a shared
 host, allocate CPUs and set existing worker controls such as
 `VITEST_MAX_WORKERS` before starting it; `PREFIXD_TEST_CPUSET` separately
-restricts the owned speaker containers. Coordinate other builds yourself.
+restricts the owned speaker and promtool containers. Coordinate other builds
+yourself.
 
 This manual gate is broader than the optional hooks below. Image builds and
 publication, release/SBOM operations, long labs, performance/fuzz work and
