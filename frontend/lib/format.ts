@@ -33,7 +33,8 @@ export function formatPps(pps: number | null | undefined): string {
   return isReported(pps) ? scaled(pps, PPS_UNITS) : MISSING
 }
 
-export const DISPLAY_TIME_ZONES = ["UTC", ...Intl.supportedValuesOf("timeZone")]
+// JavaScriptCore lists UTC in supportedValuesOf; V8 does not. Keep exactly one, first.
+export const DISPLAY_TIME_ZONES = ["UTC", ...Intl.supportedValuesOf("timeZone").filter(zone => zone !== "UTC")]
 const supportedTimeZones = new Set(DISPLAY_TIME_ZONES)
 const dateFormatters = new Map<string, Intl.DateTimeFormat>()
 

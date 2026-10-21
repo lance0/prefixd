@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { MISSING, displayDateKey, formatBps, formatClock, formatPps, formatRelative, formatTimeRemaining, formatTimestamp, formatTimestampTick, isDisplayTimeZone } from "@/lib/format"
 
 const nbsp = "\u00a0"
@@ -140,5 +140,20 @@ describe("selected display timezone", () => {
     expect(formatRelative(value, now)).toBe("in 1h")
     expect(formatTimeRemaining(value, now)).toBe("1h 5m")
     expect(Date.parse(value)).toBe(instant)
+  })
+})
+
+describe("DISPLAY_TIME_ZONES", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+
+  it("lists UTC once and first when the engine already includes it", async () => {
+    vi.spyOn(Intl, "supportedValuesOf").mockReturnValue(["America/New_York", "UTC", "Europe/London"])
+    vi.resetModules()
+    const { DISPLAY_TIME_ZONES } = await import("@/lib/format")
+
+    expect(DISPLAY_TIME_ZONES).toEqual(["UTC", "America/New_York", "Europe/London"])
   })
 })
