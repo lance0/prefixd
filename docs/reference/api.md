@@ -2691,7 +2691,9 @@ rows of active enforced blackholes by `committed`, `withheld` and `pending`;
 `prefixd_blackhole_unexported{reason}` counts blackholes committed to no
 Established peer by the `warning.reason` values above; and
 `prefixd_blackhole_export_read_errors` counts blackholes whose read failed.
-`committed` is Adj-RIB-Out state, not enforcement. The shipped
+The peer and reason gauges count current evidence only: a blackhole whose
+evidence is `historical` counts as a read error, while health and detail keep
+its retained rows. `committed` is Adj-RIB-Out state, not enforcement. The shipped
 [`PrefixdBlackholeNotExported`](../how-to/grafana.md#export-alerts) alert uses
 the reason gauge.
 

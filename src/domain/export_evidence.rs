@@ -315,6 +315,16 @@ impl ExportEvidenceStore {
     }
 
     pub fn summary(&self, epoch: Option<u64>) -> BlackholeExportSummary {
+        self.summarize(epoch, true)
+    }
+
+    /// The summary for metrics: historical routes still count as read errors,
+    /// but their counts and warnings are not presented as current.
+    pub fn current_summary(&self, epoch: Option<u64>) -> BlackholeExportSummary {
+        self.summarize(epoch, false)
+    }
+
+    fn summarize(&self, epoch: Option<u64>, with_historical: bool) -> BlackholeExportSummary {
         let snapshot = self.0.read().unwrap_or_else(|poison| poison.into_inner());
         let mut summary = BlackholeExportSummary {
             historical: snapshot.observed_at.is_some() && snapshot.epoch != epoch,
@@ -324,11 +334,15 @@ impl ExportEvidenceStore {
         };
         for (id, stored) in &snapshot.routes {
             let evidence = &stored.evidence;
-            summary.historical |= epoch != Some(stored.epoch);
+            let historical = epoch != Some(stored.epoch);
+            summary.historical |= historical;
             match evidence.status {
                 ExportObservation::Error => summary.errors += 1,
                 ExportObservation::NoLocalRoute => summary.no_local_route += 1,
                 _ => {}
+            }
+            if historical && !with_historical {
+                continue;
             }
             summary.counts.committed += evidence.counts.committed;
             summary.counts.withheld += evidence.counts.withheld;

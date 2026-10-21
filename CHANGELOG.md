@@ -30,8 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ownership is lost, including after ownership returns until a fresh complete
   read. Detail preserves historical peer rows and their timestamp on a failed
   refresh; health and the interface no longer present them as current export.
+- Historical blackhole export evidence no longer feeds
+  `prefixd_blackhole_export_peers` or `prefixd_blackhole_unexported`, so a
+  failed refresh after ownership returns cannot report the previous owner's
+  committed peers or keep `PrefixdBlackholeNotExported` firing; it counts as a
+  read error until a fresh complete read.
 - Rotate blackhole export reads between reconciliation passes so the shared
   observation budget does not repeatedly leave the same mitigations unread.
+  Each pass resumes at the first read the budget cut off, so every blackhole
+  is read within as many passes as it takes the budget to cover the set.
 - Blackhole export-policy warnings now direct operators to the speaker's export
   policy without guessing that RPKI validation caused the denial.
 
