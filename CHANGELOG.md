@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-10-22
+
+prefixd 0.22.1 makes `PrefixdBlackholeReplaced` clear an hour after the last
+replacement instead of latching until prefixd restarts, and exports the
+pre-registered metric series at zero from startup, as the metrics reference
+already described. It adds no migration, keeps rustbgpd 0.79.0 and loads an
+unchanged 0.22.0 configuration.
+
+### Upgrade notes
+
+- Follow
+  [v0.22.0 → 0.22.1](https://github.com/lance0/prefixd/blob/v0.22.1/docs/how-to/upgrading.md#v0220--0221)
+  in the upgrade guide: replace the controller and dashboard, then copy the
+  new `grafana/prometheus-alerts.yml` to your Prometheus or recreate the
+  Compose Prometheus. No migration or adoption step runs, the configuration is
+  unchanged and rustbgpd stays at 0.79.0.
+
+### Known limitations
+
+- TTL expiry needs the running controller. Unleased FlowSpec rules and
+  blackholes stay announced if prefixd stops while the speaker stays up; the
+  leased modes, which bound that to one lease, are opt-in and rustbgpd-only.
+- The replacement counter is local to the process. A restart resets it
+  without firing or clearing a replacement still inside the alert's hour, and
+  a replacement before Prometheus first scrapes the process is not alerted.
+- The 0.22.0 known limitations otherwise still apply, except that
+  `PrefixdBlackholeReplaced` no longer latches.
+
 ### Changed
 
 - `PrefixdBlackholeReplaced` no longer latches until prefixd restarts. It fires
@@ -14,8 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one. prefixd exports `prefixd_blackhole_replaced_total{pop}` for its
   configured POP at zero from startup, so the first replacement fires the
   alert. Copy the new `grafana/prometheus-alerts.yml` to your Prometheus.
-  Startup now also exports the other pre-registered metric series at zero, as
-  the metrics reference already described.
+
+### Fixed
+
+- The controller now exports the pre-registered metric series, such as lease
+  renewal and state, export disposition, unexported reason and reconciliation
+  status, at zero from startup, as the metrics reference already described.
+  Before, each series appeared only at its first event.
 
 ## [0.22.0] - 2026-10-22
 
@@ -2226,7 +2259,8 @@ Startup now refuses the configuration keys removed in 0.20.0, and requires
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.22.1...HEAD
+[0.22.1]: https://github.com/lance0/prefixd/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/lance0/prefixd/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/lance0/prefixd/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/lance0/prefixd/compare/v0.19.1...v0.20.0

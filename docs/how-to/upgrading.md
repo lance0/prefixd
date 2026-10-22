@@ -1,8 +1,9 @@
 # Upgrade Guide
 
-Upgrading a v0.21.0 deployment? Follow [v0.21.0 → 0.22.0](#v0210--0220).
-From v0.20.0, follow [v0.20.0 → 0.21.0](#v0200--0210) first, and from
-v0.19.1, [v0.19.1 → 0.20.0](#v0191--0200) before that.
+Upgrading a v0.22.0 deployment? Follow [v0.22.0 → 0.22.1](#v0220--0221).
+From v0.21.0, follow [v0.21.0 → 0.22.0](#v0210--0220) first; from v0.20.0,
+[v0.20.0 → 0.21.0](#v0200--0210) before that; and from v0.19.1,
+[v0.19.1 → 0.20.0](#v0191--0200) before that.
 
 ## General Principles
 
@@ -537,6 +538,90 @@ prefixdctl migrations
 ---
 
 ## Version-Specific Notes
+
+### v0.22.0 → 0.22.1
+
+This patch replaces the controller, the dashboard and the alert rules. It adds
+no migration and needs no adoption step, and the configuration is unchanged: a
+0.22.0 `prefixd.yaml` loads as it is. rustbgpd stays at 0.79.0, and GoBGP is
+unchanged. Keep the POP, speaker target and `mode` unchanged.
+
+#### Before you start
+
+1. **Back up PostgreSQL** and keep the 0.22.0 image or binaries for the
+   [rollback rules](#rollback).
+2. **Update your alert rules.** `PrefixdBlackholeReplaced` now fires on
+   `increase(prefixd_blackhole_replaced_total[1h]) > 0` and clears an hour
+   after the last replacement, instead of latching until prefixd restarts. If
+   your Prometheus loads its own copy of `grafana/prometheus-alerts.yml`, copy
+   the new one after the upgrade; see the
+   [replacement conflict alert](grafana.md#replacement-conflict-alert).
+3. **Expect new zero series.** 0.22.1 exports
+   `prefixd_blackhole_replaced_total{pop}` for the configured POP, and the
+   other pre-registered series such as lease renewals and reconciliation
+   status, at zero from startup. 0.22.0 exported each only after its first
+   event.
+
+#### Compose
+
+Run these in the deployment's checkout, keeping your configuration files and
+image references:
+
+```bash
+# 1. Back up the database
+docker compose exec -T postgres pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+
+# 2. Update the checkout; rustbgpd stays pinned at 0.79.0
+git fetch --tags && git checkout v0.22.1
+
+# 3. Pin and pull the 0.22.1 controller and dashboard
+export PREFIXD_IMAGE=ghcr.io/lance0/prefixd:0.22.1
+export PREFIXD_DASHBOARD_IMAGE=ghcr.io/lance0/prefixd-dashboard:0.22.1
+docker compose --profile rustbgpd pull prefixd-rustbgpd dashboard
+
+# 4. Replace the controller and dashboard; rustbgpd keeps its routes
+docker compose --profile rustbgpd up -d --no-deps --no-build prefixd-rustbgpd dashboard
+
+# 5. Recreate Prometheus to load the new alert rules
+docker compose up -d --no-deps --force-recreate prometheus
+```
+
+Keep both variables set for later Compose commands, or put them in `.env`.
+For GoBGP, use profile `gobgp` and service `prefixd-gobgp`.
+
+#### Bare metal
+
+```bash
+pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+git fetch --tags && git checkout v0.22.1
+cargo build --release --locked
+sudo systemctl stop prefixd
+sudo cp target/release/prefixd target/release/prefixdctl /usr/local/bin/
+sudo systemctl start prefixd
+```
+
+Then copy `grafana/prometheus-alerts.yml` to your Prometheus and reload it.
+
+#### Check the 0.22.1 upgrade
+
+Run the [0.21.0 checks](#check-the-upgrade) with the 0.22.1 controller. The
+migration list is unchanged, so startup still logs `versions: [1, ..., 18]`,
+and the grep for repairs and failures should print nothing from the 0.22.1
+controller. Right after startup, the configured POP's replacement counter is
+exported at zero:
+
+```bash
+docker compose exec prometheus wget -qO- http://prefixd:8080/metrics \
+  | grep '^prefixd_blackhole_replaced_total'
+# Expect: prefixd_blackhole_replaced_total{pop="<your pop>"} 0
+```
+
+#### Downgrading to 0.22.0
+
+0.22.1 adds no migration and no stored field, so a 0.22.0 controller runs on
+its database. Follow the [rollback](#rollback) steps, and restore the 0.22.0
+alert file too: 0.22.0 exports the POP's series only at its first replacement,
+so the 0.22.1 rule misses the first replacement after each 0.22.0 start.
 
 ### v0.21.0 → 0.22.0
 
