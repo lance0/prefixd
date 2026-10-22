@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-22
+
+prefixd 0.22.0 lets operators choose the dashboard's display timezone, counts
+and alerts on unleased blackhole admissions that replaced an untracked local
+route, and marks blackhole export evidence retained from before a lost
+controller fence as historical so health, metrics and the interface no longer
+present it as current. It adds no migration, keeps rustbgpd 0.79.0 and loads an
+unchanged 0.21.0 configuration.
+
+### Upgrade notes
+
+- Follow
+  [v0.21.0 → 0.22.0](https://github.com/lance0/prefixd/blob/v0.22.0/docs/how-to/upgrading.md#v0210--0220)
+  in the upgrade guide: replace the controller and dashboard. No migration or
+  adoption step runs, the configuration is unchanged and rustbgpd stays at
+  0.79.0.
+- Copy the new `grafana/prometheus-alerts.yml` to your Prometheus, or recreate
+  the Compose Prometheus. It adds `PrefixdBlackholeReplaced` on the new
+  `prefixd_blackhole_replaced_total{pop}` counter and rewords the
+  `export_policy` text of `PrefixdBlackholeNotExported`.
+- With rustbgpd, mitigation `export_evidence` and health detail's
+  `speaker.blackhole_exports` add `historical`. After the controller loses and
+  regains its fence, `GET /v1/health/detail` reports `degraded` until a fresh
+  complete read replaces each retained blackhole's evidence. Automation that
+  treats `degraded` as a database or speaker fault should read
+  `speaker.blackhole_exports.historical`. `/v1/ready` is unchanged.
+
+### Known limitations
+
+- TTL expiry needs the running controller. Unleased FlowSpec rules and
+  blackholes stay announced if prefixd stops while the speaker stays up; the
+  leased modes, which bound that to one lease, are opt-in and rustbgpd-only.
+- `PrefixdBlackholeReplaced` latches: the counter is local to the process, so
+  the alert keeps firing until prefixd restarts or the alert is silenced. It
+  records a past replacement, not an active conflict.
+- The 0.21.0 known limitations otherwise still apply.
+
 ### Added
 
 - Choose a dashboard display timezone in Preferences. The browser-local choice
@@ -32,8 +69,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Retained blackhole export evidence is explicitly historical after controller
   ownership is lost, including after ownership returns until a fresh complete
-  read. Detail preserves historical peer rows and their timestamp on a failed
-  refresh; health and the interface no longer present them as current export.
+  read. Mitigation `export_evidence` and `speaker.blackhole_exports` report it
+  with `historical: true`, and health detail is `degraded` while it remains
+  after ownership returns. Detail preserves historical peer rows and their
+  timestamp on a failed refresh; health and the interface no longer present
+  them as current export. An observation that spans an ownership loss is
+  discarded.
 - Historical blackhole export evidence no longer feeds
   `prefixd_blackhole_export_peers` or `prefixd_blackhole_unexported`, so a
   failed refresh after ownership returns cannot report the previous owner's
@@ -2175,7 +2216,8 @@ Startup now refuses the configuration keys removed in 0.20.0, and requires
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/lance0/prefixd/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/lance0/prefixd/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/lance0/prefixd/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/lance0/prefixd/compare/v0.19.0...v0.19.1

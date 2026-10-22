@@ -2402,7 +2402,7 @@ dependencies = [
 
 [[package]]
 name = "prefixd"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "anyhow",
  "argon2",
