@@ -2644,15 +2644,13 @@ gauges.
 
 `prefixd_blackhole_replaced_total{pop}` counts unleased blackhole admission
 adds that returned `replaced`: an untracked local route appeared between the
-pre-read and add. It has only the configured POP label, and its POP series
-appears at the first replacement. Created, unchanged, leased and failed adds
+pre-read and add. It has only the configured POP label, and that series is
+exported at `0` from startup. Created, unchanged, leased and failed adds
 do not increment it. The counter records local RPC outcomes in this process,
 not a current-conflict gauge or router enforcement. The shipped
 [`PrefixdBlackholeReplaced`](../how-to/grafana.md#replacement-conflict-alert)
-alert fires on any positive value and stays firing until the process counter
-resets, including on restart. Audit and error logs identify the affected
-prefix; use normal alert triage and silencing rather than restarting just to
-clear this historical signal.
+alert fires when it increased in the last hour and clears about an hour after
+the last replacement. Audit and error logs identify the affected prefix.
 
 With [leased blackholes](configuration.md#leased-blackholes),
 `prefixd_injection_lease_renewals_total{result}` counts renewals by `success`,

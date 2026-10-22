@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
         mode = ?config.settings.mode,
         "starting prefixd"
     );
+    prefixd::observability::init_metrics(&config.settings.pop);
 
     // Init database
     // DATABASE_URL env var takes precedence over config file

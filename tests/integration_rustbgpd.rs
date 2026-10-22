@@ -560,7 +560,7 @@ async fn live_rustbgpd_restart_recovers_with_the_same_client_and_desired_state()
     );
     assert_eq!(speaker.list_active().await.unwrap().len(), 3);
 
-    metrics::init_metrics();
+    metrics::init_metrics(&settings.pop);
     let state = prefixd::AppState::new(
         settings,
         common::test_inventory(),

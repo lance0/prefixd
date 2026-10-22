@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `PrefixdBlackholeReplaced` no longer latches until prefixd restarts. It fires
+  on a replacement within the last hour and clears an hour after the last
+  one. prefixd exports `prefixd_blackhole_replaced_total{pop}` for its
+  configured POP at zero from startup, so the first replacement fires the
+  alert. Copy the new `grafana/prometheus-alerts.yml` to your Prometheus.
+  Startup now also exports the other pre-registered metric series at zero, as
+  the metrics reference already described.
+
 ## [0.22.0] - 2026-10-22
 
 prefixd 0.22.0 lets operators choose the dashboard's display timezone, counts

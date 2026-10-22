@@ -1506,7 +1506,7 @@ async fn test_config_settings_endpoint() {
 
 #[tokio::test]
 async fn metrics_remain_unauthenticated_on_the_private_api_listener() {
-    prefixd::observability::init_metrics();
+    prefixd::observability::init_metrics("test-pop");
     let mut state = AppState::new(
         test_settings(),
         test_inventory(),

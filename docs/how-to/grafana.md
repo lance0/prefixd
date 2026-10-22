@@ -147,16 +147,19 @@ replaced an untracked local route after its pre-read:
 
 | Alert | Fires when | Why it matters |
 | --- | --- | --- |
-| `PrefixdBlackholeReplaced` | `prefixd_blackhole_replaced_total{pop}` is above zero, including its first observed sample | An unleased add replaced a route that appeared between the ownership pre-read and add; another writer may be using this speaker |
+| `PrefixdBlackholeReplaced` | `increase(prefixd_blackhole_replaced_total{pop}[1h])` is above zero | An unleased add replaced a route that appeared between the ownership pre-read and add; another writer may be using this speaker |
 
-This is historical local-replacement evidence, not proof that a conflict
-remains active or that a router enforced the route. The counter is local to
-this process. The alert stays firing until it resets, normally on restart;
-it does not clear merely because no more replacements occur. Inspect the
-error log and `announce` audit entries for the affected prefix, check the
-speaker's current routes and other writers, and use normal Alertmanager
-triage or silencing. Do not restart just to clear this alert. Leased adds,
-created or unchanged outcomes and failed adds do not increment the counter.
+This is historical local-replacement evidence from the last hour, not proof
+that a conflict remains active or that a router enforced the route. prefixd
+exports the configured POP's series at zero from startup, so the first
+replacement fires the alert. It clears about an hour after the last
+replacement. The counter is local to the process: a restart resets it to zero
+without firing or clearing a replacement still inside the window. A
+replacement before Prometheus first scrapes the process is not alerted.
+Inspect the error log and `announce` audit entries for the affected prefix,
+check the speaker's current routes and other writers, and use normal
+Alertmanager triage. Leased adds, created or unchanged outcomes and failed
+adds do not increment the counter.
 
 ### Example rules
 

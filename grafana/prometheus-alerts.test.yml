@@ -124,53 +124,86 @@ tests:
               summary: "Active blackhole exported to no peer"
               description: "2 active blackhole(s) on a are committed to no Established peer, reason no_established_peer, so no router is sent them. Health detail lists each blackhole under speaker.blackhole_exports."
 
-  # Only the affected POP fires, and the historical signal stays latched even
-  # after five minutes without another replacement.
+  # Startup exports the series at zero, so the first replacement fires. Only
+  # the affected POP fires, and the alert clears once the last increase
+  # leaves the one-hour window.
   - interval: 1m
     input_series:
       - series: 'prefixd_blackhole_replaced_total{job="prefixd",instance="a",pop="pop-a"}'
-        values: '0x2 1x8'
+        values: '0x5 1x80'
       - series: 'prefixd_blackhole_replaced_total{job="prefixd",instance="b",pop="pop-b"}'
-        values: '0x11'
+        values: '0x85'
     alert_rule_test:
-      - eval_time: 2m
+      - eval_time: 5m
         alertname: PrefixdBlackholeReplaced
         exp_alerts: []
-      - eval_time: 3m
+      - eval_time: 6m
         alertname: PrefixdBlackholeReplaced
         exp_alerts:
           - exp_labels: {severity: critical, job: prefixd, instance: a, pop: pop-a}
             exp_annotations:
               summary: "Unleased blackhole replaced an untracked local route"
-              description: "prefixd on a at POP pop-a reported 1 unleased blackhole add(s) that replaced an untracked local route. This is historical replacement evidence, not proof of an active conflict or router enforcement. Inspect the error log and announce audit for the affected prefix and check other tools writing to this speaker. A positive process counter keeps this alert firing; triage or silence it as needed."
+              description: "prefixd on a at POP pop-a reported an unleased blackhole add that replaced an untracked local route in the last hour. This is historical replacement evidence, not proof of an active conflict or router enforcement. Inspect the error log and announce audit for the affected prefix and check other tools writing to this speaker. The alert clears an hour after the last replacement."
+      - eval_time: 64m
+        alertname: PrefixdBlackholeReplaced
+        exp_alerts:
+          - exp_labels: {severity: critical, job: prefixd, instance: a, pop: pop-a}
+            exp_annotations:
+              summary: "Unleased blackhole replaced an untracked local route"
+              description: "prefixd on a at POP pop-a reported an unleased blackhole add that replaced an untracked local route in the last hour. This is historical replacement evidence, not proof of an active conflict or router enforcement. Inspect the error log and announce audit for the affected prefix and check other tools writing to this speaker. The alert clears an hour after the last replacement."
+      - eval_time: 65m
+        alertname: PrefixdBlackholeReplaced
+        exp_alerts: []
+      - eval_time: 85m
+        alertname: PrefixdBlackholeReplaced
+        exp_alerts: []
+  # A restart resets the counter to zero. The reset itself is not a
+  # replacement: a counter left positive by a replacement more than an hour
+  # earlier never fires, before or after the restart.
+  - interval: 1m
+    input_series:
+      - series: 'prefixd_blackhole_replaced_total{job="prefixd",instance="a",pop="pop-a"}'
+        values: '1x70 0x30'
+    alert_rule_test:
       - eval_time: 10m
         alertname: PrefixdBlackholeReplaced
-        exp_alerts:
-          - exp_labels: {severity: critical, job: prefixd, instance: a, pop: pop-a}
-            exp_annotations:
-              summary: "Unleased blackhole replaced an untracked local route"
-              description: "prefixd on a at POP pop-a reported 1 unleased blackhole add(s) that replaced an untracked local route. This is historical replacement evidence, not proof of an active conflict or router enforcement. Inspect the error log and announce audit for the affected prefix and check other tools writing to this speaker. A positive process counter keeps this alert firing; triage or silence it as needed."
-  # The first observed sample can already be positive; no earlier zero or
-  # rate-window samples are needed to report a replacement.
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: PrefixdBlackholeReplaced
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: PrefixdBlackholeReplaced
+        exp_alerts: []
+  # A replacement shortly before a restart stays in the window across the
+  # reset, then clears with no new replacement.
   - interval: 1m
     input_series:
       - series: 'prefixd_blackhole_replaced_total{job="prefixd",instance="a",pop="pop-a"}'
-        values: '1x3'
+        values: '0x5 1x10 0x80'
     alert_rule_test:
-      - eval_time: 0m
+      - eval_time: 20m
         alertname: PrefixdBlackholeReplaced
         exp_alerts:
           - exp_labels: {severity: critical, job: prefixd, instance: a, pop: pop-a}
             exp_annotations:
               summary: "Unleased blackhole replaced an untracked local route"
-              description: "prefixd on a at POP pop-a reported 1 unleased blackhole add(s) that replaced an untracked local route. This is historical replacement evidence, not proof of an active conflict or router enforcement. Inspect the error log and announce audit for the affected prefix and check other tools writing to this speaker. A positive process counter keeps this alert firing; triage or silence it as needed."
-  # Zero is not a replacement.
+              description: "prefixd on a at POP pop-a reported an unleased blackhole add that replaced an untracked local route in the last hour. This is historical replacement evidence, not proof of an active conflict or router enforcement. Inspect the error log and announce audit for the affected prefix and check other tools writing to this speaker. The alert clears an hour after the last replacement."
+      - eval_time: 70m
+        alertname: PrefixdBlackholeReplaced
+        exp_alerts: []
+      - eval_time: 95m
+        alertname: PrefixdBlackholeReplaced
+        exp_alerts: []
+  # A series that stays at zero never fires.
   - interval: 1m
     input_series:
       - series: 'prefixd_blackhole_replaced_total{job="prefixd",instance="a",pop="pop-a"}'
-        values: '0x3'
+        values: '0x90'
     alert_rule_test:
-      - eval_time: 3m
+      - eval_time: 5m
+        alertname: PrefixdBlackholeReplaced
+        exp_alerts: []
+      - eval_time: 90m
         alertname: PrefixdBlackholeReplaced
         exp_alerts: []
   # Without a replacement series, enabling unleased detector blackholes
@@ -180,22 +213,6 @@ tests:
       - series: 'prefixd_blackhole_detector_unleased{job="prefixd",instance="a"}'
         values: '1x3'
     alert_rule_test:
-      - eval_time: 3m
-        alertname: PrefixdBlackholeReplaced
-        exp_alerts: []
-  # Process counter reset clears its historical signal.
-  - interval: 1m
-    input_series:
-      - series: 'prefixd_blackhole_replaced_total{job="prefixd",instance="a",pop="pop-a"}'
-        values: '1x2 0x3'
-    alert_rule_test:
-      - eval_time: 2m
-        alertname: PrefixdBlackholeReplaced
-        exp_alerts:
-          - exp_labels: {severity: critical, job: prefixd, instance: a, pop: pop-a}
-            exp_annotations:
-              summary: "Unleased blackhole replaced an untracked local route"
-              description: "prefixd on a at POP pop-a reported 1 unleased blackhole add(s) that replaced an untracked local route. This is historical replacement evidence, not proof of an active conflict or router enforcement. Inspect the error log and announce audit for the affected prefix and check other tools writing to this speaker. A positive process counter keeps this alert firing; triage or silence it as needed."
       - eval_time: 3m
         alertname: PrefixdBlackholeReplaced
         exp_alerts: []

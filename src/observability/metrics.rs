@@ -418,8 +418,10 @@ pub fn gather_metrics() -> String {
     String::from_utf8(buffer).unwrap()
 }
 
-/// Initialize all metrics (forces lazy statics to be created)
-pub fn init_metrics() {
+/// Initialize all metrics (forces lazy statics to be created). The configured
+/// POP's replacement counter is exported at zero so increase() sees its first
+/// replacement.
+pub fn init_metrics(pop: &str) {
     // Touch all lazy statics to initialize them
     Lazy::force(&crate::alerting::ALERTS_SENT);
     Lazy::force(&EVENTS_INGESTED);
@@ -435,7 +437,7 @@ pub fn init_metrics() {
     Lazy::force(&EVENT_RULE_QUOTA_REJECTIONS);
     Lazy::force(&CONTROLLER_FENCE_ACTIVE);
     Lazy::force(&BLACKHOLE_DETECTOR_UNLEASED);
-    Lazy::force(&BLACKHOLE_REPLACED);
+    BLACKHOLE_REPLACED.with_label_values(&[pop]);
     for result in ["success", "not_live", "error"] {
         INJECTION_LEASE_RENEWALS.with_label_values(&[result]);
     }
@@ -485,4 +487,14 @@ pub fn update_db_pool_metrics(pool: &sqlx::PgPool) {
     DB_POOL_SIZE.with_label_values(&["active"]).set(active);
     DB_POOL_SIZE.with_label_values(&["idle"]).set(idle);
     DB_POOL_SIZE.with_label_values(&["total"]).set(size);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn init_exports_the_configured_pop_replacement_counter_at_zero() {
+        super::init_metrics("init-zero-pop");
+        let expected = r#"prefixd_blackhole_replaced_total{pop="init-zero-pop"} 0"#;
+        assert!(super::gather_metrics().lines().any(|line| line == expected));
+    }
 }
