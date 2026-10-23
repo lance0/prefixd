@@ -553,7 +553,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
             </p>
             <p className="mt-2 text-xs text-muted-foreground">
               {Number.isInteger(Number(form.ttl)) && Number(form.ttl) > 0
-                ? `Expires ${Number(form.ttl)} seconds after creation. ` : "Set a valid TTL. "}
+                ? `Requested lifetime: ${Number(form.ttl)} seconds. ` : "Set a valid TTL. "}
               {form.action === "police" ? "The rate applies to the matching flow, across the whole destination. " : ""}
               Router enforcement is unobserved. Expiry needs the running controller.
             </p>

@@ -257,7 +257,7 @@ describe("manual rule dialog", () => {
     fill(/^Rate/, "8000000")
     const preview = screen.getByRole("region", { name: "Rule preview" })
     expect(preview).toHaveTextContent("match destination 203.0.112.0/22 protocol udp destination-port 443 then rate-limit 8.0 Mbps")
-    expect(preview).toHaveTextContent("Expires 300 seconds after creation")
+    expect(preview).toHaveTextContent("Requested lifetime: 300 seconds")
     expect(preview).toHaveTextContent("across the whole destination")
     fill(/^Destination ports/, "invalid")
     expect(preview).toHaveTextContent("Complete the match fields to preview the rule")
