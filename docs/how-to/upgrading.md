@@ -283,6 +283,21 @@ ordinary idempotent TTL cleanup retires each row. New manual creation rejects
 an owned canonical scope before RPC; detector events extend exactly one owner
 and reject ambiguous ownership without consuming their external event ID.
 
+## Manual destination CIDRs and downgrade
+
+Manual FlowSpec discard and police requests can use destination CIDRs after an
+operator relaxes the existing [prefix bounds](../reference/configuration.md#guardrails).
+Defaults and detector/playbook destinations remain host-only. No database
+migration or new speaker version is required for this target form.
+
+Prefix bounds apply to new admission. Tightening them does not withdraw saved
+CIDR intent; repair still checks current whole-prefix ownership and safelist
+overlap. To return to host-only operation or downgrade to a controller without
+these checks, pause subnet creation, withdraw every live non-host destination
+with the current controller and drain pending withdrawals first. Verify removal
+from the original speaker before stopping the controller. A database terminal
+status or local speaker read-back does not establish router cleanup.
+
 ## Source-prefix matches and downgrade
 
 The next release adds optional `src_prefix` to manual FlowSpec matches. No
