@@ -13,6 +13,11 @@ withdrawal with the original actor and reason, and absence of the rule
 afterwards. Its documentation peers stayed Idle, so it says nothing about
 router export or enforcement.
 
+For an existing active enforced FlowSpec rule, use the detail page's **Extend
+lifetime** action instead of creating another rule. It rechecks current safety
+policy and records the operator's reason and old/new expiry. See
+[Extend a mitigation](../how-to/extending-mitigations.md).
+
 ## 1. Sign in
 
 Start the stack and create an administrator with the [quickstart](../tutorials/quickstart.md).
@@ -43,7 +48,8 @@ The controller returns `422` before it saves intent or calls the speaker:
 {"error":"guardrail violation: IP 10.0.0.5/32 is safelisted"}
 ```
 
-A TTL outside 30 to 1800 seconds, more than 8 ports or a full quota fails the
+A TTL outside 30 to 1800 seconds, more ports than `guardrails.max_ports`
+(default 5), or a full quota fails the
 same way. See [guardrails](../reference/configuration.md#guardrails).
 
 ### Optional: check admission without saving intent

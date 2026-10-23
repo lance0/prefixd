@@ -1,3 +1,8 @@
+mod lifetime;
+pub use lifetime::{
+    __path_extend_mitigation, ExtendMitigationRequest, ExtendMitigationResponse, extend_mitigation,
+};
+
 mod accounts;
 pub use accounts::{
     __path_change_password, __path_create_operator, __path_delete_operator, __path_get_me,

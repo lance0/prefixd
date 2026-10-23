@@ -271,6 +271,13 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
   return doFetch<T>(url, { ...options, headers })
 }
 
+/** HTTP errors use the existing API error prefix; transport errors have no status. */
+export function apiErrorStatus(error: Error): number | null {
+  const match = /^API error (\d{3}):/.exec(error.message)
+
+  return match ? Number(match[1]) : null
+}
+
 /** True only for a 404 from the API, so a failed request is never shown as "not found". */
 export function isNotFound(error: Error): boolean {
   return error.message.startsWith("API error 404:")
@@ -598,6 +605,20 @@ export async function createMitigation(request: CreateFlowSpecRequest): Promise<
   return fetchApi<Mitigation>("/v1/mitigations", {
     method: "POST",
     body: JSON.stringify(request),
+  })
+}
+
+export interface ExtendMitigationResponse {
+  extended: boolean
+  previous_expires_at: string
+  mitigation: Mitigation
+}
+
+/** Update saved lifetime only; router enforcement remains independently observed. */
+export async function extendMitigation(id: string, ttl_seconds: number, reason: string): Promise<ExtendMitigationResponse> {
+  return fetchApi<ExtendMitigationResponse>(`/v1/mitigations/${encodeURIComponent(id)}/extend`, {
+    method: "POST",
+    body: JSON.stringify({ ttl_seconds, reason }),
   })
 }
 

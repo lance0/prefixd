@@ -57,6 +57,13 @@ impl Guardrails {
         repo: &dyn RepositoryTrait,
         is_safelisted: bool,
     ) -> Result<()> {
+        self.validate_rule(intent, is_safelisted)?;
+        self.validate_quotas(intent, repo).await
+    }
+
+    /// Pure admission checks reused when an operator increases an existing rule's
+    /// exposure. Quota and new-admission accounting belong to creation alone.
+    pub fn validate_rule(&self, intent: &MitigationIntent, is_safelisted: bool) -> Result<()> {
         (FlowSpecAction {
             action_type: intent.action_type,
             rate_bps: intent.action_params.rate_bps,
@@ -83,9 +90,6 @@ impl Guardrails {
 
         // Check ADR 028 match invariants and opt-ins
         self.validate_match(&intent.match_criteria)?;
-
-        // Check quotas
-        self.validate_quotas(intent, repo).await?;
 
         Ok(())
     }

@@ -926,6 +926,75 @@ evidence that a router installed or enforces the route. Withdraw a blackhole
 with the ordinary [withdraw](#withdraw-mitigation) and
 [bulk withdraw](#bulk-withdraw-mitigations) endpoints.
 
+### Extend FlowSpec Lifetime
+
+```http
+POST /v1/mitigations/{id}/extend
+Content-Type: application/json
+
+{"ttl_seconds":600,"reason":"Attack continues; retain the existing filter"}
+```
+
+Requires Operator or Admin access. `reason` must contain non-whitespace text and
+fit within 1,024 UTF-8 bytes; the actor comes from authentication. Unknown fields
+are refused. `ttl_seconds` must be positive and within the current effective TTL
+bounds, including when `guardrails.require_ttl` is false. It means remaining
+lifetime from the database update time, **not** seconds added to the old expiry.
+The update is monotonic: an already sufficient expiry returns `extended: false`
+without changing `updated_at` or writing an extension audit entry. A reason is
+still required for that check.
+
+**Response (200):**
+
+```json
+{
+  "extended": true,
+  "previous_expires_at": "2026-10-23T12:02:00Z",
+  "mitigation": {
+    "mitigation_id": "550e8400-e29b-41d4-a716-446655440000",
+    "expires_at": "2026-10-23T12:10:00Z"
+  }
+}
+```
+
+The nested `mitigation` is the complete ordinary mitigation response; only
+relevant fields are shown above. Extension updates expiry and revision atomically
+with an `extend` audit entry containing authenticated actor, reason, requested
+TTL and exact old/new expiry. It preserves the original creation reason and
+triggering/last event IDs, action/rate, injection owner, destination/source and
+all selectors. It creates no mitigation or quota slot, charges no new-rule rate,
+and sends no speaker add, withdrawal or lease renewal RPC.
+
+Only unexpired `active` or `escalated` ordinary discard/police intent on this POP,
+with enforced origin and a current enforced controller, is eligible. Detector-
+created rules are eligible too: “manual” describes the operator action.
+Pending, expired, withdrawn, blackhole, unknown-origin, simulated and foreign
+rules are refused. A pending withdrawal, changed revision, ambiguous ledger
+owner, changed speaker binding or lost controller fence also refuses the request.
+
+Current inventory must positively attribute the whole destination to the saved
+customer; a saved service must still agree. Unknown or unattributed legacy host
+rows cannot be extended. Current safelists, prefix bounds, ports, match opt-ins
+and speaker match support are checked afresh because extension creates longer
+exposure. Tightening an opt-in can therefore refuse extension of a saved rule,
+even where ordinary reconciliation retains its original admitted match. The
+creation-only `expires_at_cap` is not a permanent ceiling on later extension.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Extension saved, or explicit unchanged horizon |
+| 400 / 422 | Invalid reason/body, or current TTL/match/safelist policy refused |
+| 401 / 403 | Authentication or Operator access required |
+| 404 | No such mitigation |
+| 409 | Ineligible state, ownership/binding changed, or withdrawal pending |
+| 500 / 503 | Outcome unavailable or controller standby; refresh mitigation and audit before retry |
+
+Transport or commit errors can leave the result unknown to the caller. Refresh
+the mitigation and audit before retrying; do not assume the expiry stayed
+unchanged. A successful response is saved desired intent, not proof of speaker
+retention, export or router enforcement. Expiry still requires a running
+controller. See the [operator workflow](../how-to/extending-mitigations.md).
+
 ### Get Mitigation
 
 ```http

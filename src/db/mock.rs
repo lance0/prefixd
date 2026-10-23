@@ -43,6 +43,9 @@ pub struct MockRepository {
     /// Every active-mitigation inventory read fails.
     #[cfg(test)]
     pub fail_active_reads: std::sync::atomic::AtomicBool,
+    /// Simulate transactional audit failure before committing an expiry change.
+    #[cfg(test)]
+    pub fail_extension_audit: std::sync::atomic::AtomicBool,
     mitigations: Mutex<Vec<Mitigation>>,
     withdrawals: Mutex<Vec<WithdrawalRequest>>,
     safelist: Mutex<Vec<SafelistEntry>>,
@@ -93,6 +96,8 @@ impl MockRepository {
             fail_creation_rate_reads: Default::default(),
             #[cfg(test)]
             fail_active_reads: Default::default(),
+            #[cfg(test)]
+            fail_extension_audit: Default::default(),
             mitigations: Mutex::new(Vec::new()),
             withdrawals: Mutex::new(Vec::new()),
             safelist: Mutex::new(Vec::new()),
@@ -531,6 +536,87 @@ impl RepositoryTrait for MockRepository {
             .unwrap()
             .push(AuditEntry::mitigation_created(m, actor));
         Ok(())
+    }
+
+    async fn extend_flowspec_lifetime(
+        &self,
+        request: &crate::domain::LifetimeExtension,
+        fence: &crate::fence::ControllerFence,
+    ) -> Result<crate::domain::LifetimeExtensionOutcome> {
+        use crate::domain::LifetimeExtensionOutcome;
+        use crate::error::PrefixdError;
+
+        let bindings = self.speaker_bindings.lock().unwrap();
+        let mut mitigations = self.mitigations.lock().unwrap();
+        let withdrawals = self.withdrawals.lock().unwrap();
+        let safelist = self.safelist.lock().unwrap();
+        let mut audit = self.audit.lock().unwrap();
+        if bindings.pops.get(&request.expected.pop).copied() != request.target_id {
+            return Err(crate::domain::binding_mismatch());
+        }
+        let current = mitigations
+            .iter_mut()
+            .find(|m| m.mitigation_id == request.expected.mitigation_id)
+            .ok_or(PrefixdError::MitigationNotFound(
+                request.expected.mitigation_id,
+            ))?;
+        let now = Utc::now();
+        request.validate_current(current, now)?;
+        if withdrawals.iter().any(|withdrawal| {
+            withdrawal.mitigation_id == current.mitigation_id && withdrawal.completed_at.is_none()
+        }) {
+            return Err(PrefixdError::Conflict(
+                "mitigation has a pending withdrawal".into(),
+            ));
+        }
+        let destination =
+            crate::domain::parse_flowspec_destination(&current.match_criteria.dst_prefix)
+                .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+        for protected in safelist.iter() {
+            let prefix = protected
+                .prefix
+                .parse::<ipnet::IpNet>()
+                .or_else(|_| {
+                    protected
+                        .prefix
+                        .parse::<std::net::IpAddr>()
+                        .map(ipnet::IpNet::from)
+                })
+                .map_err(|_| PrefixdError::Internal("invalid stored safelist prefix".into()))?;
+            if prefix.contains(&destination) || destination.contains(&prefix) {
+                return Err(crate::domain::extension_safelisted(
+                    &destination.to_string(),
+                ));
+            }
+        }
+        let previous_expires_at = current.expires_at;
+        let proposed = now
+            .checked_add_signed(chrono::Duration::seconds(request.ttl_seconds.into()))
+            .ok_or_else(|| {
+                PrefixdError::InvalidRequest("lifetime horizon is out of range".into())
+            })?;
+        let extended = proposed > current.expires_at;
+        request.ensure_fence(fence)?;
+        #[cfg(test)]
+        if extended
+            && self
+                .fail_extension_audit
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(PrefixdError::Internal("extension audit unavailable".into()));
+        }
+        if extended {
+            let mut updated = current.clone();
+            updated.expires_at = proposed;
+            updated.updated_at = now;
+            audit.push(request.audit(&updated));
+            *current = updated;
+        }
+        Ok(LifetimeExtensionOutcome {
+            mitigation: current.clone(),
+            previous_expires_at,
+            extended,
+        })
     }
 
     async fn update_mitigation(&self, m: &Mitigation) -> Result<()> {

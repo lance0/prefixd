@@ -176,6 +176,18 @@ pub trait RepositoryTrait: Send + Sync {
         actor: &crate::observability::CreationActor,
     ) -> Result<()>;
     async fn update_mitigation(&self, m: &Mitigation) -> Result<()>;
+    /// Atomically extend an unchanged live FlowSpec row and its authenticated
+    /// audit. Implementations must recheck time, binding and pending withdrawal
+    /// after waiting for their mutation lock. An unchanged horizon writes nothing.
+    async fn extend_flowspec_lifetime(
+        &self,
+        _request: &crate::domain::LifetimeExtension,
+        _fence: &crate::fence::ControllerFence,
+    ) -> Result<crate::domain::LifetimeExtensionOutcome> {
+        Err(crate::error::PrefixdError::Internal(
+            "atomic lifetime extension is unsupported by this repository".into(),
+        ))
+    }
     async fn get_mitigation(&self, id: Uuid) -> Result<Option<Mitigation>>;
     async fn find_active_by_scope(&self, scope_hash: &str, pop: &str)
     -> Result<Option<Mitigation>>;

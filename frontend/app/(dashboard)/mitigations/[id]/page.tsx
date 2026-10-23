@@ -18,6 +18,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { formatBps, formatTimeRemaining } from "@/lib/format"
 import { useTimeFormat } from "@/components/time-zone-provider"
 import { FlowSpecPreview, describeMatch, formatFlowSpecRule } from "@/components/dashboard/flowspec-preview"
+import { ExtendLifetimeDialog } from "@/components/dashboard/extend-lifetime-dialog"
 import { IncidentReportDialog } from "@/components/dashboard/incident-report-dialog"
 import { withdrawMitigation, getIncidentReport, isNotFound, type Mitigation } from "@/lib/api"
 import { copyText } from "@/lib/clipboard"
@@ -240,6 +241,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                 <FileText className="size-4" aria-hidden="true" />
                 Report
               </Button>
+              <ExtendLifetimeDialog mitigation={mitigation} now={now} onUpdated={async () => { await mutate() }} />
               {permissions.canWithdraw && canWithdraw ? (
                 <Button
                   ref={withdrawTrigger}

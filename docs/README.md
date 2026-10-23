@@ -20,6 +20,7 @@ covers the daemon.
 |------------|-----------|
 | Run prefixd and rustbgpd on my machine | [Quickstart](tutorials/quickstart.md) |
 | Mitigate a target by hand and withdraw it | [Manual mitigation and withdrawal](cookbook/manual-mitigation.md) |
+| Keep an existing FlowSpec rule for longer | [Extend a mitigation](how-to/extending-mitigations.md) |
 | See what policy would do before it announces | [Dry-run rollout](cookbook/dry-run-rollout.md) |
 | Connect FastNetMon | [FastNetMon](how-to/detectors/fastnetmon.md) |
 | Connect a detector without a native adapter | [Generic webhooks](how-to/detectors/generic-webhook.md) |

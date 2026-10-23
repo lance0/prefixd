@@ -60,6 +60,10 @@ fn api_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/v1/mitigations/{id}", get(handlers::get_mitigation))
         .route(
+            "/v1/mitigations/{id}/extend",
+            post(handlers::extend_mitigation),
+        )
+        .route(
             "/v1/mitigations/withdraw",
             post(handlers::bulk_withdraw_mitigations),
         )

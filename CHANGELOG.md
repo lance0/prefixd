@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Preview database reads additionally use server-side deadlines and discarded
   connections to release blocked queries and shared pool capacity before retry.
 
+- Operators can extend an active enforced FlowSpec rule from its detail page or
+  `POST /v1/mitigations/{id}/extend`, with a required reason and atomic old/new
+  expiry audit. Remaining lifetime stays bounded and never shortens the saved
+  horizon; an unchanged horizon writes no revision or audit. Fresh ownership,
+  safelist, binding and match-policy checks protect the exact existing rule,
+  without creating another mitigation, consuming a quota slot or mutating the
+  speaker. Blackholes, simulations, pending and expired intent are refused.
+
 - Manual FlowSpec discard and police rules accept aligned IPv4/IPv6 destination
   CIDRs in `victim_ip` when operators deliberately relax existing prefix bounds.
   Whole-prefix customer ownership, all safelist overlaps and fresh repair checks
