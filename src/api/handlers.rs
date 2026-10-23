@@ -2227,7 +2227,8 @@ async fn admit_detector_blackhole(
     signal_group_id: Option<Uuid>,
 ) -> crate::error::Result<(Mitigation, Option<AnnouncementOutcome>)> {
     let binding = state.verified_speaker_binding()?;
-    // A snapshot, so a configuration reload never waits behind the speaker add.
+    // Do not hold the inventory RwLock across speaker RPCs. The lifecycle mutex
+    // serializes inventory replacement with this admission.
     let inventory = state.inventory.read().await.clone();
     let admission = crate::guardrails::admit_blackhole(
         state.repo.as_ref(),
@@ -2315,7 +2316,8 @@ async fn create_blackhole(
         ttl_seconds: req.ttl_seconds,
         reason: req.reason,
     };
-    // A snapshot, so a configuration reload never waits behind the speaker add.
+    // Do not hold the inventory RwLock across speaker RPCs. The lifecycle mutex
+    // serializes inventory replacement with this admission.
     let inventory = state.inventory.read().await.clone();
     let admission = match crate::guardrails::admit_blackhole(
         state.repo.as_ref(),
