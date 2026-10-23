@@ -156,8 +156,8 @@ jobs:
         with:
           just-version: "1"
 
-      - name: Install protobuf compiler and HTTP load-test tool
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler hey
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -189,18 +189,6 @@ jobs:
 
       - name: Lint and format-check Python
         run: just python
-
-      - name: Check load-script HTTP qualification
-        run: just test-load-script
-        env:
-          TMPDIR: ${{ runner.temp }}
-
-      - name: Retain load-script HTTP samples
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: load-script-http-samples-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/prefixd-load-selftest-*
 
       - name: Lint GoBGP fallback
         run: just clippy-gobgp

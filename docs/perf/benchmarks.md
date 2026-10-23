@@ -11,43 +11,14 @@ limits described below.
 ## How to Run
 
 ```bash
-# Micro-benchmarks (criterion, in-memory MockRepository)
+# Micro-benchmarks (Criterion, in-memory MockRepository)
 cargo bench
-
-# Regression of the helper itself; only tiny owned loopback fixtures, requires hey
-just test-load-script
-
-# HTTP load tests: only against your own isolated Compose stack, requires hey
-./scripts/load-test.sh          # default suite
-./scripts/load-test.sh quick    # fast smoke test
-./scripts/load-test.sh burst    # high concurrency spike
-./scripts/load-test.sh sustained # 60s sustained ingestion
 ```
 
-The load helper targets `http://localhost` and writes attack events. Use an
-isolated deployment you own. Set the existing `PREFIXD_API_TOKEN` when the API
-requires a bearer token; it is used for workloads and health/stats/metrics probes
-without printing the header. Do not run this against another operator's stack.
-
-Each run prints a retained result directory containing raw `hey` output and its
-exit status for every foreground and background workload. Empty/malformed
-output, missing latency data, request errors or any non-2xx response reject the
-workload before throughput/latency checks. Status totals must match the complete
-histogram and the exact attempt count in a generator-written completion record
-after the error section. Fixed-request bursts must account for every requested
-response. Interrupted foreground and background workloads retain their exit
-status and partial output without qualifying.
-[`hey` 0.1.4 retains at most 1,000,000 response records](https://github.com/rakyll/hey/blob/v0.1.4/requester/report.go#L28-L29);
-the helper conservatively refuses reports at that retention limit, beyond which
-response statuses are unobservable. Redirect following is disabled, so a
-redirect to a successful page cannot qualify the original request. Failures
-remain in the result directory; temporary request bodies are removed and owned background
-work is killed and reaped on exit. Keep failed attempts alongside later runs.
-
-Even all-2xx HTTP responses prove only HTTP request throughput. Event responses
-can describe guardrail rejections or extensions of existing intent; `hey` does
-not inspect their bodies. They do not prove newly admitted mitigations, speaker
-acceptance, export or router enforcement.
+The HTTP load harness and its report-parser tests have been retired. The HTTP
+request-rate results below remain unqualified historical evidence; they do not
+establish admitted mitigation capacity, speaker acceptance, export or router
+enforcement.
 
 ---
 

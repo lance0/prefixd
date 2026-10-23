@@ -13,7 +13,6 @@ default:
 gate:
     just fmt
     just python
-    just test-load-script
     just alerts
     just proto
     just clippy
@@ -33,11 +32,6 @@ fmt:
 python:
     uvx ruff@{{ruff_version}} check .
     uvx ruff@{{ruff_version}} format --check .
-
-# Validate HTTP workload interpretation using only tiny owned loopback fixtures; requires hey.
-test-load-script:
-    bash -n scripts/load-test.sh
-    python3 scripts/test-load-test.py
 
 # Validate the Prometheus alert rules and run their unit tests with pinned promtool.
 alerts:

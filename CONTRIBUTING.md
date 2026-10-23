@@ -10,7 +10,7 @@ Thanks for your interest in contributing!
 - Docker and Docker Compose
 - PostgreSQL 14+ (or use Docker)
 - protobuf compiler (`protoc`)
-- `hey`, `curl`, `jq` and Python 3.11+ for the load-script regression
+- Python 3.11+ for verification and release helpers
 - [just](https://just.systems/), `cargo-audit` and `cargo-deny`
 - Bun 1.4.3 and native Node.js 26.12.0 for the dashboard
 - [uv](https://docs.astral.sh/uv/) for `just python`, which runs the pinned ruff
@@ -72,8 +72,8 @@ scripts/test-gobgp.sh
 ### Local verification
 
 Run `just gate` before opening a PR with substantive code changes. It runs
-Rust and Python formatting, Python lint, the loopback HTTP load-script regression,
-the Prometheus alert rules and their promtool tests, the pinned rustbgpd proto
+Rust and Python formatting, Python lint, the Prometheus alert rules and their
+promtool tests, the pinned rustbgpd proto
 checksum, both locked Rust test and Clippy feature combinations,
 minimum-compiler checks, the release build,
 frozen dashboard install/types/tests/build, advisory checks and the owned GoBGP
@@ -82,7 +82,7 @@ listed above; it does not install missing tools or Rust toolchains.
 Prose-only changes need affected-link checks and `git diff --check`.
 
 Use `just --list` for focused checks such as `just fmt`, `just python`,
-`just clippy`, `just test-fast`, `just test-load-script`, `just msrv` or
+`just clippy`, `just test-fast`, `just msrv` or
 `just frontend`. Recipes expose ordinary commands, and CI shares them while
 retaining separate jobs and speaker versions.
 The Rust advisory recipe audits both the controller and separate fuzz lockfiles
