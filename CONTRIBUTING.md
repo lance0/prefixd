@@ -10,7 +10,7 @@ Thanks for your interest in contributing!
 - Docker and Docker Compose
 - PostgreSQL 14+ (or use Docker)
 - protobuf compiler (`protoc`)
-- Python 3.11+ for verification and release helpers
+- `curl`, `jq` and Python 3.11+ for verification and integration helpers
 - [just](https://just.systems/), `cargo-audit` and `cargo-deny`
 - Bun 1.4.3 and native Node.js 26.12.0 for the dashboard
 - [uv](https://docs.astral.sh/uv/) for `just python`, which runs the pinned ruff
