@@ -211,8 +211,10 @@ readiness, an operator must explicitly re-arm the profile and create new intent.
 Confirmed absence requires the
 [pending-mutation barrier](../project/scrubber-diversion-contract.md#finalize-withdrawal-behind-a-pending-mutation-barrier):
 prevent outstanding adds from committing, then complete a final recorded-owner
-delete and complete inventory read. An initial delete acknowledgment or absence
-read cannot release victim exclusion or authorize re-arm while an old add is
+and admission-revision delete and complete inventory read. A delayed delete
+must not remove a newer admission using the same match and owner. An initial
+delete acknowledgment or absence read cannot release victim exclusion or
+authorize re-arm while an old add is
 still permitted to recreate the rule.
 Restart must not erase an unpersisted latch: a new controller starts unarmed
 for profiles with outstanding diversion, drains that intent and requires re-arm.
@@ -260,8 +262,13 @@ never replay withdrawn or latched diversion.
 Carry the same pending-mutation barrier through explicit withdrawal, TTL expiry,
 target/profile changes, configuration drain and rollback. Keep durable pending
 intent and victim exclusion until outstanding adds are invalidated or their
-authorization expires, then confirm final local absence. Do not terminate a
-legitimate same-owner sibling merely to establish this per-rule barrier.
+authorization expires, then confirm final local absence. Add/read/delete carry
+an immutable admission revision distinct from the shared owner lease generation;
+deletion compares it at commit, so old retries cannot delete a newer rule at the
+same key and owner. An upstream drain alternative must prove every outstanding
+delete is server-invalidated or otherwise unable to commit before key reuse.
+Preserve each withdrawal's original intent and revision. Do not terminate a
+legitimate same-owner sibling merely to establish these per-rule barriers.
 
 Application TTL still requires a running controller. The speaker lease bounds
 retention after renewal stops by the last possible lease extension plus RIB
