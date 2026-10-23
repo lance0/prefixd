@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Manual FlowSpec discard and police rules accept aligned IPv4/IPv6 destination
+  CIDRs in `victim_ip` when operators deliberately relax existing prefix bounds.
+  Whole-prefix customer ownership, all safelist overlaps and fresh repair checks
+  protect admission; new safelist entries withdraw affected owned rules in full.
+  The dashboard previews the complete match and expiry, keeps CIDRs on their
+  mitigation detail pages, and generates exact-target reports without implying
+  host aggregation. Defaults, detectors, playbooks and RTBH remain host-only.
+
 - The Inventory page shows the selected speaker's local IPv4/IPv6 FlowSpec
   routes, complete matches, actions and injection owners. Observation scope
   distinguishes rustbgpd retained intent from GoBGP accepted local RIB;

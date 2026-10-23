@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
+import { mitigationTargetHref } from "@/lib/destination"
 import { useRouter } from "next/navigation"
 import { Ban, Eye, Search, ShieldPlus, ChevronDown, ChevronUp, Filter, RefreshCw, XCircle, Plus, Download, Trash2 } from "lucide-react"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -561,7 +562,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                       )}
                       <TableCell className="order-1 min-w-0 p-0 md:px-3 md:py-2">
                         <Link
-                          href={`/ip-history?ip=${encodeURIComponent(mitigation.victim_ip)}`}
+                          href={mitigationTargetHref(mitigation)}
                           onClick={(e) => e.stopPropagation()}
                           className="break-all rounded-sm font-mono font-medium hover:underline"
                         >

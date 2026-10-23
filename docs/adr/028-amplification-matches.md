@@ -15,9 +15,9 @@ now 5. Extends
 [ADR 012](012-playbook-policy-engine.md),
 [ADR 019](019-signal-adapter-architecture.md) and
 [ADR 025](025-pluggable-speaker-backends.md). It follows the identity
-conventions of [ADR 027](027-blackhole-mitigations.md), and it leaves
-[ADR 004](004-destination-prefix-32-only.md) unchanged: every rule still
-matches one victim host.
+conventions of [ADR 027](027-blackhole-mitigations.md). The 2026-10-23
+amendment to [ADR 004](004-destination-prefix-32-only.md) permits guarded
+manual destination CIDRs; automatic rules still match one victim host.
 
 ## Date
 
@@ -155,7 +155,9 @@ the same invariants, enforced in one domain function:
 - An empty `src_ports` list means the component is absent. Policy never
   produces an empty list from nonempty detector input, as it already does for
   destination ports (`NoAllowedPorts`).
-- The destination prefix stays an IPv4 `/32` or IPv6 `/128` victim.
+- Detector and playbook destinations stay IPv4 `/32` or IPv6 `/128` hosts.
+  Manual rules may use the explicitly enabled destination CIDRs in
+  [ADR 004](004-destination-prefix-32-only.md), preserving these components.
 
 **IPv6.** RFC 8956 §3.3 matches type 3 on "the first Next Header value octet
 in IPv6 packets that is not an extension header", and its §7 notes that
@@ -552,8 +554,9 @@ documented in the API reference.
     resolvers, partners or a CDN. Reflection uses thousands of real
     reflectors, so prefix lists are unbounded and outrun rule budgets.
   - A source *port* names a protocol role. It is drawn from a bounded,
-    operator-owned library. It is always combined with the victim `/32` or
-    `/128` and with UDP, and it is limited by `max_ports` and the TTL.
+    operator-owned library. Automatic rules combine it with the victim `/32`
+    or `/128` and UDP, limited by `max_ports` and the TTL. Manually selected
+    destination CIDRs retain these port, protocol and TTL checks.
   - Collateral is bounded too: the victim loses replies from that service port
     while the rule lives.
   - The induced-collateral risk remains. An attacker can spoof sport-53 traffic
@@ -563,8 +566,8 @@ documented in the API reference.
 - **Dry run.** Preserved as in [ADR 013](013-dry-run-mode.md). Extended rules
   are persisted with their components and `origin_mode = dry-run`, and are
   audited, but no RPC is sent. Capability and opt-in checks run in both modes.
-- **Unchanged guardrails.** Safelist, TTL bounds, quotas, the host-prefix
-  bounds, owned-victim checks, lifecycle serialization and immutable
+- **Unchanged guardrails.** Safelist, TTL bounds, quotas, the configured
+  destination-prefix bounds, ownership checks, lifecycle serialization and immutable
   withdrawal intent apply to every rule as today.
 
 ### 7. Router reality

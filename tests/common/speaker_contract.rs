@@ -42,6 +42,7 @@ pub fn contract_rules() -> Vec<FlowSpecRule> {
     })
     .collect();
     rules.extend(source_prefix_rules());
+    rules.extend(destination_prefix_rules());
     rules
 }
 
@@ -81,6 +82,39 @@ pub fn source_prefix_rules() -> Vec<FlowSpecRule> {
                     ..Default::default()
                 },
                 FlowSpecAction::discard(),
+            ));
+        }
+    }
+    rules
+}
+
+/// Exact subnet destinations with the same port selector and both actions.
+/// Source and extended components must survive alongside a non-host destination.
+pub fn destination_prefix_rules() -> Vec<FlowSpecRule> {
+    let mut rules = Vec::new();
+    for (destination, source) in [
+        ("203.0.112.0/22", "198.51.100.0/24"),
+        ("2001:db8:1234::/48", "2001:db8:5678::/48"),
+    ] {
+        for extended in [false, true] {
+            rules.push(FlowSpecRule::new(
+                FlowSpecNlri {
+                    dst_prefix: destination.into(),
+                    src_prefix: extended.then(|| source.into()),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                    src_ports: if extended { vec![123, 389] } else { vec![] },
+                    packet_length: extended.then_some(prefixd::domain::PacketLengthRange {
+                        min: 468,
+                        max: 65535,
+                    }),
+                    ..Default::default()
+                },
+                if extended {
+                    FlowSpecAction::police(8_000_000)
+                } else {
+                    FlowSpecAction::discard()
+                },
             ));
         }
     }

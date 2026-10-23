@@ -137,6 +137,19 @@ const validForm: RuleForm = {
 describe("manual rule validation", () => {
   const guardrails = { maxPorts: 8, allowFragmentMatch: false, allowPacketLengthMatch: false }
 
+  it("admits aligned destination CIDRs only within explicit prefix bounds", () => {
+    const allowed = { maxPorts: 5, dstPrefixMinlen: 22, dstPrefixMaxlen: 32, dstPrefixMinlenV6: 48, dstPrefixMaxlenV6: 128, allowSrcPrefixMatch: true }
+    for (const [victimIp, srcPrefix] of [["203.0.112.0/22", "198.51.100.0/24"], ["2001:db8:1234::/48", "2001:db8:ffff::/64"]]) {
+      const form = { ...validForm, victimIp, srcPrefix, dstPorts: "443" }
+      expect(validateRule(form, allowed)).toEqual({})
+      expect(toRequest(form)).toMatchObject({ victim_ip: victimIp, src_prefix: srcPrefix, dst_ports: [443], src_ports: [123, 389] })
+    }
+    expect(validateRule({ ...validForm, victimIp: "203.0.112.0/22" }, { maxPorts: 5, dstPrefixMinlen: 32 }).victimIp).toContain("dst_prefix_minlen=32")
+    expect(validateRule({ ...validForm, victimIp: "2001:db8:1234::/48" }, { maxPorts: 5, dstPrefixMinlenV6: 128 }).victimIp).toContain("dst_prefix_minlen_v6=128")
+    expect(validateRule({ ...validForm, victimIp: "203.0.113.1/22" }, allowed).victimIp).toContain("203.0.112.0/22")
+    expect(validateRule({ ...validForm, victimIp: "2001:db8:1234::1/48" }, allowed).victimIp).toContain("2001:db8:1234::/48")
+  })
+
   it("keeps source CIDR independent of the UDP-only components and preserves it in requests and displays", () => {
     for (const [victimIp, srcPrefix] of [["203.0.113.10", "198.51.100.9/24"], ["2001:db8::1", "2001:db8:1::/64"]]) {
       const form = { ...validForm, victimIp, srcPrefix, protocol: "tcp", srcPorts: "" }
@@ -200,13 +213,13 @@ describe("manual rule dialog", () => {
     fireEvent.click(trigger)
     const dialog = await screen.findByRole("dialog", { name: "Create FlowSpec rule" })
     // Focus moves into the dialog, and every control is reachable in reading order.
-    await waitFor(() => expect(within(dialog).getByLabelText(/^Victim IP/)).toHaveFocus())
+    await waitFor(() => expect(within(dialog).getByLabelText(/^Destination IP or CIDR/)).toHaveFocus())
     const order = Array.from(dialog.querySelectorAll<HTMLElement>("input, button")).filter((element) => element.tabIndex >= 0)
     expect(order.map((element) => element.getAttribute("id") ?? element.textContent?.trim())).toEqual([
       "fs-ip", "fs-src-prefix", "fs-protocol", "fs-action", "fs-dst", "fs-src", "fs-fragment", "fs-length-min", "fs-length-max",
       "fs-ttl", "fs-reason", "Cancel", "Create rule", "Close",
     ])
-    fill(/^Victim IP/, "203.0.113.10")
+    fill(/^Destination IP or CIDR/, "203.0.113.10")
     fill(/^Source prefix/, "198.51.100.0/24")
     fill(/^Source ports/, "389, 123")
     fill(/^Reason/, "NTP and CLDAP reflection")
@@ -217,6 +230,61 @@ describe("manual rule dialog", () => {
       victim_ip: "203.0.113.10", protocol: "udp", action: "discard", ttl_seconds: 300,
       reason: "NTP and CLDAP reflection", src_prefix: "198.51.100.0/24", src_ports: [389, 123],
     })
+  })
+
+  it.each([null, undefined])("applies effective host-only IPv6 bounds when loaded settings contain %s", async (bound) => {
+    controller.route("GET", "/v1/config/settings", () => json({ settings: { guardrails: { dst_prefix_minlen: 32, dst_prefix_maxlen: 32, dst_prefix_minlen_v6: bound, dst_prefix_maxlen_v6: bound } }, loaded_at: createdAt }))
+    renderApp(<FlowSpecRuleDialog open onOpenChange={vi.fn()} />, { withoutAuth: true })
+    await settle()
+    fill(/^Destination IP or CIDR/, "2001:db8:1234::/48")
+    fill(/^Reason/, "subnet attack")
+    fireEvent.click(screen.getByRole("button", { name: "Create rule" }))
+    expect(await screen.findByText(/dst_prefix_minlen_v6=128/)).toBeInTheDocument()
+    expect(controller.calls("POST", "/v1/mitigations")).toHaveLength(0)
+  })
+
+  it("previews a subnet's complete match, policing scope and expiry before posting", async () => {
+    const subnetRule = rule("subnet", { victim_ip: "203.0.112.0/22", dst_prefix: "203.0.112.0/22", dst_ports: [443], action_type: "police", rate_bps: 8_000_000 })
+    controller.route("GET", "/v1/config/settings", () => json({ settings: { guardrails: { dst_prefix_minlen: 22, dst_prefix_maxlen: 32 } }, loaded_at: createdAt }))
+    controller.route("POST", "/v1/mitigations", () => json(subnetRule, 201))
+    const { router } = renderApp(<FlowSpecRuleDialog open onOpenChange={vi.fn()} />, { withoutAuth: true })
+    await settle()
+    fill(/^Destination IP or CIDR/, "203.0.112.0/22")
+    fill(/^Destination ports/, "443")
+    fill(/^Reason/, "UDP port 443 subnet attack")
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Action" }), { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "police" }))
+    fill(/^Rate/, "8000000")
+    const preview = screen.getByRole("region", { name: "Rule preview" })
+    expect(preview).toHaveTextContent("match destination 203.0.112.0/22 protocol udp destination-port 443 then rate-limit 8.0 Mbps")
+    expect(preview).toHaveTextContent("Expires 300 seconds after creation")
+    expect(preview).toHaveTextContent("across the whole destination")
+    fill(/^Destination ports/, "invalid")
+    expect(preview).toHaveTextContent("Complete the match fields to preview the rule")
+    expect(preview).not.toHaveTextContent("then rate-limit")
+    fill(/^Destination ports/, "443")
+    fireEvent.submit(screen.getByLabelText(/^Reason/).closest("form")!)
+    await waitFor(() => expect(router.push).toHaveBeenCalledWith("/mitigations/subnet"))
+    expect(JSON.parse(controller.calls("POST", "/v1/mitigations")[0].body ?? "")).toMatchObject({ victim_ip: "203.0.112.0/22", protocol: "udp", dst_ports: [443], action: "police", rate_bps: 8_000_000, ttl_seconds: 300 })
+  })
+
+  it("keeps subnet list links and incident reports on the exact CIDR", async () => {
+    const subnetRule = rule("cidr-rule", { victim_ip: "203.0.112.0/22", dst_prefix: "203.0.112.0/22", dst_ports: [443] })
+    controller.route("GET", "/v1/mitigations", () => json({ mitigations: [subnetRule], count: 1, has_more: false, next_cursor: null }))
+    signIn(controller, "credentials", operatorResponse("operator"))
+    const list = renderApp(<MitigationsContentLive />, { url: "/mitigations" })
+    expect(await screen.findByRole("link", { name: "203.0.112.0/22" })).toHaveAttribute("href", "/mitigations/cidr-rule")
+    list.unmount()
+    controller.route("GET", "/v1/mitigations/cidr-rule", () => json(subnetRule))
+    controller.route("GET", "/v1/reports/incident", () => new Response("# Exact CIDR incident", { headers: { "Content-Type": "text/markdown" } }))
+    renderApp(<Suspense fallback={<p>Loading...</p>}><MitigationDetailPage params={Promise.resolve({ id: "cidr-rule" })} /></Suspense>, { url: "/mitigations/cidr-rule" })
+    await screen.findByText("FlowSpec rule")
+    expect(screen.getByText(/Individual addresses|individual addresses/)).toHaveTextContent("not aggregated")
+    expect(document.querySelector('a[href*="ip-history?ip=203.0"]')).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: "Report" }))
+    await screen.findByText("# Exact CIDR incident")
+    expect(controller.calls("GET", "/v1/reports/incident")[0].query.get("mitigation_id")).toBe("cidr-rule")
+    expect(controller.calls("GET", "/v1/reports/incident")[0].query.has("ip")).toBe(false)
   })
 
   it.each([undefined, false, "error"])("never posts a source selector when controller support is %s", async (support) => {
@@ -230,7 +298,7 @@ describe("manual rule dialog", () => {
     controller.route("GET", "/v1/config/settings", () => json({ settings: { guardrails: { max_ports: 8, allow_fragment_match: false, allow_packet_length_match: true } }, loaded_at: createdAt }))
     renderApp(<FlowSpecRuleDialog open onOpenChange={vi.fn()} />, { withoutAuth: true })
     await settle()
-    fill(/^Victim IP/, "203.0.113.10")
+    fill(/^Destination IP or CIDR/, "203.0.113.10")
     fill(/^Reason/, "fragment tail")
     fireEvent.click(screen.getByRole("checkbox", { name: "Match non-first fragments only" }))
     fireEvent.click(screen.getByRole("button", { name: "Create rule" }))
@@ -243,7 +311,7 @@ describe("manual rule dialog", () => {
     controller.route("POST", "/v1/mitigations", () => json({ error: "guardrail violation: packet length matching not allowed (guardrails.allow_packet_length_match=false)" }, 422))
     const close = vi.fn()
     renderApp(<FlowSpecRuleDialog open onOpenChange={close} />, { withoutAuth: true })
-    fill(/^Victim IP/, "203.0.113.10")
+    fill(/^Destination IP or CIDR/, "203.0.113.10")
     fill(/^Source ports/, "11211")
     fill(/Minimum packet length/, "1000")
     fill(/Maximum packet length/, "65535")

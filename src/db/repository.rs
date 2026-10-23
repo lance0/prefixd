@@ -877,17 +877,16 @@ impl RepositoryTrait for Repository {
         Ok(rows)
     }
 
-    async fn is_safelisted(&self, ip: &str) -> Result<bool> {
-        // Use PostgreSQL inet operators for efficient CIDR matching
-        // This avoids loading all entries and leverages database indexes
+    async fn is_safelisted(&self, target: &str) -> Result<bool> {
+        // Overlap is symmetric: a broad candidate must not cover a protected
+        // host or subnet. Bare addresses retain their /32 or /128 semantics.
         let row: (i64,) = sqlx::query_as(
             r#"
             SELECT COUNT(*) FROM safelist
-            WHERE $1::inet <<= prefix::inet
-               OR prefix = $1
+            WHERE $1::inet && prefix::inet
             "#,
         )
-        .bind(ip)
+        .bind(target)
         .fetch_one(&self.pool)
         .await?;
 

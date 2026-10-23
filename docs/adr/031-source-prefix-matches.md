@@ -26,8 +26,10 @@ selection would let the attacker influence filtering scope.
 
 Add optional `src_prefix` to manual discard and police creation, guarded by
 `guardrails.allow_src_prefix_match` (default false). It must be a same-family
-CIDR and is stored with host bits cleared. The destination remains one victim
-host, subject to existing safelist, TTL, quota, ownership and mode rules.
+CIDR and is stored with host bits cleared. The destination follows
+[ADR 004](004-destination-prefix-32-only.md): a host by default, or an aligned
+manual CIDR after deliberate prefix-bound relaxation and whole-prefix ownership
+checks. Safelist, TTL, quota, ownership and mode rules apply to the full match.
 Source matching does not require UDP. Combined amplification components retain
 all [ADR 028](028-amplification-matches.md) restrictions.
 

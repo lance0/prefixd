@@ -51,8 +51,8 @@ pub enum FlowSpecMatchError {
     PacketLengthWithoutSourcePorts,
     #[error("packet length {min}-{max} is invalid: min must exceed {floor} and not exceed max")]
     InvalidPacketLength { min: u16, max: u16, floor: u16 },
-    #[error("destination must be one IPv4 /32 or IPv6 /128 host")]
-    NotHostPrefix,
+    #[error("destination must be a canonical IPv4 or IPv6 network CIDR")]
+    InvalidDestinationPrefix,
     #[error("source prefix must be an IPv4 or IPv6 CIDR")]
     InvalidSourcePrefix,
     #[error("source and destination prefixes must use the same address family")]
@@ -90,9 +90,9 @@ impl FlowSpecNlri {
         let prefix: ipnet::IpNet = self
             .dst_prefix
             .parse()
-            .map_err(|_| FlowSpecMatchError::NotHostPrefix)?;
-        if prefix.prefix_len() != prefix.max_prefix_len() {
-            return Err(FlowSpecMatchError::NotHostPrefix);
+            .map_err(|_| FlowSpecMatchError::InvalidDestinationPrefix)?;
+        if prefix.addr() != prefix.network() {
+            return Err(FlowSpecMatchError::InvalidDestinationPrefix);
         }
         if let Some(source) = &self.src_prefix {
             let source: ipnet::IpNet = source
@@ -506,13 +506,13 @@ mod tests {
                 }
             }
         }
-        for prefix in ["192.0.2.0/24", "2001:db8::/64", "invalid"] {
+        for prefix in ["192.0.2.1/24", "2001:db8::1/64", "invalid"] {
             cases.push((
                 FlowSpecNlri {
                     src_ports: vec![123],
                     ..udp(prefix)
                 },
-                Err(FlowSpecMatchError::NotHostPrefix),
+                Err(FlowSpecMatchError::InvalidDestinationPrefix),
             ));
         }
         // Rules without new components are outside these invariants, as before.
@@ -618,12 +618,15 @@ mod tests {
             mixed.validate(),
             Err(FlowSpecMatchError::SourcePrefixFamilyMismatch)
         );
-        for destination in ["", "192.0.2.0/24", "invalid"] {
+        for destination in ["", "192.0.2.1/24", "invalid"] {
             let nlri = FlowSpecNlri {
                 dst_prefix: destination.into(),
                 ..base.clone()
             };
-            assert_eq!(nlri.validate(), Err(FlowSpecMatchError::NotHostPrefix));
+            assert_eq!(
+                nlri.validate(),
+                Err(FlowSpecMatchError::InvalidDestinationPrefix)
+            );
         }
         let mut amplification = FlowSpecNlri {
             src_ports: vec![123],

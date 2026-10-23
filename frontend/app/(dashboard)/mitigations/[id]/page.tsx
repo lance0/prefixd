@@ -2,6 +2,7 @@
 
 import { use, useEffect, useRef, useState } from "react"
 import Link from "next/link"
+import { mitigationTargetHref } from "@/lib/destination"
 import { useMitigation, useMitigations, useConfigInventory, useSignalGroupDetail } from "@/hooks/use-api"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 import { ActionBadge } from "@/components/dashboard/action-badge"
@@ -211,7 +212,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
           title={
             <Link
               ref={victimLink}
-              href={`/ip-history?ip=${encodeURIComponent(mitigation.victim_ip)}`}
+              href={mitigationTargetHref(mitigation)}
               className="break-all rounded-sm font-mono hover:underline"
             >
               {mitigation.victim_ip}
@@ -293,6 +294,11 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                   <span className="text-muted-foreground"> → </span>
                   <span className="font-mono">{mitigation.victim_ip}</span>
                 </p>
+                {mitigation.victim_ip.includes("/") && (
+                  <p className="text-xs text-muted-foreground">
+                    This mitigation and its report use the exact destination. Events and mitigations for individual addresses inside it are not aggregated.
+                  </p>
+                )}
                 <FieldList className="grid-cols-2 sm:grid-cols-4">
                   <Field label="Destination prefix"><span className="font-mono">{mitigation.dst_prefix}</span></Field>
                   <Field label="Protocol">{protocolName(mitigation.protocol)}</Field>
@@ -596,7 +602,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
 
       <IncidentReportDialog
         markdown={reportMarkdown}
-        filename={`incident-${mitigation.victim_ip}-${mitigation.mitigation_id.slice(0, 8)}.md`}
+        filename={`incident-${mitigation.victim_ip.replace(/[/:]/g, "-")}-${mitigation.mitigation_id.slice(0, 8)}.md`}
         open={showReportDialog}
         onOpenChange={setShowReportDialog}
         loading={reportLoading}

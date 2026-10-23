@@ -762,8 +762,8 @@ impl RepositoryTrait for MockRepository {
         Ok(self.safelist.lock().unwrap().clone())
     }
 
-    async fn is_safelisted(&self, ip: &str) -> Result<bool> {
-        use ipnet::{Ipv4Net, Ipv6Net};
+    async fn is_safelisted(&self, target: &str) -> Result<bool> {
+        use ipnet::IpNet;
         use std::net::IpAddr;
         use std::str::FromStr;
 
@@ -774,30 +774,21 @@ impl RepositoryTrait for MockRepository {
             ));
         }
 
-        let entries = self.safelist.lock().unwrap();
-        let ip_addr: IpAddr = match IpAddr::from_str(ip) {
-            Ok(addr) => addr,
-            Err(_) => return Ok(false),
+        let parse = |text: &str| -> Result<IpNet> {
+            text.parse::<IpNet>()
+                .or_else(|_| IpAddr::from_str(text).map(IpNet::from))
+                .map(|prefix| prefix.trunc())
+                .map_err(|_| {
+                    crate::error::PrefixdError::InvalidRequest(
+                        "invalid safelist address or prefix".into(),
+                    )
+                })
         };
-
+        let candidate = parse(target)?;
+        let entries = self.safelist.lock().unwrap();
         for entry in entries.iter() {
-            match ip_addr {
-                IpAddr::V4(v4) => {
-                    if let Ok(prefix) = Ipv4Net::from_str(&entry.prefix) {
-                        if prefix.contains(&v4) {
-                            return Ok(true);
-                        }
-                    }
-                }
-                IpAddr::V6(v6) => {
-                    if let Ok(prefix) = Ipv6Net::from_str(&entry.prefix) {
-                        if prefix.contains(&v6) {
-                            return Ok(true);
-                        }
-                    }
-                }
-            }
-            if entry.prefix == ip {
+            let protected = parse(&entry.prefix)?;
+            if candidate.contains(&protected) || protected.contains(&candidate) {
                 return Ok(true);
             }
         }

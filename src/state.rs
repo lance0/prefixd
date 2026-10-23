@@ -246,6 +246,10 @@ impl AppState {
         if inventory_path.exists() {
             let new_inventory = Inventory::load(&inventory_path)
                 .map_err(|e| PrefixdError::Config(format!("inventory: {}", e)))?;
+            // Admission and repair use whole-prefix ownership. Publish a new
+            // inventory between lifecycle operations, never after their safety
+            // check but before a speaker mutation.
+            let _mitigation_guard = self.mitigation_lock.lock().await;
             *self.inventory.write().await = new_inventory;
             *self.inventory_loaded_at.write().await = Utc::now();
             reloaded.push("inventory".to_string());

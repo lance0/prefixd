@@ -222,8 +222,8 @@ async fn record_announcement(
     }
 }
 
-/// Caller holds the lifecycle mutex. Audited system withdrawal of a blackhole
-/// whose victim is now safelisted, through the immutable withdrawal path. A
+/// Caller holds the lifecycle mutex. Audited system withdrawal of a mitigation
+/// whose destination overlaps the safelist, through the immutable withdrawal path. A
 /// simulation, or any row in dry-run, is retired locally without an RPC.
 pub async fn withdraw_safelisted(
     repo: &dyn RepositoryTrait,
@@ -244,10 +244,10 @@ pub async fn withdraw_safelisted(
     )
     .await?;
     tracing::warn!(mitigation_id = %mitigation.mitigation_id, operation_id = %request.operation_id,
-        "blackhole victim safelisted after admission; withdrawing");
+        "mitigation destination safelisted after admission; withdrawing");
     let withdrawn = execute_withdrawal(repo, announcer, dry_run, &request, binding).await?;
     crate::observability::metrics::MITIGATIONS_WITHDRAWN
-        .with_label_values(&["blackhole", &withdrawn.pop, "safelisted"])
+        .with_label_values(&[withdrawn.action_type.as_str(), &withdrawn.pop, "safelisted"])
         .inc();
     Ok(withdrawn)
 }

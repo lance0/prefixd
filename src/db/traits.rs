@@ -217,7 +217,9 @@ pub trait RepositoryTrait: Send + Sync {
     ) -> Result<()>;
     async fn remove_safelist(&self, prefix: &str) -> Result<bool>;
     async fn list_safelist(&self) -> Result<Vec<SafelistEntry>>;
-    async fn is_safelisted(&self, ip: &str) -> Result<bool>;
+    /// Whether an IP or destination prefix overlaps any protected prefix.
+    /// Broader candidates also protect entries contained inside them.
+    async fn is_safelisted(&self, target: &str) -> Result<bool>;
 
     // Multi-POP coordination
     async fn list_pops(&self) -> Result<Vec<PopInfo>>;

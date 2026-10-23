@@ -413,7 +413,7 @@ Authorization: Bearer <token>
 |-------|------|-------------|
 | `status` | string | Filter by one or more statuses (comma-separated): `pending`, `active`, `withdrawn`, `expired`, `rejected`. Legacy `escalated` is still accepted for stored rows; no code path produces it |
 | `customer_id` | string | Filter by customer |
-| `victim_ip` | string | Filter by exact victim IP |
+| `victim_ip` | string | Filter by exact stored target: host IP or canonical manual CIDR; no containment matching |
 | `pop` | string | Exact case-sensitive POP identifier; omitted or literal `all` lists every POP |
 | `acknowledged` | boolean | Filter by acknowledged status (`true`/`false`) |
 | `limit` | integer | Max results (default 100, max 1000) |
@@ -547,7 +547,7 @@ instead submits an attack event through `POST /v1/events`, which applies playboo
 |-------|------|----------|-------------|
 | `operator_id` | string | no | Legacy field, ignored; authenticated operator identity is authoritative |
 | `reason` | string | yes | Reason for the mitigation |
-| `victim_ip` | string | yes | IPv4 or IPv6 host address to protect (`/32` or `/128` scope) |
+| `victim_ip` | string | yes | Bare IPv4/IPv6 address or aligned destination CIDR for discard/police; default bounds allow only `/32` and `/128`. Blackholes require a bare host IP |
 | `protocol` | string | conditional | Required for `"discard"` and `"police"`: `"udp"`, `"tcp"`, `"icmp"` (IPv4 protocol 1), `"icmpv6"` (IPv6 protocol 58), or `"any"`; `""` also selects any protocol. Omit for `"blackhole"` |
 | `dst_ports` | array | no | Destination ports (default `[]`) |
 | `src_prefix` | string | no | Same-family source CIDR; requires `guardrails.allow_src_prefix_match`. Host bits are cleared. Discard and police only; see [source-prefix matches](#source-prefix-matches) |
@@ -595,6 +595,64 @@ Remaining time is never rounded upward; the ordinary TTL guardrails still apply.
 The cap applies to initial creation only. Subsequent detector events can extend
 the stored expiry, so pause all creation and extension inputs during maintenance.
 
+#### Destination CIDRs
+
+Manual discard and police requests can match a whole destination network, for
+example UDP port 443 across an attacked IPv4 `/22`:
+
+```json
+{
+  "victim_ip": "203.0.112.0/22",
+  "protocol": "udp",
+  "dst_ports": [443],
+  "action": "discard",
+  "ttl_seconds": 300,
+  "reason": "UDP port 443 attack across the customer allocation"
+}
+```
+
+The existing prefix bounds are the explicit opt-in: this request needs
+`guardrails.dst_prefix_minlen: 22` and an appropriate maximum. IPv6 uses
+`dst_prefix_minlen_v6` and `dst_prefix_maxlen_v6`; for example an owned
+`2001:db8:1234::/48` needs a minimum no greater than 48. Defaults remain
+IPv4 `/32` and IPv6 `/128`. Detectors, playbooks and RTBH remain host-only.
+
+These bounds apply to new admissions. Previously admitted CIDRs retain their
+saved scope after a restart with tighter bounds, subject to fresh ownership and
+safelist checks. Withdraw broad rules and drain their pending withdrawals before
+tightening bounds or returning to host-only operation.
+
+A CIDR must fit within one configured customer prefix, with no conflicting
+customer ownership inside it. Partial ownership and coverage assembled from
+several smaller prefixes are refused. No service is inferred from its first
+address. Any configured or database safelist overlap refuses the whole rule,
+even when the protected entry is a single host inside the destination. A failed
+safety lookup fails admission before any speaker add. Adding a safelist entry
+later requests durable withdrawal of the entire affected owned rule; it does
+not generate narrower replacement rules. Repair applies fresh safety checks.
+
+Destination host bits are invalid: `203.0.113.10/22` returns `400` with a
+suggestion to use `203.0.112.0/22`; it never silently widens the target. Invalid
+lengths and malformed CIDRs also return `400`. Accepted CIDR target text is
+canonical in `dst_prefix`; non-host CIDRs are also canonical in `victim_ip`.
+Explicit `/32` and `/128` targets normalize to a bare canonical host in
+`victim_ip`, so equivalent host and CIDR spellings share duplicate detection.
+Bare-IP target text retains its existing representation.
+
+A subnet remains one precisely scoped rule. All protocol, port, source-match,
+capability, TTL, quota, dry-run and authorization checks still apply. Quotas
+count rules, not addresses; a policing rate applies to the matching flow across
+the destination, not an independent allowance for each address. The dashboard
+shows the complete match and requested expiry before creation. Local acceptance
+or read-back does not prove router enforcement.
+
+Mitigation filtering uses the exact canonical `victim_ip`; a CIDR does not
+match its hosts or other overlapping prefixes. The dashboard links CIDR targets
+to their mitigation details. IP history remains a host-only view. Use
+[`mitigation_id` incident reports](#generate-incident-report) for the exact CIDR.
+Drain these rules and pending withdrawals before downgrading to a controller
+without the same safety checks.
+
 #### Source-prefix matches
 
 Manual discard and police rules may include `src_prefix`, for example
@@ -602,8 +660,8 @@ Manual discard and police rules may include `src_prefix`, for example
 The response echoes the canonical network (`"198.51.100.0/24"` in the first
 example), and mitigation list/detail responses expose `src_prefix: null` when
 absent. The source and victim must have the same address family. Invalid CIDRs
-are refused, and source-only rules are unavailable: `victim_ip` still selects
-one destination host. An explicit `/0` matches all sources and has its own rule
+are refused, and source-only rules are unavailable: `victim_ip` must also
+select a destination permitted by [destination CIDR admission](#destination-cidrs). An explicit `/0` matches all sources and has its own rule
 identity; omit the field to leave the source component absent.
 
 Set `guardrails.allow_src_prefix_match: true` before use. Otherwise creation
@@ -2838,13 +2896,21 @@ GET /v1/reports/incident?ip=<ip>
 Authorization: Bearer <token>
 ```
 
-Generates a markdown incident report for a specific mitigation or all activity for an IP address. Exactly one of `mitigation_id` or `ip` must be provided.
+Generates a markdown incident report for the selected mitigation's exact stored
+target, or for a bare host IP. Exactly one of `mitigation_id` or `ip` must be
+provided; `ip` does not accept CIDRs. For a CIDR mitigation, the report selects
+only rows with that exact canonical destination. It does not substitute the
+network address, include host events, or aggregate hosts and overlapping
+prefixes. Customer context follows the mitigation's saved owner; no service is
+inferred from the first address.
 
-The report includes: summary table, chronological timeline, events table with peak traffic, mitigations table with durations, and audit trail. Customer and service context is included from inventory when available.
+The report includes a summary, chronological timeline, host events with peak
+traffic when applicable, mitigation matches/actions/expiry/durations, and audit
+trail. It identifies saved intent and leaves router enforcement unobserved.
 
-The report selects the newest 100 mitigations for the IP. An undecodable mitigation
+The report selects the newest 100 mitigations for the exact stored target. An undecodable mitigation
 within that selection returns `500` rather than a successful report missing that
-row. Mitigations for other IPs or outside that limit do not affect the selection.
+row. Mitigations for other targets or outside that limit do not affect the selection.
 
 **Response:** `200 OK` with `Content-Type: text/markdown`
 

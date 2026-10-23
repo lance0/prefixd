@@ -416,6 +416,7 @@ export async function createBlackhole(request: CreateBlackholeRequest): Promise<
 }
 
 export interface CreateFlowSpecRequest {
+  /** IP or aligned destination CIDR; subnet admission requires configured prefix bounds and ownership. */
   victim_ip: string
   /** Same-family source CIDR; requires guardrails.allow_src_prefix_match. */
   src_prefix?: string

@@ -14966,3 +14966,228 @@ mod manual_amplification_match {
         }
     }
 }
+
+/// Manual subnet admission must protect the entire destination, not its first IP.
+mod manual_destination_cidr {
+    use super::*;
+    use prefixd::config::OperationMode;
+    use serde_json::{Value, json};
+
+    fn state(
+        mode: OperationMode,
+        relaxed: bool,
+        inventory: Inventory,
+    ) -> (Arc<AppState>, Arc<MockRepository>, Arc<MockAnnouncer>) {
+        let mut settings = test_settings();
+        settings.mode = mode;
+        settings.guardrails.allow_src_prefix_match = true;
+        settings.guardrails.allow_packet_length_match = true;
+        settings.guardrails.allow_fragment_match = true;
+        if relaxed {
+            settings.guardrails.dst_prefix_minlen = 22;
+            settings.guardrails.dst_prefix_minlen_v6 = Some(48);
+        }
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(MockAnnouncer::new());
+        let state = AppState::new(
+            settings,
+            inventory,
+            test_playbooks(),
+            repo.clone(),
+            speaker.clone(),
+            ".".into(),
+        )
+        .unwrap();
+        (state, repo, speaker)
+    }
+
+    fn owned_inventory() -> Inventory {
+        let mut inventory = test_inventory();
+        inventory.customers[0].prefixes = vec!["203.0.112.0/22".into(), "2001:db8:1::/48".into()];
+        inventory
+    }
+
+    fn payload(target: &str) -> Value {
+        json!({"victim_ip": target, "protocol":"udp", "dst_ports":[53], "action":"discard", "ttl_seconds":120, "reason":"subnet under attack"})
+    }
+
+    async fn post(state: Arc<AppState>, payload: Value) -> (StatusCode, Value) {
+        let response = create_test_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/mitigations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn cidrs_require_explicit_prefix_bounds_in_both_modes() {
+        for mode in [OperationMode::DryRun, OperationMode::Enforced] {
+            for target in ["203.0.112.0/22", "2001:db8:1::/48"] {
+                let (state, repo, speaker) = state(mode, false, owned_inventory());
+                let (status, body) = post(state, payload(target)).await;
+                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+                assert_eq!(repo.count_active_global().await.unwrap(), 0);
+                assert!(speaker.list_active().await.unwrap().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_cidr_round_trips_and_duplicates_conflict_in_both_modes() {
+        for mode in [OperationMode::DryRun, OperationMode::Enforced] {
+            for (target, canonical, source) in [
+                ("203.0.112.0/22", "203.0.112.0/22", "198.51.100.0/24"),
+                ("2001:0DB8:0001::/48", "2001:db8:1::/48", "2001:db8:2::/48"),
+            ] {
+                let (state, repo, speaker) = state(mode, true, owned_inventory());
+                let mut input = payload(target);
+                input["src_prefix"] = source.into();
+                input["src_ports"] = json!([123, 389]);
+                input["packet_length"] = json!({"min":468,"max":65535});
+                input["action"] = "police".into();
+                input["rate_bps"] = 8_000_000.into();
+                let (status, body) = post(state.clone(), input.clone()).await;
+                assert_eq!(status, StatusCode::CREATED, "{body}");
+                assert_eq!(body["dst_prefix"], canonical);
+                assert_eq!(body["victim_ip"], canonical);
+                assert_eq!(body["customer_id"], "cust_test");
+                assert_eq!(body["src_prefix"], source);
+                let stored = repo
+                    .get_mitigation(body["mitigation_id"].as_str().unwrap().parse().unwrap())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stored.match_criteria.dst_prefix, canonical);
+                assert!(stored.service_id.is_none());
+                let rules = speaker.list_active().await.unwrap();
+                assert_eq!(rules.len(), usize::from(mode == OperationMode::Enforced));
+                if let Some(rule) = rules.first() {
+                    assert_eq!(rule.nlri.dst_prefix, canonical);
+                    assert_eq!(rule.nlri.src_ports, [123, 389]);
+                    assert_eq!(rule.actions[0].rate_bps, Some(8_000_000));
+                }
+                input["victim_ip"] = canonical.into();
+                assert_eq!(post(state, input).await.0, StatusCode::CONFLICT);
+                assert_eq!(repo.count_active_global().await.unwrap(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_or_conflicting_ownership_and_host_bits_never_reach_speaker() {
+        let mut partial = owned_inventory();
+        partial.customers[0].prefixes = vec!["203.0.112.0/23".into(), "203.0.114.0/23".into()];
+        let mut conflicting = owned_inventory();
+        let mut other = conflicting.customers[0].clone();
+        other.customer_id = "other".into();
+        other.prefixes = vec!["203.0.114.0/24".into()];
+        conflicting.customers.push(other);
+        for (inventory, target) in [
+            (Inventory::new(vec![]), "203.0.112.0/22"),
+            (partial, "203.0.112.0/22"),
+            (conflicting, "203.0.112.0/22"),
+            (owned_inventory(), "203.0.113.1/22"),
+            (owned_inventory(), "2001:db8:1::1/48"),
+            (owned_inventory(), "203.0.112.0/33"),
+        ] {
+            let (state, repo, speaker) = state(OperationMode::Enforced, true, inventory);
+            let (status, body) = post(state, payload(target)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{target} {body}");
+            assert_eq!(repo.count_active_global().await.unwrap(), 0);
+            assert!(speaker.list_active().await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_address_inside_cidr_blocks_the_whole_rule() {
+        for mode in [OperationMode::DryRun, OperationMode::Enforced] {
+            for (target, protected) in [
+                ("203.0.112.0/22", "203.0.115.254/32"),
+                ("2001:db8:1::/48", "2001:db8:1:ffff::1/128"),
+            ] {
+                let (state, repo, speaker) = state(mode, true, owned_inventory());
+                repo.insert_safelist(protected, "protected canary", None)
+                    .await
+                    .unwrap();
+                let (status, body) = post(state, payload(target)).await;
+                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+                assert_eq!(repo.count_active_global().await.unwrap(), 0);
+                assert!(speaker.list_active().await.unwrap().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cidr_and_host_spellings_share_host_identity_without_requiring_inventory() {
+        let (state, repo, _) = state(OperationMode::Enforced, false, Inventory::new(vec![]));
+        let (status, body) = post(state.clone(), payload("2001:0DB8::1/128")).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["victim_ip"], "2001:db8::1");
+        assert_eq!(
+            post(state, payload("2001:db8::1")).await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(repo.count_active_global().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn bare_host_text_retains_legacy_history_and_scope_representation() {
+        let (state, repo, _) = state(OperationMode::Enforced, false, Inventory::new(vec![]));
+        let (status, body) = post(state.clone(), payload("2001:0DB8:0:0:0:0:0:1")).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["victim_ip"], "2001:0DB8:0:0:0:0:0:1");
+        assert_eq!(body["dst_prefix"], "2001:0DB8:0:0:0:0:0:1/128");
+        assert_eq!(
+            post(state, payload("2001:db8::1/128")).await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(repo.count_active_global().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn inventory_reload_publishes_between_lifecycle_operations() {
+        use std::future::Future;
+        use std::task::Poll;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("inventory.yaml"), r#"{"customers":[]}"#).unwrap();
+        let (mut state, _, _) = state(OperationMode::Enforced, true, owned_inventory());
+        Arc::get_mut(&mut state).unwrap().config_dir = dir.path().into();
+        let destination = "203.0.112.0/22".parse().unwrap();
+        let guard = state.mitigation_lock.lock().await;
+        let mut reload = std::pin::pin!(state.reload_config());
+        std::future::poll_fn(|context| {
+            assert!(reload.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert!(
+            state
+                .inventory
+                .read()
+                .await
+                .lookup_prefix(&destination)
+                .is_some()
+        );
+        drop(guard);
+        reload.await.unwrap();
+        assert!(
+            state
+                .inventory
+                .read()
+                .await
+                .lookup_prefix(&destination)
+                .is_none()
+        );
+    }
+}

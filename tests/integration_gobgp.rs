@@ -691,3 +691,32 @@ async fn real_peers_receive_exact_actions_and_do_not_hide_nonselected_local_path
         .await
         .unwrap();
 }
+
+#[cfg(feature = "test-utils")]
+#[path = "common/destination_lifecycle.rs"]
+mod destination_lifecycle;
+
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
+async fn manual_destination_cidrs_survive_restart_then_withdraw_and_expire_exactly() {
+    let fixture = fixture::Speaker::start().await;
+    let speaker = std::sync::Arc::new(fixture.connect().await);
+    let bgp = prefixd::config::BgpConfig {
+        mode: prefixd::config::BgpMode::Gobgp,
+        gobgp_grpc: fixture.endpoint.clone(),
+        local_asn: 65010,
+        router_id: "192.0.2.10".into(),
+        rustbgpd: None,
+        neighbors: vec![],
+    };
+    let harness = destination_lifecycle::Harness::start(bgp, speaker.clone()).await;
+    fixture.container.stop_with_timeout(Some(0)).await.unwrap();
+    fixture.container.start().await.unwrap();
+    fixture.configure().await;
+    contract::wait_inventory(speaker.as_ref(), &[])
+        .await
+        .unwrap();
+    harness.repair().await;
+    harness.finish().await;
+}

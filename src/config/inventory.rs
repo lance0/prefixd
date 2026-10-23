@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -134,6 +134,44 @@ impl Inventory {
         }
     }
 
+    /// Attribute a whole network to one customer, never to its first asset.
+    /// One configured prefix must contain it; another customer's overlapping
+    /// prefix or enclosed asset makes ownership ambiguous. Service data belongs
+    /// to individual assets and is deliberately absent from this context.
+    pub fn lookup_prefix(&self, prefix: &IpNet) -> Option<IpContext> {
+        let mut owner = None;
+        for customer in &self.customers {
+            for configured in &customer.prefixes {
+                let configured: IpNet = configured.parse().ok()?;
+                if configured.contains(prefix) {
+                    if owner.is_some_and(|id| id != customer.customer_id) {
+                        return None;
+                    }
+                    owner = Some(customer.customer_id.as_str());
+                }
+            }
+        }
+        let owner = owner?;
+        for customer in &self.customers {
+            if customer.customer_id == owner {
+                continue;
+            }
+            for configured in &customer.prefixes {
+                let configured: IpNet = configured.parse().ok()?;
+                if prefix.contains(&configured) || configured.contains(prefix) {
+                    return None;
+                }
+            }
+            for asset in customer.services.iter().flat_map(|service| &service.assets) {
+                let address: IpAddr = asset.ip.parse().ok()?;
+                if prefix.contains(&address) {
+                    return None;
+                }
+            }
+        }
+        self.build_context(owner, None, None)
+    }
+
     fn lookup_ipv4(&self, ip: Ipv4Addr) -> Option<IpContext> {
         // Check direct asset match first
         if let Some((customer_id, service_id, interface)) = self.ip_index_v4.get(&ip) {
@@ -213,5 +251,68 @@ impl Inventory {
 
     pub fn is_owned(&self, ip_str: &str) -> bool {
         self.lookup_ip(ip_str).is_some()
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+
+    fn customer(id: &str, prefixes: &[&str]) -> Customer {
+        Customer {
+            customer_id: id.into(),
+            name: id.into(),
+            prefixes: prefixes.iter().map(|p| (*p).into()).collect(),
+            policy_profile: PolicyProfile::Normal,
+            services: vec![],
+        }
+    }
+
+    #[test]
+    fn whole_prefix_needs_one_containing_owner_and_no_conflicting_prefix_or_asset() {
+        let target: IpNet = "203.0.112.0/22".parse().unwrap();
+        let owner = customer("owner", &["203.0.112.0/22", "2001:db8::/32"]);
+        let inv = Inventory::new(vec![owner.clone()]);
+        let context = inv.lookup_prefix(&target).unwrap();
+        assert_eq!(context.customer_id, "owner");
+        assert!(context.service_id.is_none());
+        assert!(context.interface.is_none());
+        assert!(context.allowed_ports.udp.is_empty());
+        assert!(
+            inv.lookup_prefix(&"2001:db8:1::/48".parse().unwrap())
+                .is_some()
+        );
+        for competing in [
+            customer("other", &["203.0.115.0/24"]),
+            customer("other", &["203.0.0.0/16"]),
+        ] {
+            assert!(
+                Inventory::new(vec![owner.clone(), competing])
+                    .lookup_prefix(&target)
+                    .is_none()
+            );
+        }
+        let mut asset_owner = customer("other", &[]);
+        asset_owner.services.push(Service {
+            service_id: "svc".into(),
+            name: "svc".into(),
+            assets: vec![Asset {
+                ip: "203.0.115.254".into(),
+                role: None,
+                interface: None,
+            }],
+            allowed_ports: AllowedPorts::default(),
+        });
+        assert!(
+            Inventory::new(vec![owner, asset_owner])
+                .lookup_prefix(&target)
+                .is_none()
+        );
+        let partial = customer("owner", &["203.0.112.0/23", "203.0.114.0/23"]);
+        assert!(
+            Inventory::new(vec![partial])
+                .lookup_prefix(&target)
+                .is_none()
+        );
     }
 }

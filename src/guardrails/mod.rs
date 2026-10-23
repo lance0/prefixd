@@ -494,10 +494,10 @@ mod tests {
             ),
             (
                 MatchCriteria {
-                    dst_prefix: "192.0.2.0/24".into(),
+                    dst_prefix: "192.0.2.1/24".into(),
                     ..udp(vec![123])
                 },
-                FlowSpecMatchError::NotHostPrefix,
+                FlowSpecMatchError::InvalidDestinationPrefix,
             ),
         ] {
             assert!(

@@ -71,6 +71,48 @@ Expect one of these outcomes:
 
 The dashboard's **Mitigations** page shows the same rule with its expiry.
 
+### Subnet destination
+
+When an attack targets a port across an entire allocation, use **Create
+FlowSpec rule** and enter the complete **Destination IP or CIDR**. The preview
+shows the full prefix, protocol, ports, action and TTL before submission.
+
+For example, to discard UDP port 443 across `203.0.112.0/22`:
+
+1. Configure a single customer prefix containing that entire `/22`. Resolve
+   overlapping allocations and assets owned by other customers first.
+2. Explicitly set `guardrails.dst_prefix_minlen: 22` while retaining
+   `dst_prefix_maxlen: 32`, then restart with those settings. Defaults refuse
+   subnets. For an IPv6 `/48`, use `dst_prefix_minlen_v6: 48` and
+   `dst_prefix_maxlen_v6: 128`.
+3. Check that no configured or API safelist entry overlaps the range. A single
+   protected host inside it refuses the whole rule.
+4. Submit the aligned network, precise protocol/port and a short TTL:
+
+```bash
+curl -sS -b cookies.txt -X POST http://localhost/v1/mitigations \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"UDP port 443 attack across the allocation",
+       "victim_ip":"203.0.112.0/22","protocol":"udp","dst_ports":[443],
+       "action":"discard","ttl_seconds":300}'
+```
+
+`203.0.113.10/22` is refused with a suggestion for `203.0.112.0/22`; prefixd
+never clears destination host bits silently. IPv6 works the same way, for
+example `2001:db8:1234::/48`. Source-prefix and amplification selectors retain
+their existing opt-ins and protocol/family checks.
+
+One CIDR consumes one quota slot. A police rate covers the matching flow
+across the whole destination, not a separate allowance per address. Withdrawal
+and expiry remove that exact rule. Safelisting a host inside it requests
+withdrawal of the entire rule; prefixd does not create split replacements.
+
+Use the mitigation detail page and its **Report** action for CIDRs. These show
+that exact target; host history and host events are not aggregated into a subnet
+report. The speaker read-back below establishes local state only. Before a
+controller downgrade, withdraw CIDR rules and finish pending withdrawals on
+the original target. Detector ingestion and RTBH still accept only host IPs.
+
 ## 4. Check the speaker's local state
 
 rustbgpd reports prefixd's rules as retained local intent:

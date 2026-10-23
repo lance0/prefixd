@@ -669,6 +669,12 @@ impl ReconciliationLoop {
             };
             let key = ownership_key(&candidate_rule);
             let nlri_hash = candidate_rule.nlri_hash();
+            let destination_prefix = candidate_rule
+                .nlri
+                .dst_prefix
+                .parse::<ipnet::IpNet>()
+                .ok()
+                .filter(|prefix| prefix.prefix_len() < prefix.max_prefix_len());
             if owner_counts[&key] != 1 {
                 tracing::warn!(mitigation_id = %candidate.mitigation_id,
                     "announcement repair blocked by multiple active owners");
@@ -712,7 +718,7 @@ impl ReconciliationLoop {
                         )));
                     continue;
                 }
-                if !forced && observed_action == &action {
+                if !forced && observed_action == &action && destination_prefix.is_none() {
                     continue;
                 }
             }
@@ -778,6 +784,82 @@ impl ReconciliationLoop {
             self.verified_speaker_binding()?;
             if mitigation.expires_at <= chrono::Utc::now() {
                 continue;
+            }
+            // Hosts keep their existing admission policy. Non-host rules need
+            // fresh whole-prefix ownership and overlap safety, even when the
+            // speaker already has the desired action. The lifecycle mutex
+            // serializes safelist insertion and inventory replacement.
+            if let Some(destination) = destination_prefix {
+                let safelisted = match self.repo.is_safelisted(&destination.to_string()).await {
+                    Ok(safelisted) => safelisted,
+                    Err(error) => {
+                        repair_error = Some(error);
+                        continue;
+                    }
+                };
+                let ownership_lost = if safelisted {
+                    false
+                } else if let Some(state) = &self.state {
+                    let owner = state.inventory.read().await.lookup_prefix(&destination);
+                    owner.is_none_or(|owner| {
+                        mitigation.customer_id.as_deref() != Some(owner.customer_id.as_str())
+                    })
+                } else {
+                    repair_error = Some(crate::error::PrefixdError::Conflict(
+                        "destination prefix repair requires current customer inventory".into(),
+                    ));
+                    continue;
+                };
+                if safelisted || ownership_lost {
+                    if self.dry_run {
+                        continue;
+                    }
+                    let binding = self.verified_speaker_binding()?;
+                    let withdrawal = if safelisted {
+                        crate::domain::withdraw_safelisted(
+                            self.repo.as_ref(),
+                            self.announcer.as_ref(),
+                            false,
+                            &mitigation,
+                            binding,
+                        )
+                        .await
+                    } else {
+                        match request_withdrawal(
+                            self.repo.as_ref(),
+                            &mitigation,
+                            false,
+                            "system",
+                            "inventory-recheck",
+                            "destination prefix ownership changed after admission".into(),
+                            true,
+                            binding,
+                        )
+                        .await
+                        {
+                            Ok(request) => {
+                                execute_withdrawal(
+                                    self.repo.as_ref(),
+                                    self.announcer.as_ref(),
+                                    false,
+                                    &request,
+                                    binding,
+                                )
+                                .await
+                            }
+                            Err(error) => Err(error),
+                        }
+                    };
+                    match withdrawal {
+                        Ok(withdrawn) => self.notify_withdrawn(&withdrawn).await,
+                        Err(error) => {
+                            tracing::error!(mitigation_id = %mitigation.mitigation_id, error = %error,
+                                "failed to withdraw destination prefix after safety recheck");
+                            repair_error = Some(error);
+                        }
+                    }
+                    continue;
+                }
             }
             if forced
                 || announced_actions.get(&nlri_hash).map(|(_, action)| action) != Some(&action)
@@ -1489,8 +1571,8 @@ mod tests {
         }
         async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
             let mode = self.mode.load(SeqCst);
-            if rule.nlri.dst_prefix == "192.0.2.1/32" && mode != 0 {
-                if mode == 2 {
+            if (rule.nlri.dst_prefix == "192.0.2.1/32" && mode != 0) || matches!(mode, 11 | 12) {
+                if matches!(mode, 2 | 12) {
                     self.inner.withdraw(rule).await?;
                 }
                 return Err(PrefixdError::BgpWithdrawalFailed(
@@ -2173,6 +2255,166 @@ mod tests {
             ".".into(),
         )
         .unwrap()
+    }
+
+    async fn destination_prefix_state(
+        repo: Arc<MockRepository>,
+        speaker: Arc<dyn FlowSpecAnnouncer>,
+        prefixes: &[&str],
+    ) -> Arc<AppState> {
+        // Keep default /32 and /128 admission bounds: the unaffected CIDR in
+        // repair tests proves saved intent survives tighter startup bounds.
+        let state = action_state(repo, speaker);
+        *state.inventory.write().await =
+            crate::config::Inventory::new(vec![crate::config::Customer {
+                customer_id: "prefix-owner".into(),
+                name: "Prefix owner".into(),
+                prefixes: prefixes.iter().map(|prefix| (*prefix).into()).collect(),
+                policy_profile: crate::config::PolicyProfile::Normal,
+                services: vec![],
+            }]);
+        state
+    }
+
+    fn destination_prefix_mitigation(prefix: &str) -> Mitigation {
+        let mut mitigation = action_mitigation(prefix, FlowSpecAction::discard());
+        mitigation.victim_ip = prefix.into();
+        mitigation.customer_id = Some("prefix-owner".into());
+        mitigation
+    }
+
+    #[tokio::test]
+    async fn destination_prefix_repair_rechecks_safety_after_observation() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for (destination, protected, unaffected) in [
+            ("203.0.112.0/22", "203.0.113.10/32", "203.0.116.0/22"),
+            ("2001:db8::/64", "2001:db8::abcd/128", "2001:db8:0:1::/64"),
+        ] {
+            for present in [false, true] {
+                for change in ["safelist", "ownership", "lookup_failure"] {
+                    let repo = Arc::new(MockRepository::new());
+                    let inner = action_speaker(0);
+                    let speaker = Arc::new(PausedActionInventory {
+                        inner: inner.clone(),
+                        observed: Default::default(),
+                        release: Default::default(),
+                    });
+                    let affected = destination_prefix_mitigation(destination);
+                    let control = destination_prefix_mitigation(unaffected);
+                    for mitigation in [&affected, &control] {
+                        repo.insert_mitigation(mitigation).await.unwrap();
+                    }
+                    if present {
+                        inner
+                            .inner
+                            .announce(&crate::domain::mitigation_rule(&affected).unwrap())
+                            .await
+                            .unwrap();
+                    }
+                    let mut unknown = crate::domain::mitigation_rule(&affected).unwrap();
+                    unknown.nlri.dst_ports = vec![123];
+                    inner.inner.announce(&unknown).await.unwrap();
+                    let state = destination_prefix_state(
+                        repo.clone(),
+                        speaker.clone(),
+                        &[destination, unaffected],
+                    )
+                    .await;
+                    let reconciler =
+                        ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+                            .with_app_state(state.clone());
+                    let mut pass = Box::pin(reconciler.sync_announcements());
+                    assert!(futures_util::poll!(&mut pass).is_pending());
+                    speaker.observed.notified().await;
+                    let guard = state.mitigation_lock.lock().await;
+                    match change {
+                        "safelist" => repo.insert_safelist(protected, "test", None).await.unwrap(),
+                        "ownership" => {
+                            let mut inventory = state.inventory.write().await;
+                            inventory.customers[0].prefixes = vec![unaffected.into()];
+                        }
+                        _ => repo.fail_safelist.store(true, SeqCst),
+                    }
+                    speaker.release.notify_one();
+                    drop(guard);
+                    let result = pass.await;
+                    if change == "lookup_failure" {
+                        assert!(result.is_err());
+                        assert_eq!(status(&repo, &affected).await, MitigationStatus::Active);
+                        assert_eq!(inner.announcements.load(SeqCst), 0);
+                        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+                    } else {
+                        result.unwrap();
+                        assert_eq!(status(&repo, &affected).await, MitigationStatus::Withdrawn);
+                        assert_eq!(status(&repo, &control).await, MitigationStatus::Active);
+                        assert_eq!(inner.announcements.load(SeqCst), 1);
+                    }
+                    let retained = inner.inner.list_active().await.unwrap();
+                    assert!(
+                        retained
+                            .iter()
+                            .any(|rule| rule.nlri_hash() == unknown.nlri_hash())
+                    );
+                    if change != "lookup_failure" {
+                        assert!(retained.iter().all(|rule| {
+                            rule.nlri_hash()
+                                != crate::domain::mitigation_rule(&affected)
+                                    .unwrap()
+                                    .nlri_hash()
+                        }));
+                        assert_eq!(retained.len(), 2, "the unknown rule and control remain");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn destination_prefix_safety_withdrawal_retries_immutable_intent() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for failure in [11, 12] {
+            let repo = Arc::new(MockRepository::new());
+            let speaker = action_speaker(failure);
+            let mut affected = destination_prefix_mitigation("203.0.112.0/22");
+            affected.match_criteria.src_prefix = Some("198.51.100.0/24".into());
+            affected.scope_hash = affected.match_criteria.compute_scope_hash();
+            repo.insert_mitigation(&affected).await.unwrap();
+            let rule = crate::domain::mitigation_rule(&affected).unwrap();
+            speaker.inner.announce(&rule).await.unwrap();
+            let state =
+                destination_prefix_state(repo.clone(), speaker.clone(), &["203.0.112.0/22"]).await;
+            let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+                .with_app_state(state);
+            repo.insert_safelist("203.0.113.10", "test", None)
+                .await
+                .unwrap();
+            assert!(reconciler.sync_announcements().await.is_err());
+            let pending = repo.pending_withdrawals(None).await.unwrap();
+            let [request] = pending.as_slice() else {
+                panic!("one pending withdrawal")
+            };
+            assert_eq!(request.rule_kind, "flowspec");
+            assert_eq!(request.reason, crate::domain::SAFELISTED_AFTER_ADMISSION);
+            assert_eq!(
+                serde_json::to_value(request.flowspec_rule().unwrap()).unwrap(),
+                serde_json::to_value(&rule).unwrap()
+            );
+            // Removing the protection cannot turn pending deletion into an add.
+            repo.remove_safelist("203.0.113.10").await.unwrap();
+            reconciler.sync_announcements().await.unwrap();
+            assert_eq!(speaker.announcements.load(SeqCst), 0);
+            assert!(reconciler.expire_mitigations().await.is_err());
+            let retained = repo.pending_withdrawals(None).await.unwrap();
+            assert_eq!(retained[0].operation_id, request.operation_id);
+            assert_eq!(retained[0].rule_json, request.rule_json);
+            assert_eq!(retained[0].actor, "safelist-recheck");
+            speaker.mode.store(0, SeqCst);
+            reconciler.expire_mitigations().await.unwrap();
+            reconciler.sync_announcements().await.unwrap();
+            assert_eq!(status(&repo, &affected).await, MitigationStatus::Withdrawn);
+            assert!(speaker.inner.list_active().await.unwrap().is_empty());
+            assert_eq!(speaker.announcements.load(SeqCst), 0);
+        }
     }
 
     #[tokio::test]

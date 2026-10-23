@@ -1501,3 +1501,26 @@ async fn live_rustbgpd_leased_flowspec_renewal_restart_and_expiry() {
     }
     assert!(rows(owner).await.is_empty());
 }
+
+#[path = "common/destination_lifecycle.rs"]
+mod destination_lifecycle;
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
+async fn manual_destination_cidrs_survive_restart_then_withdraw_and_expire_exactly() {
+    let fixture = fixture::Speaker::start().await;
+    let speaker = std::sync::Arc::new(fixture.connect().await);
+    let harness = destination_lifecycle::Harness::start(
+        fixture_settings(&fixture, "destination-cidr").bgp,
+        speaker.clone(),
+    )
+    .await;
+    fixture.container.stop_with_timeout(Some(0)).await.unwrap();
+    fixture.container.start().await.unwrap();
+    fixture.ready().await;
+    contract::wait_inventory(speaker.as_ref(), &[])
+        .await
+        .unwrap();
+    harness.repair().await;
+    harness.finish().await;
+}

@@ -39,18 +39,19 @@ pub struct AddSafelistRequest {
 
 #[derive(Serialize, ToSchema)]
 pub struct AddSafelistResponse {
-    /// Live blackholes on this POP inside the new prefix that this request
-    /// withdrew with the system reason `safelisted after admission`.
+    /// Live blackholes and non-host FlowSpec rules on this POP overlapping the
+    /// entry that this request withdrew with `safelisted after admission`.
     withdrawn_mitigation_ids: Vec<Uuid>,
-    /// Present when covered blackholes could not be found or withdrawn. The
+    /// Present when overlapping mitigations could not be found or withdrawn. The
     /// entry is stored either way; reconciliation retries enforced routes.
     #[serde(skip_serializing_if = "Option::is_none")]
     withdrawal_error: Option<String>,
 }
 
 /// Caller holds the lifecycle mutex and has stored the entry. Withdraws every
-/// live blackhole on this POP inside `prefix`; a failed lookup withdraws nothing.
-async fn withdraw_covered_blackholes(
+/// live blackhole or non-host FlowSpec rule on this POP overlapping `prefix`;
+/// host FlowSpec admission policy is unchanged. A failed lookup withdraws nothing.
+async fn withdraw_covered_mitigations(
     state: &AppState,
     prefix: ipnet::IpNet,
 ) -> AddSafelistResponse {
@@ -60,9 +61,34 @@ async fn withdraw_covered_blackholes(
     };
     let found = async {
         let binding = state.verified_speaker_binding()?;
-        let covered =
-            crate::domain::covered_blackholes(state.repo.as_ref(), &state.settings.pop, prefix)
-                .await?;
+        let pending = state
+            .repo
+            .pending_withdrawals(Some(&state.settings.pop))
+            .await?;
+        let now = chrono::Utc::now();
+        let covered = state
+            .repo
+            .active_mitigation_inventory(Some(&state.settings.pop))
+            .await?
+            .into_iter()
+            .filter(|mitigation| {
+                mitigation.pop == state.settings.pop
+                    && mitigation.is_active()
+                    && mitigation.expires_at > now
+                    && !pending
+                        .iter()
+                        .any(|request| request.mitigation_id == mitigation.mitigation_id)
+                    && mitigation
+                        .match_criteria
+                        .dst_prefix
+                        .parse::<ipnet::IpNet>()
+                        .is_ok_and(|destination| {
+                            (mitigation.action_type == crate::domain::ActionType::Blackhole
+                                || destination.prefix_len() < destination.max_prefix_len())
+                                && (prefix.contains(&destination) || destination.contains(&prefix))
+                        })
+            })
+            .collect::<Vec<_>>();
         Ok::<_, PrefixdError>((binding, covered))
     }
     .await;
@@ -70,9 +96,9 @@ async fn withdraw_covered_blackholes(
         Ok(found) => found,
         Err(error) => {
             tracing::error!(target: "prefixd::api::handlers", %prefix, error = %error,
-                "covered blackhole lookup failed after safelist add; nothing withdrawn");
+                "overlapping mitigation lookup failed after safelist add; nothing withdrawn");
             response.withdrawal_error =
-                Some("covered blackhole lookup failed; nothing was withdrawn".into());
+                Some("overlapping mitigation lookup failed; nothing was withdrawn".into());
             return response;
         }
     };
@@ -104,9 +130,10 @@ async fn withdraw_covered_blackholes(
             Err(error) => {
                 tracing::error!(target: "prefixd::api::handlers", %prefix,
                     mitigation_id = %mitigation.mitigation_id, error = %error,
-                    "failed to withdraw safelisted blackhole");
-                response.withdrawal_error =
-                    Some("a covered blackhole was not withdrawn; reconciliation retries it".into());
+                    "failed to withdraw safelisted mitigation");
+                response.withdrawal_error = Some(
+                    "an overlapping mitigation was not withdrawn; reconciliation retries it".into(),
+                );
             }
         }
     }
@@ -136,7 +163,7 @@ pub async fn list_safelist(
     tag = "safelist",
     request_body = AddSafelistRequest,
     responses(
-        (status = 201, description = "Safelist entry created; lists covered blackholes withdrawn", body = AddSafelistResponse),
+        (status = 201, description = "Safelist entry created; lists overlapping mitigations withdrawn", body = AddSafelistResponse),
         (status = 400, description = "Invalid prefix"),
         (status = 401, description = "Not authenticated"),
         (status = 403, description = "Insufficient permissions")
@@ -172,7 +199,7 @@ pub async fn add_safelist(
         })?;
 
     tracing::info!(target: "prefixd::api::handlers", prefix = %req.prefix, operator = %operator_id, "safelist entry added");
-    let response = withdraw_covered_blackholes(&state, prefix).await;
+    let response = withdraw_covered_mitigations(&state, prefix).await;
     Ok((StatusCode::CREATED, Json(response)))
 }
 
@@ -222,7 +249,9 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::AppState;
-    use crate::bgp::{BlackholeRoute, BlackholeSpeaker, FaultyBlackholes};
+    use crate::bgp::{
+        BlackholeRoute, BlackholeSpeaker, FaultyBlackholes, FlowSpecReader, FlowSpecWriter,
+    };
     use crate::config::{BlackholeConfig, OperationMode};
     use crate::db::{MockRepository, RepositoryTrait};
     use crate::domain::{
@@ -307,16 +336,50 @@ mod tests {
             .unwrap()
     }
 
+    fn flowspec(prefix: &str, pop: &str, origin: OperationMode) -> Mitigation {
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: Some("prefix-owner".into()),
+                service_id: None,
+                pop: pop.into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: prefix.into(),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                    ..Default::default()
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams::default(),
+                ttl_seconds: 600,
+                reason: "test".into(),
+            },
+            prefix.into(),
+            AttackVector::UdpFlood,
+        );
+        mitigation.activate();
+        mitigation.origin_mode = Some(origin);
+        mitigation
+    }
+
     impl Fixture {
         /// Persist `mitigation`; an enforced row's route is also on the speaker.
         async fn live(&self, mitigation: &Mitigation) {
             self.repo.insert_mitigation(mitigation).await.unwrap();
             if !mitigation.is_dry_run_origin() && mitigation.pop == "test" {
-                self.speaker
-                    .inner
-                    .announce_blackhole(&route(mitigation))
-                    .await
-                    .unwrap();
+                if mitigation.action_type == ActionType::Blackhole {
+                    self.speaker
+                        .inner
+                        .announce_blackhole(&route(mitigation))
+                        .await
+                        .unwrap();
+                } else {
+                    self.speaker
+                        .inner
+                        .announce(&crate::domain::mitigation_rule(mitigation).unwrap())
+                        .await
+                        .unwrap();
+                }
             }
         }
 
@@ -401,6 +464,116 @@ mod tests {
         ));
         assert_eq!(entry.details["reason"], SAFELISTED_AFTER_ADMISSION);
         assert!(entry.details["operation_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn safelisting_inside_a_destination_prefix_withdraws_the_whole_rule() {
+        for (destination, protected, outside) in [
+            ("203.0.112.0/22", "203.0.113.10/32", "203.0.116.0/22"),
+            ("2001:db8::/64", "2001:db8::abcd/128", "2001:db8:0:1::/64"),
+        ] {
+            let fx = fixture(OperationMode::Enforced);
+            let affected = flowspec(destination, "test", OperationMode::Enforced);
+            let unaffected = flowspec(outside, "test", OperationMode::Enforced);
+            let foreign = flowspec(destination, "other-pop", OperationMode::Enforced);
+            let host = flowspec(protected, "test", OperationMode::Enforced);
+            for mitigation in [&affected, &unaffected, &foreign, &host] {
+                fx.live(mitigation).await;
+            }
+            let mut unknown = crate::domain::mitigation_rule(&affected).unwrap();
+            unknown.nlri.dst_ports = vec![123];
+            fx.speaker.inner.announce(&unknown).await.unwrap();
+            let (status, body) = fx.safelist(protected).await;
+            assert_eq!(status, StatusCode::CREATED);
+            assert_eq!(ids(&body), [affected.mitigation_id.to_string()]);
+            assert!(body.get("withdrawal_error").is_none());
+            assert_eq!(fx.status(&affected).await, MitigationStatus::Withdrawn);
+            for mitigation in [&unaffected, &foreign, &host] {
+                assert_eq!(fx.status(mitigation).await, MitigationStatus::Active);
+            }
+            let retained = fx.speaker.inner.list_active().await.unwrap();
+            assert_eq!(retained.len(), 3);
+            assert!(
+                retained
+                    .iter()
+                    .any(|rule| rule.nlri_hash() == unknown.nlri_hash())
+            );
+            assert!(retained.iter().all(|rule| {
+                rule.nlri_hash()
+                    != crate::domain::mitigation_rule(&affected)
+                        .unwrap()
+                        .nlri_hash()
+            }));
+            let audit = fx.audit(&affected).await;
+            assert_eq!(audit.details["reason"], SAFELISTED_AFTER_ADMISSION);
+            assert_eq!(fx.speaker.flowspec_adds.load(SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn destination_prefix_foreign_owner_keeps_exact_pending_withdrawal() {
+        let fx = fixture(OperationMode::Enforced);
+        let mut affected = flowspec("203.0.112.0/22", "test", OperationMode::Enforced);
+        affected.action_params.injection_owner = "prefixd-test".into();
+        affected.scope_hash = affected.match_criteria.compute_scope_hash();
+        fx.repo.insert_mitigation(&affected).await.unwrap();
+        let own_rule = crate::domain::mitigation_rule(&affected).unwrap();
+        let mut foreign_rule = own_rule.clone();
+        foreign_rule.owner = "another-controller".into();
+        fx.speaker
+            .inner
+            .announce_leased(&foreign_rule, 90)
+            .await
+            .unwrap();
+
+        let (status, body) = fx.safelist("203.0.113.10").await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(ids(&body).is_empty());
+        assert!(body["withdrawal_error"].is_string());
+        let pending = fx.repo.pending_withdrawals(None).await.unwrap();
+        let [request] = pending.as_slice() else {
+            panic!("one pending withdrawal")
+        };
+        assert_eq!(
+            serde_json::to_value(request.flowspec_rule().unwrap()).unwrap(),
+            serde_json::to_value(&own_rule).unwrap(),
+        );
+        assert_eq!(request.reason, SAFELISTED_AFTER_ADMISSION);
+        let retained_rules = fx.speaker.inner.list_active().await.unwrap();
+        assert_eq!(retained_rules.len(), 1);
+        assert_eq!(retained_rules[0].owner, foreign_rule.owner);
+        assert_eq!(retained_rules[0].nlri_hash(), foreign_rule.nlri_hash());
+
+        // Another insertion cannot replace the failed operation or split the rule.
+        let (_, retried_body) = fx.safelist("203.0.113.0/24").await;
+        assert!(ids(&retried_body).is_empty());
+        let retained = fx.repo.pending_withdrawals(None).await.unwrap();
+        assert_eq!(retained[0].operation_id, request.operation_id);
+        assert_eq!(retained[0].rule_json, request.rule_json);
+        assert_eq!(retained[0].actor, "safelist-recheck");
+        assert_eq!(fx.speaker.flowspec_adds.load(SeqCst), 0);
+
+        fx.speaker.inner.withdraw(&foreign_rule).await.unwrap();
+        fx.speaker
+            .inner
+            .announce_leased(&own_rule, 90)
+            .await
+            .unwrap();
+        crate::domain::execute_withdrawal(
+            fx.repo.as_ref(),
+            fx.speaker.as_ref(),
+            false,
+            request,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fx.status(&affected).await, MitigationStatus::Withdrawn);
+        assert!(fx.speaker.inner.list_active().await.unwrap().is_empty());
+        assert_eq!(
+            fx.audit(&affected).await.details["operation_id"],
+            request.operation_id.to_string()
+        );
     }
 
     #[tokio::test]

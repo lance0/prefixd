@@ -387,8 +387,8 @@ pub struct IncidentReportQuery {
     path = "/v1/reports/incident",
     tag = "reports",
     params(
-        ("mitigation_id" = Option<String>, Query, description = "Mitigation ID to generate report for"),
-        ("ip" = Option<String>, Query, description = "IP address to generate report for"),
+        ("mitigation_id" = Option<String>, Query, description = "Mitigation ID; report uses its exact stored destination, including CIDRs"),
+        ("ip" = Option<String>, Query, description = "Bare host IP address to generate report for; CIDRs require mitigation_id"),
     ),
     responses(
         (status = 200, description = "Markdown incident report", content_type = "text/markdown"),
@@ -409,30 +409,47 @@ pub async fn generate_incident_report(
     }
 
     // Require exactly one of mitigation_id or ip
-    let ip = match (query.mitigation_id, &query.ip) {
+    let (ip, saved_owner) = match (query.mitigation_id, &query.ip) {
         (Some(mid), None) => {
             let mitigation = match state.repo.get_mitigation(mid).await {
                 Ok(Some(m)) => m,
                 Ok(None) => return StatusCode::NOT_FOUND.into_response(),
                 Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             };
-            mitigation.victim_ip
+            (
+                mitigation.victim_ip,
+                Some((mitigation.customer_id, mitigation.service_id)),
+            )
         }
-        (None, Some(ip_str)) => ip_str.clone(),
+        (None, Some(ip_str)) => {
+            if validate_ip(ip_str).is_err() {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+            (ip_str.clone(), None)
+        }
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };
 
-    if validate_ip(&ip).is_err() {
-        return StatusCode::BAD_REQUEST.into_response();
+    let is_cidr = ip.contains('/');
+    if (is_cidr && ip.parse::<ipnet::IpNet>().is_err()) || (!is_cidr && validate_ip(&ip).is_err()) {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    // Fetch events and mitigations in parallel
-    let (events, mitigations) = match tokio::try_join!(
-        state.repo.list_events_by_ip(&ip, 1000),
-        state.repo.list_mitigations_by_ip(&ip, 100),
-    ) {
-        Ok(data) => data,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    // CIDRs select exact stored targets. Detector events remain host-only; do not
+    // substitute the network address or imply an aggregate of addresses inside it.
+    let (events, mitigations) = if is_cidr {
+        match state.repo.list_mitigations_by_ip(&ip, 100).await {
+            Ok(mitigations) => (Vec::new(), mitigations),
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    } else {
+        match tokio::try_join!(
+            state.repo.list_events_by_ip(&ip, 1000),
+            state.repo.list_mitigations_by_ip(&ip, 100),
+        ) {
+            Ok(data) => data,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
     };
 
     // Determine earliest timestamp across all events/mitigations for audit range
@@ -478,24 +495,40 @@ pub async fn generate_incident_report(
         })
         .collect();
 
-    // Inventory lookup for customer/service context
+    // A CIDR's recorded owner is authoritative; its first address is not a
+    // service lookup key. Host reports retain their exact-asset context.
     let inventory = state.inventory.read().await;
     let mut customer_name: Option<String> = None;
     let mut customer_id: Option<String> = None;
     let mut service_name: Option<String> = None;
     let mut service_id: Option<String> = None;
-    'customer_search: for customer in &inventory.customers {
-        for service in &customer.services {
-            if service
-                .assets
+    if is_cidr {
+        if let Some((saved_customer, saved_service)) = saved_owner {
+            customer_id = saved_customer;
+            service_id = saved_service;
+            if let Some(customer) = inventory
+                .customers
                 .iter()
-                .any(|asset| asset.ip.as_str() == ip.as_str())
+                .find(|c| Some(c.customer_id.as_str()) == customer_id.as_deref())
             {
                 customer_name = Some(customer.name.clone());
-                customer_id = Some(customer.customer_id.clone());
-                service_name = Some(service.name.clone());
-                service_id = Some(service.service_id.clone());
-                break 'customer_search;
+                service_name = customer
+                    .services
+                    .iter()
+                    .find(|service| Some(service.service_id.as_str()) == service_id.as_deref())
+                    .map(|service| service.name.clone());
+            }
+        }
+    } else {
+        'customer_search: for customer in &inventory.customers {
+            for service in &customer.services {
+                if service.assets.iter().any(|asset| asset.ip == ip) {
+                    customer_name = Some(customer.name.clone());
+                    customer_id = Some(customer.customer_id.clone());
+                    service_name = Some(service.name.clone());
+                    service_id = Some(service.service_id.clone());
+                    break 'customer_search;
+                }
             }
         }
     }
@@ -580,6 +613,10 @@ pub async fn generate_incident_report(
     md.push_str(&format!("# Incident Report — {}\n\n", ip));
 
     md.push_str(&format!("- **Generated**: {}\n", now.to_rfc3339()));
+    if is_cidr {
+        md.push_str("- **Scope**: exact destination CIDR. Individual host events and mitigations within this range are not aggregated.\n");
+    }
+    md.push_str("- **Evidence**: saved mitigation intent; router enforcement is unobserved.\n");
     if let Some(ref cid) = customer_id {
         md.push_str(&format!(
             "- **Customer**: {} (`{}`)\n",
@@ -652,18 +689,27 @@ pub async fn generate_incident_report(
     // Mitigations table
     if !mitigations.is_empty() {
         md.push_str("## Mitigations\n\n");
-        md.push_str("| Mitigation ID | Status | Action | Vector | Prefix | Duration |\n");
-        md.push_str("|---------------|--------|--------|--------|--------|----------|\n");
+        md.push_str("| Mitigation ID | Status | Action | Vector | Prefix | Match | Expires (UTC) | Duration |\n");
+        md.push_str("|---------------|--------|--------|--------|--------|-------|---------------|----------|\n");
         for m in &mitigations {
             let end_time = m.withdrawn_at.unwrap_or(m.expires_at).min(now);
             let duration_secs = (end_time - m.created_at).num_seconds().max(0);
             md.push_str(&format!(
-                "| `{}` | {} | {} | {} | `{}` | {} |\n",
+                "| `{}` | {} | {} | {} | `{}` | {} | {} | {} |\n",
                 m.mitigation_id,
                 m.status,
-                m.action_type,
+                if m.action_type == crate::domain::ActionType::Police {
+                    format!(
+                        "police {} bps",
+                        m.action_params.rate_bps.unwrap_or_default()
+                    )
+                } else {
+                    m.action_type.to_string()
+                },
                 m.vector,
                 m.match_criteria.dst_prefix,
+                report_match(&m.match_criteria),
+                m.expires_at.to_rfc3339(),
                 format_duration(duration_secs),
             ));
         }
@@ -742,6 +788,43 @@ pub async fn generate_incident_report(
     );
 
     (StatusCode::OK, response_headers, md).into_response()
+}
+
+fn report_match(criteria: &crate::domain::MatchCriteria) -> String {
+    let protocol = match criteria.protocol {
+        Some(1) => "ICMP".into(),
+        Some(6) => "TCP".into(),
+        Some(17) => "UDP".into(),
+        Some(58) => "ICMPv6".into(),
+        Some(number) => format!("protocol {number}"),
+        None => "any protocol".into(),
+    };
+    let mut parts = vec![protocol];
+    if let Some(source) = &criteria.src_prefix {
+        parts.push(format!("from `{source}`"));
+    }
+    for (label, ports) in [
+        ("dst ports", &criteria.dst_ports),
+        ("src ports", &criteria.src_ports),
+    ] {
+        if !ports.is_empty() {
+            parts.push(format!(
+                "{label} {}",
+                ports
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    if criteria.fragment.is_some() {
+        parts.push("non-first fragments".into());
+    }
+    if let Some(length) = &criteria.packet_length {
+        parts.push(format!("length {}–{} B", length.min, length.max));
+    }
+    parts.join("; ")
 }
 
 fn format_bps(bps: i64) -> String {

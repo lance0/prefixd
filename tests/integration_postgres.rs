@@ -9,6 +9,55 @@ use common::TestContext;
 use prefixd::domain::MitigationStatus;
 
 #[tokio::test]
+async fn test_safelist_prefix_overlap_postgres_mock_parity() {
+    use prefixd::db::{MockRepository, RepositoryTrait};
+    use std::sync::Arc;
+
+    let ctx = TestContext::new().await;
+    let repositories: [Arc<dyn RepositoryTrait>; 2] =
+        [ctx.repo.clone(), Arc::new(MockRepository::new())];
+    for repo in repositories {
+        for protected in [
+            "203.0.113.10",
+            "198.51.100.0/24",
+            "2001:db8::abcd",
+            "2001:db8:1::/48",
+        ] {
+            repo.insert_safelist(protected, "test", None).await.unwrap();
+        }
+        for (candidate, expected) in [
+            ("203.0.113.10", true),
+            ("203.0.113.10/32", true),
+            ("203.0.112.0/22", true),
+            ("203.0.113.0/24", true),
+            ("203.0.113.11", false),
+            ("203.0.116.0/22", false),
+            ("198.51.100.64/26", true),
+            ("198.51.100.0/24", true),
+            ("198.51.100.0/23", true),
+            ("198.51.102.0/24", false),
+            ("2001:db8::abcd", true),
+            ("2001:0db8:0:0:0:0:0:abcd/128", true),
+            ("2001:db8::/64", true),
+            ("2001:db8::abce", false),
+            ("2001:db8:1:1234::/64", true),
+            ("2001:db8:1::/48", true),
+            ("2001:db8::/32", true),
+            ("2001:db8:2::/48", false),
+            ("192.0.2.0/24", false),
+            ("2001:db9::/32", false),
+        ] {
+            assert_eq!(
+                repo.is_safelisted(candidate).await.unwrap(),
+                expected,
+                "{candidate}"
+            );
+        }
+        assert!(repo.is_safelisted("invalid/22").await.is_err());
+    }
+}
+
+#[tokio::test]
 async fn test_cli_operator_list_matches_shipped_schema() {
     async fn list(ctx: &TestContext, format: &str) -> String {
         let output = tokio::time::timeout(

@@ -1,4 +1,5 @@
 mod blackhole;
+mod destination;
 mod event;
 mod export_evidence;
 mod flowspec;
@@ -9,6 +10,7 @@ mod speaker_target;
 mod withdrawal;
 
 pub use blackhole::*;
+pub use destination::*;
 pub use event::*;
 pub use export_evidence::*;
 pub use flowspec::*;

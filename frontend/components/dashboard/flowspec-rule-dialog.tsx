@@ -19,6 +19,8 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useConfigSettings } from "@/hooks/use-api"
 import { createMitigation, type CreateFlowSpecRequest, type JsonValue } from "@/lib/api"
+import { parseDestination } from "@/lib/destination"
+import { formatFlowSpecRule } from "./flowspec-preview"
 
 const PROTOCOLS = ["udp", "tcp", "icmp", "icmpv6", "any"] as const
 const DEFAULT_TTL_SECONDS = "300"
@@ -41,6 +43,10 @@ export interface RuleForm {
 /** The guardrails this form checks before the controller does; absent settings skip the opt-ins. */
 export interface RuleGuardrails {
   maxPorts: number
+  dstPrefixMinlen?: number
+  dstPrefixMaxlen?: number
+  dstPrefixMinlenV6?: number
+  dstPrefixMaxlenV6?: number
   allowSrcPrefixMatch?: boolean
   allowFragmentMatch?: boolean
   allowPacketLengthMatch?: boolean
@@ -91,10 +97,25 @@ function parseBound(input: string): number | null {
  */
 export function validateRule(form: RuleForm, guardrails: RuleGuardrails): RuleErrors {
   const errors: RuleErrors = {}
-  const v4 = isIPv4(form.victimIp)
-  const v6 = !v4 && isIPv6(form.victimIp)
+  const destination = parseDestination(form.victimIp)
+  const v4 = destination !== null && !destination.ipv6
+  const v6 = destination?.ipv6 === true
 
-  if (!v4 && !v6) errors.victimIp = "Enter an IPv4 or IPv6 address."
+  if (!destination) {
+    errors.victimIp = "Enter an IPv4 or IPv6 address, or a network in CIDR notation."
+  } else if (!destination.networkAligned) {
+    errors.victimIp = `Host bits are set. Use ${destination.prefix} if you intend to match that entire network.`
+  } else {
+    const min = v6 ? guardrails.dstPrefixMinlenV6 : guardrails.dstPrefixMinlen
+    const max = v6 ? guardrails.dstPrefixMaxlenV6 : guardrails.dstPrefixMaxlen
+    const key = v6 ? "dst_prefix_minlen_v6" : "dst_prefix_minlen"
+
+    if (min !== undefined && destination.prefixLength < min) {
+      errors.victimIp = `Destination is broader than allowed (guardrails.${key}=${min}).`
+    } else if (max !== undefined && destination.prefixLength > max) {
+      errors.victimIp = `Destination is narrower than allowed (guardrails.${v6 ? "dst_prefix_maxlen_v6" : "dst_prefix_maxlen"}=${max}).`
+    }
+  }
 
   const source = form.srcPrefix.trim()
 
@@ -115,14 +136,14 @@ export function validateRule(form: RuleForm, guardrails: RuleGuardrails): RuleEr
       !(sourceV4 || sourceV6) || Number(length) > (sourceV6 ? 128 : 32)) {
       errors.srcPrefix = "Enter an IPv4 or IPv6 network in CIDR notation."
     } else if ((v4 && !sourceV4) || (v6 && !sourceV6)) {
-      errors.srcPrefix = "Source prefix must match the victim's address family."
+      errors.srcPrefix = "Source prefix must match the destination's address family."
     } else if (guardrails.allowSrcPrefixMatch === false) {
       errors.srcPrefix = "Source prefix matching is off (guardrails.allow_src_prefix_match=false)."
     }
   }
 
   if ((form.protocol === "icmp" && v6) || (form.protocol === "icmpv6" && v4)) {
-    errors.protocol = "Protocol does not match the victim's address family."
+    errors.protocol = "Protocol does not match the destination's address family."
   }
 
   const rate = Number(form.rateBps)
@@ -188,7 +209,7 @@ export function validateRule(form: RuleForm, guardrails: RuleGuardrails): RuleEr
 /** The request body for a valid form; optional components are sent only when set. */
 export function toRequest(form: RuleForm): CreateFlowSpecRequest {
   const request: CreateFlowSpecRequest = {
-    victim_ip: form.victimIp,
+    victim_ip: form.victimIp.trim(),
     protocol: form.protocol,
     action: form.action,
     ttl_seconds: Number(form.ttl),
@@ -217,12 +238,17 @@ export function toRequest(form: RuleForm): CreateFlowSpecRequest {
 
 function readGuardrails(settings: { [key: string]: JsonValue } | undefined): RuleGuardrails {
   const value = settings?.guardrails
-  const guardrails: { [key: string]: JsonValue } = value instanceof Object && !Array.isArray(value) ? value : {}
+  const loaded = value instanceof Object && !Array.isArray(value)
+  const guardrails: { [key: string]: JsonValue } = loaded ? value : {}
   const maxPorts = Number(guardrails.max_ports)
   const flag = (key: string) => (guardrails[key] === true ? true : guardrails[key] === false ? false : undefined)
 
   return {
     maxPorts: Number.isInteger(maxPorts) && maxPorts > 0 ? maxPorts : 5,
+    dstPrefixMinlen: typeof guardrails.dst_prefix_minlen === "number" ? guardrails.dst_prefix_minlen : undefined,
+    dstPrefixMaxlen: typeof guardrails.dst_prefix_maxlen === "number" ? guardrails.dst_prefix_maxlen : undefined,
+    dstPrefixMinlenV6: typeof guardrails.dst_prefix_minlen_v6 === "number" ? guardrails.dst_prefix_minlen_v6 : loaded ? 128 : undefined,
+    dstPrefixMaxlenV6: typeof guardrails.dst_prefix_maxlen_v6 === "number" ? guardrails.dst_prefix_maxlen_v6 : loaded ? 128 : undefined,
     allowSrcPrefixMatch: flag("allow_src_prefix_match"),
     allowFragmentMatch: flag("allow_fragment_match"),
     allowPacketLengthMatch: flag("allow_packet_length_match"),
@@ -249,6 +275,20 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
 
   const errors = validateRule(form, readGuardrails(settings?.settings))
   const isValid = Object.keys(errors).length === 0
+  const destination = parseDestination(form.victimIp)
+  const request = toRequest(form)
+  const matchValid = !Object.keys(errors).some((field) => field !== "reason" && field !== "ttl")
+  const preview = destination?.networkAligned && matchValid ? formatFlowSpecRule({
+    dst_prefix: destination.prefix,
+    src_prefix: request.src_prefix ? parseDestination(request.src_prefix)?.prefix : undefined,
+    protocol: ({ udp: 17, tcp: 6, icmp: 1, icmpv6: 58 } as Record<string, number>)[form.protocol] ?? null,
+    dst_ports: request.dst_ports ?? [],
+    src_ports: request.src_ports,
+    fragment: request.fragment,
+    packet_length: request.packet_length,
+    action_type: form.action,
+    rate_bps: form.action === "police" ? Number(form.rateBps) : null,
+  }) : null
   const shown = (field: keyof RuleForm) => (submitted || touched.has(field) ? errors[field] : undefined)
 
   const update = <K extends keyof RuleForm>(field: K, value: RuleForm[K]) => {
@@ -319,24 +359,27 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
               Create FlowSpec rule
             </DialogTitle>
             <DialogDescription className="text-xs">
-              One rule to one victim host. The controller applies the same guardrails as playbooks;
-              router enforcement is not verified here.
+              Define the traffic to discard or police. The controller checks ownership, safelists
+              and deployment guardrails before saving intent.
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-1.5">
-            <Label htmlFor="fs-ip">Victim IP</Label>
+            <Label htmlFor="fs-ip">Destination IP or CIDR</Label>
             <Input
               id="fs-ip"
-              placeholder="203.0.113.10"
+              placeholder="203.0.113.10 or 203.0.112.0/22"
               value={form.victimIp}
               onChange={(e) => update("victimIp", e.target.value)}
               aria-invalid={Boolean(shown("victimIp"))}
-              aria-describedby={describedBy("victimIp", "fs-ip")}
+              aria-describedby={["fs-ip-help", describedBy("victimIp", "fs-ip")].filter(Boolean).join(" ")}
               className="h-9 font-mono"
               spellCheck={false}
               autoComplete="off"
             />
+            <p id="fs-ip-help" className="text-xs text-muted-foreground">
+              Subnets require explicitly relaxed prefix bounds and one configured customer prefix covering the entire range.
+            </p>
             {fieldError("victimIp", "fs-ip")}
           </div>
 
@@ -354,7 +397,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
               autoComplete="off"
             />
             <p id="fs-src-prefix-help" className="text-xs text-muted-foreground">
-              Limits which sources match this victim. Requires source prefix matching to be enabled.
+              Limits which sources match this destination. Requires source prefix matching to be enabled.
             </p>
             {fieldError("srcPrefix", "fs-src-prefix")}
           </div>
@@ -502,6 +545,19 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
               {fieldError("reason", "fs-reason")}
             </div>
           </div>
+
+          <section aria-labelledby="fs-preview-title" className="rounded-md border bg-muted/30 p-3">
+            <h3 id="fs-preview-title" className="text-xs font-semibold">Rule preview</h3>
+            <p className="mt-2 break-words font-mono text-xs" aria-live="polite">
+              {preview ?? "Complete the match fields to preview the rule."}
+            </p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {Number.isInteger(Number(form.ttl)) && Number(form.ttl) > 0
+                ? `Expires ${Number(form.ttl)} seconds after creation. ` : "Set a valid TTL. "}
+              {form.action === "police" ? "The rate applies to the matching flow, across the whole destination. " : ""}
+              Router enforcement is unobserved. Expiry needs the running controller.
+            </p>
+          </section>
 
           {error && (
             <div role="alert" className="break-words rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">

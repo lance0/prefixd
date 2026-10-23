@@ -139,8 +139,12 @@ Safety limits that prevent accidental broad impact.
 ### Prefix Restrictions
 
 - **/32 only (IPv4)** - No broader prefixes allowed by default
-- **/128 only (IPv6)** - Configurable via `dst_prefix_maxlen_v6`
-- **Safelist protection** - Infrastructure IPs never mitigated
+- **/128 only (IPv6)** - Host-only by default
+- **Manual destination CIDRs** - Deliberately relaxed existing prefix bounds
+  allow one owned subnet for discard/police. Host bits, partial/conflicting
+  ownership and any safelist overlap are refused. Automatic mitigation and
+  RTBH stay host-only; no per-address rule expansion
+- **Safelist protection** - Any overlap protects infrastructure, including hosts inside a broader destination
 
 ### TTL Enforcement
 
@@ -188,7 +192,8 @@ configuration. Both use the same policy and lifecycle logic and support IPv4 and
 IPv6 FlowSpec with discard or policing. Exact build, selection, transport and
 observation details are in the [backend reference](docs/reference/speaker-backends.md).
 
-Rules match a victim destination host, optional protocol and discrete
+Rules match a destination host by default, or a guarded manual destination
+CIDR with explicit prefix-bound opt-in, optional protocol and discrete
 destination-port equalities, with source-port, fragment and packet-length
 components for amplification. Manual rules may also select a same-family source
 CIDR behind `guardrails.allow_src_prefix_match`. Policy rates use bits/sec;

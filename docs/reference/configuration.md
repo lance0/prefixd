@@ -248,6 +248,29 @@ guardrails:
   allow_tcp_flags_match: false
 ```
 
+The destination bounds default to host-only: IPv4 `/32`, IPv6 `/128`. To
+admit manual subnet FlowSpec rules, deliberately lower `dst_prefix_minlen`
+(for example to 22 for IPv4 `/22` through `/32`) or `dst_prefix_minlen_v6`
+(for example to 48 for IPv6 `/48` through `/128`). Keep the corresponding
+maximum at the narrowest prefix you want to permit. These are existing bounds;
+there is no separate subnet switch. Detectors, playbooks and RTBH stay host-only.
+
+Prefix bounds gate new admissions. Tightening them on restart does not withdraw
+or change previously admitted CIDRs; reconciliation retains their saved scope,
+subject to fresh inventory ownership and safelist checks. Withdraw broad rules
+and drain their pending withdrawals before tightening bounds or returning the
+deployment to host-only operation.
+
+A manual CIDR must be network-aligned and entirely contained in one configured
+customer prefix with no conflicting ownership. Services are not inferred from
+the network's first address. Any safelist overlap, including a protected host
+inside the destination, refuses it. Fresh safety checks also prevent unsafe
+repair, and a new safelist entry withdraws the whole affected owned rule through
+the durable withdrawal path. See [destination CIDRs](api.md#destination-cidrs)
+and the [manual recipe](../cookbook/manual-mitigation.md#subnet-destination).
+A policing rate covers the matching flow across the destination. Quotas count
+one rule for one CIDR, regardless of its address count.
+
 `max_ports` applies to the destination-port list and the source-port list
 separately: a rule with five of each passes the default. A list over the cap
 is refused with `422`, never truncated. Duplicate source ports count once. A
@@ -274,7 +297,7 @@ responses and UDP-encapsulated VPNs, so prefer `police` for fragments.
 Source-port matches need no flag. Every rule with a source-port, fragment or
 packet-length match must also meet the
 [ADR 028](../adr/028-amplification-matches.md#1-components) rule invariants:
-UDP only, an IPv4 `/32` or IPv6 `/128` destination, no source ports together
+UDP only, a destination within the configured prefix bounds, no source ports together
 with `fragment`, `packet_length` only with source ports, and a lower bound above
 the IP and UDP headers (28 bytes for IPv4, 48 for IPv6). These checks run before
 anything is saved, in `dry-run` and `enforced` modes alike. Refusals return
@@ -295,7 +318,7 @@ in dry run. Disabling the flag prevents new admissions; withdraw existing rules
 explicitly. This flag previously had no effect. Source prefixes do not require
 UDP; source-port, fragment and packet-length combinations still do. Host bits
 are cleared, IPv6 offsets are always zero, and an explicit `/0` matches all
-sources. The destination stays one victim host. Detectors and playbooks do not
+sources. Manual destination CIDRs follow the whole-prefix admission above. Detectors and playbooks do not
 select source prefixes: source addresses may be spoofed, so operators must
 choose the scope from their own evidence. See [source matches](api.md#source-prefix-matches)
 and the [downgrade procedure](../how-to/upgrading.md#source-prefix-matches-and-downgrade).
