@@ -635,6 +635,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
                   {admission.candidate && (
                     <>
                       <p className="break-words font-mono">{formatFlowSpecRule({ ...admission.candidate.scope, action_type: admission.candidate.action.action_type, rate_bps: admission.candidate.action.rate_bps ?? null })}</p>
+                      {admission.candidate.action.action_type === "police" && <p className="font-mono">Police rate: {admission.candidate.action.rate_bps} bps</p>}
                       <p className="text-muted-foreground">
                         {admission.candidate.customer_id ? `Customer ${admission.candidate.customer_id}` : "No customer attribution"}
                         {` · POP ${admission.candidate.pop} · ${admission.candidate.ttl_seconds}s requested · ${admission.mode}`}

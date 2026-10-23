@@ -1,10 +1,14 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { FlowSpecRuleDialog } from "@/components/dashboard/flowspec-rule-dialog"
 import { parseFlowSpecAdmissionPreview, previewFlowSpecAdmission } from "@/lib/api"
 import { json, renderApp, settle, useFakeController } from "./support/fake-controller"
 
 const controller = useFakeController()
+
+// Radix Select uses these browser APIs when selecting a police action in jsdom.
+const pointerApis = ["hasPointerCapture", "releasePointerCapture", "scrollIntoView"] as const
+const originals = new Map(pointerApis.map((name) => [name, Object.getOwnPropertyDescriptor(Element.prototype, name)]))
 
 const request = { victim_ip: "203.0.112.0/22", protocol: "udp", dst_ports: [443], action: "discard" as const, ttl_seconds: 300, reason: "attack across allocation" }
 
@@ -18,8 +22,16 @@ const result = {
 }
 
 beforeEach(() => {
+  for (const name of pointerApis) Object.defineProperty(Element.prototype, name, { configurable: true, value: vi.fn(() => false) })
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
   vi.stubGlobal("matchMedia", vi.fn((media: string) => ({ media, matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })))
+})
+
+afterEach(() => {
+  for (const [name, descriptor] of originals) {
+    if (descriptor) Object.defineProperty(Element.prototype, name, descriptor)
+    else Reflect.deleteProperty(Element.prototype, name)
+  }
 })
 
 function fill(label: RegExp, value: string) {
@@ -72,6 +84,20 @@ describe("admission response boundary", () => {
 })
 
 describe("optional controller admission check", () => {
+  it("shows the exact server police rate alongside its readable shorthand", async () => {
+    controller.route("POST", "/v1/mitigations/preview", () => json({ ...result, candidate: { ...result.candidate, action: { action_type: "police", rate_bps: 1048576 } } }))
+    await openForm()
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Action" }), { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "police" }))
+    fill(/^Rate/, "1048576")
+    fireEvent.click(screen.getByRole("button", { name: "Check admission" }))
+    const region = screen.getByRole("region", { name: "Controller admission" })
+    expect(await within(region).findByText("Controller checks passed")).toBeInTheDocument()
+    expect(region).toHaveTextContent("then rate-limit 1.0 Mbps")
+    expect(region).toHaveTextContent("Police rate: 1048576 bps")
+    expect(JSON.parse(controller.calls("POST", "/v1/mitigations/preview")[0].body ?? "")).toMatchObject({ action: "police", rate_bps: 1048576 })
+  })
+
   it("shows the exact server candidate and evidence limits without creating intent", async () => {
     controller.route("POST", "/v1/mitigations/preview", () => json(result))
     await openForm()
