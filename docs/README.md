@@ -107,6 +107,7 @@ Follow development plans, contribution guidance and release history.
 | [Changelog](../CHANGELOG.md) | Release history and unreleased changes. |
 | [Contributing](../CONTRIBUTING.md) | Development workflow and checks. |
 | [Release checklist](project/release-checklist.md) | Release preconditions, version bump and publication steps. |
+| [Redirect-to-IP contract plan](project/scrubber-diversion-contract.md) | Proposed speaker dependency, action vectors and failure qualification for guarded scrubber diversion. |
 | [Security](../SECURITY.md) | Reporting and security guidance. |
 
 Flat guide and reference paths moved into these categories. ADR identifiers and

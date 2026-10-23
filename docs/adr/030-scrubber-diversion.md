@@ -331,6 +331,11 @@ These are acceptance gates for future implementation, not results of this PR.
 Each slice is independently reviewable; the feature remains disabled until the
 required gates for its family/backend/profile pass.
 
+The [speaker contract and qualification plan](../project/scrubber-diversion-contract.md)
+records the 2026-10-23 released-contract audit, canonical target-action vectors,
+rollback refusal and concrete queued-mutation acceptance cases for slice 1.
+It remains a proposal; it supplies no runtime or forwarding qualification.
+
 | Slice | Deliverable and acceptance |
 | --- | --- |
 | 1. Speaker contract | Agree and pin typed redirect-to-IP add/read-back for both target families, owner-scoped leased mutation and lossless action preservation; test exact bytes, copy/reserved-bit refusal, incompatible actions, idempotent owner-checked delete and restart/generation behavior. A qualified IPv4-only alternative must be described explicitly if chosen. |

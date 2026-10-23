@@ -85,6 +85,9 @@ builds on the shipped blackhole unicast contract, injection lease and controller
 fence; the redirect action and scrubber workflow remain unimplemented. VRF
 redirect, whole-victim unicast diversion and automatic escalation are later
 slices, each requiring its own qualification.
+The [speaker contract plan](docs/project/scrubber-diversion-contract.md) records
+the released API gaps, exact action vectors and queued-mutation controls needed
+before the first runtime slice.
 
 [ADR 026](docs/adr/026-facelift-framework-scope.md) defers framework adoption.
 Loco or an ORM migration is not a prerequisite for these changes.
