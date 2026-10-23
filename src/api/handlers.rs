@@ -56,6 +56,12 @@ pub use health::{
     health, health_detail, ready,
 };
 
+mod manual_flowspec;
+pub use manual_flowspec::{
+    __path_preview_manual_flowspec, FlowSpecAdmissionCandidate, FlowSpecAdmissionCheck,
+    FlowSpecAdmissionOutcome, FlowSpecAdmissionPreview, preview_manual_flowspec,
+};
+
 mod speaker;
 pub use speaker::{
     __path_list_speaker_routes, FlowSpecObservationScope, SpeakerRoutesResponse,
@@ -627,12 +633,12 @@ pub async fn ingest_event(
     }
 }
 
-/// Caller holds the lifecycle mutex; commit desired state before any speaker mutation.
-async fn persist_new_mitigation(
+/// Pure local preparation: capability metadata and injection-owner configuration only.
+/// No writer method or speaker RPC is called here.
+fn flowspec_rule_for_admission(
     state: &AppState,
     mitigation: &mut Mitigation,
-    actor: &CreationActor,
-) -> crate::error::Result<Option<AnnouncementOutcome>> {
+) -> crate::error::Result<crate::domain::FlowSpecRule> {
     // Leased FlowSpec (ADR 027): new enforced rules are recorded under the
     // controller's owner and added only through AddLeasedFlowSpec.
     if !state.is_dry_run()
@@ -659,6 +665,16 @@ async fn persist_new_mitigation(
     // and only with components the selected speaker encodes, in dry-run too.
     let rule = mitigation_rule(mitigation)?;
     state.announcer.match_support().require(&rule.nlri)?;
+    Ok(rule)
+}
+
+/// Caller holds the lifecycle mutex; commit desired state before any speaker mutation.
+async fn persist_new_mitigation(
+    state: &AppState,
+    mitigation: &mut Mitigation,
+    actor: &CreationActor,
+) -> crate::error::Result<Option<AnnouncementOutcome>> {
+    let rule = flowspec_rule_for_admission(state, mitigation)?;
     mitigation.activate();
     mitigation.origin_mode = Some(state.settings.mode);
     state
@@ -1999,203 +2015,45 @@ pub async fn create_mitigation(
         return Ok(create_blackhole(&state, operator_id, req).await);
     }
     let _mitigation_guard = state.mitigation_lock.lock().await;
-    if let Err(error) = state.verified_speaker_binding() {
-        return Ok(AppError(error).into_response());
-    }
-
-    // Validate input
-    let destination = if req.victim_ip.contains('/') {
-        crate::domain::parse_flowspec_destination(&req.victim_ip)
-            .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))
-    } else {
-        // Bare-IP validation keeps its existing error contract.
-        validate_ip(&req.victim_ip).map(ipnet::IpNet::from)
+    let prepared = manual_flowspec::prepare_manual_flowspec(&state, req, &operator_id).await;
+    let admitted = match prepared {
+        Ok(prepared) => manual_flowspec::validate_manual_flowspec(&state, prepared).await,
+        Err(error) => Err(error),
     };
-    let destination = match destination {
-        Ok(prefix) => prefix,
-        Err(error) => return Ok(AppError(error).into_response()),
-    };
-    let victim_ip = destination.addr();
-    let is_subnet = destination.prefix_len() != destination.max_prefix_len();
-    let target = if !req.victim_ip.contains('/') {
-        // Preserve the existing host history key and scope spelling. New CIDRs
-        // have one canonical representation; saved host identities stay intact.
-        req.victim_ip.clone()
-    } else if is_subnet {
-        destination.to_string()
-    } else {
-        victim_ip.to_string()
-    };
-    if let Err(e) = validate_string_len(&req.reason, "reason", MAX_STRING_LEN) {
-        return Ok(AppError(e).into_response());
-    }
-    if let Err(e) = validate_string_len(&operator_id, "operator_id", MAX_USERNAME_LEN) {
-        return Ok(AppError(e).into_response());
-    }
-
-    // Validate protocol - reject unknown values instead of silently converting to None
-    let protocol = req.protocol.as_deref().unwrap_or_default();
-    let protocol = match protocol {
-        "udp" => Some(17u8),
-        "tcp" => Some(6u8),
-        "icmp" if victim_ip.is_ipv4() => Some(1u8),
-        "icmpv6" if victim_ip.is_ipv6() => Some(58u8),
-        "icmp" | "icmpv6" => {
-            return Ok(AppError(PrefixdError::InvalidRequest(format!(
-                "protocol '{protocol}' does not match victim IP address family"
-            )))
-            .into_response());
-        }
-        "any" | "" => None,
-        _ => {
-            return Ok(AppError(PrefixdError::InvalidRequest(format!(
-                "invalid protocol '{protocol}', expected: udp, tcp, icmp, icmpv6, any"
-            )))
-            .into_response());
+    let mut mitigation = match admitted {
+        Ok(mitigation) => mitigation,
+        Err(failure) => {
+            // Preview runs the same checks without updating operational mutation metrics.
+            let reason = match failure.check {
+                FlowSpecAdmissionCheck::Guardrails => Some(match &failure.error {
+                    PrefixdError::GuardrailViolation(violation) => format!("{violation:?}")
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    _ => "unknown".into(),
+                }),
+                FlowSpecAdmissionCheck::Lifetime => Some("TtlOutOfBounds".into()),
+                FlowSpecAdmissionCheck::CreationRate
+                    if matches!(
+                        failure.error,
+                        PrefixdError::GuardrailViolation(
+                            GuardrailError::NewMitigationRateExceeded { .. }
+                        )
+                    ) =>
+                {
+                    Some("NewMitigationRateExceeded".into())
+                }
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                crate::observability::metrics::GUARDRAIL_REJECTIONS
+                    .with_label_values(&[&reason])
+                    .inc();
+            }
+            return Ok(AppError(failure.error).into_response());
         }
     };
-
-    // Validate action type
-    let action_type = match req.action.as_str() {
-        "police" => ActionType::Police,
-        "discard" => ActionType::Discard,
-        _ => {
-            return Ok(AppError(PrefixdError::InvalidRequest(format!(
-                "invalid action '{}', expected: discard, police, blackhole",
-                req.action
-            )))
-            .into_response());
-        }
-    };
-
-    if let Err(error) = (FlowSpecAction {
-        action_type,
-        rate_bps: req.rate_bps,
-    })
-    .traffic_rate_bytes_per_second()
-    {
-        return Ok(AppError(PrefixdError::InvalidRequest(error.to_string())).into_response());
-    }
-
-    let inventory = state.inventory.read().await;
-    let context = if is_subnet {
-        let Some(context) = inventory.lookup_prefix(&destination) else {
-            return Ok(AppError(PrefixdError::InvalidRequest(
-                "destination CIDR must fit within one inventory customer prefix without conflicting ownership".into(),
-            )).into_response());
-        };
-        Some(context)
-    } else {
-        inventory.lookup_ip(&target)
-    };
-    let customer_id = context.map(|context| context.customer_id);
-    drop(inventory);
-    let src_prefix = match req
-        .src_prefix
-        .as_deref()
-        .map(crate::domain::canonical_source_prefix)
-        .transpose()
-    {
-        Ok(prefix) => prefix,
-        Err(error) => {
-            return Ok(AppError(PrefixdError::InvalidRequest(error.to_string())).into_response());
-        }
-    };
-    let intent = MitigationIntent {
-        event_id: Uuid::new_v4(),
-        customer_id,
-        service_id: None,
-        pop: state.settings.pop.clone(),
-        match_criteria: MatchCriteria {
-            dst_prefix: if req.victim_ip.contains('/') {
-                destination.to_string()
-            } else {
-                format!("{}/{}", req.victim_ip, destination.prefix_len())
-            },
-            src_prefix,
-            protocol,
-            dst_ports: req.dst_ports,
-            src_ports: crate::domain::canonical_ports(&req.src_ports),
-            fragment: req.fragment,
-            packet_length: req.packet_length,
-        },
-        action_type,
-        action_params: ActionParams {
-            rate_bps: req.rate_bps,
-            ..Default::default()
-        },
-        ttl_seconds: req.ttl_seconds,
-        reason: req.reason,
-    };
-
-    match find_mitigation_owner(
-        state.repo.as_ref(),
-        &state.settings.pop,
-        &MitigationRoute::new(
-            intent.action_type,
-            &intent.match_criteria,
-            &intent.action_params,
-        ),
-        &intent.match_criteria.scope_hash_for(intent.action_type),
-    )
-    .await
-    {
-        Ok(Some(_)) => {
-            return Ok(AppError(PrefixdError::Conflict(
-                "FlowSpec rule already has an active owner".into(),
-            ))
-            .into_response());
-        }
-        Ok(None) => {}
-        Err(error) => return Ok(AppError(error).into_response()),
-    }
-
-    // Validate
-    let guardrails = Guardrails::with_timers(
-        state.settings.guardrails.clone(),
-        state.settings.quotas.clone(),
-        &state.settings.timers,
-    );
-    let is_safelisted = match state
-        .repo
-        .is_safelisted(&intent.match_criteria.dst_prefix)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => return Ok(AppError(e).into_response()),
-    };
-    if let Err(e) = guardrails
-        .validate(&intent, state.repo.as_ref(), is_safelisted)
-        .await
-    {
-        let reason = match &e {
-            PrefixdError::GuardrailViolation(g) => format!("{:?}", g)
-                .split_whitespace()
-                .next()
-                .unwrap_or("unknown")
-                .to_string(),
-            _ => "unknown".to_string(),
-        };
-        crate::observability::metrics::GUARDRAIL_REJECTIONS
-            .with_label_values(&[&reason])
-            .inc();
-        return Ok(AppError(e).into_response());
-    }
-
-    // Create and announce
-    let mut mitigation =
-        Mitigation::from_intent(intent, target, crate::domain::AttackVector::Unknown);
-    if let Some(cap) = req.expires_at_cap {
-        mitigation.expires_at = mitigation.expires_at.min(cap);
-        if let Err(error) =
-            guardrails.validate_remaining_ttl(mitigation.expires_at - mitigation.created_at)
-        {
-            crate::observability::metrics::GUARDRAIL_REJECTIONS
-                .with_label_values(&["TtlOutOfBounds"])
-                .inc();
-            return Ok(AppError(error).into_response());
-        }
-    }
 
     let actor = CreationActor::Operator(operator_id);
     let announcement_outcome = match persist_new_mitigation(&state, &mut mitigation, &actor).await {

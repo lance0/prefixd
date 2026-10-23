@@ -1,3 +1,5 @@
+import { parseDestination } from "./destination"
+
 // Use relative URL to proxy through Next.js API route
 // This allows the dashboard to work on any host without hardcoded URLs
 const API_BASE = "/api/prefixd"
@@ -430,6 +432,153 @@ export interface CreateFlowSpecRequest {
   src_ports?: number[]
   fragment?: FragmentMatch
   packet_length?: PacketLengthRange
+}
+
+export interface FlowSpecAdmissionPreview {
+  outcome: "admissible" | "refused" | "unavailable"
+  checked_at: string
+  mode: "dry-run" | "enforced"
+  speaker_state: "unobserved"
+  candidate: {
+    victim_ip: string
+    customer_id: string | null
+    service_id: string | null
+    pop: string
+    scope: {
+      dst_prefix: string
+      src_prefix?: string | null
+      protocol: number | null
+      dst_ports: number[]
+      src_ports?: number[]
+      fragment?: FragmentMatch | null
+      packet_length?: PacketLengthRange | null
+    }
+    action: { action_type: "discard" | "police"; rate_bps?: number | null }
+    ttl_seconds: number
+    expires_at_cap: string | null
+  } | null
+  failed_check: "input" | "target" | "ownership" | "safelist" | "guardrails" | "creation_rate" | "capability" | "lifetime" | null
+  reason: string | null
+}
+
+function isRecord(value: JsonValue | undefined): value is { [key: string]: JsonValue } {
+  return value instanceof Object && !Array.isArray(value)
+}
+
+/** JSON.parse supplies only JSON values; boxed primitive identity distinguishes text. */
+function isText(value: JsonValue | undefined): value is string {
+  return Object(value) instanceof String
+}
+
+function isWholeNumber(value: JsonValue | undefined): value is number {
+  return Number.isSafeInteger(value)
+}
+
+function isPortList(value: JsonValue | undefined): value is number[] {
+  return Array.isArray(value) && value.every((port: JsonValue) => isWholeNumber(port) && port >= 0 && port <= 65535)
+}
+
+function admissionCandidate(value: JsonValue | undefined): FlowSpecAdmissionPreview["candidate"] | undefined {
+  if (value === null) return null
+
+  if (!isRecord(value) || !isText(value.victim_ip) || !value.victim_ip ||
+    !(value.customer_id === null || isText(value.customer_id)) ||
+    !(value.service_id === null || isText(value.service_id)) ||
+    !isText(value.pop) || !value.pop ||
+    !isWholeNumber(value.ttl_seconds) || value.ttl_seconds < 0 ||
+    !(value.expires_at_cap === null || (isText(value.expires_at_cap) && Number.isFinite(Date.parse(value.expires_at_cap)))) ||
+    !isRecord(value.scope) || !isRecord(value.action)) return undefined
+
+  const scope = value.scope
+  const action = value.action
+  const scopeKeys = ["dst_prefix", "src_prefix", "protocol", "dst_ports", "src_ports", "fragment", "packet_length"]
+
+  // A future match component must not be silently dropped from an operator preview.
+  if (Object.keys(scope).some((key) => !scopeKeys.includes(key)) ||
+    Object.keys(action).some((key) => key !== "action_type" && key !== "rate_bps") ||
+    !isText(scope.dst_prefix) || !scope.dst_prefix ||
+    !(scope.src_prefix === undefined || scope.src_prefix === null || isText(scope.src_prefix)) ||
+    !(scope.protocol === null || (isWholeNumber(scope.protocol) && scope.protocol >= 0 && scope.protocol <= 255)) ||
+    !isPortList(scope.dst_ports) || !(scope.src_ports === undefined || isPortList(scope.src_ports)) ||
+    !(scope.fragment === undefined || scope.fragment === null || scope.fragment === "non_first") ||
+    (action.action_type !== "discard" && action.action_type !== "police") ||
+    !(action.rate_bps === undefined || action.rate_bps === null || (isWholeNumber(action.rate_bps) && action.rate_bps > 0))) return undefined
+
+  const destination = parseDestination(scope.dst_prefix)
+  const source = isText(scope.src_prefix) ? parseDestination(scope.src_prefix) : null
+
+  if (!destination?.isCidr || !destination.networkAligned ||
+    (isText(scope.src_prefix) && (!source?.isCidr || !source.networkAligned || source.ipv6 !== destination.ipv6))) return undefined
+
+  let packetLength: PacketLengthRange | null | undefined
+
+  if (scope.packet_length === undefined || scope.packet_length === null) packetLength = scope.packet_length
+  else {
+    const length = scope.packet_length
+
+    if (!isRecord(length) || Object.keys(length).some((key) => key !== "min" && key !== "max") || !isWholeNumber(length.min) || !isWholeNumber(length.max) || length.min < 0 || length.max < length.min || length.min > 65535 || length.max > 65535) return undefined
+    packetLength = { min: length.min, max: length.max }
+  }
+
+  if ((action.action_type === "police" && !(isWholeNumber(action.rate_bps) && action.rate_bps > 0)) ||
+    (action.action_type === "discard" && action.rate_bps !== undefined && action.rate_bps !== null)) return undefined
+
+  return {
+    victim_ip: value.victim_ip, customer_id: value.customer_id, service_id: value.service_id, pop: value.pop,
+    ttl_seconds: value.ttl_seconds, expires_at_cap: value.expires_at_cap,
+    scope: {
+      dst_prefix: scope.dst_prefix, src_prefix: scope.src_prefix, protocol: scope.protocol,
+      dst_ports: scope.dst_ports, src_ports: scope.src_ports, fragment: scope.fragment, packet_length: packetLength,
+    },
+    action: { action_type: action.action_type, rate_bps: action.rate_bps },
+  }
+}
+
+/** A malformed, contradictory or newer unsupported result is never shown as passing. */
+export function parseFlowSpecAdmissionPreview(value: JsonValue, status: number): FlowSpecAdmissionPreview | null {
+  if (!isRecord(value) || !isText(value.checked_at) || !Number.isFinite(Date.parse(value.checked_at)) ||
+    (value.mode !== "dry-run" && value.mode !== "enforced") || value.speaker_state !== "unobserved" ||
+    (value.reason !== null && !isText(value.reason))) return null
+
+  const outcome = value.outcome
+
+  if (!((outcome === "admissible" && status === 200) ||
+    (outcome === "refused" && [400, 409, 422].includes(status)) || (outcome === "unavailable" && status === 503))) return null
+
+  const failedCheck = value.failed_check
+
+  if (!(failedCheck === null || failedCheck === "input" || failedCheck === "target" || failedCheck === "ownership" ||
+    failedCheck === "safelist" || failedCheck === "guardrails" || failedCheck === "creation_rate" || failedCheck === "capability" || failedCheck === "lifetime")) return null
+
+  const candidate = admissionCandidate(value.candidate)
+
+  if (candidate === undefined || (outcome === "admissible" && (candidate === null || failedCheck !== null || value.reason !== null)) ||
+    (outcome !== "admissible" && (failedCheck === null || !value.reason))) return null
+
+  return { outcome, checked_at: value.checked_at, mode: value.mode, speaker_state: "unobserved", candidate, failed_check: failedCheck, reason: value.reason }
+}
+
+/** Read-only snapshot. Creation always repeats admission; a preview reserves nothing. */
+export async function previewFlowSpecAdmission(request: CreateFlowSpecRequest): Promise<FlowSpecAdmissionPreview> {
+  const response = await fetch(`${API_BASE}/v1/mitigations/preview`, {
+    method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request),
+  })
+
+  if (response.status === 401 && typeof window !== "undefined") dispatchAuthExpired()
+  const body = await response.text()
+  let result: FlowSpecAdmissionPreview | null = null
+
+  try {
+    const value: JsonValue = JSON.parse(body)
+    result = parseFlowSpecAdmissionPreview(value, response.status)
+  } catch {
+    // A proxy, authentication boundary or old controller may return plain text.
+  }
+
+  if (result) return result
+  throw new Error(response.status === 404
+    ? "This controller does not provide admission checks. Upgrade the controller or create the rule with its usual guardrails."
+    : `Admission check unavailable (HTTP ${response.status}). Retry the check; no preview result is available.`)
 }
 
 /** Manual FlowSpec rule; the controller applies the same guardrails as playbooks. */

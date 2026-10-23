@@ -46,6 +46,34 @@ The controller returns `422` before it saves intent or calls the speaker:
 A TTL outside 30 to 1800 seconds, more than 8 ports or a full quota fails the
 same way. See [guardrails](../reference/configuration.md#guardrails).
 
+### Optional: check admission without saving intent
+
+In **Create FlowSpec rule**, choose **Check admission** after entering the
+complete rule. It shows the server's exact match/action, customer attribution,
+lifetime and mode, or the check that refused it. Editing any input clears that
+result. This optional check neither creates a mitigation nor calls the speaker.
+
+The API accepts the same body as creation:
+
+```bash
+curl -sS -b cookies.txt -X POST http://localhost/v1/mitigations/preview \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"manual drill","victim_ip":"203.0.113.10","protocol":"udp",
+       "dst_ports":[53],"action":"police","rate_bps":8000000,
+       "ttl_seconds":300}'
+```
+
+A `200` result with `outcome: admissible` means controller-side checks passed at
+`checked_at`. A `refused` result names a policy or ownership constraint. An
+`unavailable` result means a required safety read failed: retry it, and never
+interpret it as a passed check. Standby and malformed requests use the ordinary
+error boundary. See the [complete response contract](../reference/api.md#preview-manual-flowspec-admission).
+
+The check reserves no capacity and grants no bypass. Step 3 repeats admission,
+including atomic quotas and creation rate. Speaker-side route ownership and
+availability, acceptance, export and enforcement are still unobserved. This
+check works in dry-run too; unlike dry-run creation, it saves no simulation.
+
 ## 3. Create the mitigation
 
 Police UDP port 53 to 8 Mbps on a shipped inventory address for five minutes:

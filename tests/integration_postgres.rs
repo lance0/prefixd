@@ -5298,6 +5298,8 @@ async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
         let candidate = |prefix: &str, pop: &str| {
             inventory_mitigation(prefix, pop, Utc::now(), MitigationStatus::Active)
         };
+        // Read-only preview shares admission's exact window, status and POP semantics.
+        repo.check_new_mitigation_rate("rate-a", 2).await.unwrap();
         // Under the limit: one counted row, so the second creation is admitted.
         repo.admit_mitigation(
             &candidate("203.0.113.10/32", "rate-a"),
@@ -5307,6 +5309,7 @@ async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
         )
         .await
         .unwrap();
+        assert_rate_error(repo.check_new_mitigation_rate("rate-a", 2).await, 2, 2);
         // At the limit, then over it: rejected without persisting or using quota.
         let active = repo.count_active_by_pop("rate-a").await.unwrap();
         for prefix in ["203.0.113.11/32", "203.0.113.12/32"] {
@@ -5336,6 +5339,7 @@ async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
         .unwrap();
         // Zero admits no new mitigation, like the active quotas.
         quotas.max_new_per_minute = 0;
+        assert_rate_error(repo.check_new_mitigation_rate("rate-c", 0).await, 0, 0);
         assert_rate_error(
             repo.admit_mitigation(
                 &candidate("203.0.113.14/32", "rate-c"),
@@ -5356,6 +5360,11 @@ async fn test_new_mitigation_rate_postgres_mock_window_scope_and_zero() {
         .await
         .unwrap();
     for prefix in ["203.0.113.11/32", "203.0.113.12/32"] {
+        context
+            .repo
+            .check_new_mitigation_rate("rate-a", 2)
+            .await
+            .unwrap();
         let admitted = inventory_mitigation(prefix, "rate-a", Utc::now(), MitigationStatus::Active);
         context
             .repo

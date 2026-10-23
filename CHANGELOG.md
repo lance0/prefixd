@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Authenticated `POST /v1/mitigations/preview` and the manual rule form's optional
+  **Check admission** action evaluate the same FlowSpec preparation and safety
+  policy as creation without saving intent or calling the speaker. Results show
+  the complete candidate, owner attribution, requested lifetime, mode and check
+  time, distinguish refusal from unavailable reads, and clear on edits. Capacity
+  is not reserved; creation rechecks. Speaker-side state and router enforcement
+  remain unobserved. Blackhole preview is unavailable.
+
 - Manual FlowSpec discard and police rules accept aligned IPv4/IPv6 destination
   CIDRs in `victim_ip` when operators deliberately relax existing prefix bounds.
   Whole-prefix customer ownership, all safelist overlaps and fresh repair checks

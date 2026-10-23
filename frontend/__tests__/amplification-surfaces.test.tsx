@@ -219,7 +219,7 @@ describe("manual rule dialog", () => {
     const order = Array.from(dialog.querySelectorAll<HTMLElement>("input, button")).filter((element) => element.tabIndex >= 0)
     expect(order.map((element) => element.getAttribute("id") ?? element.textContent?.trim())).toEqual([
       "fs-ip", "fs-src-prefix", "fs-protocol", "fs-action", "fs-dst", "fs-src", "fs-fragment", "fs-length-min", "fs-length-max",
-      "fs-ttl", "fs-reason", "Cancel", "Create rule", "Close",
+      "fs-ttl", "fs-reason", "Check admission", "Cancel", "Create rule", "Close",
     ])
     fill(/^Destination IP or CIDR/, "203.0.113.10")
     fill(/^Source prefix/, "198.51.100.0/24")

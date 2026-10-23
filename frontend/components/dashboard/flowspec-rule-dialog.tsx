@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, type FormEvent } from "react"
+import { useRef, useState, type FormEvent } from "react"
 import { useRouter } from "next/navigation"
 import { RefreshCw, ShieldPlus } from "lucide-react"
 import { toast } from "sonner"
@@ -18,9 +18,11 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useConfigSettings } from "@/hooks/use-api"
-import { createMitigation, type CreateFlowSpecRequest, type JsonValue } from "@/lib/api"
+import { useTimeFormat } from "@/components/time-zone-provider"
+import { createMitigation, previewFlowSpecAdmission, type CreateFlowSpecRequest, type FlowSpecAdmissionPreview, type JsonValue } from "@/lib/api"
 import { parseDestination } from "@/lib/destination"
 import { formatFlowSpecRule } from "./flowspec-preview"
+import { StatusPill } from "./status-pill"
 
 const PROTOCOLS = ["udp", "tcp", "icmp", "icmpv6", "any"] as const
 const DEFAULT_TTL_SECONDS = "300"
@@ -282,6 +284,7 @@ interface FlowSpecRuleDialogProps {
  * and packet-length matches. Errors appear once a field is edited or submission is attempted.
  */
 export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogProps) {
+  const { formatTime } = useTimeFormat()
   const router = useRouter()
   const { data: settings } = useConfigSettings()
   const [form, setForm] = useState<RuleForm>(EMPTY_FORM)
@@ -289,6 +292,10 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
   const [submitted, setSubmitted] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [admission, setAdmission] = useState<FlowSpecAdmissionPreview | null>(null)
+  const [admissionError, setAdmissionError] = useState<string | null>(null)
+  const [isChecking, setIsChecking] = useState(false)
+  const admissionGeneration = useRef(0)
 
   const errors = validateRule(form, readGuardrails(settings?.settings))
   const isValid = Object.keys(errors).length === 0
@@ -310,16 +317,47 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
 
   const shown = (field: keyof RuleForm) => (submitted || touched.has(field) ? errors[field] : undefined)
 
+  const invalidateAdmission = () => {
+    admissionGeneration.current += 1
+    setAdmission(null)
+    setAdmissionError(null)
+    setIsChecking(false)
+  }
+
   const update = <K extends keyof RuleForm>(field: K, value: RuleForm[K]) => {
+    invalidateAdmission()
     setForm((prev) => ({ ...prev, [field]: value }))
     setTouched((prev) => new Set(prev).add(field))
   }
 
   const reset = () => {
+    invalidateAdmission()
     setForm(EMPTY_FORM)
     setTouched(new Set())
     setSubmitted(false)
     setError(null)
+  }
+
+  const handleCheckAdmission = async () => {
+    setSubmitted(true)
+
+    if (!isValid || isChecking || isSubmitting) return
+    const generation = ++admissionGeneration.current
+    setIsChecking(true)
+    setAdmission(null)
+    setAdmissionError(null)
+
+    try {
+      const result = await previewFlowSpecAdmission(toRequest(form))
+
+      if (generation === admissionGeneration.current) setAdmission(result)
+    } catch (error) {
+      if (generation === admissionGeneration.current) {
+        setAdmissionError(error instanceof Error ? error.message : "Admission check unavailable. Retry the check.")
+      }
+    } finally {
+      if (generation === admissionGeneration.current) setIsChecking(false)
+    }
   }
 
   const handleSubmit = async (event: FormEvent) => {
@@ -327,6 +365,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
     setSubmitted(true)
 
     if (!isValid || isSubmitting) return
+    invalidateAdmission()
     setIsSubmitting(true)
     setError(null)
 
@@ -575,6 +614,41 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
                 ? `Requested lifetime: ${Number(form.ttl)} seconds. ` : "Set a valid TTL. "}
               {form.action === "police" ? "The rate applies to the matching flow, across the whole destination. " : ""}
               Router enforcement is unobserved. Expiry needs the running controller.
+            </p>
+          </section>
+
+          <section aria-labelledby="fs-admission-title" className="space-y-3 rounded-md border p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 id="fs-admission-title" className="text-xs font-semibold">Controller admission</h3>
+              <Button type="button" variant="outline" size="sm" onClick={handleCheckAdmission} disabled={isChecking || isSubmitting}>
+                {isChecking && <RefreshCw className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />}
+                {isChecking ? "Checking…" : "Check admission"}
+              </Button>
+            </div>
+            <div role="status" aria-live="polite" className="space-y-2 text-xs">
+              {admission ? (
+                <>
+                  <StatusPill tone={admission.outcome === "admissible" ? "success" : admission.outcome === "refused" ? "danger" : "warning"}>
+                    {admission.outcome === "admissible" ? "Controller checks passed" : admission.outcome === "refused" ? "Admission refused" : "Checks unavailable"}
+                  </StatusPill>
+                  {admission.reason && <p className="break-words">{admission.reason}</p>}
+                  {admission.candidate && (
+                    <>
+                      <p className="break-words font-mono">{formatFlowSpecRule({ ...admission.candidate.scope, action_type: admission.candidate.action.action_type, rate_bps: admission.candidate.action.rate_bps ?? null })}</p>
+                      <p className="text-muted-foreground">
+                        {admission.candidate.customer_id ? `Customer ${admission.candidate.customer_id}` : "No customer attribution"}
+                        {` · POP ${admission.candidate.pop} · ${admission.candidate.ttl_seconds}s requested · ${admission.mode}`}
+                      </p>
+                      {admission.candidate.expires_at_cap && <p className="text-muted-foreground">Lifetime cap <time dateTime={admission.candidate.expires_at_cap}>{formatTime(admission.candidate.expires_at_cap)}</time>.</p>}
+                    </>
+                  )}
+                  <p className="text-muted-foreground">Checked <time dateTime={admission.checked_at}>{formatTime(admission.checked_at)}</time>.</p>
+                </>
+              ) : admissionError ? <p className="break-words text-warning">{admissionError}</p>
+                : <p className="text-muted-foreground">Optionally check current ownership, safelists, limits and adapter support before creating.</p>}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              No intent is saved and no capacity is reserved. Creation rechecks. Speaker availability and route ownership at the speaker, acceptance, export and router enforcement are unobserved.
             </p>
           </section>
 

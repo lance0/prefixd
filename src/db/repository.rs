@@ -535,6 +535,10 @@ impl RepositoryTrait for Repository {
         Self::insert_mitigation_on(&mut *self.pool.acquire().await?, m).await
     }
 
+    async fn check_new_mitigation_rate(&self, pop: &str, max: u32) -> Result<()> {
+        Self::check_new_mitigation_rate_on(&mut *self.pool.acquire().await?, pop, max).await
+    }
+
     async fn admit_mitigation(
         &self,
         m: &Mitigation,

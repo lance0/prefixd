@@ -54,6 +54,10 @@ fn api_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/mitigations",
             get(handlers::list_mitigations).post(handlers::create_mitigation),
         )
+        .route(
+            "/v1/mitigations/preview",
+            post(handlers::preview_manual_flowspec),
+        )
         .route("/v1/mitigations/{id}", get(handlers::get_mitigation))
         .route(
             "/v1/mitigations/withdraw",

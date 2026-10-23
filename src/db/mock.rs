@@ -34,6 +34,12 @@ pub struct MockRepository {
     /// Every safelist lookup fails, as an unavailable database does.
     #[cfg(test)]
     pub fail_safelist: std::sync::atomic::AtomicBool,
+    /// Every FlowSpec quota/rate snapshot read fails.
+    #[cfg(test)]
+    pub fail_quota_reads: std::sync::atomic::AtomicBool,
+    /// The creation-rate snapshot fails independently of active quota reads.
+    #[cfg(test)]
+    pub fail_creation_rate_reads: std::sync::atomic::AtomicBool,
     /// Every active-mitigation inventory read fails.
     #[cfg(test)]
     pub fail_active_reads: std::sync::atomic::AtomicBool,
@@ -81,6 +87,10 @@ impl MockRepository {
             pending_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             fail_safelist: Default::default(),
+            #[cfg(test)]
+            fail_quota_reads: Default::default(),
+            #[cfg(test)]
+            fail_creation_rate_reads: Default::default(),
             #[cfg(test)]
             fail_active_reads: Default::default(),
             mitigations: Mutex::new(Vec::new()),
@@ -394,6 +404,31 @@ impl RepositoryTrait for MockRepository {
         Ok(())
     }
 
+    async fn check_new_mitigation_rate(&self, pop: &str, max: u32) -> Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_quota_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+            || self
+                .fail_creation_rate_reads
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::error::PrefixdError::Internal(
+                "sensitive storage diagnostic".into(),
+            ));
+        }
+
+        let since = Utc::now() - super::repository::NEW_MITIGATION_WINDOW;
+        let count = self
+            .mitigations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|existing| existing.pop == pop && existing.created_at > since)
+            .count();
+        super::repository::check_new_mitigation_rate(u32::try_from(count).unwrap_or(u32::MAX), max)
+    }
+
     async fn admit_mitigation(
         &self,
         m: &Mitigation,
@@ -664,6 +699,16 @@ impl RepositoryTrait for MockRepository {
     }
 
     async fn count_active_flowspec_by_customer(&self, customer_id: &str) -> Result<u32> {
+        #[cfg(test)]
+        if self
+            .fail_quota_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::error::PrefixdError::Internal(
+                "sensitive storage diagnostic".into(),
+            ));
+        }
+
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
             .iter()
@@ -681,6 +726,16 @@ impl RepositoryTrait for MockRepository {
     }
 
     async fn count_active_flowspec_by_pop(&self, pop: &str) -> Result<u32> {
+        #[cfg(test)]
+        if self
+            .fail_quota_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::error::PrefixdError::Internal(
+                "sensitive storage diagnostic".into(),
+            ));
+        }
+
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
             .iter()
@@ -698,6 +753,16 @@ impl RepositoryTrait for MockRepository {
     }
 
     async fn count_active_flowspec_global(&self) -> Result<u32> {
+        #[cfg(test)]
+        if self
+            .fail_quota_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::error::PrefixdError::Internal(
+                "sensitive storage diagnostic".into(),
+            ));
+        }
+
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
             .iter()
