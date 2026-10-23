@@ -243,15 +243,32 @@ function readGuardrails(settings: { [key: string]: JsonValue } | undefined): Rul
   const maxPorts = Number(guardrails.max_ports)
   const flag = (key: string) => (guardrails[key] === true ? true : guardrails[key] === false ? false : undefined)
 
+  const prefixBound = (key: string, maximum: 32 | 128, fallback?: number) => {
+    const input = guardrails[key]
+    const value = Number(input)
+
+    return Number.isInteger(input) && value >= 0 && value <= maximum ? value : fallback
+  }
+
   return {
     maxPorts: Number.isInteger(maxPorts) && maxPorts > 0 ? maxPorts : 5,
-    dstPrefixMinlen: typeof guardrails.dst_prefix_minlen === "number" ? guardrails.dst_prefix_minlen : undefined,
-    dstPrefixMaxlen: typeof guardrails.dst_prefix_maxlen === "number" ? guardrails.dst_prefix_maxlen : undefined,
-    dstPrefixMinlenV6: typeof guardrails.dst_prefix_minlen_v6 === "number" ? guardrails.dst_prefix_minlen_v6 : loaded ? 128 : undefined,
-    dstPrefixMaxlenV6: typeof guardrails.dst_prefix_maxlen_v6 === "number" ? guardrails.dst_prefix_maxlen_v6 : loaded ? 128 : undefined,
+    dstPrefixMinlen: prefixBound("dst_prefix_minlen", 32),
+    dstPrefixMaxlen: prefixBound("dst_prefix_maxlen", 32),
+    dstPrefixMinlenV6: prefixBound("dst_prefix_minlen_v6", 128, loaded ? 128 : undefined),
+    dstPrefixMaxlenV6: prefixBound("dst_prefix_maxlen_v6", 128, loaded ? 128 : undefined),
     allowSrcPrefixMatch: flag("allow_src_prefix_match"),
     allowFragmentMatch: flag("allow_fragment_match"),
     allowPacketLengthMatch: flag("allow_packet_length_match"),
+  }
+}
+
+function previewProtocol(protocol: string): number | null {
+  switch (protocol) {
+    case "udp": return 17
+    case "tcp": return 6
+    case "icmp": return 1
+    case "icmpv6": return 58
+    default: return null
   }
 }
 
@@ -278,10 +295,11 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
   const destination = parseDestination(form.victimIp)
   const request = toRequest(form)
   const matchValid = !Object.keys(errors).some((field) => field !== "reason" && field !== "ttl")
+
   const preview = destination?.networkAligned && matchValid ? formatFlowSpecRule({
     dst_prefix: destination.prefix,
     src_prefix: request.src_prefix ? parseDestination(request.src_prefix)?.prefix : undefined,
-    protocol: ({ udp: 17, tcp: 6, icmp: 1, icmpv6: 58 } as Record<string, number>)[form.protocol] ?? null,
+    protocol: previewProtocol(form.protocol),
     dst_ports: request.dst_ports ?? [],
     src_ports: request.src_ports,
     fragment: request.fragment,
@@ -289,6 +307,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
     action_type: form.action,
     rate_bps: form.action === "police" ? Number(form.rateBps) : null,
   }) : null
+
   const shown = (field: keyof RuleForm) => (submitted || touched.has(field) ? errors[field] : undefined)
 
   const update = <K extends keyof RuleForm>(field: K, value: RuleForm[K]) => {

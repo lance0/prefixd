@@ -139,11 +139,13 @@ describe("manual rule validation", () => {
 
   it("admits aligned destination CIDRs only within explicit prefix bounds", () => {
     const allowed = { maxPorts: 5, dstPrefixMinlen: 22, dstPrefixMaxlen: 32, dstPrefixMinlenV6: 48, dstPrefixMaxlenV6: 128, allowSrcPrefixMatch: true }
+
     for (const [victimIp, srcPrefix] of [["203.0.112.0/22", "198.51.100.0/24"], ["2001:db8:1234::/48", "2001:db8:ffff::/64"]]) {
       const form = { ...validForm, victimIp, srcPrefix, dstPorts: "443" }
       expect(validateRule(form, allowed)).toEqual({})
       expect(toRequest(form)).toMatchObject({ victim_ip: victimIp, src_prefix: srcPrefix, dst_ports: [443], src_ports: [123, 389] })
     }
+
     expect(validateRule({ ...validForm, victimIp: "203.0.112.0/22" }, { maxPorts: 5, dstPrefixMinlen: 32 }).victimIp).toContain("dst_prefix_minlen=32")
     expect(validateRule({ ...validForm, victimIp: "2001:db8:1234::/48" }, { maxPorts: 5, dstPrefixMinlenV6: 128 }).victimIp).toContain("dst_prefix_minlen_v6=128")
     expect(validateRule({ ...validForm, victimIp: "203.0.113.1/22" }, allowed).victimIp).toContain("203.0.112.0/22")
@@ -277,7 +279,9 @@ describe("manual rule dialog", () => {
     list.unmount()
     controller.route("GET", "/v1/mitigations/cidr-rule", () => json(subnetRule))
     controller.route("GET", "/v1/reports/incident", () => new Response("# Exact CIDR incident", { headers: { "Content-Type": "text/markdown" } }))
-    renderApp(<Suspense fallback={<p>Loading...</p>}><MitigationDetailPage params={Promise.resolve({ id: "cidr-rule" })} /></Suspense>, { url: "/mitigations/cidr-rule" })
+    await act(async () => {
+      renderApp(<Suspense fallback={<p>Loading...</p>}><MitigationDetailPage params={Promise.resolve({ id: "cidr-rule" })} /></Suspense>, { url: "/mitigations/cidr-rule" })
+    })
     await screen.findByText("FlowSpec rule")
     expect(screen.getByText(/Individual addresses|individual addresses/)).toHaveTextContent("not aggregated")
     expect(document.querySelector('a[href*="ip-history?ip=203.0"]')).toBeNull()

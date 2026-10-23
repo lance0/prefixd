@@ -48,12 +48,15 @@ export function parseDestination(value: string): Destination | null {
   const prefixLength = isCidr ? Number(length) : maxLength
 
   if (prefixLength > maxLength) return null
+
   const network = bytes.map((byte, index) => {
     const hostBits = Math.max(0, Math.min(8, (index + 1) * 8 - prefixLength))
 
     return byte & (255 << hostBits)
   })
+
   const networkAligned = bytes.every((byte, index) => byte === network[index])
+
   const networkAddress = ipv6
     ? new URL(`http://[${Array.from({ length: 8 }, (_, index) => ((network[index * 2] << 8) | network[index * 2 + 1]).toString(16)).join(":")}]/`).hostname.slice(1, -1)
     : network.join(".")
