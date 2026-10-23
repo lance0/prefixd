@@ -111,117 +111,124 @@ pub async fn extend_flowspec_lifetime(
             "reason must contain text and be at most 1024 UTF-8 bytes".into(),
         ));
     }
-    let _guard = state.mitigation_lock.lock().await;
-    let fence_epoch = state
-        .fence
-        .with_observation_epoch(|epoch| epoch)
-        .ok_or(PrefixdError::Standby)?;
-    if state.settings.mode != OperationMode::Enforced {
-        return Err(PrefixdError::Conflict(
-            "lifetime extension requires enforced mode; simulations cannot be extended".into(),
-        ));
-    }
-    let binding = state.verified_speaker_binding()?;
-    let expected = state
-        .repo
-        .get_mitigation(id)
-        .await?
-        .ok_or(PrefixdError::MitigationNotFound(id))?;
-    validate_live(&expected, &state.settings.pop, Utc::now())?;
-    let rule = super::mitigation_rule(&expected)?;
-    if let Some(binding) = binding {
-        if !rule.owner.is_empty() && rule.owner != binding.owner() {
-            return Err(super::binding_mismatch());
+    // Only read-only preparation is cancellable. Return the guard with the
+    // checked request so the repository mutation and COMMIT remain serialized.
+    let (_guard, request) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let guard = state.mitigation_lock.lock().await;
+        let fence_epoch = state
+            .fence
+            .with_observation_epoch(|epoch| epoch)
+            .ok_or(PrefixdError::Standby)?;
+        if state.settings.mode != OperationMode::Enforced {
+            return Err(PrefixdError::Conflict(
+                "lifetime extension requires enforced mode; simulations cannot be extended".into(),
+            ));
         }
-    }
-    let owner = super::find_mitigation_owner(
-        state.repo.as_ref(),
-        &state.settings.pop,
-        &MitigationRoute::of(&expected),
-        &expected.scope_hash,
-    )
-    .await?;
-    if owner.is_none_or(|owner| {
-        owner.mitigation_id != expected.mitigation_id || owner.updated_at != expected.updated_at
-    }) {
-        return Err(PrefixdError::Conflict(
-            "mitigation no longer uniquely owns this FlowSpec match".into(),
-        ));
-    }
-    let destination = super::parse_flowspec_destination(&expected.match_criteria.dst_prefix)
-        .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
-    let inventory = state.inventory.read().await;
-    let context = if destination.prefix_len() == destination.max_prefix_len() {
-        inventory.lookup_ip(&expected.victim_ip)
-    } else {
-        inventory.lookup_prefix(&destination)
-    };
-    if context.is_none_or(|context| {
-        expected.customer_id.as_deref() != Some(context.customer_id.as_str())
-            || expected
-                .service_id
-                .as_deref()
-                .is_some_and(|service| context.service_id.as_deref() != Some(service))
-    }) {
-        return Err(PrefixdError::Conflict(
-            "destination inventory ownership changed or is unavailable".into(),
-        ));
-    }
-    drop(inventory);
-    let configured_safelisted =
-        state
-            .settings
-            .safelist
-            .prefixes
-            .iter()
-            .try_fold(false, |overlap, configured| {
-                let prefix = configured
-                    .parse::<ipnet::IpNet>()
-                    .or_else(|_| {
-                        configured
-                            .parse::<std::net::IpAddr>()
-                            .map(ipnet::IpNet::from)
-                    })
-                    .map_err(|_| {
-                        PrefixdError::Config("invalid configured safelist prefix".into())
-                    })?;
-                Ok::<_, PrefixdError>(
-                    overlap || prefix.contains(&destination) || destination.contains(&prefix),
-                )
-            })?;
-    let safelisted =
-        state.repo.is_safelisted(&destination.to_string()).await? || configured_safelisted;
-    let intent = MitigationIntent {
-        event_id: expected.triggering_event_id,
-        customer_id: expected.customer_id.clone(),
-        service_id: expected.service_id.clone(),
-        pop: expected.pop.clone(),
-        match_criteria: expected.match_criteria.clone(),
-        action_type: expected.action_type,
-        action_params: expected.action_params.clone(),
-        ttl_seconds,
-        reason: expected.reason.clone(),
-    };
-    let guardrails = crate::guardrails::Guardrails::with_timers(
-        state.settings.guardrails.clone(),
-        state.settings.quotas.clone(),
-        &state.settings.timers,
-    );
-    guardrails.validate_rule(&intent, safelisted)?;
-    guardrails.validate_remaining_ttl(chrono::Duration::seconds(ttl_seconds.into()))?;
-    // Unlike new admission, extension does not consume another quota/rate slot.
-    state.announcer.match_support().require(&rule.nlri)?;
-    validate_live(&expected, &state.settings.pop, Utc::now())?;
-    state.verified_speaker_binding()?;
-    let request = LifetimeExtension {
-        expected,
-        ttl_seconds,
-        actor,
-        reason,
-        target_id: binding.map(super::VerifiedSpeakerBinding::target_id),
-        fence_epoch,
-    };
-    request.ensure_fence(&state.fence)?;
+        let binding = state.verified_speaker_binding()?;
+        let expected = state
+            .repo
+            .get_mitigation(id)
+            .await?
+            .ok_or(PrefixdError::MitigationNotFound(id))?;
+        validate_live(&expected, &state.settings.pop, Utc::now())?;
+        let rule = super::mitigation_rule(&expected)?;
+        if let Some(binding) = binding {
+            if !rule.owner.is_empty() && rule.owner != binding.owner() {
+                return Err(super::binding_mismatch());
+            }
+        }
+        let owner = super::find_mitigation_owner(
+            state.repo.as_ref(),
+            &state.settings.pop,
+            &MitigationRoute::of(&expected),
+            &expected.scope_hash,
+        )
+        .await?;
+        if owner.is_none_or(|owner| {
+            owner.mitigation_id != expected.mitigation_id || owner.updated_at != expected.updated_at
+        }) {
+            return Err(PrefixdError::Conflict(
+                "mitigation no longer uniquely owns this FlowSpec match".into(),
+            ));
+        }
+        let destination = super::parse_flowspec_destination(&expected.match_criteria.dst_prefix)
+            .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+        let inventory = state.inventory.read().await;
+        let context = if destination.prefix_len() == destination.max_prefix_len() {
+            inventory.lookup_ip(&expected.victim_ip)
+        } else {
+            inventory.lookup_prefix(&destination)
+        };
+        if context.is_none_or(|context| {
+            expected.customer_id.as_deref() != Some(context.customer_id.as_str())
+                || expected
+                    .service_id
+                    .as_deref()
+                    .is_some_and(|service| context.service_id.as_deref() != Some(service))
+        }) {
+            return Err(PrefixdError::Conflict(
+                "destination inventory ownership changed or is unavailable".into(),
+            ));
+        }
+        drop(inventory);
+        let configured_safelisted =
+            state
+                .settings
+                .safelist
+                .prefixes
+                .iter()
+                .try_fold(false, |overlap, configured| {
+                    let prefix = configured
+                        .parse::<ipnet::IpNet>()
+                        .or_else(|_| {
+                            configured
+                                .parse::<std::net::IpAddr>()
+                                .map(ipnet::IpNet::from)
+                        })
+                        .map_err(|_| {
+                            PrefixdError::Config("invalid configured safelist prefix".into())
+                        })?;
+                    Ok::<_, PrefixdError>(
+                        overlap || prefix.contains(&destination) || destination.contains(&prefix),
+                    )
+                })?;
+        let safelisted =
+            state.repo.is_safelisted(&destination.to_string()).await? || configured_safelisted;
+        let intent = MitigationIntent {
+            event_id: expected.triggering_event_id,
+            customer_id: expected.customer_id.clone(),
+            service_id: expected.service_id.clone(),
+            pop: expected.pop.clone(),
+            match_criteria: expected.match_criteria.clone(),
+            action_type: expected.action_type,
+            action_params: expected.action_params.clone(),
+            ttl_seconds,
+            reason: expected.reason.clone(),
+        };
+        let guardrails = crate::guardrails::Guardrails::with_timers(
+            state.settings.guardrails.clone(),
+            state.settings.quotas.clone(),
+            &state.settings.timers,
+        );
+        guardrails.validate_rule(&intent, safelisted)?;
+        guardrails.validate_remaining_ttl(chrono::Duration::seconds(ttl_seconds.into()))?;
+        // Unlike new admission, extension does not consume another quota/rate slot.
+        state.announcer.match_support().require(&rule.nlri)?;
+        validate_live(&expected, &state.settings.pop, Utc::now())?;
+        state.verified_speaker_binding()?;
+        let request = LifetimeExtension {
+            expected,
+            ttl_seconds,
+            actor,
+            reason,
+            target_id: binding.map(super::VerifiedSpeakerBinding::target_id),
+            fence_epoch,
+        };
+        request.ensure_fence(&state.fence)?;
+        Ok::<_, PrefixdError>((guard, request))
+    }).await.map_err(|_| PrefixdError::Internal(
+        "lifetime read-only preparation timed out; refresh mitigation and audit before retrying".into(),
+    ))??;
     state
         .repo
         .extend_flowspec_lifetime(&request, &state.fence)
@@ -866,5 +873,51 @@ mod tests {
             m.updated_at
         );
         assert!(audits(&repo).await.is_empty());
+    }
+    #[tokio::test]
+    async fn preparation_timeout_releases_lifecycle_lock_without_waiting_for_inventory() {
+        let repo = Arc::new(MockRepository::new());
+        let m = rule("203.0.113.10/32");
+        let state = state(repo.clone(), Arc::new(MockAnnouncer::new()), |_| {});
+        repo.insert_mitigation(&m).await.unwrap();
+        let inventory = state.inventory.write().await;
+        let cloned = state.clone();
+        let id = m.mitigation_id;
+        let running = tokio::spawn(async move {
+            extend_flowspec_lifetime(&cloned, id, 600, "alice".into(), "ongoing".into()).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while repo.lifecycle_read_counts().1 == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            state.mitigation_lock.try_lock().is_err(),
+            "preparation must own the lifecycle lock before the timeout"
+        );
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(7), running)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(outcome, Err(PrefixdError::Internal(message)) if message.contains("preparation timed out"))
+        );
+        // Inventory remains blocked: only the preparation deadline can release
+        // the lifecycle guard, allowing withdrawal/expiry work to proceed.
+        assert!(state.mitigation_lock.try_lock().is_ok());
+        assert_eq!(
+            repo.get_mitigation(id).await.unwrap().unwrap().expires_at,
+            m.expires_at
+        );
+        assert!(audits(&repo).await.is_empty());
+        drop(inventory);
+        assert!(
+            extend_flowspec_lifetime(&state, id, 600, "alice".into(), "retry".into())
+                .await
+                .unwrap()
+                .extended
+        );
     }
 }

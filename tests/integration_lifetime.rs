@@ -351,3 +351,131 @@ async fn postgres_expiry_during_audit_wait_rolls_back_the_tentative_update() {
     assert_eq!(saved.updated_at, request.expected.updated_at);
     assert_eq!(audit_count(&ctx).await, 0);
 }
+
+#[tokio::test]
+async fn postgres_backward_clock_step_returns_noop_without_shortening_or_audit() {
+    let ctx = common::TestContext::new().await;
+    let request = request(&ctx).await;
+    // This schema belongs only to this disposable database. Its isolated pool
+    // shadows the clock with two deterministic samples; no host clock changes.
+    sqlx::raw_sql("CREATE SCHEMA extension_clock; CREATE SEQUENCE extension_clock.calls; CREATE TABLE extension_clock.samples (sample bigint PRIMARY KEY, stamp timestamptz NOT NULL);")
+        .execute(&ctx.pool).await.unwrap();
+    sqlx::query("INSERT INTO extension_clock.samples(sample, stamp) VALUES (1, $1), (2, $2)")
+        .bind(request.expected.expires_at - Duration::seconds(599))
+        .bind(request.expected.expires_at - Duration::seconds(601))
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE FUNCTION extension_clock.clock_timestamp() RETURNS timestamptz LANGUAGE SQL VOLATILE AS $$ WITH tick AS MATERIALIZED (SELECT LEAST(nextval('extension_clock.calls'), 2) AS sample) SELECT samples.stamp FROM extension_clock.samples samples JOIN tick USING (sample) $$;")
+        .execute(&ctx.pool).await.unwrap();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                sqlx::query("SET search_path = extension_clock, pg_catalog, public")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(ctx.pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let repo = Repository::new(pool.clone());
+    let outcome = repo
+        .extend_flowspec_lifetime(&request, &ControllerFence::new(true))
+        .await
+        .unwrap();
+    assert!(
+        !outcome.extended,
+        "the write's clock sample yields a horizon covered by the saved expiry: {outcome:?}"
+    );
+    assert_eq!(outcome.mitigation.expires_at, request.expected.expires_at);
+    assert_eq!(outcome.mitigation.updated_at, request.expected.updated_at);
+    let saved = ctx
+        .repo
+        .get_mitigation(request.expected.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.expires_at, request.expected.expires_at);
+    assert_eq!(saved.updated_at, request.expected.updated_at);
+    assert_eq!(audit_count(&ctx).await, 0);
+    let samples: i64 = sqlx::query_scalar("SELECT last_value FROM extension_clock.calls")
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        samples, 3,
+        "initial liveness, write decision and final liveness use the scripted clock"
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn postgres_blocked_preparation_read_times_out_and_releases_lifecycle_lock() {
+    let ctx = common::TestContext::new().await;
+    let request = request(&ctx).await;
+    let mut settings = common::test_settings();
+    settings.mode = OperationMode::Enforced;
+    let state = prefixd::AppState::new(
+        settings,
+        common::test_inventory(),
+        common::test_playbooks(),
+        ctx.repo.clone(),
+        std::sync::Arc::new(prefixd::bgp::MockAnnouncer::new()),
+        ".".into(),
+    )
+    .unwrap();
+    let mut held = ctx.pool.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    sqlx::query("LOCK TABLE mitigations IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let cloned = state.clone();
+    let id = request.expected.mitigation_id;
+    let running = tokio::spawn(async move {
+        prefixd::domain::extend_flowspec_lifetime(
+            &cloned,
+            id,
+            600,
+            "alice".into(),
+            "ongoing".into(),
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM mitigations WHERE mitigation_id = $1%')")
+                .bind(blocker).fetch_one(&ctx.pool).await.unwrap();
+            if waiting { break; } tokio::task::yield_now().await;
+        }
+    }).await.expect("initial mitigation read must demonstrably wait on the held table lock");
+    assert!(state.mitigation_lock.try_lock().is_err());
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(7), running)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(outcome, Err(PrefixdError::Internal(message)) if message.contains("preparation timed out"))
+    );
+    assert!(
+        state.mitigation_lock.try_lock().is_ok(),
+        "the lifecycle lock must release while the database read remains blocked"
+    );
+    held.rollback().await.unwrap();
+    assert_eq!(
+        ctx.repo
+            .get_mitigation(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .expires_at,
+        request.expected.expires_at
+    );
+    assert_eq!(audit_count(&ctx).await, 0);
+}

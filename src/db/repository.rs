@@ -720,28 +720,28 @@ impl RepositoryTrait for Repository {
                 ));
             }
             request.ensure_fence(fence)?;
-            let proposed = now.checked_add_signed(chrono::Duration::seconds(request.ttl_seconds.into()))
-                .ok_or_else(|| PrefixdError::InvalidRequest("lifetime horizon is out of range".into()))?;
-            let extended = proposed > current.expires_at;
-            let updated = if extended {
-                let row = sqlx::query_as::<_, MitigationRow>(
-                    r#"WITH timing AS MATERIALIZED (SELECT clock_timestamp() AS checked_at)
-                    UPDATE mitigations m SET
-                        expires_at = timing.checked_at + make_interval(secs => $4::double precision),
-                        updated_at = timing.checked_at
-                    FROM timing
-                    WHERE mitigation_id = $1 AND updated_at = $2 AND expires_at = $3
-                      AND pop = $5 AND status IN ('active', 'escalated')
-                      AND action_type IN ('discard', 'police') AND origin_mode = 'enforced'
-                      AND withdrawn_at IS NULL AND expires_at > timing.checked_at
-                      AND NOT EXISTS (SELECT 1 FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL)
-                      AND NOT EXISTS (SELECT 1 FROM safelist WHERE $6::inet && prefix::inet)
-                    RETURNING m.*"#,
-                ).bind(current.mitigation_id).bind(current.updated_at).bind(current.expires_at)
-                    .bind(f64::from(request.ttl_seconds)).bind(&current.pop)
-                    .bind(&current.match_criteria.dst_prefix)
-                    .fetch_optional(&mut *tx).await?
-                    .ok_or_else(|| PrefixdError::Conflict("mitigation expired or changed before lifetime update".into()))?;
+            // Decide from the exact sample used for the write. A backward wall-
+            // clock step between reads must never shorten the existing horizon.
+            let row = sqlx::query_as::<_, MitigationRow>(
+                r#"WITH timing AS MATERIALIZED (SELECT clock_timestamp() AS checked_at)
+                UPDATE mitigations m SET
+                    expires_at = timing.checked_at + make_interval(secs => $4::double precision),
+                    updated_at = timing.checked_at
+                FROM timing
+                WHERE mitigation_id = $1 AND updated_at = $2 AND expires_at = $3
+                  AND pop = $5 AND status IN ('active', 'escalated')
+                  AND action_type IN ('discard', 'police') AND origin_mode = 'enforced'
+                  AND withdrawn_at IS NULL AND expires_at > timing.checked_at
+                  AND expires_at < timing.checked_at + make_interval(secs => $4::double precision)
+                  AND NOT EXISTS (SELECT 1 FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL)
+                  AND NOT EXISTS (SELECT 1 FROM safelist WHERE $6::inet && prefix::inet)
+                RETURNING m.*"#,
+            ).bind(current.mitigation_id).bind(current.updated_at).bind(current.expires_at)
+                .bind(f64::from(request.ttl_seconds)).bind(&current.pop)
+                .bind(&current.match_criteria.dst_prefix)
+                .fetch_optional(&mut *tx).await?;
+            let extended = row.is_some();
+            let updated = if let Some(row) = row {
                 let updated = Mitigation::from_row(row)?;
                 Self::insert_audit_on(&mut tx, &request.audit(&updated)).await?;
                 updated
