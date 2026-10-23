@@ -208,6 +208,12 @@ and all leased adds for that profile immediately, even if the database write
 fails. Once storage recovers, record the latched reason before any replay.
 Automatic recovery cannot clear the latch: after confirmed absence and fresh
 readiness, an operator must explicitly re-arm the profile and create new intent.
+Confirmed absence requires the
+[pending-mutation barrier](../project/scrubber-diversion-contract.md#finalize-withdrawal-behind-a-pending-mutation-barrier):
+prevent outstanding adds from committing, then complete a final recorded-owner
+delete and complete inventory read. An initial delete acknowledgment or absence
+read cannot release victim exclusion or authorize re-arm while an old add is
+still permitted to recreate the rule.
 Restart must not erase an unpersisted latch: a new controller starts unarmed
 for profiles with outstanding diversion, drains that intent and requires re-arm.
 This prevents a flapping scrubber from repeatedly attracting traffic.
@@ -250,6 +256,12 @@ the client timeout. Record and expose that uncertainty. On lease
 loss or speaker restart, re-add only unexpired, still-authorized desired intent
 under a fresh owner generation, after a complete inventory and fresh readiness;
 never replay withdrawn or latched diversion.
+
+Carry the same pending-mutation barrier through explicit withdrawal, TTL expiry,
+target/profile changes, configuration drain and rollback. Keep durable pending
+intent and victim exclusion until outstanding adds are invalidated or their
+authorization expires, then confirm final local absence. Do not terminate a
+legitimate same-owner sibling merely to establish this per-rule barrier.
 
 Application TTL still requires a running controller. The speaker lease bounds
 retention after renewal stops by the last possible lease extension plus RIB

@@ -67,7 +67,8 @@ protobuf field numbers or claim that rustbgpd implements a proposed RPC.
 5. Preserve the exact `(AFI/SAFI, canonical components)` key and recorded owner
    through add, read-back and idempotent delete. A target or profile change does
    not create a separate NLRI key. Changing an active action requires confirmed
-   withdrawal and a fresh admission under ADR 030's victim-level exclusion.
+   withdrawal through the [pending-mutation barrier](#finalize-withdrawal-behind-a-pending-mutation-barrier)
+   and a fresh admission under ADR 030's victim-level exclusion.
 
 ### Canonical action vectors
 
@@ -155,6 +156,33 @@ If the receipt cannot bound either lag under its failure model, report that
 layer as unbounded or unknown. A route with zero lease time remaining still
 needs confirmed local absence and separate router evidence.
 
+### Finalize withdrawal behind a pending-mutation barrier
+
+A successful delete and an empty read do not finalize withdrawal while an
+earlier add can still commit. A delayed request can recreate that exact key
+using a valid window, including when another rule keeps the profile's owner
+generation live. Bounded eventual expiry does not make the earlier absence
+check final.
+
+Persist withdrawal intent and stop adds for the selected key before draining
+it. Durably record each window authorizing a sent add before dispatch, including
+requests with unknown outcomes. Keep the original operation, rule, owner and
+victim exclusion pending until every such add is unable to commit. Establish
+that barrier either by acknowledged server-side invalidation checked at commit,
+or by proving all windows that could authorize those adds have expired on the
+server. Invalidating a key's outstanding add authorization must not remove a
+legitimate sibling rule or kill its live owner generation. Client cancellation,
+an RPC deadline and an initial absence read provide no barrier.
+
+After that barrier, perform a final idempotent delete under the recorded owner
+and obtain a complete local inventory confirming absence. Only then finalize
+the local withdrawal, release victim exclusion or permit a target/profile
+change or operator re-arm. A failed read, uncertain authorization or foreign
+owner keeps the operation pending; recovery must re-establish the barrier from
+durable state. Router removal remains a separate evidence layer. Apply this
+ordering to explicit withdrawal, TTL expiry, readiness loss, configuration drain
+and rollback preparation.
+
 ## Required qualification cases
 
 Implement the speaker cases upstream, release that contract, then pin it in
@@ -169,6 +197,7 @@ results recorded here.
 | Unsupported server/family | Old daemon or unsupported family refuses the mutation; complete inventory proves no new key, lease extension or unleased fallback |
 | Invalid action | Copy, reserved-bit injection, cross-family target, duplicate/conflicting actions and malformed IPv6 length fail prefixd's supported contract before mutation |
 | Exact deletion | Delete using the recorded owner removes only the selected match; repeated delete reports absent; sibling sources/ports remain; foreign or unowned key refusal changes no state |
+| Pending-add withdrawal | Keep another rule under the same owner live. Delay an add before handler receipt, delete its key and observe absence, then deliver the still-authorized add. The negative control recreates the key before its window expires. Withdrawal stays pending and victim exclusion/re-arm stay blocked until invalidation or expiry prevents every outstanding add from committing, followed by a final owner-checked delete and complete absence check. Replay the old add again: it cannot recreate the key; the sibling remains live |
 | Queue after timeout | Stall the RIB, enqueue add, lose the client response, stop the controller, expire the window, then resume; the old add cannot start or extend a lease |
 | Delayed retry and renewal | Queue duplicate adds and a renewal through window expiry; resume in different orders; none extends or recreates state past the original window |
 | Delay before handler receipt | Hold an already formed request outside the API until its window expires; the server refuses it even though its handler just started |
