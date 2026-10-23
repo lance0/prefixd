@@ -10104,7 +10104,7 @@ mod manual_protocol {
             ("2001:db8::10", "58", "invalid protocol"),
             ("203.0.113.10", "1", "invalid protocol"),
             ("not-an-ip", "icmpv6", "invalid IP address"),
-            ("2001:db8::10/128", "icmpv6", "invalid IP address"),
+            ("2001:db8::10/129", "icmpv6", "CIDR"),
             ("[2001:db8::10]", "icmpv6", "invalid IP address"),
         ] {
             let (state, repo, speaker) = state(AuthMode::None);

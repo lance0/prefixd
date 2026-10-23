@@ -2004,11 +2004,16 @@ pub async fn create_mitigation(
     }
 
     // Validate input
-    let destination = match crate::domain::parse_flowspec_destination(&req.victim_ip) {
+    let destination = if req.victim_ip.contains('/') {
+        crate::domain::parse_flowspec_destination(&req.victim_ip)
+            .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))
+    } else {
+        // Bare-IP validation keeps its existing error contract.
+        validate_ip(&req.victim_ip).map(ipnet::IpNet::from)
+    };
+    let destination = match destination {
         Ok(prefix) => prefix,
-        Err(error) => {
-            return Ok(AppError(PrefixdError::InvalidRequest(error.to_string())).into_response());
-        }
+        Err(error) => return Ok(AppError(error).into_response()),
     };
     let victim_ip = destination.addr();
     let is_subnet = destination.prefix_len() != destination.max_prefix_len();

@@ -698,11 +698,10 @@ pub async fn generate_incident_report(
                 "| `{}` | {} | {} | {} | `{}` | {} | {} | {} |\n",
                 m.mitigation_id,
                 m.status,
-                if m.action_type == crate::domain::ActionType::Police {
-                    format!(
-                        "police {} bps",
-                        m.action_params.rate_bps.unwrap_or_default()
-                    )
+                if m.action_type == crate::domain::ActionType::Police
+                    && let Some(rate) = m.action_params.rate_bps
+                {
+                    format!("police {rate} bps")
                 } else {
                     m.action_type.to_string()
                 },

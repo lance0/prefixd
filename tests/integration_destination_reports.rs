@@ -88,8 +88,16 @@ async fn cidr_incident_reports_use_exact_stored_targets_without_host_aggregation
         )
         .unwrap();
         let app = create_test_router(state);
-        let selected = mitigation(target, target);
-        let same_target = mitigation(target, target);
+        let mut selected = mitigation(target, target);
+        let source = if target.contains(':') {
+            "2001:db8:5678::/48"
+        } else {
+            "198.51.100.0/24"
+        };
+        selected.match_criteria.src_prefix = Some(source.into());
+        let mut same_target = mitigation(target, target);
+        // Historical incomplete action data must not be rendered as a zero rate.
+        same_target.action_params.rate_bps = None;
         let host_rule = mitigation(host, host_prefix);
         let overlap_rule = mitigation(overlapping, overlapping);
         for rule in [&selected, &same_target, &host_rule, &overlap_rule] {
@@ -134,8 +142,13 @@ async fn cidr_incident_reports_use_exact_stored_targets_without_host_aggregation
         assert!(!report.contains("Peak Traffic"));
         assert!(!report.contains("Base Only Service"));
         assert!(report.contains("Allocation Owner (`allocation-owner`)"));
-        assert!(report.contains("UDP; dst ports 443"));
+        assert!(report.contains(&format!("UDP; from `{source}`; dst ports 443")));
         assert!(report.contains("police 8000000 bps"));
+        assert!(!report.contains("police 0 bps"));
+        assert!(report.contains(&format!(
+            "| `{}` | {} | police |",
+            same_target.mitigation_id, same_target.status
+        )));
         assert!(report.contains(&selected.expires_at.to_rfc3339()));
         assert!(report.contains("router enforcement is unobserved"));
 
