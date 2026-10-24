@@ -572,22 +572,26 @@ metrics and rate limiting still apply.
 
 `failed_check` identifies `input`, `target`, `ownership`, `safelist`,
 `guardrails`, `creation_rate`, `capability`, `lifetime` or `timeout`; `reason`
-gives safe detail. Invalid match capabilities currently return `400`, as creation does.
+gives safe detail. A safelisted target is a guardrail refusal (`422`,
+`failed_check: "guardrails"`); `safelist` appears only when the safelist read
+itself fails (`503`, `unavailable`). Invalid match capabilities currently return `400`, as creation does.
 The candidate remains present after successful preparation even when a later
 check refuses it or becomes unavailable. It is null when preparation fails.
 Never interpret a safety-read error as an empty inventory or a passed check.
 
-The read-only preview has a five-second deadline covering lifecycle-lock
-acquisition, inventory preparation and all safety reads. A timeout returns
-`503`, `outcome: "unavailable"` and `failed_check: "timeout"`, retaining the
-candidate if preparation completed. It releases the lifecycle mutex so an
-optional check cannot indefinitely block withdrawal or expiry cleanup. This
-deadline does not apply to creation, persistence or COMMIT.
+The preview is a read-only snapshot and does not take the lifecycle mutex, so
+it never delays detector ingest, expiry or withdrawal. Its reads can straddle a
+concurrent change; creation rechecks everything under lifecycle serialization.
+A five-second deadline covers inventory preparation and all safety reads. A
+timeout returns `503`, `outcome: "unavailable"` and `failed_check: "timeout"`,
+retaining the candidate if preparation completed. This deadline does not apply
+to creation, persistence or COMMIT.
 
-Preview database reads also have a server-side statement deadline within the
-remaining request budget, leaving time for cleanup. Their connections are
-discarded so cancelled queries and changed session settings cannot retain shared
-pool capacity or affect normal operations. A server deadline returns `503` with
+Each preview database read runs in its own read-only transaction with a
+transaction-local statement deadline within the remaining request budget,
+leaving time for cleanup. The setting ends with the transaction and the
+connection returns to the pool, so cancelled queries and changed session
+settings cannot retain shared pool capacity or affect normal operations. A server deadline returns `503` with
 `outcome: "unavailable"` at the affected `failed_check` (for example `ownership`);
 the outer request deadline uses `failed_check: "timeout"`. Both preserve an
 already prepared candidate and save no intent. A retry reruns all checks.
@@ -748,7 +752,10 @@ capability, TTL, quota, dry-run and authorization checks still apply. Quotas
 count rules, not addresses; a policing rate applies to the matching flow across
 the destination, not an independent allowance for each address. The dashboard
 shows the complete match and requested expiry before creation. Local acceptance
-or read-back does not prove router enforcement.
+or read-back does not prove router enforcement. Routers order FlowSpec rules by
+[RFC 8955](https://www.rfc-editor.org/rfc/rfc8955#section-5.1) precedence: when
+a CIDR rule and a more-specific host rule both match a packet, the host rule's
+action applies.
 
 Mitigation filtering uses the exact canonical `victim_ip`; a CIDR does not
 match its hosts or other overlapping prefixes. The dashboard links CIDR targets
@@ -997,9 +1004,9 @@ controller. See the [operator workflow](../how-to/extending-mitigations.md).
 
 Read-only lifetime preparation has a five-second budget covering lifecycle-lock
 and pool acquisition. Each database read uses a server statement deadline within
-that remaining budget, preserving any shorter server limit. Modified or
-interrupted read connections are discarded so retries cannot strand blocked
-queries or shared pool slots. The atomic expiry/audit update and COMMIT use the
+that remaining budget, preserving any shorter server limit. Each read runs in a
+read-only transaction that rolls back when it finishes or is interrupted, so
+retries cannot strand blocked queries or shared pool slots. The atomic expiry/audit update and COMMIT use the
 ordinary repository outside this cancellable read-only preparation.
 
 ### Get Mitigation
@@ -3009,9 +3016,10 @@ run without the rustbgpd injection lease, matching health detail's
 [availability alerts](../how-to/grafana.md#availability-alerts) use these
 gauges.
 
-`prefixd_blackhole_replaced_total{pop}` counts unleased blackhole admission
-adds that returned `replaced`: an untracked local route appeared between the
-pre-read and add. It has only the configured POP label, and that series is
+`prefixd_blackhole_replaced_total{pop}` counts unleased blackhole adds from
+admissions and reconciliation repairs that returned `replaced`: the add
+overwrote a different local route at the prefix. At admission, that route
+appeared between the pre-read and add. It has only the configured POP label, and that series is
 exported at `0` from startup. Created, unchanged, leased and failed adds
 do not increment it. The counter records local RPC outcomes in this process,
 not a current-conflict gauge or router enforcement. The shipped

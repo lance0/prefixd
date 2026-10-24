@@ -87,7 +87,10 @@ async fn assert_preview_pool_recovers(server_timeout_ms: u32) {
         })
         .await
         .expect("preview must demonstrably wait on the held table lock after preparation");
-        assert!(state.mitigation_lock.try_lock().is_err());
+        assert!(
+            state.mitigation_lock.try_lock().is_ok(),
+            "a blocked preview must not hold the lifecycle mutex"
+        );
 
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(if server_timeout_ms == 0 { 7 } else { 2 }),
@@ -126,11 +129,6 @@ async fn assert_preview_pool_recovers(server_timeout_ms: u32) {
             blocked, 0,
             "a timed-out preview must leave no blocked statement"
         );
-        assert!(
-            state.mitigation_lock.try_lock().is_ok(),
-            "the lifecycle lock must release before the database blocker"
-        );
-
         let result: serde_json::Value =
             serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
         assert_eq!(result["outcome"], "unavailable");
@@ -195,5 +193,52 @@ async fn assert_preview_pool_recovers(server_timeout_ms: u32) {
             .unwrap();
         assert_eq!(count, 0, "preview unexpectedly changed {table}");
     }
+    pool.close().await;
+}
+
+/// Bounded preview reads return their connections to the pool: repeated
+/// previews must not open a new connection per read.
+#[tokio::test]
+async fn postgres_previews_reuse_pooled_connections() {
+    const MAX_CONNECTIONS: u32 = 2;
+    const PREVIEWS: usize = 10;
+    let ctx = common::TestContext::new().await;
+    let connects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = connects.clone();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(MAX_CONNECTIONS)
+        .after_connect(move |_, _| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        })
+        .connect_with(ctx.pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let state = prefixd::AppState::new(
+        common::test_settings(),
+        common::test_inventory(),
+        common::test_playbooks(),
+        Arc::new(prefixd::db::Repository::new(pool.clone())),
+        Arc::new(prefixd::bgp::MockAnnouncer::new()),
+        ".".into(),
+    )
+    .unwrap();
+    let app = prefixd::api::create_test_router(state);
+    for _ in 0..PREVIEWS {
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let opened = connects.load(std::sync::atomic::Ordering::SeqCst);
+    eprintln!("previews={PREVIEWS}, connections_opened={opened}");
+    assert!(
+        opened <= MAX_CONNECTIONS as usize,
+        "{PREVIEWS} previews opened {opened} connections"
+    );
+    // Transaction-local settings end with each read.
+    let timeout: String = sqlx::query_scalar("SELECT current_setting('statement_timeout')")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(timeout, "0");
     pool.close().await;
 }

@@ -252,32 +252,6 @@ pub async fn withdraw_safelisted(
     Ok(withdrawn)
 }
 
-/// Live blackholes at `pop` whose victim lies inside `prefix`, without a
-/// pending withdrawal. A failed read is an error, never an empty result.
-pub async fn covered_blackholes(
-    repo: &dyn RepositoryTrait,
-    pop: &str,
-    prefix: ipnet::IpNet,
-) -> Result<Vec<Mitigation>> {
-    let pending = repo.pending_withdrawals(Some(pop)).await?;
-    let now = chrono::Utc::now();
-    Ok(repo
-        .active_mitigations_for_pop(pop)
-        .await?
-        .into_iter()
-        .filter(|m| {
-            m.action_type == ActionType::Blackhole
-                && m.pop == pop
-                && m.expires_at > now
-                && !pending.iter().any(|r| r.mitigation_id == m.mitigation_id)
-                && m.match_criteria
-                    .dst_prefix
-                    .parse::<ipnet::IpNet>()
-                    .is_ok_and(|victim| prefix.contains(&victim))
-        })
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

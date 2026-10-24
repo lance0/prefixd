@@ -443,8 +443,10 @@ restart or each retry of a partial re-add, is `unchanged`: it is logged but
 writes no audit entry, so retries cannot flood the audit log. After a speaker
 restart the same re-add is `created` and audited. A `replaced` outcome on an unleased
 admission means a local route appeared at the prefix after the pre-read; it is
-logged as an error and the audit entry records it. It also increments
-`prefixd_blackhole_replaced_total{pop}` and triggers the shipped
+logged as an error and the audit entry records it. An unleased reconciliation
+repair that returns `replaced` overwrote a different local route at the prefix
+and is logged and audited the same way. Both increment
+`prefixd_blackhole_replaced_total{pop}` and trigger the shipped
 [replacement-conflict alert](../how-to/grafana.md#replacement-conflict-alert).
 The alert records a historical local replacement, not ongoing conflict or
 router enforcement; leased adds do not increment this counter.

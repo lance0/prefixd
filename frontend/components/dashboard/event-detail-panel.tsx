@@ -1,11 +1,12 @@
 "use client"
 
-import { useState } from "react"
+import { useRef, useState, type RefObject } from "react"
 import { motion } from "motion/react"
 import { X, Copy, Check, ExternalLink } from "lucide-react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Dialog, DialogClose, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { Tag } from "./status-pill"
 import { Field, FieldList } from "./field"
 import { ConfidenceBar } from "./confidence-bar"
@@ -21,6 +22,8 @@ import { useTimeFormat } from "@/components/time-zone-provider"
 interface EventDetailPanelProps {
   event: Event | null
   onClose: () => void
+  /** Receives focus on close when the opener is gone, such as after a direct link or a live-list removal. */
+  fallbackFocusRef?: RefObject<HTMLElement | null>
 }
 
 function protocolName(proto: number | null): string {
@@ -42,10 +45,12 @@ function parsePorts(portsJson: string): number[] {
   }
 }
 
-export function EventDetailPanel({ event, onClose }: EventDetailPanelProps) {
+export function EventDetailPanel({ event, onClose, fallbackFocusRef }: EventDetailPanelProps) {
   const { formatTime } = useTimeFormat()
   const [copied, setCopied] = useState<string | null>(null)
   const reducedMotion = useReducedMotion()
+  const openerRef = useRef<HTMLElement | null>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
 
   if (!event) return null
 
@@ -65,132 +70,155 @@ export function EventDetailPanel({ event, onClose }: EventDetailPanelProps) {
   const srcPorts = event.top_src_ports_json == null ? null : parsePorts(event.top_src_ports_json)
 
   return (
-    <motion.div
-      initial={reducedMotion ? false : { x: "100%", opacity: 0.5 }}
-      animate={{ x: 0, opacity: 1 }}
-      exit={reducedMotion ? undefined : { x: "100%", opacity: 0.5 }}
-      transition={{ duration: 0.15, ease: "easeOut" }}
-      className="fixed inset-y-0 right-0 z-50 w-full max-w-lg overflow-y-auto overscroll-contain border-l bg-popover shadow-md"
-    >
-      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b bg-popover px-4 py-3">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <Link
-            href={`/ip-history?ip=${encodeURIComponent(event.victim_ip)}`}
-            className="break-all rounded-sm font-mono text-base font-semibold hover:underline"
-          >
-            {event.victim_ip}
-          </Link>
-          <Tag>{event.vector.replace(/_/g, " ")}</Tag>
-          <Tag>{event.source}</Tag>
-        </div>
-        <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close panel">
-          <X className="size-4" aria-hidden="true" />
-        </Button>
-      </div>
+    // Modal at every width: the fixed panel overlays the list rather than reserving layout space.
+    <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent
+        aria-describedby={undefined}
+        showCloseButton={false}
+        onOpenAutoFocus={(e) => {
+          e.preventDefault()
+          openerRef.current = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null
+          closeRef.current?.focus()
+        }}
+        onCloseAutoFocus={(e) => {
+          // No DialogTrigger here, so Radix has no trigger to restore; return to the opener or the list.
+          e.preventDefault()
+          const opener = openerRef.current?.isConnected ? openerRef.current : fallbackFocusRef?.current
+          opener?.focus()
+        }}
+        className="inset-y-0 right-0 left-auto block w-full max-w-lg translate-x-0 translate-y-0 rounded-none border-0 bg-transparent p-0 shadow-none data-[state=open]:animate-none data-[state=closed]:animate-none sm:max-w-lg"
+      >
+        <motion.div
+          initial={reducedMotion ? false : { x: "100%", opacity: 0.5 }}
+          animate={{ x: 0, opacity: 1 }}
+          exit={reducedMotion ? undefined : { x: "100%", opacity: 0.5 }}
+          transition={{ duration: 0.15, ease: "easeOut" }}
+          className="h-full overflow-y-auto overscroll-contain border-l bg-popover shadow-md"
+        >
+          <DialogTitle className="sr-only">Event details</DialogTitle>
+          <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b bg-popover px-4 py-3">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <Link
+                href={`/ip-history?ip=${encodeURIComponent(event.victim_ip)}`}
+                className="break-all rounded-sm font-mono text-base font-semibold hover:underline"
+              >
+                {event.victim_ip}
+              </Link>
+              <Tag>{event.vector.replace(/_/g, " ")}</Tag>
+              <Tag>{event.source}</Tag>
+            </div>
+            <DialogClose asChild>
+              <Button ref={closeRef} variant="ghost" size="icon" aria-label="Close panel">
+                <X className="size-4" aria-hidden="true" />
+              </Button>
+            </DialogClose>
+          </div>
 
-      <div className="space-y-4 p-4">
-        <FieldList>
-          <InfoItem
-            label="Event ID"
-            value={event.event_id}
-            mono
-            copyable
-            copied={copied === "id"}
-            onCopy={() => copyToClipboard(event.event_id, "id")}
-          />
-          {event.external_event_id && (
-            <InfoItem
-              label="External ID"
-              value={event.external_event_id}
-              mono
-              copyable
-              copied={copied === "ext"}
-              onCopy={() => copyToClipboard(event.external_event_id!, "ext")}
-            />
-          )}
-          <Field label="Source">{event.source}</Field>
-          <Field label="Vector">{event.vector.replace(/_/g, " ")}</Field>
-        </FieldList>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Traffic</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <FieldList className="grid-cols-2">
-              <Field label="Bandwidth">
-                <span className="text-xl font-semibold tabular-nums">{formatBps(event.bps)}</span>
-                {event.bps ? <span className="block text-xs text-muted-foreground tabular-nums">{event.bps.toLocaleString("en-US")}&nbsp;bps</span> : null}
-              </Field>
-              <Field label="Packet rate">
-                <span className="text-xl font-semibold tabular-nums">{formatPps(event.pps)}</span>
-                {event.pps ? <span className="block text-xs text-muted-foreground tabular-nums">{event.pps.toLocaleString("en-US")}&nbsp;pps</span> : null}
-              </Field>
-            </FieldList>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Attack details</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <FieldList className="grid-cols-2">
-              <Field label="Protocol">{protocolName(event.protocol)}</Field>
-              <Field label="Top destination ports">
-                <span className="font-mono">{ports.length > 0 ? ports.join(", ") : MISSING}</span>
-              </Field>
-              {srcPorts !== null && (
-                <Field label="Top source ports" className="col-span-2">
-                  <span className="font-mono">{srcPorts.length > 0 ? srcPorts.join(", ") : "none reported"}</span>
-                  <span className="block text-xs text-muted-foreground">In detector rank order. Playbook rules with src_ports: from_event keep only reflector-library ports.</span>
-                </Field>
+          <div className="space-y-4 p-4">
+            <FieldList>
+              <InfoItem
+                label="Event ID"
+                value={event.event_id}
+                mono
+                copyable
+                copied={copied === "id"}
+                onCopy={() => copyToClipboard(event.event_id, "id")}
+              />
+              {event.external_event_id && (
+                <InfoItem
+                  label="External ID"
+                  value={event.external_event_id}
+                  mono
+                  copyable
+                  copied={copied === "ext"}
+                  onCopy={() => copyToClipboard(event.external_event_id!, "ext")}
+                />
               )}
+              <Field label="Source">{event.source}</Field>
+              <Field label="Vector">{event.vector.replace(/_/g, " ")}</Field>
             </FieldList>
-          </CardContent>
-        </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Confidence</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ConfidenceBar value={event.confidence} />
-            <p className="mt-2 text-xs text-muted-foreground text-pretty">
-              {isConfidence(event.confidence)
-                ? event.confidence >= 0.8
-                  ? "High reported confidence."
-                  : event.confidence >= 0.5
-                    ? "Medium reported confidence."
-                    : "Low reported confidence."
-                : "No valid confidence reported."}{" "}
-              Confidence alone does not confirm mitigation or router installation.
-            </p>
-          </CardContent>
-        </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Traffic</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <FieldList className="grid-cols-2">
+                  <Field label="Bandwidth">
+                    <span className="text-xl font-semibold tabular-nums">{formatBps(event.bps)}</span>
+                    {event.bps ? <span className="block text-xs text-muted-foreground tabular-nums">{event.bps.toLocaleString("en-US")}&nbsp;bps</span> : null}
+                  </Field>
+                  <Field label="Packet rate">
+                    <span className="text-xl font-semibold tabular-nums">{formatPps(event.pps)}</span>
+                    {event.pps ? <span className="block text-xs text-muted-foreground tabular-nums">{event.pps.toLocaleString("en-US")}&nbsp;pps</span> : null}
+                  </Field>
+                </FieldList>
+              </CardContent>
+            </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Timeline</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <FieldList className="grid-cols-2">
-              <Field label="Event time"><span className="tabular-nums">{formatTime(event.event_timestamp)}</span></Field>
-              <Field label="Ingested">
-                <time dateTime={event.ingested_at} title={formatTime(event.ingested_at)} className="tabular-nums">{formatRelative(event.ingested_at)}</time>
-              </Field>
-            </FieldList>
-          </CardContent>
-        </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Attack details</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <FieldList className="grid-cols-2">
+                  <Field label="Protocol">{protocolName(event.protocol)}</Field>
+                  <Field label="Top destination ports">
+                    <span className="font-mono">{ports.length > 0 ? ports.join(", ") : MISSING}</span>
+                  </Field>
+                  {srcPorts !== null && (
+                    <Field label="Top source ports" className="col-span-2">
+                      <span className="font-mono">{srcPorts.length > 0 ? srcPorts.join(", ") : "none reported"}</span>
+                      <span className="block text-xs text-muted-foreground">In detector rank order. Playbook rules with src_ports: from_event keep only reflector-library ports.</span>
+                    </Field>
+                  )}
+                </FieldList>
+              </CardContent>
+            </Card>
 
-        <Button variant="outline" className="w-full" asChild>
-          <Link href={`/mitigations?ip=${encodeURIComponent(event.victim_ip)}`}>
-            <ExternalLink className="size-4" aria-hidden="true" />
-            View mitigations for {event.victim_ip}
-          </Link>
-        </Button>
-      </div>
-    </motion.div>
+            <Card>
+              <CardHeader>
+                <CardTitle>Confidence</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <ConfidenceBar value={event.confidence} />
+                <p className="mt-2 text-xs text-muted-foreground text-pretty">
+                  {isConfidence(event.confidence)
+                    ? event.confidence >= 0.8
+                      ? "High reported confidence."
+                      : event.confidence >= 0.5
+                        ? "Medium reported confidence."
+                        : "Low reported confidence."
+                    : "No valid confidence reported."}{" "}
+                  Confidence alone does not confirm mitigation or router installation.
+                </p>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Timeline</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <FieldList className="grid-cols-2">
+                  <Field label="Event time"><span className="tabular-nums">{formatTime(event.event_timestamp)}</span></Field>
+                  <Field label="Ingested">
+                    <time dateTime={event.ingested_at} title={formatTime(event.ingested_at)} className="tabular-nums">{formatRelative(event.ingested_at)}</time>
+                  </Field>
+                </FieldList>
+              </CardContent>
+            </Card>
+
+            <Button variant="outline" className="w-full" asChild>
+              <Link href={`/mitigations?ip=${encodeURIComponent(event.victim_ip)}`}>
+                <ExternalLink className="size-4" aria-hidden="true" />
+                View mitigations for {event.victim_ip}
+              </Link>
+            </Button>
+          </div>
+        </motion.div>
+      </DialogContent>
+    </Dialog>
   )
 }
 

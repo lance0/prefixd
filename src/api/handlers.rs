@@ -2047,6 +2047,9 @@ pub async fn create_mitigation(
                         )
                     ) =>
                 {
+                    // The same event as the persistence-time recheck.
+                    tracing::warn!(error = %failure.error, pop = %state.settings.pop,
+                        reason = "NewMitigationRateExceeded", "admission rejected new mitigation");
                     Some("NewMitigationRateExceeded".into())
                 }
                 _ => None,

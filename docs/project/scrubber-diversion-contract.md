@@ -19,7 +19,7 @@ table; unreleased upstream changes cannot satisfy a release gate.
 
 | Boundary | Evidence at the pinned revisions | Required before enforced diversion |
 | --- | --- | --- |
-| Match selection | prefixd supports source-prefix selection; existing manual destinations are hosts | Preserve canonical match identity and source guardrails; broader destination support needs its own admission design |
+| Match selection | prefixd supports source-prefix selection; manual discard and police may use guarded destination CIDRs, while diversion stays host-only | Preserve canonical match identity and source guardrails; CIDR diversion needs its own admission design |
 | Target action | rustbgpd has typed VRF redirect and raw eight-byte communities; prefixd's adapters require traffic-rate | Agree lossless target-IP add and read-back; preserve target, family and copy flag without substituting a VRF or legacy next hop |
 | IPv6 target | `AddFlowSpecRequest.extended_communities` holds `uint64` values | Carry the twenty-byte IPv6-specific community through add, retained read-back and export |
 | Ownership | Released leased add and delete check the exact owner; owner/key caps are 64 live owners and 16,384 keys per owner | Allocate disjoint owners for ordinary mitigations and each profile; refuse new profile activation/admission at capacity |
