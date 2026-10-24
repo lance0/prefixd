@@ -660,7 +660,10 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
           )}
 
           <DialogFooter>
-            <Button type="button" variant="outline" size="sm" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
+            <Button type="button" variant="outline" size="sm" onClick={() => {
+              invalidateAdmission()
+              onOpenChange(false)
+            }} disabled={isSubmitting}>
               Cancel
             </Button>
             <Button type="submit" size="sm" disabled={isSubmitting}>

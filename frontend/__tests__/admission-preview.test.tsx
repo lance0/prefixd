@@ -38,13 +38,16 @@ function fill(label: RegExp, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } })
 }
 
-async function openForm() {
+async function openForm(onOpenChange = vi.fn()) {
   controller.route("GET", "/v1/config/settings", () => json({ settings: { guardrails: { dst_prefix_minlen: 22, dst_prefix_maxlen: 32 } }, loaded_at: result.checked_at }))
-  renderApp(<FlowSpecRuleDialog open onOpenChange={vi.fn()} />, { withoutAuth: true })
+  const view = renderApp(<FlowSpecRuleDialog open onOpenChange={onOpenChange} />, { withoutAuth: true })
+
   await settle()
   fill(/^Destination IP or CIDR/, request.victim_ip)
   fill(/^Destination ports/, "443")
   fill(/^Reason/, request.reason)
+
+  return view
 }
 
 describe("admission response boundary", () => {
@@ -125,6 +128,31 @@ describe("optional controller admission check", () => {
     await act(async () => { release?.(json(result)) })
     expect(screen.queryByText("Controller checks passed")).not.toBeInTheDocument()
     expect(screen.getByRole("button", { name: "Check admission" })).toBeEnabled()
+  })
+
+  it("discards a deferred result on Cancel while preserving the form for a fresh check", async () => {
+    let release: ((response: Response) => void) | undefined
+    controller.route("POST", "/v1/mitigations/preview", () => new Promise<Response>(resolve => { release = resolve }))
+    const onOpenChange = vi.fn()
+    const view = await openForm(onOpenChange)
+
+    fireEvent.click(screen.getByRole("button", { name: "Check admission" }))
+    await waitFor(() => expect(release).toBeDefined())
+    fireEvent.click(screen.getByRole("button", { name: "Cancel", exact: true }))
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+    view.rerender(<FlowSpecRuleDialog open={false} onOpenChange={onOpenChange} />)
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    view.rerender(<FlowSpecRuleDialog open onOpenChange={onOpenChange} />)
+    expect(screen.getByLabelText(/^Destination IP or CIDR/)).toHaveValue(request.victim_ip)
+    expect(screen.getByLabelText(/^Reason/)).toHaveValue(request.reason)
+    await act(async () => { release?.(json(result)) })
+    expect(screen.queryByText("Controller checks passed")).not.toBeInTheDocument()
+    expect(screen.queryByText(/^Checked /)).not.toBeInTheDocument()
+
+    controller.route("POST", "/v1/mitigations/preview", () => json(result))
+    fireEvent.click(screen.getByRole("button", { name: "Check admission" }))
+    expect(await screen.findByText("Controller checks passed")).toBeInTheDocument()
+    expect(controller.calls("POST", "/v1/mitigations/preview")).toHaveLength(2)
   })
 
   it.each([[422, "refused", "Admission refused"], [503, "unavailable", "Checks unavailable"]] as const)("distinguishes %s %s", async (status, outcome, label) => {
