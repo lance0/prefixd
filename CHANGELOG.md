@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- Check `guardrails.dst_prefix_minlen` and `dst_prefix_minlen_v6` before
+  upgrading. Earlier releases ignored values below 32 and 128; this release
+  admits manual destination CIDRs down to those lengths. Set them to 32 and 128
+  first if you do not want CIDRs. See
+  [manual destination CIDRs and downgrade](docs/how-to/upgrading.md#manual-destination-cidrs-and-downgrade).
+
+- Inventory load and reload now reject an unparseable customer prefix or asset
+  IP. A failed reload keeps the previous inventory; fix the reported entry and
+  reload again.
+
 ### Added
 
 - Authenticated `POST /v1/mitigations/preview` and the manual rule form's optional
@@ -63,6 +75,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `prefixd_blackhole_replaced_total{pop}` and the `PrefixdBlackholeReplaced`
+  alert now count unleased blackhole reconciliation repairs that replaced a
+  different local route at the prefix, as well as admissions. The repair also
+  logs an error. Leased adds still do not increment the counter.
+
 - Announcement counters, announcement latency histograms and BGP session gauges
   add a bounded `backend` label. The operations dashboard identifies backend and
   peer, preserves backend latency groups and shows capability availability.
@@ -78,6 +95,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The HTTP load helper and its report-parser regression suite. Local verification
   and CI no longer require `hey`.
 
+- The obsolete GoBGP-only lab helper and standalone FRR topology. Use
+  `just interop-frr` for maintained rustbgpd and GoBGP router receipt tests with
+  isolated fixtures and dated results. The Juniper topologies remain available.
+
 ### Fixed
 
 - Historical benchmark claims state their missing qualification and distinguish
@@ -86,6 +107,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Events, mitigations and audit log filters return to the first matching page.
   Refreshed events keep pagination within the available pages instead of falsely
   showing an empty list.
+
+- The event detail panel is a modal dialog named "Event details". Opening it
+  moves focus to its close button and keeps Tab inside the panel. Escape closes
+  it and returns focus to the button that opened it. The panel closes when its
+  event leaves the live list. Without a remaining opener, such as after a direct
+  link, focus returns to the events list.
 
 - Routine PostgreSQL NOTICE messages are quiet by default in native, Compose
   and systemd deployments. Warnings, errors and controller INFO remain enabled;
@@ -113,11 +140,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signed-in operators. Browser preferences remain available when health fails,
   and a retry keeps the signed-in dashboard and open preferences mounted.
 
-### Removed
+### Security
 
-- The obsolete GoBGP-only lab helper and standalone FRR topology. Use
-  `just interop-frr` for maintained rustbgpd and GoBGP router receipt tests with
-  isolated fixtures and dated results. The Juniper topologies remain available.
+- **ctutils** — Updated 0.4.2 → 0.4.4, which removes secret-dependent branches
+  from constant-time mask generation and `u128` comparisons
+  (RUSTSEC-2026-0385). The crate reaches the HMAC signing and verification
+  used for signal webhooks and alert delivery through `hmac` and `sha2`.
+- **tokio** — Updated 1.52.3 → 1.53.3, which deprecates the `AsyncFd`
+  constructors that let safe code register file descriptors it does not own
+  (RUSTSEC-2026-0386). prefixd does not call `AsyncFd` directly.
 
 ## [0.22.1] - 2026-10-22
 

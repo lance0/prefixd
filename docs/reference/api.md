@@ -752,7 +752,10 @@ capability, TTL, quota, dry-run and authorization checks still apply. Quotas
 count rules, not addresses; a policing rate applies to the matching flow across
 the destination, not an independent allowance for each address. The dashboard
 shows the complete match and requested expiry before creation. Local acceptance
-or read-back does not prove router enforcement.
+or read-back does not prove router enforcement. Routers order FlowSpec rules by
+[RFC 8955](https://www.rfc-editor.org/rfc/rfc8955#section-5.1) precedence: when
+a CIDR rule and a more-specific host rule both match a packet, the host rule's
+action applies.
 
 Mitigation filtering uses the exact canonical `victim_ip`; a CIDR does not
 match its hosts or other overlapping prefixes. The dashboard links CIDR targets
@@ -2937,9 +2940,10 @@ run without the rustbgpd injection lease, matching health detail's
 [availability alerts](../how-to/grafana.md#availability-alerts) use these
 gauges.
 
-`prefixd_blackhole_replaced_total{pop}` counts unleased blackhole admission
-adds that returned `replaced`: an untracked local route appeared between the
-pre-read and add. It has only the configured POP label, and that series is
+`prefixd_blackhole_replaced_total{pop}` counts unleased blackhole adds from
+admissions and reconciliation repairs that returned `replaced`: the add
+overwrote a different local route at the prefix. At admission, that route
+appeared between the pre-read and add. It has only the configured POP label, and that series is
 exported at `0` from startup. Created, unchanged, leased and failed adds
 do not increment it. The counter records local RPC outcomes in this process,
 not a current-conflict gauge or router enforcement. The shipped

@@ -197,12 +197,18 @@ pub(super) async fn prepare_manual_flowspec(
     };
     let inventory = state.inventory.read().await;
     let context = if is_subnet {
-        Some(inventory.lookup_prefix(&destination).ok_or_else(|| AdmissionFailure {
-            check: Ownership,
-            error: PrefixdError::InvalidRequest(
-                "destination CIDR must fit within one inventory customer prefix without conflicting ownership".into(),
-            ),
-        })?)
+        // An invalid inventory is an error, never an unowned or admissible prefix.
+        Some(
+            inventory
+                .lookup_prefix(&destination)
+                .map_err(AdmissionFailure::at(Ownership))?
+                .ok_or_else(|| AdmissionFailure {
+                    check: Ownership,
+                    error: PrefixdError::InvalidRequest(
+                        "destination CIDR must fit within one inventory customer prefix without conflicting ownership".into(),
+                    ),
+                })?,
+        )
     } else {
         inventory.lookup_ip(&target)
     };
