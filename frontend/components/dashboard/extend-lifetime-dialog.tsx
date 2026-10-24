@@ -90,7 +90,7 @@ export function ExtendLifetimeDialog({ mitigation, now, onUpdated }: {
     }
   }
 
-  if (!eligible) return null
+  if (!eligible && !open) return null
 
   return <Dialog open={open} onOpenChange={(value) => {
     if (busy) return
@@ -103,7 +103,7 @@ export function ExtendLifetimeDialog({ mitigation, now, onUpdated }: {
 
     setOpen(value)
   }}>
-    <DialogTrigger asChild><Button variant="outline" size="sm"><Clock3 className="size-4" aria-hidden="true" />Extend lifetime</Button></DialogTrigger>
+    {eligible && <DialogTrigger asChild><Button variant="outline" size="sm"><Clock3 className="size-4" aria-hidden="true" />Extend lifetime</Button></DialogTrigger>}
     <DialogContent showCloseButton={!busy} className="max-h-[90dvh] overflow-y-auto">
       <DialogHeader>
         <DialogTitle>Extend saved FlowSpec lifetime</DialogTitle>
@@ -122,6 +122,7 @@ export function ExtendLifetimeDialog({ mitigation, now, onUpdated }: {
           <div><dt className="text-muted-foreground">{unchanged ? "Estimated expiry (unchanged)" : "Estimated new expiry"}</dt><dd>{formatTime(unchanged ? mitigation.expires_at : proposed, now)}</dd></div>
         </dl>
         <p className="text-xs text-muted-foreground">The saved expiry is never shortened. The database clock determines the result; a horizon already covered at the update writes no revision or audit entry.</p>
+        {!eligible && <p role="status" className="text-sm text-warning">This mitigation is no longer eligible for a lifetime extension. Review its current status and audit before taking further action.</p>}
         <div className="space-y-2">
           <Label htmlFor="extension-reason">Reason for extending</Label>
           <Textarea id="extension-reason" required value={reason} disabled={busy} onChange={(event) => setReason(event.target.value)} placeholder="Why does this mitigation need more time?" aria-describedby="extension-reason-help" />
@@ -130,7 +131,7 @@ export function ExtendLifetimeDialog({ mitigation, now, onUpdated }: {
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         <DialogFooter>
           <Button type="button" variant="outline" disabled={busy} onClick={() => setOpen(false)}>Cancel</Button>
-          <Button type="submit" disabled={!valid || busy}>{busy && <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />}{unchanged ? "Confirm lifetime check" : "Confirm extension"}</Button>
+          <Button type="submit" disabled={!eligible || !valid || busy}>{busy && <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />}{unchanged ? "Confirm lifetime check" : "Confirm extension"}</Button>
         </DialogFooter>
       </form>
     </DialogContent>

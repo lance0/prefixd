@@ -23,9 +23,9 @@ function setup(role: "viewer" | "operator" = "operator", fields: Partial<Mitigat
     pop: "test-pop", mode, guardrails: { min_ttl_seconds: minimum, max_ttl_seconds: 1800 },
   }, loaded_at: new Date(now).toISOString() }))
   const onUpdated = vi.fn(async () => {})
-  renderApp(<ExtendLifetimeDialog mitigation={{ ...mitigation, ...fields }} now={now} onUpdated={onUpdated} />)
+  const view = renderApp(<ExtendLifetimeDialog mitigation={{ ...mitigation, ...fields }} now={now} onUpdated={onUpdated} />)
 
-  return onUpdated
+  return { ...view, onUpdated }
 }
 
 async function open() {
@@ -37,7 +37,7 @@ describe("operator lifetime extension", () => {
   it("previews exact target and expiry, requires a reason and confirms the bounded remaining lifetime", async () => {
     const response = deferred<Response>()
     controller.route("POST", "/v1/mitigations/rule-1/extend", () => response.promise)
-    const refresh = setup()
+    const { onUpdated: refresh } = setup()
     await open()
     expect(screen.getByText(/2001:db8:1234::\/48.*source-port 123.*rate-limit/)).toBeVisible()
     expect(screen.getByText("1048576 bps")).toBeVisible()
@@ -71,7 +71,7 @@ describe("operator lifetime extension", () => {
 
   it("treats an unavailable result as ambiguous and refreshes before retry", async () => {
     controller.route("POST", "/v1/mitigations/rule-1/extend", () => failure(503))
-    const refresh = setup()
+    const { onUpdated: refresh } = setup()
     await open()
     fireEvent.change(screen.getByLabelText("Reason for extending"), { target: { value: "ongoing" } })
     fireEvent.click(screen.getByRole("button", { name: "Confirm extension" }))
@@ -88,6 +88,61 @@ describe("operator lifetime extension", () => {
     fireEvent.click(screen.getByRole("button", { name: "Confirm extension" }))
     expect(await screen.findByRole("alert")).toHaveTextContent("source prefix matching is disabled")
     expect(screen.getByRole("alert")).not.toHaveTextContent("may have been saved")
+  })
+
+  it("retains an open dialog and refusal when the mitigation expires during a request", async () => {
+    const response = deferred<Response>()
+    controller.route("POST", "/v1/mitigations/rule-1/extend", () => response.promise)
+    const view = setup()
+
+    await open()
+    fireEvent.change(screen.getByLabelText("Reason for extending"), { target: { value: "ongoing" } })
+    fireEvent.click(screen.getByRole("button", { name: "Confirm extension" }))
+    await waitFor(() => expect(controller.calls("POST", "/v1/mitigations/rule-1/extend")).toHaveLength(1))
+    view.rerender(<ExtendLifetimeDialog mitigation={mitigation} now={Date.parse(mitigation.expires_at) + 1} onUpdated={view.onUpdated} />)
+    expect(screen.getByRole("dialog")).toBeVisible()
+    expect(screen.getByRole("status")).toHaveTextContent("no longer eligible")
+    expect(screen.queryByRole("button", { name: "Extend lifetime" })).not.toBeInTheDocument()
+    response.resolve(failure(409, "mitigation has expired"))
+    expect(await screen.findByRole("alert")).toHaveTextContent("mitigation has expired")
+    expect(screen.getByRole("dialog")).toBeVisible()
+    const confirm = screen.getByRole("button", { name: "Confirm extension" })
+    expect(confirm).toBeDisabled()
+    fireEvent.click(confirm)
+    fireEvent.submit(screen.getByLabelText("Reason for extending").closest("form")!)
+    expect(controller.calls("POST", "/v1/mitigations/rule-1/extend")).toHaveLength(1)
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+    expect(screen.queryByRole("button", { name: "Extend lifetime" })).not.toBeInTheDocument()
+  })
+
+  it("retains an uncertain update warning when error refresh discovers withdrawal", async () => {
+    const response = deferred<Response>()
+    controller.route("POST", "/v1/mitigations/rule-1/extend", () => response.promise)
+    const view = setup()
+    view.onUpdated.mockImplementation(async () => {
+      view.rerender(<ExtendLifetimeDialog mitigation={{ ...mitigation, status: "withdrawn", withdrawn_at: new Date(now).toISOString() }} now={now} onUpdated={view.onUpdated} />)
+    })
+
+    await open()
+    fireEvent.change(screen.getByLabelText("Reason for extending"), { target: { value: "ongoing" } })
+    fireEvent.click(screen.getByRole("button", { name: "Confirm extension" }))
+    await waitFor(() => expect(controller.calls("POST", "/v1/mitigations/rule-1/extend")).toHaveLength(1))
+    response.resolve(failure(503))
+    expect(await screen.findByRole("alert")).toHaveTextContent("the update may have been saved")
+    expect(view.onUpdated).toHaveBeenCalledOnce()
+    expect(screen.getByRole("dialog")).toBeVisible()
+    expect(screen.getByRole("status")).toHaveTextContent("current status and audit")
+    expect(screen.queryByRole("button", { name: "Extend lifetime" })).not.toBeInTheDocument()
+    const confirm = screen.getByRole("button", { name: "Confirm extension" })
+    expect(confirm).toBeDisabled()
+    fireEvent.click(confirm)
+    fireEvent.submit(screen.getByLabelText("Reason for extending").closest("form")!)
+    expect(controller.calls("POST", "/v1/mitigations/rule-1/extend")).toHaveLength(1)
+    expect(screen.getByRole("alert")).toHaveTextContent("the update may have been saved")
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+    expect(screen.queryByRole("button", { name: "Extend lifetime" })).not.toBeInTheDocument()
   })
 
   it("offers positive remaining lifetime when the general policy minimum is zero", async () => {
