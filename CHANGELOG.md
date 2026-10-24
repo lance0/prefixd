@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   safelist, binding and match-policy checks protect the exact existing rule,
   without creating another mitigation, consuming a quota slot or mutating the
   speaker. Blackholes, simulations, pending and expired intent are refused.
+  Read-only preparation bounds server statements and discards interrupted read
+  connections so timed-out checks do not strand shared database pool capacity.
 
 - Manual FlowSpec discard and police rules accept aligned IPv4/IPv6 destination
   CIDRs in `victim_ip` when operators deliberately relax existing prefix bounds.

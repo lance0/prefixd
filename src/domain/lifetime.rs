@@ -113,7 +113,8 @@ pub async fn extend_flowspec_lifetime(
     }
     // Only read-only preparation is cancellable. Return the guard with the
     // checked request so the repository mutation and COMMIT remain serialized.
-    let (_guard, request) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let (_guard, request) = tokio::time::timeout_at(deadline, async {
         let guard = state.mitigation_lock.lock().await;
         let fence_epoch = state
             .fence
@@ -125,8 +126,8 @@ pub async fn extend_flowspec_lifetime(
             ));
         }
         let binding = state.verified_speaker_binding()?;
-        let expected = state
-            .repo
+        let read_repo = state.repo.clone().for_bounded_reads(deadline)?;
+        let expected = read_repo
             .get_mitigation(id)
             .await?
             .ok_or(PrefixdError::MitigationNotFound(id))?;
@@ -138,7 +139,7 @@ pub async fn extend_flowspec_lifetime(
             }
         }
         let owner = super::find_mitigation_owner(
-            state.repo.as_ref(),
+            read_repo.as_ref(),
             &state.settings.pop,
             &MitigationRoute::of(&expected),
             &expected.scope_hash,
@@ -193,7 +194,7 @@ pub async fn extend_flowspec_lifetime(
                     )
                 })?;
         let safelisted =
-            state.repo.is_safelisted(&destination.to_string()).await? || configured_safelisted;
+            read_repo.is_safelisted(&destination.to_string()).await? || configured_safelisted;
         let intent = MitigationIntent {
             event_id: expected.triggering_event_id,
             customer_id: expected.customer_id.clone(),

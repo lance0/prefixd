@@ -413,16 +413,31 @@ async fn postgres_backward_clock_step_returns_noop_without_shortening_or_audit()
 }
 
 #[tokio::test]
-async fn postgres_blocked_preparation_read_times_out_and_releases_lifecycle_lock() {
+async fn postgres_blocked_preparation_recovers_pool_before_blocker_release() {
     let ctx = common::TestContext::new().await;
     let request = request(&ctx).await;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            ctx.pool
+                .connect_options()
+                .as_ref()
+                .clone()
+                .application_name("prefixd-lifetime-preparation-test"),
+        )
+        .await
+        .unwrap();
     let mut settings = common::test_settings();
     settings.mode = OperationMode::Enforced;
+    let inventory = serde_json::from_value(serde_json::json!({"customers": [{
+        "customer_id": "owner", "name": "Owner", "prefixes": ["203.0.113.0/24"]
+    }]}))
+    .unwrap();
     let state = prefixd::AppState::new(
         settings,
-        common::test_inventory(),
+        inventory,
         common::test_playbooks(),
-        ctx.repo.clone(),
+        std::sync::Arc::new(Repository::new(pool.clone())),
         std::sync::Arc::new(prefixd::bgp::MockAnnouncer::new()),
         ".".into(),
     )
@@ -436,46 +451,88 @@ async fn postgres_blocked_preparation_read_times_out_and_releases_lifecycle_lock
         .execute(&mut *held)
         .await
         .unwrap();
-    let cloned = state.clone();
     let id = request.expected.mitigation_id;
-    let running = tokio::spawn(async move {
-        prefixd::domain::extend_flowspec_lifetime(
-            &cloned,
-            id,
-            600,
-            "alice".into(),
-            "ongoing".into(),
-        )
-        .await
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM mitigations WHERE mitigation_id = $1%')")
-                .bind(blocker).fetch_one(&ctx.pool).await.unwrap();
-            if waiting { break; } tokio::task::yield_now().await;
-        }
-    }).await.expect("initial mitigation read must demonstrably wait on the held table lock");
-    assert!(state.mitigation_lock.try_lock().is_err());
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(7), running)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        matches!(outcome, Err(PrefixdError::Internal(message)) if message.contains("preparation timed out"))
-    );
-    assert!(
-        state.mitigation_lock.try_lock().is_ok(),
-        "the lifecycle lock must release while the database read remains blocked"
-    );
-    held.rollback().await.unwrap();
-    assert_eq!(
-        ctx.repo
-            .get_mitigation(id)
+    // Three retries exceed this pool's capacity while the blocker stays held.
+    for attempt in 0..3 {
+        let cloned = state.clone();
+        let running = tokio::spawn(async move {
+            prefixd::domain::extend_flowspec_lifetime(
+                &cloned,
+                id,
+                600,
+                "alice".into(),
+                "ongoing".into(),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND application_name = 'prefixd-lifetime-preparation-test' AND query LIKE '%FROM mitigations WHERE mitigation_id = $1%')")
+                    .bind(blocker).fetch_one(&ctx.pool).await.unwrap();
+                if waiting { break; } tokio::task::yield_now().await;
+            }
+        }).await.expect("initial mitigation read must demonstrably wait on the held table lock");
+        assert!(state.mitigation_lock.try_lock().is_err());
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(7), running)
             .await
             .unwrap()
-            .unwrap()
-            .expires_at,
-        request.expected.expires_at
-    );
+            .unwrap();
+        let blocked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND application_name = 'prefixd-lifetime-preparation-test'",
+        ).bind(blocker).fetch_one(&ctx.pool).await.unwrap();
+        eprintln!(
+            "attempt={attempt}, blocked_lifetime_statements={blocked}, pool_size={}, pool_idle={}",
+            pool.size(),
+            pool.num_idle()
+        );
+        let (probe, timeout_setting): (i32, String) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            sqlx::query_as("SELECT 1::int, current_setting('statement_timeout')").fetch_one(&pool),
+        )
+        .await
+        .expect("the lifetime pool must recover before the blocker is released")
+        .unwrap();
+        assert_eq!(probe, 1);
+        assert_eq!(
+            timeout_setting, "0",
+            "read settings must not leak into mutation connections"
+        );
+        assert_eq!(
+            blocked, 0,
+            "lifetime preparation must leave no blocked server statement"
+        );
+        assert!(state.mitigation_lock.try_lock().is_ok());
+        assert!(
+            matches!(outcome, Err(PrefixdError::Database(sqlx::Error::Database(error))) if error.code().as_deref() == Some("57014")),
+            "the server deadline must refuse the blocked read"
+        );
+        assert_eq!(audit_count(&ctx).await, 0);
+    }
+    held.rollback().await.unwrap();
+    let unchanged = ctx.repo.get_mitigation(id).await.unwrap().unwrap();
+    assert_eq!(unchanged.expires_at, request.expected.expires_at);
+    assert_eq!(unchanged.updated_at, request.expected.updated_at);
     assert_eq!(audit_count(&ctx).await, 0);
+
+    // The normal repository must still perform the atomic extension after the
+    // read-only view has recovered; no statement deadline may leak to COMMIT.
+    let outcome = prefixd::domain::extend_flowspec_lifetime(
+        &state,
+        id,
+        600,
+        "alice".into(),
+        "fresh successful retry".into(),
+    )
+    .await
+    .unwrap();
+    assert!(outcome.extended);
+    assert_eq!(outcome.previous_expires_at, request.expected.expires_at);
+    assert!(outcome.mitigation.expires_at > request.expected.expires_at);
+    assert_eq!(audit_count(&ctx).await, 1);
+    let timeout_setting: String = sqlx::query_scalar("SELECT current_setting('statement_timeout')")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(timeout_setting, "0");
+    pool.close().await;
 }

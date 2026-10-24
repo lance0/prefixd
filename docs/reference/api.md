@@ -995,6 +995,13 @@ unchanged. A successful response is saved desired intent, not proof of speaker
 retention, export or router enforcement. Expiry still requires a running
 controller. See the [operator workflow](../how-to/extending-mitigations.md).
 
+Read-only lifetime preparation has a five-second budget covering lifecycle-lock
+and pool acquisition. Each database read uses a server statement deadline within
+that remaining budget, preserving any shorter server limit. Modified or
+interrupted read connections are discarded so retries cannot strand blocked
+queries or shared pool slots. The atomic expiry/audit update and COMMIT use the
+ordinary repository outside this cancellable read-only preparation.
+
 ### Get Mitigation
 
 ```http

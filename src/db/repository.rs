@@ -774,6 +774,7 @@ impl RepositoryTrait for Repository {
     }
 
     async fn get_mitigation(&self, id: Uuid) -> Result<Option<Mitigation>> {
+        let mut connection = self.bounded_read_connection().await?;
         let row = sqlx::query_as::<_, MitigationRow>(
             r#"
             SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
@@ -785,7 +786,7 @@ impl RepositoryTrait for Repository {
             "#,
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
         match row {
             Some(r) => Ok(Some(Mitigation::from_row(r)?)),
