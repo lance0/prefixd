@@ -185,6 +185,58 @@ describe("operator configuration accessible names", () => {
     expectUniqueIds()
   })
 
+  it("names checkbox and toggle groups and keeps the global-events hint at full muted contrast", async () => {
+    controller.route("GET", "/v1/config/alerting", () => json({ destinations: [{ type: "discord", webhook_url: "***" }], events: [] }))
+    renderApp(<AlertingConfigPanel />)
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }))
+    fireEvent.click(screen.getByRole("button", { name: "Edit Discord destination 1" }))
+    const events = screen.getByRole("group", { name: "Per-Destination Events" })
+    expect(within(events).getByRole("checkbox", { name: "mitigation.created" })).toBeVisible()
+    expect(within(events).getByText("Using global events")).toHaveClass("text-muted-foreground")
+    expect(within(events).getByText("Using global events").className).not.toMatch(/muted-foreground\/\d/)
+    cleanup()
+
+    const playbooks: ConfigPlaybook[] = [{ name: "udp", match: { vector: "udp_flood" }, steps: [{ action: "police", rate_bps: 5_000_000, ttl_seconds: 300 }] }]
+    renderApp(<PlaybookEditor playbooks={playbooks} onSave={vi.fn()} saving={false} />)
+    fireEvent.click(screen.getByRole("button", { name: "Edit playbook udp" }))
+    const steps = screen.getByRole("group", { name: "Steps" })
+    expect(within(steps).getByRole("spinbutton", { name: "Rate (bps)" })).toBeVisible()
+    expect(within(steps).getByRole("button", { name: "Add step" })).toBeVisible()
+  })
+
+  it("announces correlation errors and links each to the field it describes", async () => {
+    renderApp(<ConfigTab />)
+    const window = await screen.findByRole("spinbutton", { name: "Window (seconds)" })
+    expect(window).not.toHaveAccessibleDescription()
+    fireEvent.change(window, { target: { value: "0" } })
+    expect(screen.getByText("Window must be at least 1 second").closest('[role="alert"]')).not.toBeNull()
+    expect(window).toHaveAttribute("aria-invalid", "true")
+    expect(window).toHaveAccessibleDescription("Window must be at least 1 second")
+    expect(screen.getByRole("spinbutton", { name: "Min sources" })).not.toHaveAccessibleDescription()
+    fireEvent.change(window, { target: { value: "60" } })
+    expect(screen.queryByText("Window must be at least 1 second")).toBeNull()
+    expect(window).toHaveAttribute("aria-invalid", "false")
+
+    fireEvent.click(screen.getByRole("button", { name: "Add source" }))
+    const dialog = within(await screen.findByRole("dialog", { name: "Add signal source" }))
+    fireEvent.change(dialog.getByRole("textbox", { name: "Name" }), { target: { value: "netflow" } })
+    await choose(dialog.getByRole("combobox", { name: "Mode" }), "Corroborating (strengthens other sources only)")
+    const dimensions = dialog.getByRole("group", { name: "Match dimensions" })
+    expect(within(dimensions).getByRole("button", { name: "customer_id" })).toBeVisible()
+    fireEvent.click(dialog.getByRole("button", { name: "Add" }))
+    const message = "Select at least one match dimension for corroborating sources"
+    expect(dialog.getByText(message)).toHaveAttribute("role", "alert")
+    expect(dimensions).toHaveAccessibleDescription(expect.stringContaining(message))
+  })
+
+  it("announces playbook validation errors", () => {
+    const playbooks: ConfigPlaybook[] = [{ name: "udp", match: { vector: "udp_flood" }, steps: [{ action: "police", rate_bps: 5_000_000, ttl_seconds: 300 }] }]
+    renderApp(<PlaybookEditor playbooks={playbooks} onSave={vi.fn()} saving={false} />)
+    fireEvent.click(screen.getByRole("button", { name: "Edit playbook udp" }))
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "" } })
+    expect(screen.getByText('Playbook "#1": name is required').closest('[role="alert"]')).not.toBeNull()
+  })
+
   it("keeps quiet-hour purposes named with Off and selected times", async () => {
     controller.route("GET", "/v1/preferences", () => json({ muted_events: [], quiet_hours_start: null, quiet_hours_end: null }))
     renderApp(<NotificationPreferencesPanel />)

@@ -60,7 +60,7 @@ function CorrelationSettingsEditor() {
   const { isAdmin } = usePermissions()
   const [saving, setSaving] = useState(false)
   const [formState, setFormState] = useState<CorrelationConfig | null>(null)
-  const [validationErrors, setValidationErrors] = useState<string[]>([])
+  const [validationErrors, setValidationErrors] = useState<ConfigError[]>([])
 
   // Initialize form state from fetched config
   const form = formState ?? config
@@ -127,6 +127,12 @@ function CorrelationSettingsEditor() {
   const isDirty = formState != null
   const readOnly = !isAdmin
 
+  const errorProps = (field: keyof CorrelationConfig) => {
+    const invalid = validationErrors.some(([f]) => f === field)
+
+    return { "aria-invalid": invalid, "aria-describedby": invalid ? `corr-error-${field}` : undefined }
+  }
+
   return (
     <Card>
       <CardHeader>
@@ -146,6 +152,7 @@ function CorrelationSettingsEditor() {
               type="number"
               value={form.window_seconds}
               onChange={(e) => handleFieldChange("window_seconds", parseInt(e.target.value) || 0)}
+              {...errorProps("window_seconds")}
               disabled={readOnly}
               className="h-8 text-xs"
               min={1}
@@ -158,6 +165,7 @@ function CorrelationSettingsEditor() {
               type="number"
               value={form.min_sources}
               onChange={(e) => handleFieldChange("min_sources", parseInt(e.target.value) || 0)}
+              {...errorProps("min_sources")}
               disabled={readOnly}
               className="h-8 text-xs"
               min={1}
@@ -170,6 +178,7 @@ function CorrelationSettingsEditor() {
               type="number"
               value={form.confidence_threshold}
               onChange={(e) => handleFieldChange("confidence_threshold", parseFloat(e.target.value) || 0)}
+              {...errorProps("confidence_threshold")}
               disabled={readOnly}
               className="h-8 text-xs"
               min={0}
@@ -180,9 +189,9 @@ function CorrelationSettingsEditor() {
         </div>
 
         {validationErrors.length > 0 && (
-          <div className="bg-destructive/10 border border-destructive/20 rounded-md p-3">
-            {validationErrors.map((err, i) => (
-              <p key={i} className="text-xs text-destructive">{err}</p>
+          <div role="alert" className="bg-destructive/10 border border-destructive/20 rounded-md p-3">
+            {validationErrors.map(([field, err]) => (
+              <p key={field} id={`corr-error-${field}`} className="text-xs text-destructive">{err}</p>
             ))}
           </div>
         )}
@@ -559,7 +568,11 @@ function SourceDialog({
                 }
               }}
             >
-              <SelectTrigger id={`${id}-mode`} className="h-8">
+              <SelectTrigger
+                id={`${id}-mode`}
+                aria-describedby={formError && mode === "primary" ? `${id}-form-error` : undefined}
+                className="h-8"
+              >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -577,8 +590,13 @@ function SourceDialog({
             </p>
           </div>
           {mode === "corroborating" && (
-            <div className="space-y-1.5">
-              <Label>Match dimensions</Label>
+            <div
+              role="group"
+              aria-labelledby={`${id}-dims`}
+              aria-describedby={formError ? `${id}-dims-hint ${id}-form-error` : `${id}-dims-hint`}
+              className="space-y-1.5"
+            >
+              <Label id={`${id}-dims`}>Match dimensions</Label>
               <div className="grid grid-cols-2 gap-1.5">
                 {(["customer_id", "pop", "service_id", "interface"] satisfies MatchDimension[]).map(
                   (dim) => (
@@ -598,14 +616,14 @@ function SourceDialog({
                   )
                 )}
               </div>
-              <p className="text-xs text-muted-foreground">
+              <p id={`${id}-dims-hint`} className="text-xs text-muted-foreground">
                 Signals from this source must populate at least one of these
                 fields; the matcher uses OR across dimensions.
               </p>
             </div>
           )}
           {formError && (
-            <p className="text-xs text-destructive">{formError}</p>
+            <p id={`${id}-form-error`} role="alert" className="text-xs text-destructive">{formError}</p>
           )}
         </div>
         <DialogFooter>
@@ -730,17 +748,20 @@ export function validateSourceConfig(
   return errors
 }
 
-function validateConfig(config: CorrelationConfig): string[] {
-  const errors: string[] = []
+/** A settings error and the field it describes. */
+type ConfigError = [keyof CorrelationConfig, string]
 
-  if (config.window_seconds < 1) errors.push("Window must be at least 1 second")
+function validateConfig(config: CorrelationConfig): ConfigError[] {
+  const errors: ConfigError[] = []
 
-  if (config.min_sources < 1) errors.push("Min sources must be at least 1")
+  if (config.window_seconds < 1) errors.push(["window_seconds", "Window must be at least 1 second"])
+
+  if (config.min_sources < 1) errors.push(["min_sources", "Min sources must be at least 1"])
 
   if (config.confidence_threshold < 0 || config.confidence_threshold > 1)
-    errors.push("Confidence threshold must be between 0 and 1")
+    errors.push(["confidence_threshold", "Confidence threshold must be between 0 and 1"])
 
-  if (config.default_weight < 0) errors.push("Default weight must be non-negative")
+  if (config.default_weight < 0) errors.push(["default_weight", "Default weight must be non-negative"])
 
   return errors
 }

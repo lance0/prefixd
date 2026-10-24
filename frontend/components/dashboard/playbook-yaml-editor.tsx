@@ -155,7 +155,7 @@ export function PlaybookYamlEditor({ playbooks: initialPlaybooks, onSave, saving
         spellCheck={false}
         aria-label="Playbooks YAML"
         className={
-          "w-full min-h-[400px] bg-secondary/50 border border-border rounded-md p-4 " +
+          "w-full min-h-[400px] bg-secondary/50 border border-input-border rounded-md p-4 " +
           "text-xs font-mono text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-primary"
         }
       />

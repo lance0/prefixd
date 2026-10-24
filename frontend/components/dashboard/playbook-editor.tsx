@@ -475,10 +475,10 @@ export function PlaybookEditor({ playbooks: initialPlaybooks, onSave, saving }: 
 
       {/* Validation errors */}
       {errors.length > 0 && hasChanges && (
-        <Card className="border-destructive/50 bg-destructive/5">
+        <Card role="alert" className="border-destructive/50 bg-destructive/5">
           <CardContent>
             <div className="flex items-start gap-2">
-              <AlertCircle className="h-4 w-4 text-destructive shrink-0 mt-0.5" />
+              <AlertCircle className="h-4 w-4 text-destructive shrink-0 mt-0.5" aria-hidden="true" />
               <div className="space-y-1">
                 {errors.map((err, i) => (
                   <p key={`${err}-${i}`} className="text-xs text-destructive">{err}</p>
@@ -578,9 +578,9 @@ export function PlaybookEditor({ playbooks: initialPlaybooks, onSave, saving }: 
                   </div>
                 </div>
               </CardHeader>
-              <CardContent className="space-y-2">
+              <CardContent role="group" aria-labelledby={`steps-${playbook._id}`} className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <Label className="text-muted-foreground font-medium">Steps</Label>
+                  <Label id={`steps-${playbook._id}`} className="text-muted-foreground font-medium">Steps</Label>
                   <Button
                     variant="ghost"
                     size="sm"

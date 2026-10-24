@@ -100,6 +100,7 @@ function destSummary(d: AlertingDestination): string {
 
 function DestinationEventsFilter({ dest, onChange }: { dest: DraftDestination; onChange: (d: DraftDestination) => void }) {
   const destEvents = dest.events ?? []
+  const labelId = useId()
 
   const toggleDestEvent = (event: string) => {
     const next = destEvents.includes(event) ? destEvents.filter((e) => e !== event) : [...destEvents, event]
@@ -107,8 +108,8 @@ function DestinationEventsFilter({ dest, onChange }: { dest: DraftDestination; o
   }
 
   return (
-    <div className="mt-3 pt-3 border-t border-border/50">
-      <Label className="text-muted-foreground">Per-Destination Events</Label>
+    <div role="group" aria-labelledby={labelId} className="mt-3 pt-3 border-t border-border/50">
+      <Label id={labelId} className="text-muted-foreground">Per-Destination Events</Label>
       <p className="text-xs text-muted-foreground mb-1.5">Override global filters for this destination. Empty = uses global.</p>
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
         {EVENT_TYPES.map((event) => (
@@ -123,7 +124,7 @@ function DestinationEventsFilter({ dest, onChange }: { dest: DraftDestination; o
         ))}
       </div>
       {destEvents.length === 0 && (
-        <p className="text-xs text-muted-foreground/60 mt-1">Using global events</p>
+        <p className="text-xs text-muted-foreground mt-1">Using global events</p>
       )}
     </div>
   )

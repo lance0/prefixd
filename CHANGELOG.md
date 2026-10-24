@@ -116,6 +116,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quiet-hour selections named, and expose webhook field hints and validation
   errors to assistive technology.
 
+- Unfocused text inputs, text areas, selects and checkboxes have a boundary of
+  at least 3:1 against page, card, muted and dialog surfaces in light and dark
+  themes. The "Using global events" hint is no longer dimmed. Per-destination
+  event, match dimension and playbook step controls are named groups.
+  Correlation and playbook validation errors are announced, and correlation
+  errors describe the field they concern.
+
 - Historical benchmark claims state their missing qualification and distinguish
   HTTP request throughput from mitigation enforcement.
 
