@@ -642,6 +642,10 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "mitigations: 1")]
     async fn no_mutation_check_detects_real_creation() {
+        // The creation increments `MITIGATIONS_CREATED`.
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
         let fixture = Fixture::new(Fixture::settings(), FlowSpecMatchSupport::ALL);
         let (status, created) = fixture
             .post("/v1/mitigations", &request("203.0.113.10"))
@@ -1219,6 +1223,10 @@ mod tests {
 
     #[tokio::test]
     async fn rate_refused_creation_logs_the_admission_rejection_once() {
+        // The refusal increments `GUARDRAIL_REJECTIONS{NewMitigationRateExceeded}`.
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
         let mut settings = Fixture::settings();
         settings.quotas.max_new_per_minute = 0;
         let fixture = Fixture::new(settings, FlowSpecMatchSupport::ALL);
