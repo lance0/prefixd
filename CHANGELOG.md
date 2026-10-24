@@ -98,6 +98,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `just interop-frr` for maintained rustbgpd and GoBGP router receipt tests with
   isolated fixtures and dated results. The Juniper topologies remain available.
 
+### Security
+
+- **ctutils** — Updated 0.4.2 → 0.4.4, which removes secret-dependent branches
+  from constant-time mask generation and `u128` comparisons
+  (RUSTSEC-2026-0385). The crate reaches the HMAC signing and verification
+  used for signal webhooks and alert delivery through `hmac` and `sha2`.
+- **tokio** — Updated 1.52.3 → 1.53.3, which deprecates the `AsyncFd`
+  constructors that let safe code register file descriptors it does not own
+  (RUSTSEC-2026-0386). prefixd does not call `AsyncFd` directly.
+
 ## [0.22.1] - 2026-10-22
 
 prefixd 0.22.1 makes `PrefixdBlackholeReplaced` clear an hour after the last
