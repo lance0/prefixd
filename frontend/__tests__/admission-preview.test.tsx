@@ -154,7 +154,7 @@ describe("optional controller admission check", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Check admission" }))
     await waitFor(() => expect(release).toBeDefined())
-    fireEvent.click(screen.getByRole("button", { name: "Cancel", exact: true }))
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
     expect(onOpenChange).toHaveBeenCalledWith(false)
     view.rerender(<FlowSpecRuleDialog open={false} onOpenChange={onOpenChange} />)
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
