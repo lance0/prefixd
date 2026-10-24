@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useState, useId } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
@@ -25,6 +25,7 @@ const EVENT_TYPES = [
 const HOURS = Array.from({ length: 24 }, (_, i) => i)
 
 export function NotificationPreferencesPanel() {
+  const id = useId()
   const { data, error, isLoading, mutate } = useNotificationPreferences()
   const [mutedEvents, setMutedEvents] = useState<string[]>([])
   const [quietStart, setQuietStart] = useState<number | null>(null)
@@ -126,6 +127,7 @@ export function NotificationPreferencesPanel() {
         </CardHeader>
         <CardContent>
           <div className="flex items-center gap-3">
+            <Label htmlFor={`${id}-quiet-start`} className="sr-only">Quiet hours start (UTC)</Label>
             <Select
               value={quietStart !== null ? String(quietStart) : "off"}
               onValueChange={(v) => {
@@ -141,7 +143,7 @@ export function NotificationPreferencesPanel() {
                 setDirty(true)
               }}
             >
-              <SelectTrigger className="w-28 h-8">
+              <SelectTrigger id={`${id}-quiet-start`} className="w-28 h-8">
                 <SelectValue placeholder="Start" />
               </SelectTrigger>
               <SelectContent>
@@ -154,6 +156,7 @@ export function NotificationPreferencesPanel() {
             {quietStart !== null && (
               <>
                 <span className="text-xs text-muted-foreground">to</span>
+                <Label htmlFor={`${id}-quiet-end`} className="sr-only">Quiet hours end (UTC)</Label>
                 <Select
                   value={quietEnd !== null ? String(quietEnd) : "8"}
                   onValueChange={(v) => {
@@ -161,7 +164,7 @@ export function NotificationPreferencesPanel() {
                     setDirty(true)
                   }}
                 >
-                  <SelectTrigger className="w-28 h-8">
+                  <SelectTrigger id={`${id}-quiet-end`} className="w-28 h-8">
                     <SelectValue placeholder="End" />
                   </SelectTrigger>
                   <SelectContent>

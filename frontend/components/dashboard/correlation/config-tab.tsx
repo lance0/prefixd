@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback, useEffect, useId } from "react"
 import { toast } from "sonner"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -426,6 +426,7 @@ function SourceDialog({
   initialConfig?: SourceConfig
   isNew: boolean
 }) {
+  const id = useId()
   const [name, setName] = useState(initialName || "")
   const [weight, setWeight] = useState(initialConfig?.weight?.toString() || "1.0")
   const [type, setType] = useState(initialConfig?.type || "detector")
@@ -510,8 +511,9 @@ function SourceDialog({
         </DialogHeader>
         <div className="space-y-4 py-2">
           <div className="space-y-1.5">
-            <Label>Name</Label>
+            <Label htmlFor={`${id}-name`}>Name</Label>
             <Input
+              id={`${id}-name`}
               value={name}
               onChange={(e) => setName(e.target.value)}
               disabled={!isNew}
@@ -520,9 +522,9 @@ function SourceDialog({
             />
           </div>
           <div className="space-y-1.5">
-            <Label>Type</Label>
+            <Label htmlFor={`${id}-type`}>Type</Label>
             <Select value={type} onValueChange={setType}>
-              <SelectTrigger className="h-8">
+              <SelectTrigger id={`${id}-type`} className="h-8">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -533,8 +535,9 @@ function SourceDialog({
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label>Weight</Label>
+            <Label htmlFor={`${id}-weight`}>Weight</Label>
             <Input
+              id={`${id}-weight`}
               type="number"
               value={weight}
               onChange={(e) => setWeight(e.target.value)}
@@ -544,7 +547,7 @@ function SourceDialog({
             />
           </div>
           <div className="space-y-1.5">
-            <Label>Mode</Label>
+            <Label htmlFor={`${id}-mode`}>Mode</Label>
             <Select
               value={mode}
               onValueChange={(v) => {
@@ -556,7 +559,7 @@ function SourceDialog({
                 }
               }}
             >
-              <SelectTrigger className="h-8">
+              <SelectTrigger id={`${id}-mode`} className="h-8">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

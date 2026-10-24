@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useMemo, useState, useId } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { StatusPill } from "@/components/dashboard/status-pill"
@@ -130,6 +130,7 @@ function DestinationEventsFilter({ dest, onChange }: { dest: DraftDestination; o
 }
 
 function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange: (d: DraftDestination) => void }) {
+  const id = useId()
   const update = (field: string, value: string) => onChange({ ...dest, [field]: value })
 
   return (
@@ -137,8 +138,9 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
       {dest.type === "slack" && (
         <>
           <div className="space-y-1 sm:col-span-2">
-            <Label className="text-muted-foreground">Webhook URL</Label>
+            <Label htmlFor={`${id}-webhook-url`} className="text-muted-foreground">Webhook URL</Label>
             <Input
+              id={`${id}-webhook-url`}
               type={dest.webhook_url === "***" ? "password" : "text"}
               value={dest.webhook_url ?? ""}
               onChange={(e) => update("webhook_url", e.target.value)}
@@ -147,15 +149,16 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-muted-foreground">Channel (optional)</Label>
-            <Input value={dest.channel ?? ""} onChange={(e) => update("channel", e.target.value)} placeholder="#ddos-alerts" className="h-8 text-xs font-mono" />
+            <Label htmlFor={`${id}-channel`} className="text-muted-foreground">Channel (optional)</Label>
+            <Input id={`${id}-channel`} value={dest.channel ?? ""} onChange={(e) => update("channel", e.target.value)} placeholder="#ddos-alerts" className="h-8 text-xs font-mono" />
           </div>
         </>
       )}
       {dest.type === "discord" && (
         <div className="space-y-1 sm:col-span-2">
-          <Label className="text-muted-foreground">Webhook URL</Label>
+          <Label htmlFor={`${id}-webhook-url`} className="text-muted-foreground">Webhook URL</Label>
           <Input
+            id={`${id}-webhook-url`}
             type={dest.webhook_url === "***" ? "password" : "text"}
             value={dest.webhook_url ?? ""}
             onChange={(e) => update("webhook_url", e.target.value)}
@@ -166,8 +169,9 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
       )}
       {dest.type === "teams" && (
         <div className="space-y-1 sm:col-span-2">
-          <Label className="text-muted-foreground">Webhook URL</Label>
+          <Label htmlFor={`${id}-webhook-url`} className="text-muted-foreground">Webhook URL</Label>
           <Input
+            id={`${id}-webhook-url`}
             type={dest.webhook_url === "***" ? "password" : "text"}
             value={dest.webhook_url ?? ""}
             onChange={(e) => update("webhook_url", e.target.value)}
@@ -179,8 +183,9 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
       {dest.type === "telegram" && (
         <>
           <div className="space-y-1">
-            <Label className="text-muted-foreground">Bot token</Label>
+            <Label htmlFor={`${id}-bot-token`} className="text-muted-foreground">Bot token</Label>
             <Input
+              id={`${id}-bot-token`}
               type={dest.bot_token === "***" ? "password" : "text"}
               value={dest.bot_token ?? ""}
               onChange={(e) => update("bot_token", e.target.value)}
@@ -189,16 +194,17 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-muted-foreground">Chat ID</Label>
-            <Input value={dest.chat_id ?? ""} onChange={(e) => update("chat_id", e.target.value)} placeholder="-100123456789" className="h-8 text-xs font-mono" />
+            <Label htmlFor={`${id}-chat-id`} className="text-muted-foreground">Chat ID</Label>
+            <Input id={`${id}-chat-id`} value={dest.chat_id ?? ""} onChange={(e) => update("chat_id", e.target.value)} placeholder="-100123456789" className="h-8 text-xs font-mono" />
           </div>
         </>
       )}
       {dest.type === "pagerduty" && (
         <>
           <div className="space-y-1">
-            <Label className="text-muted-foreground">Routing key</Label>
+            <Label htmlFor={`${id}-routing-key`} className="text-muted-foreground">Routing key</Label>
             <Input
+              id={`${id}-routing-key`}
               type={dest.routing_key === "***" ? "password" : "text"}
               value={dest.routing_key ?? ""}
               onChange={(e) => update("routing_key", e.target.value)}
@@ -207,16 +213,17 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-muted-foreground">Events URL</Label>
-            <Input value={dest.events_url ?? ""} onChange={(e) => update("events_url", e.target.value)} className="h-8 text-xs font-mono" />
+            <Label htmlFor={`${id}-events-url`} className="text-muted-foreground">Events URL</Label>
+            <Input id={`${id}-events-url`} value={dest.events_url ?? ""} onChange={(e) => update("events_url", e.target.value)} className="h-8 text-xs font-mono" />
           </div>
         </>
       )}
       {dest.type === "opsgenie" && (
         <>
           <div className="space-y-1">
-            <Label className="text-muted-foreground">API Key</Label>
+            <Label htmlFor={`${id}-api-key`} className="text-muted-foreground">API Key</Label>
             <Input
+              id={`${id}-api-key`}
               type={dest.api_key === "***" ? "password" : "text"}
               value={dest.api_key ?? ""}
               onChange={(e) => update("api_key", e.target.value)}
@@ -225,9 +232,9 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-muted-foreground">Region</Label>
+            <Label htmlFor={`${id}-region`} className="text-muted-foreground">Region</Label>
             <Select value={dest.region ?? "us"} onValueChange={(v) => update("region", v)}>
-              <SelectTrigger className="h-8">
+              <SelectTrigger id={`${id}-region`} className="h-8">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -241,12 +248,13 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
       {dest.type === "generic" && (
         <>
           <div className="space-y-1 sm:col-span-2">
-            <Label className="text-muted-foreground">URL</Label>
-            <Input value={dest.url ?? ""} onChange={(e) => update("url", e.target.value)} placeholder="https://example.com/webhook" className="h-8 text-xs font-mono" />
+            <Label htmlFor={`${id}-url`} className="text-muted-foreground">URL</Label>
+            <Input id={`${id}-url`} value={dest.url ?? ""} onChange={(e) => update("url", e.target.value)} placeholder="https://example.com/webhook" className="h-8 text-xs font-mono" />
           </div>
           <div className="space-y-1">
-            <Label className="text-muted-foreground">HMAC Secret (optional)</Label>
+            <Label htmlFor={`${id}-secret`} className="text-muted-foreground">HMAC Secret (optional)</Label>
             <Input
+              id={`${id}-secret`}
               type={dest.secret === "***" ? "password" : "text"}
               value={dest.secret ?? ""}
               onChange={(e) => update("secret", e.target.value)}
@@ -574,7 +582,7 @@ export function AlertingConfigPanel() {
                         </div>
                         <div className="flex items-center gap-1">
                           <Button variant="ghost" size="sm" className="h-7" onClick={() => setEditingIndex(null)}>Done</Button>
-                          <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive" onClick={() => removeDest(i)}>
+                          <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive" onClick={() => removeDest(i)} aria-label={`Remove ${DEST_LABELS[dest.type] ?? dest.type} destination ${i + 1}`}>
                             <Trash2 className="h-3.5 w-3.5" />
                           </Button>
                         </div>
@@ -594,10 +602,10 @@ export function AlertingConfigPanel() {
                   </div>
                   {isEditing ? (
                     <div className="flex items-center gap-1 shrink-0">
-                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setEditingIndex(i)}>
+                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setEditingIndex(i)} aria-label={`Edit ${DEST_LABELS[dest.type] ?? dest.type} destination ${i + 1}`}>
                         <Pencil className="h-3.5 w-3.5" />
                       </Button>
-                      <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive" onClick={() => removeDest(i)}>
+                      <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive" onClick={() => removeDest(i)} aria-label={`Remove ${DEST_LABELS[dest.type] ?? dest.type} destination ${i + 1}`}>
                         <Trash2 className="h-3.5 w-3.5" />
                       </Button>
                     </div>

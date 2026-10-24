@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback, useEffect, useId } from "react"
 import { toast } from "sonner"
 import { copyText } from "@/lib/clipboard"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -326,6 +326,7 @@ function AdapterDialog({
   existingNames: string[]
   onSubmit: (a: WebhookAdapter) => void
 }) {
+  const id = useId()
   const [form, setForm] = useState<WebhookAdapter>(initial ?? newAdapter())
   const [saving, setSaving] = useState(false)
 
@@ -390,26 +391,26 @@ function AdapterDialog({
 
           <div className="flex items-center gap-2">
             <input
-              id="adapter-enabled"
+              id={`${id}-enabled`}
               type="checkbox"
               checked={form.enabled}
               onChange={(e) => setForm({ ...form, enabled: e.target.checked })}
               className="h-3 w-3"
             />
-            <Label htmlFor="adapter-enabled">
+            <Label htmlFor={`${id}-enabled`}>
               Enabled
             </Label>
           </div>
 
           <div className="border-t pt-3">
-            <div className="text-xs font-medium mb-2">Authentication</div>
+            <div id={`${id}-auth-label`} className="text-xs font-medium mb-2">Authentication</div>
             <Select
               value={form.auth.type}
               onValueChange={(v) => {
                 if (v === "hmac" || v === "bearer" || v === "none") setForm({ ...form, auth: defaultAuth(v) })
               }}
             >
-              <SelectTrigger className="h-8">
+              <SelectTrigger id={`${id}-auth`} aria-labelledby={`${id}-auth-label`} className="h-8">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -491,10 +492,11 @@ function AdapterDialog({
             />
 
             <div className="mt-3">
-              <Label>
+              <Label htmlFor={`${id}-vector-map`}>
                 vector_map <span className="text-muted-foreground">(one per line, raw=prefixd)</span>
               </Label>
               <Textarea
+                id={`${id}-vector-map`}
                 className="mt-1 text-xs font-mono h-20"
                 value={vectorMapToText(form.vector_map)}
                 onChange={(e) =>
@@ -555,18 +557,24 @@ function Field({
   disabled?: boolean
   error?: string
 }) {
+  const id = useId()
+  const descriptionId = error ? `${id}-error` : hint ? `${id}-hint` : undefined
+
   return (
     <div className="space-y-1">
-      <Label>{label}</Label>
+      <Label htmlFor={id}>{label}</Label>
       <Input
+        id={id}
+        aria-invalid={Boolean(error)}
+        aria-describedby={descriptionId}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
         className="h-8 text-xs font-mono"
       />
-      {error && <div className="text-xs text-destructive">{error}</div>}
+      {error && <div id={`${id}-error`} className="text-xs text-destructive">{error}</div>}
       {hint && !error && (
-        <div className="text-xs text-muted-foreground">{hint}</div>
+        <div id={`${id}-hint`} className="text-xs text-muted-foreground">{hint}</div>
       )}
     </div>
   )

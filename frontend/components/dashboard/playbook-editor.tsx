@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useMemo, useState, useId } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -276,6 +276,8 @@ function StepEditor({
   onChange: (step: DraftStep) => void
   onRemove: () => void
 }) {
+  const id = useId()
+
   return (
     <div className="flex flex-wrap items-start gap-3 bg-secondary/50 px-3 py-2.5 rounded-md">
       <div className="flex items-center gap-1 text-muted-foreground pt-2">
@@ -291,7 +293,7 @@ function StepEditor({
         </div>
       ) : (
         <div className="space-y-1">
-          <Label className="text-muted-foreground">Action</Label>
+          <Label htmlFor={`${id}-action`} className="text-muted-foreground">Action</Label>
           <Select
             value={step.action ?? undefined}
             onValueChange={(v) => {
@@ -300,7 +302,7 @@ function StepEditor({
               if (v === "discard" || v === "blackhole") onChange({ ...step, action: v, rate_bps: undefined })
             }}
           >
-            <SelectTrigger className="w-28 h-8" aria-label={`Step ${index + 1} action`}>
+            <SelectTrigger id={`${id}-action`} className="w-28 h-8" aria-label={`Step ${index + 1} action`}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -314,8 +316,9 @@ function StepEditor({
 
       {step.action === "police" && (
         <div className="space-y-1">
-          <Label className="text-muted-foreground">Rate (bps)</Label>
+          <Label htmlFor={`${id}-rate`} className="text-muted-foreground">Rate (bps)</Label>
           <Input
+            id={`${id}-rate`}
             type="number"
             min={1}
             value={step.rate_bps ?? ""}
@@ -326,8 +329,9 @@ function StepEditor({
       )}
 
       <div className="space-y-1">
-        <Label className="text-muted-foreground">TTL (seconds)</Label>
+        <Label htmlFor={`${id}-ttl`} className="text-muted-foreground">TTL (seconds)</Label>
         <Input
+          id={`${id}-ttl`}
           type="number"
           min={1}
           max={86400}
@@ -341,8 +345,9 @@ function StepEditor({
       {!isFirst && (
         <>
           <div className="space-y-1">
-            <Label className="text-muted-foreground">Min confidence</Label>
+            <Label htmlFor={`${id}-confidence`} className="text-muted-foreground">Min confidence</Label>
             <Input
+              id={`${id}-confidence`}
               type="number"
               min={0}
               max={1}
@@ -355,8 +360,9 @@ function StepEditor({
           </div>
 
           <div className="space-y-1">
-            <Label className="text-muted-foreground">Min persist (s)</Label>
+            <Label htmlFor={`${id}-persistence`} className="text-muted-foreground">Min persist (s)</Label>
             <Input
+              id={`${id}-persistence`}
               type="number"
               min={0}
               value={step.require_persistence_seconds ?? ""}
@@ -401,6 +407,7 @@ function ReadOnlyPlaybookCard({ playbook }: { playbook: ConfigPlaybook }) {
 }
 
 export function PlaybookEditor({ playbooks: initialPlaybooks, onSave, saving }: PlaybookEditorProps) {
+  const id = useId()
   const [draft, setDraft] = useState<DraftPlaybook[]>(() => toDraft(initialPlaybooks))
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
 
@@ -539,8 +546,9 @@ export function PlaybookEditor({ playbooks: initialPlaybooks, onSave, saving }: 
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-2">
                   <div className="space-y-1">
-                    <Label className="text-muted-foreground">Name</Label>
+                    <Label htmlFor={`${id}-${playbook._id}-name`} className="text-muted-foreground">Name</Label>
                     <Input
+                      id={`${id}-${playbook._id}-name`}
                       value={playbook.name}
                       onChange={(e) => updatePlaybook(index, { ...playbook, name: e.target.value })}
                       className="h-8 text-xs font-mono"
@@ -548,9 +556,9 @@ export function PlaybookEditor({ playbooks: initialPlaybooks, onSave, saving }: 
                     />
                   </div>
                   <div className="space-y-1">
-                    <Label className="text-muted-foreground">Vector</Label>
+                    <Label htmlFor={`${id}-${playbook._id}-vector`} className="text-muted-foreground">Vector</Label>
                     <Select value={playbook.match.vector} onValueChange={(v) => updatePlaybook(index, { ...playbook, match: { ...playbook.match, vector: v } })}>
-                      <SelectTrigger className="h-8">
+                      <SelectTrigger id={`${id}-${playbook._id}-vector`} className="h-8">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>

@@ -89,6 +89,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Operator configuration forms connect visible labels to their controls, keep
+  quiet-hour selections named, and expose webhook field hints and validation
+  errors to assistive technology.
+
 - Historical benchmark claims state their missing qualification and distinguish
   HTTP request throughput from mitigation enforcement.
 

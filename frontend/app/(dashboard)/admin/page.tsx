@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useId } from "react"
 import { useSWRConfig } from "swr"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -104,6 +104,7 @@ const TABS = ["status", "safelist", "users"] as const
 const TABS_WITHOUT_USERS = ["status", "safelist"] as const
 
 export default function AdminPage() {
+  const id = useId()
   const { formatTime, timeZone } = useTimeFormat()
   const { mutate } = useSWRConfig()
   const { operator } = useAuth()
@@ -390,12 +391,14 @@ export default function AdminPage() {
               {/* Add new entry */}
               <div className="flex gap-2">
                 <Input
+                  aria-label="Safelist prefix"
                   placeholder="Prefix (e.g., 10.0.0.1/32)"
                   value={newPrefix}
                   onChange={(e) => setNewPrefix(e.target.value)}
                   className="font-mono flex-1"
                 />
                 <Input
+                  aria-label="Safelist reason (optional)"
                   placeholder="Reason (optional)"
                   value={newReason}
                   onChange={(e) => setNewReason(e.target.value)}
@@ -524,16 +527,18 @@ export default function AdminPage() {
                       </DialogHeader>
                       <div className="space-y-4 py-4">
                         <div className="space-y-2">
-                          <label className="text-sm font-medium">Username</label>
+                          <label htmlFor={`${id}-username`} className="text-sm font-medium">Username</label>
                           <Input
+                            id={`${id}-username`}
                             placeholder="username"
                             value={newUsername}
                             onChange={(e) => setNewUsername(e.target.value)}
                           />
                         </div>
                         <div className="space-y-2">
-                          <label className="text-sm font-medium">Password</label>
+                          <label htmlFor={`${id}-password`} className="text-sm font-medium">Password</label>
                           <Input
+                            id={`${id}-password`}
                             type="password"
                             placeholder="minimum 8 characters"
                             value={newPassword}
@@ -541,9 +546,9 @@ export default function AdminPage() {
                           />
                         </div>
                         <div className="space-y-2">
-                          <label className="text-sm font-medium">Role</label>
+                          <label htmlFor={`${id}-role`} className="text-sm font-medium">Role</label>
                           <Select value={newRole} onValueChange={(v: "admin" | "operator" | "viewer") => setNewRole(v)}>
-                            <SelectTrigger>
+                            <SelectTrigger id={`${id}-role`}>
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
@@ -688,8 +693,9 @@ export default function AdminPage() {
           <div className="space-y-4 py-4">
             {operator?.id === passwordTarget?.operator_id && (
               <div className="space-y-2">
-                <label className="text-sm font-medium">Current password</label>
+                <label htmlFor={`${id}-current-password`} className="text-sm font-medium">Current password</label>
                 <Input
+                  id={`${id}-current-password`}
                   type="password"
                   placeholder="enter your current password"
                   value={currentPassword}
@@ -698,8 +704,9 @@ export default function AdminPage() {
               </div>
             )}
             <div className="space-y-2">
-              <label className="text-sm font-medium">New password</label>
+              <label htmlFor={`${id}-new-password`} className="text-sm font-medium">New password</label>
               <Input
+                id={`${id}-new-password`}
                 type="password"
                 placeholder="minimum 8 characters"
                 value={newUserPassword}
