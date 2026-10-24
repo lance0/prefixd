@@ -66,6 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Refreshed events keep pagination within the available pages instead of falsely
   showing an empty list.
 
+- The event detail panel is a modal dialog named "Event details". Opening it
+  moves focus to its close button and keeps Tab inside the panel. Escape closes
+  it and returns focus to the button that opened it. The panel closes when its
+  event leaves the live list. Without a remaining opener, such as after a direct
+  link, focus returns to the events list.
+
 - Routine PostgreSQL NOTICE messages are quiet by default in native, Compose
   and systemd deployments. Warnings, errors and controller INFO remain enabled;
   custom logging filters retain their chosen levels and can restore notice
