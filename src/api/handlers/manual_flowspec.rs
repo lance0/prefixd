@@ -255,12 +255,20 @@ pub(super) async fn validate_manual_flowspec(
     state: &AppState,
     prepared: PreparedManualFlowSpec,
 ) -> Result<Mitigation, AdmissionFailure> {
+    validate_manual_flowspec_on(state, prepared, state.repo.as_ref()).await
+}
+
+async fn validate_manual_flowspec_on(
+    state: &AppState,
+    prepared: PreparedManualFlowSpec,
+    repo: &dyn crate::db::RepositoryTrait,
+) -> Result<Mitigation, AdmissionFailure> {
     use FlowSpecAdmissionCheck::{
         Capability, CreationRate, Guardrails as Safety, Lifetime, Ownership, Safelist,
     };
     let intent = &prepared.intent;
     let owner = find_mitigation_owner(
-        state.repo.as_ref(),
+        repo,
         &state.settings.pop,
         &MitigationRoute::new(
             intent.action_type,
@@ -282,18 +290,15 @@ pub(super) async fn validate_manual_flowspec(
         state.settings.quotas.clone(),
         &state.settings.timers,
     );
-    let is_safelisted = state
-        .repo
+    let is_safelisted = repo
         .is_safelisted(&intent.match_criteria.dst_prefix)
         .await
         .map_err(AdmissionFailure::at(Safelist))?;
     guardrails
-        .validate(intent, state.repo.as_ref(), is_safelisted)
+        .validate(intent, repo, is_safelisted)
         .await
         .map_err(AdmissionFailure::at(Safety))?;
-    state
-        .repo
-        .check_new_mitigation_rate(&intent.pop, state.settings.quotas.max_new_per_minute)
+    repo.check_new_mitigation_rate(&intent.pop, state.settings.quotas.max_new_per_minute)
         .await
         .map_err(AdmissionFailure::at(CreationRate))?;
     let mut mitigation =
@@ -337,14 +342,22 @@ pub async fn preview_manual_flowspec(
         .and_then(|value| value.to_str().ok());
     let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
     let mut candidate = None;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     // Every awaited operation here is read-only, so cancellation can release
     // the lifecycle mutex without an uncertain mutation or COMMIT. Keep any
     // prepared candidate outside the future to retain it when a later read stalls.
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let result = tokio::time::timeout_at(deadline, async {
         let _guard = state.mitigation_lock.lock().await;
         let prepared = prepare_manual_flowspec(&state, req, &operator.username).await?;
         candidate = Some(prepared.candidate());
-        validate_manual_flowspec(&state, prepared).await.map(|_| ())
+        let repo = state
+            .repo
+            .clone()
+            .for_bounded_reads(deadline)
+            .map_err(AdmissionFailure::at(FlowSpecAdmissionCheck::Ownership))?;
+        validate_manual_flowspec_on(&state, prepared, repo.as_ref())
+            .await
+            .map(|_| ())
     })
     .await
     .unwrap_or_else(|_| {

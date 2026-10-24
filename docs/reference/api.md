@@ -584,6 +584,14 @@ candidate if preparation completed. It releases the lifecycle mutex so an
 optional check cannot indefinitely block withdrawal or expiry cleanup. This
 deadline does not apply to creation, persistence or COMMIT.
 
+Preview database reads also have a server-side statement deadline within the
+remaining request budget, leaving time for cleanup. Their connections are
+discarded so cancelled queries and changed session settings cannot retain shared
+pool capacity or affect normal operations. A server deadline returns `503` with
+`outcome: "unavailable"` at the affected `failed_check` (for example `ownership`);
+the outer request deadline uses `failed_check: "timeout"`. Both preserve an
+already prepared candidate and save no intent. A retry reruns all checks.
+
 Authentication failures use `401`/`403`. Like creation, this POST is restricted
 to the active controller: standby returns `503` with the ordinary
 [error body](#error-responses), not an admission preview. Malformed JSON or field

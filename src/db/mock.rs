@@ -114,6 +114,15 @@ impl Default for MockRepository {
 
 #[async_trait]
 impl RepositoryTrait for MockRepository {
+    fn for_bounded_reads(
+        self: std::sync::Arc<Self>,
+        _deadline: tokio::time::Instant,
+    ) -> Result<std::sync::Arc<dyn RepositoryTrait>> {
+        // These synchronous in-memory reads leave no server work or pooled
+        // connection behind when the enclosing preparation future is cancelled.
+        Ok(self)
+    }
+
     async fn register_speaker_target(
         &self,
         pop: &str,

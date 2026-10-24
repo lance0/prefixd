@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::correlation::engine::{SignalGroup, SignalGroupEvent, SignalGroupFilter};
@@ -89,6 +90,21 @@ pub struct MitigationListParams {
 
 #[async_trait]
 pub trait RepositoryTrait: Send + Sync {
+    /// Bound read-only preparation's ownership inventory, pending-withdrawal,
+    /// safelist and FlowSpec quota/rate reads by an absolute deadline. The
+    /// implementation must bound server work and discard cancelled or
+    /// session-modified connections. Other reads and all mutations are outside
+    /// this contract; persistence must use the original repository. Unsupported
+    /// repositories fail closed; explicitly cancellation-safe mocks may reuse self.
+    fn for_bounded_reads(
+        self: Arc<Self>,
+        _deadline: tokio::time::Instant,
+    ) -> Result<Arc<dyn RepositoryTrait>> {
+        Err(crate::error::PrefixdError::Config(
+            "bounded preparation reads are unsupported by this repository".into(),
+        ))
+    }
+
     /// Serialize startup registration/adoption; never rebind an existing POP or target.
     /// Trusted implementations must persist/validate ownership and commit before
     /// issuing a binding. Legacy implementations remain source-compatible but

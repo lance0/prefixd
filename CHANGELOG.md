@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Preview lock acquisition and safety reads have a five-second deadline; timeout
   returns an unavailable result and releases lifecycle serialization without
   saving intent, preserving the prepared candidate when available.
+  Preview database reads additionally use server-side deadlines and discarded
+  connections to release blocked queries and shared pool capacity before retry.
 
 - Manual FlowSpec discard and police rules accept aligned IPv4/IPv6 destination
   CIDRs in `victim_ip` when operators deliberately relax existing prefix bounds.
