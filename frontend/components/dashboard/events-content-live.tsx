@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo, useEffect } from "react"
+import { useState, useMemo, useEffect, useRef } from "react"
 import Link from "next/link"
 import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, Download } from "lucide-react"
 import { Tag } from "@/components/dashboard/status-pill"
@@ -39,6 +39,13 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
 
   const { data: eventsResp, error, isLoading, mutate } = useEvents({ limit: 200 })
   const events = eventsResp?.events
+  const listRef = useRef<HTMLElement>(null)
+  const selectedEvent = selectedId ? events?.find((e) => e.event_id === selectedId) ?? null : null
+
+  // Close rather than hide when the selected event leaves the loaded list, so it cannot reopen later.
+  useEffect(() => {
+    if (events && selectedId && !selectedEvent) setSelectedId(null)
+  }, [events, selectedId, selectedEvent])
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -145,7 +152,7 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
 
   return (
     <div className="space-y-4">
-      <section aria-label="Events" className="overflow-hidden rounded-md border bg-card">
+      <section ref={listRef} tabIndex={-1} aria-label="Events" className="overflow-hidden rounded-md border bg-card">
         <div className="flex items-center gap-2 border-b p-3">
           <div className="relative min-w-0 flex-1">
             <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
@@ -351,10 +358,11 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
       </section>
 
       {/* Detail Panel */}
-      {selectedId && (
+      {selectedEvent && (
         <EventDetailPanel
-          event={events?.find(e => e.event_id === selectedId) || null}
+          event={selectedEvent}
           onClose={() => setSelectedId(null)}
+          fallbackFocusRef={listRef}
         />
       )}
     </div>

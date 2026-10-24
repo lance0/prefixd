@@ -1028,6 +1028,10 @@ customers:
 | `policy_profile` | string | Policy strictness: strict, normal, relaxed |
 | `services` | list | Services within customer |
 
+Every prefix must be an IPv4 or IPv6 CIDR and every asset `ip` a literal address.
+Load and reload reject the whole file on an invalid entry; a failed reload keeps
+the previous inventory.
+
 ### Services
 
 ```yaml

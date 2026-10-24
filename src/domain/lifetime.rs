@@ -158,7 +158,8 @@ pub async fn extend_flowspec_lifetime(
         let context = if destination.prefix_len() == destination.max_prefix_len() {
             inventory.lookup_ip(&expected.victim_ip)
         } else {
-            inventory.lookup_prefix(&destination)
+            // An invalid inventory refuses the extension, never an unowned prefix.
+            inventory.lookup_prefix(&destination)?
         };
         if context.is_none_or(|context| {
             expected.customer_id.as_deref() != Some(context.customer_id.as_str())

@@ -155,6 +155,9 @@ describe("operator lifetime extension", () => {
     expect(screen.getByRole("button", { name: "Confirm lifetime check" })).toBeEnabled()
     fireEvent.change(ttl, { target: { value: "0" } })
     expect(screen.getByRole("button", { name: "Confirm lifetime check" })).toBeDisabled()
+    fireEvent.change(ttl, { target: { value: "" } })
+    expect(ttl).toHaveValue(null)
+    expect(screen.getByRole("button", { name: "Confirm lifetime check" })).toBeDisabled()
   })
 
   it.each([

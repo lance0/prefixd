@@ -6,8 +6,8 @@
 //! sha256 `21a7f5ca199184a0d4cf94414ed8dcfa49c660c1fbb8b4c79e076b9d7685dd62`.
 //! `proto/rustbgpd.proto.sha256` is that release's checksum asset, and
 //! `just proto` checks the file against it offline. To move the pin, download
-//! both assets of the new release, run `shasum -a 256 --check` on them, copy both
-//! here and update this comment.
+//! both assets of the new release, run `sha256sum --check --strict` on them, copy
+//! both here and update this comment.
 //!
 //! The generated stubs follow the pinned release. v0.79.0 is the minimum
 //! daemon, and `RustBgpdAnnouncer::connect` refuses anything older. Fields and
