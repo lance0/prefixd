@@ -15,6 +15,7 @@ use super::{ActionType, Mitigation, MitigationIntent, MitigationRoute, Mitigatio
 pub struct LifetimeExtension {
     pub expected: Mitigation,
     pub ttl_seconds: u32,
+    pub max_lifetime_seconds: Option<u32>,
     pub actor: String,
     pub reason: String,
     pub target_id: Option<Uuid>,
@@ -221,6 +222,7 @@ pub async fn extend_flowspec_lifetime(
         let request = LifetimeExtension {
             expected,
             ttl_seconds,
+            max_lifetime_seconds: state.settings.guardrails.max_lifetime_seconds,
             actor,
             reason,
             target_id: binding.map(super::VerifiedSpeakerBinding::target_id),
@@ -331,6 +333,87 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn total_lifetime_cap_survives_repeated_extensions_and_preserves_noops() {
+        for cap in [None, Some(800)] {
+            let repo = Arc::new(MockRepository::new());
+            let mut m = rule("203.0.113.10/32");
+            m.created_at = Utc::now() - chrono::Duration::seconds(500);
+            let state = state(repo.clone(), Arc::new(MockAnnouncer::new()), |s| {
+                s.guardrails.max_lifetime_seconds = cap;
+            });
+            repo.insert_mitigation(&m).await.unwrap();
+            let first = extend_flowspec_lifetime(
+                &state,
+                m.mitigation_id,
+                200,
+                "alice".into(),
+                "ongoing".into(),
+            )
+            .await
+            .unwrap();
+            assert!(first.extended);
+            let second = extend_flowspec_lifetime(
+                &state,
+                m.mitigation_id,
+                400,
+                "alice".into(),
+                "still ongoing".into(),
+            )
+            .await;
+            if cap.is_some() {
+                assert!(matches!(
+                    second,
+                    Err(PrefixdError::GuardrailViolation(
+                        GuardrailError::LifetimeCapExceeded { max_seconds: 800 }
+                    ))
+                ));
+                assert_eq!(
+                    repo.get_mitigation(m.mitigation_id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .expires_at,
+                    first.mitigation.expires_at
+                );
+                assert_eq!(audits(&repo).await.len(), 1);
+                assert!(
+                    !extend_flowspec_lifetime(
+                        &state,
+                        m.mitigation_id,
+                        30,
+                        "alice".into(),
+                        "already covered".into()
+                    )
+                    .await
+                    .unwrap()
+                    .extended
+                );
+            } else {
+                assert!(second.unwrap().extended);
+            }
+        }
+        // Tightening policy does not shorten a legacy row or turn a no-op into a write.
+        let repo = Arc::new(MockRepository::new());
+        let m = rule("203.0.113.10/32");
+        let state = state(repo.clone(), Arc::new(MockAnnouncer::new()), |s| {
+            s.guardrails.max_lifetime_seconds = Some(60)
+        });
+        repo.insert_mitigation(&m).await.unwrap();
+        let noop = extend_flowspec_lifetime(
+            &state,
+            m.mitigation_id,
+            90,
+            "alice".into(),
+            "already covered".into(),
+        )
+        .await
+        .unwrap();
+        assert!(!noop.extended);
+        assert_eq!(noop.mitigation.updated_at, m.updated_at);
+        assert!(audits(&repo).await.is_empty());
     }
 
     #[tokio::test]

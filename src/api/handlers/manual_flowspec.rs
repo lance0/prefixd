@@ -315,6 +315,11 @@ async fn validate_manual_flowspec_on(
             .validate_remaining_ttl(mitigation.expires_at - mitigation.created_at)
             .map_err(AdmissionFailure::at(Lifetime))?;
     }
+    crate::guardrails::validate_total_lifetime(
+        mitigation.expires_at - mitigation.created_at,
+        state.settings.guardrails.max_lifetime_seconds,
+    )
+    .map_err(AdmissionFailure::at(Lifetime))?;
     super::flowspec_rule_for_admission(state, &mut mitigation)
         .map_err(AdmissionFailure::at(Capability))?;
     Ok(mitigation)
@@ -656,6 +661,32 @@ mod tests {
 
     fn request(target: &str) -> Value {
         json!({"victim_ip": target, "protocol": "udp", "dst_ports": [443], "action": "discard", "ttl_seconds": 300, "reason": "operator preview"})
+    }
+
+    #[tokio::test]
+    async fn total_lifetime_cap_checks_actual_expiry_after_the_creation_cap() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let rejections = crate::observability::metrics::GUARDRAIL_REJECTIONS
+            .with_label_values(&["LifetimeCapExceeded"]);
+        let before_rejections = rejections.get();
+        let mut settings = Fixture::settings();
+        settings.guardrails.max_lifetime_seconds = Some(60);
+        let fixture = Fixture::new(settings, FlowSpecMatchSupport::ALL);
+        let mut body = request("203.0.113.10");
+        for path in ["/v1/mitigations/preview", "/v1/mitigations"] {
+            let (status, result) = fixture.post(path, &body).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{result}");
+        }
+        fixture.assert_no_mutations().await;
+        body["expires_at_cap"] = json!(chrono::Utc::now() + chrono::Duration::seconds(45));
+        assert_eq!(rejections.get() - before_rejections, 1.0);
+        let (status, result) = fixture.post("/v1/mitigations/preview", &body).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        fixture.assert_no_mutations().await;
+        let (status, result) = fixture.post("/v1/mitigations", &body).await;
+        assert_eq!(status, StatusCode::CREATED, "{result}");
     }
 
     #[tokio::test]

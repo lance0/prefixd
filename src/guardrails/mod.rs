@@ -13,6 +13,20 @@ use crate::db::RepositoryTrait;
 use crate::domain::{FlowSpecAction, FlowSpecNlri, MatchCriteria, MitigationIntent};
 use crate::error::{GuardrailError, PrefixdError, Result};
 
+pub(crate) fn validate_total_lifetime(
+    lifetime: chrono::Duration,
+    max_seconds: Option<u32>,
+) -> Result<()> {
+    if let Some(max_seconds) = max_seconds
+        && lifetime > chrono::Duration::seconds(max_seconds.into())
+    {
+        return Err(PrefixdError::GuardrailViolation(
+            GuardrailError::LifetimeCapExceeded { max_seconds },
+        ));
+    }
+    Ok(())
+}
+
 pub struct Guardrails {
     config: GuardrailsConfig,
     quotas: QuotasConfig,
@@ -567,6 +581,7 @@ mod tests {
                 require_ttl: true,
                 min_ttl_seconds: Some(30),
                 max_ttl_seconds: Some(1800),
+                max_lifetime_seconds: None,
                 dst_prefix_minlen: 32,
                 dst_prefix_maxlen: 32,
                 dst_prefix_minlen_v6: None,
@@ -610,12 +625,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn total_lifetime_cap_is_optional_and_has_a_precise_boundary() {
+        use chrono::Duration;
+        assert!(validate_total_lifetime(Duration::seconds(600), Some(600)).is_ok());
+        assert!(matches!(
+            validate_total_lifetime(Duration::seconds(600) + Duration::nanoseconds(1), Some(600)),
+            Err(PrefixdError::GuardrailViolation(
+                GuardrailError::LifetimeCapExceeded { max_seconds: 600 }
+            ))
+        ));
+        assert!(validate_total_lifetime(Duration::days(365), None).is_ok());
+    }
+
     fn relaxed_config() -> (GuardrailsConfig, QuotasConfig) {
         (
             GuardrailsConfig {
                 require_ttl: false,
                 min_ttl_seconds: None,
                 max_ttl_seconds: None,
+                max_lifetime_seconds: None,
                 dst_prefix_minlen: 24,
                 dst_prefix_maxlen: 32,
                 dst_prefix_minlen_v6: Some(64),

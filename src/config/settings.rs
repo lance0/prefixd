@@ -276,6 +276,9 @@ pub struct GuardrailsConfig {
     /// Maximum TTL in seconds (default: from timers.max_ttl_seconds)
     #[serde(default)]
     pub max_ttl_seconds: Option<u32>,
+    /// Optional total ordinary FlowSpec lifetime, measured from original creation.
+    #[serde(default)]
+    pub max_lifetime_seconds: Option<u32>,
     #[serde(default = "default_32")]
     pub dst_prefix_minlen: u8,
     #[serde(default = "default_32")]
@@ -309,6 +312,10 @@ impl GuardrailsConfig {
     /// A rustbgpd `max_ports` above the encoder's per-list cap would save intent
     /// the encoder never announces. GoBGP has no per-list cap.
     pub fn validate_for_backend(&self, backend: BgpMode) -> Result<()> {
+        anyhow::ensure!(
+            self.max_lifetime_seconds != Some(0),
+            "guardrails.max_lifetime_seconds must be nonzero when configured"
+        );
         let cap = crate::bgp::RUSTBGPD_MAX_PORTS_PER_LIST;
         anyhow::ensure!(
             backend != BgpMode::Rustbgpd || self.max_ports <= cap,
@@ -1062,6 +1069,25 @@ observability:
         ] {
             let result = parse(&format!("max_ports: {max_ports}\n")).validate_for_backend(backend);
             assert_eq!(result.is_ok(), accepted, "{backend:?} {max_ports}");
+        }
+    }
+
+    #[test]
+    fn total_lifetime_cap_is_optional_and_refuses_zero() {
+        for (field, accepted) in [
+            ("", true),
+            ("max_lifetime_seconds: 600\n", true),
+            ("max_lifetime_seconds: 0\n", false),
+        ] {
+            let config: GuardrailsConfig =
+                crate::config::parse_yaml(&format!("max_ports: 5\n{field}")).unwrap();
+            assert_eq!(
+                config.validate_for_backend(BgpMode::Rustbgpd).is_ok(),
+                accepted
+            );
+            if field.is_empty() {
+                assert_eq!(config.max_lifetime_seconds, None);
+            }
         }
     }
 

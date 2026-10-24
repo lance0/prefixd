@@ -44,6 +44,16 @@ speaker. The optional initial `expires_at_cap` is a creation-only cap, not a
 permanent extension ceiling. See the [API contract](../reference/api.md#extend-flowspec-lifetime)
 and [upgrade guidance](upgrading.md).
 
+To bound the lifetime of each ordinary FlowSpec row, set the optional nonzero
+`guardrails.max_lifetime_seconds`. New admissions, detector refreshes and operator
+extensions cannot save an expiry later than the row's original `created_at` plus
+that limit. Requests exceeding it are refused, not truncated. Existing expiry is
+never shortened, and an already sufficient horizon remains a no-op. With the
+setting omitted, repeated extensions retain their existing behavior. This is a
+per-rule limit, not a ban on new mitigations for the same destination after expiry;
+blackholes keep their separate policy. Changing the setting requires a controller
+restart. It does not add a speaker-enforced deadline.
+
 ## Operational references
 
 [Wanguard's response policy](https://docs.andrisoft.com/wanguard/latest/Configuration__Network__Policy__Response.html)

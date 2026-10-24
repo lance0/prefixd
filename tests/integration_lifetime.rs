@@ -70,6 +70,7 @@ async fn request(ctx: &common::TestContext) -> LifetimeExtension {
             .unwrap()
             .unwrap(),
         ttl_seconds: 600,
+        max_lifetime_seconds: None,
         actor: "alice".into(),
         reason: "attack continues".into(),
         target_id: None,
@@ -182,6 +183,67 @@ async fn postgres_audit_failure_rolls_back_expiry_and_version() {
     assert_eq!(saved.updated_at, request.expected.updated_at);
     assert_eq!(saved.expires_at, request.expected.expires_at);
     assert_eq!(audit_count(&ctx).await, 0);
+}
+
+#[tokio::test]
+async fn postgres_total_lifetime_cap_uses_the_write_clock_after_row_lock_wait() {
+    let ctx = common::TestContext::new().await;
+    let mut request = request(&ctx).await;
+    request.max_lifetime_seconds = Some(720);
+    sqlx::query("UPDATE mitigations SET created_at = clock_timestamp() - interval '119 seconds' WHERE mitigation_id = $1")
+        .bind(request.expected.mitigation_id).execute(&ctx.pool).await.unwrap();
+    request.expected = ctx
+        .repo
+        .get_mitigation(request.expected.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut held = ctx.pool.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    sqlx::query("SELECT mitigation_id FROM mitigations WHERE mitigation_id = $1 FOR UPDATE")
+        .bind(request.expected.mitigation_id)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let repo = ctx.repo.clone();
+    let cloned = request.clone();
+    let running = tokio::spawn(async move {
+        repo.extend_flowspec_lifetime(&cloned, &ControllerFence::new(true))
+            .await
+    });
+    wait_for_row_wait(&ctx, blocker).await;
+    let last_admissible_write = request.expected.created_at + Duration::seconds(120);
+    sqlx::query("SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM ($1::timestamptz - clock_timestamp()))) + 0.02)")
+        .bind(last_admissible_write).execute(&ctx.pool).await.unwrap();
+    held.commit().await.unwrap();
+    let outcome = running.await.unwrap();
+    assert!(matches!(
+        outcome,
+        Err(PrefixdError::GuardrailViolation(
+            prefixd::error::GuardrailError::LifetimeCapExceeded { max_seconds: 720 }
+        ))
+    ));
+    let saved = ctx
+        .repo
+        .get_mitigation(request.expected.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.expires_at, request.expected.expires_at);
+    assert_eq!(saved.updated_at, request.expected.updated_at);
+    assert_eq!(audit_count(&ctx).await, 0);
+    request.max_lifetime_seconds = None;
+    assert!(
+        ctx.repo
+            .extend_flowspec_lifetime(&request, &ControllerFence::new(true))
+            .await
+            .unwrap()
+            .extended
+    );
+    assert_eq!(audit_count(&ctx).await, 1);
 }
 
 #[tokio::test]

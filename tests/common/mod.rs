@@ -183,6 +183,7 @@ pub fn test_settings() -> Settings {
             require_ttl: true,
             min_ttl_seconds: Some(30),
             max_ttl_seconds: Some(1800),
+            max_lifetime_seconds: None,
             dst_prefix_minlen: 32,
             dst_prefix_maxlen: 32,
             dst_prefix_minlen_v6: None,

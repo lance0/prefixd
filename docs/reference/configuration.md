@@ -238,6 +238,9 @@ guardrails:
   # TTL bounds (optional overrides; if omitted, uses timers.min/max_ttl_seconds)
   min_ttl_seconds: 30
   max_ttl_seconds: 1800
+
+  # Optional total FlowSpec lifetime from original creation; unset means no total cap
+  # max_lifetime_seconds: 7200
   
   # FlowSpec match opt-ins (default false)
   allow_fragment_match: false

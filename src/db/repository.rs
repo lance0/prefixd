@@ -774,6 +774,10 @@ impl RepositoryTrait for Repository {
             let extended = row.is_some();
             let updated = if let Some(row) = row {
                 let updated = Mitigation::from_row(row)?;
+                crate::guardrails::validate_total_lifetime(
+                    updated.expires_at - updated.created_at,
+                    request.max_lifetime_seconds,
+                )?;
                 Self::insert_audit_on(&mut tx, &request.audit(&updated)).await?;
                 updated
             } else {

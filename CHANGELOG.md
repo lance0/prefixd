@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Optional nonzero `guardrails.max_lifetime_seconds` caps each ordinary FlowSpec
+  rule's lifetime from original creation across admission, detector refreshes and
+  operator extensions. Over-cap requests are refused without changing expiry or
+  extension audit; unset preserves existing behavior. Existing rows are never
+  retroactively shortened. Blackhole policy is separate.
+
 - Authenticated `POST /v1/mitigations/preview` and the manual rule form's optional
   **Check admission** action evaluate the same FlowSpec preparation and safety
   policy as creation without saving intent or calling the speaker. Results show

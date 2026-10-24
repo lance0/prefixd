@@ -7,6 +7,15 @@ From v0.21.0, follow [v0.21.0 → 0.22.0](#v0210--0220) first; from v0.20.0,
 
 ## General Principles
 
+`guardrails.max_lifetime_seconds` is optional and defaults to no total cap.
+If configured, its nonzero value bounds ordinary FlowSpec expiry from the saved
+row's original creation across new admissions, detector refreshes and operator
+extensions. Apply it on controller restart. Existing expiry is not shortened;
+over-cap increases are refused and unchanged horizons remain no-ops. Review
+detector TTLs before enabling it. This does not cap blackholes or add a remote
+speaker deadline. An older controller ignores this setting, so downgrading removes
+the protection; drain affected rules or accept that policy change explicitly.
+
 - **Database migrations run automatically** on startup. Legacy speaker state also
   requires the explicit ownership adoption below before the upgraded daemon starts.
 - Review configuration and ownership changes before upgrading; new defaults do

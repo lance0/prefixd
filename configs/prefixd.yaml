@@ -26,6 +26,8 @@ guardrails:
   # dst_prefix_minlen_v6: 128
   # dst_prefix_maxlen_v6: 128
   max_ports: 5
+  # Optional total FlowSpec lifetime from original creation (unset: no total cap).
+  # max_lifetime_seconds: 7200
   # Optional manual source CIDR; detectors and playbooks never derive it.
   allow_src_prefix_match: false
 

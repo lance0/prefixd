@@ -596,6 +596,12 @@ impl RepositoryTrait for MockRepository {
                 PrefixdError::InvalidRequest("lifetime horizon is out of range".into())
             })?;
         let extended = proposed > current.expires_at;
+        if extended {
+            crate::guardrails::validate_total_lifetime(
+                proposed - current.created_at,
+                request.max_lifetime_seconds,
+            )?;
+        }
         request.ensure_fence(fence)?;
         #[cfg(test)]
         if extended

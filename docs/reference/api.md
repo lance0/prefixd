@@ -987,6 +987,15 @@ exposure. Tightening an opt-in can therefore refuse extension of a saved rule,
 even where ordinary reconciliation retains its original admitted match. The
 creation-only `expires_at_cap` is not a permanent ceiling on later extension.
 
+When `guardrails.max_lifetime_seconds` is configured, an extension that would
+increase the horizon beyond original `created_at` plus that limit is refused with
+422 (`LifetimeCapExceeded`). The repository checks the actual saved horizon and
+rolls expiry and audit back together on refusal. The same total cap applies to
+new ordinary FlowSpec admissions and detector refreshes. An unchanged horizon
+remains a no-op even if an older row already exceeds a newly configured limit;
+the controller never shortens existing expiry retroactively. Omitted means no
+total-lifetime cap. Blackhole policy is separate.
+
 | Status | Meaning |
 | --- | --- |
 | 200 | Extension saved, or explicit unchanged horizon |

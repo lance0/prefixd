@@ -99,6 +99,9 @@ pub enum GuardrailError {
     #[error("TTL {ttl}s out of bounds (min={min}, max={max})")]
     TtlOutOfBounds { ttl: u32, min: u32, max: u32 },
 
+    #[error("total FlowSpec lifetime exceeds {max_seconds}s from original creation")]
+    LifetimeCapExceeded { max_seconds: u32 },
+
     #[error("destination prefix /{len} violates length constraint (min=/{min}, max=/{max})")]
     PrefixLengthViolation { len: u8, min: u8, max: u8 },
 

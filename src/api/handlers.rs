@@ -1417,7 +1417,14 @@ async fn handle_ban(
                         event.event_id,
                     )?;
                 } else {
+                    let previous_expires_at = existing.expires_at;
                     existing.extend_ttl(intent.ttl_seconds, event.event_id);
+                    if existing.expires_at > previous_expires_at {
+                        crate::guardrails::validate_total_lifetime(
+                            existing.expires_at - existing.created_at,
+                            state.settings.guardrails.max_lifetime_seconds,
+                        )?;
+                    }
                 }
                 state.repo.update_mitigation(&existing).await?;
                 let _ = state
@@ -1467,6 +1474,10 @@ async fn handle_ban(
 
                 let mut mitigation =
                     Mitigation::from_intent(intent, event.victim_ip.clone(), decision.vector);
+                crate::guardrails::validate_total_lifetime(
+                    mitigation.expires_at - mitigation.created_at,
+                    state.settings.guardrails.max_lifetime_seconds,
+                )?;
                 mitigation.signal_group_id = signal_group_id;
                 let announcement_outcome =
                     persist_new_mitigation(&state, &mut mitigation, &actor).await?;
@@ -1515,6 +1526,14 @@ async fn handle_ban(
                 rules.push(outcome);
             }
             Err(error) => {
+                if matches!(
+                    error,
+                    PrefixdError::GuardrailViolation(GuardrailError::LifetimeCapExceeded { .. })
+                ) {
+                    crate::observability::metrics::GUARDRAIL_REJECTIONS
+                        .with_label_values(&["LifetimeCapExceeded"])
+                        .inc();
+                }
                 let quota_type =
                     if let PrefixdError::GuardrailViolation(GuardrailError::QuotaExceeded {
                         quota_type,
@@ -2030,15 +2049,16 @@ pub async fn create_mitigation(
         Err(failure) => {
             // Preview runs the same checks without updating operational mutation metrics.
             let reason = match failure.check {
-                FlowSpecAdmissionCheck::Guardrails => Some(match &failure.error {
-                    PrefixdError::GuardrailViolation(violation) => format!("{violation:?}")
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    _ => "unknown".into(),
-                }),
-                FlowSpecAdmissionCheck::Lifetime => Some("TtlOutOfBounds".into()),
+                FlowSpecAdmissionCheck::Guardrails | FlowSpecAdmissionCheck::Lifetime => {
+                    Some(match &failure.error {
+                        PrefixdError::GuardrailViolation(violation) => format!("{violation:?}")
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        _ => "unknown".into(),
+                    })
+                }
                 FlowSpecAdmissionCheck::CreationRate
                     if matches!(
                         failure.error,
@@ -4467,6 +4487,58 @@ playbooks:
             assert_eq!(get(&f, *id).await.status, MitigationStatus::Withdrawn);
         }
         assert_eq!(f.speaker.announced_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn detector_refresh_cannot_bypass_the_total_lifetime_cap() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let rejections = crate::observability::metrics::GUARDRAIL_REJECTIONS
+            .with_label_values(&["LifetimeCapExceeded"]);
+        let before_rejections = rejections.get();
+        let too_short = fixture(OperationMode::DryRun, |settings, _| {
+            settings.guardrails.max_lifetime_seconds = Some(60)
+        });
+        assert!(matches!(
+            ban(&too_short, event("cap-creation", "udp_flood", None)).await,
+            Err(PrefixdError::GuardrailViolation(
+                crate::error::GuardrailError::LifetimeCapExceeded { .. }
+            ))
+        ));
+        assert!(rows(&too_short).await.is_empty());
+        let f = fixture(OperationMode::DryRun, |settings, _| {
+            settings.guardrails.max_lifetime_seconds = Some(600)
+        });
+        let first = ban(&f, event("cap-first", "udp_flood", None))
+            .await
+            .unwrap();
+        let id = first.mitigation_ids[0];
+        let mut original = get(&f, id).await;
+        original.created_at = chrono::Utc::now() - chrono::Duration::seconds(500);
+        original.expires_at = chrono::Utc::now() + chrono::Duration::seconds(60);
+        f.repo.update_mitigation(&original).await.unwrap();
+        assert!(matches!(
+            ban(&f, event("cap-repeat", "udp_flood", None)).await,
+            Err(PrefixdError::GuardrailViolation(
+                crate::error::GuardrailError::LifetimeCapExceeded { max_seconds: 600 }
+            ))
+        ));
+        let saved = get(&f, id).await;
+        assert_eq!(saved.expires_at, original.expires_at);
+        assert_eq!(saved.last_event_id, original.last_event_id);
+        assert_eq!(rejections.get() - before_rejections, 2.0);
+        let uncapped = fixture_on(
+            f.repo.clone(),
+            f.speaker.clone(),
+            OperationMode::DryRun,
+            |_, _| {},
+        );
+        let extended = ban(&uncapped, event("cap-disabled", "udp_flood", None))
+            .await
+            .unwrap();
+        assert_eq!(outcomes(&extended), [RuleOutcome::Extended]);
+        assert!(get(&uncapped, id).await.expires_at > original.expires_at);
     }
 
     #[tokio::test]
