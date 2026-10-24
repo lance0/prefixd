@@ -710,14 +710,18 @@ impl RepositoryTrait for Repository {
             let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
                 .fetch_one(&mut *tx).await?;
             request.validate_current(&current, now)?;
-            let safe: bool = sqlx::query_scalar(
-                "SELECT NOT EXISTS (SELECT 1 FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL) AND NOT EXISTS (SELECT 1 FROM safelist WHERE $2::inet && prefix::inet)",
+            let (withdrawing, safelisted): (bool, bool) = sqlx::query_as(
+                "SELECT EXISTS (SELECT 1 FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL), EXISTS (SELECT 1 FROM safelist WHERE $2::inet && prefix::inet)",
             ).bind(current.mitigation_id).bind(&current.match_criteria.dst_prefix)
                 .fetch_one(&mut *tx).await?;
-            if !safe {
+            if withdrawing {
                 return Err(PrefixdError::Conflict(
-                    "mitigation is safelisted or has a pending withdrawal".into(),
+                    "mitigation has a pending withdrawal".into(),
                 ));
+            }
+            // Same 422 refusal as preparation for a safelist that landed meanwhile.
+            if safelisted {
+                return Err(crate::domain::extension_safelisted(&current.match_criteria.dst_prefix));
             }
             request.ensure_fence(fence)?;
             // Decide from the exact sample used for the write. A backward wall-
@@ -750,14 +754,17 @@ impl RepositoryTrait for Repository {
             };
             // Audit insertion may itself await. Refuse and roll back if the
             // original live authorization elapsed or deletion/safety changed.
-            let still_valid: bool = sqlx::query_scalar(
-                "SELECT $1::timestamptz > clock_timestamp() AND NOT EXISTS (SELECT 1 FROM withdrawal_requests WHERE mitigation_id = $2 AND completed_at IS NULL) AND NOT EXISTS (SELECT 1 FROM safelist WHERE $3::inet && prefix::inet)",
+            let (eligible, safelisted): (bool, bool) = sqlx::query_as(
+                "SELECT $1::timestamptz > clock_timestamp() AND NOT EXISTS (SELECT 1 FROM withdrawal_requests WHERE mitigation_id = $2 AND completed_at IS NULL), EXISTS (SELECT 1 FROM safelist WHERE $3::inet && prefix::inet)",
             ).bind(request.expected.expires_at).bind(updated.mitigation_id)
                 .bind(&updated.match_criteria.dst_prefix).fetch_one(&mut *tx).await?;
-            if !still_valid {
+            if !eligible {
                 return Err(PrefixdError::Conflict(
-                    "mitigation expired, was safelisted or began withdrawal during lifetime update".into(),
+                    "mitigation expired or began withdrawal during lifetime update".into(),
                 ));
+            }
+            if safelisted {
+                return Err(crate::domain::extension_safelisted(&updated.match_criteria.dst_prefix));
             }
             request.ensure_fence(fence)?;
             let outcome = LifetimeExtensionOutcome {

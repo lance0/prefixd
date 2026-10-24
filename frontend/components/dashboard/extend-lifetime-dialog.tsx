@@ -25,7 +25,9 @@ export function ExtendLifetimeDialog({ mitigation, now, onUpdated }: {
   const { mutate } = useSWRConfig()
   const { formatTime } = useTimeFormat()
   const [open, setOpen] = useState(false)
-  const [ttl, setTtl] = useState(600)
+  const [ttlInput, setTtlInput] = useState("600")
+  // Keep a cleared field empty; Number("") is 0, which stays invalid.
+  const ttl = Number(ttlInput)
   const [reason, setReason] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -96,7 +98,7 @@ export function ExtendLifetimeDialog({ mitigation, now, onUpdated }: {
     if (busy) return
 
     if (value) {
-      setTtl(Math.min(maximum, Math.max(minimum, Math.ceil((Date.parse(mitigation.expires_at) - Date.now()) / 1000) + 300)))
+      setTtlInput(String(Math.min(maximum, Math.max(minimum, Math.ceil((Date.parse(mitigation.expires_at) - Date.now()) / 1000) + 300))))
       setReason("")
       setError(null)
     }
@@ -114,7 +116,7 @@ export function ExtendLifetimeDialog({ mitigation, now, onUpdated }: {
         {mitigation.action_type === "police" && <p className="text-sm text-muted-foreground">Exact rate: <span className="font-mono text-foreground">{mitigation.rate_bps} bps</span></p>}
         <div className="space-y-2">
           <Label htmlFor="extension-ttl">Remaining lifetime (seconds)</Label>
-          <Input id="extension-ttl" type="number" min={minimum} max={maximum} step={1} value={ttl} disabled={busy} onChange={(event) => setTtl(Number(event.target.value))} aria-describedby="extension-bounds" />
+          <Input id="extension-ttl" type="number" min={minimum} max={maximum} step={1} value={ttlInput} disabled={busy} onChange={(event) => setTtlInput(event.target.value)} aria-describedby="extension-bounds" />
           <p id="extension-bounds" className="text-xs text-muted-foreground">{minimum}–{maximum} seconds from the database update, rather than seconds added to the old expiry.</p>
         </div>
         <dl className="space-y-2 rounded-md border border-border bg-muted/40 p-3 text-sm">

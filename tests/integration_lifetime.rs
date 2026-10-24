@@ -283,7 +283,23 @@ async fn postgres_safelist_and_withdrawal_committed_during_lock_wait_refuse_upda
                 .execute(&mut *held).await.unwrap();
         }
         held.commit().await.unwrap();
-        assert!(running.await.unwrap().is_err());
+        let result = running.await.unwrap();
+        if safelist {
+            // Matches the preparation refusal: 422, not an ownership conflict.
+            assert!(
+                matches!(result, Err(PrefixdError::GuardrailViolation(_))),
+                "{result:?}"
+            );
+            assert_eq!(
+                result.unwrap_err().status_code(),
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY
+            );
+        } else {
+            assert!(
+                matches!(result, Err(PrefixdError::Conflict(_))),
+                "{result:?}"
+            );
+        }
         assert_eq!(audit_count(&ctx).await, 0);
         assert_eq!(
             ctx.repo
@@ -341,6 +357,55 @@ async fn postgres_expiry_during_audit_wait_rolls_back_the_tentative_update() {
         running.await.unwrap(),
         Err(PrefixdError::Conflict(_))
     ));
+    let saved = ctx
+        .repo
+        .get_mitigation(request.expected.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.expires_at, request.expected.expires_at);
+    assert_eq!(saved.updated_at, request.expected.updated_at);
+    assert_eq!(audit_count(&ctx).await, 0);
+}
+
+#[tokio::test]
+async fn postgres_safelist_committed_during_audit_wait_refuses_with_guardrail() {
+    let ctx = common::TestContext::new().await;
+    let request = request(&ctx).await;
+    sqlx::raw_sql("CREATE FUNCTION hold_extension_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action = 'extend' THEN PERFORM pg_advisory_xact_lock(987654321); END IF; RETURN NEW; END $$; CREATE TRIGGER hold_extension_audit BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION hold_extension_audit();")
+        .execute(&ctx.pool).await.unwrap();
+    let mut held = ctx.pool.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(987654321)")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let repo = ctx.repo.clone();
+    let cloned = request.clone();
+    let running = tokio::spawn(async move {
+        repo.extend_flowspec_lifetime(&cloned, &ControllerFence::new(true))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%INSERT INTO audit_log%')")
+                .bind(blocker).fetch_one(&ctx.pool).await.unwrap();
+            if waiting { break; } tokio::task::yield_now().await;
+        }
+    }).await.expect("audit insertion must be demonstrably blocked after the tentative expiry update");
+    ctx.repo
+        .insert_safelist("203.0.113.0/24", "bob", None)
+        .await
+        .unwrap();
+    held.commit().await.unwrap();
+    let result = running.await.unwrap();
+    assert!(
+        matches!(result, Err(PrefixdError::GuardrailViolation(_))),
+        "{result:?}"
+    );
     let saved = ctx
         .repo
         .get_mitigation(request.expected.mitigation_id)
