@@ -15156,6 +15156,27 @@ mod manual_destination_cidr {
     }
 
     #[tokio::test]
+    async fn invalid_inventory_reload_keeps_previous_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("inventory.yaml"),
+            r#"{"customers":[{"customer_id":"typo","name":"Typo","prefixes":["198.51.100.0/33"]}]}"#,
+        )
+        .unwrap();
+        let (mut state, _, _) = state(OperationMode::Enforced, true, owned_inventory());
+        Arc::get_mut(&mut state).unwrap().config_dir = dir.path().into();
+        let error = state.reload_config().await.unwrap_err();
+        assert!(error.to_string().contains("198.51.100.0/33"), "{error}");
+        let inventory = state.inventory.read().await;
+        assert!(
+            inventory
+                .lookup_prefix(&"203.0.112.0/22".parse().unwrap())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn inventory_reload_publishes_between_lifecycle_operations() {
         use std::future::Future;
         use std::task::Poll;
@@ -15177,6 +15198,7 @@ mod manual_destination_cidr {
                 .read()
                 .await
                 .lookup_prefix(&destination)
+                .unwrap()
                 .is_some()
         );
         drop(guard);
@@ -15187,6 +15209,7 @@ mod manual_destination_cidr {
                 .read()
                 .await
                 .lookup_prefix(&destination)
+                .unwrap()
                 .is_none()
         );
     }

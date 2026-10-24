@@ -800,7 +800,15 @@ impl ReconciliationLoop {
                 let ownership_lost = if safelisted {
                     false
                 } else if let Some(state) = &self.state {
-                    let owner = state.inventory.read().await.lookup_prefix(&destination);
+                    // Invalid inventory is not a definite loss of ownership:
+                    // keep the rule and report the repair error.
+                    let owner = match state.inventory.read().await.lookup_prefix(&destination) {
+                        Ok(owner) => owner,
+                        Err(error) => {
+                            repair_error = Some(error);
+                            continue;
+                        }
+                    };
                     owner.is_none_or(|owner| {
                         mitigation.customer_id.as_deref() != Some(owner.customer_id.as_str())
                     })
@@ -2367,6 +2375,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_unrelated_inventory_keeps_destination_prefix() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = action_speaker(0);
+        let affected = destination_prefix_mitigation("203.0.112.0/22");
+        repo.insert_mitigation(&affected).await.unwrap();
+        let rule = crate::domain::mitigation_rule(&affected).unwrap();
+        speaker.inner.announce(&rule).await.unwrap();
+        let state =
+            destination_prefix_state(repo.clone(), speaker.clone(), &["203.0.112.0/22"]).await;
+        state
+            .inventory
+            .write()
+            .await
+            .customers
+            .push(crate::config::Customer {
+                customer_id: "unrelated".into(),
+                name: "Unrelated".into(),
+                prefixes: vec!["198.51.100.0/33".into()],
+                policy_profile: crate::config::PolicyProfile::Normal,
+                services: vec![],
+            });
+        let reconciler =
+            ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false).with_app_state(state);
+        let error = reconciler.sync_announcements().await.unwrap_err();
+        assert!(error.to_string().contains("198.51.100.0/33"), "{error}");
+        assert_eq!(status(&repo, &affected).await, MitigationStatus::Active);
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+        let retained = speaker.inner.list_active().await.unwrap();
+        assert!(retained.iter().any(|r| r.nlri_hash() == rule.nlri_hash()));
     }
 
     #[tokio::test]

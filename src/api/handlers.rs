@@ -2079,12 +2079,15 @@ pub async fn create_mitigation(
 
     let inventory = state.inventory.read().await;
     let context = if is_subnet {
-        let Some(context) = inventory.lookup_prefix(&destination) else {
-            return Ok(AppError(PrefixdError::InvalidRequest(
-                "destination CIDR must fit within one inventory customer prefix without conflicting ownership".into(),
-            )).into_response());
-        };
-        Some(context)
+        match inventory.lookup_prefix(&destination) {
+            Ok(Some(context)) => Some(context),
+            Ok(None) => {
+                return Ok(AppError(PrefixdError::InvalidRequest(
+                    "destination CIDR must fit within one inventory customer prefix without conflicting ownership".into(),
+                )).into_response());
+            }
+            Err(error) => return Ok(AppError(error).into_response()),
+        }
     } else {
         inventory.lookup_ip(&target)
     };
