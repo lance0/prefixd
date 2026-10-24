@@ -572,22 +572,26 @@ metrics and rate limiting still apply.
 
 `failed_check` identifies `input`, `target`, `ownership`, `safelist`,
 `guardrails`, `creation_rate`, `capability`, `lifetime` or `timeout`; `reason`
-gives safe detail. Invalid match capabilities currently return `400`, as creation does.
+gives safe detail. A safelisted target is a guardrail refusal (`422`,
+`failed_check: "guardrails"`); `safelist` appears only when the safelist read
+itself fails (`503`, `unavailable`). Invalid match capabilities currently return `400`, as creation does.
 The candidate remains present after successful preparation even when a later
 check refuses it or becomes unavailable. It is null when preparation fails.
 Never interpret a safety-read error as an empty inventory or a passed check.
 
-The read-only preview has a five-second deadline covering lifecycle-lock
-acquisition, inventory preparation and all safety reads. A timeout returns
-`503`, `outcome: "unavailable"` and `failed_check: "timeout"`, retaining the
-candidate if preparation completed. It releases the lifecycle mutex so an
-optional check cannot indefinitely block withdrawal or expiry cleanup. This
-deadline does not apply to creation, persistence or COMMIT.
+The preview is a read-only snapshot and does not take the lifecycle mutex, so
+it never delays detector ingest, expiry or withdrawal. Its reads can straddle a
+concurrent change; creation rechecks everything under lifecycle serialization.
+A five-second deadline covers inventory preparation and all safety reads. A
+timeout returns `503`, `outcome: "unavailable"` and `failed_check: "timeout"`,
+retaining the candidate if preparation completed. This deadline does not apply
+to creation, persistence or COMMIT.
 
-Preview database reads also have a server-side statement deadline within the
-remaining request budget, leaving time for cleanup. Their connections are
-discarded so cancelled queries and changed session settings cannot retain shared
-pool capacity or affect normal operations. A server deadline returns `503` with
+Each preview database read runs in its own read-only transaction with a
+transaction-local statement deadline within the remaining request budget,
+leaving time for cleanup. The setting ends with the transaction and the
+connection returns to the pool, so cancelled queries and changed session
+settings cannot retain shared pool capacity or affect normal operations. A server deadline returns `503` with
 `outcome: "unavailable"` at the affected `failed_check` (for example `ownership`);
 the outer request deadline uses `failed_check: "timeout"`. Both preserve an
 already prepared candidate and save no intent. A retry reruns all checks.

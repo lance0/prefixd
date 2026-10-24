@@ -47,7 +47,7 @@ pub enum FlowSpecAdmissionCheck {
     CreationRate,
     Capability,
     Lifetime,
-    /// The read-only deadline includes lifecycle-lock acquisition and safety reads.
+    /// The read-only deadline covers inventory preparation and safety reads.
     Timeout,
 }
 
@@ -122,7 +122,7 @@ impl PreparedManualFlowSpec {
     }
 }
 
-/// Caller holds the lifecycle mutex. This function performs no state mutation.
+/// Creation calls this under the lifecycle mutex; preview does not. It mutates nothing.
 pub(super) async fn prepare_manual_flowspec(
     state: &AppState,
     req: CreateMitigationRequest,
@@ -327,8 +327,8 @@ async fn validate_manual_flowspec_on(
         (status = 401, description = "Authentication required"),
         (status = 403, description = "Operator role required"),
         (status = 409, description = "Conflicting target or owner", body = FlowSpecAdmissionPreview),
-        (status = 422, description = "Guardrail refusal uses the preview response; malformed JSON shape uses the framework rejection body"),
-        (status = 503, description = "Safety-read failures or the five-second read-only deadline use the preview response; standby middleware returns the standard error response")
+        (status = 422, description = "Guardrail refusal uses the preview response; malformed JSON shape uses the framework rejection body", body = FlowSpecAdmissionPreview),
+        (status = 503, description = "Safety-read failures or the five-second read-only deadline use the preview response; standby middleware returns the standard error response", body = FlowSpecAdmissionPreview)
     )
 )]
 pub async fn preview_manual_flowspec(
@@ -343,11 +343,13 @@ pub async fn preview_manual_flowspec(
     let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
     let mut candidate = None;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    // Every awaited operation here is read-only, so cancellation can release
-    // the lifecycle mutex without an uncertain mutation or COMMIT. Keep any
-    // prepared candidate outside the future to retain it when a later read stalls.
+    // A read-only snapshot needs no lifecycle mutex: it mutates nothing, and
+    // creation rechecks everything under the mutex. Not taking it keeps preview
+    // from delaying detector ingest, expiry or withdrawal. Every awaited
+    // operation is read-only, so cancellation leaves no uncertain mutation.
+    // Keep any prepared candidate outside the future to retain it when a later
+    // read stalls.
     let result = tokio::time::timeout_at(deadline, async {
-        let _guard = state.mitigation_lock.lock().await;
         let prepared = prepare_manual_flowspec(&state, req, &operator.username).await?;
         candidate = Some(prepared.candidate());
         let repo = state
@@ -496,6 +498,8 @@ mod tests {
         state: Arc<AppState>,
         repo: Arc<MockRepository>,
         speaker: Arc<NoRpcSpeaker>,
+        seeded_safelist: AtomicUsize,
+        seeded_operators: AtomicUsize,
     }
 
     impl Fixture {
@@ -538,6 +542,8 @@ mod tests {
                 state,
                 repo,
                 speaker,
+                seeded_safelist: AtomicUsize::new(0),
+                seeded_operators: AtomicUsize::new(0),
             }
         }
         async fn post(&self, path: &str, body: &Value) -> (StatusCode, Value) {
@@ -547,11 +553,11 @@ mod tests {
             &self,
             path: &str,
             body: &Value,
-            token: Option<&str>,
+            auth: Option<(&str, &str)>,
         ) -> (StatusCode, Value) {
             let mut request = Request::post(path).header("content-type", "application/json");
-            if let Some(token) = token {
-                request = request.header("authorization", format!("Bearer {token}"));
+            if let Some((name, value)) = auth {
+                request = request.header(name, value);
             }
             let response = crate::api::create_test_router(self.state.clone())
                 .oneshot(request.body(Body::from(body.to_string())).unwrap())
@@ -567,31 +573,49 @@ mod tests {
                     .unwrap_or_else(|_| json!({"raw": String::from_utf8_lossy(&bytes)})),
             )
         }
+        async fn seed_safelist(&self, source: &str) {
+            self.repo
+                .insert_safelist("203.0.113.10/32", source, None)
+                .await
+                .unwrap();
+            self.seeded_safelist.fetch_add(1, SeqCst);
+        }
         async fn assert_no_mutations(&self) {
-            assert!(
-                self.repo
-                    .list_mitigations(None, None, None, None, &MitigationListParams::default())
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
-            assert!(
-                self.repo
-                    .list_audit(&ListParams::default())
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
-            assert!(
-                self.repo
-                    .list_events(&ListParams::default())
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
+            let mitigations = self
+                .repo
+                .list_mitigations(
+                    None,
+                    None,
+                    None,
+                    None,
+                    &MitigationListParams {
+                        limit: u32::MAX,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(mitigations.is_empty(), "mitigations: {}", mitigations.len());
+            assert!(self.repo.list_audit(&all()).await.unwrap().is_empty());
+            assert!(self.repo.list_events(&all()).await.unwrap().is_empty());
             assert!(
                 self.repo
                     .pending_withdrawals(None)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                self.repo.list_safelist().await.unwrap().len(),
+                self.seeded_safelist.load(SeqCst)
+            );
+            assert_eq!(
+                self.repo.list_operators().await.unwrap().len(),
+                self.seeded_operators.load(SeqCst)
+            );
+            assert!(
+                self.repo
+                    .list_signal_groups(&Default::default(), &all())
                     .await
                     .unwrap()
                     .is_empty()
@@ -600,28 +624,60 @@ mod tests {
         }
     }
 
+    /// Mock listings `take(limit)`; the default limit of zero would list nothing.
+    fn all() -> ListParams {
+        ListParams {
+            limit: u32::MAX,
+            ..Default::default()
+        }
+    }
+
+    /// Negative control: the helper must detect a real creation's writes.
+    #[tokio::test]
+    #[should_panic(expected = "mitigations: 1")]
+    async fn no_mutation_check_detects_real_creation() {
+        let fixture = Fixture::new(Fixture::settings(), FlowSpecMatchSupport::ALL);
+        let (status, created) = fixture
+            .post("/v1/mitigations", &request("203.0.113.10"))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        fixture.assert_no_mutations().await;
+    }
+
     fn request(target: &str) -> Value {
         json!({"victim_ip": target, "protocol": "udp", "dst_ports": [443], "action": "discard", "ttl_seconds": 300, "reason": "operator preview"})
     }
 
     #[tokio::test]
-    async fn preview_deadline_includes_lifecycle_lock_acquisition() {
+    async fn preview_skips_the_lifecycle_mutex_and_bounds_preparation() {
         let fixture = Fixture::new(Fixture::settings(), FlowSpecMatchSupport::ALL);
+        // A held lifecycle mutex (ingest, expiry, withdrawal) does not delay preview.
         let held = fixture.state.mitigation_lock.lock().await;
+        let (status, result) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            fixture.post("/v1/mitigations/preview", &request("203.0.113.10")),
+        )
+        .await
+        .expect("preview must not wait for the lifecycle mutex");
+        assert_eq!(status, StatusCode::OK, "{result}");
+        drop(held);
+        fixture.assert_no_mutations().await;
+
+        // A stalled preparation still ends at the five-second deadline.
+        let inventory = fixture.state.inventory.write().await;
         let (status, result) = tokio::time::timeout(
             std::time::Duration::from_secs(7),
             fixture.post("/v1/mitigations/preview", &request("203.0.113.10")),
         )
         .await
-        .expect("preview must time out while the lifecycle mutex remains held");
+        .expect("preview must time out while inventory preparation is blocked");
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(result["outcome"], "unavailable");
         assert_eq!(result["failed_check"], "timeout");
         assert!(result["candidate"].is_null());
         assert!(result["reason"].as_str().unwrap().contains("timed out"));
         fixture.assert_no_mutations().await;
-        drop(held);
-        assert!(fixture.state.mitigation_lock.try_lock().is_ok());
+        drop(inventory);
         let (status, _) = fixture
             .post("/v1/mitigations/preview", &request("203.0.113.10"))
             .await;
@@ -754,11 +810,7 @@ mod tests {
             }
             let fixture = Fixture::new(settings, support);
             if kind == "safelist" {
-                fixture
-                    .repo
-                    .insert_safelist("203.0.113.10/32", "config", None)
-                    .await
-                    .unwrap();
+                fixture.seed_safelist("config").await;
             }
             let (status, preview) = fixture.post("/v1/mitigations/preview", &body).await;
             assert_eq!(status, expected_status, "{kind}: {preview}");
@@ -814,11 +866,7 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             fixture.assert_no_mutations().await;
             if change == "safelist" {
-                fixture
-                    .repo
-                    .insert_safelist("203.0.113.10/32", "operator", None)
-                    .await
-                    .unwrap();
+                fixture.seed_safelist("operator").await;
             } else {
                 let target = if change == "owner" {
                     "203.0.112.0/22"
@@ -850,14 +898,7 @@ mod tests {
                 }
             );
             assert_eq!(fixture.speaker.calls.load(SeqCst), 0);
-            assert!(
-                fixture
-                    .repo
-                    .list_audit(&ListParams::default())
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
+            assert!(fixture.repo.list_audit(&all()).await.unwrap().is_empty());
         }
     }
 
@@ -940,14 +981,7 @@ mod tests {
             fixture.repo.pending_withdrawals(None).await.unwrap().len(),
             1
         );
-        assert!(
-            fixture
-                .repo
-                .list_audit(&ListParams::default())
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(fixture.repo.list_audit(&all()).await.unwrap().is_empty());
         assert_eq!(fixture.speaker.calls.load(SeqCst), 0);
     }
 
@@ -991,6 +1025,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn viewer_sessions_cannot_preview() {
+        use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+        let mut settings = Fixture::settings();
+        settings.http.auth.mode = AuthMode::Credentials;
+        let fixture = Fixture::new(settings, FlowSpecMatchSupport::ALL);
+        let hash = Argon2::default()
+            .hash_password(
+                b"preview-viewer-password",
+                &SaltString::encode_b64(b"preview-viewer").unwrap(),
+            )
+            .unwrap()
+            .to_string();
+        fixture
+            .repo
+            .create_operator("preview-viewer", &hash, OperatorRole::Viewer, None)
+            .await
+            .unwrap();
+        fixture.seeded_operators.fetch_add(1, SeqCst);
+        let app = crate::api::create_test_router(fixture.state.clone());
+        let login = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"username": "preview-viewer", "password": "preview-viewer-password"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let cookie = login.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        // The session store belongs to this router, so reuse it.
+        let response = app
+            .oneshot(
+                Request::post("/v1/mitigations/preview")
+                    .header("content-type", "application/json")
+                    .header("cookie", cookie)
+                    .body(Body::from(request("203.0.112.0/22").to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("outcome"));
+        fixture.assert_no_mutations().await;
+    }
+
+    #[tokio::test]
     async fn preview_requires_authentication_and_does_not_update_operational_metrics() {
         let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
             .lock()
@@ -1010,7 +1104,7 @@ mod tests {
             .post_with_auth(
                 "/v1/mitigations/preview",
                 &request("203.0.112.0/22"),
-                Some("preview-test-token"),
+                Some(("authorization", "Bearer preview-test-token")),
             )
             .await;
         assert_eq!(status, StatusCode::OK);
@@ -1028,11 +1122,7 @@ mod tests {
             .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(preview["mode"], "enforced");
-        fixture
-            .repo
-            .insert_safelist("203.0.113.10/32", "config", None)
-            .await
-            .unwrap();
+        fixture.seed_safelist("config").await;
         let (status, _) = fixture
             .post("/v1/mitigations/preview", &request("203.0.112.0/22"))
             .await;
@@ -1106,5 +1196,60 @@ mod tests {
             }
             fixture.assert_no_mutations().await;
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_refused_creation_logs_the_admission_rejection_once() {
+        let mut settings = Fixture::settings();
+        settings.quotas.max_new_per_minute = 0;
+        let fixture = Fixture::new(settings, FlowSpecMatchSupport::ALL);
+        let capture = LogCapture::default();
+        let writer = capture.clone();
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .json()
+                .without_time()
+                .with_writer(move || writer.clone())
+                .finish(),
+        );
+        let (status, _) = fixture
+            .post("/v1/mitigations/preview", &request("203.0.112.0/22"))
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            !String::from_utf8_lossy(&capture.0.lock().unwrap()).contains("admission rejected"),
+            "preview must not log a mutation refusal"
+        );
+        let (status, _) = fixture
+            .post("/v1/mitigations", &request("203.0.112.0/22"))
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        let events: Vec<Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|event: &Value| {
+                event["fields"]["message"] == "admission rejected new mitigation"
+            })
+            .collect();
+        assert_eq!(events.len(), 1, "{output}");
+        assert_eq!(events[0]["level"], "WARN");
+        assert_eq!(events[0]["fields"]["pop"], fixture.state.settings.pop);
+        assert_eq!(events[0]["fields"]["reason"], "NewMitigationRateExceeded");
+        assert!(events[0]["fields"]["error"].is_string());
+        fixture.assert_no_mutations().await;
     }
 }
