@@ -75,7 +75,7 @@ reqwest = { version = "0.13", features = ["json"] }
 urlencoding = "2"
 
 # OpenAPI
-utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
+utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
 rand = "0.10.1"
 
 [target.'cfg(unix)'.dependencies]
