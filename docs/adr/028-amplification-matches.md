@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted 2026-10-19, with the owner decisions recorded below. Slices 1 to 6
+Accepted 2026-10-19, with the decisions recorded below. Slices 1 to 6
 are implemented: the match model and identity, speaker encoding and
 capability, guardrails, the vector and multi-rule policy, detector adapters,
 and operator surfaces (manual API fields, dashboard, playbook editors and CLI).
@@ -730,7 +730,7 @@ their platform. Downgrades past slice 1 need a documented drain.
 
 ## Decisions recorded
 
-The owner decided the following on 2026-10-19:
+Decisions recorded on 2026-10-19:
 
 1. **Fragment action.** Shipped examples police the non-first-fragment rule;
    they do not discard it. Discard remains available when an operator writes it

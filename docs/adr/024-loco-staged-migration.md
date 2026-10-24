@@ -35,7 +35,7 @@ A 2026-09-28 evaluation found the following, which shapes *how* the migration is
 - Both 1.1.0 and 1.2.0 shipped breaking changes; there is no published stability policy.
 - The orthodox full migration was estimated at **100-170 person-days**, dominated by the repository → SeaORM rewrite, the handler → controller rewrite and the test-harness rewrite.
 
-The owner's decision is to migrate to loco as the eventual framework and to accept the MSRV bump. This ADR records that decision, the costs accepted with it, and the staged path that avoids a big-bang rewrite while the rustbgpd speaker swap (ADR 023) is in flight.
+The decision is to migrate to loco as the eventual framework and to accept the MSRV bump. This ADR records that decision, the costs accepted with it, and the staged path that avoids a big-bang rewrite while the rustbgpd speaker swap (ADR 023) is in flight.
 
 ## Decision
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted 2026-10-19, with the owner decisions recorded below. Nothing in this
+Accepted 2026-10-19, with the decisions recorded below. Nothing in this
 ADR is implemented yet. Extends
 [ADR 004](004-destination-prefix-32-only.md),
 [ADR 012](012-playbook-policy-engine.md) and
@@ -15,7 +15,7 @@ failed leased add never falls back to an unleased one, the owner is persisted
 per route, and the leased and unleased transition is decided below. A
 PostgreSQL advisory lock fences duplicate controllers.
 
-Amended 2026-10-19 (evening): the owner decided that enforced detector
+Amended 2026-10-19 (evening): enforced detector
 blackholes ship before the rustbgpd injection lease, as an explicit opt-in.
 In enforced mode, a playbook blackhole step without `blackhole_lease` is
 allowed only when `blackhole.enabled` is true and `blackhole.detector_sources`
@@ -55,7 +55,7 @@ ships requirements (a), (b) and (c), and prefixd now requires 0.79.0. Deletes
 set `allow_missing` and treat `NOT_PRESENT` as absent; `NOT_FOUND` is an
 error. Each accepted add logs `CREATED`, `REPLACED` or `UNCHANGED`, and records
 it in an `announce` audit entry unless it is `UNCHANGED`, so a retried leased
-re-add cannot flood the audit log. By the owner's decision, `UNSPECIFIED` (and a leased
+re-add cannot flood the audit log. `UNSPECIFIED` (and a leased
 reply without `result`) is accepted with outcome `unknown` and a warning,
 rather than the error requirement (a) asked for. A `replaced` outcome on an
 unleased admission is logged as an error. prefixd keeps refusing
@@ -592,7 +592,7 @@ enabled. The owner name is derived as above in every deployment.
 
 ### Amendment: leased FlowSpec
 
-Amended 2026-10-20 by the owner's decision to exercise the lease for FlowSpec
+Amended 2026-10-20 to exercise the lease for FlowSpec
 as well, so FlowSpec rules expire when prefixd stops and the speaker keeps
 running. It replaces the "later decision" in
 the FlowSpec bullet of [Owner and lease](#owner-and-lease) and the
@@ -873,7 +873,7 @@ before it. An unleased manual blackhole can outlive a stopped controller.
 
 ## Decisions recorded
 
-The owner decided the following on 2026-10-19:
+Decisions recorded on 2026-10-19:
 
 1. **Detector-driven enforced blackholes ship before the injection lease,
    as an opt-in** (amended the evening of 2026-10-19; first decided as a hard

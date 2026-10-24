@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted 2026-10-24, with the owner decisions recorded below. Proposed
+Accepted 2026-10-24, with the decisions recorded below. Proposed
 2026-10-20. Design only; upstream profiles and the API fields described below
 are not implemented. Extends [ADR 027](027-blackhole-mitigations.md).
 The existing unleased local blackhole opt-in remains as documented there.
@@ -283,9 +283,9 @@ controls. Add a bounded packet test through FRR to distinguish control-plane
 discard from forwarding, including an unaffected destination and recovery
 after withdrawal. No FRR result claims commercial-provider acceptance.
 
-## Owner decisions — 2026-10-24
+## Decisions recorded — 2026-10-24
 
-The owner accepted these choices after review of the operator tradeoffs:
+These decisions follow review of the operational tradeoffs:
 
 1. **Profile defaults.** Use two active victims, a 600-second maximum TTL and
    ten new admissions per minute as conservative defaults. Provider limits
