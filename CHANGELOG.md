@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- Check `guardrails.dst_prefix_minlen` and `dst_prefix_minlen_v6` before
+  upgrading. Earlier releases ignored values below 32 and 128; this release
+  admits manual destination CIDRs down to those lengths. Set them to 32 and 128
+  first if you do not want CIDRs. See
+  [manual destination CIDRs and downgrade](docs/how-to/upgrading.md#manual-destination-cidrs-and-downgrade).
+
+- Inventory load and reload now reject an unparseable customer prefix or asset
+  IP. A failed reload keeps the previous inventory; fix the reported entry and
+  reload again.
+
 ### Added
 
 - Manual FlowSpec discard and police rules accept aligned IPv4/IPv6 destination

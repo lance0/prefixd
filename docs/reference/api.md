@@ -644,7 +644,10 @@ capability, TTL, quota, dry-run and authorization checks still apply. Quotas
 count rules, not addresses; a policing rate applies to the matching flow across
 the destination, not an independent allowance for each address. The dashboard
 shows the complete match and requested expiry before creation. Local acceptance
-or read-back does not prove router enforcement.
+or read-back does not prove router enforcement. Routers order FlowSpec rules by
+[RFC 8955](https://www.rfc-editor.org/rfc/rfc8955#section-5.1) precedence: when
+a CIDR rule and a more-specific host rule both match a packet, the host rule's
+action applies.
 
 Mitigation filtering uses the exact canonical `victim_ip`; a CIDR does not
 match its hosts or other overlapping prefixes. The dashboard links CIDR targets
