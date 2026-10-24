@@ -47,6 +47,8 @@ pub enum FlowSpecAdmissionCheck {
     CreationRate,
     Capability,
     Lifetime,
+    /// The read-only deadline includes lifecycle-lock acquisition and safety reads.
+    Timeout,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -321,7 +323,7 @@ pub(super) async fn validate_manual_flowspec(
         (status = 403, description = "Operator role required"),
         (status = 409, description = "Conflicting target or owner", body = FlowSpecAdmissionPreview),
         (status = 422, description = "Guardrail refusal uses the preview response; malformed JSON shape uses the framework rejection body"),
-        (status = 503, description = "Safety-read failures use the preview response; standby middleware returns the standard error response")
+        (status = 503, description = "Safety-read failures or the five-second read-only deadline use the preview response; standby middleware returns the standard error response")
     )
 )]
 pub async fn preview_manual_flowspec(
@@ -334,18 +336,23 @@ pub async fn preview_manual_flowspec(
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
     let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
-    let _guard = state.mitigation_lock.lock().await;
-    let prepared = prepare_manual_flowspec(&state, req, &operator.username).await;
-    let (candidate, result) = match prepared {
-        Ok(prepared) => {
-            let candidate = prepared.candidate();
-            (
-                Some(candidate),
-                validate_manual_flowspec(&state, prepared).await.map(|_| ()),
-            )
-        }
-        Err(error) => (None, Err(error)),
-    };
+    let mut candidate = None;
+    // Every awaited operation here is read-only, so cancellation can release
+    // the lifecycle mutex without an uncertain mutation or COMMIT. Keep any
+    // prepared candidate outside the future to retain it when a later read stalls.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let _guard = state.mitigation_lock.lock().await;
+        let prepared = prepare_manual_flowspec(&state, req, &operator.username).await?;
+        candidate = Some(prepared.candidate());
+        validate_manual_flowspec(&state, prepared).await.map(|_| ())
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(AdmissionFailure {
+            check: FlowSpecAdmissionCheck::Timeout,
+            error: PrefixdError::Internal("admission preview timed out".into()),
+        })
+    });
     let (status, outcome, failed_check, reason) = match result {
         Ok(()) => (
             StatusCode::OK,
@@ -363,10 +370,11 @@ pub async fn preview_manual_flowspec(
             StatusCode::SERVICE_UNAVAILABLE,
             FlowSpecAdmissionOutcome::Unavailable,
             Some(failure.check),
-            Some(
+            Some(if matches!(failure.check, FlowSpecAdmissionCheck::Timeout) {
+                "Admission check timed out after five seconds. No intent was saved; retry the check."
+            } else {
                 "Admission safety checks are unavailable. No intent was saved; retry the check."
-                    .into(),
-            ),
+            }.into()),
         ),
     };
     Ok((
@@ -581,6 +589,31 @@ mod tests {
 
     fn request(target: &str) -> Value {
         json!({"victim_ip": target, "protocol": "udp", "dst_ports": [443], "action": "discard", "ttl_seconds": 300, "reason": "operator preview"})
+    }
+
+    #[tokio::test]
+    async fn preview_deadline_includes_lifecycle_lock_acquisition() {
+        let fixture = Fixture::new(Fixture::settings(), FlowSpecMatchSupport::ALL);
+        let held = fixture.state.mitigation_lock.lock().await;
+        let (status, result) = tokio::time::timeout(
+            std::time::Duration::from_secs(7),
+            fixture.post("/v1/mitigations/preview", &request("203.0.113.10")),
+        )
+        .await
+        .expect("preview must time out while the lifecycle mutex remains held");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(result["outcome"], "unavailable");
+        assert_eq!(result["failed_check"], "timeout");
+        assert!(result["candidate"].is_null());
+        assert!(result["reason"].as_str().unwrap().contains("timed out"));
+        fixture.assert_no_mutations().await;
+        drop(held);
+        assert!(fixture.state.mitigation_lock.try_lock().is_ok());
+        let (status, _) = fixture
+            .post("/v1/mitigations/preview", &request("203.0.113.10"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        fixture.assert_no_mutations().await;
     }
 
     #[tokio::test]

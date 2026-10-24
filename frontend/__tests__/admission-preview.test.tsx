@@ -84,6 +84,22 @@ describe("admission response boundary", () => {
 
     await expect(previewFlowSpecAdmission(request)).rejects.toThrow("Admission check unavailable")
   })
+
+  it("accepts a timed-out check with or without an already prepared candidate", async () => {
+    for (const candidate of [null, result.candidate]) {
+      controller.route("POST", "/v1/mitigations/preview", () => json({
+        ...result, outcome: "unavailable", candidate, failed_check: "timeout",
+        reason: "Admission check timed out after five seconds. No intent was saved; retry the check.",
+      }, 503))
+      await expect(previewFlowSpecAdmission(request)).resolves.toMatchObject({
+        outcome: "unavailable", candidate, failed_check: "timeout",
+      })
+    }
+
+    expect(parseFlowSpecAdmissionPreview({
+      ...result, outcome: "refused", failed_check: "timeout", reason: "Admission check timed out",
+    }, 422)).toBeNull()
+  })
 })
 
 describe("optional controller admission check", () => {

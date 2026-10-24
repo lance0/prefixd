@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time, distinguish refusal from unavailable reads, and clear on edits. Capacity
   is not reserved; creation rechecks. Speaker-side state and router enforcement
   remain unobserved. Blackhole preview is unavailable.
+  Preview lock acquisition and safety reads have a five-second deadline; timeout
+  returns an unavailable result and releases lifecycle serialization without
+  saving intent, preserving the prepared candidate when available.
 
 - Manual FlowSpec discard and police rules accept aligned IPv4/IPv6 destination
   CIDRs in `victim_ip` when operators deliberately relax existing prefix bounds.

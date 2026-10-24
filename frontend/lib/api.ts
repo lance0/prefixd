@@ -457,7 +457,7 @@ export interface FlowSpecAdmissionPreview {
     ttl_seconds: number
     expires_at_cap: string | null
   } | null
-  failed_check: "input" | "target" | "ownership" | "safelist" | "guardrails" | "creation_rate" | "capability" | "lifetime" | null
+  failed_check: "input" | "target" | "ownership" | "safelist" | "guardrails" | "creation_rate" | "capability" | "lifetime" | "timeout" | null
   reason: string | null
 }
 
@@ -548,7 +548,9 @@ export function parseFlowSpecAdmissionPreview(value: JsonValue, status: number):
   const failedCheck = value.failed_check
 
   if (!(failedCheck === null || failedCheck === "input" || failedCheck === "target" || failedCheck === "ownership" ||
-    failedCheck === "safelist" || failedCheck === "guardrails" || failedCheck === "creation_rate" || failedCheck === "capability" || failedCheck === "lifetime")) return null
+    failedCheck === "safelist" || failedCheck === "guardrails" || failedCheck === "creation_rate" || failedCheck === "capability" || failedCheck === "lifetime" || failedCheck === "timeout")) return null
+
+  if (failedCheck === "timeout" && outcome !== "unavailable") return null
 
   const candidate = admissionCandidate(value.candidate)
 

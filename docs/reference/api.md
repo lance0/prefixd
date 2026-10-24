@@ -571,11 +571,18 @@ metrics and rate limiting still apply.
 | 503 | `unavailable` | A required safety read could not complete; diagnostics are sanitized |
 
 `failed_check` identifies `input`, `target`, `ownership`, `safelist`,
-`guardrails`, `creation_rate`, `capability` or `lifetime`; `reason` gives safe
-detail. Invalid match capabilities currently return `400`, as creation does.
+`guardrails`, `creation_rate`, `capability`, `lifetime` or `timeout`; `reason`
+gives safe detail. Invalid match capabilities currently return `400`, as creation does.
 The candidate remains present after successful preparation even when a later
 check refuses it or becomes unavailable. It is null when preparation fails.
 Never interpret a safety-read error as an empty inventory or a passed check.
+
+The read-only preview has a five-second deadline covering lifecycle-lock
+acquisition, inventory preparation and all safety reads. A timeout returns
+`503`, `outcome: "unavailable"` and `failed_check: "timeout"`, retaining the
+candidate if preparation completed. It releases the lifecycle mutex so an
+optional check cannot indefinitely block withdrawal or expiry cleanup. This
+deadline does not apply to creation, persistence or COMMIT.
 
 Authentication failures use `401`/`403`. Like creation, this POST is restricted
 to the active controller: standby returns `503` with the ordinary
