@@ -2771,9 +2771,10 @@ run without the rustbgpd injection lease, matching health detail's
 [availability alerts](../how-to/grafana.md#availability-alerts) use these
 gauges.
 
-`prefixd_blackhole_replaced_total{pop}` counts unleased blackhole admission
-adds that returned `replaced`: an untracked local route appeared between the
-pre-read and add. It has only the configured POP label, and that series is
+`prefixd_blackhole_replaced_total{pop}` counts unleased blackhole adds from
+admissions and reconciliation repairs that returned `replaced`: the add
+overwrote a different local route at the prefix. At admission, that route
+appeared between the pre-read and add. It has only the configured POP label, and that series is
 exported at `0` from startup. Created, unchanged, leased and failed adds
 do not increment it. The counter records local RPC outcomes in this process,
 not a current-conflict gauge or router enforcement. The shipped

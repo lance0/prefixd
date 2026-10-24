@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `prefixd_blackhole_replaced_total{pop}` and the `PrefixdBlackholeReplaced`
+  alert now count unleased blackhole reconciliation repairs that replaced a
+  different local route at the prefix, as well as admissions. The repair also
+  logs an error. Leased adds still do not increment the counter.
+
 - Announcement counters, announcement latency histograms and BGP session gauges
   add a bounded `backend` label. The operations dashboard identifies backend and
   peer, preserves backend latency groups and shows capability availability.

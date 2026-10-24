@@ -1143,10 +1143,20 @@ impl ReconciliationLoop {
             )
             .await
             {
-                Ok(crate::domain::BlackholeAnnouncement::Announced(_)) => {
+                Ok(crate::domain::BlackholeAnnouncement::Announced(outcome)) => {
                     crate::observability::metrics::RECONCILIATION_REPAIRS
                         .with_label_values(&["success"])
                         .inc();
+                    // As at admission (ADR 027 §5): an unleased replace overwrote
+                    // a different local route at the prefix. Leased adds refuse
+                    // another owner's route, so their replace is our own.
+                    if rule.owner.is_empty() && outcome == crate::bgp::AddOutcome::Replaced {
+                        crate::observability::metrics::BLACKHOLE_REPLACED
+                            .with_label_values(&[&mitigation.pop])
+                            .inc();
+                        tracing::error!(mitigation_id = %mitigation.mitigation_id, prefix = %rule.prefix,
+                            "blackhole repair replaced a different local route at the prefix");
+                    }
                 }
                 Ok(crate::domain::BlackholeAnnouncement::Withdrawn(withdrawn)) => {
                     self.notify_withdrawn(&withdrawn).await
@@ -4425,6 +4435,91 @@ mod tests {
             ..live_config()
         };
         blackhole_reconciler(repo, speaker, config, false).with_lease(lease)
+    }
+
+    /// As at admission, only an unleased repair add that replaced a different
+    /// local route counts, once, on the configured POP.
+    #[tokio::test]
+    async fn replacement_counter_counts_unleased_replaced_repairs() {
+        use crate::bgp::AddOutcome;
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let counter =
+            crate::observability::metrics::BLACKHOLE_REPLACED.with_label_values(&["test"]);
+        for (name, leased, outcome) in [
+            ("unleased created", false, Some(AddOutcome::Created)),
+            ("unleased unchanged", false, Some(AddOutcome::Unchanged)),
+            ("unleased replaced", false, Some(AddOutcome::Replaced)),
+            ("leased created", true, Some(AddOutcome::Created)),
+            ("leased unchanged", true, Some(AddOutcome::Unchanged)),
+            ("leased replaced", true, Some(AddOutcome::Replaced)),
+            ("unleased error", false, None),
+            ("leased error", true, None),
+        ] {
+            let before = counter.get();
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let lease = Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60));
+            let (reconciler, row) = if leased {
+                let reconciler = leased_reconciler(repo.clone(), speaker.clone(), lease);
+                (reconciler, leased_row("192.0.2.1"))
+            } else {
+                let reconciler =
+                    blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), false);
+                (reconciler, blackhole_row("192.0.2.1"))
+            };
+            repo.insert_mitigation(&row).await.unwrap();
+            // The repair read finds nothing; this route lands just before the add.
+            if matches!(outcome, Some(AddOutcome::Unchanged | AddOutcome::Replaced)) {
+                let mut raced = row.clone();
+                if outcome == Some(AddOutcome::Replaced) {
+                    raced.action_params.blackhole.as_mut().unwrap().next_hop =
+                        "192.0.2.99".parse().unwrap();
+                }
+                *speaker.before_add.lock().unwrap() = Some(frozen(&raced));
+            }
+            speaker.fail_adds.store(outcome.is_none(), SeqCst);
+            assert_eq!(
+                reconciler.reconcile().await.is_ok(),
+                outcome.is_some(),
+                "{name}"
+            );
+            let increment = if !leased && outcome == Some(AddOutcome::Replaced) {
+                1.0
+            } else {
+                0.0
+            };
+            assert_eq!(counter.get(), before + increment, "{name}");
+            // The speaker reported the case's outcome.
+            let audited: Vec<String> = repo
+                .list_audit(&crate::db::ListParams {
+                    limit: 1000,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|entry| entry.action == "announce")
+                .map(|entry| entry.details["outcome"].as_str().unwrap().into())
+                .collect();
+            let expected_audit: &[&str] = match outcome {
+                Some(AddOutcome::Created) => &["created"],
+                Some(AddOutcome::Replaced) => &["replaced"],
+                _ => &[],
+            };
+            assert_eq!(audited, expected_audit, "{name}");
+            let expected_routes = if outcome.is_some() {
+                vec![frozen(&row)]
+            } else {
+                vec![]
+            };
+            assert_eq!(speaker.routes().await, expected_routes, "{name}");
+            assert_eq!(speaker.adds.load(SeqCst), usize::from(!leased), "{name}");
+            assert_eq!(
+                speaker.leased_adds.load(SeqCst),
+                usize::from(leased),
+                "{name}"
+            );
+        }
     }
 
     /// A refused renewal wakes the reconciler at once for a full leased re-add,

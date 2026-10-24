@@ -143,12 +143,13 @@ installed or enforces it. See
 
 ### Replacement conflict alert
 
-The `prefixd-blackhole-conflicts` group reports an unleased admission that
-replaced an untracked local route after its pre-read:
+The `prefixd-blackhole-conflicts` group reports unleased blackhole adds, from
+admissions and reconciliation repairs, that replaced a different local route
+at the prefix:
 
 | Alert | Fires when | Why it matters |
 | --- | --- | --- |
-| `PrefixdBlackholeReplaced` | `increase(prefixd_blackhole_replaced_total{pop}[1h])` is above zero | An unleased add replaced a route that appeared between the ownership pre-read and add; another writer may be using this speaker |
+| `PrefixdBlackholeReplaced` | `increase(prefixd_blackhole_replaced_total{pop}[1h])` is above zero | An unleased add from an admission or reconciliation repair replaced a different local route at the prefix; another writer may be using this speaker |
 
 This is historical local-replacement evidence from the last hour, not proof
 that a conflict remains active or that a router enforced the route. prefixd
