@@ -100,6 +100,31 @@ pub(crate) fn unknown_origin_audit(
     )
 }
 
+/// An ordinary pooled connection, or a bounded read's read-only transaction.
+enum ReadConnection {
+    Pooled(sqlx::pool::PoolConnection<sqlx::Postgres>),
+    ReadOnly(sqlx::Transaction<'static, sqlx::Postgres>),
+}
+
+impl std::ops::Deref for ReadConnection {
+    type Target = PgConnection;
+    fn deref(&self) -> &PgConnection {
+        match self {
+            Self::Pooled(connection) => connection,
+            Self::ReadOnly(transaction) => transaction,
+        }
+    }
+}
+
+impl std::ops::DerefMut for ReadConnection {
+    fn deref_mut(&mut self) -> &mut PgConnection {
+        match self {
+            Self::Pooled(connection) => connection,
+            Self::ReadOnly(transaction) => transaction,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Repository {
     pool: PgPool,
@@ -114,43 +139,45 @@ impl Repository {
         }
     }
 
-    /// Only a bounded-read view changes session settings. Its connections are
-    /// discarded instead of returning modified or unfinished work to the pool.
-    async fn bounded_read_connection(&self) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
-        let mut connection = if let Some(deadline) = self.read_deadline {
-            tokio::time::timeout_at(deadline, self.pool.acquire())
-                .await
-                .map_err(|_| sqlx::Error::PoolTimedOut)??
-        } else {
-            self.pool.acquire().await?
+    /// A bounded-read view runs each read in its own `BEGIN READ ONLY`
+    /// transaction with a transaction-local `statement_timeout`. Dropping it
+    /// rolls back, ending the setting, and returns the connection to the pool.
+    async fn bounded_read_connection(&self) -> Result<ReadConnection> {
+        let Some(deadline) = self.read_deadline else {
+            return Ok(ReadConnection::Pooled(self.pool.acquire().await?));
         };
-        if let Some(deadline) = self.read_deadline {
-            // Set this before the first await using the acquired connection,
-            // including SET itself. SQLx's ordinary return path would ping and
-            // wait for an interrupted SELECT before releasing its pool permit.
-            connection.close_on_drop();
-            let remaining = deadline
-                .saturating_duration_since(tokio::time::Instant::now())
-                .checked_sub(Duration::from_millis(500))
-                .ok_or(sqlx::Error::PoolTimedOut)?;
-            let milliseconds = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
-            if milliseconds == 0 {
-                return Err(sqlx::Error::PoolTimedOut.into());
-            }
-            // pg_settings stores this GUC in milliseconds. Preserve a stricter
-            // server limit; zero means disabled and must never be our new limit.
-            let _: String = sqlx::query_scalar(
-                r#"SELECT pg_catalog.set_config(
-                    'statement_timeout',
-                    LEAST($1::int, COALESCE(NULLIF(setting::int, 0), $1::int))::text,
-                    false
-                ) FROM pg_catalog.pg_settings WHERE name = 'statement_timeout'"#,
-            )
-            .bind(milliseconds)
-            .fetch_one(&mut *connection)
-            .await?;
+        // SQLx records a transaction only after BEGIN's reply; cancelling that
+        // await would return an open transaction to the pool. The detached task
+        // always finishes BEGIN, so a dropped result rolls back normally.
+        let pool = self.pool.clone();
+        let begin = tokio::spawn(async move { pool.begin_with("BEGIN READ ONLY").await });
+        let mut transaction = tokio::time::timeout_at(deadline, begin)
+            .await
+            .map_err(|_| sqlx::Error::PoolTimedOut)?
+            .map_err(|_| sqlx::Error::PoolTimedOut)??;
+        // The server deadline ends before the request deadline, so a cancelled
+        // statement has finished by the time the pool's release ping waits on it.
+        let remaining = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .checked_sub(Duration::from_millis(500))
+            .ok_or(sqlx::Error::PoolTimedOut)?;
+        let milliseconds = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+        if milliseconds == 0 {
+            return Err(sqlx::Error::PoolTimedOut.into());
         }
-        Ok(connection)
+        // pg_settings stores this GUC in milliseconds. Preserve a stricter
+        // server limit; zero means disabled and must never be our new limit.
+        let _: String = sqlx::query_scalar(
+            r#"SELECT pg_catalog.set_config(
+                'statement_timeout',
+                LEAST($1::int, COALESCE(NULLIF(setting::int, 0), $1::int))::text,
+                true
+            ) FROM pg_catalog.pg_settings WHERE name = 'statement_timeout'"#,
+        )
+        .bind(milliseconds)
+        .fetch_one(&mut *transaction)
+        .await?;
+        Ok(ReadConnection::ReadOnly(transaction))
     }
 
     async fn insert_mitigation_on(connection: &mut PgConnection, m: &Mitigation) -> Result<()> {
