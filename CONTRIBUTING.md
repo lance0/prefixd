@@ -88,6 +88,21 @@ retaining separate jobs and speaker versions.
 The Rust advisory recipe audits both the controller and separate fuzz lockfiles
 with CI's explicit unfixed `rsa` exception; warnings remain visible.
 
+Pull requests changing only the known root documentation files, Markdown under
+`docs/`, images under `docs/images/`, `lab/README.md`, or the two vendored-lint
+`UPSTREAM.md` provenance files use a documentation CI fast path. The scope
+check examines the complete PR diff, runs its classifier self-test and
+checks patch whitespace; the existing Rust, frontend, speaker, audit and Docker
+jobs report skipped. Mixed, unknown or empty changes use full CI. A failed
+scope check also fails `Test`. Main always runs the complete workflow, including
+the checks required by release automation.
+
+This is an intentional verification tradeoff: integration tests read examples
+from the upgrade and troubleshooting guides, but documentation PRs do not run
+those tests. Check affected examples and local links before submitting; their
+full integration verification runs after merge. The local `just gate` is
+unchanged.
+
 The gate preserves caller `CARGO_BUILD_JOBS` and `CARGO_TARGET_DIR`. On a shared
 host, allocate CPUs and set existing worker controls such as
 `VITEST_MAX_WORKERS` before starting it; `PREFIXD_TEST_CPUSET` separately
