@@ -17,6 +17,15 @@ Or use the Docker image:
 docker run --rm ghcr.io/lance0/prefixd:latest prefixdctl --help
 ```
 
+For a short interactive command, add this alias to your Bash or Zsh configuration:
+
+```sh
+alias pfx=prefixdctl
+pfx status
+```
+
+Scripts and container commands continue to use the installed `prefixdctl` binary.
+
 ## Configuration
 
 ### Environment Variables
@@ -213,6 +222,30 @@ The next hop and communities are the route prefixd saved at admission, not
 evidence that a router enforces it. `-f json` output includes the same
 `blackhole` object as the API. The CLI cannot create a blackhole: creation
 requires an Admin session, and bearer tokens act as Operator.
+
+### Extend Mitigation Lifetime
+
+```bash
+prefixdctl mitigations extend <id> --ttl-seconds 600 --reason "attack continues"
+prefixdctl -f json mitigations extend <id> --ttl-seconds 600 --reason "attack continues"
+```
+
+Requests 600 seconds of **remaining lifetime** from the server's update time,
+without changing the rule's match or action. Both options are required: TTL
+must be positive and the reason must contain text within 1,024 UTF-8 bytes.
+The authenticated API identity supplies the actor; there is no operator option.
+
+Table output reports `extended` or `unchanged`, the previous expiry and the saved
+expiry. JSON includes `extended`, `previous_expires_at` and `mitigation`.
+An unchanged horizon is successful and writes no extension audit. Policy or
+safety refusals produce an error and a nonzero exit status in either format.
+After an unavailable outcome, inspect the mitigation and audit before retrying.
+
+Only live ordinary FlowSpec rules admitted in enforced mode are eligible;
+blackholes and simulations are refused. The server rechecks ownership, safelists
+and current policy. Saving a later expiry does not establish router enforcement.
+See [extending mitigations](../how-to/extending-mitigations.md) for the full
+eligibility and safety contract.
 
 ### Withdraw Mitigation
 

@@ -148,6 +148,20 @@ enum MitigationCommands {
         id: String,
     },
 
+    /// Extend the remaining lifetime of an active enforced FlowSpec mitigation
+    Extend {
+        /// Mitigation ID
+        id: uuid::Uuid,
+
+        /// Requested remaining lifetime in seconds, subject to current policy
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        ttl_seconds: u32,
+
+        /// Nonblank explanation, at most 1,024 UTF-8 bytes
+        #[arg(short, long, value_parser = parse_extension_reason)]
+        reason: String,
+    },
+
     /// Withdraw a mitigation
     Withdraw {
         /// Mitigation ID
@@ -187,6 +201,13 @@ enum SafelistCommands {
         /// Prefix to remove
         prefix: String,
     },
+}
+
+fn parse_extension_reason(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() || value.len() > 1024 {
+        return Err("reason must contain text and be at most 1024 UTF-8 bytes".into());
+    }
+    Ok(value.to_owned())
 }
 
 // API Response types
@@ -349,6 +370,13 @@ struct BlackholeRoute {
 struct MitigationsListResponse {
     mitigations: Vec<MitigationResponse>,
     count: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ExtendMitigationResponse {
+    extended: bool,
+    previous_expires_at: String,
+    mitigation: MitigationResponse,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -695,6 +723,34 @@ async fn cmd_mitigations(
                     println!("Created:        {}", m.created_at);
                     println!("Expires:        {}", m.expires_at);
                     println!("Scope Hash:     {}", m.scope_hash);
+                }
+            }
+        }
+
+        MitigationCommands::Extend {
+            id,
+            ttl_seconds,
+            reason,
+        } => {
+            let path = format!("/v1/mitigations/{id}/extend");
+            let body = serde_json::json!({ "ttl_seconds": ttl_seconds, "reason": reason });
+            let response: ExtendMitigationResponse = client.post(&path, &body).await?;
+            match format {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&response).unwrap());
+                }
+                OutputFormat::Table => {
+                    println!("Mitigation ID:  {}", response.mitigation.mitigation_id);
+                    println!(
+                        "Lifetime:       {}",
+                        if response.extended {
+                            "extended"
+                        } else {
+                            "unchanged"
+                        }
+                    );
+                    println!("Previous expiry: {}", response.previous_expires_at);
+                    println!("Saved expiry:    {}", response.mitigation.expires_at);
                 }
             }
         }
@@ -1181,6 +1237,49 @@ async fn cmd_migrations(format: OutputFormat) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_requires_positive_ttl_and_a_bounded_reason() {
+        let args = [
+            "prefixdctl",
+            "mitigations",
+            "extend",
+            "7f72a903-63d1-4a4a-a5db-0517e0a7df1d",
+        ];
+        let parse =
+            |extra: &[&str]| Cli::try_parse_from(args.iter().copied().chain(extra.iter().copied()));
+        let cli = parse(&["--ttl-seconds", "600", "--reason", "attack continues"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Mitigations(MitigationCommands::Extend { ttl_seconds: 600, reason, .. })
+                if reason == "attack continues"
+        ));
+        for invalid in [
+            vec!["--ttl-seconds", "0", "--reason", "attack continues"],
+            vec!["--ttl-seconds", "-1", "--reason", "attack continues"],
+            vec![
+                "--ttl-seconds",
+                "4294967296",
+                "--reason",
+                "attack continues",
+            ],
+            vec!["--ttl-seconds", "600"],
+            vec!["--reason", "attack continues"],
+            vec!["--ttl-seconds", "600", "--reason", " \t\n"],
+            vec![
+                "--ttl-seconds",
+                "600",
+                "--reason",
+                "test",
+                "--operator",
+                "forged",
+            ],
+        ] {
+            assert!(parse(&invalid).is_err(), "{invalid:?}");
+        }
+        assert!(parse_extension_reason(&"é".repeat(512)).is_ok());
+        assert!(parse_extension_reason(&"é".repeat(513)).is_err());
+    }
 
     #[test]
     fn mitigation_match_summary_shows_amplification_fields() {

@@ -46,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction-local server deadline, so timed-out checks release blocked queries
   and return their connections to the shared database pool.
 
+- `prefixdctl mitigations extend` requests a guarded FlowSpec lifetime extension
+  with a required TTL and reason. Table and JSON output distinguish a saved
+  extension from an unchanged horizon and include the previous and saved expiry.
+
 - Manual FlowSpec discard and police rules accept aligned IPv4/IPv6 destination
   CIDRs in `victim_ip` when operators deliberately relax existing prefix bounds.
   Whole-prefix customer ownership, all safelist overlaps and fresh repair checks
