@@ -36,7 +36,7 @@ Format follows [Michael Nygard's template](https://cognitect.com/blog/2011/11/15
 | [026](026-facelift-framework-scope.md) | Defer framework migration during the facelift | Accepted | 2026-10-17 |
 | [027](027-blackhole-mitigations.md) | Remotely triggered blackhole host routes as a second mitigation kind | Accepted | 2026-10-19 |
 | [028](028-amplification-matches.md) | Amplification-aware FlowSpec matches | Accepted | 2026-10-19 |
-| [029](029-upstream-blackholing.md) | Provider-scoped upstream blackholing | Proposed | 2026-10-20 |
+| [029](029-upstream-blackholing.md) | Provider-scoped upstream blackholing | Accepted (design only) | 2026-10-24 |
 | [030](030-scrubber-diversion.md) | Guarded diversion to an external scrubber | Proposed | 2026-10-22 |
 | [031](031-source-prefix-matches.md) | Manual source-prefix FlowSpec matches | Proposed | 2026-10-22 |
 

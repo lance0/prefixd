@@ -2,10 +2,11 @@
 
 ## Status
 
-Proposed 2026-10-20. Design only; upstream profiles and the API fields described
-below are not implemented. Extends [ADR 027](027-blackhole-mitigations.md).
+Accepted 2026-10-24, with the owner decisions recorded below. Proposed
+2026-10-20. Design only; upstream profiles and the API fields described below
+are not implemented. Extends [ADR 027](027-blackhole-mitigations.md).
 The existing unleased local blackhole opt-in remains as documented there.
-This proposal requires owner-scoped leased injection for every enforced
+This design requires owner-scoped leased injection for every enforced
 upstream blackhole, including manual actions, before it can ship.
 
 ## Context
@@ -45,9 +46,10 @@ The [existing FRR receipt](../reference/qualification/blackhole-frr-2026-10-19.m
 already separates local RPC success from router discard, demonstrates eBGP
 next-hop rewriting and records stale blackholes while the controller is down.
 It does not qualify provider selection, a route-server topology or leased
-expiry. The adapter currently uses unleased `AddPath`.
+expiry. Local blackholes now support owner-leased injection as ADR 027
+describes; that foundation does not qualify the upstream lifecycle.
 
-## Proposed decision
+## Decision
 
 ### 1. One immutable upstream target set per victim and POP
 
@@ -62,7 +64,9 @@ conflict and names the existing mitigation. It must not overwrite the route,
 merge targets or shorten another actor's protection implicitly. Identical
 targets may use the existing refresh path within TTL bounds. Changing targets
 requires withdrawing the old mitigation, confirming absence and creating a new
-one. Local FlowSpec may coexist and keeps its independent expiry.
+one. This creates a protection gap that the operator must review deliberately;
+there is no automatic retargeting. Local FlowSpec may coexist and keeps its
+independent expiry.
 
 At admission, persist the scope, sorted target profile IDs, profile revision,
 resolved peer identities, provider community sets and export-policy selectors
@@ -112,11 +116,18 @@ preinstalled export chain must:
 
 1. Deny upstream blackholes unless the peer is an explicit target and the
    owner, family and victim-prefix constraints match the qualified policy.
-2. Remove every internal selector and every other provider's trigger
-   communities, then attach only this profile's agreed community set.
+2. Remove every internal selector and replace the trigger communities with
+   exactly this profile's agreed set. This includes removing generic BLACKHOLE
+   (`65535:666`) unless that profile explicitly lists it.
 3. Apply the qualified next-hop and propagation behavior for this peer.
 4. Deny these routes to all other peers, including customers, other POPs and
    ordinary transit peers. An unmatched selector must fail closed.
+
+For example, a profile for [NTT's published blackhole service](https://www.gin.ntt.net/support-center/policies-procedures/routing/)
+can select exactly `2914:666`, while a
+[DE-CIX route-server profile](https://docs.de-cix.net/article/ulhsfuqe47)
+explicitly selects `65535:666`. These remain operator-configured profiles,
+with no hardcoded provider presets.
 
 Host routes count toward the provider's maximum-prefix limit on that session,
 and exceeding it usually tears the session down, dropping all transit or
@@ -162,23 +173,31 @@ and never overwritten or deleted. A policy mismatch or unreadable inventory
 refuses new adds without abandoning pending withdrawals.
 
 Upstream routes count toward blackhole quotas and stricter profile caps, not
-FlowSpec filter capacity. Initial proposed profile defaults are two active
+FlowSpec filter capacity. Initial profile defaults are two active
 victims, ten new admissions per minute and a 600-second maximum TTL; these
-are product choices for review, not measured capacity. They do not raise the
-existing POP/global blackhole limits. A multi-provider route consumes one
+are conservative operator risk budgets, not measured capacity or provider
+limits. They do not raise the existing POP/global blackhole limits. A
+multi-provider route consumes one
 blackhole slot and one slot in each selected profile, reserved atomically.
 Refuse the complete upstream request if any profile cannot admit it; partial
 provider coverage must not look like complete admission. Refreshes cannot
 bypass the TTL cap or consume a new slot, and pending withdrawals retain slots.
 
-Detector lifetimes must fit the configured cap. In particular, FastNetMon
-Community's documented 1900-second ban is longer than the proposed 600-second
-profile default and has no periodic refresh. That integration needs an
-explicitly reviewed longer profile TTL (within the existing blackhole cap) or
-a coordinated shorter detector ban. Refuse an incompatible playbook TTL;
-silently truncating it would restore reachability while the detector still
-considers the victim banned. This is a required configuration and integration
-test, not a reason to remove expiry.
+Detector lifetimes must fit the configured cap. In the inspected FastNetMon
+Community source snapshot `2436f447` (checked 2026-10-24), the
+[configuration](https://github.com/pavel-odintsov/fastnetmon/blob/2436f447b9c2ba959eb3392bd3cf3c9efb14c94d/src/fastnetmon.conf)
+defaults to a 1900-second ban and defers IPv4 unban while an attack continues.
+Its [ban logic](https://github.com/pavel-odintsov/fastnetmon/blob/2436f447b9c2ba959eb3392bd3cf3c9efb14c94d/src/fastnetmon_logic.cpp)
+does not periodically repeat a ban for an already banned IPv4 host. A reviewed
+longer profile TTL (within the existing blackhole cap) or shorter detector ban
+therefore does not establish compatibility by itself. Qualify sustained attacks,
+each address family, watchdog timing and ban/unban callbacks against the actual
+detector configuration. Conditional unban may outlast any fixed route TTL;
+that needs a separately qualified refresh or operator-review workflow. Refuse
+an incompatible playbook TTL and leave unqualified detector workflows disabled.
+Never silently truncate the TTL or automatically re-ban after expiry: either
+can leave the detector and route lifecycle disagreeing. Qualify the deployed
+detector version rather than assuming every release matches this snapshot.
 
 Require a nonzero TTL and a healthy, owner-scoped injection lease on manual
 and detector paths. Probe the connected daemon's capability and make the leased
@@ -201,9 +220,22 @@ deadline would require a separate upstream contract and is not claimed here.
 
 Remote expiry is not bounded by the injection lease alone. Graceful Restart or
 LLGR can retain a stale route downstream after session loss. Each profile must
-record the agreed stale-route policy and verify its actual maximum duration;
-unbounded or unknown retention blocks enforcement qualification. An operator
-can withdraw early without relaxing any safelist or ownership check.
+record a bounded provider contract or configuration and qualify the retention
+behavior on its path, including the receiving member behind a route server.
+State the bound's clock origin and measure failure detection, owner-lease
+expiry, local removal and downstream removal separately. A stale-retention
+timer measured from detected session loss is not an expiry bound measured
+from the controller's stop or the mitigation's TTL.
+Unknown or unbounded retention blocks that profile's enforcement qualification.
+Prefer disabling GR/LLGR for a dedicated RTBH session or family when supported.
+[RFC 4724 section 4.2](https://www.rfc-editor.org/rfc/rfc4724.html#section-4.2)
+and [RFC 9494 section 4.2](https://www.rfc-editor.org/rfc/rfc9494.html#section-4.2)
+make the restart timer alone insufficient: reconnection without End-of-RIB and
+LLGR need separate bounds. `NO_LLGR` does not disable ordinary GR. A stale host
+route can still override the covering aggregate despite a lower preference.
+Qualification covers session loss, reconnection and missing End-of-RIB; a lab
+receipt alone does not prove commercial-provider behavior. An operator can
+withdraw early without relaxing any safelist or ownership check.
 
 ### 4. Tell the operator what is known
 
@@ -244,33 +276,32 @@ families and test IPv6 NLRI over the intended transport explicitly.
 | Admission | Test exhausted profile/global caps, concurrent controllers and full FlowSpec capacity without bypassing blackhole caps |
 | Authorization | Non-Admin, unapproved source, safelisted victim, unsupported prefix lengths and missing lease produce no speaker mutation |
 | Withdrawal | Explicit withdrawal, TTL, safelist addition, speaker restart and controller crash drain only owned state; inject RPC failures to prove immutable retries |
-| Lease and staleness | Stop renewal with speaker alive, then lose the session with GR/LLGR enabled; measure local removal and downstream retention separately |
+| Lease and staleness | Stop renewal with speaker alive, then lose the session with GR/LLGR enabled; test reconnection without End-of-RIB and measure local removal and qualified downstream retention separately |
 
 Record dated versions, policy revisions, raw RIB/FIB evidence and negative
 controls. Add a bounded packet test through FRR to distinguish control-plane
 discard from forwarding, including an unaffected destination and recovery
 after withdrawal. No FRR result claims commercial-provider acceptance.
 
-## Open questions
+## Owner decisions — 2026-10-24
 
-These need an owner decision before the ADR is accepted:
+The owner accepted these choices after review of the operator tradeoffs:
 
-1. **Profile defaults.** The proposed two active victims, 600-second maximum
-   TTL and ten new admissions per minute are unmeasured product choices.
-   FastNetMon Community's 1900-second ban needs an explicit profile override
-   or a shorter detector ban.
+1. **Profile defaults.** Use two active victims, a 600-second maximum TTL and
+   ten new admissions per minute as conservative defaults. Provider limits
+   and detector lifetime behavior still require explicit qualification;
+   a FastNetMon TTL override alone is insufficient.
 2. **Generic BLACKHOLE on transit.** The injected route still carries
-   `65535:666`, as ADR 027 requires. Whether egress keeps it toward a transit
-   profile that wants only a provider community, such as `2914:666`, is open.
-   Recommendation, pending the owner's decision: the profile's community set
-   replaces the generic one at egress, and a profile may list `65535:666`
-   explicitly.
+   `65535:666`, as ADR 027 requires. The profile's community set replaces the
+   generic one at egress; retain `65535:666` only when explicitly listed.
 3. **First-version scope.** Withdrawal covers the whole target set only, and
    profiles may not overlap on a peer. Per-provider withdrawal and overlap
-   are deferred.
-4. **Stale-route bound.** Requiring a stated, verified GR/LLGR stale-route
-   maximum deliberately blocks enforcement toward providers that will not
-   state one.
+   are deferred. Changing targets requires deliberate review of the gap
+   between withdrawal and new admission.
+4. **Stale-route bound.** Require a documented, qualified bound for the
+   profile's provider path, including its route-server member where applicable.
+   Unknown bounds block that profile; a lease, restart timer or lab result
+   alone does not prove the provider has removed stale state.
 
 ## Consequences and delivery
 
@@ -279,9 +310,11 @@ keeping provider behavior reviewable. It adds configuration and qualification
 work, stricter admission and a complete-target withdrawal restriction. Losing
 one target cannot be hidden behind the health of another.
 
-Implementation slices are: (1) released owner/lease adoption and policy
-qualification; (2) persisted profiles, atomic reservations and immutable
-target-set lifecycle; (3) authenticated manual API and operator confirmation;
+The local unicast and owner-lease foundations have shipped under ADR 027.
+Upstream implementation slices are: (1) qualification of those foundations and
+revision-specific export policy on each upstream topology; (2) persisted
+profiles, atomic reservations and immutable target-set lifecycle;
+(3) authenticated manual API and operator confirmation;
 (4) per-target export evidence, audits and alerts; (5) explicit detector
 playbooks; (6) transit and route-server interop receipts. Every slice updates
 its compatibility surfaces and downgrade procedure. Enforced upstream use

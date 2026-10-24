@@ -65,7 +65,8 @@ server-backed pagination remain work below.
 ## Later work
 
 Provider-scoped upstream RTBH for saturated transit or exchange ports is
-proposed in [ADR 029](docs/adr/029-upstream-blackholing.md). It requires
+an accepted design in [ADR 029](docs/adr/029-upstream-blackholing.md), with no
+upstream runtime support yet. It requires
 owner-leased injection, explicit per-provider export policy and separate
 transit/route-server qualification before enforcement can be enabled.
 
