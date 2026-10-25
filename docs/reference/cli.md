@@ -115,6 +115,11 @@ prefixdctl peers
 # 192.0.2.2                       established
 ```
 
+Peer identifiers retain link-local scope (`fe80::1%eth0`). An interface-only
+neighbor has the stable name `interface:eth0`, including before discovery;
+an unbound neighbor is never shown as Established. Observation failure remains
+a command failure. See [scoped neighbors](speaker-backends.md#scoped-and-interface-only-neighbors).
+
 ### Speaker Routes
 
 ```bash

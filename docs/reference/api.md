@@ -2343,6 +2343,13 @@ is absent; after ownership returns, historical evidence makes it `degraded`
 until a fresh complete observation replaces each retained route. Historical
 counts and warnings describe the retained observation, not current export.
 
+Peer identifiers in `bgp_sessions` preserve IPv6 link-local scope, for example
+`fe80::1%eth0`. Interface-only neighbors use a stable `interface:eth0` key.
+Blackhole export peer addresses use the learned scoped endpoint, and unbound
+neighbors remain non-Established. These strings distinguish neighbors on
+different links; they are not all bare IP literals. See
+[scoped neighbors](speaker-backends.md#scoped-and-interface-only-neighbors).
+
 Top-level `version` and `uptime_seconds` describe prefixd. `speaker.daemon`
 independently reports authenticated speaker process metadata: `observed`, `error`
 or `unsupported`. Successful observations carry receipt time `observed_at`,

@@ -1,19 +1,20 @@
 //! Generated rustbgpd client stubs (ADR 023).
 //!
 //! `proto/rustbgpd.proto` (package `rustbgpd.v1`) is the unmodified
-//! `rustbgpd.proto` asset of the rustbgpd v0.79.0 release,
-//! <https://github.com/lance0/rustbgpd/releases/download/v0.79.0/rustbgpd.proto>,
-//! sha256 `21a7f5ca199184a0d4cf94414ed8dcfa49c660c1fbb8b4c79e076b9d7685dd62`.
+//! `rustbgpd.proto` asset of the rustbgpd v0.80.0 release,
+//! <https://github.com/lance0/rustbgpd/releases/download/v0.80.0/rustbgpd.proto>,
+//! sha256 `cc1cac82881d3ac42e91ccdd13daebb649dee550e446a48d7e1a8f2bafe83927`.
 //! `proto/rustbgpd.proto.sha256` is that release's checksum asset, and
 //! `just proto` checks the file against it offline. To move the pin, download
 //! both assets of the new release, run `sha256sum --check --strict` on them, copy
 //! both here and update this comment.
 //!
 //! The generated stubs follow the pinned release. v0.79.0 is the minimum
-//! daemon, and `RustBgpdAnnouncer::connect` refuses anything older. Fields and
-//! RPCs newer than the minimum stay unset and unused until a change adopts
-//! them and raises the minimum. The stubs are compiled only when the
-//! `bgp-rustbgpd` feature is on, so the GoBGP and rustbgpd backends can coexist.
+//! daemon, and `RustBgpdAnnouncer::connect` refuses anything older. Additive
+//! peer identity fields are decoded when present; new optional read-back and
+//! replay RPCs remain unused. Requests preserve the 0.79.0 contract. The stubs
+//! are compiled only when the `bgp-rustbgpd` feature is on, so the GoBGP and
+//! rustbgpd backends can coexist.
 #[cfg(feature = "bgp-rustbgpd")]
 pub mod rustbgpd_pb {
     #![allow(

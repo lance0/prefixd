@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Compose and the default speaker fixture now pin rustbgpd v0.80.0; the minimum
+  remains v0.79.0. Scoped peer observations preserve their interface, and
+  interface-only peers report discovery without aliasing another neighbor.
+  Exact peer metric labels can change; scoped blackhole export evidence needs
+  v0.80.0. See [speaker upgrade notes](docs/how-to/upgrading.md#rustbgpd-v0800).
+
 - Check `guardrails.dst_prefix_minlen` and `dst_prefix_minlen_v6` before
   upgrading. Earlier releases ignored values below 32 and 128; this release
   admits manual destination CIDRs down to those lengths. Set them to 32 and 128

@@ -125,6 +125,7 @@ test-rustbgpd-speaker:
 speakers:
     just test-gobgp-speaker
     PREFIXD_RUSTBGPD_TEST_VERSION=0.79.0 just test-rustbgpd-speaker
+    PREFIXD_RUSTBGPD_TEST_VERSION=0.80.0 just test-rustbgpd-speaker
 
 # Needs Docker and containerlab; set CLAB="sudo containerlab" outside clab_admins. Not in gate.
 # Run the prefixd -> speaker -> FRR FlowSpec interop lab and write dated receipts.

@@ -11,6 +11,16 @@ import "google/protobuf/field_mask.proto";
 // Common types
 // ---------------------------------------------------------------------------
 
+// Neighbor selectors. Every request field that selects a neighbor by address
+// (neighbor_address, peer_address, address, peer, peer_filter,
+// source_peer_filter, received_from, advertised_to and the like) takes a bare
+// IP literal for a numbered neighbor. An IPv6 link-local (fe80::/10) neighbor
+// must be scoped: "fe80::1%eth0", or the bare address plus the request's
+// interface field where it has one. A bare link-local selector is
+// INVALID_ARGUMENT whatever the configuration; a scope on a numbered address
+// is INVALID_ARGUMENT. The scope is part of page-token identity. Response
+// peer addresses stay bare IP literals beside a peer_interface field.
+
 enum AddressFamily {
   ADDRESS_FAMILY_UNSPECIFIED = 0;
   ADDRESS_FAMILY_IPV4_UNICAST = 1;
@@ -59,6 +69,9 @@ message BgpProtocolError {
   uint32 error_subcode = 2;
   string description = 3;
   string peer_address = 4;
+  // Interface of a scoped (IPv6 link-local) neighbor named by peer_address;
+  // empty for a numbered one.
+  string peer_interface = 5;
 }
 
 message ResourceLimitError {
@@ -66,6 +79,9 @@ message ResourceLimitError {
   uint64 current_value = 2;
   uint64 max_value = 3;
   string peer_address = 4;
+  // Interface of a scoped (IPv6 link-local) neighbor named by peer_address;
+  // empty for a numbered one.
+  string peer_interface = 5;
 }
 
 message ConfigError {
@@ -635,6 +651,40 @@ message NeighborConfig {
   // Effective canonical inbound path-attribute type codes discarded for this
   // route-server client. Empty means no configured discard.
   repeated uint32 discard_path_attributes = 22;
+  // How remote_asn is matched against the ASN in the peer's OPEN.
+  // UNSPECIFIED means NUMERIC. With EXTERNAL or INTERNAL, remote_asn is 0 on
+  // reads and must be 0 on create requests; the ASN the peer actually sent
+  // is NegotiatedSessionState.remote_asn.
+  RemoteAsnMode remote_asn_mode = 23;
+}
+
+// A neighbor's remote ASN matching mode (TOML remote_asn = a number,
+// "external" or "internal").
+enum RemoteAsnMode {
+  // NUMERIC, the behavior before this field existed.
+  REMOTE_ASN_MODE_UNSPECIFIED = 0;
+  // remote_asn is the ASN the peer must send.
+  REMOTE_ASN_MODE_NUMERIC = 1;
+  // Any ASN except the local ASN (eBGP). Never the dynamic-neighbor
+  // wildcard: an iBGP OPEN is refused.
+  REMOTE_ASN_MODE_EXTERNAL = 2;
+  // The local ASN (iBGP).
+  REMOTE_ASN_MODE_INTERNAL = 3;
+}
+
+// Discovery state of an interface-only neighbor (ADR-0142), which names an
+// interface and learns its peer's IPv6 link-local address.
+enum NeighborDiscoveryState {
+  // Not an interface-only neighbor, or a daemon that does not report it.
+  NEIGHBOR_DISCOVERY_STATE_UNSPECIFIED = 0;
+  // The interface does not exist yet.
+  NEIGHBOR_DISCOVERY_STATE_INTERFACE_MISSING = 1;
+  // The interface is down (carrier loss or administratively down).
+  NEIGHBOR_DISCOVERY_STATE_LINK_DOWN = 2;
+  // The link is up and no peer address is bound yet.
+  NEIGHBOR_DISCOVERY_STATE_AWAITING_DISCOVERY = 3;
+  // A learned peer address is bound; learned_peer_address names it.
+  NEIGHBOR_DISCOVERY_STATE_BOUND = 4;
 }
 
 message PathsLimitState {
@@ -655,10 +705,22 @@ message NeighborState {
   uint64 uptime_seconds = 3;
   uint64 prefixes_received = 4;
   uint64 prefixes_sent = 5;
+  // UPDATE messages received from / sent to this neighbor, End-of-RIB
+  // included. Daemon-lifetime per neighbor (address and interface): the
+  // count persists across session resets and re-establishment, including on
+  // a replacement session, and is cleared only by daemon restart or neighbor
+  // deletion. A reconfigure keeps it.
   uint64 updates_received = 6;
   uint64 updates_sent = 7;
+  // NOTIFICATION messages received from / sent to this neighbor, all codes:
+  // the events bgp_notifications_{received,sent}_total count. Daemon-lifetime
+  // per neighbor (address and interface), persisting across session resets
+  // and replacement sessions; cleared only by daemon restart or neighbor
+  // deletion.
   uint64 notifications_received = 8;
   uint64 notifications_sent = 9;
+  // Transitions out of Established (the events bgp_session_flaps_total
+  // counts), with the same per-neighbor daemon-lifetime scope.
   uint64 flap_count = 10;
   string last_error = 11;
   // True for peers auto-created from a dynamic_neighbors prefix range.
@@ -675,14 +737,17 @@ message NeighborState {
   // True when both sides advertised compatible BGP Roles.
   bool role_negotiated = 16;
   // Unicast route announcements blocked by RFC 9234 OTC rules.
+  // Daemon-lifetime per neighbor, with the same scope as updates_received.
   uint64 otc_routes_blocked = 17;
-  // Import policy evaluations that permitted a route.
+  // Import policy evaluations that permitted a route. Daemon-lifetime per
+  // neighbor, with the same scope as updates_received.
   uint64 import_policy_routes_permitted = 18;
-  // Import policy evaluations that denied a route.
+  // Import policy evaluations that denied a route (same scope).
   uint64 import_policy_routes_denied = 19;
-  // Export policy evaluations that permitted a route.
+  // Export policy evaluations that permitted a route. Daemon-lifetime per
+  // neighbor, with the same scope as updates_received.
   uint64 export_policy_routes_permitted = 20;
-  // Export policy evaluations that denied a route.
+  // Export policy evaluations that denied a route (same scope).
   uint64 export_policy_routes_denied = 21;
   // Live outbound update-group membership: "group:N" for shared staging, or
   // the private-path reason
@@ -831,6 +896,17 @@ message NeighborState {
   // not the routes the peer is known to hold. Absence means an older daemon.
   // Update-group internal; explicitly unstable.
   optional bool prefixes_sent_pending = 65;
+  // Interface-only neighbor (config.address empty, config.interface set):
+  // the IPv6 link-local address bound to it, without a scope. Empty until
+  // an address is bound, and for every other neighbor.
+  string learned_peer_address = 66;
+  // Interface-only neighbor discovery state; UNSPECIFIED for every other
+  // neighbor.
+  NeighborDiscoveryState discovery_state = 67;
+  // The session reports nothing to BMP: another BMP-monitored neighbor held
+  // its link-local address when it was admitted, and every collector sets
+  // on_identity_conflict = "exclude". Kept for the life of the session.
+  bool bmp_identity_excluded = 68;
 }
 
 // Stale routes one family of a neighbor still holds for GR or LLGR.
@@ -967,6 +1043,10 @@ message NegotiatedSessionState {
   optional string local_address = 10;
   // Negotiated KEEPALIVE cadence, including present zero when Hold Time is 0.
   optional uint32 keepalive_interval_seconds = 11;
+  // The ASN the peer sent in its OPEN (the four-octet AS capability when
+  // present). For a neighbor configured with REMOTE_ASN_MODE_EXTERNAL this is
+  // the only place the session's actual ASN appears.
+  optional uint32 remote_asn = 12;
 }
 
 message NegotiatedGracefulRestartState {
@@ -1088,6 +1168,10 @@ message TcpAoKeyState {
   // Linux VRF L3-master ifindex (`TCP_AO_KEYF_IFINDEX`), when present.
   // This is not an IPv6 link-local scope ID.
   optional uint32 vrf_ifindex = 12;
+  // Interface of the neighbor whose socket holds this key, when
+  // peer_address is IPv6 link-local; empty otherwise. peer_address stays a
+  // bare IP literal.
+  string peer_interface = 13;
 }
 
 message DynamicNeighborRange {
@@ -1144,7 +1228,8 @@ message ListNeighborsRequest {}
 
 message ListNeighborsResponse {
   // Ordered numerically by IP (IPv4 before IPv6), then lexicographically by
-  // interface (absent before present).
+  // interface (absent before present). Interface-only neighbors with no bound
+  // address follow, ordered by interface.
   repeated NeighborState neighbors = 1;
 }
 
@@ -1597,12 +1682,17 @@ message DeletePeerGroupResponse {}
 message SetNeighborPeerGroupRequest {
   string address = 1;
   string peer_group = 2;
+  // With an empty address, selects the interface-only neighbor on this
+  // interface (ADR-0142); with a link-local address, its scope.
+  string interface = 3;
 }
 
 message SetNeighborPeerGroupResponse {}
 
 message ClearNeighborPeerGroupRequest {
   string address = 1;
+  // As SetNeighborPeerGroupRequest.interface.
+  string interface = 2;
 }
 
 message ClearNeighborPeerGroupResponse {}
@@ -1724,7 +1814,7 @@ enum ImportExplainOutcome {
 
 message ExplainImportPolicyRequest {
   // IPv4 or IPv6 literal of the peer whose import-decision cache
-  // should be consulted. Required.
+  // should be consulted, scoped for a link-local peer. Required.
   string peer_address = 1;
   // Address-family / sub-address-family scope. v1 supports
   // IPv4-unicast and IPv6-unicast only; FlowSpec and EVPN need
@@ -1798,6 +1888,10 @@ message ImportExplainMatch {
   // NOT_SEEN / EVICTED have no decision at all. Empty also when the
   // peer has no import chain (implicit permit — nothing to attribute).
   repeated ImportExplainStatementStep statements = 13;
+  // Scope echoed with peer_address for a scoped (IPv6 link-local)
+  // neighbor; empty for a numbered one. peer_address stays a bare IP
+  // literal.
+  string peer_interface = 14;
 }
 
 // One step of the statement-level import-chain trace: how a single
@@ -1885,6 +1979,10 @@ message ExplainImportPolicyResponse {
   // every decision recorded on this session is still cached. An evicted
   // prefix answers EVICTED, not NOT_SEEN, however large this count is.
   optional uint64 evictions_since_reset = 8;
+  // Scope echoed with peer_address for a scoped (IPv6 link-local)
+  // neighbor; empty for a numbered one. peer_address stays a bare IP
+  // literal.
+  string peer_interface = 9;
 }
 
 message ListRejectedRoutesRequest {
@@ -1966,6 +2064,10 @@ message ListRejectedRoutesResponse {
   // absent means the serving daemon predates this field, while present
   // zero proves no retention loss.
   optional uint64 evictions_since_reset = 5;
+  // Scope echoed with peer_address for a scoped (IPv6 link-local)
+  // neighbor; empty for a numbered one. peer_address stays a bare IP
+  // literal.
+  string peer_interface = 6;
 }
 
 message TestPolicyRequest {
@@ -2089,16 +2191,24 @@ message TestPolicyDiff {
   // Human-readable attribute changes, e.g. "local_pref 100 - 200" or
   // "communities + 65001:999".
   repeated string changes = 4;
+  // Interface of the scoped (IPv6 link-local) neighbor named by peer; empty
+  // for a numbered neighbor. Recorded with the route, like
+  // Route.peer_interface.
+  string peer_interface = 5;
 }
 
 message TestPolicyRejectedRoute {
   string prefix = 1;
   uint32 prefix_length = 2;
   string peer = 3;
+  // Interface of the scoped (IPv6 link-local) neighbor named by peer; empty
+  // for a numbered neighbor.
+  string peer_interface = 4;
 }
 
 message GetPolicyStatsRequest {
-  // Optional managed-peer filter (IPv4 or IPv6 literal). Empty =
+  // Optional managed-peer filter (IPv4 or IPv6 literal, scoped for a
+  // link-local peer). Empty =
   // every peer with an installed chain. An unknown peer returns
   // NOT_FOUND rather than falling through to a global chain.
   string peer_address = 1;
@@ -2166,6 +2276,10 @@ message PolicyChainStats {
   // "KIND in policy NAME term NAME". Empty when no evaluation has
   // errored since chain install.
   string last_error = 7;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // neighbor and the "global" row. peer_address stays a bare IP literal:
+  // the pair (peer_address, peer_interface) identifies the neighbor.
+  string peer_interface = 8;
 }
 
 message GetPolicyStatsResponse {
@@ -2233,8 +2347,21 @@ message ConditionalAdvertisementStatus {
   // True while RFC 4724 selection deferral holds a condition prefix's
   // family; no settle timer is armed until it is released.
   bool selection_deferred = 10;
-  // Static neighbor addresses with this definition attached, sorted.
+  // Static neighbor addresses with this definition attached, sorted, one
+  // per neighbor (two neighbors on one link-local address appear twice).
+  // Superseded by attached_neighbors, which also names each interface.
   repeated string attached_peers = 11;
+  // Static neighbors with this definition attached, sorted by address then
+  // interface.
+  repeated ConditionalAdvertisementNeighbor attached_neighbors = 12;
+}
+
+// One static neighbor a conditional advertisement is attached to.
+message ConditionalAdvertisementNeighbor {
+  // Bare IP literal of the neighbor.
+  string peer_address = 1;
+  // Interface of an IPv6 link-local neighbor; empty for a numbered one.
+  string peer_interface = 2;
 }
 
 // Operator-facing status of one external policy dataset (LAN-305).
@@ -2540,6 +2667,10 @@ message BfdSession {
   // requirement). False for single-hop (RFC 5881); a serving daemon that
   // predates this field ran single-hop sessions only, so absent is false.
   bool multihop = 6;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // one. peer_address stays a bare IP literal: the pair (peer_address,
+  // peer_interface) identifies the neighbor.
+  string peer_interface = 7;
 }
 
 message GetBfdSessionsResponse {
@@ -2559,6 +2690,8 @@ service EventService {
 }
 
 message ListRoutesRequest {
+  // Optional for received routes, required for advertised routes. A
+  // link-local neighbor needs its scope (see "Neighbor selectors").
   string neighbor_address = 1;
   AddressFamily afi_safi = 2;
   uint32 page_size = 3;
@@ -2665,8 +2798,15 @@ message ExplainAdvertisedRouteRequest {
 // are assigned locally by the advertising speaker, so this inbound identity
 // is independent of the outbound rank returned as `path_id` by export explain.
 message RouteSourceIdentity {
+  // Bare IP literal of the advertising neighbor. A request may instead
+  // give an IPv6 link-local neighbor in scoped form (fe80::1%eth0).
   string peer_address = 1;
   uint32 path_id = 2;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a
+  // numbered one. A request naming an IPv6 link-local peer_address must
+  // carry its scope here or in peer_address; a bare link-local address is
+  // INVALID_ARGUMENT.
+  string peer_interface = 3;
 }
 
 // Verdict of one export gate for one (route, peer) explain.
@@ -2732,6 +2872,10 @@ message OrrExplainCandidate {
   optional uint64 cost = 4;
   // True for the per-vantage winner (first in ORR best-path order).
   bool selected = 5;
+  // Interface of the scoped (IPv6 link-local) neighbor named by
+  // peer_address; empty for a numbered neighbor. peer_address stays a bare IP
+  // literal: the pair (peer_address, peer_interface) identifies the neighbor.
+  string peer_interface = 6;
 }
 
 message ExplainAdvertisedRouteResponse {
@@ -2780,6 +2924,11 @@ message ExplainAdvertisedRouteResponse {
   // legacy winner-oriented query. `path_id` above remains the independently
   // assigned outbound Add-Path rank (0 when the source is not selected).
   RouteSourceIdentity source = 17;
+  // Scope of the target peer_address (echoed from the request) and of
+  // route_peer_address (recorded with the selected route); empty for
+  // numbered neighbors. The addresses stay bare IP literals.
+  string peer_interface = 18;
+  string route_peer_interface = 19;
 }
 
 message ExplainBestPathRequest {
@@ -2787,8 +2936,8 @@ message ExplainBestPathRequest {
   // returns NOT_FOUND (there is nothing to explain).
   string prefix = 1;
   uint32 prefix_length = 2;
-  // Optional IP address (IPv4 or IPv6 literal) of the peer to
-  // scope the explanation to. With a resolved RFC 9107 ORR vantage,
+  // Optional IP address (IPv4 or IPv6 literal, scoped for a link-local
+  // peer) of the peer to scope the explanation to. With a resolved RFC 9107 ORR vantage,
   // `best_route` is the peer's per-vantage winner and `candidates`
   // contains the same split-horizon / reflection-eligible set as live
   // ORR distribution. Otherwise `best_route` remains the ordinary
@@ -2901,6 +3050,9 @@ message ExplainBestPathResponse {
   // peer-scoped best. Empty for a global view, a non-ORR peer, or an
   // unresolved vantage that fell back to the ordinary Loc-RIB best.
   string orr_vantage = 9;
+  // Scope echoed with peer_address for a scoped (IPv6 link-local) peer;
+  // empty for a numbered peer or a global view.
+  string peer_interface = 10;
 }
 
 message ListBlackholeDiscardsRequest {}
@@ -2922,6 +3074,10 @@ message BlackholeDiscard {
   // kernel error summary. route_churn_deferred guards an install or repair;
   // it is not proof that the row is installed in the kernel.
   string reason = 5;
+  // Interface of the scoped (IPv6 link-local) neighbor named by
+  // peer_address; empty for a numbered neighbor. Recorded by the session that
+  // received the BLACKHOLE route, like Route.peer_interface.
+  string peer_interface = 6;
 }
 
 message ListBlackholeDiscardsResponse {
@@ -2946,7 +3102,8 @@ message ListFibRoutesRequest {
   // Optional page size. 0 preserves legacy behavior and returns the full
   // filtered snapshot.
   uint32 page_size = 7;
-  // Decimal offset returned by next_page_token. Requires page_size > 0.
+  // Opaque offset returned by next_page_token (bound to a scoped
+  // peer_address selector). Requires page_size > 0.
   string page_token = 8;
 }
 
@@ -3002,6 +3159,11 @@ message FibRouteStatus {
   // is the selected best route's next-hop and is a member of `next_hops` when
   // the set is non-empty (not necessarily `next_hops[0]`).
   repeated string next_hops = 16;
+  // Interface of the scoped (IPv6 link-local) neighbor named by
+  // peer_address; empty for a numbered neighbor or a row with no source
+  // peer. Recorded by the session that received the best route, like
+  // Route.peer_interface.
+  string peer_interface = 17;
 }
 
 message ListFibRoutesResponse {
@@ -3154,12 +3316,22 @@ message Route {
   bool atomic_aggregate = 22;
   // For a route injected with AddLeasedPath (source peer 0.0.0.0): its lease
   // owner, the generation it is tagged with, and the time to the owner's
-  // deadline, where 0 means expired and withdrawal pending. Set on received
+  // deadline, rounded up to whole milliseconds, where 0 means expired and
+  // withdrawal pending. Set on received
   // and best rows only: advertised rows carry an outbound path_id, so they
-  // leave these unset. Unset for every other route.
+  // leave these unset. Unset for every other route. The three are set
+  // together or not at all: a row with injection_owner non-empty also has
+  // lease_generation and lease_remaining_ms, and a row with any of them
+  // unset has none.
   string injection_owner = 23;
   LeaseGeneration lease_generation = 24;
   optional uint32 lease_remaining_ms = 25;
+  // Interface of the scoped (IPv6 link-local) neighbor named by
+  // peer_address; empty for a numbered neighbor. peer_address stays a bare IP
+  // literal: the pair (peer_address, peer_interface) identifies the neighbor.
+  // Recorded by the session that received the route, so retained routes
+  // report the interface they were learned on.
+  string peer_interface = 26;
 }
 
 enum RouteEventType {
@@ -3196,6 +3368,16 @@ message RouteEvent {
   // recorded. The deprecated timestamp string is this value truncated to
   // whole seconds.
   int64 timestamp_unix_ms = 12;
+  // Interfaces of the scoped (IPv6 link-local) neighbors named by
+  // peer_address, previous_peer_address and target_peer_address; empty
+  // for a numbered or absent neighbor. Each address stays a bare IP
+  // literal and pairs with its interface to identify the neighbor. They
+  // are captured when the event is recorded, so history keeps the
+  // interface a route was learned on after its neighbor changes or is
+  // deleted.
+  string peer_interface = 13;
+  string previous_peer_interface = 14;
+  string target_peer_interface = 15;
 }
 
 enum EventCategory {
@@ -3364,6 +3546,10 @@ message SessionEvent {
   string session_role = 6;
   // Stable operator-facing reason/summary string for this event.
   string reason = 7;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // one. peer_address is the bare IP literal; the pair identifies the
+  // neighbor, as on RouteEvent.
+  string peer_interface = 8;
 }
 
 message StreamLagEvent {
@@ -3395,6 +3581,10 @@ message NotificationEvent {
   string shutdown_reason = 9;
   // Stable operator-facing reason/summary string for this event.
   string reason = 10;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // one. peer_address is the bare IP literal; the pair identifies the
+  // neighbor, as on RouteEvent.
+  string peer_interface = 11;
 }
 
 message PolicyEvent {
@@ -3415,6 +3605,10 @@ message PolicyEvent {
   string timestamp = 7;
   // Stable operator-facing reason/summary string for this event.
   string reason = 8;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // one. peer_address is the bare IP literal; the pair identifies the
+  // neighbor, as on RouteEvent.
+  string peer_interface = 9;
 }
 
 message DataplaneEvent {
@@ -3445,6 +3639,9 @@ message DataplaneRouteEvent {
   string timestamp = 10;
   // Stable operator-facing reason/summary string for this event.
   string reason = 11;
+  // Interface of the scoped (IPv6 link-local) neighbor named by
+  // peer_address; empty for a numbered neighbor, as on FibRouteStatus.
+  string peer_interface = 12;
 }
 
 message EvpnRouteEvent {
@@ -3466,6 +3663,10 @@ message EvpnRouteEvent {
   EvpnRouteEntry previous_route = 9;
   // Stable operator-facing reason/summary string for this event.
   string reason = 10;
+  // Interfaces recorded with the current and previous best-path peers.
+  // Empty for numbered or absent peers, independent of the current roster.
+  string peer_interface = 11;
+  string previous_peer_interface = 12;
 }
 
 message BfdSessionEvent {
@@ -3480,6 +3681,9 @@ message BfdSessionEvent {
   string diagnostic = 6;
   // Stable operator-facing reason/summary string for this event.
   string reason = 7;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // one, as on BfdSession.
+  string peer_interface = 8;
 }
 
 message BgpEvent {
@@ -3505,6 +3709,10 @@ message BgpEvent {
   // Outbound peer affected by target-scoped route events such as
   // export-policy filtering. Empty for ordinary source-peer route events.
   string target_peer_address = 19;
+  // peer_address is a bare IP literal for every category. A scoped
+  // neighbor's interface is in the payload (RouteEvent, SessionEvent,
+  // NotificationEvent or PolicyEvent peer_interface fields); it is not
+  // duplicated here, which would grow every broadcast ring slot.
 
   // 21 was the durable event_id and 22 the OTC route-blocked payload, both
   // produced only by the removed durable event history.
@@ -3543,6 +3751,8 @@ service InjectionService {
   // periodically and after every reconnect by re-adding its desired routes
   // (an UNCHANGED re-add is cheap). A lower ControlService.GetHealth
   // uptime_seconds is an extra trigger, not a reliable restart detector.
+  // A key held by a lease owner (ADR-0141) returns FAILED_PRECONDITION with
+  // ErrorInfo reason OWNER_MISMATCH; see AddLeasedPath.
   rpc AddPath(AddPathRequest) returns (AddPathResponse);
   // Withdraw a locally injected unicast route by its (prefix, prefix_length,
   // path_id) key. Only routes added through AddPath are affected; routes
@@ -3557,14 +3767,61 @@ service InjectionService {
   // path_id, never counts as this route's export. Rows cover Established
   // peers only: each peer registered for outbound updates gets exactly one
   // disposition, in peer-address order and paged by page_size and
-  // page_token. A configured peer without a session is absent from the list,
-  // and absent does not mean withheld: cross-check NeighborService
-  // ListNeighbors to find peers that receive nothing because they are not
-  // Established. COMMITTED means the
+  // page_token. A configured peer without a session is absent from the list
+  // unless include_configured is set, and absent does not mean withheld.
+  // With include_configured, every managed peer without an Established
+  // session also gets one NOT_ESTABLISHED row, in the same order. COMMITTED
+  // means the
   // route sits in that peer's Adj-RIB-Out: committed to its outbound path,
   // not received, accepted or installed by the peer, which BGP does not
-  // report. A key with no local route returns NOT_FOUND.
+  // report. A key with no local route returns NOT_FOUND. A resumed page
+  // returns ABORTED when, since the walk's first page, the route's content
+  // changed (including its removal), a peer joined or left the Established
+  // set, or an Established peer's export policy, a dataset it or an
+  // attached conditional advertisement reads, or another of its export
+  // settings changed: outbound prefix limits, conditional advertisement,
+  // peer group, Add-Path send limits, exported families, ORF state or the
+  // session's outbound encoding profile. Restart
+  // the walk with an empty page_token. Any page, including the first, also
+  // returns ABORTED when such a dataset or encoding profile changes while
+  // the page is being evaluated. Removing the route and restoring identical
+  // content between pages is indistinguishable and the walk stays valid.
+  // Other inputs, such as other routes for the prefix or outbound delivery
+  // progress, are read live on each page and are not checked. With
+  // include_configured, a resumed page also returns ABORTED when the managed
+  // peer set changed, and a managed peer becoming Established counts as a
+  // peer joining. A token for another key, another include_configured or
+  // from another daemon process returns INVALID_ARGUMENT.
   rpc ListPathExportDispositions(ListPathExportDispositionsRequest) returns (ListPathExportDispositionsResponse);
+  // ListPathExportDispositions over a list of local route keys in one paged
+  // walk, such as every key ListLeasedKeys lists for an owner. A walk names
+  // 1 to 1000 keys; an empty key list, more than 1000 keys or a key named
+  // twice returns INVALID_ARGUMENT. The 1000 bounds the keys per walk, not
+  // what one response holds: a response holds at most page_size entries,
+  // each peer row is one entry, and a key listed with no rows is one, so one
+  // key's rows can span several pages. A key whose rows continue on the
+  // next page is listed there again with the remaining peers. Keys are
+  // listed in request order, each with its peers as
+  // ListPathExportDispositions lists them. A key with no local route on the
+  // page that lists it is listed with found false and no rows; the call
+  // itself does not return NOT_FOUND. A resumed page returns ABORTED on the
+  // changes ListPathExportDispositions checks, applied to every key: the
+  // content of any key's route, or whether it has a route, differs from the
+  // first page. The check compares each page's read, not the history between
+  // pages, so a route added and removed again between pages does not abort
+  // the walk. A token for another key list, another include_configured or
+  // from another daemon process returns INVALID_ARGUMENT.
+  rpc BatchListPathExportDispositions(BatchListPathExportDispositionsRequest) returns (BatchListPathExportDispositionsResponse);
+  // ListPathExportDispositions for one locally injected FlowSpec rule,
+  // identified by its exact AddFlowSpec key (afi_safi, components), with the
+  // same rows, peer order, paging, include_configured, ABORTED and
+  // INVALID_ARGUMENT contract. A received rule with the same key never
+  // counts as this rule's export: when it is the selected rule, this rule is
+  // WITHHELD with reason not_selected. Export policy evaluates a FlowSpec
+  // rule with RPKI state not_found and ASPA state unknown, so deny_validation
+  // carries those states when the deciding statement tests them. A key with
+  // no local rule returns NOT_FOUND. This new diagnostic RPC is outside v1.
+  rpc ListFlowSpecExportDispositions(ListFlowSpecExportDispositionsRequest) returns (ListPathExportDispositionsResponse);
   // Inject or replace a locally originated FlowSpec rule. The rule is an
   // upsert keyed on (afi_safi, components): repeating an identical request
   // is idempotent, and a request with the same key but different actions or
@@ -3575,7 +3832,9 @@ service InjectionService {
   // Graceful Restart selection deferral is active for the family. OK does
   // not mean any peer received or installed the rule, and a received rule
   // with the same key can out-select it. Injected rules are process-local:
-  // a controller must re-inject them after a daemon restart.
+  // a controller must re-inject them after a daemon restart. A key held by a
+  // lease owner returns FAILED_PRECONDITION with ErrorInfo reason
+  // OWNER_MISMATCH; see AddLeasedPath.
   rpc AddFlowSpec(AddFlowSpecRequest) returns (AddFlowSpecResponse);
   // Withdraw a locally injected FlowSpec rule by its (afi_safi, components)
   // key. Only rules added through AddFlowSpec are affected; rules received
@@ -3603,11 +3862,33 @@ service InjectionService {
   // state may be gone and it must re-add its full desired state. A leased
   // add on a key held by another owner, or by no owner, returns
   // FAILED_PRECONDITION: convert an unleased entry by deleting it first, or
-  // add under a fresh key such as another path_id. A 65th live owner, or an
-  // owner's 16,385th key, returns RESOURCE_EXHAUSTED. Both leave everything
-  // unchanged. A daemon without
-  // these RPCs answers UNIMPLEMENTED and creates nothing; never retry a
-  // failed leased add through AddPath or AddFlowSpec.
+  // add under a fresh key such as another path_id. A 65th live owner
+  // returns RESOURCE_EXHAUSTED. An owner holds at most 16,384 keys, per
+  // owner across unicast and FlowSpec together; its 16,385th returns
+  // RESOURCE_EXHAUSTED, and keys of an expired generation count until the
+  // expiry sweep removes them. Every refusal leaves everything unchanged. A
+  // daemon without these RPCs answers UNIMPLEMENTED and creates nothing;
+  // never retry a failed leased add through AddPath or AddFlowSpec.
+  //
+  // A leased add whose outcome is unknown, such as a deadline, a lost
+  // connection or INTERNAL "RIB manager dropped reply" (which can follow a
+  // commit), may be retried as the same leased add. The entry is owned
+  // intent whether or not the first attempt committed: the retry joins the
+  // owner's lease, or starts a new generation if it has expired, and a
+  // leased add never becomes permanent injection.
+  //
+  // Lease conflicts. Every ownership or generation refusal on AddLeasedPath,
+  // AddLeasedFlowSpec, AddPath, AddFlowSpec, DeletePath, DeleteFlowSpec and
+  // RenewLease is FAILED_PRECONDITION with one google.rpc.ErrorInfo detail
+  // (domain "rustbgpd") in the grpc-status-details-bin trailer. Its reason
+  // is contract and tells the cases apart; the message text is not:
+  //   OWNER_MISMATCH       the key is held by a different owner (for an
+  //                        unleased add or delete, by any owner).
+  //   KEY_UNOWNED          the key is held by no owner: a leased add must
+  //                        not adopt it, and an owner-scoped delete must not
+  //                        remove it.
+  //   GENERATION_NOT_LIVE  RenewLease named an unknown owner, or an expired
+  //                        or superseded generation.
   rpc AddLeasedPath(AddLeasedPathRequest) returns (AddLeasedPathResponse);
   rpc AddLeasedFlowSpec(AddLeasedFlowSpecRequest) returns (AddLeasedFlowSpecResponse);
   // Set the owner's lease deadline to exactly now + lease_seconds, which may
@@ -3617,10 +3898,66 @@ service InjectionService {
   // deadline loses) or a superseded generation, including one from before a
   // daemon restart. A renewal never creates or resurrects a lease; on
   // FAILED_PRECONDITION the controller re-adds its full desired state, and
-  // the first leased add starts a new generation.
+  // the first leased add starts a new generation. The refusal's ErrorInfo
+  // reason is GENERATION_NOT_LIVE.
   rpc RenewLease(RenewLeaseRequest) returns (RenewLeaseResponse);
-  // The lease table, optionally for one owner.
+  // The lease table, optionally for one owner. An owner past its deadline
+  // stays listed, with lease_remaining_ms 0, until the expiry task's pass
+  // scheduled for that deadline takes it and hands its routes to the RIB
+  // for withdrawal; until the RIB applies that batch the routes may still be
+  // present. RenewLease refuses that generation with GENERATION_NOT_LIVE,
+  // so a controller adopting a listed entry with remaining 0 re-adds its
+  // full desired state instead.
   rpc ListInjectionLeases(ListInjectionLeasesRequest) returns (ListInjectionLeasesResponse);
+  // The injected keys one lease owner holds, with each key's generation and
+  // remaining lease, paged in a fixed key order: unicast by (prefix,
+  // prefix_length, path_id), then FlowSpec by AFI and rule. Only that owner's
+  // keys are listed, never another owner's or unowned entries. A key whose
+  // lease expired and whose withdrawal is pending reports
+  // lease_remaining_ms = 0.
+  //
+  // Every page carries the owner's live generation the walk is bound to:
+  // absent means the owner has no live lease, so the controller re-adds its
+  // whole desired state; present with keys lists the owner's keys, where a
+  // row whose own generation differs from it belongs to an expired
+  // generation awaiting withdrawal, which renewing the live generation does
+  // not keep, so re-add it if still wanted; present with no keys means a
+  // live lease that holds nothing. An
+  // empty page is never a failure: errors are gRPC statuses.
+  //
+  // A walk is bound to the daemon process and the owner's generation at its
+  // first page. A later page after a daemon restart, or after the owner's
+  // lease expired or a new generation started, returns ABORTED with a
+  // google.rpc.ErrorInfo (domain "rustbgpd", reason "WALK_INVALIDATED") and
+  // no keys; restart the walk with an empty page_token. A walk that began with no
+  // live lease also aborts if any lease generation started since, even one
+  // that expired again. A token from a previous daemon process is never
+  // accepted, and a token is valid only for the owner it was issued for
+  // (another owner's token is INVALID_ARGUMENT).
+  rpc ListLeasedKeys(ListLeasedKeysRequest) returns (ListLeasedKeysResponse);
+  // A controller's replay-complete signal for the planned-restart
+  // End-of-RIB grace window (gr_eor_grace_time). The daemon releases the
+  // held End-of-RIB once every owner listed in [global]
+  // gr_eor_replay_owners has signalled for the current incarnation, or at
+  // the window's deadline, whichever comes first. An empty list keeps the
+  // timer-only window.
+  //
+  // Protocol: read incarnation I (CheckLivenessResponse.incarnation or
+  // LeaseGeneration.incarnation) before replaying, replay the full desired
+  // state, then call MarkReplayComplete(owner, I). Ordering: the signal
+  // travels through the RIB queue behind the controller's earlier
+  // injections, and each AddPath, AddFlowSpec or leased add commits before
+  // its RPC returns, so every route the controller added before calling is
+  // distributed ahead of the released End-of-RIB.
+  //
+  // The incarnation must be the daemon's current one; otherwise the call
+  // returns FAILED_PRECONDITION with google.rpc.ErrorInfo reason
+  // INCARNATION_MISMATCH and changes nothing: the daemon restarted, so read
+  // the incarnation again and replay again. Every other outcome is OK (see
+  // ReplayCompleteOutcome). A repeated signal for the same owner changes
+  // nothing. The signal proves only that the controller replayed its own
+  // desired state. A malformed owner is INVALID_ARGUMENT.
+  rpc MarkReplayComplete(MarkReplayCompleteRequest) returns (MarkReplayCompleteResponse);
   // Inject a locally-originated EVPN route (RFC 7432). SDN controllers
   // push Type 2 / Type 5 / etc. routes to the RR's Loc-RIB, and the RR
   // reflects them to iBGP peers negotiating L2VPN/EVPN.
@@ -3699,7 +4036,10 @@ message DeletePathRequest {
   bool allow_missing = 5;
   // Owner the caller expects the route to have; "" means unowned. A
   // mismatch, including "" on an owned route, returns FAILED_PRECONDITION
-  // unless override_owner is set. A delete does not renew a lease.
+  // unless override_owner is set, with ErrorInfo reason OWNER_MISMATCH when
+  // another owner holds the route and KEY_UNOWNED when an owner is named
+  // but the route is unowned (see AddLeasedPath). A delete does not renew a
+  // lease.
   string owner = 6;
   // Delete regardless of the route's owner (operator override).
   bool override_owner = 7;
@@ -3726,8 +4066,12 @@ message ListPathExportDispositionsRequest {
   uint32 path_id = 3;
   // Peers per page: 0 selects 100, and larger values are capped at 1000.
   uint32 page_size = 4;
-  // next_page_token of the previous page; empty for the first page.
+  // next_page_token of the previous page; empty for the first page. Opaque.
   string page_token = 5;
+  // Also list every managed peer (configured, or dynamic while the daemon
+  // tracks it) without an Established session, as NOT_ESTABLISHED. Keep it
+  // the same on every page of a walk.
+  bool include_configured = 6;
 }
 
 enum PathExportDisposition {
@@ -3739,6 +4083,10 @@ enum PathExportDisposition {
   PATH_EXPORT_DISPOSITION_WITHHELD = 2;
   // Export to this peer has not settled; reason names what is outstanding.
   PATH_EXPORT_DISPOSITION_PENDING = 3;
+  // The peer is managed but has no Established session, so nothing is
+  // exported to it; reason is not_established. Returned only when the
+  // request sets include_configured.
+  PATH_EXPORT_DISPOSITION_NOT_ESTABLISHED = 4;
 }
 
 message PathExportDispositionEntry {
@@ -3753,7 +4101,8 @@ message PathExportDispositionEntry {
   // a colon and the exact-export reason, e.g.
   // exact_export_rejected:missing_ipv6_next_hop), export_rule (any other
   // export gate; explain_code names it). PENDING: selection_deferred,
-  // outbound_resync, orf_pending, not_yet_committed. New codes may be added.
+  // outbound_resync, orf_pending, not_yet_committed. NOT_ESTABLISHED:
+  // not_established. New codes may be added.
   string reason = 3;
   // Stop code of the export explain ladder behind the reason, in the
   // ExplainAdvertisedRoute gate vocabulary; empty when none applies.
@@ -3762,11 +4111,71 @@ message PathExportDispositionEntry {
   string detail = 5;
   // Outbound Add-Path path identifier when COMMITTED; 0 on single-best.
   uint32 advertised_path_id = 6;
+  // Empty unless explain_code is policy_denied. Then one code for each
+  // validation state the deciding export-policy statement's match tests,
+  // carrying the route's state: rpki_valid, rpki_invalid or rpki_not_found,
+  // then aspa_valid, aspa_invalid or aspa_unknown. A statement's conditions
+  // AND together, so others may also have matched; under an rpol || or !,
+  // the validation comparison need not be the operand that held. Empty when
+  // the deciding statement tests neither, such as a later statement's deny
+  // after a validation-matching statement permitted, or an rpol term decided
+  // by a loop or a fail-closed error. New codes may be added.
+  repeated string deny_validation = 7;
+  // Interface of the scoped (IPv6 link-local) neighbor named by
+  // peer_address; empty for a numbered neighbor. peer_address stays a bare IP
+  // literal: the pair (peer_address, peer_interface) identifies the neighbor.
+  string peer_interface = 8;
 }
 
 message ListPathExportDispositionsResponse {
   repeated PathExportDispositionEntry peers = 1;
   // Empty when no peers remain.
+  string next_page_token = 2;
+}
+
+message BatchListPathExportDispositionsRequest {
+  // The local routes' AddPath keys, in walk order: 1 to 1000 keys per walk,
+  // none named twice.
+  repeated LeasedPathKey keys = 1;
+  // Entries per page: 0 selects 100, and larger values are capped at 1000.
+  // A peer row is one entry, and so is a key listed with no rows, so a page
+  // can end inside one key's rows.
+  uint32 page_size = 2;
+  // next_page_token of the previous page; empty for the first page. Opaque.
+  string page_token = 3;
+  // As ListPathExportDispositionsRequest.include_configured.
+  bool include_configured = 4;
+}
+
+message ListFlowSpecExportDispositionsRequest {
+  // The local rule's AddFlowSpec key, with the same identity and ordering
+  // rules as AddFlowSpecRequest.
+  AddressFamily afi_safi = 1;
+  repeated FlowSpecComponent components = 2;
+  // As ListPathExportDispositionsRequest.page_size, page_token and
+  // include_configured.
+  uint32 page_size = 3;
+  string page_token = 4;
+  bool include_configured = 5;
+}
+
+// The export dispositions of one requested key on one page.
+message PathExportDispositions {
+  // The key as the request named it.
+  LeasedPathKey key = 1;
+  // Whether a local route had this key when this page read it. false lists
+  // no peers. A resumed walk also had no route for the key on its first
+  // page, but a route added and removed again between pages is not
+  // detected.
+  bool found = 2;
+  // One row per peer, as ListPathExportDispositions lists them; the key's
+  // remaining peers continue on the next page when it ends mid-key.
+  repeated PathExportDispositionEntry peers = 3;
+}
+
+message BatchListPathExportDispositionsResponse {
+  repeated PathExportDispositions routes = 1;
+  // Empty when no entries remain.
   string next_page_token = 2;
 }
 
@@ -3851,7 +4260,8 @@ message FlowSpecRouteEntry {
   repeated uint64 extended_communities = 7;
   // Same as Route.injection_owner, lease_generation and lease_remaining_ms,
   // for a rule injected with AddLeasedFlowSpec. Set only in the
-  // received_peer_address "0.0.0.0" view of ListFlowSpecRoutes.
+  // received_peer_address "0.0.0.0" view of ListFlowSpecRoutes. As on
+  // Route, the three are set together or not at all.
   string injection_owner = 8;
   LeaseGeneration lease_generation = 9;
   optional uint32 lease_remaining_ms = 10;
@@ -3974,12 +4384,87 @@ message InjectionLeaseEntry {
   LeaseGeneration generation = 2;
   // The lease_seconds that last set the deadline.
   uint32 lease_seconds = 3;
-  // Time to the deadline; 0 means expired, withdrawal pending.
+  // Time to the deadline, rounded up to whole milliseconds; 0 means the
+  // deadline has passed and removal is pending: the entry stays listed
+  // until the expiry pass takes it and withdraws the owner's routes.
+  // RenewLease refuses it with GENERATION_NOT_LIVE, and the controller
+  // re-adds its full desired state.
   uint32 lease_remaining_ms = 4;
 }
 
 message ListInjectionLeasesResponse {
   repeated InjectionLeaseEntry leases = 1;
+}
+
+message ListLeasedKeysRequest {
+  // Required lease owner.
+  string owner = 1;
+  // Keys per page: 0 selects 100, and larger values are capped at 1000.
+  uint32 page_size = 2;
+  // next_page_token of the previous page; empty for the first page. Opaque:
+  // never parse or synthesize it.
+  string page_token = 3;
+}
+
+// A unicast key, as AddPath and DeletePath name it.
+message LeasedPathKey {
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  uint32 path_id = 3;
+}
+
+// A FlowSpec key, as AddFlowSpec and DeleteFlowSpec name it.
+message LeasedFlowSpecKey {
+  AddressFamily afi_safi = 1;
+  repeated FlowSpecComponent components = 2;
+}
+
+message LeasedKey {
+  oneof key {
+    LeasedPathKey path = 1;
+    LeasedFlowSpecKey flow_spec = 2;
+  }
+  // Generation the key is held under.
+  LeaseGeneration generation = 3;
+  // Time to the lease deadline; 0 means expired, withdrawal pending.
+  uint32 lease_remaining_ms = 4;
+}
+
+message ListLeasedKeysResponse {
+  repeated LeasedKey keys = 1;
+  // Empty when no keys remain.
+  string next_page_token = 2;
+  // The owner's live generation this walk is bound to; absent when the
+  // owner has no live lease.
+  LeaseGeneration generation = 3;
+}
+
+message MarkReplayCompleteRequest {
+  // 1-64 bytes of [A-Za-z0-9._-], the lease owner syntax.
+  string owner = 1;
+  // The daemon incarnation the controller read before it replayed.
+  fixed64 incarnation = 2;
+}
+
+message MarkReplayCompleteResponse {
+  ReplayCompleteOutcome outcome = 1;
+  // Listed owners that have not signalled yet, sorted. Empty unless the
+  // outcome is RECORDED.
+  repeated string awaiting = 2;
+}
+
+enum ReplayCompleteOutcome {
+  REPLAY_COMPLETE_OUTCOME_UNSPECIFIED = 0;
+  // This owner was the last one awaited: the held End-of-RIB was released.
+  REPLAY_COMPLETE_OUTCOME_RELEASED = 1;
+  // Recorded; other listed owners have not signalled yet.
+  REPLAY_COMPLETE_OUTCOME_RECORDED = 2;
+  // The owner is not in gr_eor_replay_owners. Nothing changed.
+  REPLAY_COMPLETE_OUTCOME_NOT_EXPECTED = 3;
+  // No End-of-RIB is held: a cold boot, no grace window configured, or the
+  // window already ended (released or past its deadline). Nothing is
+  // released; the signal is still recorded for this incarnation.
+  REPLAY_COMPLETE_OUTCOME_NOT_HOLDING = 4;
 }
 
 message DeleteFlowSpecResponse {
@@ -4793,7 +5278,8 @@ message DeleteEvpnRouteResponse {}
 
 service ControlService {
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
-  // Answers only that the authenticated gRPC handler is serving; no actor readiness or topology.
+  // Answers only that the authenticated gRPC handler is serving, and which
+  // process answered; no actor readiness or topology.
   rpc CheckLiveness(CheckLivenessRequest) returns (CheckLivenessResponse);
   // Fails UNAVAILABLE when a core actor misses the 200 ms probe deadline. The
   // miss may be transient (busy, as while a reload settles) or persistent (a
@@ -4813,7 +5299,14 @@ message ShutdownResponse {}
 
 message CheckLivenessRequest {}
 
-message CheckLivenessResponse {}
+message CheckLivenessResponse {
+  // Identifies one daemon process lifetime: drawn at random when the daemon
+  // starts and different on every start, with no other meaning. It is the
+  // same value as LeaseGeneration.incarnation, so a client that sees it
+  // change knows the daemon restarted between two calls. Zero only from a
+  // server that predates the field.
+  fixed64 incarnation = 1;
+}
 
 message HealthRequest {}
 

@@ -1076,11 +1076,104 @@ impl DaemonHealthObserver for RustBgpdAnnouncer {
     }
 }
 
-fn decode_export(entry: pb::PathExportDispositionEntry) -> Result<PeerExport> {
-    entry
-        .peer_address
+// Keep scope in the existing string identity: consumers use it as both a
+// metric label and a UI row key. A bare link-local address aliases neighbors.
+fn scoped_peer_address(address: &str, interface: &str) -> Result<String> {
+    let address = address
         .parse::<std::net::IpAddr>()
-        .map_err(|_| invalid("invalid export peer address"))?;
+        .map_err(|_| invalid("invalid peer address"))?;
+    match address {
+        std::net::IpAddr::V6(address) if address.is_unicast_link_local() => {
+            validate_peer_interface(interface)?;
+            Ok(format!("{address}%{interface}"))
+        }
+        _ if interface.is_empty() => Ok(address.to_string()),
+        _ => Err(invalid("numbered peer has an interface scope")),
+    }
+}
+
+fn validate_peer_interface(interface: &str) -> Result<()> {
+    if interface.is_empty()
+        || interface
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(invalid("invalid peer interface"));
+    }
+    Ok(())
+}
+
+fn decode_peer_status(peer: pb::NeighborState) -> Result<PeerStatus> {
+    if peer.stale {
+        return Err(invalid("stale rustbgpd peer state"));
+    }
+    let config = peer
+        .config
+        .ok_or_else(|| invalid("missing peer configuration"))?;
+    let state = match peer.state {
+        1 => SessionState::Idle,
+        2 => SessionState::Connect,
+        3 => SessionState::Active,
+        4 => SessionState::OpenSent,
+        5 => SessionState::OpenConfirm,
+        6 => SessionState::Established,
+        _ => return Err(invalid("unknown peer state")),
+    };
+    let (name, address) = if config.address.is_empty() {
+        validate_peer_interface(&config.interface)?;
+        let name = format!("interface:{}", config.interface);
+        let address = match pb::NeighborDiscoveryState::try_from(peer.discovery_state) {
+            Ok(pb::NeighborDiscoveryState::Bound) => {
+                let address = peer
+                    .learned_peer_address
+                    .parse::<std::net::Ipv6Addr>()
+                    .map_err(|_| invalid("invalid learned peer address"))?;
+                if !address.is_unicast_link_local() {
+                    return Err(invalid("learned peer address is not link-local"));
+                }
+                scoped_peer_address(&peer.learned_peer_address, &config.interface)?
+            }
+            Ok(
+                pb::NeighborDiscoveryState::InterfaceMissing
+                | pb::NeighborDiscoveryState::LinkDown
+                | pb::NeighborDiscoveryState::AwaitingDiscovery,
+            ) if peer.learned_peer_address.is_empty() && !state.is_established() => name.clone(),
+            _ => return Err(invalid("inconsistent interface-only peer discovery state")),
+        };
+        (name, address)
+    } else {
+        if !peer.learned_peer_address.is_empty()
+            || peer.discovery_state != pb::NeighborDiscoveryState::Unspecified as i32
+        {
+            return Err(invalid("addressed peer has interface-only discovery state"));
+        }
+        let address = scoped_peer_address(&config.address, &config.interface)?;
+        (address.clone(), address)
+    };
+    Ok(PeerStatus {
+        name,
+        address,
+        state,
+    })
+}
+
+fn decode_peer_statuses(peers: Vec<pb::NeighborState>) -> Result<Vec<PeerStatus>> {
+    let mut names = std::collections::HashSet::new();
+    let mut addresses = std::collections::HashSet::new();
+    peers
+        .into_iter()
+        .map(|peer| {
+            let peer = decode_peer_status(peer)?;
+            if !names.insert(peer.name.clone()) || !addresses.insert(peer.address.clone()) {
+                return Err(invalid("peer observation repeated a neighbor identity"));
+            }
+            Ok(peer)
+        })
+        .collect()
+}
+
+fn decode_export(entry: pb::PathExportDispositionEntry) -> Result<PeerExport> {
+    let peer_address = scoped_peer_address(&entry.peer_address, &entry.peer_interface)?;
     let disposition = match pb::PathExportDisposition::try_from(entry.disposition) {
         Ok(pb::PathExportDisposition::Committed) => ExportDisposition::Committed,
         Ok(pb::PathExportDisposition::Withheld) => ExportDisposition::Withheld,
@@ -1088,7 +1181,7 @@ fn decode_export(entry: pb::PathExportDispositionEntry) -> Result<PeerExport> {
         _ => return Err(invalid("unknown export disposition")),
     };
     Ok(PeerExport {
-        peer_address: entry.peer_address,
+        peer_address,
         disposition,
         reason: entry.reason,
         explain_code: entry.explain_code,
@@ -1109,6 +1202,7 @@ impl ExportObserver for RustBgpdAnnouncer {
                 path_id: 0,
                 page_size: ROUTE_PAGE_SIZE,
                 page_token: page_token.clone(),
+                include_configured: false,
             };
             let response = match self
                 .call("ListPathExportDispositions", || async {
@@ -1157,36 +1251,7 @@ impl PeerObserver for RustBgpdAnnouncer {
                     .await
             })
             .await?;
-        response
-            .neighbors
-            .into_iter()
-            .map(|peer| {
-                if peer.stale {
-                    return Err(invalid("stale rustbgpd peer state"));
-                }
-                let config = peer
-                    .config
-                    .ok_or_else(|| invalid("missing peer configuration"))?;
-                config
-                    .address
-                    .parse::<std::net::IpAddr>()
-                    .map_err(|_| invalid("invalid peer address"))?;
-                let state = match peer.state {
-                    1 => SessionState::Idle,
-                    2 => SessionState::Connect,
-                    3 => SessionState::Active,
-                    4 => SessionState::OpenSent,
-                    5 => SessionState::OpenConfirm,
-                    6 => SessionState::Established,
-                    _ => return Err(invalid("unknown peer state")),
-                };
-                Ok(PeerStatus {
-                    name: config.address.clone(),
-                    address: config.address,
-                    state,
-                })
-            })
-            .collect()
+        decode_peer_statuses(response.neighbors)
     }
 }
 
@@ -1617,3 +1682,7 @@ mod tests {
 #[cfg(all(test, feature = "test-utils"))]
 #[path = "rustbgpd_tests.rs"]
 mod rpc_tests;
+
+#[cfg(test)]
+#[path = "rustbgpd_v080_tests.rs"]
+mod v080_tests;

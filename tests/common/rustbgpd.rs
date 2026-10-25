@@ -23,6 +23,8 @@ use testcontainers::{
 pub const EXPORT_DENIED: &str = "203.0.113.99/32";
 /// A configured neighbor with no listener behind it.
 pub const UNREACHABLE_PEER: &str = "192.0.2.250";
+/// Missing interface in the dedicated v0.80 observation fixture's own namespace.
+pub const UNBOUND_INTERFACE: &str = "pd-unbound";
 
 pub struct Speaker {
     pub container: ContainerAsync<GenericImage>,
@@ -41,18 +43,32 @@ impl Speaker {
     }
 
     pub async fn start_secure(transport: &str) -> Self {
-        Self::start_configured(transport, None, None, false).await
+        Self::start_configured(transport, None, None, false, false).await
     }
 
     pub async fn start_peered(network: &str, peer: &str, peer_asn: u32) -> Self {
-        Self::start_configured("bearer", Some((peer, peer_asn)), Some(network), false).await
+        Self::start_configured(
+            "bearer",
+            Some((peer, peer_asn)),
+            Some(network),
+            false,
+            false,
+        )
+        .await
     }
 
     /// The peer also negotiates IPv4/IPv6 unicast. Export policy denies
     /// [`EXPORT_DENIED`], and [`UNREACHABLE_PEER`] is configured but never
     /// Established.
     pub async fn start_peered_unicast(network: &str, peer: &str, peer_asn: u32) -> Self {
-        Self::start_configured("bearer", Some((peer, peer_asn)), Some(network), true).await
+        Self::start_configured("bearer", Some((peer, peer_asn)), Some(network), true, false).await
+    }
+
+    /// Missing-interface discovery, with no real BGP peer.
+    /// Only this mode needs a raw-capable user; it has its own network namespace
+    /// and disables Router Advertisement/Solicitation sending.
+    pub async fn start_observation_neighbors() -> Self {
+        Self::start_configured("bearer", None, Some("bridge"), false, true).await
     }
 
     async fn start_configured(
@@ -60,9 +76,10 @@ impl Speaker {
         peer: Option<(&str, u32)>,
         network: Option<&str>,
         unicast: bool,
+        observation_neighbors: bool,
     ) -> Self {
         let bridged = network.is_some();
-        let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.79.0".into());
+        let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.80.0".into());
         let releases: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/rustbgpd/releases.json")).unwrap();
         let release = &releases[&version];
@@ -211,6 +228,28 @@ hold_time = 9
                 )
             })
             .unwrap_or_default();
+        let observation_config = if observation_neighbors {
+            let unbound = UNBOUND_INTERFACE;
+            format!(
+                r#"
+[global.unnumbered]
+router_advertisements = false
+[flowspec]
+validation = "off"
+[policy.definitions.observation]
+default_action = "permit"
+[policy]
+import_chain = ["observation"]
+export_chain = ["observation"]
+[[neighbors]]
+interface = "{unbound}"
+remote_asn = "external"
+families = ["ipv4_flowspec", "ipv6_flowspec"]
+"#
+            )
+        } else {
+            String::new()
+        };
         std::fs::write(
             files.path().join("config.toml"),
             format!(
@@ -220,7 +259,7 @@ asn = 64512
 router_id = "192.0.2.1"
 {bgp_listen_addresses}
 listen_port = {}
-runtime_state_dir = "/fixture/runtime"
+runtime_state_dir = "{runtime_state_dir}"
 worker_threads = 2
 ebgp_requires_policy = true
 [global.telemetry]
@@ -238,12 +277,20 @@ access_mode = "read_write"
 prefixd-test = "operator"
 "rustbgpd:prefixd-test" = "operator"
 {peering}
+{observation_config}
 "#,
                 if bridged { 179 } else { ports[0] },
                 ports[1],
                 transport == "uds",
                 ports[2],
                 auth,
+                // Discovery runs as root only in this isolated mode. Let it
+                // create an owned state directory inside its container.
+                runtime_state_dir = if observation_neighbors {
+                    "/tmp/prefixd-observation-runtime"
+                } else {
+                    "/fixture/runtime"
+                },
                 bgp_listen_addresses = if bridged {
                     ""
                 } else {
@@ -268,6 +315,9 @@ prefixd-test = "operator"
         let image = image
             .with_host_config_modifier(move |host| {
                 host.cpuset_cpus = std::env::var("PREFIXD_TEST_CPUSET").ok();
+                if observation_neighbors {
+                    host.cap_add = Some(vec!["NET_RAW".into()]);
+                }
                 if bridged {
                     host.publish_all_ports = Some(false);
                     host.port_bindings = Some(
@@ -284,7 +334,11 @@ prefixd-test = "operator"
                 }
             })
             .with_network(network.unwrap_or("host"))
-            .with_user(format!("{}:{}", metadata.uid(), metadata.gid()))
+            .with_user(if observation_neighbors {
+                "0:0".into()
+            } else {
+                format!("{}:{}", metadata.uid(), metadata.gid())
+            })
             .with_mount(
                 Mount::bind_mount(files.path().to_str().unwrap(), "/fixture")
                     .with_access_mode(AccessMode::ReadWrite),
@@ -294,24 +348,26 @@ prefixd-test = "operator"
             .start()
             .await
             .expect("start pinned rustbgpd container");
-        let mut check = container
+        let check = container
             .exec(ExecCommand::new([
                 "rustbgpd",
                 "--check",
                 "--strict",
                 "/fixture/config.toml",
             ]))
-            .await
-            .unwrap();
+            .await;
+        let mut check = match check {
+            Ok(check) => check,
+            Err(error) => {
+                Self::print_startup_logs(&container).await;
+                panic!("owned daemon config-check could not start: {error}");
+            }
+        };
         let output = check.stdout_to_vec().await.unwrap();
         let errors = check.stderr_to_vec().await.unwrap();
         let status = check.exit_code().await;
         if !matches!(status, Ok(Some(0))) {
-            eprintln!(
-                "daemon startup stdout: {}\ndaemon startup stderr: {}",
-                String::from_utf8_lossy(&container.stdout_to_vec().await.unwrap_or_default()),
-                String::from_utf8_lossy(&container.stderr_to_vec().await.unwrap_or_default())
-            );
+            Self::print_startup_logs(&container).await;
         }
         let status =
             status.expect("owned daemon config-check exit status (startup logs printed above)");
@@ -339,6 +395,14 @@ prefixd-test = "operator"
         };
         fixture.ready().await;
         fixture
+    }
+
+    async fn print_startup_logs(container: &ContainerAsync<GenericImage>) {
+        eprintln!(
+            "daemon startup stdout: {}\ndaemon startup stderr: {}",
+            String::from_utf8_lossy(&container.stdout_to_vec().await.unwrap_or_default()),
+            String::from_utf8_lossy(&container.stderr_to_vec().await.unwrap_or_default())
+        );
     }
 
     pub async fn ready(&self) {

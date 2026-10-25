@@ -29,6 +29,34 @@ the protection; drain affected rules or accept that policy change explicitly.
   [mitigation origin mode](#mitigation-origin-mode).
 - **Always back up the database** before upgrading.
 
+## rustbgpd v0.80.0
+
+Compose now pins the immutable rustbgpd v0.80.0 image. The minimum controller
+contract remains v0.79.0, and existing GoBGP selection is unchanged. There is no
+prefixd database migration or target transfer for this speaker version change.
+Keep the same POP, endpoint, credentials and operation mode. Follow rustbgpd's
+[v0.80.0 release notes](https://github.com/lance0/rustbgpd/releases/tag/v0.80.0)
+for its own configuration and restart requirements, then verify readiness,
+reconciliation and the receiving routers after recreating the speaker.
+
+This restart loses process-local injection until reconciliation replays desired
+state. Allow for the configured reconciliation interval and verify exact rules
+and expiry; a healthy peer alone does not prove recovery. Back up speaker state
+and configuration before changing its version, and review rustbgpd's downgrade
+requirements before reverting it. Do not roll back below v0.79.0.
+
+Health, peer metrics and blackhole export evidence now distinguish scoped IPv6
+link-local neighbors (`fe80::1%eth0`). Interface-only peers use `interface:eth0`
+as their metric name and, until discovery, their observed address. Review any
+alerts that select exact peer labels. A malformed or unbound Established peer
+fails observation rather than being reported healthy. v0.79.0 lacks interface
+scope on blackhole export rows, so scoped export evidence requires v0.80.0.
+
+New v0.80 FlowSpec/batch export reads and replay-complete signaling are not yet
+used. Do not list prefixd in `global.gr_eor_replay_owners`. The optional
+timer-only End-of-RIB grace window must be qualified against the actual replay
+budget; it is not an end-to-end enforcement guarantee.
+
 ## Speaker ownership upgrade
 
 Migration 014 adds immutable `speaker_targets`, one-to-one `speaker_pop_bindings`,

@@ -191,9 +191,9 @@ owns the BGP sessions. The two meet at a narrow, tested boundary:
   process. After a speaker restart, prefixd's database still holds the desired
   state, and the next reconciliation poll (every 30 seconds in the shipped
   config) re-adds missing rules.
-- **Qualified versions:** v0.79.0 is the minimum controller contract and
-  the Compose pin; prefixd refuses to start against an older daemon. CI runs
-  the lifecycle, TTL and restart suite against the v0.79.0 immutable image.
+- **Qualified versions:** v0.79.0 remains the minimum controller contract;
+  Compose pins v0.80.0. prefixd refuses to start against an older daemon. CI
+  runs the lifecycle, TTL and restart suite against both immutable images.
 
 This qualifies the controller-to-speaker boundary on Linux amd64. It says
 nothing about router enforcement.

@@ -2003,6 +2003,7 @@ fn export_row(
         explain_code: explain_code.into(),
         detail: format!("detail for {peer}"),
         advertised_path_id: u32::from(disposition == pb::PathExportDisposition::Committed),
+        ..Default::default()
     }
 }
 
@@ -2043,6 +2044,10 @@ async fn export_dispositions_page_to_completion_and_keep_every_field() {
             ("2001:db8::7", 128, 0)
         );
         assert_eq!(request.page_size, ROUTE_PAGE_SIZE);
+        assert!(
+            !request.include_configured,
+            "retain the 0.79 Established-peer contract"
+        );
         assert_eq!(request.page_token, token);
     }
     let dispositions: Vec<_> = peers.iter().map(|peer| peer.disposition).collect();
