@@ -39,3 +39,8 @@ remote_asn = 65001
 description = "edge-router-example"
 families = ["ipv4_flowspec", "ipv6_flowspec"]
 hold_time = 30
+# Off only because this placeholder never connects. Enable Graceful Restart on
+# real peers that support it. After a planned speaker restart, a GR neighbor
+# that never comes up holds route selection, including for injected routes,
+# until the restart window (gr_restart_time, default 120 s) expires.
+graceful_restart = false
