@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-10-26
+
+prefixd 0.23.1 makes planned rustbgpd restarts clearer and shorter. A
+blackhole that the speaker holds from selection after its restart now reports
+the unexported reason `selection_deferred`, and the example rustbgpd
+configuration disables Graceful Restart on its placeholder neighbor, so in
+the Compose quickstart replayed rules are selected as soon as reconciliation
+re-adds them instead of after the 120-second restart window. There is no migration and no
+configuration change; copy the updated alert rules.
+
+### Upgrade notes
+
+- Follow
+  [v0.23.0 → 0.23.1](https://github.com/lance0/prefixd/blob/v0.23.1/docs/how-to/upgrading.md#v0230--0231)
+  in the upgrade guide: replace the controller and dashboard, then copy
+  `grafana/prometheus-alerts.yml`. No migration, adoption step or
+  configuration change is required, and rustbgpd stays at 0.80.1.
+
+- `selection_deferred` is a new value of the `reason` label on
+  `prefixd_blackhole_unexported` and of the blackhole export warning. Check
+  your own queries and silences that match `reason="pending"`.
+
+- If you based your rustbgpd configuration on the shipped example, set
+  `graceful_restart = false` on any neighbor that never comes up, or remove
+  that neighbor. See
+  [speaker upgrade notes](https://github.com/lance0/prefixd/blob/v0.23.1/docs/how-to/upgrading.md#rustbgpd-v080).
+
+### Known limitations
+
+- After a planned restart, rustbgpd 0.80.x holds injected routes from
+  selection until its Graceful Restart peers send End-of-RIB or
+  `gr_restart_time` expires, so a Graceful Restart peer that is down holds
+  them for the full window. The example configuration change removes only its
+  placeholder neighbor's hold. Unicast injection, blackholes included, stays
+  held while any Graceful Restart peer is down; rustbgpd's upcoming release
+  exempts only injected FlowSpec. prefixd reports a held blackhole as
+  `selection_deferred` and cannot end the hold.
+- The 0.23.0 known limitations otherwise still apply.
+
 ### Changed
 
 - A blackhole that every Established peer reports as pending with rustbgpd's
@@ -2511,7 +2550,8 @@ Startup now refuses the configuration keys removed in 0.20.0, and requires
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.23.1...HEAD
+[0.23.1]: https://github.com/lance0/prefixd/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/lance0/prefixd/compare/v0.22.1...v0.23.0
 [0.22.1]: https://github.com/lance0/prefixd/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/lance0/prefixd/compare/v0.21.0...v0.22.0

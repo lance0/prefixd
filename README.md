@@ -24,12 +24,15 @@ to announce a FlowSpec rule with a mandatory TTL. No detector speaks BGP.
 > [Why rustbgpd](#pairs-with-rustbgpd)
 
 **Status:** pre-1.0, and the API can change before 1.0. The latest release,
-[v0.23.0](https://github.com/lance0/prefixd/releases/tag/v0.23.0), adds guarded
+[v0.23.1](https://github.com/lance0/prefixd/releases/tag/v0.23.1), reports a
+blackhole that rustbgpd holds from selection after a restart as
+`selection_deferred`, and the example speaker configuration no longer holds
+replayed rules for two minutes after each restart. v0.23.0 added guarded
 manual destination CIDRs and source-prefix matches, admission preview, audited
 FlowSpec lifetime extension with an optional total lifetime cap, and a
 read-only view of the speaker's local FlowSpec routes. It needs rustbgpd
 v0.80.0 or later and no migration; follow the
-[upgrade guide](docs/how-to/upgrading.md#v0221--0230).
+[upgrade guide](docs/how-to/upgrading.md#v0230--0231).
 
 ## Choose your path
 
