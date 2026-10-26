@@ -660,6 +660,18 @@ names the policy. prefixd exposes no RPKI-specific reason, and at 0.79.0 an
 RPKI-Invalid filter does not cause it for prefixd's blackholes, which carry
 no AS_PATH and validate NotFound (see [RPKI filters](#router-and-speaker-requirements)).
 
+After a planned rustbgpd restart, Graceful Restart selection deferral holds
+injected routes, prefixd's blackholes included, until the Graceful Restart
+peers send End-of-RIB or the restart window (`gr_restart_time`, 120 seconds by
+default) expires. Every Established peer then reports `pending` with
+`selection_deferred`, and prefixd reports the unexported reason
+`selection_deferred`: the speaker accepted the route, but it is exported to no
+peer. Health stays `degraded` until export settles, and the five-minute alert
+window outlasts the default hold. The hold is not a missing route:
+reconciliation repairs only routes absent from the speaker's local RIB, so it
+neither re-adds nor retries a held blackhole. Any other pending reason, or a
+mix with `selection_deferred`, stays `pending`.
+
 rustbgpd v0.80.0 adds a FlowSpec export-disposition RPC, batch unicast reads,
 configured-peer rows and typed validation-deny details. prefixd does not yet
 consume these additions: FlowSpec rules still carry no export evidence,

@@ -2072,6 +2072,32 @@ async fn export_dispositions_page_to_completion_and_keep_every_field() {
     server.abort();
 }
 
+/// A speaker-restart selection hold decodes as PENDING with its reason and is
+/// reported as held, never committed.
+#[tokio::test]
+async fn selection_deferred_rows_decode_as_pending_and_are_never_committed() {
+    use pb::PathExportDisposition::Pending;
+    let (speaker, fake, server) = export_speaker().await;
+    *fake.rows.lock().unwrap() = vec![
+        export_row("192.0.2.1", Pending, "selection_deferred", ""),
+        export_row("2001:db8::2", Pending, "selection_deferred", ""),
+    ];
+    let prefix: ipnet::IpNet = "192.0.2.7/32".parse().unwrap();
+    let peers = speaker.blackhole_exports(&prefix).await.unwrap().unwrap();
+    assert!(peers.iter().all(|peer| {
+        peer.disposition == ExportDisposition::Pending && peer.reason == "selection_deferred"
+    }));
+    let evidence = crate::domain::BlackholeExportEvidence::from_read(
+        &Ok(Some(peers)),
+        None,
+        chrono::Utc::now(),
+    );
+    assert_eq!(evidence.counts.committed, 0);
+    assert_eq!(evidence.counts.pending, 2);
+    assert_eq!(evidence.warning.unwrap().reason, "selection_deferred");
+    server.abort();
+}
+
 /// ABORTED mid-walk discards the pages read and restarts once from the first
 /// page; a second ABORTED is an error, never a partial or empty list.
 #[tokio::test]

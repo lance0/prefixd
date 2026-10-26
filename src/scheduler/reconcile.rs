@@ -4188,12 +4188,20 @@ mod tests {
         }
 
         // The next pass replaces the snapshot and resets the reason series.
+        // A speaker-restart selection hold is its own reason, never committed,
+        // and drives no repair: the speaker holds the route.
         speaker.inner.set_exports(
             prefix(&rows[1]),
-            Ok(vec![export(ExportDisposition::Committed, "")]),
+            Ok(vec![export(
+                ExportDisposition::Pending,
+                "selection_deferred",
+            )]),
         );
         reconciler.reconcile().await.unwrap();
         assert_eq!(label("export_policy"), 0.0);
+        assert_eq!(label("selection_deferred"), 1.0);
+        assert_eq!(label("pending"), 0.0);
+        assert_eq!(evidence(&rows[1]).counts.committed, 0);
         assert_eq!(speaker.adds.load(SeqCst), adds, "observation never writes");
         assert_eq!(speaker.deletes.load(SeqCst), 0);
     }
