@@ -65,7 +65,7 @@ impl DispositionCounts {
 
 /// Bounded reasons an observed blackhole is committed to no Established peer.
 /// They are the `reason` label of `prefixd_blackhole_unexported`.
-pub const UNEXPORTED_REASONS: [&str; 11] = [
+pub const UNEXPORTED_REASONS: [&str; 12] = [
     "no_established_peer",
     "export_policy",
     "family_suppressed",
@@ -75,6 +75,7 @@ pub const UNEXPORTED_REASONS: [&str; 11] = [
     "exact_export_rejected",
     "export_rule",
     "pending",
+    "selection_deferred",
     "mixed",
     "other",
 ];
@@ -92,6 +93,13 @@ fn unexported(peers: &[PeerExport]) -> ExportWarning {
     let base = |peer: &PeerExport| peer.reason.split(':').next().unwrap_or_default().to_owned();
     let reason = match peers {
         [] => "no_established_peer",
+        // Graceful Restart selection deferral after a speaker restart.
+        _ if peers.iter().all(|peer| {
+            peer.disposition == ExportDisposition::Pending && base(peer) == "selection_deferred"
+        }) =>
+        {
+            "selection_deferred"
+        }
         _ if peers
             .iter()
             .all(|peer| peer.disposition == ExportDisposition::Pending) =>
@@ -128,6 +136,10 @@ fn unexported(peers: &[PeerExport]) -> ExportWarning {
         "exact_export_rejected" => "Every Established session refuses its exact encoding.",
         "export_rule" => "Another export rule stops it toward every Established peer.",
         "pending" => "Export to every Established peer has not settled yet.",
+        "selection_deferred" => {
+            "The speaker accepted it but holds it from selection after a speaker restart \
+             until its Graceful Restart peers send End-of-RIB or the restart window expires."
+        }
         "mixed" => "It is withheld or pending toward every Established peer; see each peer.",
         _ => {
             "It is withheld from every Established peer for an unclassified reason; see each peer."
@@ -485,6 +497,24 @@ mod tests {
             ),
             (vec![("not_yet_committed", Pending)], "pending"),
             (
+                vec![
+                    ("selection_deferred", Pending),
+                    ("selection_deferred", Pending),
+                ],
+                "selection_deferred",
+            ),
+            (
+                vec![
+                    ("selection_deferred", Pending),
+                    ("not_yet_committed", Pending),
+                ],
+                "pending",
+            ),
+            (
+                vec![("selection_deferred", Pending), ("export_policy", Withheld)],
+                "mixed",
+            ),
+            (
                 vec![("export_policy", Withheld), ("not_selected", Withheld)],
                 "mixed",
             ),
@@ -514,6 +544,11 @@ mod tests {
             let peers = match reason {
                 "no_established_peer" => vec![],
                 "pending" => vec![peer("192.0.2.1", ExportDisposition::Pending, "x")],
+                "selection_deferred" => vec![peer(
+                    "192.0.2.1",
+                    ExportDisposition::Pending,
+                    "selection_deferred",
+                )],
                 "mixed" => vec![
                     peer("192.0.2.1", ExportDisposition::Pending, "x"),
                     peer("192.0.2.2", ExportDisposition::Withheld, "x"),

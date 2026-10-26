@@ -7,14 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A blackhole that every Established peer reports as pending with rustbgpd's
+  `selection_deferred` reason now carries the unexported reason
+  `selection_deferred` instead of `pending`, in detail, health and
+  `prefixd_blackhole_unexported{reason}`. The speaker accepted the route but
+  holds route selection after its restart until Graceful Restart peers send
+  End-of-RIB or the restart window expires. Health stays `degraded` while the
+  route is exported to no peer. A mix of pending reasons stays `pending`.
+  `PrefixdBlackholeNotExported` adds a hint for the new reason and keeps its
+  five-minute window, which outlasts the default 120-second hold.
+
 ### Fixed
 
 - The example `configs/rustbgpd.toml` disables Graceful Restart on its
   placeholder neighbor. That neighbor never connects, so after each planned
-  rustbgpd restart in the Compose quickstart, replayed FlowSpec rules stayed
-  unselected for up to the 120-second restart window. They are now selected
-  as soon as reconciliation re-adds them. Enable Graceful Restart on real
-  peers that support it.
+  rustbgpd restart in the Compose quickstart, replayed FlowSpec rules were
+  held from selection until the restart window (`gr_restart_time`, 120
+  seconds by default) expired. They are now selected as soon as
+  reconciliation re-adds them. Enable Graceful Restart on real peers that
+  support it.
 
 ## [0.23.0] - 2026-10-26
 

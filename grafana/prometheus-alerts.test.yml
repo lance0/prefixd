@@ -99,7 +99,8 @@ tests:
         alertname: PrefixdDown
         exp_alerts: []
   # Blackholes exported to no peer for 5 minutes fire per reason; a brief
-  # pending export does not.
+  # pending export or a default 120-second restart selection hold does not,
+  # and a hold that outlasts the window does.
   - interval: 1m
     input_series:
       - series: 'prefixd_blackhole_unexported{job="prefixd",instance="a",reason="export_policy"}'
@@ -108,6 +109,10 @@ tests:
         values: '0x2 2x10'
       - series: 'prefixd_blackhole_unexported{job="prefixd",instance="a",reason="pending"}'
         values: '0x2 1x2 0x8'
+      - series: 'prefixd_blackhole_unexported{job="prefixd",instance="a",reason="selection_deferred"}'
+        values: '0x2 1x2 0x8'
+      - series: 'prefixd_blackhole_unexported{job="prefixd",instance="b",reason="selection_deferred"}'
+        values: '0x2 1x10'
     alert_rule_test:
       - eval_time: 5m
         alertname: PrefixdBlackholeNotExported
@@ -123,6 +128,10 @@ tests:
             exp_annotations:
               summary: "Active blackhole exported to no peer"
               description: "2 active blackhole(s) on a are committed to no Established peer, reason no_established_peer, so no router is sent them. Health detail lists each blackhole under speaker.blackhole_exports."
+          - exp_labels: {severity: warning, job: prefixd, instance: b, reason: selection_deferred}
+            exp_annotations:
+              summary: "Active blackhole exported to no peer"
+              description: "1 active blackhole(s) on b are committed to no Established peer, reason selection_deferred, so no router is sent them. The speaker still holds them from selection after a restart; check that its Graceful Restart peers have sent End-of-RIB. Health detail lists each blackhole under speaker.blackhole_exports."
 
   # Startup exports the series at zero, so the first replacement fires. Only
   # the affected POP fires, and the alert clears once the last increase
