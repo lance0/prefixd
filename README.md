@@ -24,12 +24,12 @@ to announce a FlowSpec rule with a mandatory TTL. No detector speaks BGP.
 > [Why rustbgpd](#pairs-with-rustbgpd)
 
 **Status:** pre-1.0, and the API can change before 1.0. The latest release,
-[v0.22.1](https://github.com/lance0/prefixd/releases/tag/v0.22.1), makes the
-blackhole replacement alert clear an hour after the last replacement and
-exports the pre-registered metric series at zero from startup. v0.22.0 added a
-dashboard display timezone and marked blackhole export evidence from before a
-lost controller fence as historical. It needs rustbgpd 0.79.0 and no
-migration; follow the [upgrade guide](docs/how-to/upgrading.md#v0220--0221).
+[v0.23.0](https://github.com/lance0/prefixd/releases/tag/v0.23.0), adds guarded
+manual destination CIDRs and source-prefix matches, admission preview, audited
+FlowSpec lifetime extension with an optional total lifetime cap, and a
+read-only view of the speaker's local FlowSpec routes. It needs rustbgpd
+v0.80.0 or later and no migration; follow the
+[upgrade guide](docs/how-to/upgrading.md#v0221--0230).
 
 ## Choose your path
 

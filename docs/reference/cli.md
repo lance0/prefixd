@@ -73,7 +73,7 @@ refuses to run until it does. It can't be combined with
 `--adopt-legacy-speaker`; see
 [mitigation origin mode](../how-to/upgrading.md#mitigation-origin-mode).
 
-`prefixd --version` prints the daemon version, such as `prefixd 0.22.1`, and
+`prefixd --version` prints the daemon version, such as `prefixd 0.23.0`, and
 exits.
 
 ## Commands

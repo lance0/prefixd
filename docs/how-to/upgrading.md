@@ -1,7 +1,8 @@
 # Upgrade Guide
 
-Upgrading a v0.22.0 deployment? Follow [v0.22.0 → 0.22.1](#v0220--0221).
-From v0.21.0, follow [v0.21.0 → 0.22.0](#v0210--0220) first; from v0.20.0,
+Upgrading a v0.22.1 deployment? Follow [v0.22.1 → 0.23.0](#v0221--0230).
+From v0.22.0, follow [v0.22.0 → 0.22.1](#v0220--0221) first; from v0.21.0,
+[v0.21.0 → 0.22.0](#v0210--0220) before that; from v0.20.0,
 [v0.20.0 → 0.21.0](#v0200--0210) before that; and from v0.19.1,
 [v0.19.1 → 0.20.0](#v0191--0200) before that.
 
@@ -652,6 +653,124 @@ prefixdctl migrations
 ---
 
 ## Version-Specific Notes
+
+### v0.22.1 → 0.23.0
+
+This upgrade needs rustbgpd 0.80.0 or later, upgraded before prefixd. It adds
+no migration and needs no adoption step. Keep the POP, speaker target and
+`mode` unchanged. GoBGP deployments skip the rustbgpd step.
+
+#### Before you start
+
+1. **Back up PostgreSQL** and keep the 0.22.1 image or binaries and a copy of
+   the configuration for the [rollback rules](#rollback).
+2. **Upgrade rustbgpd to v0.80.x first.** prefixd 0.23.0 refuses to start
+   against an older daemon, before it reads or writes any intent:
+
+   ```text
+   rustbgpd 0.79.0 is older than the minimum 0.80.0; upgrade the speaker first
+   ```
+
+   Read [rustbgpd v0.80](#rustbgpd-v080) for the speaker's own notes and the
+   changed peer metric labels.
+3. **Check the destination prefix bounds.** `guardrails.dst_prefix_minlen` and
+   `dst_prefix_minlen_v6` should be `32` and `128` unless you want manual
+   destination CIDRs. 0.22.1 ignored lower values; 0.23.0 admits manual CIDRs
+   down to them. See
+   [manual destination CIDRs and downgrade](#manual-destination-cidrs-and-downgrade).
+4. **Validate `inventory.yaml`.** Inventory load and reload now reject a
+   customer prefix or asset IP that does not parse. Startup fails, and a
+   reload keeps the previous inventory, with an error that names the entry:
+
+   ```text
+   inventory customer acme: invalid prefix "203.0.113.0/33"
+   ```
+
+   Fix every such entry before you start the new controller.
+5. **Review alerts and dashboards.** `grafana/prometheus-alerts.yml` is
+   unchanged since 0.22.1, so there is nothing to copy.
+   `PrefixdBlackholeReplaced` also fires now when reconciliation replaces a
+   different local route at an unleased blackhole's prefix. Announcement
+   counters, announcement latency histograms and BGP session gauges add a
+   `backend` label; check your own queries that match exact label sets.
+   Compose mounts the updated `grafana/prefixd-operations.json`; elsewhere,
+   [import it](grafana.md#import-dashboards) again.
+6. **Leave the new lifetime cap for later.** The optional
+   `guardrails.max_lifetime_seconds` is unset by default, which keeps
+   existing behavior. To cap total FlowSpec lifetime, set it in a separate
+   restart after this upgrade is verified; see
+   [General Principles](#general-principles).
+
+#### Compose
+
+Run these in the deployment's checkout, keeping your configuration files and
+image references. Step 3 leaves the 0.22.1 controller running:
+
+```bash
+# 1. Back up the database
+docker compose exec -T postgres pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+
+# 2. Update the checkout; it pins rustbgpd 0.80.1
+git fetch --tags && git checkout v0.23.0
+
+# 3. Upgrade only rustbgpd
+docker compose --profile rustbgpd pull rustbgpd
+docker compose --profile rustbgpd up -d --no-deps rustbgpd
+```
+
+The new rustbgpd process starts with an empty local RIB. The running 0.22.1
+controller repairs every active rule on its next reconciliation pass, within
+`timers.reconciliation_interval_seconds` (30 by default), and logs
+`repairing local announcement` for each. Rules are not announced until then.
+Wait for that pass and check that the local RIB holds your active rules
+([commands below](#check-the-upgrade)) before you continue:
+
+```bash
+# 4. Pin and pull the 0.23.0 controller and dashboard
+export PREFIXD_IMAGE=ghcr.io/lance0/prefixd:0.23.0
+export PREFIXD_DASHBOARD_IMAGE=ghcr.io/lance0/prefixd-dashboard:0.23.0
+docker compose --profile rustbgpd pull prefixd-rustbgpd dashboard
+
+# 5. Replace the controller and dashboard; rustbgpd keeps its routes
+docker compose --profile rustbgpd up -d --no-deps --no-build prefixd-rustbgpd dashboard
+```
+
+Keep both variables set for later Compose commands, or put them in `.env`.
+For GoBGP, skip step 3 and use profile `gobgp` and service `prefixd-gobgp`.
+
+#### Bare metal
+
+Upgrade rustbgpd to 0.80.1 as its release notes describe and wait for one
+reconciliation pass of the running 0.22.1 controller, as above. Then:
+
+```bash
+pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+git fetch --tags && git checkout v0.23.0
+cargo build --release --locked
+sudo systemctl stop prefixd
+sudo cp target/release/prefixd target/release/prefixdctl /usr/local/bin/
+sudo systemctl start prefixd
+```
+
+#### Check the 0.23.0 upgrade
+
+Run the [0.21.0 checks](#check-the-upgrade) with the 0.23.0 controller. The
+migration list is unchanged, so startup still logs `versions: [1, ..., 18]`.
+`prefixdctl status` reports daemon version 0.80.1, and the grep for repairs
+and failures should print nothing from the 0.23.0 controller.
+`prefixdctl speaker list-routes` also lists the speaker's local FlowSpec rules
+for comparison with the active mitigations.
+
+#### Downgrading to 0.22.1
+
+0.23.0 adds no migration, and 0.22.1 runs with rustbgpd 0.80.x. Before you
+downgrade, withdraw every manual
+[destination CIDR](#manual-destination-cidrs-and-downgrade) and
+[source-prefix](#source-prefix-matches-and-downgrade) rule with 0.23.0 still
+running and drain their withdrawals. 0.22.1 ignores
+`guardrails.max_lifetime_seconds`, so rules lose that cap. Then follow the
+[rollback](#rollback) steps. Keep rustbgpd at 0.80.x; don't roll it back below
+0.80.0.
 
 ### v0.22.0 → 0.22.1
 

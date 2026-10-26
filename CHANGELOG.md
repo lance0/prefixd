@@ -7,24 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-26
+
+prefixd 0.23.0 lets manual FlowSpec rules target guarded destination CIDRs
+and same-family source prefixes, previews manual admission without side
+effects, and extends an active rule's lifetime with an audit trail, optionally
+bounded by a new total lifetime cap. The Inventory page,
+`prefixdctl speaker list-routes` and `GET /v1/speaker/routes` show the
+speaker's local FlowSpec routes. rustbgpd v0.80.0 or later is now required:
+upgrade it before prefixd. There is no migration; check the destination prefix
+bounds and `inventory.yaml` before upgrading.
+
 ### Upgrade notes
+
+- Follow
+  [v0.22.1 → 0.23.0](https://github.com/lance0/prefixd/blob/v0.23.0/docs/how-to/upgrading.md#v0221--0230)
+  in the upgrade guide: upgrade rustbgpd first, then replace the controller
+  and dashboard. No migration or adoption step runs, and
+  `grafana/prometheus-alerts.yml` is unchanged.
 
 - prefixd now requires rustbgpd v0.80.0 or later and refuses to start against
   an older daemon; upgrade the speaker first. Compose and the default speaker
   fixture pin v0.80.1. Scoped peer observations preserve their interface, and
   interface-only peers report discovery without aliasing another neighbor.
   Exact peer metric labels can change. See
-  [speaker upgrade notes](docs/how-to/upgrading.md#rustbgpd-v080).
+  [speaker upgrade notes](https://github.com/lance0/prefixd/blob/v0.23.0/docs/how-to/upgrading.md#rustbgpd-v080).
 
 - Check `guardrails.dst_prefix_minlen` and `dst_prefix_minlen_v6` before
   upgrading. Earlier releases ignored values below 32 and 128; this release
   admits manual destination CIDRs down to those lengths. Set them to 32 and 128
   first if you do not want CIDRs. See
-  [manual destination CIDRs and downgrade](docs/how-to/upgrading.md#manual-destination-cidrs-and-downgrade).
+  [manual destination CIDRs and downgrade](https://github.com/lance0/prefixd/blob/v0.23.0/docs/how-to/upgrading.md#manual-destination-cidrs-and-downgrade).
 
 - Inventory load and reload now reject an unparseable customer prefix or asset
-  IP. A failed reload keeps the previous inventory; fix the reported entry and
-  reload again.
+  IP. Startup fails on one, and a failed reload keeps the previous inventory;
+  validate `inventory.yaml` before upgrading.
+
+### Known limitations
+
+- TTL expiry needs the running controller. Unleased FlowSpec rules and
+  blackholes stay announced if prefixd stops while the speaker stays up; the
+  leased modes, which bound that to one lease, are opt-in and rustbgpd-only.
+- `guardrails.max_lifetime_seconds` bounds ordinary FlowSpec intent in prefixd.
+  It does not cap blackholes or set a deadline on the speaker, and a
+  controller downgrade removes it.
+- Admission preview reserves no capacity, and creation rechecks it. Preview,
+  the local route view and lifetime extension observe neither export nor
+  router enforcement.
+- prefixd does not yet use rustbgpd v0.80's FlowSpec and batch export reads or
+  replay-complete signaling. Do not list prefixd in
+  `global.gr_eor_replay_owners`.
+- Leave `guardrails.allow_src_prefix_match` false until the receiving routers
+  are qualified for source-prefix matches.
+- The 0.21.0 known limitations otherwise still apply, except that
+  `allow_src_prefix_match` is no longer reserved; `allow_tcp_flags_match`
+  still is.
+
+### Security
+
+- **ctutils** — Updated 0.4.2 → 0.4.4, which removes secret-dependent branches
+  from constant-time mask generation and `u128` comparisons
+  (RUSTSEC-2026-0385). The crate reaches the HMAC signing and verification
+  used for signal webhooks and alert delivery through `hmac` and `sha2`.
+- **tokio** — Updated 1.52.3 → 1.53.3, which deprecates the `AsyncFd`
+  constructors that let safe code register file descriptors it does not own
+  (RUSTSEC-2026-0386). prefixd does not call `AsyncFd` directly.
 
 ### Added
 
@@ -144,9 +191,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Correlation and playbook validation errors are announced, and correlation
   errors describe the field they concern.
 
-- Historical benchmark claims state their missing qualification and distinguish
-  HTTP request throughput from mitigation enforcement.
-
 - Events, mitigations and audit log filters return to the first matching page.
   Refreshed events keep pagination within the available pages instead of falsely
   showing an empty list.
@@ -161,9 +205,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and systemd deployments. Warnings, errors and controller INFO remain enabled;
   custom logging filters retain their chosen levels and can restore notice
   diagnostics.
-
-- Document Compose recovery after enforced startup refuses remaining dry-run
-  intent, keeping PostgreSQL and the original speaker running.
 
 - GoBGP FlowSpec paths now carry their injection timestamp, so route age starts
   at announcement instead of Unix epoch.
@@ -183,15 +224,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signed-in operators. Browser preferences remain available when health fails,
   and a retry keeps the signed-in dashboard and open preferences mounted.
 
-### Security
+### Documentation
 
-- **ctutils** — Updated 0.4.2 → 0.4.4, which removes secret-dependent branches
-  from constant-time mask generation and `u128` comparisons
-  (RUSTSEC-2026-0385). The crate reaches the HMAC signing and verification
-  used for signal webhooks and alert delivery through `hmac` and `sha2`.
-- **tokio** — Updated 1.52.3 → 1.53.3, which deprecates the `AsyncFd`
-  constructors that let safe code register file descriptors it does not own
-  (RUSTSEC-2026-0386). prefixd does not call `AsyncFd` directly.
+- Historical benchmark claims state their missing qualification and distinguish
+  HTTP request throughput from mitigation enforcement.
+
+- The dry-run rollout cookbook and upgrade guide describe Compose recovery
+  after enforced startup refuses remaining dry-run intent, keeping PostgreSQL
+  and the original speaker running.
+
+- ADR 029 accepts the provider-scoped upstream blackholing decisions, and
+  ADR 030 with its speaker contract proposes guarded diversion to an external
+  scrubber. Both are designs only; neither ships in this release.
 
 ## [0.22.1] - 2026-10-22
 
@@ -2445,7 +2489,8 @@ Startup now refuses the configuration keys removed in 0.20.0, and requires
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.22.1...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/lance0/prefixd/compare/v0.22.1...v0.23.0
 [0.22.1]: https://github.com/lance0/prefixd/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/lance0/prefixd/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/lance0/prefixd/compare/v0.20.0...v0.21.0
