@@ -9,11 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
-- Compose and the default speaker fixture now pin rustbgpd v0.80.0; the minimum
-  remains v0.79.0. Scoped peer observations preserve their interface, and
+- prefixd now requires rustbgpd v0.80.0 or later and refuses to start against
+  an older daemon; upgrade the speaker first. Compose and the default speaker
+  fixture pin v0.80.1. Scoped peer observations preserve their interface, and
   interface-only peers report discovery without aliasing another neighbor.
-  Exact peer metric labels can change; scoped blackhole export evidence needs
-  v0.80.0. See [speaker upgrade notes](docs/how-to/upgrading.md#rustbgpd-v0800).
+  Exact peer metric labels can change. See
+  [speaker upgrade notes](docs/how-to/upgrading.md#rustbgpd-v080).
 
 - Check `guardrails.dst_prefix_minlen` and `dst_prefix_minlen_v6` before
   upgrading. Earlier releases ignored values below 32 and 128; this release
@@ -116,6 +117,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without a source prefix keep their existing identity and JSON storage. Before
   downgrading, drain source-prefix rules and their pending withdrawals as
   described in the upgrade guide. No database migration is required.
+
+- A blackhole export read that rustbgpd aborts because the route, its
+  Established peers or their export settings changed between pages now
+  restarts once from the first page. A second abort is an observation error.
 
 ### Removed
 

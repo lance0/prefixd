@@ -30,7 +30,7 @@ topology:
 
     speaker:
       kind: linux
-      image: ghcr.io/lance0/rustbgpd:0.79.0@sha256:b2054d0ce98f3c8299b8de5be1920cd88a1ab2c85e02766927e487be0c60f8ff
+      image: ghcr.io/lance0/rustbgpd:0.80.1@sha256:a7a6c4533ba0976f73525ef4d932ad04ef1b034115dc684511fd2679c02513f1
       network-mode: container:postgres
       stages:
         create:

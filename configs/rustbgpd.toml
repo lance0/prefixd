@@ -1,4 +1,4 @@
-# FlowSpec-only adaptation of rustbgpd v0.80.0 examples/flowspec-controller/config.toml.
+# FlowSpec-only adaptation of rustbgpd v0.80.1 examples/flowspec-controller/config.toml.
 # Replace documentation peer addresses with your edge routers before deployment.
 config_epoch = 2
 

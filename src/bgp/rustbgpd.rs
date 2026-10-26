@@ -24,8 +24,9 @@ pub struct RustBgpdAnnouncer {
 }
 
 /// The oldest daemon prefixd runs against: 0.79.0 adds the injection lease
-/// (rustbgpd ADR-0141).
-const MINIMUM_DAEMON_VERSION: [u64; 3] = [0, 79, 0];
+/// (rustbgpd ADR-0141); 0.80.0 scopes link-local export rows by interface and
+/// aborts export walks whose pages disagree.
+const MINIMUM_DAEMON_VERSION: [u64; 3] = [0, 80, 0];
 
 /// `major.minor.patch`, ignoring any pre-release or build suffix.
 fn parse_version(version: &str) -> Option<[u64; 3]> {
@@ -56,7 +57,7 @@ impl RustBgpdAnnouncer {
         Ok(speaker)
     }
 
-    /// Startup contract check: refuse a daemon older than 0.79.0, or one whose
+    /// Startup contract check: refuse a daemon older than 0.80.0, or one whose
     /// version cannot be read, before any intent is read or written.
     async fn require_minimum_version(&self) -> anyhow::Result<()> {
         let version = self
@@ -1195,6 +1196,7 @@ impl ExportObserver for RustBgpdAnnouncer {
     async fn blackhole_exports(&self, prefix: &ipnet::IpNet) -> Result<Option<Vec<PeerExport>>> {
         let mut peers: Vec<PeerExport> = Vec::new();
         let mut page_token = String::new();
+        let mut restarted = false;
         loop {
             let request = pb::ListPathExportDispositionsRequest {
                 prefix: prefix.addr().to_string(),
@@ -1217,6 +1219,16 @@ impl ExportObserver for RustBgpdAnnouncer {
                 // pages read so far are partial: that is an error, not absence.
                 Err(status) if status.code() == Code::NotFound && page_token.is_empty() => {
                     return Ok(None);
+                }
+                // The route, Established peer set or an export setting changed
+                // during the walk. Discard every page and restart once; a second
+                // ABORTED fails the read rather than mixing snapshots.
+                Err(status) if status.code() == Code::Aborted && !restarted => {
+                    tracing::debug!(%prefix, "restarting aborted export disposition walk");
+                    restarted = true;
+                    peers.clear();
+                    page_token.clear();
+                    continue;
                 }
                 Err(status) => return Err(failed("ListPathExportDispositions", &status)),
             };

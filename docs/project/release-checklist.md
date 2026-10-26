@@ -150,7 +150,7 @@ Check these on the release candidate before opening the release PR:
       `just speakers`. To rerun them alone:
 
       ```bash
-      PREFIXD_RUSTBGPD_TEST_VERSION=0.79.0 scripts/test-rustbgpd.sh
+      PREFIXD_RUSTBGPD_TEST_VERSION=0.80.0 scripts/test-rustbgpd.sh
       ```
 
       Use the pins in ci.yml's `rustbgpd` matrix if they have moved.

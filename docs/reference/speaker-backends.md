@@ -275,20 +275,20 @@ Initial network connections and TLS handshakes have a ten-second budget;
 complete RPC attempts are bounded separately.
 
 `proto/rustbgpd.proto` is the unmodified `rustbgpd.proto` asset of the
-rustbgpd `v0.80.0` release, checked offline against the release's sha256 by
+rustbgpd `v0.80.1` release, checked offline against the release's sha256 by
 `just proto`. The controller message fields prefixd uses were checked against
 it. This is a protocol baseline, not proof that an arbitrary binary reporting
 that version has passed the deployment or router tests. The stubs follow the
-pinned release, and v0.79.0 is the minimum daemon. At startup prefixd reads
-the version that `GetHealth` reports and refuses a daemon older than v0.79.0,
+pinned release, and v0.80.0 is the minimum daemon. At startup prefixd reads
+the version that `GetHealth` reports and refuses a daemon older than v0.80.0,
 or one that reports no readable version, with "upgrade the speaker first".
-Additive peer identity fields are decoded when present. New optional RPCs
-remain unused, and export requests leave `include_configured` false to preserve
-the minimum contract. A daemon rolled back while prefixd runs is
+Peer identity fields are decoded. New optional RPCs remain unused, and
+export requests leave `include_configured` false, so export rows cover
+Established peers only. A daemon rolled back while prefixd runs is
 still caught at runtime: an `UNIMPLEMENTED` lease RPC withdraws the lease
 capability and the leased add creates nothing.
 
-prefixd does not call v0.80.0 `MarkReplayComplete`. Leave prefixd out of
+prefixd does not call `MarkReplayComplete`. Leave prefixd out of
 `global.gr_eor_replay_owners`; listing it would hold End-of-RIB until the
 configured grace deadline. Reconciliation still restores desired state on its
 normal poll. The daemon's optional timer-only grace window needs a separately
@@ -304,15 +304,15 @@ scoped endpoint as the observed address, or `interface:eth0` until discovery.
 An unbound neighbor cannot be reported as Established. Malformed, duplicate or
 inconsistent identity fails the complete observation rather than dropping a row.
 
-The v0.79 export API does not report interface scope. A link-local export row
-from that daemon fails observation because prefixd cannot identify it safely;
-use v0.80.0 for scoped export evidence. This does not change route injection or
-withdrawal. See the [upgrade notes](../how-to/upgrading.md#rustbgpd-v0800).
+A link-local export row without interface scope, as a daemon rolled back
+below v0.80.0 reports, fails observation because prefixd cannot identify it
+safely. This does not change route injection or withdrawal. See the
+[upgrade notes](../how-to/upgrading.md#rustbgpd-v080).
 
 ## Released controller qualification
 
-The scoped controller promotion is released: v0.79.0 is the minimum controller
-contract version; v0.80.0 is the Compose and default fixture pin. CI runs the
+The scoped controller promotion is released: v0.80.0 is the minimum controller
+contract version; v0.80.1 is the Compose and default fixture pin. CI runs the
 lifecycle, TTL and restart suite against both immutable image references in
 [releases.json](../../tests/fixtures/rustbgpd/releases.json). Image OCI source
 revisions match the dereferenced release-tag commits. This qualifies the local
@@ -321,8 +321,8 @@ controller boundary on Linux amd64, independently of router interoperability.
 Run the same isolated suite locally with Docker available:
 
 ```bash
-scripts/test-rustbgpd.sh # 0.80.0
-PREFIXD_RUSTBGPD_TEST_VERSION=0.79.0 scripts/test-rustbgpd.sh
+scripts/test-rustbgpd.sh # 0.80.1
+PREFIXD_RUSTBGPD_TEST_VERSION=0.80.0 scripts/test-rustbgpd.sh
 ```
 
 Fixtures bind ephemeral loopback ports, create an owner-only bearer token, and
@@ -578,12 +578,11 @@ the blackhole stage detects later in the same pass, such as an expired row,
 forces the blackhole re-add at once; that re-add adopts the new generation
 and requests another pass immediately, which re-adds the FlowSpec rules.
 
-The lease probe, adds and renewals run against rustbgpd 0.79.0 and later.
-`scripts/test-rustbgpd.sh` runs the leased lifecycle for blackholes and
-FlowSpec (add and renew, a prefixd restart within the lease, expiry after
-prefixd stops, and a rustbgpd restart) only when
-`PREFIXD_RUSTBGPD_TEST_VERSION` is 0.79.0 or later, and proves the refused
-startup on earlier releases.
+The lease probe, adds and renewals are part of the minimum controller
+contract. `scripts/test-rustbgpd.sh` runs the leased lifecycle for blackholes
+and FlowSpec (add and renew, a prefixd restart within the lease, expiry after
+prefixd stops, and a rustbgpd restart) against each pinned release. Refusal of
+an older daemon is covered by the adapter's startup tests.
 
 ### Export evidence
 
@@ -665,8 +664,10 @@ rustbgpd v0.80.0 adds a FlowSpec export-disposition RPC, batch unicast reads,
 configured-peer rows and typed validation-deny details. prefixd does not yet
 consume these additions: FlowSpec rules still carry no export evidence,
 blackhole reads remain per key and join a separate session observation, and
-validation detail is not exposed. The existing complete-page/error semantics
-remain in effect.
+validation detail is not exposed. A read is complete or an error. When the
+daemon aborts a paged read because the route, its Established peers or their
+export settings changed between pages, prefixd discards the pages and restarts
+once; a second abort is an error.
 
 `tests/integration_rustbgpd_peer.rs` reads the dispositions from a released
 rustbgpd peered with GoBGP over IPv4 and IPv6 unicast: `committed` for both

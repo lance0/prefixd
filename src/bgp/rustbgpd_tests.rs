@@ -73,9 +73,9 @@ impl pb::control_service_server::ControlService for Fake {
             _ => {}
         }
         let daemon_version = match self.mode.load(SeqCst) {
-            23 => "0.78.0",
-            24 => "0.79.0",
-            25 => "0.80.0-dev",
+            23 => "0.79.0",
+            24 => "0.80.0",
+            25 => "0.81.0-dev",
             _ => "observed-daemon-version",
         };
         Ok(Response::new(pb::HealthResponse {
@@ -132,7 +132,7 @@ async fn startup_refuses_a_daemon_older_than_the_minimum_contract() {
         .to_string();
     assert_eq!(
         error,
-        "rustbgpd 0.78.0 is older than the minimum 0.79.0; upgrade the speaker first"
+        "rustbgpd 0.79.0 is older than the minimum 0.80.0; upgrade the speaker first"
     );
     // No version, an unreadable one or a failed read refuses too, without upstream detail.
     for (mode, expected) in [
@@ -1908,6 +1908,8 @@ struct ExportFake {
     mode: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<pb::ListPathExportDispositionsRequest>>>,
+    /// Later pages answer ABORTED this many times.
+    aborts: Arc<AtomicUsize>,
 }
 
 const EXPORT_NO_ROUTE: usize = 1;
@@ -1939,6 +1941,10 @@ impl pb::injection_service_server::InjectionService for ExportFake {
                 return Err(Status::permission_denied("denied"));
             }
             _ => {}
+        }
+        if !first && self.aborts.load(SeqCst) > 0 {
+            self.aborts.fetch_sub(1, SeqCst);
+            return Err(Status::aborted("export walk changed"));
         }
         let rows = self.rows.lock().unwrap().clone();
         // A repeated-peer page restarts one row too early.
@@ -2046,7 +2052,7 @@ async fn export_dispositions_page_to_completion_and_keep_every_field() {
         assert_eq!(request.page_size, ROUTE_PAGE_SIZE);
         assert!(
             !request.include_configured,
-            "retain the 0.79 Established-peer contract"
+            "Established peers only; NOT_ESTABLISHED rows are not requested"
         );
         assert_eq!(request.page_token, token);
     }
@@ -2063,6 +2069,41 @@ async fn export_dispositions_page_to_completion_and_keep_every_field() {
         assert_eq!(peer.detail, row.detail);
         assert_eq!(peer.advertised_path_id, row.advertised_path_id);
     }
+    server.abort();
+}
+
+/// ABORTED mid-walk discards the pages read and restarts once from the first
+/// page; a second ABORTED is an error, never a partial or empty list.
+#[tokio::test]
+async fn export_walk_restarts_once_after_aborted() {
+    let (speaker, fake, server) = export_speaker().await;
+    *fake.rows.lock().unwrap() = export_rows();
+    let prefix: ipnet::IpNet = "192.0.2.7/32".parse().unwrap();
+    fake.aborts.store(1, SeqCst);
+    let peers = speaker.blackhole_exports(&prefix).await.unwrap().unwrap();
+    let addresses: Vec<_> = peers
+        .iter()
+        .map(|peer| peer.peer_address.as_str())
+        .collect();
+    let expected: Vec<_> = export_rows()
+        .into_iter()
+        .map(|row| row.peer_address)
+        .collect();
+    assert_eq!(addresses, expected, "one complete walk, no repeated rows");
+    let tokens: Vec<_> = fake
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| request.page_token.clone())
+        .collect();
+    assert_eq!(tokens, ["", "192.0.2.2", "", "192.0.2.2", "2001:db8::4"]);
+
+    fake.requests.lock().unwrap().clear();
+    fake.aborts.store(2, SeqCst);
+    let read = speaker.blackhole_exports(&prefix).await;
+    assert!(read.is_err(), "repeated ABORTED: {read:?}");
+    assert_eq!(fake.requests.lock().unwrap().len(), 4, "one restart only");
     server.abort();
 }
 
