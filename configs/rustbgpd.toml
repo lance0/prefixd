@@ -40,7 +40,8 @@ description = "edge-router-example"
 families = ["ipv4_flowspec", "ipv6_flowspec"]
 hold_time = 30
 # Off only because this placeholder never connects. Enable Graceful Restart on
-# real peers that support it. After a planned speaker restart, a GR neighbor
-# that never comes up holds route selection, including for injected routes,
-# until the restart window (gr_restart_time, default 120 s) expires.
+# real peers that support it. Injected routes are held from selection after a
+# speaker restart until Graceful Restart peers send End-of-RIB or the restart
+# window (gr_restart_time, default 120 s) expires, so a GR peer that never
+# comes up holds them for the full window.
 graceful_restart = false
