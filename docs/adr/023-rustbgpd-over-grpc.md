@@ -3,7 +3,8 @@
 ## Status
 
 Accepted; refreshed 2026-10-18. Updates [ADR 001](001-gobgp-sidecar.md).
-The minimum controller version rose to rustbgpd v0.79.0 on 2026-10-20.
+The minimum controller version rose to rustbgpd v0.79.0 on 2026-10-20 and to
+v0.80.0 on 2026-10-26.
 GoBGP remains supported under [ADR 025](025-pluggable-speaker-backends.md).
 
 ## Date
@@ -35,7 +36,8 @@ the preferred integration target; GoBGP remains a maintained choice. Normal
 builds and example deployment now prefer rustbgpd, with GoBGP selectable in the
 same controller image. Do not embed private runtime crates or remove GoBGP code.
 
-The relevant controller message fields were checked against `v0.79.0`:
+The relevant controller message fields were checked against `v0.79.0` on
+2026-10-20:
 
 | Trait operation | rustbgpd API and required semantics |
 |-----------------|------------------------------------|
@@ -67,13 +69,16 @@ not promote receive-side diagnostics/validation, `Config.flowspec`, or general
 GR/LLGR guarantees into that controller contract.
 
 The release gate for the controller promotion is resolved: v0.79.0 contains
-ADR 0139 and adds the injection lease (rustbgpd ADR-0141). It is the minimum
-controller version and the current qualification pin. prefixd reads the daemon
+ADR 0139 and adds the injection lease (rustbgpd ADR-0141). It became the
+minimum controller version and qualification pin on 2026-10-20. On 2026-10-26
+the minimum rose to v0.80.0: scoped peer identity requires interface-scoped
+export and peer rows, which v0.79 omits. The current qualification pin is
+v0.80.1, whose proto is byte-identical to v0.80.0. prefixd reads the daemon
 version from `GetHealth` at startup and refuses an older or unreadable one. The
-immutable image identity lives in
+immutable image identities live in
 [the release fixture](../../tests/fixtures/rustbgpd/releases.json), and CI runs
-local lifecycle/TTL/restart checks on it. Owner-only UDS and verified
-client-certificate mTLS are implemented. Both secure deployment profiles have
+local lifecycle/TTL/restart checks on the minimum and the pin. Owner-only UDS
+and verified client-certificate mTLS are implemented. Both secure deployment profiles have
 [dated qualification](../reference/qualification/speaker-profiles-2026-10-18.md).
 This does not qualify router enforcement.
 
