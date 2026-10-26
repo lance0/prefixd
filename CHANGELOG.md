@@ -36,14 +36,13 @@ configuration change; copy the updated alert rules.
 
 ### Known limitations
 
-- After a planned restart, rustbgpd 0.80.x holds injected routes from
-  selection until its Graceful Restart peers send End-of-RIB or
-  `gr_restart_time` expires, so a Graceful Restart peer that is down holds
-  them for the full window. The example configuration change removes only its
-  placeholder neighbor's hold. Unicast injection, blackholes included, stays
-  held while any Graceful Restart peer is down; rustbgpd's upcoming release
-  exempts only injected FlowSpec. prefixd reports a held blackhole as
-  `selection_deferred` and cannot end the hold.
+- After a planned speaker restart, rustbgpd v0.80.x holds injected routes,
+  blackholes included, from selection while any Graceful Restart peer is
+  down, until that peer sends End-of-RIB or `gr_restart_time` expires (120
+  seconds by default). `MarkReplayComplete` does not end the hold. Disable
+  Graceful Restart on peers that never come up. The example configuration
+  change removes only its placeholder neighbor's hold. prefixd reports a held
+  blackhole as `selection_deferred` and cannot end the hold.
 - The 0.23.0 known limitations otherwise still apply.
 
 ### Changed
