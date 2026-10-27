@@ -14,8 +14,22 @@ use crate::state::AppState;
 use crate::ws::WsMessage;
 use tokio::sync::RwLock;
 
-/// Time allowed for all blackhole export reads in one reconciliation pass.
+/// Time allowed for all route-kind export reads in one reconciliation pass.
 const EXPORT_OBSERVATION_BUDGET: Duration = Duration::from_secs(10);
+
+enum ExportTarget {
+    Blackhole(ipnet::IpNet),
+    FlowSpec(crate::domain::FlowSpecNlri),
+}
+
+impl ExportTarget {
+    fn prefix(&self) -> String {
+        match self {
+            Self::Blackhole(prefix) => prefix.to_string(),
+            Self::FlowSpec(nlri) => nlri.dst_prefix.clone(),
+        }
+    }
+}
 
 /// Audit reason for a local blackhole route withdrawn because its row is already terminal.
 pub const ORPHANED_AFTER_DOWNTIME: &str = "orphaned after controller downtime";
@@ -283,7 +297,24 @@ impl ReconciliationLoop {
             None => None,
         };
         self.update_bgp_session_metrics(sessions.as_ref());
-        self.observe_blackhole_exports(blackholes, sessions.as_ref(), export_epoch)
+        let flowspec = match self.flowspec_export_candidates().await {
+            Ok(rules) => Some(rules),
+            Err(error) => {
+                tracing::warn!(%error, "FlowSpec export inventory failed; retaining previous evidence");
+                if let (Some(state), Some(epoch)) = (&self.state, export_epoch) {
+                    state.fence.with_observation_epoch(|current| {
+                        if current == Some(epoch) {
+                            state
+                                .flowspec_export_evidence
+                                .inventory_failed("FlowSpec export inventory unavailable".into());
+                        }
+                    });
+                }
+                failure = Some(error.into());
+                None
+            }
+        };
+        self.observe_exports(blackholes, flowspec, sessions.as_ref(), export_epoch)
             .await;
         match failure {
             Some(error) => Err(error),
@@ -711,11 +742,17 @@ impl ReconciliationLoop {
                 }
                 // Another owner's rule, or an unowned one where ours is leased, is never touched.
                 if observed.owner != candidate_rule.owner {
-                    repair_error =
-                        Some(crate::error::PrefixdError::InjectionOwnerMismatch(format!(
-                            "FlowSpec rule for {} is held by injection owner {:?}",
-                            candidate_rule.nlri.dst_prefix, observed.owner
-                        )));
+                    repair_error = Some(crate::error::PrefixdError::InjectionOwnerMismatch {
+                        reason: if observed.owner.is_empty() {
+                            crate::error::InjectionRefusalReason::KeyUnowned
+                        } else {
+                            crate::error::InjectionRefusalReason::OwnerMismatch
+                        },
+                        message: format!(
+                            "FlowSpec rule for {} has a different injection owner",
+                            candidate_rule.nlri.dst_prefix
+                        ),
+                    });
                     continue;
                 }
                 if !forced && observed_action == &action && destination_prefix.is_none() {
@@ -1260,7 +1297,10 @@ impl ReconciliationLoop {
                     // An ownership refusal will not clear by re-adding everything
                     // again: report it each pass without re-triggering the re-add.
                     forced_failure |= forced
-                        && !matches!(error, crate::error::PrefixdError::InjectionOwnerMismatch(_));
+                        && !matches!(
+                            error,
+                            crate::error::PrefixdError::InjectionOwnerMismatch { .. }
+                        );
                     repair_error = Some(error);
                 }
             }
@@ -1412,25 +1452,57 @@ impl ReconciliationLoop {
         }
     }
 
-    /// Read-only export evidence for the active enforced blackholes: one
-    /// paginated read each per pass, sequentially, joined with this pass's peer
-    /// read. An unknown blackhole set keeps the last snapshot and metrics.
+    async fn flowspec_export_candidates(
+        &self,
+    ) -> crate::error::Result<Vec<(uuid::Uuid, crate::domain::FlowSpecNlri)>> {
+        // Dry-run cannot establish that rules from an earlier enforced run are absent.
+        if self.announcer.flowspec_export_observer().is_none() {
+            return Ok(vec![]);
+        }
+        let pop = self.owning_pop();
+        self.repo
+            .active_mitigation_inventory(pop)
+            .await?
+            .into_iter()
+            .filter(|mitigation| {
+                mitigation.action_type != ActionType::Blackhole
+                    && matches!(
+                        mitigation.status,
+                        MitigationStatus::Active | MitigationStatus::Escalated
+                    )
+                    && !mitigation.is_dry_run_origin()
+                    && mitigation.expires_at > chrono::Utc::now()
+                    && pop.is_none_or(|pop| mitigation.pop == pop)
+            })
+            .map(|mitigation| {
+                self.build_flowspec_rule(&mitigation)
+                    .map(|rule| (mitigation.mitigation_id, rule.nlri))
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
     async fn observe_blackhole_exports(
         &self,
         blackholes: Option<Vec<(uuid::Uuid, ipnet::IpNet)>>,
         sessions: Option<&crate::error::Result<Vec<crate::bgp::PeerStatus>>>,
         epoch: Option<u64>,
     ) {
-        use crate::domain::{BlackholeExportEvidence, UNEXPORTED_REASONS};
-        use crate::observability::metrics::{
-            BLACKHOLE_EXPORT_PEERS, BLACKHOLE_EXPORT_READ_ERRORS, BLACKHOLE_UNEXPORTED,
-        };
-        let (Some(state), Some(observer), Some(mut blackholes), Some(epoch)) = (
-            &self.state,
-            self.announcer.export_observer(),
-            blackholes,
-            epoch,
-        ) else {
+        self.observe_exports(blackholes, None, sessions, epoch)
+            .await;
+    }
+
+    /// Both route kinds share one rotating, bounded read pass. Unknown inventories
+    /// retain their previous snapshot; partial speaker reads are never empty.
+    async fn observe_exports(
+        &self,
+        blackholes: Option<Vec<(uuid::Uuid, ipnet::IpNet)>>,
+        flowspec: Option<Vec<(uuid::Uuid, crate::domain::FlowSpecNlri)>>,
+        sessions: Option<&crate::error::Result<Vec<crate::bgp::PeerStatus>>>,
+        epoch: Option<u64>,
+    ) {
+        use crate::domain::BlackholeExportEvidence;
+        let (Some(state), Some(epoch)) = (&self.state, epoch) else {
             return;
         };
         if !state
@@ -1439,32 +1511,53 @@ impl ReconciliationLoop {
         {
             return;
         }
-        // Repository order is unspecified. Start where the last stored pass
-        // stopped; the head then moves to the first read the budget cut off,
-        // so N blackholes at K reads per budget are all read within ceil(N/K)
-        // passes.
-        blackholes.sort_unstable_by_key(|(id, _)| *id);
-        let candidates = blackholes.len();
-        if candidates > 0 {
+        let known_blackholes = blackholes.is_some() && self.announcer.export_observer().is_some();
+        let known_flowspec =
+            flowspec.is_some() && self.announcer.flowspec_export_observer().is_some();
+        let mut candidates = Vec::new();
+        if let (Some(routes), Some(observer)) = (blackholes, self.announcer.export_observer()) {
+            candidates.extend(
+                routes
+                    .into_iter()
+                    .map(|(id, prefix)| (id, ExportTarget::Blackhole(prefix), observer)),
+            );
+        }
+        if let (Some(routes), Some(observer)) =
+            (flowspec, self.announcer.flowspec_export_observer())
+        {
+            candidates.extend(
+                routes
+                    .into_iter()
+                    .map(|(id, nlri)| (id, ExportTarget::FlowSpec(nlri), observer)),
+            );
+        }
+        candidates.sort_unstable_by_key(|(id, _, _)| *id);
+        let count = candidates.len();
+        if count > 0 {
             let start = self
                 .export_cursor
                 .load(std::sync::atomic::Ordering::Relaxed)
-                % candidates;
-            blackholes.rotate_left(start);
+                % count;
+            candidates.rotate_left(start);
         }
         let sessions = match sessions {
             Some(Ok(peers)) => Some(peers.as_slice()),
             _ => None,
         };
         let now = chrono::Utc::now();
-        // ponytail: one fixed budget per pass, so a stalled speaker cannot hold
-        // up expiry; reads it cuts off report an error. Make it a setting if
-        // large blackhole tables need longer.
+        // shortcut: one fixed pass budget, revisit if qualified rule tables need longer.
         let deadline = tokio::time::Instant::now() + EXPORT_OBSERVATION_BUDGET;
-        let mut routes = std::collections::HashMap::new();
+        let mut blackhole_routes = std::collections::HashMap::new();
+        let mut flowspec_routes = std::collections::HashMap::new();
         let mut cut_off = None;
-        for (index, (id, prefix)) in blackholes.into_iter().enumerate() {
-            let read = tokio::time::timeout_at(deadline, observer.blackhole_exports(&prefix))
+        for (index, (id, target, observer)) in candidates.into_iter().enumerate() {
+            let read = async {
+                match &target {
+                    ExportTarget::Blackhole(prefix) => observer.blackhole_exports(prefix).await,
+                    ExportTarget::FlowSpec(nlri) => observer.flowspec_exports(nlri).await,
+                }
+            };
+            let read = tokio::time::timeout_at(deadline, read)
                 .await
                 .unwrap_or_else(|_| {
                     cut_off.get_or_insert(index);
@@ -1472,51 +1565,57 @@ impl ReconciliationLoop {
                         "export observation budget for this pass exhausted".into(),
                     ))
                 });
+            let prefix = target.prefix();
+            let (store, routes, kind) = match target {
+                ExportTarget::Blackhole(_) => {
+                    (&state.export_evidence, &mut blackhole_routes, "blackhole")
+                }
+                ExportTarget::FlowSpec(_) => (
+                    &state.flowspec_export_evidence,
+                    &mut flowspec_routes,
+                    "flowspec",
+                ),
+            };
             let mut evidence = BlackholeExportEvidence::from_read(&read, sessions, now);
-            if let Some(error) = &evidence.error {
-                tracing::warn!(%prefix, error, "blackhole export read failed; export unknown");
-                // Keep the last complete read's warning, so a transient read
-                // error does not clear degraded health or the unexported alert.
-                evidence.warning = state
-                    .export_evidence
-                    .get(id, Some(epoch))
-                    .and_then(|previous| previous.warning);
+            if let Some(error) = evidence.error.clone() {
+                tracing::warn!(%prefix, kind, error, "export read failed; export unknown");
+                if let Some(previous) = store.get(id, Some(epoch)) {
+                    if kind == "flowspec" {
+                        evidence = previous;
+                        evidence.status = crate::domain::ExportObservation::Error;
+                        evidence.error = Some(error);
+                        evidence.counts = Default::default();
+                    } else {
+                        // Preserve the existing blackhole error response contract.
+                        evidence.warning = previous.warning;
+                    }
+                }
             }
             if let Some(warning) = &evidence.warning {
-                tracing::warn!(%prefix, reason = warning.reason,
-                    "active blackhole is committed to no Established peer");
+                tracing::warn!(%prefix, kind, reason = warning.reason,
+                    "last complete export observation has no committed Established peer");
             }
-            routes.insert(id, (prefix.to_string(), evidence));
+            routes.insert(id, (prefix, evidence));
         }
         state.fence.with_observation_epoch(|current| {
             if current != Some(epoch) {
                 return;
             }
-            state.export_evidence.replace(now, epoch, routes);
-            if candidates > 0 {
-                // At least one place, so a read longer than the budget cannot
-                // pin the head.
-                let attempted = cut_off.unwrap_or(candidates).max(1);
-                self.export_cursor
-                    .fetch_add(attempted, std::sync::atomic::Ordering::Relaxed);
+            if known_blackholes {
+                state.export_evidence.replace(now, epoch, blackhole_routes);
             }
-            let summary = state.export_evidence.current_summary(current);
-            for disposition in crate::bgp::ExportDisposition::ALL {
-                BLACKHOLE_EXPORT_PEERS
-                    .with_label_values(&[disposition.as_str()])
-                    .set(summary.counts.get(disposition) as f64);
+            if known_flowspec {
+                state
+                    .flowspec_export_evidence
+                    .replace(now, epoch, flowspec_routes);
             }
-            for reason in UNEXPORTED_REASONS {
-                let count = summary
-                    .unexported
-                    .iter()
-                    .filter(|route| route.warning.reason == reason)
-                    .count();
-                BLACKHOLE_UNEXPORTED
-                    .with_label_values(&[reason])
-                    .set(count as f64);
+            if count > 0 {
+                self.export_cursor.fetch_add(
+                    cut_off.unwrap_or(count).max(1),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
-            BLACKHOLE_EXPORT_READ_ERRORS.set(summary.errors as f64);
+            crate::observability::metrics::update_export_metrics(state, current);
         });
     }
 
@@ -3425,6 +3524,9 @@ mod tests {
         fn export_observer(&self) -> Option<&dyn crate::bgp::ExportObserver> {
             self.enabled.load(SeqCst).then_some(self)
         }
+        fn flowspec_export_observer(&self) -> Option<&dyn crate::bgp::ExportObserver> {
+            self.enabled.load(SeqCst).then_some(self)
+        }
     }
 
     #[async_trait::async_trait]
@@ -3440,6 +3542,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::bgp::ExportObserver for SlowExportSpeaker {
+        async fn flowspec_exports(
+            &self,
+            nlri: &crate::domain::FlowSpecNlri,
+        ) -> Result<Option<Vec<crate::bgp::PeerExport>>> {
+            self.blackhole_exports(&nlri.dst_prefix.parse().unwrap())
+                .await
+        }
         async fn blackhole_exports(
             &self,
             prefix: &ipnet::IpNet,
@@ -3917,6 +4026,9 @@ mod tests {
         fn export_observer(&self) -> Option<&dyn crate::bgp::ExportObserver> {
             Some(self)
         }
+        fn flowspec_export_observer(&self) -> Option<&dyn crate::bgp::ExportObserver> {
+            Some(self)
+        }
     }
 
     #[async_trait::async_trait]
@@ -3932,6 +4044,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::bgp::ExportObserver for PausedExportRead {
+        async fn flowspec_exports(
+            &self,
+            nlri: &crate::domain::FlowSpecNlri,
+        ) -> Result<Option<Vec<crate::bgp::PeerExport>>> {
+            self.blackhole_exports(&nlri.dst_prefix.parse().unwrap())
+                .await
+        }
         async fn blackhole_exports(
             &self,
             _: &ipnet::IpNet,
@@ -5226,5 +5345,294 @@ mod tests {
         assert_eq!(speaker.routes().await.len(), 2);
         assert!(speaker.routes().await.contains(&unowned));
         assert_eq!(speaker.deletes.load(SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flowspec_and_blackholes_share_a_fair_export_budget_and_separate_metrics() {
+        use crate::observability::metrics::{BLACKHOLE_EXPORT_PEERS, FLOWSPEC_EXPORT_PEERS};
+        let _metrics = RECONCILIATION_TEST_LOCK.lock().await;
+        let speaker = Arc::new(SlowExportSpeaker {
+            enabled: std::sync::atomic::AtomicBool::new(true),
+            read_time: Duration::from_secs(6),
+            completed: std::sync::Mutex::new(vec![]),
+        });
+        let reconciler = blackhole_reconciler(
+            Arc::new(MockRepository::new()),
+            speaker.clone(),
+            live_config(),
+            false,
+        );
+        let blackholes = vec![(uuid::Uuid::from_u128(2), "192.0.2.2/32".parse().unwrap())];
+        let flowspec: Vec<_> = [1, 3, 4]
+            .into_iter()
+            .map(|n| {
+                (
+                    uuid::Uuid::from_u128(n),
+                    crate::domain::FlowSpecNlri {
+                        dst_prefix: format!("192.0.2.{n}/32"),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        for pass in 0..4 {
+            let started = tokio::time::Instant::now();
+            reconciler
+                .observe_exports(
+                    Some(blackholes.clone()),
+                    Some(flowspec.clone()),
+                    None,
+                    Some(0),
+                )
+                .await;
+            assert!(started.elapsed() <= EXPORT_OBSERVATION_BUDGET + Duration::from_millis(1));
+            assert_eq!(
+                BLACKHOLE_EXPORT_PEERS
+                    .with_label_values(&["committed"])
+                    .get(),
+                if pass == 1 { 1.0 } else { 0.0 }
+            );
+            assert_eq!(
+                FLOWSPEC_EXPORT_PEERS
+                    .with_label_values(&["committed"])
+                    .get(),
+                if pass != 1 { 1.0 } else { 0.0 }
+            );
+        }
+        assert_eq!(
+            *speaker.completed.lock().unwrap(),
+            (1..=4)
+                .map(|n| format!("192.0.2.{n}/32").parse::<ipnet::IpNet>().unwrap())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flowspec_export_read_crossing_fence_loss_is_discarded() {
+        use crate::domain::BlackholeExportEvidence;
+        let _metrics = RECONCILIATION_TEST_LOCK.lock().await;
+        let speaker = Arc::new(PausedExportRead {
+            started: tokio::sync::Notify::new(),
+            proceed: tokio::sync::Notify::new(),
+        });
+        let reconciler = Arc::new(blackhole_reconciler(
+            Arc::new(MockRepository::new()),
+            speaker.clone(),
+            live_config(),
+            false,
+        ));
+        let state = reconciler.state.clone().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let nlri = crate::domain::FlowSpecNlri {
+            dst_prefix: "192.0.2.1/32".into(),
+            ..Default::default()
+        };
+        let old_time = chrono::DateTime::from_timestamp(0, 0).unwrap();
+        let old = BlackholeExportEvidence::from_read(&Ok(Some(vec![])), None, old_time);
+        state.flowspec_export_evidence.replace(
+            old_time,
+            0,
+            [(id, (nlri.dst_prefix.clone(), old))].into(),
+        );
+        let pass = tokio::spawn({
+            let reconciler = reconciler.clone();
+            let nlri = nlri.clone();
+            async move {
+                reconciler
+                    .observe_exports(None, Some(vec![(id, nlri)]), None, Some(0))
+                    .await
+            }
+        });
+        speaker.started.notified().await;
+        state.fence.set(false);
+        state.fence.set(true);
+        speaker.proceed.notify_one();
+        pass.await.unwrap();
+        let retained = state.flowspec_export_evidence.get(id, Some(1)).unwrap();
+        assert!(retained.historical);
+        assert_eq!(retained.observed_at, Some(old_time));
+        assert_eq!(retained.counts.committed, 0);
+        speaker.proceed.notify_one();
+        reconciler
+            .observe_exports(None, Some(vec![(id, nlri)]), None, Some(1))
+            .await;
+        let current = state.flowspec_export_evidence.get(id, Some(1)).unwrap();
+        assert!(!current.historical);
+        assert_eq!(current.counts.committed, 1);
+    }
+
+    #[derive(Default)]
+    struct DryRunFlowSpecObserver {
+        speaker: FaultyBlackholes,
+        observed: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FlowSpecAnnouncer for DryRunFlowSpecObserver {
+        fn backend(&self) -> &'static str {
+            "mock"
+        }
+        fn reader(&self) -> Option<&dyn FlowSpecReader> {
+            Some(&self.speaker)
+        }
+        fn injection_leases(&self) -> Option<&dyn crate::bgp::InjectionLeases> {
+            Some(&self.speaker)
+        }
+        fn flowspec_export_observer(&self) -> Option<&dyn ExportObserver> {
+            Some(self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for DryRunFlowSpecObserver {
+        async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.speaker.announce(rule).await
+        }
+        async fn announce_leased(
+            &self,
+            rule: &FlowSpecRule,
+            seconds: u32,
+        ) -> Result<crate::bgp::LeaseGeneration> {
+            self.speaker.announce_leased(rule, seconds).await
+        }
+        async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.speaker.withdraw(rule).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExportObserver for DryRunFlowSpecObserver {
+        async fn blackhole_exports(
+            &self,
+            prefix: &ipnet::IpNet,
+        ) -> Result<Option<Vec<crate::bgp::PeerExport>>> {
+            self.speaker.inner.blackhole_exports(prefix).await
+        }
+        async fn flowspec_exports(
+            &self,
+            nlri: &crate::domain::FlowSpecNlri,
+        ) -> Result<Option<Vec<crate::bgp::PeerExport>>> {
+            self.observed.lock().unwrap().push(nlri.compute_hash());
+            self.speaker.inner.flowspec_exports(nlri).await
+        }
+    }
+
+    #[tokio::test]
+    async fn dry_run_observes_retained_flowspec_without_reading_simulations_or_mutating() {
+        use crate::bgp::{ExportDisposition, PeerExport};
+        use crate::config::OperationMode;
+        use crate::domain::{ExportObservation, LeaseKeeper};
+        let _metrics = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(DryRunFlowSpecObserver::default());
+        let owner = "prefixd.test.0123456789abcdef";
+        let mut rows = [
+            expired_mitigation("192.0.2.1"),
+            expired_mitigation("192.0.2.2"),
+            expired_mitigation("192.0.2.3"),
+        ];
+        rows[0].origin_mode = Some(OperationMode::Enforced);
+        // A successful export read cannot infer this legacy row's admission mode.
+        rows[1].origin_mode = None;
+        rows[2].origin_mode = Some(OperationMode::DryRun);
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+            if index < 2 {
+                row.action_params.injection_owner = owner.into();
+            }
+            repo.insert_mitigation(row).await.unwrap();
+        }
+        let rules: Vec<_> = rows
+            .iter()
+            .map(|row| crate::domain::mitigation_rule(row).unwrap())
+            .collect();
+        for rule in &rules[..2] {
+            // Seed the retained speaker state before the dry-run controller starts.
+            speaker
+                .speaker
+                .inner
+                .announce_leased(rule, 60)
+                .await
+                .unwrap();
+        }
+        speaker.speaker.inner.set_flowspec_exports(
+            &rules[1].nlri,
+            Ok(vec![PeerExport {
+                peer_address: "192.0.2.10".into(),
+                disposition: ExportDisposition::Withheld,
+                reason: "family_not_negotiated".into(),
+                explain_code: String::new(),
+                detail: String::new(),
+                advertised_path_id: 0,
+            }]),
+        );
+        speaker.speaker.inner.set_flowspec_exports(
+            &rules[0].nlri,
+            Ok(vec![PeerExport {
+                peer_address: "192.0.2.10".into(),
+                disposition: ExportDisposition::Committed,
+                reason: String::new(),
+                explain_code: String::new(),
+                detail: String::new(),
+                advertised_path_id: 0,
+            }]),
+        );
+        let keeper = Arc::new(LeaseKeeper::new(owner.into(), 60).without_renewal());
+        assert!(keeper.recover(&speaker.speaker).await.unwrap());
+        assert!(keeper.generation().is_some());
+        let mut reconciler =
+            blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), true)
+                .with_lease(keeper.clone());
+        Arc::get_mut(reconciler.state.as_mut().unwrap())
+            .unwrap()
+            .settings
+            .mode = OperationMode::DryRun;
+        reconciler.reconcile().await.unwrap();
+        keeper.renew_once(&speaker.speaker).await;
+        let state = reconciler.state.as_ref().unwrap();
+        for (row, disposition) in rows[..2]
+            .iter()
+            .zip([ExportDisposition::Committed, ExportDisposition::Withheld])
+        {
+            let evidence = state
+                .flowspec_export_evidence
+                .get(row.mitigation_id, Some(0))
+                .expect("retained rule remains observable in dry-run");
+            assert_eq!(evidence.status, ExportObservation::Observed);
+            assert_eq!(evidence.peers[0].disposition, disposition);
+        }
+        assert!(
+            state
+                .flowspec_export_evidence
+                .get(rows[2].mitigation_id, Some(0))
+                .is_none()
+        );
+        let mut observed = speaker.observed.lock().unwrap().clone();
+        observed.sort();
+        let mut expected = rules[..2]
+            .iter()
+            .map(FlowSpecRule::nlri_hash)
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(observed, expected, "simulation-origin intent is never read");
+        assert_eq!(speaker.speaker.flowspec_adds.load(SeqCst), 0);
+        assert_eq!(speaker.speaker.leased_flowspec_adds.load(SeqCst), 0);
+        assert!(
+            speaker
+                .speaker
+                .flowspec_delete_owners
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(speaker.speaker.renewals.load(SeqCst), 0);
+        assert_eq!(speaker.speaker.inner.list_active().await.unwrap().len(), 2);
+        assert_eq!(
+            repo.get_mitigation(rows[1].mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .origin_mode,
+            None
+        );
     }
 }

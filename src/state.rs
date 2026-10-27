@@ -52,6 +52,8 @@ pub struct AppState {
     pub lease: Option<Arc<crate::domain::LeaseKeeper>>,
     /// The last reconciliation pass's blackhole export evidence (observation only).
     pub export_evidence: crate::domain::ExportEvidenceStore,
+    /// FlowSpec uses the same epoch-fenced snapshot contract as blackholes.
+    pub flowspec_export_evidence: crate::domain::ExportEvidenceStore,
     /// Directory containing config files (for hot-reload)
     pub config_dir: PathBuf,
     shutting_down: AtomicBool,
@@ -133,6 +135,7 @@ impl AppState {
             fence: Arc::new(crate::fence::ControllerFence::new(true)),
             lease: None,
             export_evidence: Default::default(),
+            flowspec_export_evidence: Default::default(),
             db_pool,
             config_dir,
             shutting_down: AtomicBool::new(false),

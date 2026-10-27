@@ -1,14 +1,81 @@
 # FastNetMon Community Integration
 
-This guide covers integrating FastNetMon Community Edition with prefixd for automated FlowSpec-based DDoS mitigation.
+This guide covers integrating FastNetMon Community Edition with prefixd for
+automated FlowSpec or guarded host-blackhole mitigation.
 
 ## Overview
 
 FastNetMon detects DDoS attacks via NetFlow/sFlow analysis and calls a notify script when attacks are detected. The `prefixd-fastnetmon.sh` script bridges FastNetMon to prefixd's HTTP APIs (event ingest + mitigation withdraw).
 
 ```
-FastNetMon → notify script → prefixd → BGP speaker (rustbgpd by default, or GoBGP) → routers (FlowSpec)
+FastNetMon → notify script → prefixd → BGP speaker → routers
 ```
+
+### Choose the mitigation owner
+
+Use the notify script below when prefixd should own mitigation. prefixd applies
+inventory ownership, safelists, quotas and TTL limits, evaluates playbooks, and
+records mitigation and withdrawal audit history. It supports FlowSpec through
+rustbgpd or GoBGP, and opt-in host blackholes through rustbgpd. The dashboard
+shows desired intent and the available speaker evidence; neither local RPC
+acceptance nor peer health proves router enforcement.
+
+FastNetMon also has a native rustbgpd action for direct RTBH:
+
+```text
+FastNetMon → rustbgpd injection API → routers
+```
+
+As checked on 2026-10-27, [the native action was merged upstream](https://github.com/pavel-odintsov/fastnetmon/pull/1097)
+that day and is absent from the latest published FastNetMon release,
+[`v1.2.9`](https://github.com/pavel-odintsov/fastnetmon/releases/tag/v1.2.9).
+It requires a source build containing that change, with
+`-DENABLE_RUSTBGPD_SUPPORT=ON`, plus `rustbgpd = on` at runtime. It announces
+IPv4 `/32` and IPv6 `/128` blackholes, optionally IPv4 customer subnets, and
+offers experimental injection leases with `rustbgpd_lease = on`. See
+[FastNetMon's native-action guide at the merged revision](https://github.com/pavel-odintsov/fastnetmon/blob/5686208f28f2eef36b5329dd9595e79a3da38a89/docs/rustbgpd_integration.md)
+for its build, transport, router-policy and lease requirements.
+
+The native action sends FastNetMon's bans directly to rustbgpd. Those bans do
+not pass through prefixd's admission checks or create prefixd mitigation and
+audit records. Choose this path when FastNetMon should own RTBH; use the notify
+path when prefixd should apply its policy and own the route lifecycle.
+
+### Keep one writer per speaker target
+
+prefixd requires exclusive administration of its physical speaker target.
+Do not enable FastNetMon's native action against that same target, even with
+disjoint prefixes. Use separate speaker targets if both systems must inject
+routes independently. See
+[persistent target ownership](../../reference/speaker-backends.md#persistent-target-ownership).
+
+The following conflict behavior was checked against prefixd source and
+rustbgpd `v0.80.1`; it does not qualify a shared-target deployment:
+
+- Normal add/delete calls refuse a leased route held by another owner,
+  including calls with no owner. A leased add also cannot adopt an unowned
+  route. When such a route already occupies a prefix, prefixd's leased
+  blackhole admission returns `409`, retires the new database row locally and
+  sends no delete.
+  Keep FastNetMon's lease owner distinct from prefixd's; sharing an owner
+  removes this protection.
+- Before unleased admission, prefixd reads local routes and returns `409`
+  without saving or adding if the prefix already has an untracked route.
+  This pre-read cannot fence another writer: a later unleased add can replace
+  an unowned route, and an unleased delete can remove it. A prefixd admission
+  race or reconciliation repair that returns `replaced` increments
+  `prefixd_blackhole_replaced_total{pop}` and triggers `PrefixdBlackholeReplaced`.
+  That counter records replacements performed by prefixd, not every external
+  overwrite; see the
+  [replacement-conflict alert](../grafana.md#replacement-conflict-alert).
+- When blackhole reconciliation runs, a successful inventory read reports
+  routes outside prefixd's ledger in
+  `prefixd_unknown_local_routes{kind="blackhole"}`. Unknown and foreign-owner
+  routes are left alone. The documented exception is cleanup of a route that
+  exactly matches a terminal prefixd-owned snapshot; unleased routes carry no
+  writer identity. See
+  [blackhole reconciliation](../../reference/speaker-backends.md#blackhole-lifecycle-and-reconciliation)
+  for the exact ownership and orphan-cleanup rules.
 
 ## Prerequisites
 

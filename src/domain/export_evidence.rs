@@ -1,4 +1,4 @@
-//! Per-peer export evidence for active blackholes: the speaker's export
+//! Per-peer export evidence for active mitigations: the speaker's export
 //! dispositions joined with its peer sessions. Observation only.
 //!
 //! A committed disposition means the route is in that peer's Adj-RIB-Out. It
@@ -148,7 +148,7 @@ fn unexported(peers: &[PeerExport]) -> ExportWarning {
     ExportWarning { reason, message }
 }
 
-/// Export evidence for one active blackhole.
+/// Export evidence shared by blackholes and FlowSpec; the schema name is retained for compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct BlackholeExportEvidence {
     pub status: ExportObservation,
@@ -253,8 +253,35 @@ pub struct BlackholeExportSummary {
     pub unexported: Vec<UnexportedBlackhole>,
 }
 
+/// FlowSpec export health, using the same evidence semantics as blackholes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, ToSchema)]
+pub struct FlowSpecExportSummary {
+    pub historical: bool,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub rules: usize,
+    pub counts: DispositionCounts,
+    pub errors: usize,
+    pub no_local_route: usize,
+    pub unexported: Vec<UnexportedBlackhole>,
+}
+
+impl From<BlackholeExportSummary> for FlowSpecExportSummary {
+    fn from(summary: BlackholeExportSummary) -> Self {
+        Self {
+            historical: summary.historical,
+            observed_at: summary.observed_at,
+            rules: summary.blackholes,
+            counts: summary.counts,
+            errors: summary.errors,
+            no_local_route: summary.no_local_route,
+            unexported: summary.unexported,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Snapshot {
+    inventory_error: Option<String>,
     observed_at: Option<DateTime<Utc>>,
     epoch: Option<u64>,
     routes: HashMap<Uuid, StoredEvidence>,
@@ -307,31 +334,50 @@ impl ExportEvidenceStore {
             })
             .collect();
         *snapshot = Snapshot {
+            inventory_error: None,
             observed_at: Some(observed_at),
             epoch: Some(epoch),
             routes,
         };
     }
 
-    pub fn get(&self, mitigation_id: Uuid, epoch: Option<u64>) -> Option<BlackholeExportEvidence> {
+    /// The candidate set is unknown: keep prior complete observations, never an empty set.
+    pub fn inventory_failed(&self, error: String) {
         self.0
-            .read()
+            .write()
             .unwrap_or_else(|poison| poison.into_inner())
-            .routes
-            .get(&mitigation_id)
-            .map(|stored| {
+            .inventory_error = Some(error);
+    }
+
+    pub fn get(&self, mitigation_id: Uuid, epoch: Option<u64>) -> Option<BlackholeExportEvidence> {
+        let snapshot = self.0.read().unwrap_or_else(|poison| poison.into_inner());
+        let mut evidence = match snapshot.routes.get(&mitigation_id) {
+            Some(stored) => {
                 let mut evidence = stored.evidence.clone();
                 evidence.historical = epoch != Some(stored.epoch);
                 evidence
-            })
+            }
+            None if snapshot.inventory_error.is_some() => {
+                BlackholeExportEvidence::unobserved(ExportObservation::Error)
+            }
+            None => return None,
+        };
+        if let Some(error) = &snapshot.inventory_error {
+            evidence.status = ExportObservation::Error;
+            evidence.error = Some(error.clone());
+            if !evidence.historical {
+                evidence.counts = Default::default();
+            }
+        }
+        Some(evidence)
     }
 
     pub fn summary(&self, epoch: Option<u64>) -> BlackholeExportSummary {
         self.summarize(epoch, true)
     }
 
-    /// The summary for metrics: historical routes still count as read errors,
-    /// but their counts and warnings are not presented as current.
+    /// Attempted read errors still count, but historical dispositions and
+    /// warnings are not presented as current; ownership loss invents no RPC failure.
     pub fn current_summary(&self, epoch: Option<u64>) -> BlackholeExportSummary {
         self.summarize(epoch, false)
     }
@@ -356,9 +402,11 @@ impl ExportEvidenceStore {
             if historical && !with_historical {
                 continue;
             }
-            summary.counts.committed += evidence.counts.committed;
-            summary.counts.withheld += evidence.counts.withheld;
-            summary.counts.pending += evidence.counts.pending;
+            if snapshot.inventory_error.is_none() {
+                summary.counts.committed += evidence.counts.committed;
+                summary.counts.withheld += evidence.counts.withheld;
+                summary.counts.pending += evidence.counts.pending;
+            }
             if let Some(warning) = &evidence.warning {
                 summary.unexported.push(UnexportedBlackhole {
                     mitigation_id: *id,
@@ -366,6 +414,10 @@ impl ExportEvidenceStore {
                     warning: warning.clone(),
                 });
             }
+        }
+        if snapshot.inventory_error.is_some() {
+            // One inventory-level failure when no candidate keys are known yet.
+            summary.errors = snapshot.routes.len().max(1);
         }
         summary.unexported.sort_by(|a, b| a.prefix.cmp(&b.prefix));
         summary

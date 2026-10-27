@@ -8,7 +8,7 @@ use super::{
     InjectionLeases, LeaseGeneration, PeerExport, PeerObserver, PeerStatus, SessionState,
 };
 use crate::domain::FlowSpecRule;
-use crate::error::{PrefixdError, Result};
+use crate::error::{InjectionRefusalReason, PrefixdError, Result};
 
 /// Daemon-side lease table (rustbgpd ADR-0141): one live generation per owner.
 #[derive(Debug, Default)]
@@ -31,12 +31,13 @@ pub struct MockAnnouncer {
     /// Test seam: export reads for these prefixes return this instead; `Err`
     /// fails the read.
     export_overrides: std::sync::Mutex<ExportOverrides>,
+    flowspec_export_overrides: std::sync::Mutex<ExportOverrides<String>>,
     /// Test seam: every export read stalls and never completes.
     pub stall_exports: std::sync::atomic::AtomicBool,
 }
 
-type ExportOverrides =
-    std::collections::HashMap<ipnet::IpNet, std::result::Result<Vec<PeerExport>, String>>;
+type ExportOverrides<K = ipnet::IpNet> =
+    std::collections::HashMap<K, std::result::Result<Vec<PeerExport>, String>>;
 
 impl MockAnnouncer {
     pub fn new() -> Self {
@@ -51,6 +52,7 @@ impl MockAnnouncer {
             }],
             no_match_support: false,
             export_overrides: Default::default(),
+            flowspec_export_overrides: Default::default(),
             stall_exports: Default::default(),
         }
     }
@@ -63,6 +65,7 @@ impl MockAnnouncer {
             peers,
             no_match_support: false,
             export_overrides: Default::default(),
+            flowspec_export_overrides: Default::default(),
             stall_exports: Default::default(),
         }
     }
@@ -85,6 +88,18 @@ impl MockAnnouncer {
             .lock()
             .unwrap()
             .insert(prefix, exports);
+    }
+
+    /// Exact-key FlowSpec export result for failure and withholding controls.
+    pub fn set_flowspec_exports(
+        &self,
+        nlri: &crate::domain::FlowSpecNlri,
+        exports: std::result::Result<Vec<PeerExport>, String>,
+    ) {
+        self.flowspec_export_overrides
+            .lock()
+            .unwrap()
+            .insert(nlri.compute_hash(), exports);
     }
 
     pub async fn announced_count(&self) -> usize {
@@ -121,10 +136,15 @@ impl MockAnnouncer {
         self.rules.write().await.clear();
     }
 
-    fn owner_mismatch(operation: &str) -> PrefixdError {
-        PrefixdError::InjectionOwnerMismatch(format!(
-            "mock refused {operation}: the key is held by another injection owner or by none"
-        ))
+    fn owner_mismatch(operation: &str, held_owner: Option<&str>) -> PrefixdError {
+        PrefixdError::InjectionOwnerMismatch {
+            reason: match held_owner {
+                Some("") => InjectionRefusalReason::KeyUnowned,
+                Some(_) => InjectionRefusalReason::OwnerMismatch,
+                None => InjectionRefusalReason::Unspecified,
+            },
+            message: format!("mock refused {operation}; nothing changed"),
+        }
     }
 }
 
@@ -147,6 +167,9 @@ impl FlowSpecAnnouncer for MockAnnouncer {
     fn export_observer(&self) -> Option<&dyn ExportObserver> {
         Some(self)
     }
+    fn flowspec_export_observer(&self) -> Option<&dyn ExportObserver> {
+        Some(self)
+    }
     fn match_support(&self) -> FlowSpecMatchSupport {
         if self.no_match_support {
             FlowSpecMatchSupport::default()
@@ -166,7 +189,13 @@ impl FlowSpecWriter for MockAnnouncer {
                 .iter()
                 .any(|r| r.nlri_hash() == hash && !r.owner.is_empty())
         {
-            return Err(Self::owner_mismatch("AddFlowSpec"));
+            return Err(Self::owner_mismatch(
+                "AddFlowSpec",
+                rules
+                    .iter()
+                    .find(|r| r.nlri_hash() == hash)
+                    .map(|r| r.owner.as_str()),
+            ));
         }
 
         // Remove existing rule with same NLRI if present
@@ -188,7 +217,13 @@ impl FlowSpecWriter for MockAnnouncer {
                 .iter()
                 .any(|r| r.nlri_hash() == hash && r.owner != rule.owner)
         {
-            return Err(Self::owner_mismatch("AddLeasedFlowSpec"));
+            return Err(Self::owner_mismatch(
+                "AddLeasedFlowSpec",
+                rules
+                    .iter()
+                    .find(|r| r.nlri_hash() == hash)
+                    .map(|r| r.owner.as_str()),
+            ));
         }
         let generation = self.join_lease(&rule.owner);
         rules.retain(|r| r.nlri_hash() != hash);
@@ -202,7 +237,13 @@ impl FlowSpecWriter for MockAnnouncer {
             .iter()
             .any(|r| r.nlri_hash() == hash && r.owner != rule.owner)
         {
-            return Err(Self::owner_mismatch("DeleteFlowSpec"));
+            return Err(Self::owner_mismatch(
+                "DeleteFlowSpec",
+                rules
+                    .iter()
+                    .find(|r| r.nlri_hash() == hash)
+                    .map(|r| r.owner.as_str()),
+            ));
         }
         let before = rules.len();
         rules.retain(|r| r.nlri_hash() != hash);
@@ -240,7 +281,13 @@ impl BlackholeSpeaker for MockAnnouncer {
                 .iter()
                 .any(|r| r.prefix() == route.prefix() && !r.owner().is_empty())
         {
-            return Err(Self::owner_mismatch("AddPath"));
+            return Err(Self::owner_mismatch(
+                "AddPath",
+                routes
+                    .iter()
+                    .find(|r| r.prefix() == route.prefix())
+                    .map(|r| r.owner()),
+            ));
         }
         Ok(upsert_blackhole(&mut routes, route))
     }
@@ -255,7 +302,13 @@ impl BlackholeSpeaker for MockAnnouncer {
                 .iter()
                 .any(|r| r.prefix() == route.prefix() && r.owner() != route.owner())
         {
-            return Err(Self::owner_mismatch("AddLeasedPath"));
+            return Err(Self::owner_mismatch(
+                "AddLeasedPath",
+                routes
+                    .iter()
+                    .find(|r| r.prefix() == route.prefix())
+                    .map(|r| r.owner()),
+            ));
         }
         let generation = self.join_lease(route.owner());
         Ok((generation, upsert_blackhole(&mut routes, route)))
@@ -267,7 +320,13 @@ impl BlackholeSpeaker for MockAnnouncer {
             .iter()
             .any(|r| r.prefix() == *prefix && r.owner() != owner)
         {
-            return Err(Self::owner_mismatch("DeletePath"));
+            return Err(Self::owner_mismatch(
+                "DeletePath",
+                routes
+                    .iter()
+                    .find(|r| r.prefix() == *prefix)
+                    .map(|r| r.owner()),
+            ));
         }
         routes.retain(|r| r.prefix() != *prefix);
         Ok(())
@@ -302,6 +361,46 @@ impl InjectionLeases for MockAnnouncer {
 /// Synthetic: a held route is committed to every Established mock peer.
 #[async_trait]
 impl ExportObserver for MockAnnouncer {
+    async fn flowspec_exports(
+        &self,
+        nlri: &crate::domain::FlowSpecNlri,
+    ) -> Result<Option<Vec<PeerExport>>> {
+        if self.stall_exports.load(std::sync::atomic::Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        if let Some(exports) = self
+            .flowspec_export_overrides
+            .lock()
+            .unwrap()
+            .get(&nlri.compute_hash())
+        {
+            return exports.clone().map(Some).map_err(PrefixdError::Internal);
+        }
+        if !self
+            .rules
+            .read()
+            .await
+            .iter()
+            .any(|rule| rule.nlri_hash() == nlri.compute_hash())
+        {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.peers
+                .iter()
+                .filter(|peer| peer.state.is_established())
+                .map(|peer| PeerExport {
+                    peer_address: peer.address.clone(),
+                    disposition: ExportDisposition::Committed,
+                    reason: String::new(),
+                    explain_code: String::new(),
+                    detail: String::new(),
+                    advertised_path_id: 0,
+                })
+                .collect(),
+        ))
+    }
+
     async fn blackhole_exports(&self, prefix: &ipnet::IpNet) -> Result<Option<Vec<PeerExport>>> {
         if self.stall_exports.load(std::sync::atomic::Ordering::SeqCst) {
             std::future::pending::<()>().await;

@@ -22,13 +22,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   omitted and identifiers named `All` remain selectable.
 - `GET /v1/mitigations` accepts bounded literal substring search through `q`,
   covering target, vector, customer ID and mitigation UUID before pagination.
+- rustbgpd ownership refusals now distinguish `owner_mismatch` from
+  `key_unowned` in admission `409` bodies, retirement audit reasons and
+  operational logs. Missing, malformed, conflicting or unrecognized rich-status
+  details use `unspecified`; prefixd still changes no speaker route and never
+  falls back to an unleased add. Refused lease renewals still trigger a full
+  leased re-add and retain the existing `not_live` health result, with a typed
+  `generation_not_live` diagnostic when the speaker supplies it.
 
 ### Added
+
+- FastNetMon guidance distinguishes its source-build native rustbgpd RTBH
+  action from the prefixd notify path, and explains the exclusive speaker-target
+  requirement and leased/unleased route conflicts.
+- Per-peer FlowSpec export evidence on rustbgpd, keyed by the full canonical
+  match and shown on mitigation detail, authenticated health and the dashboard.
+  Separate bounded FlowSpec metrics preserve the existing blackhole metrics.
+  Both kinds share one fair, rotating 10-second observation budget. Failed and
+  historical reads remain distinct from empty or unsupported observation;
+  committed means the peer's Adj-RIB-Out, not router enforcement. No configuration
+  or schema migration is required, and the existing blackhole alert stays scoped
+  to blackholes.
 
 - An optional `docker-compose.inventory.yml` overlay reads
   `configs/inventory.yaml` directly from the host for either speaker profile.
   Existing volume-managed inventories remain the default. The quickstart covers
   switching workflows, reloading edits and recreating stale file mounts.
+
+### Fixed
+
+- A controller running in dry-run continues to observe export for active
+  FlowSpec rules retained from an earlier run, while excluding rows recorded
+  as dry-run. Observation sends no announcement, withdrawal or lease renewal,
+  and never infers an unknown legacy admission mode.
+
+- Export metric scrapes now exclude peer dispositions and unexported warnings
+  from before the controller lost ownership, including during standby and after
+  regain before the next observation pass. Read-error metrics still describe
+  attempted reads; ownership loss alone does not count as a failed RPC.
 
 ## [0.23.1] - 2026-10-26
 

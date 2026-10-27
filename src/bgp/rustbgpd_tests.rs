@@ -12,6 +12,7 @@ type HeldOwner = (Vec<pb::FlowSpecComponent>, String);
 struct Fake {
     rules: Arc<Mutex<Vec<pb::AddFlowSpecRequest>>>,
     mode: Arc<AtomicUsize>,
+    refusal: Arc<Mutex<Option<Status>>>,
     attempts: Arc<AtomicUsize>,
     deletes: Arc<AtomicUsize>,
     health_calls: Arc<AtomicUsize>,
@@ -209,6 +210,9 @@ impl pb::injection_service_server::InjectionService for Fake {
     ) -> std::result::Result<Response<pb::AddFlowSpecResponse>, Status> {
         let attempt = self.attempts.fetch_add(1, SeqCst);
         auth(&request)?;
+        if let Some(status) = self.refusal.lock().unwrap().clone() {
+            return Err(status);
+        }
         match self.mode.load(SeqCst) {
             1 => return Err(Status::unavailable("temporary")),
             2 => return Err(Status::invalid_argument("bad input")),
@@ -250,6 +254,9 @@ impl pb::injection_service_server::InjectionService for Fake {
         request: Request<pb::AddLeasedFlowSpecRequest>,
     ) -> std::result::Result<Response<pb::AddLeasedFlowSpecResponse>, Status> {
         auth(&request)?;
+        if let Some(status) = self.refusal.lock().unwrap().clone() {
+            return Err(status);
+        }
         if self.mode.load(SeqCst) == FLOWSPEC_LEASE_UNIMPLEMENTED {
             return Err(Status::unimplemented("older daemon"));
         }
@@ -275,6 +282,9 @@ impl pb::injection_service_server::InjectionService for Fake {
     ) -> std::result::Result<Response<pb::DeleteFlowSpecResponse>, Status> {
         self.deletes.fetch_add(1, SeqCst);
         auth(&request)?;
+        if let Some(status) = self.refusal.lock().unwrap().clone() {
+            return Err(status);
+        }
         let request = request.into_inner();
         assert!(request.allow_missing);
         assert!(!request.override_owner, "prefixd never overrides the owner");
@@ -914,6 +924,7 @@ async fn initial_connection_bounds_a_stalled_tls_handshake() {
 struct UnicastFake {
     paths: Arc<Mutex<Vec<pb::AddPathRequest>>>,
     mode: Arc<AtomicUsize>,
+    refusal: Arc<Mutex<Option<Status>>>,
     pages: Arc<AtomicUsize>,
     /// Injection owner per prefix; absent for an unowned path.
     owners: Arc<Mutex<std::collections::HashMap<String, String>>>,
@@ -995,6 +1006,9 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
         request: Request<pb::AddPathRequest>,
     ) -> std::result::Result<Response<pb::AddPathResponse>, Status> {
         auth(&request)?;
+        if let Some(status) = self.refusal.lock().unwrap().clone() {
+            return Err(status);
+        }
         if self.mode.load(SeqCst) == PRECONDITION {
             return Err(Status::failed_precondition("key is held by owner"));
         }
@@ -1007,6 +1021,9 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
         request: Request<pb::AddLeasedPathRequest>,
     ) -> std::result::Result<Response<pb::AddLeasedPathResponse>, Status> {
         auth(&request)?;
+        if let Some(status) = self.refusal.lock().unwrap().clone() {
+            return Err(status);
+        }
         match self.mode.load(SeqCst) {
             LEASE_UNIMPLEMENTED => return Err(Status::unimplemented("older daemon")),
             PRECONDITION => return Err(Status::failed_precondition("key is held by no owner")),
@@ -1031,6 +1048,9 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
         request: Request<pb::RenewLeaseRequest>,
     ) -> std::result::Result<Response<pb::RenewLeaseResponse>, Status> {
         auth(&request)?;
+        if let Some(status) = self.refusal.lock().unwrap().clone() {
+            return Err(status);
+        }
         match self.mode.load(SeqCst) {
             LEASE_UNIMPLEMENTED => return Err(Status::unimplemented("older daemon")),
             PRECONDITION => {
@@ -1080,6 +1100,9 @@ impl pb::injection_service_server::InjectionService for UnicastFake {
         request: Request<pb::DeletePathRequest>,
     ) -> std::result::Result<Response<pb::DeletePathResponse>, Status> {
         auth(&request)?;
+        if let Some(status) = self.refusal.lock().unwrap().clone() {
+            return Err(status);
+        }
         let request = request.into_inner();
         assert_eq!(request.path_id, 0);
         assert!(request.allow_missing, "deletes are idempotent");
@@ -1711,7 +1734,7 @@ async fn ownership_refusals_and_dead_generations_map_by_status_code() {
             .unwrap_err(),
     ] {
         assert!(
-            matches!(error, PrefixdError::InjectionOwnerMismatch(_)),
+            matches!(error, PrefixdError::InjectionOwnerMismatch { .. }),
             "{error}"
         );
     }
@@ -1720,6 +1743,174 @@ async fn ownership_refusals_and_dead_generations_map_by_status_code() {
     // On RenewLease the code means only "that generation is not live".
     assert!(!speaker.renew_lease(LEASE_OWNER, live(), 60).await.unwrap());
     server.abort();
+}
+
+fn refusal_status(reason: &str) -> Status {
+    rich_refusal(Code::FailedPrecondition, "rustbgpd", reason)
+}
+
+fn rich_refusal(code: Code, domain: &str, reason: &str) -> Status {
+    let info = ErrorInfo {
+        domain: domain.into(),
+        reason: reason.into(),
+    };
+    Status::with_details(
+        code,
+        "private upstream diagnostic",
+        RpcStatus {
+            code: code as i32,
+            details: vec![prost_types::Any {
+                type_url: "type.googleapis.com/google.rpc.ErrorInfo".into(),
+                value: info.encode_to_vec(),
+            }],
+        }
+        .encode_to_vec()
+        .into(),
+    )
+}
+
+#[test]
+fn injection_refusal_details_require_one_matching_typed_reason() {
+    for (wire, expected) in [
+        ("OWNER_MISMATCH", InjectionRefusalReason::OwnerMismatch),
+        ("KEY_UNOWNED", InjectionRefusalReason::KeyUnowned),
+        (
+            "GENERATION_NOT_LIVE",
+            InjectionRefusalReason::GenerationNotLive,
+        ),
+    ] {
+        assert_eq!(
+            injection_refusal_reason(&refusal_status(wire)),
+            Some(expected)
+        );
+    }
+    let valid = refusal_status("OWNER_MISMATCH");
+    let rich = RpcStatus::decode(valid.details()).unwrap();
+    let mut mismatched_code = rich.clone();
+    mismatched_code.code = Code::Ok as i32;
+    let mut wrong_type = rich.clone();
+    wrong_type.details[0].type_url = "untrusted/google.rpc.ErrorInfo".into();
+    let mut malformed_info = rich.clone();
+    malformed_info.details[0].value = vec![0xff];
+    let mut contradictory = rich.clone();
+    contradictory.details.push(
+        RpcStatus::decode(refusal_status("KEY_UNOWNED").details())
+            .unwrap()
+            .details
+            .remove(0),
+    );
+    let mut duplicate = rich.clone();
+    duplicate.details.extend(rich.details.clone());
+    let mut controls = vec![
+        Status::failed_precondition("OWNER_MISMATCH"),
+        Status::with_details(
+            Code::FailedPrecondition,
+            "OWNER_MISMATCH",
+            vec![0xff].into(),
+        ),
+        rich_refusal(Code::InvalidArgument, "rustbgpd", "OWNER_MISMATCH"),
+        rich_refusal(Code::FailedPrecondition, "other", "OWNER_MISMATCH"),
+        refusal_status("A_NEW_REASON"),
+    ];
+    controls.extend(
+        [
+            mismatched_code,
+            wrong_type,
+            malformed_info,
+            contradictory,
+            duplicate,
+        ]
+        .map(|rich| {
+            Status::with_details(
+                Code::FailedPrecondition,
+                "OWNER_MISMATCH",
+                rich.encode_to_vec().into(),
+            )
+        }),
+    );
+    for status in controls {
+        assert_eq!(injection_refusal_reason(&status), None, "{status:?}");
+    }
+}
+
+#[tokio::test]
+async fn typed_refusals_round_trip_over_grpc_without_mutating_routes() {
+    let (speaker, fake, server) = unicast_speaker().await;
+    let (flowspec, flow_fake, flow_server) = flowspec_speaker().await;
+    let route = blackhole("192.0.2.1/32", "192.0.2.66", 1).with_owner(LEASE_OWNER);
+    let flow = rule("192.0.2.1/32", 0).with_owner(LEASE_OWNER);
+    for (status, expected) in [
+        (
+            refusal_status("OWNER_MISMATCH"),
+            InjectionRefusalReason::OwnerMismatch,
+        ),
+        (
+            refusal_status("KEY_UNOWNED"),
+            InjectionRefusalReason::KeyUnowned,
+        ),
+        (
+            refusal_status("GENERATION_NOT_LIVE"),
+            InjectionRefusalReason::Unspecified,
+        ),
+        (
+            rich_refusal(Code::FailedPrecondition, "other", "KEY_UNOWNED"),
+            InjectionRefusalReason::Unspecified,
+        ),
+        (
+            Status::failed_precondition("OWNER_MISMATCH"),
+            InjectionRefusalReason::Unspecified,
+        ),
+        (
+            refusal_status("A_NEW_REASON"),
+            InjectionRefusalReason::Unspecified,
+        ),
+        (
+            Status::with_details(
+                Code::FailedPrecondition,
+                "private upstream diagnostic",
+                vec![0xff].into(),
+            ),
+            InjectionRefusalReason::Unspecified,
+        ),
+    ] {
+        *fake.refusal.lock().unwrap() = Some(status.clone());
+        *flow_fake.refusal.lock().unwrap() = Some(status);
+        for error in [
+            speaker
+                .announce_leased_blackhole(&route, 60)
+                .await
+                .unwrap_err(),
+            speaker
+                .announce_blackhole(&blackhole("192.0.2.2/32", "192.0.2.66", 1))
+                .await
+                .unwrap_err(),
+            speaker
+                .withdraw_blackhole(&route.prefix(), LEASE_OWNER)
+                .await
+                .unwrap_err(),
+            flowspec.announce_leased(&flow, 60).await.unwrap_err(),
+            flowspec
+                .announce(&rule("192.0.2.2/32", 0))
+                .await
+                .unwrap_err(),
+            flowspec.withdraw(&flow).await.unwrap_err(),
+        ] {
+            assert!(
+                matches!(error, PrefixdError::InjectionOwnerMismatch { reason, .. } if reason == expected),
+                "{error}"
+            );
+            assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
+            assert!(!error.to_string().contains("private upstream"));
+        }
+        assert!(!speaker.renew_lease(LEASE_OWNER, live(), 60).await.unwrap());
+    }
+    assert!(fake.paths.lock().unwrap().is_empty());
+    assert!(fake.leased.lock().unwrap().is_empty());
+    assert_eq!(fake.plain_adds.load(SeqCst), 0);
+    assert!(flow_fake.rules.lock().unwrap().is_empty());
+    assert!(flow_fake.leased.lock().unwrap().is_empty());
+    server.abort();
+    flow_server.abort();
 }
 
 #[tokio::test]
@@ -1882,7 +2073,7 @@ async fn leased_flowspec_adds_reads_and_deletes_under_the_recorded_owner() {
     // Deletes pass the recorded owner; a mismatch is the daemon's refusal.
     assert!(matches!(
         speaker.withdraw(&rule("192.0.2.1/32", 0)).await,
-        Err(PrefixdError::InjectionOwnerMismatch(_))
+        Err(PrefixdError::InjectionOwnerMismatch { .. })
     ));
     speaker.withdraw(&leased).await.unwrap();
     speaker.withdraw(&unleased).await.unwrap();
@@ -1908,6 +2099,7 @@ struct ExportFake {
     mode: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<pb::ListPathExportDispositionsRequest>>>,
+    flowspec_requests: Arc<Mutex<Vec<pb::ListFlowSpecExportDispositionsRequest>>>,
     /// Later pages answer ABORTED this many times.
     aborts: Arc<AtomicUsize>,
 }
@@ -1918,9 +2110,32 @@ const EXPORT_UNAVAILABLE: usize = 3;
 const EXPORT_DENIED_SECOND_PAGE: usize = 4;
 const EXPORT_REPEATED_TOKEN: usize = 5;
 const EXPORT_REPEATED_PEER: usize = 6;
+const EXPORT_ABORT_FIRST: usize = 7;
 
 #[tonic::async_trait]
 impl pb::injection_service_server::InjectionService for ExportFake {
+    async fn list_flow_spec_export_dispositions(
+        &self,
+        request: Request<pb::ListFlowSpecExportDispositionsRequest>,
+    ) -> std::result::Result<Response<pb::ListPathExportDispositionsResponse>, Status> {
+        auth(&request)?;
+        let (metadata, extensions, request) = request.into_parts();
+        self.flowspec_requests.lock().unwrap().push(request.clone());
+        self.list_path_export_dispositions(Request::from_parts(
+            metadata,
+            extensions,
+            pb::ListPathExportDispositionsRequest {
+                prefix: "203.0.113.1".into(),
+                prefix_length: 32,
+                path_id: 0,
+                page_size: request.page_size,
+                page_token: request.page_token,
+                include_configured: request.include_configured,
+            },
+        ))
+        .await
+    }
+
     async fn list_path_export_dispositions(
         &self,
         request: Request<pb::ListPathExportDispositionsRequest>,
@@ -1942,7 +2157,7 @@ impl pb::injection_service_server::InjectionService for ExportFake {
             }
             _ => {}
         }
-        if !first && self.aborts.load(SeqCst) > 0 {
+        if (mode == EXPORT_ABORT_FIRST || !first) && self.aborts.load(SeqCst) > 0 {
             self.aborts.fetch_sub(1, SeqCst);
             return Err(Status::aborted("export walk changed"));
         }
@@ -2193,4 +2408,109 @@ async fn export_read_distinguishes_empty_absent_and_failed() {
             .blackhole_export
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn flowspec_export_key_matches_add_for_both_families_and_scoped_peers() {
+    for dst in ["203.0.113.1/32", "2001:db8::1/128"] {
+        let (speaker, fake, server) = export_speaker().await;
+        let mut rows = export_rows();
+        rows[0].peer_address = "fe80::1".into();
+        rows[0].peer_interface = "eth0".into();
+        rows[1].peer_address = "fe80::1".into();
+        rows[1].peer_interface = "eth1".into();
+        rows.truncate(2);
+        *fake.rows.lock().unwrap() = rows;
+        let rule = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: dst.into(),
+                protocol: Some(17),
+                dst_ports: vec![53, 123],
+                src_ports: vec![53],
+                ..Default::default()
+            },
+            FlowSpecAction::discard(),
+        );
+        let add = encode(&rule).unwrap();
+        let peers = speaker.flowspec_exports(&rule.nlri).await.unwrap().unwrap();
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0].peer_address, "fe80::1%eth0");
+        assert_eq!(peers[1].peer_address, "fe80::1%eth1");
+        for request in fake.flowspec_requests.lock().unwrap().iter() {
+            assert_eq!(request.afi_safi, add.afi_safi);
+            assert_eq!(request.components, add.components);
+            assert!(!request.include_configured);
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn flowspec_export_reads_refuse_partial_invalid_and_repeated_snapshots() {
+    let nlri = FlowSpecNlri {
+        dst_prefix: "203.0.113.1/32".into(),
+        ..Default::default()
+    };
+    for mode in [
+        EXPORT_NO_ROUTE_SECOND_PAGE,
+        EXPORT_DENIED_SECOND_PAGE,
+        EXPORT_REPEATED_TOKEN,
+        EXPORT_REPEATED_PEER,
+    ] {
+        let (speaker, fake, server) = export_speaker().await;
+        *fake.rows.lock().unwrap() = export_rows();
+        fake.mode.store(mode, SeqCst);
+        assert!(
+            speaker.flowspec_exports(&nlri).await.is_err(),
+            "mode {mode}"
+        );
+        server.abort();
+    }
+    let (speaker, fake, server) = export_speaker().await;
+    fake.mode.store(EXPORT_NO_ROUTE, SeqCst);
+    assert_eq!(speaker.flowspec_exports(&nlri).await.unwrap(), None);
+    fake.mode.store(0, SeqCst);
+    assert_eq!(speaker.flowspec_exports(&nlri).await.unwrap(), Some(vec![]));
+    for invalid in [
+        pb::PathExportDisposition::Unspecified as i32,
+        pb::PathExportDisposition::NotEstablished as i32,
+        999,
+    ] {
+        let mut row = export_rows().remove(0);
+        row.disposition = invalid;
+        *fake.rows.lock().unwrap() = vec![row];
+        assert!(speaker.flowspec_exports(&nlri).await.is_err());
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn flowspec_export_walk_restarts_once_even_when_first_page_is_aborted() {
+    let nlri = FlowSpecNlri {
+        dst_prefix: "203.0.113.1/32".into(),
+        ..Default::default()
+    };
+    for mode in [0, EXPORT_ABORT_FIRST] {
+        for aborts in [1, 2] {
+            let (speaker, fake, server) = export_speaker().await;
+            *fake.rows.lock().unwrap() = export_rows();
+            fake.mode.store(mode, SeqCst);
+            fake.aborts.store(aborts, SeqCst);
+            let read = speaker.flowspec_exports(&nlri).await;
+            if aborts == 1 {
+                assert_eq!(read.unwrap().unwrap().len(), export_rows().len());
+            } else {
+                assert!(read.is_err());
+            }
+            let requests = fake.flowspec_requests.lock().unwrap();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.page_token.is_empty())
+                    .count(),
+                2
+            );
+            server.abort();
+        }
+    }
 }

@@ -7,9 +7,10 @@ use super::{
 use crate::{
     config::RustBgpdConfig,
     domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule, FragmentMatch, PacketLengthRange},
-    error::{PrefixdError, Result},
+    error::{InjectionRefusalReason, PrefixdError, Result},
 };
 use async_trait::async_trait;
+use prost::Message as _;
 use std::{future::Future, time::Duration};
 use tonic::{
     Code, Request,
@@ -41,6 +42,51 @@ fn parse_version(version: &str) -> Option<[u64; 3]> {
 
 fn invalid(message: &str) -> PrefixdError {
     PrefixdError::Internal(format!("rustbgpd: {message}"))
+}
+
+/// The standard rich-status envelope; its free-form message is never exposed.
+#[derive(Clone, PartialEq, prost::Message)]
+struct RpcStatus {
+    #[prost(int32, tag = "1")]
+    code: i32,
+    #[prost(message, repeated, tag = "3")]
+    details: Vec<prost_types::Any>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ErrorInfo {
+    #[prost(string, tag = "1")]
+    reason: String,
+    #[prost(string, tag = "2")]
+    domain: String,
+}
+
+fn injection_refusal_reason(status: &tonic::Status) -> Option<InjectionRefusalReason> {
+    if status.code() != Code::FailedPrecondition {
+        return None;
+    }
+    let rich = RpcStatus::decode(status.details()).ok()?;
+    if rich.code != status.code() as i32 {
+        return None;
+    }
+    let mut details = rich
+        .details
+        .iter()
+        .filter(|detail| detail.type_url == "type.googleapis.com/google.rpc.ErrorInfo");
+    let detail = details.next()?;
+    if details.next().is_some() {
+        return None;
+    }
+    let info = ErrorInfo::decode(detail.value.as_slice()).ok()?;
+    if info.domain != "rustbgpd" {
+        return None;
+    }
+    match info.reason.as_str() {
+        "OWNER_MISMATCH" => Some(InjectionRefusalReason::OwnerMismatch),
+        "KEY_UNOWNED" => Some(InjectionRefusalReason::KeyUnowned),
+        "GENERATION_NOT_LIVE" => Some(InjectionRefusalReason::GenerationNotLive),
+        _ => None,
+    }
 }
 
 impl RustBgpdAnnouncer {
@@ -269,9 +315,17 @@ impl RustBgpdAnnouncer {
     fn mutation_error(&self, operation: &str, status: &tonic::Status) -> PrefixdError {
         self.lease_unsupported(status);
         if status.code() == Code::FailedPrecondition {
-            PrefixdError::InjectionOwnerMismatch(format!(
-                "rustbgpd refused {operation}: the key is held by another injection owner or by none"
-            ))
+            let reason = match injection_refusal_reason(status) {
+                Some(
+                    reason @ (InjectionRefusalReason::OwnerMismatch
+                    | InjectionRefusalReason::KeyUnowned),
+                ) => reason,
+                _ => InjectionRefusalReason::Unspecified,
+            };
+            PrefixdError::InjectionOwnerMismatch {
+                reason,
+                message: format!("rustbgpd refused {operation}; nothing changed"),
+            }
         } else {
             failed(operation, status)
         }
@@ -714,6 +768,9 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
     fn export_observer(&self) -> Option<&dyn ExportObserver> {
         Some(self)
     }
+    fn flowspec_export_observer(&self) -> Option<&dyn ExportObserver> {
+        Some(self)
+    }
     fn match_support(&self) -> FlowSpecMatchSupport {
         // Types 6, 10 and 12 parse and render alike in every supported release.
         FlowSpecMatchSupport::ALL
@@ -1040,8 +1097,20 @@ impl InjectionLeases for RustBgpdAnnouncer {
             .await
         {
             Ok(_) => Ok(true),
-            // On this RPC the code has one meaning: the generation is not live.
-            Err(status) if status.code() == Code::FailedPrecondition => Ok(false),
+            // Preserve code-only recovery if an older or malformed server omits ErrorInfo.
+            Err(status) if status.code() == Code::FailedPrecondition => {
+                let reason = match injection_refusal_reason(&status) {
+                    Some(InjectionRefusalReason::GenerationNotLive) => {
+                        InjectionRefusalReason::GenerationNotLive
+                    }
+                    _ => InjectionRefusalReason::Unspecified,
+                };
+                tracing::warn!(
+                    reason = reason.as_str(),
+                    "rustbgpd refused injection lease renewal"
+                );
+                Ok(false)
+            }
             Err(status) => {
                 self.lease_unsupported(&status);
                 Err(failed("RenewLease", &status))
@@ -1191,46 +1260,41 @@ fn decode_export(entry: pb::PathExportDispositionEntry) -> Result<PeerExport> {
     })
 }
 
-#[async_trait]
-impl ExportObserver for RustBgpdAnnouncer {
-    async fn blackhole_exports(&self, prefix: &ipnet::IpNet) -> Result<Option<Vec<PeerExport>>> {
+impl RustBgpdAnnouncer {
+    async fn export_dispositions<F, Fut>(
+        &self,
+        operation: &'static str,
+        page: F,
+    ) -> Result<Option<Vec<PeerExport>>>
+    where
+        F: Fn(String) -> Fut + Send + Sync,
+        Fut: Future<
+                Output = std::result::Result<
+                    tonic::Response<pb::ListPathExportDispositionsResponse>,
+                    tonic::Status,
+                >,
+            > + Send,
+    {
         let mut peers: Vec<PeerExport> = Vec::new();
         let mut page_token = String::new();
+        let mut tokens = std::collections::HashSet::new();
         let mut restarted = false;
         loop {
-            let request = pb::ListPathExportDispositionsRequest {
-                prefix: prefix.addr().to_string(),
-                prefix_length: prefix.prefix_len().into(),
-                path_id: 0,
-                page_size: ROUTE_PAGE_SIZE,
-                page_token: page_token.clone(),
-                include_configured: false,
-            };
-            let response = match self
-                .call("ListPathExportDispositions", || async {
-                    pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                        .list_path_export_dispositions(self.request(request.clone()))
-                        .await
-                })
-                .await
-            {
+            let response = match self.call(operation, || page(page_token.clone())).await {
                 Ok(response) => response,
-                // No local route at the key. Mid-walk the route went away, so the
-                // pages read so far are partial: that is an error, not absence.
+                // Absence after any page is an incomplete read, never an empty route.
                 Err(status) if status.code() == Code::NotFound && page_token.is_empty() => {
                     return Ok(None);
                 }
-                // The route, Established peer set or an export setting changed
-                // during the walk. Discard every page and restart once; a second
-                // ABORTED fails the read rather than mixing snapshots.
                 Err(status) if status.code() == Code::Aborted && !restarted => {
-                    tracing::debug!(%prefix, "restarting aborted export disposition walk");
+                    tracing::debug!(operation, "restarting aborted export disposition walk");
                     restarted = true;
                     peers.clear();
+                    tokens.clear();
                     page_token.clear();
                     continue;
                 }
-                Err(status) => return Err(failed("ListPathExportDispositions", &status)),
+                Err(status) => return Err(failed(operation, &status)),
             };
             for entry in response.peers {
                 let peer = decode_export(entry)?;
@@ -1245,11 +1309,53 @@ impl ExportObserver for RustBgpdAnnouncer {
             if response.next_page_token.is_empty() {
                 return Ok(Some(peers));
             }
-            if response.next_page_token == page_token {
+            if !tokens.insert(response.next_page_token.clone()) {
                 return Err(invalid("export disposition read did not advance"));
             }
             page_token = response.next_page_token;
         }
+    }
+}
+
+#[async_trait]
+impl ExportObserver for RustBgpdAnnouncer {
+    async fn blackhole_exports(&self, prefix: &ipnet::IpNet) -> Result<Option<Vec<PeerExport>>> {
+        self.export_dispositions("ListPathExportDispositions", |page_token| async move {
+            pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                .list_path_export_dispositions(self.request(
+                    pb::ListPathExportDispositionsRequest {
+                        prefix: prefix.addr().to_string(),
+                        prefix_length: prefix.prefix_len().into(),
+                        path_id: 0,
+                        page_size: ROUTE_PAGE_SIZE,
+                        page_token,
+                        include_configured: false,
+                    },
+                ))
+                .await
+        })
+        .await
+    }
+
+    async fn flowspec_exports(&self, nlri: &FlowSpecNlri) -> Result<Option<Vec<PeerExport>>> {
+        let (afi_safi, components) = encode_match(nlri)?;
+        self.export_dispositions("ListFlowSpecExportDispositions", |page_token| {
+            let components = components.clone();
+            async move {
+                pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                    .list_flow_spec_export_dispositions(self.request(
+                        pb::ListFlowSpecExportDispositionsRequest {
+                            afi_safi,
+                            components,
+                            page_size: ROUTE_PAGE_SIZE,
+                            page_token,
+                            include_configured: false,
+                        },
+                    ))
+                    .await
+            }
+        })
+        .await
     }
 }
 

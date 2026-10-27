@@ -40,11 +40,17 @@ function summary(evidence: BlackholeExportEvidence): Pill {
   }
 }
 
-/** Per-peer export of an active blackhole from the last reconciliation pass (rustbgpd). */
-export function ExportEvidenceCard({ evidence, now }: { evidence: BlackholeExportEvidence; now?: number }) {
+/** Per-peer export from the last reconciliation pass; this never establishes router enforcement. */
+export function ExportEvidenceCard({ evidence, now, kind = "blackhole" }: {
+  evidence: BlackholeExportEvidence
+  now?: number
+  kind?: "blackhole" | "flowspec"
+}) {
   const { formatTime } = useTimeFormat()
   const overall = summary(evidence)
   const notEstablished = evidence.not_established_peers
+  const noun = kind === "flowspec" ? "FlowSpec rule" : "blackhole"
+  const retained = evidence.historical || evidence.status === "error"
 
   return (
     <Card data-testid="export-evidence">
@@ -62,9 +68,9 @@ export function ExportEvidenceCard({ evidence, now }: { evidence: BlackholeExpor
           <div role="alert" className={`flex items-start gap-2 rounded-md border p-3 text-sm ${evidence.historical ? "text-muted-foreground" : "border-destructive/30 bg-destructive/10 text-destructive"}`}>
             <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
             <span>
-              {evidence.historical
-                ? "At the retained observation, no Established peer had this blackhole in its Adj-RIB-Out."
-                : <>{evidence.status === "error" ? "At the last complete read, no Established peer had" : "No Established peer has"} this blackhole in its Adj-RIB-Out, so no router is sent it. {evidence.warning.message}</>}{" "}
+              {retained
+                ? `At ${evidence.historical ? "the retained observation" : "the last complete read"}, no Established peer had this ${noun} in its Adj-RIB-Out.`
+                : <>No Established peer has this {noun} in its Adj-RIB-Out, so no router is sent it. {evidence.warning.message}</>}{" "}
               <span className="font-mono">({evidence.warning.reason})</span>
             </span>
           </div>
@@ -77,8 +83,8 @@ export function ExportEvidenceCard({ evidence, now }: { evidence: BlackholeExpor
         {evidence.status === "no_local_route" && (
           <p className="text-sm text-muted-foreground">
             {evidence.historical
-              ? "At the retained observation, the speaker held no local route for this blackhole."
-              : "The speaker holds no local route for this blackhole, so it is exported to no peer. Reconciliation re-adds it; check repair errors if this persists."}
+              ? `At the retained observation, the speaker held no local route for this ${noun}.`
+              : `The speaker holds no local route for this ${noun}, so it is exported to no peer. Reconciliation re-adds it; check repair errors if this persists.`}
           </p>
         )}
         {evidence.status === "unsupported" && (
@@ -94,7 +100,7 @@ export function ExportEvidenceCard({ evidence, now }: { evidence: BlackholeExpor
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
                   <TableHead>Peer</TableHead>
-                  <TableHead>{evidence.historical ? "Export at observation" : "Export"}</TableHead>
+                  <TableHead>{retained ? "Export at observation" : "Export"}</TableHead>
                   <TableHead>Reason</TableHead>
                   <TableHead>Explain code</TableHead>
                 </TableRow>
@@ -106,7 +112,7 @@ export function ExportEvidenceCard({ evidence, now }: { evidence: BlackholeExpor
                   return (
                     <TableRow key={peer.peer_address}>
                       <TableCell className="font-mono">{peer.peer_address}</TableCell>
-                      <TableCell><StatusPill tone={evidence.historical ? "neutral" : disposition.tone}>{disposition.label}</StatusPill></TableCell>
+                      <TableCell><StatusPill tone={retained ? "neutral" : disposition.tone}>{disposition.label}</StatusPill></TableCell>
                       <TableCell>
                         <span className="font-mono">{peer.reason || "—"}</span>
                         {peer.detail && peer.disposition !== "committed" && <span className="block text-xs text-muted-foreground">{peer.detail}</span>}
