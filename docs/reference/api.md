@@ -1035,11 +1035,14 @@ GET /v1/mitigations/{id}
 | `contributing_sources` | array | List of source names that contributed |
 | `explanation` | string | Human-readable explanation of the correlation decision |
 
-An active (or escalated) blackhole or FlowSpec rule admitted in enforced mode
-also carries `export_evidence`: per-peer export from the last reconciliation pass
-([export evidence](speaker-backends.md#export-evidence)). It is absent from list
-responses, dry-run mitigations and terminal rows. The request reads
-the controller's snapshot and never calls the speaker.
+An active (or escalated) blackhole or FlowSpec rule that is not a known
+simulation (`origin_mode != "dry-run"`) also carries `export_evidence`: per-peer
+export from the last reconciliation pass
+([export evidence](speaker-backends.md#export-evidence)). An untagged legacy
+`origin_mode: null` remains unknown; an actual export observation is separate
+evidence and does not recover its admission mode. Export evidence is absent
+from list responses, known dry-run mitigations and terminal rows. The request
+reads the controller's snapshot and never calls the speaker.
 
 ```json
 "export_evidence": {
@@ -2351,8 +2354,10 @@ including a `selection_deferred` hold after a speaker restart, makes `status`
 not router receipt or enforcement.
 
 `flowspec_exports` is present when `flowspec_export` is true (rustbgpd). It uses
-the same fields, with `rules` instead of `blackholes`, for exact-key FlowSpec
-export. Failed reads retain the last complete peer rows and their timestamp;
+the same fields, with `rules` instead of `blackholes`, for exact-key export of
+eligible active FlowSpec rules: known simulations and expired rules are
+excluded, while any untagged legacy admission provenance remains unknown.
+Failed reads retain the last complete peer rows and their timestamp;
 `status: error` on mitigation detail means current export is unknown, and its
 current disposition counts are zero. Historical evidence, read errors,
 `no_local_route` or an unexported rule makes health `degraded`. If the candidate

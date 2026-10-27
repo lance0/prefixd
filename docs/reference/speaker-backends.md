@@ -611,10 +611,13 @@ Once per reconciliation pass, after the blackhole stage, prefixd reads
 rustbgpd's `InjectionService.ListPathExportDispositions` for each active,
 enforced-origin blackhole of this POP (the stage's repair candidates), keyed
 on its host prefix and `path_id` 0, and walks every page. It also uses the
-pass's `ListNeighbors` read. Active enforced FlowSpec rules use
-`ListFlowSpecExportDispositions`, with the exact address family and canonical
-components used by `AddFlowSpec`, including source prefixes and ports. The
-reads of both kinds share a rotating order and one 10-second budget per pass, so a stalled speaker cannot hold up expiry; a read the budget
+pass's `ListNeighbors` read. Active, unexpired FlowSpec rules of this POP that
+are not known simulations use `ListFlowSpecExportDispositions`, with the exact
+address family and canonical components used by `AddFlowSpec`, including
+source prefixes and ports. An untagged legacy `origin_mode: null` remains
+unknown; export observation does not infer the rule's admission mode. The
+reads of both kinds share a rotating order and one 10-second budget per pass,
+so a stalled speaker cannot hold up expiry; a read the budget
 cuts off reports an error. A failed or cut-off read keeps the blackhole's
 warning from its last complete read, so a transient error neither clears nor
 raises degraded health. The pass keeps the result in memory. The mitigation
