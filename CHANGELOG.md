@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- FastNetMon guidance distinguishes its source-build native rustbgpd RTBH
+  action from the prefixd notify path, and explains the exclusive speaker-target
+  requirement and leased/unleased route conflicts.
 - An optional `docker-compose.inventory.yml` overlay reads
   `configs/inventory.yaml` directly from the host for either speaker profile.
   Existing volume-managed inventories remain the default. The quickstart covers
