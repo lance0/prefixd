@@ -907,8 +907,10 @@ routes the network holds can still apply.
 - **No fallback.** A failed leased add leaves the blackhole unconfirmed and is
   retried only as a leased add. If another owner, or no owner, holds the
   victim's route, the request gets `409`, the new row is withdrawn locally
-  with the audit reason `untracked local route at admission`, and nothing is
-  deleted.
+  with the audit reason `untracked local route at admission` followed by
+  `(owner_mismatch)`, `(key_unowned)` or `(unspecified)`, and nothing is deleted.
+  The `409` body carries the same bounded reason; see
+  [speaker ownership refusals](speaker-backends.md#blackhole-lifecycle-and-reconciliation).
 - **Lost lease.** When a renewal is refused, a leased add returns another
   generation, or the speaker reports one of this owner's routes with no lease
   time left, prefixd re-adds every active leased blackhole at once. A speaker

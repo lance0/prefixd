@@ -724,8 +724,8 @@ async fn persist_new_mitigation(
         // As for blackholes (ADR 027): retire the new row locally with an audit
         // entry and no delete, since a delete under this row's owner would be
         // refused for as long as the other rule exists.
-        Err(PrefixdError::InjectionOwnerMismatch(reason)) => {
-            tracing::warn!(mitigation_id = %mitigation.mitigation_id, reason,
+        Err(PrefixdError::InjectionOwnerMismatch { reason, .. }) => {
+            tracing::warn!(mitigation_id = %mitigation.mitigation_id, reason = reason.as_str(),
                 "untracked local rule at the FlowSpec key; retiring the new row");
             let binding = state.verified_speaker_binding()?;
             let request = crate::domain::request_withdrawal(
@@ -734,7 +734,7 @@ async fn persist_new_mitigation(
                 false,
                 "system",
                 "admission",
-                crate::guardrails::UNTRACKED_AT_ADMISSION.into(),
+                format!("{} ({reason})", crate::guardrails::UNTRACKED_AT_ADMISSION),
                 false,
                 binding,
             )
@@ -742,7 +742,7 @@ async fn persist_new_mitigation(
             crate::domain::complete_local_withdrawal(state.repo.as_ref(), &request, binding)
                 .await?;
             return Err(PrefixdError::Conflict(format!(
-                "untracked local FlowSpec rule for {}; nothing was added",
+                "untracked local FlowSpec rule for {} ({reason}); nothing was added",
                 rule.nlri.dst_prefix
             )));
         }
@@ -4080,6 +4080,7 @@ mod tests {
             again["event_id"] = uuid::Uuid::new_v4().to_string().into();
             let (status, body) = send(&app, "/v1/events", None, again).await;
             assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert!(body.to_string().contains("key_unowned"), "{body}");
             assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 1);
             assert_eq!(
                 speaker.flowspec_adds.load(SeqCst),
@@ -4107,6 +4108,19 @@ mod tests {
                 .unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].status, crate::domain::MitigationStatus::Withdrawn);
+            let audit = repo
+                .list_audit(&crate::db::ListParams {
+                    limit: 100,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert!(audit.iter().any(|entry| entry.action == "withdraw"
+                && entry.details["reason"]
+                    == format!(
+                        "{} (key_unowned)",
+                        crate::guardrails::UNTRACKED_AT_ADMISSION
+                    )));
             assert_eq!(
                 rows[0].action_params.injection_owner,
                 "prefixd.test1.0123456789abcdef"

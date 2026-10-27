@@ -1,6 +1,32 @@
 use thiserror::Error;
 use uuid::Uuid;
 
+/// Bounded reasons for a speaker's refusal to mutate an injection key or lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectionRefusalReason {
+    OwnerMismatch,
+    KeyUnowned,
+    GenerationNotLive,
+    Unspecified,
+}
+
+impl InjectionRefusalReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OwnerMismatch => "owner_mismatch",
+            Self::KeyUnowned => "key_unowned",
+            Self::GenerationNotLive => "generation_not_live",
+            Self::Unspecified => "unspecified",
+        }
+    }
+}
+
+impl std::fmt::Display for InjectionRefusalReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum PrefixdError {
     // API errors
@@ -12,8 +38,11 @@ pub enum PrefixdError {
 
     /// The speaker refused a route mutation because another injection owner, or
     /// none, holds the key (rustbgpd ADR-0141). Nothing changed.
-    #[error("untracked local route: {0}")]
-    InjectionOwnerMismatch(String),
+    #[error("untracked local route ({reason}): {message}")]
+    InjectionOwnerMismatch {
+        reason: InjectionRefusalReason,
+        message: String,
+    },
 
     #[error("rate limited, retry after {retry_after_seconds}s")]
     RateLimited { retry_after_seconds: u32 },
@@ -167,9 +196,9 @@ impl PrefixdError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::NotFound(_) | Self::MitigationNotFound(_) => StatusCode::NOT_FOUND,
             Self::ShuttingDown | Self::Standby => StatusCode::SERVICE_UNAVAILABLE,
-            Self::DuplicateEvent { .. } | Self::Conflict(_) | Self::InjectionOwnerMismatch(_) => {
-                StatusCode::CONFLICT
-            }
+            Self::DuplicateEvent { .. }
+            | Self::Conflict(_)
+            | Self::InjectionOwnerMismatch { .. } => StatusCode::CONFLICT,
             Self::GuardrailViolation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::IpNotOwned(_) | Self::InvalidIpAddress(_) | Self::InvalidPrefix(_) => {
                 StatusCode::BAD_REQUEST

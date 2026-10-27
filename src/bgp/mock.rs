@@ -8,7 +8,7 @@ use super::{
     InjectionLeases, LeaseGeneration, PeerExport, PeerObserver, PeerStatus, SessionState,
 };
 use crate::domain::FlowSpecRule;
-use crate::error::{PrefixdError, Result};
+use crate::error::{InjectionRefusalReason, PrefixdError, Result};
 
 /// Daemon-side lease table (rustbgpd ADR-0141): one live generation per owner.
 #[derive(Debug, Default)]
@@ -121,10 +121,15 @@ impl MockAnnouncer {
         self.rules.write().await.clear();
     }
 
-    fn owner_mismatch(operation: &str) -> PrefixdError {
-        PrefixdError::InjectionOwnerMismatch(format!(
-            "mock refused {operation}: the key is held by another injection owner or by none"
-        ))
+    fn owner_mismatch(operation: &str, held_owner: Option<&str>) -> PrefixdError {
+        PrefixdError::InjectionOwnerMismatch {
+            reason: match held_owner {
+                Some("") => InjectionRefusalReason::KeyUnowned,
+                Some(_) => InjectionRefusalReason::OwnerMismatch,
+                None => InjectionRefusalReason::Unspecified,
+            },
+            message: format!("mock refused {operation}; nothing changed"),
+        }
     }
 }
 
@@ -166,7 +171,13 @@ impl FlowSpecWriter for MockAnnouncer {
                 .iter()
                 .any(|r| r.nlri_hash() == hash && !r.owner.is_empty())
         {
-            return Err(Self::owner_mismatch("AddFlowSpec"));
+            return Err(Self::owner_mismatch(
+                "AddFlowSpec",
+                rules
+                    .iter()
+                    .find(|r| r.nlri_hash() == hash)
+                    .map(|r| r.owner.as_str()),
+            ));
         }
 
         // Remove existing rule with same NLRI if present
@@ -188,7 +199,13 @@ impl FlowSpecWriter for MockAnnouncer {
                 .iter()
                 .any(|r| r.nlri_hash() == hash && r.owner != rule.owner)
         {
-            return Err(Self::owner_mismatch("AddLeasedFlowSpec"));
+            return Err(Self::owner_mismatch(
+                "AddLeasedFlowSpec",
+                rules
+                    .iter()
+                    .find(|r| r.nlri_hash() == hash)
+                    .map(|r| r.owner.as_str()),
+            ));
         }
         let generation = self.join_lease(&rule.owner);
         rules.retain(|r| r.nlri_hash() != hash);
@@ -202,7 +219,13 @@ impl FlowSpecWriter for MockAnnouncer {
             .iter()
             .any(|r| r.nlri_hash() == hash && r.owner != rule.owner)
         {
-            return Err(Self::owner_mismatch("DeleteFlowSpec"));
+            return Err(Self::owner_mismatch(
+                "DeleteFlowSpec",
+                rules
+                    .iter()
+                    .find(|r| r.nlri_hash() == hash)
+                    .map(|r| r.owner.as_str()),
+            ));
         }
         let before = rules.len();
         rules.retain(|r| r.nlri_hash() != hash);
@@ -240,7 +263,13 @@ impl BlackholeSpeaker for MockAnnouncer {
                 .iter()
                 .any(|r| r.prefix() == route.prefix() && !r.owner().is_empty())
         {
-            return Err(Self::owner_mismatch("AddPath"));
+            return Err(Self::owner_mismatch(
+                "AddPath",
+                routes
+                    .iter()
+                    .find(|r| r.prefix() == route.prefix())
+                    .map(|r| r.owner()),
+            ));
         }
         Ok(upsert_blackhole(&mut routes, route))
     }
@@ -255,7 +284,13 @@ impl BlackholeSpeaker for MockAnnouncer {
                 .iter()
                 .any(|r| r.prefix() == route.prefix() && r.owner() != route.owner())
         {
-            return Err(Self::owner_mismatch("AddLeasedPath"));
+            return Err(Self::owner_mismatch(
+                "AddLeasedPath",
+                routes
+                    .iter()
+                    .find(|r| r.prefix() == route.prefix())
+                    .map(|r| r.owner()),
+            ));
         }
         let generation = self.join_lease(route.owner());
         Ok((generation, upsert_blackhole(&mut routes, route)))
@@ -267,7 +302,13 @@ impl BlackholeSpeaker for MockAnnouncer {
             .iter()
             .any(|r| r.prefix() == *prefix && r.owner() != owner)
         {
-            return Err(Self::owner_mismatch("DeletePath"));
+            return Err(Self::owner_mismatch(
+                "DeletePath",
+                routes
+                    .iter()
+                    .find(|r| r.prefix() == *prefix)
+                    .map(|r| r.owner()),
+            ));
         }
         routes.retain(|r| r.prefix() != *prefix);
         Ok(())

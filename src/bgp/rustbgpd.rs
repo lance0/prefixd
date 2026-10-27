@@ -7,9 +7,10 @@ use super::{
 use crate::{
     config::RustBgpdConfig,
     domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule, FragmentMatch, PacketLengthRange},
-    error::{PrefixdError, Result},
+    error::{InjectionRefusalReason, PrefixdError, Result},
 };
 use async_trait::async_trait;
+use prost::Message as _;
 use std::{future::Future, time::Duration};
 use tonic::{
     Code, Request,
@@ -41,6 +42,51 @@ fn parse_version(version: &str) -> Option<[u64; 3]> {
 
 fn invalid(message: &str) -> PrefixdError {
     PrefixdError::Internal(format!("rustbgpd: {message}"))
+}
+
+/// The standard rich-status envelope; its free-form message is never exposed.
+#[derive(Clone, PartialEq, prost::Message)]
+struct RpcStatus {
+    #[prost(int32, tag = "1")]
+    code: i32,
+    #[prost(message, repeated, tag = "3")]
+    details: Vec<prost_types::Any>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ErrorInfo {
+    #[prost(string, tag = "1")]
+    reason: String,
+    #[prost(string, tag = "2")]
+    domain: String,
+}
+
+fn injection_refusal_reason(status: &tonic::Status) -> Option<InjectionRefusalReason> {
+    if status.code() != Code::FailedPrecondition {
+        return None;
+    }
+    let rich = RpcStatus::decode(status.details()).ok()?;
+    if rich.code != status.code() as i32 {
+        return None;
+    }
+    let mut details = rich
+        .details
+        .iter()
+        .filter(|detail| detail.type_url == "type.googleapis.com/google.rpc.ErrorInfo");
+    let detail = details.next()?;
+    if details.next().is_some() {
+        return None;
+    }
+    let info = ErrorInfo::decode(detail.value.as_slice()).ok()?;
+    if info.domain != "rustbgpd" {
+        return None;
+    }
+    match info.reason.as_str() {
+        "OWNER_MISMATCH" => Some(InjectionRefusalReason::OwnerMismatch),
+        "KEY_UNOWNED" => Some(InjectionRefusalReason::KeyUnowned),
+        "GENERATION_NOT_LIVE" => Some(InjectionRefusalReason::GenerationNotLive),
+        _ => None,
+    }
 }
 
 impl RustBgpdAnnouncer {
@@ -269,9 +315,17 @@ impl RustBgpdAnnouncer {
     fn mutation_error(&self, operation: &str, status: &tonic::Status) -> PrefixdError {
         self.lease_unsupported(status);
         if status.code() == Code::FailedPrecondition {
-            PrefixdError::InjectionOwnerMismatch(format!(
-                "rustbgpd refused {operation}: the key is held by another injection owner or by none"
-            ))
+            let reason = match injection_refusal_reason(status) {
+                Some(
+                    reason @ (InjectionRefusalReason::OwnerMismatch
+                    | InjectionRefusalReason::KeyUnowned),
+                ) => reason,
+                _ => InjectionRefusalReason::Unspecified,
+            };
+            PrefixdError::InjectionOwnerMismatch {
+                reason,
+                message: format!("rustbgpd refused {operation}; nothing changed"),
+            }
         } else {
             failed(operation, status)
         }
@@ -1040,8 +1094,20 @@ impl InjectionLeases for RustBgpdAnnouncer {
             .await
         {
             Ok(_) => Ok(true),
-            // On this RPC the code has one meaning: the generation is not live.
-            Err(status) if status.code() == Code::FailedPrecondition => Ok(false),
+            // Preserve code-only recovery if an older or malformed server omits ErrorInfo.
+            Err(status) if status.code() == Code::FailedPrecondition => {
+                let reason = match injection_refusal_reason(&status) {
+                    Some(InjectionRefusalReason::GenerationNotLive) => {
+                        InjectionRefusalReason::GenerationNotLive
+                    }
+                    _ => InjectionRefusalReason::Unspecified,
+                };
+                tracing::warn!(
+                    reason = reason.as_str(),
+                    "rustbgpd refused injection lease renewal"
+                );
+                Ok(false)
+            }
             Err(status) => {
                 self.lease_unsupported(&status);
                 Err(failed("RenewLease", &status))

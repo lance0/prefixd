@@ -864,6 +864,12 @@ TTL while the controller is stopped.
 | 409 | Scope already has an active canonical owner or pending withdrawal, or an untracked local route holds a blackhole's prefix, or another injection owner, or none, holds a FlowSpec rule's match |
 | 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length, amplification match invariants and opt-ins, blackhole disabled, victim, TTL and quota checks, etc.) |
 
+A rustbgpd ownership refusal includes `owner_mismatch`, `key_unowned` or
+`unspecified` in the `409` error text and the new row's local retirement audit
+reason. The route at the speaker is untouched; prefixd never retries the add
+without its lease. See
+[speaker ownership refusals](speaker-backends.md#blackhole-lifecycle-and-reconciliation).
+
 Canonical ownership ignores equivalent IPv6 spelling and duplicate destination
 ports. A duplicate manual request is rejected before speaker mutation, preserving
 the original rule, action and TTL. Detector events extend a single existing owner;

@@ -492,12 +492,22 @@ prefixd-shaped or unrecognized, including another `path_id` at the prefix; a
 failed pre-read persists nothing. Leased admission skips the pre-read: the
 speaker refuses a leased add on a key held by another owner or by none
 atomically, and prefixd then returns `409` and withdraws the new row locally,
-audited as `untracked local route at admission`, without a delete. Otherwise
-the row is persisted first, then added. Immediately before every add, at
+audited as `untracked local route at admission` with a bounded reason suffix,
+without a delete. `owner_mismatch` means another injection owner holds the key;
+`key_unowned` means it has no owner. These reasons come from rustbgpd's typed
+`google.rpc.ErrorInfo` in the `rustbgpd` domain, never its message text. Missing,
+malformed, conflicting or unknown details use `unspecified` and preserve the
+same no-touch `409`. The suffix appears in the `409` body and audit reason;
+reconciliation errors and operational logs retain the bounded reason as well.
+Otherwise the row is persisted first, then added. Immediately before every add, at
 admission and on each repair, prefixd rechecks the safelist under the
 lifecycle mutex. A failed lookup sends nothing. A victim safelisted since
 admission gets a system withdrawal with the reason `safelisted after
 admission` instead of an add.
+
+A refused `RenewLease` still reports `last_renewal_result: not_live` in lease
+health and requests a full leased re-add. Its operational log distinguishes a
+typed `generation_not_live` refusal from `unspecified` details.
 
 Withdrawal intent records `rule_kind` `blackhole` and the frozen route with
 its owner. Detector unban, operator withdrawal, TTL expiry and the safelist

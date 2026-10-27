@@ -37,6 +37,130 @@ fn rule() -> FlowSpecRule {
 }
 
 #[tokio::test]
+#[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
+async fn live_rustbgpd_ownership_refusal_reasons_preserve_foreign_and_unowned_routes() {
+    use prefixd::{
+        bgp::{
+            BlackholeRoute, BlackholeSpeaker, InjectionLeases, LeaseGeneration, rustbgpd_pb as pb,
+        },
+        error::{InjectionRefusalReason, PrefixdError},
+    };
+    use prost::Message as _;
+
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    let route = |prefix: &str| {
+        BlackholeRoute::new(
+            prefix.parse().unwrap(),
+            "192.0.2.66".parse().unwrap(),
+            vec![],
+            vec![],
+        )
+        .unwrap()
+    };
+    let foreign = route("192.0.2.241/32").with_owner("other.controller");
+    let unowned = route("192.0.2.242/32");
+    let (generation, _) = speaker
+        .announce_leased_blackhole(&foreign, 60)
+        .await
+        .unwrap();
+    speaker.announce_blackhole(&unowned).await.unwrap();
+    let before = speaker.list_blackholes().await.unwrap().routes;
+    for (route, expected) in [
+        (foreign.clone(), InjectionRefusalReason::OwnerMismatch),
+        (unowned.clone(), InjectionRefusalReason::KeyUnowned),
+    ] {
+        let ours = route.with_owner("prefixd.test.owner");
+        for error in [
+            speaker
+                .announce_leased_blackhole(&ours, 60)
+                .await
+                .unwrap_err(),
+            speaker
+                .withdraw_blackhole(&ours.prefix(), ours.owner())
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(
+                matches!(error, PrefixdError::InjectionOwnerMismatch { reason, .. } if reason == expected),
+                "{error}"
+            );
+            assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
+        }
+    }
+    assert_eq!(
+        speaker.list_blackholes().await.unwrap().routes,
+        before,
+        "refusals never modify either route"
+    );
+    let dead = LeaseGeneration {
+        sequence: generation.sequence + 1,
+        ..generation
+    };
+    assert!(
+        !speaker
+            .renew_lease("other.controller", dead, 60)
+            .await
+            .unwrap()
+    );
+
+    // Independently inspect the released daemon's rich status for renewal.
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct RpcStatus {
+        #[prost(int32, tag = "1")]
+        code: i32,
+        #[prost(message, repeated, tag = "3")]
+        details: Vec<prost_types::Any>,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct ErrorInfo {
+        #[prost(string, tag = "1")]
+        reason: String,
+        #[prost(string, tag = "2")]
+        domain: String,
+    }
+    let mut client =
+        pb::injection_service_client::InjectionServiceClient::connect(fixture.endpoint.clone())
+            .await
+            .unwrap();
+    let mut request = tonic::Request::new(pb::RenewLeaseRequest {
+        owner: "other.controller".into(),
+        generation: Some(pb::LeaseGeneration {
+            incarnation: dead.incarnation,
+            sequence: dead.sequence,
+        }),
+        lease_seconds: 60,
+    });
+    let token = std::env::var("PREFIXD_RUSTBGPD_TEST_TOKEN").unwrap();
+    request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let error = client.renew_lease(request).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    let rich = RpcStatus::decode(error.details()).unwrap();
+    assert_eq!(rich.code, tonic::Code::FailedPrecondition as i32);
+    assert_eq!(rich.details.len(), 1);
+    assert_eq!(
+        rich.details[0].type_url,
+        "type.googleapis.com/google.rpc.ErrorInfo"
+    );
+    let reason = ErrorInfo::decode(rich.details[0].value.as_slice()).unwrap();
+    assert_eq!(
+        (reason.domain.as_str(), reason.reason.as_str()),
+        ("rustbgpd", "GENERATION_NOT_LIVE")
+    );
+    assert!(
+        speaker
+            .renew_lease("other.controller", generation, 60)
+            .await
+            .unwrap(),
+        "failed renewal leaves the live generation usable"
+    );
+    assert_eq!(speaker.list_blackholes().await.unwrap().routes, before);
+    fixture.container.rm().await.unwrap();
+}
+
+#[tokio::test]
 #[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
 async fn live_rustbgpd_controller_roundtrip() {
     let fixture = fixture::Speaker::start().await;

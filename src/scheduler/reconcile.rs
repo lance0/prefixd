@@ -711,11 +711,17 @@ impl ReconciliationLoop {
                 }
                 // Another owner's rule, or an unowned one where ours is leased, is never touched.
                 if observed.owner != candidate_rule.owner {
-                    repair_error =
-                        Some(crate::error::PrefixdError::InjectionOwnerMismatch(format!(
-                            "FlowSpec rule for {} is held by injection owner {:?}",
-                            candidate_rule.nlri.dst_prefix, observed.owner
-                        )));
+                    repair_error = Some(crate::error::PrefixdError::InjectionOwnerMismatch {
+                        reason: if observed.owner.is_empty() {
+                            crate::error::InjectionRefusalReason::KeyUnowned
+                        } else {
+                            crate::error::InjectionRefusalReason::OwnerMismatch
+                        },
+                        message: format!(
+                            "FlowSpec rule for {} has a different injection owner",
+                            candidate_rule.nlri.dst_prefix
+                        ),
+                    });
                     continue;
                 }
                 if !forced && observed_action == &action && destination_prefix.is_none() {
@@ -1260,7 +1266,10 @@ impl ReconciliationLoop {
                     // An ownership refusal will not clear by re-adding everything
                     // again: report it each pass without re-triggering the re-add.
                     forced_failure |= forced
-                        && !matches!(error, crate::error::PrefixdError::InjectionOwnerMismatch(_));
+                        && !matches!(
+                            error,
+                            crate::error::PrefixdError::InjectionOwnerMismatch { .. }
+                        );
                     repair_error = Some(error);
                 }
             }

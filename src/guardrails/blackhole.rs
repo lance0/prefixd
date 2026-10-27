@@ -526,8 +526,8 @@ pub async fn admit_blackhole(
             },
             // Another owner, or none, holds the key: nothing was added. Retire the
             // row locally with an audit entry and no delete; never retry unleased.
-            Err(PrefixdError::InjectionOwnerMismatch(reason)) => {
-                tracing::warn!(mitigation_id = %mitigation.mitigation_id, reason,
+            Err(PrefixdError::InjectionOwnerMismatch { reason, .. }) => {
+                tracing::warn!(mitigation_id = %mitigation.mitigation_id, reason = reason.as_str(),
                     "untracked local route at the blackhole prefix; retiring the new row");
                 let request = request_withdrawal(
                     repo,
@@ -535,14 +535,14 @@ pub async fn admit_blackhole(
                     false,
                     "system",
                     "admission",
-                    UNTRACKED_AT_ADMISSION.into(),
+                    format!("{UNTRACKED_AT_ADMISSION} ({reason})"),
                     false,
                     binding,
                 )
                 .await?;
                 complete_local_withdrawal(repo, &request, binding).await?;
                 return Err(PrefixdError::Conflict(format!(
-                    "untracked local route for {prefix}; nothing was added"
+                    "untracked local route for {prefix} ({reason}); nothing was added"
                 )));
             }
             Err(error) => {
@@ -1646,6 +1646,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, PrefixdError::Conflict(_)), "{error}");
         assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
+        assert!(error.to_string().contains("key_unowned"), "{error}");
         assert_eq!(repo.count_active_global().await.unwrap(), 0);
         let retired = repo
             .list_mitigations_by_ip("203.0.113.20", 10)
@@ -1664,10 +1665,8 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(
-            audit.iter().any(|entry| entry.action == "withdraw"
-                && entry.details["reason"] == UNTRACKED_AT_ADMISSION)
-        );
+        assert!(audit.iter().any(|entry| entry.action == "withdraw"
+            && entry.details["reason"] == format!("{UNTRACKED_AT_ADMISSION} (key_unowned)")));
         // The untracked route is untouched, and nothing was retried unleased.
         assert_eq!(speaker.routes().await, [untracked]);
         assert_eq!(speaker.deletes.load(SeqCst), 0);

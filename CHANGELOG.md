@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- rustbgpd ownership refusals now distinguish `owner_mismatch` from
+  `key_unowned` in admission `409` bodies, retirement audit reasons and
+  operational logs. Missing, malformed, conflicting or unrecognized rich-status
+  details use `unspecified`; prefixd still changes no speaker route and never
+  falls back to an unleased add. Refused lease renewals still trigger a full
+  leased re-add and retain the existing `not_live` health result, with a typed
+  `generation_not_live` diagnostic when the speaker supplies it.
+
 ### Added
 
 - An optional `docker-compose.inventory.yml` overlay reads
