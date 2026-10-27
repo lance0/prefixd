@@ -117,8 +117,8 @@ the same overlay:
 COMPOSE_FILE=docker-compose.yml:docker-compose.inventory.yml
 ```
 
-Use `;` instead of `:` on Windows. Validate the merged Compose configuration,
-then create or recreate the controller to apply the mount:
+Validate the merged Compose configuration, then create or recreate the
+controller to apply the mount:
 
 ```bash
 docker compose --profile rustbgpd config --quiet
