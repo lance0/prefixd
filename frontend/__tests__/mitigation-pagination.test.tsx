@@ -1,9 +1,10 @@
 import { act, fireEvent, screen, waitFor } from "@testing-library/react"
-import { useSWRConfig } from "swr"
+import { SWRConfig } from "swr"
+import { useEffect, type ReactNode } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { MitigationsContentLive } from "@/components/dashboard/mitigations-content-live"
 import { getAllMitigations, type Mitigation } from "@/lib/api"
-import { failure, json, operatorResponse, renderApp, signIn, useFakeController } from "./support/fake-controller"
+import { deferred, failure, json, operatorResponse, renderApp, settle, signIn, useFakeController } from "./support/fake-controller"
 
 const controller = useFakeController()
 
@@ -61,24 +62,13 @@ async function nextPage(page: number) {
 }
 
 describe("complete mitigation navigation", () => {
-  it("reaches rows beyond 100 while retaining only one page, and returns through server cursors", async () => {
-    let cache: ReturnType<typeof useSWRConfig>["cache"] | undefined
-
-    function CacheProbe() {
-      cache = useSWRConfig().cache
-
-      return null
-    }
-
-    renderApp(<><MitigationsContentLive /><CacheProbe /></>)
+  it("reaches rows beyond 100 while rendering only one page, and returns through server cursors", async () => {
+    renderApp(productionDedup(<MitigationsContentLive />))
     await screen.findByText("Page 1")
 
     for (let page = 2; page <= 7; page++) await nextPage(page)
     expect(screen.getByRole("link", { name: "203.0.113.121" })).toBeInTheDocument()
     expect(screen.getAllByRole("row")).toHaveLength(2)
-    const retained = [...cache!.keys()].flatMap((key) => cache!.get(key)?.data?.mitigations ?? [])
-
-    expect(retained).toHaveLength(1)
     expect(screen.getByRole("button", { name: "Next" })).toBeDisabled()
     fireEvent.click(screen.getByRole("button", { name: "Previous" }))
     await screen.findByText("Page 6")
@@ -134,6 +124,8 @@ describe("complete mitigation navigation", () => {
       await act(() => vi.advanceTimersByTimeAsync(20))
       expect(screen.getByText("Page 1")).toBeInTheDocument()
       expect(screen.getByRole("link", { name: "203.0.113.1" })).toBeInTheDocument()
+      expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled()
+      await act(() => vi.advanceTimersByTimeAsync(5000))
       expect(screen.getByRole("button", { name: "Next" })).toBeDisabled()
     } finally {
       vi.clearAllTimers()
@@ -215,5 +207,129 @@ describe("complete CSV input", () => {
       controller.route("GET", "/v1/mitigations", () => json({ mitigations: [rows[0]], count: 1, next_cursor, has_more: true }))
       await expect(getAllMitigations({})).rejects.toThrow("Incomplete mitigation export")
     }
+  })
+})
+
+
+const productionDedup = (children: ReactNode) => <SWRConfig value={{ dedupingInterval: 2000 }}>{children}</SWRConfig>
+
+function ReplayProbe({ events }: { events: string[] }) {
+  useEffect(() => {
+    events.push("setup")
+
+    return () => { events.push("cleanup") }
+  }, [events])
+
+  return null
+}
+
+describe("review regressions", () => {
+  it("keeps rows visible on a rapid Next-Previous revisit under production deduplication", async () => {
+    vi.useFakeTimers()
+
+    try {
+      renderApp(productionDedup(<MitigationsContentLive />))
+      await act(() => vi.advanceTimersByTimeAsync(0))
+      fireEvent.click(screen.getByRole("button", { name: "Next" }))
+      await act(() => vi.advanceTimersByTimeAsync(0))
+      expect(screen.getByRole("link", { name: "203.0.113.21" })).toBeInTheDocument()
+      fireEvent.click(screen.getByRole("button", { name: "Previous" }))
+      await act(() => vi.advanceTimersByTimeAsync(0))
+      expect(screen.getByRole("link", { name: "203.0.113.1" })).toBeInTheDocument()
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
+  it("keeps the current page live across StrictMode replay and rapid revisits", async () => {
+    const events: string[] = []
+    renderApp(productionDedup(<><MitigationsContentLive /><ReplayProbe events={events} /></>), { reactStrictMode: true })
+    await screen.findByRole("link", { name: "203.0.113.1" })
+    expect(events.slice(0, 3)).toEqual(["setup", "cleanup", "setup"])
+    await nextPage(2)
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }))
+    await screen.findByRole("link", { name: "203.0.113.1" })
+    expect(screen.queryByText("No mitigations with these statuses")).not.toBeInTheDocument()
+  })
+
+  it("loads a remounted identical key while its original request is still pending", async () => {
+    const pending = deferred<Response>()
+    controller.route("GET", "/v1/mitigations", () => pending.promise)
+    const view = renderApp(productionDedup(<MitigationsContentLive />))
+    await waitFor(() => expect(controller.calls("GET", "/v1/mitigations")).toHaveLength(1))
+    view.rerender(productionDedup(<p>Details</p>))
+    view.rerender(productionDedup(<MitigationsContentLive />))
+    await settle()
+    pending.resolve(json({ mitigations: [rows[0]], count: 1, next_cursor: null, has_more: false }))
+    await screen.findByRole("link", { name: "203.0.113.1" })
+  })
+
+  it("loads a pending first request across StrictMode replay without waiting for polling", async () => {
+    const pending = deferred<Response>()
+    controller.route("GET", "/v1/mitigations", () => pending.promise)
+    const events: string[] = []
+    renderApp(productionDedup(<><MitigationsContentLive /><ReplayProbe events={events} /></>), { reactStrictMode: true })
+    await waitFor(() => expect(controller.calls("GET", "/v1/mitigations")).toHaveLength(1))
+    expect(events.slice(0, 3)).toEqual(["setup", "cleanup", "setup"])
+    pending.resolve(json({ mitigations: [rows[0]], count: 1, next_cursor: null, has_more: false }))
+    await screen.findByRole("link", { name: "203.0.113.1" })
+  })
+
+  it("excludes empty configured customer IDs before rendering Radix choices", async () => {
+    controller.route("GET", "/v1/config/inventory", () => json({ customers: [{ customer_id: "" }, { customer_id: "acme" }] }))
+    renderApp(<MitigationsContentLive />)
+    await screen.findByText("Page 1")
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Customer" }), { key: "Enter" })
+    expect(await screen.findByRole("option", { name: "acme" })).toBeInTheDocument()
+    expect(screen.getAllByRole("option")).toHaveLength(2)
+  })
+
+  it("retains the last valid results when a multibyte draft exceeds the API byte limit", async () => {
+    renderApp(<MitigationsContentLive />)
+    await screen.findByRole("link", { name: "203.0.113.1" })
+    const reads = controller.calls("GET", "/v1/mitigations").length
+    fireEvent.change(screen.getByRole("textbox", { name: "Search mitigations" }), { target: { value: "β".repeat(129) } })
+    await settle()
+    expect(controller.calls("GET", "/v1/mitigations")).toHaveLength(reads)
+    expect(screen.getByRole("link", { name: "203.0.113.1" })).toBeInTheDocument()
+    expect(screen.getByRole("textbox", { name: "Search mitigations" })).toHaveValue("β".repeat(129))
+    expect(screen.getByRole("textbox", { name: "Search mitigations" })).toHaveAttribute("aria-invalid", "true")
+    expect(screen.getByRole("alert")).toHaveTextContent("256 UTF-8 bytes")
+    expect(screen.getByRole("button", { name: "Export CSV" })).toBeDisabled()
+    fireEvent.change(screen.getByRole("textbox", { name: "Search mitigations" }), { target: { value: "β".repeat(128) } })
+    await screen.findByText("No matching mitigations")
+    expect(controller.calls("GET", "/v1/mitigations").at(-1)?.query.get("q")).toBe("β".repeat(128))
+    fireEvent.change(screen.getByRole("textbox", { name: "Search mitigations" }), { target: { value: "203.0.113.121" } })
+    await screen.findByRole("link", { name: "203.0.113.121" })
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument()
+  })
+
+  it("searches a valid deep link beyond the old row cap on the first request", async () => {
+    renderApp(<MitigationsContentLive initialSearch="203.0.113.121" />)
+    await screen.findByRole("link", { name: "203.0.113.121" })
+    expect(controller.calls("GET", "/v1/mitigations")[0].query.get("q")).toBe("203.0.113.121")
+  })
+
+  it.each(["β".repeat(129), "x".repeat(257), "bad\0query"])("does not submit an invalid deep-link search (%#)", async (query) => {
+    renderApp(<MitigationsContentLive initialSearch={query} />)
+    await screen.findByRole("link", { name: "203.0.113.1" })
+    expect(controller.calls("GET", "/v1/mitigations").every((call) => call.query.get("q") === null)).toBe(true)
+    expect(screen.getByRole("textbox", { name: "Search mitigations" })).toHaveValue(query)
+    expect(screen.getByRole("alert")).toHaveTextContent("256 UTF-8 bytes")
+    expect(screen.getByRole("button", { name: "Export CSV" })).toBeDisabled()
+  })
+
+  it.each(["Customer", "POP"])("can select an actual All %s identifier without selecting the all-items sentinel", async (filter) => {
+    served = rows.map((row, index) => index === 120 ? { ...row, customer_id: "All", pop: "All" } : row)
+    controller.route("GET", "/v1/config/inventory", () => json({ customers: [{ customer_id: "All" }, { customer_id: "acme" }] }))
+    controller.route("GET", "/v1/pops", () => json([{ pop: "All" }, { pop: "iad1" }]))
+    renderApp(<MitigationsContentLive />)
+    await screen.findByText("Page 1")
+    fireEvent.keyDown(screen.getByRole("combobox", { name: filter }), { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "All" }))
+    await settle()
+    expect(controller.calls("GET", "/v1/mitigations").at(-1)?.query.get(filter === "Customer" ? "customer_id" : "pop")).toBe("All")
+    expect(screen.getByRole("link", { name: "203.0.113.121" })).toBeInTheDocument()
   })
 })

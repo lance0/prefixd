@@ -47,6 +47,10 @@ const STATUS_FILTERS = ["active", "pending", "expired", "withdrawn"] as const
 // A countdown under this many minutes reads as a warning.
 const EXPIRY_WARNING_MS = 5 * 60_000
 
+function validSearch(value: string): boolean {
+  return !value.includes("\0") && new TextEncoder().encode(value).length <= 256
+}
+
 interface MitigationsContentLiveProps {
   initialSearch?: string | null
   initialMitigateOpen?: boolean
@@ -55,8 +59,9 @@ interface MitigationsContentLiveProps {
 export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: MitigationsContentLiveProps = {}) {
   const { formatTime } = useTimeFormat()
   const router = useRouter()
-  const [statusFilters, setStatusFilters] = useState<string[]>(initialSearch ? [] : ["active"])
-  const [searchQuery, setSearchQuery] = useState(initialSearch ?? "")
+  const [statusFilters, setStatusFilters] = useState<string[]>(initialSearch && validSearch(initialSearch) ? [] : ["active"])
+  const [searchDraft, setSearchDraft] = useState(initialSearch ?? "")
+  const [searchQuery, setSearchQuery] = useState(() => validSearch(initialSearch ?? "") ? initialSearch ?? "" : "")
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined])
   const [isExporting, setIsExporting] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
@@ -81,15 +86,15 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   const [bulkWithdrawResults, setBulkWithdrawResults] = useState<BulkWithdrawResult[]>([])
   const bulkWithdrawInFlight = useRef(false)
   const bulkWithdrawTrigger = useRef<HTMLButtonElement | null>(null)
-  const [customerFilter, setCustomerFilter] = useState("All")
-  const [popFilter, setPopFilter] = useState("All")
+  const [customerFilter, setCustomerFilter] = useState<string | null>(null)
+  const [popFilter, setPopFilter] = useState<string | null>(null)
   const permissions = usePermissions()
   const itemsPerPage = 20
 
   const filters = {
     status: statusFilters.length > 0 ? statusFilters : undefined,
-    customer_id: customerFilter === "All" ? undefined : customerFilter,
-    pop: popFilter === "All" ? undefined : popFilter,
+    customer_id: customerFilter ?? undefined,
+    pop: popFilter ?? undefined,
     q: searchQuery || undefined,
   }
 
@@ -101,13 +106,13 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
 
   const { data: inventory, error: inventoryError } = useConfigInventory()
   const { data: popInventory, error: popsError } = usePops()
-  const customers = inventory?.customers.map((customer) => customer.customer_id).sort() ?? []
-  const pops = popInventory?.map((pop) => pop.pop).sort() ?? []
+  const customers = [...new Set(inventory?.customers.map((customer) => customer.customer_id).filter(Boolean))].sort()
+  const pops = [...new Set(popInventory?.map((pop) => pop.pop).filter(Boolean))].sort()
   const mitigations = mitigationsResp?.mitigations
   const currentPage = cursors.length
+  const searchInvalid = !validSearch(searchDraft)
 
   const resetPage = () => {
-    void mutate(undefined, { revalidate: false })
     setCursors([undefined])
     setSelectedIds(new Set())
   }
@@ -240,18 +245,18 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
 
   useEffect(() => {
     if (!bulkWithdrawOpen && !error && mitigations?.length === 0 && cursors.length > 1) {
-      void mutate(undefined, { revalidate: false })
       setCursors((previous) => previous.slice(0, -1))
       setSelectedIds(new Set())
     }
-  }, [bulkWithdrawOpen, error, mitigations, cursors.length, mutate])
+  }, [bulkWithdrawOpen, error, mitigations, cursors.length])
 
-  const filtersActive = searchQuery !== "" || customerFilter !== "All" || popFilter !== "All"
+  const filtersActive = searchQuery !== "" || customerFilter !== null || popFilter !== null
 
   const clearFilters = () => {
     setSearchQuery("")
-    setCustomerFilter("All")
-    setPopFilter("All")
+    setSearchDraft("")
+    setCustomerFilter(null)
+    setPopFilter(null)
     resetPage()
   }
 
@@ -296,9 +301,18 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
               ref={searchInput}
               placeholder="Search IP, vector or ID…"
               aria-label="Search mitigations"
-              value={searchQuery}
-              onChange={(e) => { setSearchQuery(e.target.value); resetPage() }}
-              maxLength={256}
+              value={searchDraft}
+              onChange={(e) => {
+                const value = e.target.value
+                setSearchDraft(value)
+
+                if (validSearch(value)) {
+                  setSearchQuery(value)
+                  resetPage()
+                }
+              }}
+              aria-invalid={searchInvalid}
+              aria-describedby="mitigation-search-help"
               className="h-9 pl-9 text-base sm:text-sm"
               spellCheck={false}
               autoComplete="off"
@@ -344,7 +358,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
             size="icon"
             className="size-9 shrink-0"
             onClick={handleExport}
-            disabled={!mitigations?.length || isExporting || Boolean(error)}
+            disabled={searchInvalid || !mitigations?.length || isExporting || Boolean(error)}
             aria-label="Export CSV"
             title="Export all matching mitigations; timestamps remain UTC"
             aria-busy={isExporting}
@@ -373,6 +387,10 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
           </Button>
         </div>
 
+        <p id="mitigation-search-help" role={searchInvalid ? "alert" : undefined} className={cn("border-b px-4 py-2 text-sm", searchInvalid ? "text-destructive" : "text-muted-foreground")}>
+          {searchInvalid ? "Search must be at most 256 UTF-8 bytes without null characters. Showing results for the last valid search." : "Search IP, vector, customer or ID. Maximum 256 UTF-8 bytes."}
+        </p>
+
         <div
           className={cn(
             "flex-wrap items-center gap-2 border-b p-3",
@@ -381,31 +399,31 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
         >
           <Select
             disabled={!inventory}
-            value={customerFilter}
-            onValueChange={(v) => { setCustomerFilter(v); resetPage() }}
+            value={customerFilter === null ? "all" : `customer:${customerFilter}`}
+            onValueChange={(v) => { setCustomerFilter(v === "all" ? null : v.slice("customer:".length)); resetPage() }}
           >
             <SelectTrigger className="h-9 w-full sm:w-40" aria-label="Customer">
               <SelectValue placeholder="Customer" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="All">All customers</SelectItem>
+              <SelectItem value="all">All customers</SelectItem>
               {customers.map((c) => (
-                <SelectItem key={c} value={c}>{c}</SelectItem>
+                <SelectItem key={c} value={`customer:${c}`}>{c}</SelectItem>
               ))}
             </SelectContent>
           </Select>
           <Select
             disabled={!popInventory}
-            value={popFilter}
-            onValueChange={(v) => { setPopFilter(v); resetPage() }}
+            value={popFilter === null ? "all" : `pop:${popFilter}`}
+            onValueChange={(v) => { setPopFilter(v === "all" ? null : v.slice("pop:".length)); resetPage() }}
           >
             <SelectTrigger className="h-9 w-full sm:w-32" aria-label="POP">
               <SelectValue placeholder="POP" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="All">All POPs</SelectItem>
+              <SelectItem value="all">All POPs</SelectItem>
               {pops.map((p) => (
-                <SelectItem key={p} value={p}>{p}</SelectItem>
+                <SelectItem key={p} value={`pop:${p}`}>{p}</SelectItem>
               ))}
             </SelectContent>
           </Select>
@@ -607,7 +625,6 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                 variant="outline"
                 size="sm"
                 onClick={() => {
-                  void mutate(undefined, { revalidate: false })
                   setCursors((previous) => previous.slice(0, -1))
                   setSelectedIds(new Set())
                 }}
@@ -625,7 +642,6 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                   const nextCursor = mitigationsResp?.next_cursor
 
                   if (nextCursor) {
-                    void mutate(undefined, { revalidate: false })
                     setCursors((previous) => [...previous, nextCursor])
                     setSelectedIds(new Set())
                   }

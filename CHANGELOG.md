@@ -14,7 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the newest 100 rows. Pages stay in newest-first order; column sorting of a
   bounded subset is removed. Selection is page-scoped, and CSV export walks all
   matching pages, refusing a partial download on failure. Exports are live
-  traversals and retain matching rows in browser memory.
+  traversals and retain matching rows in browser memory. Only one page is
+  rendered at a time; standard SWR caching retains visited pages for the app
+  lifetime, and large-history memory qualification remains open. Search drafts
+  that exceed the UTF-8 byte limit or contain null characters retain the last
+  valid results without submitting the invalid query. Empty filter choices are
+  omitted and identifiers named `All` remain selectable.
 - `GET /v1/mitigations` accepts bounded literal substring search through `q`,
   covering target, vector, customer ID and mitigation UUID before pagination.
 

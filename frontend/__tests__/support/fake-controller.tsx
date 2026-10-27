@@ -134,6 +134,8 @@ export interface AppOptions {
   router?: RouterSpies
   /** Render without the AuthProvider, for trees that do not read the session. */
   withoutAuth?: boolean
+  /** Replay mount effects at the React root, including the app providers. */
+  reactStrictMode?: boolean
 }
 
 export interface AppHandles {
@@ -194,5 +196,5 @@ export function appWrapper(options: AppOptions = {}): AppWrapper {
 export function renderApp(ui: ReactElement, options: AppOptions = {}) {
   const { wrapper, handles } = appWrapper(options)
 
-  return { ...render(ui, { wrapper }), ...handles }
+  return { ...render(ui, { wrapper, reactStrictMode: options.reactStrictMode }), ...handles }
 }

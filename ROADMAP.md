@@ -56,8 +56,9 @@ command palette still need complete pagination.
   results; qualify rustbgpd against FRR/Juniper and Arista/Cisco independently.
 - Replace the remaining bounded event/audit and command-palette subsets with
   complete server-backed filtering and pagination. Verify the operator workflow
-  at the tested scale and accessibility settings; mitigation navigation alone
-  does not complete that qualification.
+  at the tested scale and accessibility settings, including large-history memory
+  and cache growth; mitigation navigation alone does not complete that
+  qualification.
 - Keep input validation, authentication, dependency audits and native lint gates
   strict. Address concrete findings without adding speculative configuration.
 - Keep documentation and release guidance aligned with source. Exercise the

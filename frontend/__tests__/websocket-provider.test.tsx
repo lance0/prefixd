@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react"
 import type { ReactNode } from "react"
-import useSWR, { type Key } from "swr"
+import useSWR, { SWRConfig, type Key } from "swr"
 import { WebSocketProvider, useWebSocketContext } from "@/components/websocket-provider"
 import { ConnectionStatus } from "@/components/connection-status"
 import { useEvents, useHealth, useMitigations, useSignalGroupsPaginated, useStats } from "@/hooks/use-api"
@@ -260,6 +260,29 @@ describe("WebSocketProvider server frames", () => {
     expect(invalidatedKeys(preferenceReads)).toEqual([cacheKeys[0], cacheKeys[1], "stats"])
     const toast = await screen.findByText(title)
     expect(toast.closest("[data-sonner-toast]")).toHaveAttribute("data-type", toastKind)
+  })
+
+  it("refreshes paginated mitigation reads through the shared cache on mutations and resync", async () => {
+    controller.route("GET", "/v1/mitigations", () => json({
+      mitigations: controller.calls("GET", "/v1/mitigations").length > 1 ? [mitigation] : [],
+      count: 0, next_cursor: null, has_more: false,
+    }))
+    const app = appWrapper({ withoutAuth: true })
+
+    const { result } = renderHook(() => useMitigations({ limit: 20 }), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <app.wrapper><SWRConfig value={{ dedupingInterval: 2000 }}><WebSocketProvider>{children}</WebSocketProvider></SWRConfig></app.wrapper>
+      ),
+    })
+
+    await waitFor(() => expect(result.current.data?.mitigations).toHaveLength(0))
+    const socket = FakeWebSocket.instances[0]
+    act(() => socket.open())
+    act(() => socket.receive({ type: "mitigation_created", mitigation }))
+    await waitFor(() => expect(result.current.data?.mitigations).toHaveLength(1))
+    expect(controller.calls("GET", "/v1/mitigations")).toHaveLength(2)
+    act(() => socket.receive({ type: "resync_required" }))
+    await waitFor(() => expect(controller.calls("GET", "/v1/mitigations")).toHaveLength(3))
   })
 
   it("refreshes event caches for the backend EventResponse frame", async () => {

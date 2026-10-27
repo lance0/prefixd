@@ -443,9 +443,17 @@ A persisted row that cannot be decoded fails the entire page with `500`, includi
 a corrupt lookahead row; it is never silently omitted or reported as end of history.
 
 `count` is this page's row count, not a global total. The dashboard requests 20-row
-pages in this order, sends search and filters to the server, and keeps only the
-current page's rows. Customer choices come from the current configured inventory;
-POP choices come from `/v1/pops`. Search can still find historical customer IDs.
+pages in this order, sends search and filters to the server, and renders
+one page at a time. Standard SWR caching retains visited pages for the app
+lifetime, with polling and shared WebSocket updates. Large-history memory
+qualification remains open.
+
+The search input checks UTF-8 bytes before submitting typed or deep-linked
+queries. An invalid draft stays visible with an accessible error while results
+keep the last valid query; CSV export is disabled until the draft is valid.
+Customer choices come from the current configured inventory;
+POP choices come from `/v1/pops`. Empty choices are omitted; an identifier named
+`All` remains an exact filter. Search can still find historical customer IDs.
 Selection and select-all apply to the current page. An open bulk-withdrawal
 confirmation retains its selected IDs across refreshes until completion or cancel.
 
