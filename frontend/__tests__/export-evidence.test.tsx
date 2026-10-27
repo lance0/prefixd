@@ -155,6 +155,33 @@ describe("export evidence card", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument()
   })
 
+  it.each(["observed", "error", "unsupported", "not_observed", "no_local_route"] as const)("shows FlowSpec %s without calling it a blackhole", (status) => {
+    render(<ExportEvidenceCard kind="flowspec" evidence={evidence({
+      status,
+      peers: status === "observed" || status === "error" ? [peer("192.0.2.11", "withheld", "family_not_negotiated")] : [],
+      warning: status === "observed" || status === "error" ? { reason: "family_not_negotiated", message: "No Established session negotiated its address family." } : null,
+      error: status === "error" ? "speaker unavailable" : null,
+    })} />)
+    const card = screen.getByTestId("export-evidence")
+    expect(card).not.toHaveTextContent("blackhole")
+    expect(card).toHaveTextContent("router enforcement is not verified here")
+
+    if (status === "observed" || status === "error" || status === "no_local_route") expect(card).toHaveTextContent("FlowSpec rule")
+
+    if (status === "error") {
+      expect(card).toHaveTextContent("Export is unknown, not empty")
+      expect(within(card).getByText("Withheld")).toHaveAttribute("data-tone", "neutral")
+      expect(card).toHaveTextContent("Export at observation")
+    }
+  })
+
+  it("labels retained FlowSpec observations as historical", () => {
+    render(<ExportEvidenceCard kind="flowspec" evidence={{ ...mixed, historical: true, warning: { reason: "not_selected", message: "Another rule is selected." } }} />)
+    expect(screen.getByTestId("export-evidence")).toHaveTextContent("At the retained observation, no Established peer had this FlowSpec rule")
+    expect(screen.getByText("Committed")).toHaveAttribute("data-tone", "neutral")
+    expect(screen.getByRole("status")).toHaveTextContent("Current export is unknown")
+  })
+
   it("says when sessions were not observed rather than implying every peer is Established", () => {
     render(<ExportEvidenceCard evidence={{ ...mixed, not_established_peers: null }} />)
     expect(screen.getByText(/Peer sessions were not observed/)).toBeInTheDocument()
@@ -162,7 +189,7 @@ describe("export evidence card", () => {
 })
 
 describe("mitigation detail", () => {
-  it("puts export evidence first for an active blackhole", async () => {
+  it.each(["blackhole", "discard", "police"] as const)("puts export evidence first for an active %s", async (actionType) => {
     const createdAt = new Date(Date.now() - 60_000).toISOString()
 
     const blackhole: Mitigation = {
@@ -174,8 +201,8 @@ describe("mitigation detail", () => {
       pop: "test-pop",
       victim_ip: "203.0.113.10",
       vector: "unknown",
-      action_type: "blackhole",
-      rate_bps: null,
+      action_type: actionType,
+      rate_bps: actionType === "police" ? 8_000_000 : null,
       dst_prefix: "203.0.113.10/32",
       protocol: null,
       dst_ports: [],
@@ -189,7 +216,7 @@ describe("mitigation detail", () => {
       acknowledged_at: null,
       acknowledged_by: null,
       origin_mode: "enforced",
-      blackhole: { next_hop: "192.0.2.66", communities: ["65535:666"], large_communities: [] },
+      blackhole: actionType === "blackhole" ? { next_hop: "192.0.2.66", communities: ["65535:666"], large_communities: [] } : null,
       export_evidence: mixed,
     }
 
@@ -206,7 +233,12 @@ describe("mitigation detail", () => {
       )
     })
     const exportCard = await screen.findByTestId("export-evidence")
-    const routeCard = screen.getByTestId("blackhole-card")
-    expect(exportCard.compareDocumentPosition(routeCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    if (actionType === "blackhole") {
+      const routeCard = screen.getByTestId("blackhole-card")
+      expect(exportCard.compareDocumentPosition(routeCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    } else {
+      expect(screen.queryByTestId("blackhole-card")).not.toBeInTheDocument()
+    }
   })
 })

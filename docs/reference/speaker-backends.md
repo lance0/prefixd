@@ -69,10 +69,10 @@ their UDP invariants.
 
 Health detail adds `speaker.backend` and availability booleans under
 `speaker.capabilities`: `rule_reader`, `peer_observer`, `daemon_health`,
-`blackhole`, `blackhole_lease`, `blackhole_export` and the `flowspec_match`
-object (`source_prefix`, `source_ports`, `fragment`, `packet_length`). `blackhole_export` is
-true when the adapter reads per-peer [export evidence](#export-evidence),
-which only rustbgpd does. `blackhole_lease` is true only
+`blackhole`, `blackhole_lease`, `blackhole_export`, `flowspec_export` and the `flowspec_match`
+object (`source_prefix`, `source_ports`, `fragment`, `packet_length`). The export
+booleans are true when the adapter reads per-peer [export evidence](#export-evidence)
+for that kind, which only rustbgpd does. `blackhole_lease` is true only
 after the rustbgpd adapter's `ListInjectionLeases` probe succeeded, which
 prefixd asks only with `blackhole.leased`; an `UNIMPLEMENTED` lease RPC from a
 rolled-back daemon clears it. It is false for GoBGP. The legacy `gobgp`
@@ -92,8 +92,8 @@ also labels daemon metadata explicitly. Uptime is an observation, not a unique
 boot identifier or a restart/replay trigger.
 
 These fields describe API availability and peer observation, not announcement,
-export, or enforcement confirmation. Export is reported separately, for
-blackholes only, under `speaker.blackhole_exports`.
+export, or enforcement confirmation. Export is reported separately under
+`speaker.blackhole_exports` and `speaker.flowspec_exports`.
 
 `prefixdctl peers` fails explicitly on unsupported or failed peer observation;
 successful JSON remains the peer map. Status and dashboard clients tolerate older
@@ -603,7 +603,7 @@ Each step of this ladder is separate evidence, and none implies the next:
 | Desired intent | An active row in prefixd's database | All |
 | Local RPC acceptance | A successful add | All |
 | Retained local intent, or accepted local RIB | The reconciliation read-back | rustbgpd (retained intent), GoBGP (accepted RIB) |
-| Committed to a peer's Adj-RIB-Out | `export_evidence` on the blackhole, `committed` | rustbgpd, blackholes only |
+| Committed to a peer's Adj-RIB-Out | Mitigation detail `export_evidence`, `committed` | rustbgpd, blackholes and FlowSpec |
 | Router receipt and installation | Not observed by prefixd; the [FRR receipts](qualification/blackhole-frr-2026-10-19.md) are lab evidence only | None |
 | Router enforcement | Not observed | None |
 
@@ -611,8 +611,10 @@ Once per reconciliation pass, after the blackhole stage, prefixd reads
 rustbgpd's `InjectionService.ListPathExportDispositions` for each active,
 enforced-origin blackhole of this POP (the stage's repair candidates), keyed
 on its host prefix and `path_id` 0, and walks every page. It also uses the
-pass's `ListNeighbors` read. The reads run one at a time within a 10-second
-budget per pass, so a stalled speaker cannot hold up expiry; a read the budget
+pass's `ListNeighbors` read. Active enforced FlowSpec rules use
+`ListFlowSpecExportDispositions`, with the exact address family and canonical
+components used by `AddFlowSpec`, including source prefixes and ports. The
+reads of both kinds share a rotating order and one 10-second budget per pass, so a stalled speaker cannot hold up expiry; a read the budget
 cuts off reports an error. A failed or cut-off read keeps the blackhole's
 warning from its last complete read, so a transient error neither clears nor
 raises degraded health. The pass keeps the result in memory. The mitigation
@@ -652,8 +654,10 @@ the session read failed.
 
 A failed or partial read is an observation error. `NOT_FOUND` on the first page
 means the speaker holds no local route at the key (`no_local_route`, which
-reconciliation repairs); any error after the first page, a repeated page token
-or peer, or an unknown disposition fails the whole read. An error is never
+reconciliation repairs). `ABORTED` on any page discards the walk and restarts
+once from the first page; another abort fails the read. Any other error after
+the first page, a repeated page token or scoped peer identity, or an unknown
+disposition fails the whole read. An error is never
 reported as no peers or as success, and it is distinct from a successful empty
 list, which means no peer is Established. GoBGP reports `unsupported`.
 
@@ -670,6 +674,30 @@ names the policy. prefixd exposes no RPKI-specific reason, and at 0.79.0 an
 RPKI-Invalid filter does not cause it for prefixd's blackholes, which carry
 no AS_PATH and validate NotFound (see [RPKI filters](#router-and-speaker-requirements)).
 
+FlowSpec evidence uses the same `export_evidence` shape and ownership-epoch
+rules. It is keyed by the complete match, so rules sharing a destination but
+using different source prefixes or ports remain separate. Health adds
+`speaker.capabilities.flowspec_export` and `speaker.flowspec_exports`, with a
+`rules` count, disposition counts, read errors, missing local rules and bounded
+unexported reasons. Historical, failed, missing-local or unexported FlowSpec
+evidence degrades health. A failed candidate-inventory read marks the set
+unknown, preserving prior observations with a safe error and zero current
+counts. Health and read-error metrics count all retained rules, or one
+inventory-level failure before any keys are known; a complete inventory clears
+that marker. GoBGP reports unsupported, and dry-run and terminal
+mitigations carry no export evidence.
+
+A failed FlowSpec refresh retains the previous complete peer rows and their
+observation time, explicitly labelled as retained evidence while current
+export is unknown. Its current disposition gauges count zero until another
+complete read. FlowSpec has separate `prefixd_flowspec_export_peers{disposition}`,
+`prefixd_flowspec_unexported{reason}` and `prefixd_flowspec_export_read_errors`
+gauges; existing blackhole gauges keep their meaning. The shipped blackhole
+alert remains blackhole-only. `not_selected` can mean a received FlowSpec rule
+wins the same match key; `export_rule` groups the speaker's bounded suppression
+codes. Neither reason nor a committed export proves router receipt or traffic
+enforcement.
+
 After a planned rustbgpd restart, Graceful Restart selection deferral holds
 injected routes, prefixd's blackholes included, until the Graceful Restart
 peers send End-of-RIB or the restart window (`gr_restart_time`, 120 seconds by
@@ -682,11 +710,11 @@ reconciliation repairs only routes absent from the speaker's local RIB, so it
 neither re-adds nor retries a held blackhole. Any other pending reason, or a
 mix with `selection_deferred`, stays `pending`.
 
-rustbgpd v0.80.0 adds a FlowSpec export-disposition RPC, batch unicast reads,
-configured-peer rows and typed validation-deny details. prefixd does not yet
-consume these additions: FlowSpec rules still carry no export evidence,
-blackhole reads remain per key and join a separate session observation, and
-validation detail is not exposed. A read is complete or an error. When the
+rustbgpd v0.80.0 supplies the FlowSpec export-disposition RPC used here, plus
+batch unicast reads, configured-peer rows and typed validation-deny details.
+prefixd does not yet consume those latter additions: blackhole reads remain per
+key and both route kinds join a separate session observation; validation detail
+is not exposed. A read is complete or an error. When the
 daemon aborts a paged read because the route, its Established peers or their
 export settings changed between pages, prefixd discards the pages and restarts
 once; a second abort is an error.
@@ -695,7 +723,9 @@ once; a second abort is an error.
 rustbgpd peered with GoBGP over IPv4 and IPv6 unicast: `committed` for both
 families, `withheld`/`export_policy`/`policy_denied` for a prefix the export
 policy denies, a configured neighbor that never establishes reported as not
-Established rather than withheld, and absence after the delete.
+Established rather than withheld, and absence after the delete. The FlowSpec
+peer fixture checks committed IPv4/IPv6 exact-match keys, then `not_selected`
+when a received rule with the same full match wins selection.
 
 ### Router and speaker requirements
 

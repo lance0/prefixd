@@ -112,6 +112,7 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
             crate::domain::LeaseHealth,
             crate::domain::BlackholeExportEvidence,
             crate::domain::BlackholeExportSummary,
+            crate::domain::FlowSpecExportSummary,
             crate::domain::ExportObservation,
             crate::domain::ExportWarning,
             crate::domain::DispositionCounts,

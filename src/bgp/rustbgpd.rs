@@ -714,6 +714,9 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
     fn export_observer(&self) -> Option<&dyn ExportObserver> {
         Some(self)
     }
+    fn flowspec_export_observer(&self) -> Option<&dyn ExportObserver> {
+        Some(self)
+    }
     fn match_support(&self) -> FlowSpecMatchSupport {
         // Types 6, 10 and 12 parse and render alike in every supported release.
         FlowSpecMatchSupport::ALL
@@ -1191,46 +1194,41 @@ fn decode_export(entry: pb::PathExportDispositionEntry) -> Result<PeerExport> {
     })
 }
 
-#[async_trait]
-impl ExportObserver for RustBgpdAnnouncer {
-    async fn blackhole_exports(&self, prefix: &ipnet::IpNet) -> Result<Option<Vec<PeerExport>>> {
+impl RustBgpdAnnouncer {
+    async fn export_dispositions<F, Fut>(
+        &self,
+        operation: &'static str,
+        page: F,
+    ) -> Result<Option<Vec<PeerExport>>>
+    where
+        F: Fn(String) -> Fut + Send + Sync,
+        Fut: Future<
+                Output = std::result::Result<
+                    tonic::Response<pb::ListPathExportDispositionsResponse>,
+                    tonic::Status,
+                >,
+            > + Send,
+    {
         let mut peers: Vec<PeerExport> = Vec::new();
         let mut page_token = String::new();
+        let mut tokens = std::collections::HashSet::new();
         let mut restarted = false;
         loop {
-            let request = pb::ListPathExportDispositionsRequest {
-                prefix: prefix.addr().to_string(),
-                prefix_length: prefix.prefix_len().into(),
-                path_id: 0,
-                page_size: ROUTE_PAGE_SIZE,
-                page_token: page_token.clone(),
-                include_configured: false,
-            };
-            let response = match self
-                .call("ListPathExportDispositions", || async {
-                    pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                        .list_path_export_dispositions(self.request(request.clone()))
-                        .await
-                })
-                .await
-            {
+            let response = match self.call(operation, || page(page_token.clone())).await {
                 Ok(response) => response,
-                // No local route at the key. Mid-walk the route went away, so the
-                // pages read so far are partial: that is an error, not absence.
+                // Absence after any page is an incomplete read, never an empty route.
                 Err(status) if status.code() == Code::NotFound && page_token.is_empty() => {
                     return Ok(None);
                 }
-                // The route, Established peer set or an export setting changed
-                // during the walk. Discard every page and restart once; a second
-                // ABORTED fails the read rather than mixing snapshots.
                 Err(status) if status.code() == Code::Aborted && !restarted => {
-                    tracing::debug!(%prefix, "restarting aborted export disposition walk");
+                    tracing::debug!(operation, "restarting aborted export disposition walk");
                     restarted = true;
                     peers.clear();
+                    tokens.clear();
                     page_token.clear();
                     continue;
                 }
-                Err(status) => return Err(failed("ListPathExportDispositions", &status)),
+                Err(status) => return Err(failed(operation, &status)),
             };
             for entry in response.peers {
                 let peer = decode_export(entry)?;
@@ -1245,11 +1243,53 @@ impl ExportObserver for RustBgpdAnnouncer {
             if response.next_page_token.is_empty() {
                 return Ok(Some(peers));
             }
-            if response.next_page_token == page_token {
+            if !tokens.insert(response.next_page_token.clone()) {
                 return Err(invalid("export disposition read did not advance"));
             }
             page_token = response.next_page_token;
         }
+    }
+}
+
+#[async_trait]
+impl ExportObserver for RustBgpdAnnouncer {
+    async fn blackhole_exports(&self, prefix: &ipnet::IpNet) -> Result<Option<Vec<PeerExport>>> {
+        self.export_dispositions("ListPathExportDispositions", |page_token| async move {
+            pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                .list_path_export_dispositions(self.request(
+                    pb::ListPathExportDispositionsRequest {
+                        prefix: prefix.addr().to_string(),
+                        prefix_length: prefix.prefix_len().into(),
+                        path_id: 0,
+                        page_size: ROUTE_PAGE_SIZE,
+                        page_token,
+                        include_configured: false,
+                    },
+                ))
+                .await
+        })
+        .await
+    }
+
+    async fn flowspec_exports(&self, nlri: &FlowSpecNlri) -> Result<Option<Vec<PeerExport>>> {
+        let (afi_safi, components) = encode_match(nlri)?;
+        self.export_dispositions("ListFlowSpecExportDispositions", |page_token| {
+            let components = components.clone();
+            async move {
+                pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                    .list_flow_spec_export_dispositions(self.request(
+                        pb::ListFlowSpecExportDispositionsRequest {
+                            afi_safi,
+                            components,
+                            page_size: ROUTE_PAGE_SIZE,
+                            page_token,
+                            include_configured: false,
+                        },
+                    ))
+                    .await
+            }
+        })
+        .await
     }
 }
 

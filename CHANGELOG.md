@@ -9,10 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-peer FlowSpec export evidence on rustbgpd, keyed by the full canonical
+  match and shown on mitigation detail, authenticated health and the dashboard.
+  Separate bounded FlowSpec metrics preserve the existing blackhole metrics.
+  Both kinds share one fair, rotating 10-second observation budget. Failed and
+  historical reads remain distinct from empty or unsupported observation;
+  committed means the peer's Adj-RIB-Out, not router enforcement. No configuration
+  or schema migration is required, and the existing blackhole alert stays scoped
+  to blackholes.
+
 - An optional `docker-compose.inventory.yml` overlay reads
   `configs/inventory.yaml` directly from the host for either speaker profile.
   Existing volume-managed inventories remain the default. The quickstart covers
   switching workflows, reloading edits and recreating stale file mounts.
+
+### Fixed
+
+- Export metric scrapes now exclude peer dispositions and unexported warnings
+  from before the controller lost ownership, including during standby and after
+  regain before the next observation pass. Read-error metrics still describe
+  attempted reads; ownership loss alone does not count as a failed RPC.
 
 ## [0.23.1] - 2026-10-26
 

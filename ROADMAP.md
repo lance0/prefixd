@@ -39,6 +39,12 @@ later, opt-in [leased blackholes](docs/reference/configuration.md#leased-blackho
 lease after renewal stops. Existing unleased rules stay unleased until withdrawn
 or expired. Neither local intent nor peer health establishes vendor forwarding.
 
+Per-peer export observation covers blackholes and FlowSpec on rustbgpd, sharing
+one rotating pass budget. It distinguishes current, retained, unsupported and
+failed evidence; committed means Adj-RIB-Out, not router installation or traffic
+enforcement. Complete desired/acknowledged state and router qualification remain
+separate work.
+
 Controller inventory enumeration and the public mitigation, event, audit and
 signal-group cursors preserve tied timestamps. Complete frontend lists and
 server-backed pagination remain work below.

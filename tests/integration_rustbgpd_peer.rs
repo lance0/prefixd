@@ -15,7 +15,7 @@ mod rustbgpd;
 
 use peer_receipt::{wait_go_received, wait_rust_views};
 use prefixd::{
-    bgp::FlowSpecWriter,
+    bgp::{ExportDisposition, ExportObserver, FlowSpecWriter},
     domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule},
 };
 
@@ -46,6 +46,27 @@ fn rules() -> Vec<FlowSpecRule> {
     .collect();
     rules.extend(contract::source_prefix_rules());
     rules
+}
+
+async fn wait_flow_export(
+    speaker: &prefixd::bgp::RustBgpdAnnouncer,
+    nlri: &FlowSpecNlri,
+    disposition: ExportDisposition,
+    reason: &str,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let peers = speaker.flowspec_exports(nlri).await.unwrap().unwrap();
+            if peers.len() == 1 && peers[0].disposition == disposition && peers[0].reason == reason
+            {
+                eprintln!("FlowSpec export {}: {peers:?}", nlri.dst_prefix);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("settled FlowSpec export at the exact local match key");
 }
 
 #[tokio::test]
@@ -81,6 +102,9 @@ async fn released_peers_receive_exact_routes_and_retain_nonselected_local_intent
     wait_go_received(go, &all).await;
     wait_rust_views(rust, &all, &[]).await;
     for rule in &owned {
+        wait_flow_export(&rust_client, &rule.nlri, ExportDisposition::Committed, "").await;
+    }
+    for rule in &owned {
         rust_client.withdraw(rule).await.unwrap();
     }
     wait_go_received(go, std::slice::from_ref(&unrelated)).await;
@@ -103,6 +127,15 @@ async fn released_peers_receive_exact_routes_and_retain_nonselected_local_intent
     }
     wait_rust_views(rust, &all, &remote).await;
     contract::wait_inventory(&rust_client, &all).await.unwrap();
+    for rule in &owned {
+        wait_flow_export(
+            &rust_client,
+            &rule.nlri,
+            ExportDisposition::Withheld,
+            "not_selected",
+        )
+        .await;
+    }
     for rule in &owned {
         rust_client.withdraw(rule).await.unwrap();
     }

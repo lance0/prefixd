@@ -262,7 +262,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           <div className="space-y-6 lg:col-span-2">
-            {mitigation.export_evidence && <ExportEvidenceCard evidence={mitigation.export_evidence} now={now} />}
+            {mitigation.export_evidence && <ExportEvidenceCard evidence={mitigation.export_evidence} now={now} kind={mitigation.action_type === "blackhole" ? "blackhole" : "flowspec"} />}
             {mitigation.action_type === "blackhole" ? <BlackholeRouteCard mitigation={mitigation} /> : (
             <Card>
               <CardHeader className="flex flex-wrap items-center justify-between gap-2">

@@ -167,7 +167,7 @@ pub struct PeerExport {
     pub advertised_path_id: u32,
 }
 
-/// Optional, read-only export observation of local unicast routes. It is
+/// Optional, read-only export observation of local routes and FlowSpec rules. It is
 /// separate from every writer and mutates nothing.
 #[async_trait]
 pub trait ExportObserver: Send + Sync {
@@ -176,6 +176,17 @@ pub trait ExportObserver: Send + Sync {
     /// local route at that key. Configured peers without a session are absent.
     /// A failed or partial read is an error, never an empty list.
     async fn blackhole_exports(&self, prefix: &ipnet::IpNet) -> Result<Option<Vec<PeerExport>>>;
+
+    /// Every Established peer's disposition at the exact AddFlowSpec match key.
+    /// Partial reads fail; `None` means the speaker holds no local rule.
+    async fn flowspec_exports(
+        &self,
+        _nlri: &crate::domain::FlowSpecNlri,
+    ) -> Result<Option<Vec<PeerExport>>> {
+        Err(crate::error::PrefixdError::Internal(
+            "FlowSpec export observation is unsupported".into(),
+        ))
+    }
 }
 
 /// RFC 7999 BLACKHOLE, 65535:666. Every blackhole route carries it.
@@ -382,6 +393,10 @@ pub trait FlowSpecAnnouncer: FlowSpecWriter {
         None
     }
 
+    fn flowspec_export_observer(&self) -> Option<&dyn ExportObserver> {
+        None
+    }
+
     /// ADR 028 components this adapter encodes. Defaults to none, so an adapter
     /// that has not opted in is refused instead of silently dropping a component.
     fn match_support(&self) -> FlowSpecMatchSupport {
@@ -463,6 +478,9 @@ pub struct SpeakerCapabilities {
     /// `ListPathExportDispositions`); availability, not export.
     #[serde(default)]
     pub blackhole_export: bool,
+    /// Exact-key per-peer FlowSpec export observation; availability, not export.
+    #[serde(default)]
+    pub flowspec_export: bool,
     /// ADR 028 match components the adapter encodes; all false when absent.
     #[serde(default)]
     pub flowspec_match: FlowSpecMatchSupport,
@@ -479,6 +497,7 @@ impl dyn FlowSpecAnnouncer + '_ {
                 .injection_leases()
                 .is_some_and(|leases| leases.lease_confirmed()),
             blackhole_export: self.export_observer().is_some(),
+            flowspec_export: self.flowspec_export_observer().is_some(),
             flowspec_match: self.match_support(),
         }
     }

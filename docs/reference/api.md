@@ -1035,10 +1035,10 @@ GET /v1/mitigations/{id}
 | `contributing_sources` | array | List of source names that contributed |
 | `explanation` | string | Human-readable explanation of the correlation decision |
 
-An active (or escalated) blackhole admitted in enforced mode also carries
-`export_evidence`: per-peer export from the last reconciliation pass
+An active (or escalated) blackhole or FlowSpec rule admitted in enforced mode
+also carries `export_evidence`: per-peer export from the last reconciliation pass
 ([export evidence](speaker-backends.md#export-evidence)). It is absent from list
-responses, FlowSpec rules, dry-run blackholes and terminal rows. The request reads
+responses, dry-run mitigations and terminal rows. The request reads
 the controller's snapshot and never calls the speaker.
 
 ```json
@@ -1067,12 +1067,14 @@ the controller's snapshot and never calls the speaker.
 | `observed_at` | Controller time of the read. Historical rows retain their original observation time even if a later refresh fails; `error` reports that new failure |
 | `peers` | One row per Established peer. `disposition` is `committed` (in that peer's Adj-RIB-Out, not proof of receipt, installation or enforcement), `withheld` or `pending`; `reason` and `explain_code` are rustbgpd's bounded codes and `detail` its unstable text |
 | `not_established_peers` | Configured peers without an Established session at the observation, which were sent nothing. `null` when that session read failed or is unsupported |
-| `counts` | Peer rows by disposition |
-| `warning` | Present when an observed blackhole is committed to no Established peer: a bounded `reason` (`no_established_peer`, `export_policy`, `family_suppressed`, `family_not_negotiated`, `not_selected`, `outbound_prefix_limit`, `exact_export_rejected`, `export_rule`, `pending`, `selection_deferred`, `mixed` or `other`) and a `message`. `export_policy` means a speaker export policy denied the route. `selection_deferred` means every Established peer is pending because the speaker holds route selection after its restart; other or mixed pending reasons are `pending`. With `status` `error`, it is the last complete read's warning, kept so a transient read error does not clear degraded health |
+| `counts` | Current peer rows by disposition; zero on a failed FlowSpec refresh even if prior peer rows are retained |
+| `warning` | Present when an observed route is committed to no Established peer: a bounded `reason` (`no_established_peer`, `export_policy`, `family_suppressed`, `family_not_negotiated`, `not_selected`, `outbound_prefix_limit`, `exact_export_rejected`, `export_rule`, `pending`, `selection_deferred`, `mixed` or `other`) and a `message`. `export_policy` means a speaker export policy denied the route. `selection_deferred` means every Established peer is pending because the speaker holds route selection after its restart; other or mixed pending reasons are `pending`. With `status` `error`, it is the last complete read's warning, kept so a transient read error does not clear degraded health |
 | `error` | The read error when `status` is `error` |
 
-An ordinary failed read has no peer rows. If a refresh after loss of controller
-ownership fails, the response instead retains the historical peer rows, counts,
+An ordinary failed blackhole read has no peer rows; a failed FlowSpec refresh
+keeps prior complete rows and their timestamp with zero current counts. If a
+refresh after loss of controller ownership fails, either kind retains the
+historical peer rows, counts,
 session observations and original timestamp with `historical: true` and
 `status: "error"`. These rows do not establish current export. A successful
 `no_local_route` read is a fresh observation and clears those old peer rows.
@@ -2262,6 +2264,7 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
       "blackhole": true,
       "blackhole_lease": false,
       "blackhole_export": true,
+      "flowspec_export": true,
       "flowspec_match": {
         "source_prefix": true,
         "source_ports": true,
@@ -2287,6 +2290,15 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
       "no_local_route": 0,
       "unexported": []
     },
+    "flowspec_exports": {
+      "historical": false,
+      "observed_at": "2026-10-18T12:00:00Z",
+      "rules": 1,
+      "counts": {"committed": 1, "withheld": 0, "pending": 0},
+      "errors": 0,
+      "no_local_route": 0,
+      "unexported": []
+    },
     "daemon": {
       "status": "observed",
       "version": "<rustbgpd-version>",
@@ -2302,7 +2314,7 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
 | Status | Meaning |
 |--------|---------|
 | `healthy` | Database and supported observations succeeded; observed daemon is ready |
-| `degraded` | Database or supported observation failed, observed daemon is not ready, active blackhole export evidence is historical, or an active blackhole is committed to no Established peer |
+| `degraded` | Database or supported observation failed, observed daemon is not ready, active export evidence is historical, an active route is committed to no Established peer, or FlowSpec export observation fails or finds no local rule |
 | `standby` | Another controller holds this POP's fence; this one mutates nothing (overrides the other values) |
 
 `speaker` is additive metadata: backend identity plus observation availability.
@@ -2337,6 +2349,17 @@ with `mitigation_id`, `prefix`, a bounded `reason` and a `message`; any entry,
 including a `selection_deferred` hold after a speaker restart, makes `status`
 `degraded`. A committed disposition is the peer's Adj-RIB-Out,
 not router receipt or enforcement.
+
+`flowspec_exports` is present when `flowspec_export` is true (rustbgpd). It uses
+the same fields, with `rules` instead of `blackholes`, for exact-key FlowSpec
+export. Failed reads retain the last complete peer rows and their timestamp;
+`status: error` on mitigation detail means current export is unknown, and its
+current disposition counts are zero. Historical evidence, read errors,
+`no_local_route` or an unexported rule makes health `degraded`. If the candidate
+inventory cannot be read, `rules` retains its last known count and `errors`
+counts all retained rules, or one inventory-level failure before any keys are
+known. This is an unknown set, never a successful empty inventory; detail returns
+`error` with safe text and retains prior complete rows and their timestamp.
 
 `historical` is true if any retained export evidence predates the controller's
 last loss of ownership. The top-level status remains `standby` while ownership
@@ -3008,7 +3031,7 @@ The selected backend's announcement counters and histogram start at zero.
 Every metrics scrape refreshes capabilities from local adapter state without a
 speaker RPC. Capability values match health detail's `speaker.capabilities`:
 `rule_reader`, `peer_observer`, `daemon_health`, `blackhole`, `blackhole_lease`,
-`blackhole_export`, `flowspec_source_prefix`, `flowspec_source_ports`,
+`blackhole_export`, `flowspec_export`, `flowspec_source_prefix`, `flowspec_source_ports`,
 `flowspec_fragment` and `flowspec_packet_length` (the last four correspond to
 `flowspec_match` fields). Lease capability is `0` until a successful runtime
 probe confirms it, and returns to `0` if a lease RPC reports unsupported after
@@ -3081,11 +3104,22 @@ rows of active enforced blackholes by `committed`, `withheld` and `pending`;
 `prefixd_blackhole_unexported{reason}` counts blackholes committed to no
 Established peer by the `warning.reason` values above; and
 `prefixd_blackhole_export_read_errors` counts blackholes whose read failed.
-The peer and reason gauges count current evidence only: a blackhole whose
-evidence is `historical` counts as a read error, while health and detail keep
-its retained rows. `committed` is Adj-RIB-Out state, not enforcement. The shipped
+The peer and reason gauges count current evidence only; health and detail keep
+historical rows. Read-error gauges continue to count attempted read failures;
+ownership loss alone does not invent a failed RPC. `committed` is Adj-RIB-Out state, not enforcement. The shipped
 [`PrefixdBlackholeNotExported`](../how-to/grafana.md#export-alerts) alert uses
 the reason gauge.
+
+FlowSpec uses separate `prefixd_flowspec_export_peers{disposition}`,
+`prefixd_flowspec_unexported{reason}` and `prefixd_flowspec_export_read_errors`
+gauges with the same bounded labels and evidence limits. Candidate-inventory
+failure counts all retained keys as read errors, or one inventory-level failure
+when no keys are known yet; it clears current disposition counts. Failed FlowSpec reads
+retain peer rows in detail for inspection but contribute no current disposition
+counts. Both route kinds share the rotating 10-second pass budget. Every scrape checks
+the held ownership epoch while encoding, so loss and regain cannot expose old
+committed or unexported gauges before another reconciliation pass. No shipped
+alert uses the new FlowSpec gauges yet.
 
 See [FEATURES.md](../../FEATURES.md#prometheus-metrics) for full metric list.
 

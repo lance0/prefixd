@@ -1908,6 +1908,7 @@ struct ExportFake {
     mode: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<pb::ListPathExportDispositionsRequest>>>,
+    flowspec_requests: Arc<Mutex<Vec<pb::ListFlowSpecExportDispositionsRequest>>>,
     /// Later pages answer ABORTED this many times.
     aborts: Arc<AtomicUsize>,
 }
@@ -1918,9 +1919,32 @@ const EXPORT_UNAVAILABLE: usize = 3;
 const EXPORT_DENIED_SECOND_PAGE: usize = 4;
 const EXPORT_REPEATED_TOKEN: usize = 5;
 const EXPORT_REPEATED_PEER: usize = 6;
+const EXPORT_ABORT_FIRST: usize = 7;
 
 #[tonic::async_trait]
 impl pb::injection_service_server::InjectionService for ExportFake {
+    async fn list_flow_spec_export_dispositions(
+        &self,
+        request: Request<pb::ListFlowSpecExportDispositionsRequest>,
+    ) -> std::result::Result<Response<pb::ListPathExportDispositionsResponse>, Status> {
+        auth(&request)?;
+        let (metadata, extensions, request) = request.into_parts();
+        self.flowspec_requests.lock().unwrap().push(request.clone());
+        self.list_path_export_dispositions(Request::from_parts(
+            metadata,
+            extensions,
+            pb::ListPathExportDispositionsRequest {
+                prefix: "203.0.113.1".into(),
+                prefix_length: 32,
+                path_id: 0,
+                page_size: request.page_size,
+                page_token: request.page_token,
+                include_configured: request.include_configured,
+            },
+        ))
+        .await
+    }
+
     async fn list_path_export_dispositions(
         &self,
         request: Request<pb::ListPathExportDispositionsRequest>,
@@ -1942,7 +1966,7 @@ impl pb::injection_service_server::InjectionService for ExportFake {
             }
             _ => {}
         }
-        if !first && self.aborts.load(SeqCst) > 0 {
+        if (mode == EXPORT_ABORT_FIRST || !first) && self.aborts.load(SeqCst) > 0 {
             self.aborts.fetch_sub(1, SeqCst);
             return Err(Status::aborted("export walk changed"));
         }
@@ -2193,4 +2217,109 @@ async fn export_read_distinguishes_empty_absent_and_failed() {
             .blackhole_export
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn flowspec_export_key_matches_add_for_both_families_and_scoped_peers() {
+    for dst in ["203.0.113.1/32", "2001:db8::1/128"] {
+        let (speaker, fake, server) = export_speaker().await;
+        let mut rows = export_rows();
+        rows[0].peer_address = "fe80::1".into();
+        rows[0].peer_interface = "eth0".into();
+        rows[1].peer_address = "fe80::1".into();
+        rows[1].peer_interface = "eth1".into();
+        rows.truncate(2);
+        *fake.rows.lock().unwrap() = rows;
+        let rule = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: dst.into(),
+                protocol: Some(17),
+                dst_ports: vec![53, 123],
+                src_ports: vec![53],
+                ..Default::default()
+            },
+            FlowSpecAction::discard(),
+        );
+        let add = encode(&rule).unwrap();
+        let peers = speaker.flowspec_exports(&rule.nlri).await.unwrap().unwrap();
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0].peer_address, "fe80::1%eth0");
+        assert_eq!(peers[1].peer_address, "fe80::1%eth1");
+        for request in fake.flowspec_requests.lock().unwrap().iter() {
+            assert_eq!(request.afi_safi, add.afi_safi);
+            assert_eq!(request.components, add.components);
+            assert!(!request.include_configured);
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn flowspec_export_reads_refuse_partial_invalid_and_repeated_snapshots() {
+    let nlri = FlowSpecNlri {
+        dst_prefix: "203.0.113.1/32".into(),
+        ..Default::default()
+    };
+    for mode in [
+        EXPORT_NO_ROUTE_SECOND_PAGE,
+        EXPORT_DENIED_SECOND_PAGE,
+        EXPORT_REPEATED_TOKEN,
+        EXPORT_REPEATED_PEER,
+    ] {
+        let (speaker, fake, server) = export_speaker().await;
+        *fake.rows.lock().unwrap() = export_rows();
+        fake.mode.store(mode, SeqCst);
+        assert!(
+            speaker.flowspec_exports(&nlri).await.is_err(),
+            "mode {mode}"
+        );
+        server.abort();
+    }
+    let (speaker, fake, server) = export_speaker().await;
+    fake.mode.store(EXPORT_NO_ROUTE, SeqCst);
+    assert_eq!(speaker.flowspec_exports(&nlri).await.unwrap(), None);
+    fake.mode.store(0, SeqCst);
+    assert_eq!(speaker.flowspec_exports(&nlri).await.unwrap(), Some(vec![]));
+    for invalid in [
+        pb::PathExportDisposition::Unspecified as i32,
+        pb::PathExportDisposition::NotEstablished as i32,
+        999,
+    ] {
+        let mut row = export_rows().remove(0);
+        row.disposition = invalid;
+        *fake.rows.lock().unwrap() = vec![row];
+        assert!(speaker.flowspec_exports(&nlri).await.is_err());
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn flowspec_export_walk_restarts_once_even_when_first_page_is_aborted() {
+    let nlri = FlowSpecNlri {
+        dst_prefix: "203.0.113.1/32".into(),
+        ..Default::default()
+    };
+    for mode in [0, EXPORT_ABORT_FIRST] {
+        for aborts in [1, 2] {
+            let (speaker, fake, server) = export_speaker().await;
+            *fake.rows.lock().unwrap() = export_rows();
+            fake.mode.store(mode, SeqCst);
+            fake.aborts.store(aborts, SeqCst);
+            let read = speaker.flowspec_exports(&nlri).await;
+            if aborts == 1 {
+                assert_eq!(read.unwrap().unwrap().len(), export_rows().len());
+            } else {
+                assert!(read.is_err());
+            }
+            let requests = fake.flowspec_requests.lock().unwrap();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.page_token.is_empty())
+                    .count(),
+                2
+            );
+            server.abort();
+        }
+    }
 }
