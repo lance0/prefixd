@@ -107,7 +107,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   const { data: inventory, error: inventoryError } = useConfigInventory()
   const { data: popInventory, error: popsError } = usePops()
   const customers = [...new Set(inventory?.customers.map((customer) => customer.customer_id).filter(Boolean))].sort()
-  const pops = [...new Set(popInventory?.map((pop) => pop.pop).filter(Boolean))].sort()
+  const pops = [...new Set(popInventory?.map((pop) => pop.pop).filter((pop) => pop !== "" && pop !== "all"))].sort()
   const mitigations = mitigationsResp?.mitigations
   const currentPage = cursors.length
   const searchInvalid = !validSearch(searchDraft)

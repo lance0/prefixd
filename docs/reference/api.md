@@ -452,8 +452,10 @@ The search input checks UTF-8 bytes before submitting typed or deep-linked
 queries. An invalid draft stays visible with an accessible error while results
 keep the last valid query; CSV export is disabled until the draft is valid.
 Customer choices come from the current configured inventory;
-POP choices come from `/v1/pops`. Empty choices are omitted; an identifier named
-`All` remains an exact filter. Search can still find historical customer IDs.
+POP choices come from `/v1/pops`. Empty choices and the reserved lowercase POP
+identifier `all` are omitted; the API treats `pop=all` as the global listing scope.
+An identifier named `All` remains an exact filter. Search can still find historical
+customer IDs.
 Selection and select-all apply to the current page. An open bulk-withdrawal
 confirmation retains its selected IDs across refreshes until completion or cancel.
 

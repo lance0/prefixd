@@ -320,6 +320,19 @@ describe("review regressions", () => {
     expect(screen.getByRole("button", { name: "Export CSV" })).toBeDisabled()
   })
 
+  it("omits empty and reserved lowercase all POP choices while preserving exact identifiers", async () => {
+    controller.route("GET", "/v1/pops", () => json([{ pop: "" }, { pop: "all" }, { pop: "All" }, { pop: "iad1" }]))
+    renderApp(<MitigationsContentLive />)
+    await screen.findByText("Page 1")
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "POP" }), { key: "Enter" })
+    expect(await screen.findByRole("option", { name: "All POPs" })).toBeInTheDocument()
+    expect(screen.getByRole("option", { name: "All" })).toBeInTheDocument()
+    expect(screen.getByRole("option", { name: "iad1" })).toBeInTheDocument()
+    expect(screen.queryByRole("option", { name: "" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("option", { name: "all" })).not.toBeInTheDocument()
+    expect(screen.getAllByRole("option")).toHaveLength(3)
+  })
+
   it.each(["Customer", "POP"])("can select an actual All %s identifier without selecting the all-items sentinel", async (filter) => {
     served = rows.map((row, index) => index === 120 ? { ...row, customer_id: "All", pop: "All" } : row)
     controller.route("GET", "/v1/config/inventory", () => json({ customers: [{ customer_id: "All" }, { customer_id: "acme" }] }))
