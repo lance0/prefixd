@@ -206,7 +206,12 @@ fi
                 inventory.chmod(0o644)
                 # Exercise the real mounts without starting a GoBGP namespace owner or BGP listener.
                 isolated = directory / "isolated.yml"
-                isolated.write_text("services:\n  prefixd-gobgp:\n    network_mode: none\n")
+                services = {"prefixd-gobgp": {"network_mode": "none"}}
+                if cpuset := os.environ.get("PREFIXD_TEST_CPUSET"):
+                    for name in ("init", "prefixd-rustbgpd", "prefixd-gobgp"):
+                        services.setdefault(name, {})["cpuset"] = cpuset
+                # JSON is valid YAML.
+                isolated.write_text(json.dumps({"services": services}))
                 base = [
                     "compose",
                     "--project-name",
