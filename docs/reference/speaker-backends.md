@@ -615,8 +615,12 @@ pass's `ListNeighbors` read. Active, unexpired FlowSpec rules of this POP,
 excluding those recorded as dry-run, use `ListFlowSpecExportDispositions` with the exact
 address family and canonical components used by `AddFlowSpec`, including
 source prefixes and ports. An untagged legacy `origin_mode: null` remains
-unknown; export observation does not infer the rule's admission mode. The
-reads of both kinds share a rotating order and one 10-second budget per pass,
+unknown; export observation does not infer the rule's admission mode. A
+controller running in dry-run still observes these retained rules: its current
+mode cannot prove earlier speaker state is absent. Observation announces,
+withdraws and renews nothing. Follow the
+[mode-change guidance](../how-to/upgrading.md#mitigation-origin-mode) when
+changing modes. The reads of both kinds share a rotating order and one 10-second budget per pass,
 so a stalled speaker cannot hold up expiry; a read the budget
 cuts off reports an error. A failed or cut-off read keeps the blackhole's
 warning from its last complete read, so a transient error neither clears nor

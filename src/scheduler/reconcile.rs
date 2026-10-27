@@ -1446,7 +1446,8 @@ impl ReconciliationLoop {
     async fn flowspec_export_candidates(
         &self,
     ) -> crate::error::Result<Vec<(uuid::Uuid, crate::domain::FlowSpecNlri)>> {
-        if self.dry_run || self.announcer.flowspec_export_observer().is_none() {
+        // Dry-run cannot establish that rules from an earlier enforced run are absent.
+        if self.announcer.flowspec_export_observer().is_none() {
             return Ok(vec![]);
         }
         let pop = self.owning_pop();
@@ -5449,5 +5450,180 @@ mod tests {
         let current = state.flowspec_export_evidence.get(id, Some(1)).unwrap();
         assert!(!current.historical);
         assert_eq!(current.counts.committed, 1);
+    }
+
+    #[derive(Default)]
+    struct DryRunFlowSpecObserver {
+        speaker: FaultyBlackholes,
+        observed: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FlowSpecAnnouncer for DryRunFlowSpecObserver {
+        fn backend(&self) -> &'static str {
+            "mock"
+        }
+        fn reader(&self) -> Option<&dyn FlowSpecReader> {
+            Some(&self.speaker)
+        }
+        fn injection_leases(&self) -> Option<&dyn crate::bgp::InjectionLeases> {
+            Some(&self.speaker)
+        }
+        fn flowspec_export_observer(&self) -> Option<&dyn ExportObserver> {
+            Some(self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for DryRunFlowSpecObserver {
+        async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.speaker.announce(rule).await
+        }
+        async fn announce_leased(
+            &self,
+            rule: &FlowSpecRule,
+            seconds: u32,
+        ) -> Result<crate::bgp::LeaseGeneration> {
+            self.speaker.announce_leased(rule, seconds).await
+        }
+        async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.speaker.withdraw(rule).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExportObserver for DryRunFlowSpecObserver {
+        async fn blackhole_exports(
+            &self,
+            prefix: &ipnet::IpNet,
+        ) -> Result<Option<Vec<crate::bgp::PeerExport>>> {
+            self.speaker.inner.blackhole_exports(prefix).await
+        }
+        async fn flowspec_exports(
+            &self,
+            nlri: &crate::domain::FlowSpecNlri,
+        ) -> Result<Option<Vec<crate::bgp::PeerExport>>> {
+            self.observed.lock().unwrap().push(nlri.compute_hash());
+            self.speaker.inner.flowspec_exports(nlri).await
+        }
+    }
+
+    #[tokio::test]
+    async fn dry_run_observes_retained_flowspec_without_reading_simulations_or_mutating() {
+        use crate::bgp::{ExportDisposition, PeerExport};
+        use crate::config::OperationMode;
+        use crate::domain::{ExportObservation, LeaseKeeper};
+        let _metrics = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(DryRunFlowSpecObserver::default());
+        let owner = "prefixd.test.0123456789abcdef";
+        let mut rows = [
+            expired_mitigation("192.0.2.1"),
+            expired_mitigation("192.0.2.2"),
+            expired_mitigation("192.0.2.3"),
+        ];
+        rows[0].origin_mode = Some(OperationMode::Enforced);
+        // A successful export read cannot infer this legacy row's admission mode.
+        rows[1].origin_mode = None;
+        rows[2].origin_mode = Some(OperationMode::DryRun);
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+            if index < 2 {
+                row.action_params.injection_owner = owner.into();
+            }
+            repo.insert_mitigation(row).await.unwrap();
+        }
+        let rules: Vec<_> = rows
+            .iter()
+            .map(|row| crate::domain::mitigation_rule(row).unwrap())
+            .collect();
+        for rule in &rules[..2] {
+            // Seed the retained speaker state before the dry-run controller starts.
+            speaker
+                .speaker
+                .inner
+                .announce_leased(rule, 60)
+                .await
+                .unwrap();
+        }
+        speaker.speaker.inner.set_flowspec_exports(
+            &rules[1].nlri,
+            Ok(vec![PeerExport {
+                peer_address: "192.0.2.10".into(),
+                disposition: ExportDisposition::Withheld,
+                reason: "family_not_negotiated".into(),
+                explain_code: String::new(),
+                detail: String::new(),
+                advertised_path_id: 0,
+            }]),
+        );
+        speaker.speaker.inner.set_flowspec_exports(
+            &rules[0].nlri,
+            Ok(vec![PeerExport {
+                peer_address: "192.0.2.10".into(),
+                disposition: ExportDisposition::Committed,
+                reason: String::new(),
+                explain_code: String::new(),
+                detail: String::new(),
+                advertised_path_id: 0,
+            }]),
+        );
+        let keeper = Arc::new(LeaseKeeper::new(owner.into(), 60).without_renewal());
+        assert!(keeper.recover(&speaker.speaker).await.unwrap());
+        assert!(keeper.generation().is_some());
+        let mut reconciler =
+            blackhole_reconciler(repo.clone(), speaker.clone(), live_config(), true)
+                .with_lease(keeper.clone());
+        Arc::get_mut(reconciler.state.as_mut().unwrap())
+            .unwrap()
+            .settings
+            .mode = OperationMode::DryRun;
+        reconciler.reconcile().await.unwrap();
+        keeper.renew_once(&speaker.speaker).await;
+        let state = reconciler.state.as_ref().unwrap();
+        for (row, disposition) in rows[..2]
+            .iter()
+            .zip([ExportDisposition::Committed, ExportDisposition::Withheld])
+        {
+            let evidence = state
+                .flowspec_export_evidence
+                .get(row.mitigation_id, Some(0))
+                .expect("retained rule remains observable in dry-run");
+            assert_eq!(evidence.status, ExportObservation::Observed);
+            assert_eq!(evidence.peers[0].disposition, disposition);
+        }
+        assert!(
+            state
+                .flowspec_export_evidence
+                .get(rows[2].mitigation_id, Some(0))
+                .is_none()
+        );
+        let mut observed = speaker.observed.lock().unwrap().clone();
+        observed.sort();
+        let mut expected = rules[..2]
+            .iter()
+            .map(FlowSpecRule::nlri_hash)
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(observed, expected, "simulation-origin intent is never read");
+        assert_eq!(speaker.speaker.flowspec_adds.load(SeqCst), 0);
+        assert_eq!(speaker.speaker.leased_flowspec_adds.load(SeqCst), 0);
+        assert!(
+            speaker
+                .speaker
+                .flowspec_delete_owners
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(speaker.speaker.renewals.load(SeqCst), 0);
+        assert_eq!(speaker.speaker.inner.list_active().await.unwrap().len(), 2);
+        assert_eq!(
+            repo.get_mitigation(rows[1].mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .origin_mode,
+            None
+        );
     }
 }

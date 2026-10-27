@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A controller running in dry-run continues to observe export for active
+  FlowSpec rules retained from an earlier run, while excluding rows recorded
+  as dry-run. Observation sends no announcement, withdrawal or lease renewal,
+  and never infers an unknown legacy admission mode.
+
 - Export metric scrapes now exclude peer dispositions and unexported warnings
   from before the controller lost ownership, including during standby and after
   regain before the next observation pass. Read-error metrics still describe
