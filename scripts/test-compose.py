@@ -3,7 +3,9 @@
 
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import unittest
 import uuid
 from pathlib import Path
@@ -25,9 +27,12 @@ def docker(*args, check=True):
 
 
 class Profiles(unittest.TestCase):
-    def model(self, profile):
+    def model(self, profile, *, host_inventory=False):
+        files = ["-f", "docker-compose.yml"]
+        if host_inventory:
+            files += ["-f", "docker-compose.inventory.yml"]
         return json.loads(
-            docker("compose", "--profile", profile, "config", "--format", "json").stdout
+            docker("compose", *files, "--profile", profile, "config", "--format", "json").stdout
         )
 
     def test_profiles_isolate_backends_and_management(self):
@@ -45,6 +50,7 @@ class Profiles(unittest.TestCase):
                 self.assertEqual(services["init"]["image"], CONTROLLER_IMAGE)
                 self.assertEqual(services["dashboard"]["image"], DASHBOARD_IMAGE)
                 mounts = {v["target"]: v for v in services[selected]["volumes"]}
+                self.assertNotIn("/etc/prefixd/inventory.yaml", mounts)
                 self.assertFalse(mounts["/etc/prefixd"].get("read_only", False))
                 self.assertTrue(mounts["/etc/prefixd/prefixd.yaml"]["read_only"])
                 for service in services.values():
@@ -88,10 +94,36 @@ class Profiles(unittest.TestCase):
 
     def test_two_profiles_fail_before_startup(self):
         result = docker(
-            "compose", "--profile", "rustbgpd", "--profile", "gobgp", "config", check=False
+            "compose",
+            "-f",
+            "docker-compose.yml",
+            "--profile",
+            "rustbgpd",
+            "--profile",
+            "gobgp",
+            "config",
+            check=False,
         )
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("prefixd", result.stderr)
+
+    def test_host_inventory_preserves_profile_and_writable_volume_mounts(self):
+        for profile in ("rustbgpd", "gobgp"):
+            with self.subTest(profile=profile):
+                base = self.model(profile)["services"]
+                services = self.model(profile, host_inventory=True)["services"]
+                self.assertEqual(services.keys(), base.keys())
+                selected = f"prefixd-{profile}"
+                for name, service in services.items():
+                    if name != selected:
+                        self.assertEqual(service, base[name])
+                mounts = {v["target"]: v for v in services[selected]["volumes"]}
+                inventory = mounts.pop("/etc/prefixd/inventory.yaml")
+                self.assertEqual(inventory["type"], "bind")
+                self.assertEqual(inventory["source"], str(ROOT / "configs/inventory.yaml"))
+                self.assertTrue(inventory["read_only"])
+                self.assertFalse(inventory["bind"].get("create_host_path", False))
+                self.assertEqual(mounts, {v["target"]: v for v in base[selected]["volumes"]})
 
 
 class ConfigSeeding(unittest.TestCase):
@@ -159,6 +191,99 @@ fi
         finally:
             for volume in volumes:
                 docker("volume", "rm", volume, check=False)
+
+    def test_host_inventory_mount_and_return_to_persisted_inventory(self):
+        for profile in ("rustbgpd", "gobgp"):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as temporary:
+                project = f"prefixd-inventory-test-{uuid.uuid4().hex}"
+                directory = Path(temporary)
+                configs = directory / "configs"
+                configs.mkdir()
+                for name in ("prefixd.yaml", "prefixd-gobgp.yaml"):
+                    shutil.copyfile(ROOT / "configs" / name, configs / name)
+                inventory = configs / "inventory.yaml"
+                inventory.write_text("customers: []\n")
+                inventory.chmod(0o644)
+                # Exercise the real mounts without starting a GoBGP namespace owner or BGP listener.
+                isolated = directory / "isolated.yml"
+                isolated.write_text("services:\n  prefixd-gobgp:\n    network_mode: none\n")
+                base = [
+                    "compose",
+                    "--project-name",
+                    project,
+                    "--project-directory",
+                    str(directory),
+                    "-f",
+                    str(ROOT / "docker-compose.yml"),
+                    "-f",
+                    str(isolated),
+                ]
+                overlay = [*base, "-f", str(ROOT / "docker-compose.inventory.yml")]
+                selected = f"prefixd-{profile}"
+
+                def run(files, service, script, *, check=True, profile=profile):
+                    return docker(
+                        *files,
+                        "--profile",
+                        profile,
+                        "run",
+                        "--rm",
+                        "--no-deps",
+                        "-T",
+                        "--entrypoint",
+                        "/bin/sh",
+                        service,
+                        "-ec",
+                        script,
+                        check=check,
+                    )
+
+                try:
+                    docker(*base, "--profile", profile, "run", "--rm", "--no-deps", "-T", "init")
+                    # An existing volume inventory must survive both enabling and disabling the mount.
+                    run(
+                        base,
+                        selected,
+                        "printf '%s\\n' 'persisted inventory' > /etc/prefixd/inventory.yaml",
+                    )
+                    run(
+                        overlay,
+                        selected,
+                        """
+test "$(id -u):$(id -g)" = '999:999'
+test "$(cat /etc/prefixd/inventory.yaml)" = 'customers: []'
+if printf 'overwrite' > /etc/prefixd/inventory.yaml; then exit 1; fi
+for file in playbooks correlation alerting; do
+    printf '%s\\n' 'operator edit' > /etc/prefixd/.$file.tmp
+    mv /etc/prefixd/.$file.tmp /etc/prefixd/$file.yaml
+done
+""",
+                    )
+                    self.assertEqual(inventory.read_text(), "customers: []\n")
+                    # A recreated container must see an editor's atomic replacement.
+                    replacement = configs / "inventory.next.yaml"
+                    replacement.write_text("customers: [] # edited\n")
+                    replacement.chmod(0o644)
+                    replacement.replace(inventory)
+                    result = run(overlay, selected, "cat /etc/prefixd/inventory.yaml")
+                    self.assertEqual(result.stdout.strip(), "customers: [] # edited")
+                    run(
+                        base,
+                        selected,
+                        """
+test "$(cat /etc/prefixd/inventory.yaml)" = 'persisted inventory'
+for file in playbooks correlation alerting; do
+    test "$(cat /etc/prefixd/$file.yaml)" = 'operator edit'
+done
+""",
+                    )
+                    inventory.unlink()
+                    result = run(overlay, selected, "true", check=False)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("bind source path does not exist", result.stderr)
+                    self.assertFalse(inventory.exists())
+                finally:
+                    docker(*base, "--profile", profile, "down", "--volumes", check=False)
 
 
 if __name__ == "__main__":

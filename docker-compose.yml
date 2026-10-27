@@ -1,3 +1,6 @@
+# Inventory lives in prefixd-config by default; configs/inventory.yaml is not mounted.
+# To manage it on the host, also enable docker-compose.inventory.yml as documented in
+# docs/tutorials/quickstart.md#host-managed-inventory.
 x-controller: &controller
   image: ${PREFIXD_IMAGE:-ghcr.io/lance0/prefixd:main}
   build: .

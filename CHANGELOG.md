@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- An optional `docker-compose.inventory.yml` overlay reads
+  `configs/inventory.yaml` directly from the host for either speaker profile.
+  Existing volume-managed inventories remain the default. The quickstart covers
+  switching workflows, reloading edits and recreating stale file mounts.
+
 ## [0.23.1] - 2026-10-26
 
 prefixd 0.23.1 makes planned rustbgpd restarts clearer and shorter. A

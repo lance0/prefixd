@@ -78,16 +78,75 @@ path. Remote deployments use [verified mTLS](../reference/speaker-backends.md#re
 
 ## Configuration and persistence
 
-The initializer seeds **missing** inventory, playbook and correlation YAML files
-into the `prefixd-config` named volume. It preserves existing edits on subsequent
-starts. The directory stays writable for administrator saves, backups and atomic
-renames. Dashboard playbook, correlation and alerting editors write there.
-Changing a seed file in the checkout does not overwrite an existing volume.
+By default, the initializer seeds **missing** inventory, playbook and correlation
+YAML files from the image into the `prefixd-config` named volume. It preserves
+existing edits on subsequent starts. The directory stays writable for
+administrator saves, backups and atomic renames. Dashboard playbook, correlation
+and alerting editors write there. Editing `configs/inventory.yaml` in the checkout
+does not change this volume, even after a container or host restart.
 
 The profile overlays only its main configuration read-only:
 `configs/prefixd.yaml` for rustbgpd, `configs/prefixd-gobgp.yaml` for GoBGP.
 These select the same POP but different immutable speaker targets. Restart the
-controller after main-config changes. To inspect or edit the persisted inventory:
+controller after main-config changes. Choose one inventory workflow below.
+
+### Host-managed inventory
+
+To use `configs/inventory.yaml` directly, enable the supplied
+[`docker-compose.inventory.yml`](../../docker-compose.inventory.yml) overlay.
+It mounts only inventory read-only, for either speaker profile. Playbooks,
+correlation and alerting keep their writable volume storage. The dashboard can
+display inventory but does not edit it.
+
+For an existing deployment, preserve its active inventory before switching if
+you want to keep it; the overlay will hide the volume's copy. Back up the host
+file, then export the running inventory **before enabling the overlay**:
+
+```bash
+cp configs/inventory.yaml configs/inventory.yaml.bak
+docker compose exec -T prefixd-rustbgpd cat /etc/prefixd/inventory.yaml > configs/inventory.yaml
+```
+
+Edit `configs/inventory.yaml` for your network. The file must already exist and
+be readable by UID/GID 999 inside the container. A missing source fails mounting
+instead of being created as a directory. Add the following setting to your
+existing `.env` file (create it if absent), so later Compose commands keep using
+the same overlay:
+
+```dotenv
+COMPOSE_FILE=docker-compose.yml:docker-compose.inventory.yml
+```
+
+Use `;` instead of `:` on Windows. Validate the merged Compose configuration,
+then create or recreate the controller to apply the mount:
+
+```bash
+docker compose --profile rustbgpd config --quiet
+docker compose --profile rustbgpd up -d --no-build --force-recreate prefixd-rustbgpd
+docker compose exec -T prefixd-rustbgpd cat /etc/prefixd/inventory.yaml
+```
+
+For GoBGP, replace `rustbgpd` with `gobgp` in these commands. Use the profile
+already selected for the deployment. Confirm your customers and prefixes appear
+under **Inventory → Customer inventory**. Inventory records ownership and service
+context; loading prefixes does not start traffic monitoring or create mitigations.
+
+After later edits, use **Config → Reload** and confirm success. Editors that save
+by replacing the file can leave a single-file bind mount pointing at the old
+copy. If the container's `cat` output differs from the host file, repeat the
+`up --force-recreate` command above, then verify the loaded customer inventory.
+Reload does not rebind a replaced host file.
+
+Removing the `COMPOSE_FILE` setting and recreating the controller returns to the
+preserved volume inventory, which may be older. To carry host edits back, first
+copy `configs/inventory.yaml` to `inventory.local.yaml`. After switching back,
+skip the initial export in the volume workflow below, stream that saved file
+into the volume and reload.
+
+### Volume-managed inventory
+
+Without the overlay, inspect or edit the persisted inventory as follows. For
+GoBGP, replace `prefixd-rustbgpd` with `prefixd-gobgp`.
 
 ```bash
 docker compose exec -T prefixd-rustbgpd cat /etc/prefixd/inventory.yaml > inventory.local.yaml
@@ -144,7 +203,7 @@ The running controller enforces TTLs; stopping it alone does not expire rules.
 
 Adapt the sample policy to your network, then connect a signal source:
 
-1. **Map your address space.** Edit the persisted inventory as shown in
+1. **Map your address space.** Choose host-managed or volume-managed inventory in
    [configuration and persistence](#configuration-and-persistence). Each
    customer lists its prefixes, and each service lists its assets and allowed
    ports. See the [inventory reference](../reference/configuration.md#inventoryyaml).

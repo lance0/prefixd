@@ -420,8 +420,15 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           push: ${{ github.event_name == 'push' }}
+          load: ${{ matrix.image == 'prefixd' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.image }}
           # Cache export failures must not fail an otherwise successful image push.
           cache-to: type=gha,scope=${{ matrix.image }},mode=max,ignore-error=true
+
+      - name: Check Compose profiles, inventory mounts and configuration persistence
+        if: matrix.image == 'prefixd'
+        env:
+          PREFIXD_IMAGE: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+        run: python3 scripts/test-compose.py

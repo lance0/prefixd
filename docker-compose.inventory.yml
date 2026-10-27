@@ -1,0 +1,21 @@
+# Optional host-managed inventory for either speaker profile.
+# Enable alongside docker-compose.yml; see the quickstart's host-managed inventory section.
+# Other configuration stays in the writable prefixd-config volume.
+services:
+  prefixd-rustbgpd:
+    volumes:
+      - type: bind
+        source: ./configs/inventory.yaml
+        target: /etc/prefixd/inventory.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+
+  prefixd-gobgp:
+    volumes:
+      - type: bind
+        source: ./configs/inventory.yaml
+        target: /etc/prefixd/inventory.yaml
+        read_only: true
+        bind:
+          create_host_path: false
