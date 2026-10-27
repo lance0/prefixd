@@ -63,8 +63,8 @@ For isolated released-container lifecycle, TTL and restart validation, run
 records the version floor, immutable pins, recovery behavior and alert queries.
 With a locally built controller,
 `PREFIXD_IMAGE=prefixd:local python3 scripts/test-compose.py` checks
-profile isolation, duplicate-profile rejection, private management and missing-only
-config seeding across initializer recreation.
+profile isolation, duplicate-profile rejection, private management, missing-only
+config seeding across initializer recreation and the optional host-inventory mount.
 
 Controller RPC acceptance, peer receipt and vendor-router enforcement remain
 different evidence. Follow the [upgrade guide](upgrading.md) before changing
@@ -73,10 +73,12 @@ backend or rolling back an existing database.
 ## Image publication and selection
 
 CI publishes `ghcr.io/lance0/prefixd` and `ghcr.io/lance0/prefixd-dashboard`.
-Main pushes publish `main`, `latest` and the short commit tag. The release
-workflow publishes the version and major.minor tags, and the GitHub Release
-records each image's digest. Pull requests build the images without publishing
-them. Select the controller/dashboard pair from the same source revision.
+Main pushes publish `main`, `latest` and the short commit tag; the controller is
+published only after `scripts/test-compose.py` passes against the built image.
+The release workflow publishes the version and major.minor tags, and the GitHub
+Release records each image's digest. Pull requests build the images without
+publishing them. Select the controller/dashboard pair from the same source
+revision.
 
 Compose uses the prebuilt `main` tags by default. `PREFIXD_IMAGE` overrides both
 the controller and its initializer; `PREFIXD_DASHBOARD_IMAGE` overrides the
