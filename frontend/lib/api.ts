@@ -41,7 +41,7 @@ export interface BlackholeRoute {
 }
 
 /**
- * A blackhole's export toward one Established peer. `committed` means the
+ * A mitigation's export toward one Established peer. `committed` means the
  * speaker holds it in that peer's Adj-RIB-Out: not receipt, installation or
  * enforcement, which BGP does not report.
  */
@@ -69,7 +69,7 @@ export interface DispositionCounts {
   pending: number
 }
 
-/** Export evidence for an active enforced blackhole from the last reconciliation pass. */
+/** Shared export evidence for active rules, excluding those recorded as dry-run. */
 export interface BlackholeExportEvidence {
   /** `error` means current export is unknown; historical rows may remain. */
   status: "observed" | "no_local_route" | "error" | "unsupported" | "not_observed"
@@ -130,7 +130,7 @@ export interface Mitigation {
   correlation?: CorrelationContext | null
   /** Present only for a blackhole, which drops all traffic to the victim. */
   blackhole?: BlackholeRoute | null
-  /** Detail endpoint only, on an active enforced blackhole. */
+  /** Detail endpoint only, on active mitigations excluding those recorded as dry-run. */
   export_evidence?: BlackholeExportEvidence | null
 }
 
@@ -210,6 +210,7 @@ export interface HealthResponse {
       peer_observer: boolean
       daemon_health?: boolean
       blackhole_export?: boolean
+      flowspec_export?: boolean
       flowspec_match?: {
         source_prefix?: boolean
         source_ports?: boolean
@@ -222,6 +223,16 @@ export interface HealthResponse {
       historical: boolean
       observed_at: string | null
       blackholes: number
+      counts: DispositionCounts
+      errors: number
+      no_local_route: number
+      unexported: ({ mitigation_id: string; prefix: string } & ExportWarning)[]
+    }
+    /** Present when the speaker reports exact-key FlowSpec export. */
+    flowspec_exports?: {
+      historical: boolean
+      observed_at: string | null
+      rules: number
       counts: DispositionCounts
       errors: number
       no_local_route: number

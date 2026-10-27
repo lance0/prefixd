@@ -333,8 +333,8 @@ pub struct MitigationResponse {
     /// drops all traffic to the victim. This is the saved intent, not router state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blackhole: Option<BlackholeRouteResponse>,
-    /// Detail endpoint only, on an active enforced blackhole: per-peer export
-    /// dispositions from the last reconciliation pass. `committed` means the
+    /// Detail endpoint only, on active mitigations excluding those recorded as dry-run.
+    /// Per-peer export dispositions from the last reconciliation pass. `committed` means the
     /// route is in that peer's Adj-RIB-Out, not that a router installed or
     /// enforces it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -724,8 +724,8 @@ async fn persist_new_mitigation(
         // As for blackholes (ADR 027): retire the new row locally with an audit
         // entry and no delete, since a delete under this row's owner would be
         // refused for as long as the other rule exists.
-        Err(PrefixdError::InjectionOwnerMismatch(reason)) => {
-            tracing::warn!(mitigation_id = %mitigation.mitigation_id, reason,
+        Err(PrefixdError::InjectionOwnerMismatch { reason, .. }) => {
+            tracing::warn!(mitigation_id = %mitigation.mitigation_id, reason = reason.as_str(),
                 "untracked local rule at the FlowSpec key; retiring the new row");
             let binding = state.verified_speaker_binding()?;
             let request = crate::domain::request_withdrawal(
@@ -734,7 +734,7 @@ async fn persist_new_mitigation(
                 false,
                 "system",
                 "admission",
-                crate::guardrails::UNTRACKED_AT_ADMISSION.into(),
+                format!("{} ({reason})", crate::guardrails::UNTRACKED_AT_ADMISSION),
                 false,
                 binding,
             )
@@ -742,7 +742,7 @@ async fn persist_new_mitigation(
             crate::domain::complete_local_withdrawal(state.repo.as_ref(), &request, binding)
                 .await?;
             return Err(PrefixdError::Conflict(format!(
-                "untracked local FlowSpec rule for {}; nothing was added",
+                "untracked local FlowSpec rule for {} ({reason}); nothing was added",
                 rule.nlri.dst_prefix
             )));
         }
@@ -1917,19 +1917,25 @@ pub async fn get_mitigation(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let mut response = MitigationResponse::from(&mitigation);
-    if mitigation.action_type == ActionType::Blackhole
-        && matches!(
-            mitigation.status,
-            MitigationStatus::Active | MitigationStatus::Escalated
-        )
-        && !mitigation.is_dry_run_origin()
+    if matches!(
+        mitigation.status,
+        MitigationStatus::Active | MitigationStatus::Escalated
+    ) && !mitigation.is_dry_run_origin()
     {
         use crate::domain::{BlackholeExportEvidence, ExportObservation};
         // The reconciler's last snapshot; this request never reads the speaker.
-        response.export_evidence = Some(match state.announcer.export_observer() {
+        let (observer, store) = if mitigation.action_type == ActionType::Blackhole {
+            (state.announcer.export_observer(), &state.export_evidence)
+        } else {
+            (
+                state.announcer.flowspec_export_observer(),
+                &state.flowspec_export_evidence,
+            )
+        };
+        response.export_evidence = Some(match observer {
             None => BlackholeExportEvidence::unobserved(ExportObservation::Unsupported),
             Some(_) => state.fence.with_observation_epoch(|epoch| {
-                state.export_evidence.get(id, epoch).unwrap_or_else(|| {
+                store.get(id, epoch).unwrap_or_else(|| {
                     BlackholeExportEvidence::unobserved(ExportObservation::NotObserved)
                 })
             }),
@@ -3003,6 +3009,7 @@ mod tests {
         use crate::observability::metrics::{GUARDRAIL_REJECTIONS, METRICS_TEST_LOCK};
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
+        use axum::response::IntoResponse;
         use serde_json::{Value, json};
         use std::sync::atomic::Ordering::SeqCst;
         use tower::ServiceExt;
@@ -3648,6 +3655,257 @@ mod tests {
             })
         }
 
+        #[tokio::test]
+        async fn flowspec_export_evidence_in_detail_health_and_unsupported_backend() {
+            use crate::bgp::{ExportDisposition, MockAnnouncer, PeerExport};
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(MockAnnouncer::new());
+            let state = state(
+                OperationMode::Enforced,
+                repo.clone(),
+                speaker.clone(),
+                AuthMode::None,
+            );
+            let reconciler =
+                crate::scheduler::ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+                    .with_app_state(state.clone());
+            let app = crate::api::create_test_router(state.clone());
+            let (status, created) = send(&app, "/v1/mitigations", None,
+                json!({"reason":"test FlowSpec export", "victim_ip":"203.0.113.10", "protocol":"udp", "dst_ports":[53], "action":"discard", "ttl_seconds":600})).await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            let id = created["mitigation_id"].as_str().unwrap();
+            let path = format!("/v1/mitigations/{id}");
+            let (_, detail) = get(&app, &path).await;
+            assert_eq!(detail["export_evidence"]["status"], "not_observed");
+            reconciler.reconcile().await.unwrap();
+            let (_, detail) = get(&app, &path).await;
+            assert_eq!(detail["export_evidence"]["status"], "observed");
+            assert_eq!(detail["export_evidence"]["counts"]["committed"], 1);
+            let row = repo
+                .get_mitigation(id.parse().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            let rule = crate::domain::mitigation_rule(&row).unwrap();
+            speaker.set_flowspec_exports(
+                &rule.nlri,
+                Ok(vec![PeerExport {
+                    peer_address: "127.0.0.1".into(),
+                    disposition: ExportDisposition::Withheld,
+                    reason: "family_not_negotiated".into(),
+                    explain_code: String::new(),
+                    detail: String::new(),
+                    advertised_path_id: 0,
+                }]),
+            );
+            reconciler.reconcile().await.unwrap();
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(health["status"], "degraded");
+            assert_eq!(health["speaker"]["capabilities"]["flowspec_export"], true);
+            assert_eq!(health["speaker"]["flowspec_exports"]["rules"], 1);
+            assert_eq!(
+                health["speaker"]["flowspec_exports"]["unexported"][0]["reason"],
+                "family_not_negotiated"
+            );
+            assert_eq!(health["speaker"]["blackhole_exports"]["blackholes"], 0);
+            speaker.set_flowspec_exports(&rule.nlri, Err("speaker unavailable".into()));
+            reconciler.reconcile().await.unwrap();
+            let (_, failed) = get(&app, &path).await;
+            let evidence = &failed["export_evidence"];
+            assert_eq!(evidence["status"], "error");
+            assert_eq!(evidence["peers"][0]["reason"], "family_not_negotiated");
+            assert_eq!(evidence["counts"]["committed"], 0);
+            assert_eq!(
+                crate::observability::metrics::FLOWSPEC_EXPORT_READ_ERRORS.get(),
+                1.0
+            );
+            state.fence.set(false);
+            state.fence.set(true);
+            reconciler.reconcile().await.unwrap();
+            let (_, detail) = get(&app, &path).await;
+            assert_eq!(detail["export_evidence"]["historical"], true);
+            assert_eq!(
+                detail["export_evidence"]["observed_at"],
+                evidence["observed_at"]
+            );
+            let unsupported_state = self::state(
+                OperationMode::Enforced,
+                repo,
+                Arc::new(FaultyBlackholes::default()),
+                AuthMode::None,
+            );
+            let unsupported = crate::api::create_test_router(unsupported_state);
+            let (_, detail) = get(&unsupported, &path).await;
+            assert_eq!(detail["export_evidence"]["status"], "unsupported");
+        }
+
+        #[tokio::test]
+        async fn flowspec_inventory_failure_is_unknown_before_first_pass_and_after_success() {
+            use crate::bgp::MockAnnouncer;
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            for seeded in [false, true] {
+                let repo = Arc::new(MockRepository::new());
+                let speaker = Arc::new(MockAnnouncer::new());
+                let state = state(
+                    OperationMode::Enforced,
+                    repo.clone(),
+                    speaker.clone(),
+                    AuthMode::None,
+                );
+                let reconciler =
+                    crate::scheduler::ReconciliationLoop::new(repo.clone(), speaker, 30, false)
+                        .with_app_state(state.clone());
+                let app = crate::api::create_test_router(state.clone());
+                let (status, created) = send(&app, "/v1/mitigations", None,
+                    json!({"reason":"inventory failure control", "victim_ip":"203.0.113.10", "protocol":"udp", "dst_ports":[53], "action":"discard", "ttl_seconds":600})).await;
+                assert_eq!(status, StatusCode::CREATED, "{created}");
+                let path = format!(
+                    "/v1/mitigations/{}",
+                    created["mitigation_id"].as_str().unwrap()
+                );
+                if seeded {
+                    reconciler.reconcile().await.unwrap();
+                }
+                let (_, previous) = get(&app, &path).await;
+                repo.fail_active_reads.store(true, SeqCst);
+                assert!(reconciler.reconcile().await.is_err());
+                let (_, detail) = get(&app, &path).await;
+                let evidence = &detail["export_evidence"];
+                assert_eq!(evidence["status"], "error");
+                assert!(
+                    evidence["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("inventory unavailable")
+                );
+                assert_eq!(evidence["counts"]["committed"], 0);
+                assert_eq!(evidence["peers"], previous["export_evidence"]["peers"]);
+                assert_eq!(
+                    evidence["observed_at"],
+                    previous["export_evidence"]["observed_at"]
+                );
+                let (_, health) = get(&app, "/v1/health/detail").await;
+                assert_eq!(health["status"], "degraded", "{health}");
+                assert!(
+                    health["speaker"]["flowspec_exports"]["errors"]
+                        .as_u64()
+                        .unwrap()
+                        >= 1
+                );
+                assert_eq!(
+                    crate::observability::metrics::FLOWSPEC_EXPORT_PEERS
+                        .with_label_values(&["committed"])
+                        .get(),
+                    0.0
+                );
+                repo.fail_active_reads.store(false, SeqCst);
+                reconciler.reconcile().await.unwrap();
+                let (_, detail) = get(&app, &path).await;
+                assert_eq!(detail["export_evidence"]["status"], "observed");
+                assert_eq!(detail["export_evidence"]["counts"]["committed"], 1);
+                let (_, health) = get(&app, "/v1/health/detail").await;
+                assert_eq!(health["speaker"]["flowspec_exports"]["errors"], 0);
+            }
+        }
+
+        #[tokio::test]
+        async fn export_metrics_scrape_excludes_lost_owner_before_reconciliation() {
+            use crate::bgp::{ExportDisposition, MockAnnouncer, PeerExport};
+            use crate::domain::BlackholeExportEvidence;
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let state = state(
+                OperationMode::Enforced,
+                Arc::new(MockRepository::new()),
+                Arc::new(MockAnnouncer::new()),
+                AuthMode::None,
+            );
+            let now = chrono::Utc::now();
+            let withheld = BlackholeExportEvidence::from_read(
+                &Ok(Some(vec![PeerExport {
+                    peer_address: "192.0.2.1".into(),
+                    disposition: ExportDisposition::Withheld,
+                    reason: "export_policy".into(),
+                    explain_code: String::new(),
+                    detail: String::new(),
+                    advertised_path_id: 0,
+                }])),
+                None,
+                now,
+            );
+            let committed = BlackholeExportEvidence::from_read(
+                &Ok(Some(vec![PeerExport {
+                    peer_address: "192.0.2.1".into(),
+                    disposition: ExportDisposition::Committed,
+                    reason: String::new(),
+                    explain_code: String::new(),
+                    detail: String::new(),
+                    advertised_path_id: 0,
+                }])),
+                None,
+                now,
+            );
+            let blackhole_id = uuid::Uuid::new_v4();
+            let flowspec_id = uuid::Uuid::new_v4();
+            for epoch in [0, 1] {
+                state.export_evidence.replace(
+                    now,
+                    epoch,
+                    [(blackhole_id, ("203.0.113.10/32".into(), withheld.clone()))].into(),
+                );
+                state.flowspec_export_evidence.replace(
+                    now,
+                    epoch,
+                    [(flowspec_id, ("203.0.113.11/32".into(), committed.clone()))].into(),
+                );
+                let response =
+                    super::super::observations::metrics(axum::extract::State(state.clone()))
+                        .await
+                        .into_response();
+                let text = String::from_utf8(
+                    axum::body::to_bytes(response.into_body(), 1 << 20)
+                        .await
+                        .unwrap()
+                        .to_vec(),
+                )
+                .unwrap();
+                assert!(text.contains("prefixd_blackhole_unexported{reason=\"export_policy\"} 1"));
+                assert!(
+                    text.contains("prefixd_flowspec_export_peers{disposition=\"committed\"} 1")
+                );
+                if epoch == 0 {
+                    state.fence.set(false);
+                    for active in [false, true] {
+                        state.fence.set(active);
+                        let response = super::super::observations::metrics(axum::extract::State(
+                            state.clone(),
+                        ))
+                        .await
+                        .into_response();
+                        let text = String::from_utf8(
+                            axum::body::to_bytes(response.into_body(), 1 << 20)
+                                .await
+                                .unwrap()
+                                .to_vec(),
+                        )
+                        .unwrap();
+                        assert!(
+                            text.contains(
+                                "prefixd_blackhole_unexported{reason=\"export_policy\"} 0"
+                            )
+                        );
+                        assert!(text.contains(
+                            "prefixd_flowspec_export_peers{disposition=\"committed\"} 0"
+                        ));
+                        assert!(
+                            text.contains("prefixd_flowspec_export_read_errors 0"),
+                            "ownership loss is not an RPC failure"
+                        );
+                    }
+                }
+            }
+        }
+
         async fn get(app: &axum::Router, path: &str) -> (StatusCode, Value) {
             let response = app
                 .clone()
@@ -4080,6 +4338,7 @@ mod tests {
             again["event_id"] = uuid::Uuid::new_v4().to_string().into();
             let (status, body) = send(&app, "/v1/events", None, again).await;
             assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert!(body.to_string().contains("key_unowned"), "{body}");
             assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 1);
             assert_eq!(
                 speaker.flowspec_adds.load(SeqCst),
@@ -4107,6 +4366,19 @@ mod tests {
                 .unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].status, crate::domain::MitigationStatus::Withdrawn);
+            let audit = repo
+                .list_audit(&crate::db::ListParams {
+                    limit: 100,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert!(audit.iter().any(|entry| entry.action == "withdraw"
+                && entry.details["reason"]
+                    == format!(
+                        "{} (key_unowned)",
+                        crate::guardrails::UNTRACKED_AT_ADMISSION
+                    )));
             assert_eq!(
                 rows[0].action_params.injection_owner,
                 "prefixd.test1.0123456789abcdef"

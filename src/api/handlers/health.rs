@@ -61,6 +61,9 @@ pub struct SpeakerHealth {
     /// reconciliation pass; present when the speaker reports export.
     #[serde(skip_serializing_if = "Option::is_none")]
     blackhole_exports: Option<crate::domain::BlackholeExportSummary>,
+    /// FlowSpec export evidence from the same bounded reconciliation pass.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flowspec_exports: Option<crate::domain::FlowSpecExportSummary>,
     daemon: DaemonHealthObservation,
 }
 
@@ -268,10 +271,23 @@ pub async fn health_detail(
             .fence
             .with_observation_epoch(|epoch| state.export_evidence.summary(epoch))
     });
+    let flowspec_exports = state.announcer.flowspec_export_observer().map(|_| {
+        state.fence.with_observation_epoch(|epoch| {
+            crate::domain::FlowSpecExportSummary::from(
+                state.flowspec_export_evidence.summary(epoch),
+            )
+        })
+    });
     // Historical export cannot establish current health after ownership returns.
     let export_degraded = blackhole_exports
         .as_ref()
-        .is_some_and(|exports| exports.historical || !exports.unexported.is_empty());
+        .is_some_and(|exports| exports.historical || !exports.unexported.is_empty())
+        || flowspec_exports.as_ref().is_some_and(|exports| {
+            exports.historical
+                || exports.errors > 0
+                || exports.no_local_route > 0
+                || !exports.unexported.is_empty()
+        });
     if daemon.status == "error" || daemon.ready == Some(false) || export_degraded {
         status = "degraded".into();
     }
@@ -298,6 +314,7 @@ pub async fn health_detail(
             ),
             lease: state.lease.as_ref().map(|lease| lease.health()),
             blackhole_exports,
+            flowspec_exports,
             daemon,
         },
         auth_mode: resolve_auth_mode(&state),

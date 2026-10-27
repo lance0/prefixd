@@ -612,7 +612,8 @@ corresponding slice 9 item.
   refusal at admission (`FAILED_PRECONDITION`: another owner, or none, holds
   the key) changed nothing, so it is handled as for blackholes: the request
   gets `409`, the new row is withdrawn locally with the audit reason
-  `untracked local route at admission`, and the other rule is never deleted.
+  `untracked local route at admission` plus the bounded ownership-refusal reason,
+  and the other rule is never deleted.
   Kept active, the row could never be withdrawn, because a delete under its
   owner is refused while the other rule exists.
 - **Owner per rule.** The owner is snapshotted at admission into the row's

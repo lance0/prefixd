@@ -247,6 +247,10 @@ impl FlowSpecAnnouncer for FencedAnnouncer {
         self.inner.export_observer()
     }
 
+    fn flowspec_export_observer(&self) -> Option<&dyn ExportObserver> {
+        self.inner.flowspec_export_observer()
+    }
+
     /// The wrapper must not fall back to the trait default, which supports nothing.
     fn match_support(&self) -> FlowSpecMatchSupport {
         self.inner.match_support()

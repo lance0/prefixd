@@ -113,7 +113,10 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if let Some(pool) = &state.db_pool {
         crate::observability::metrics::update_db_pool_metrics(pool);
     }
-    crate::observability::gather_metrics()
+    state.fence.with_observation_epoch(|epoch| {
+        crate::observability::metrics::update_export_metrics(&state, epoch);
+        crate::observability::gather_metrics()
+    })
 }
 
 // Multi-POP coordination

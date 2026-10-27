@@ -123,6 +123,7 @@ pub fn update_speaker_metrics(speaker: &dyn crate::bgp::FlowSpecAnnouncer) {
         ("blackhole", capabilities.blackhole),
         ("blackhole_lease", capabilities.blackhole_lease),
         ("blackhole_export", capabilities.blackhole_export),
+        ("flowspec_export", capabilities.flowspec_export),
         (
             "flowspec_source_prefix",
             capabilities.flowspec_match.source_prefix,
@@ -240,6 +241,68 @@ pub static BLACKHOLE_EXPORT_READ_ERRORS: Lazy<Gauge> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+/// Established-peer dispositions of active FlowSpec rules, excluding recorded dry-run intent.
+pub static FLOWSPEC_EXPORT_PEERS: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_flowspec_export_peers",
+        "Established-peer export dispositions of active FlowSpec rules excluding recorded dry-run intent; committed means Adj-RIB-Out, not enforcement",
+        &["disposition"]
+    ).unwrap()
+});
+
+/// FlowSpec rules committed to no Established peer, by the closed reason set.
+pub static FLOWSPEC_UNEXPORTED: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_flowspec_unexported",
+        "Active FlowSpec rules committed to no Established peer at the last reconciliation pass, by reason",
+        &["reason"]
+    ).unwrap()
+});
+
+/// Failed FlowSpec export reads in the last pass: current export is unknown.
+pub static FLOWSPEC_EXPORT_READ_ERRORS: Lazy<Gauge> = Lazy::new(|| {
+    register_gauge!(
+        "prefixd_flowspec_export_read_errors",
+        "FlowSpec export read failures; unknown inventory counts retained rules or one inventory-level failure before any keys are known"
+    )
+    .unwrap()
+});
+
+/// Publish only evidence belonging to the held ownership epoch. The caller keeps
+/// the fence read lock through publication and, for HTTP, encoding the scrape.
+pub fn update_export_metrics(state: &crate::state::AppState, epoch: Option<u64>) {
+    for (store, peers, unexported, errors) in [
+        (
+            &state.export_evidence,
+            &*BLACKHOLE_EXPORT_PEERS,
+            &*BLACKHOLE_UNEXPORTED,
+            &*BLACKHOLE_EXPORT_READ_ERRORS,
+        ),
+        (
+            &state.flowspec_export_evidence,
+            &*FLOWSPEC_EXPORT_PEERS,
+            &*FLOWSPEC_UNEXPORTED,
+            &*FLOWSPEC_EXPORT_READ_ERRORS,
+        ),
+    ] {
+        let summary = store.current_summary(epoch);
+        for disposition in crate::bgp::ExportDisposition::ALL {
+            peers
+                .with_label_values(&[disposition.as_str()])
+                .set(summary.counts.get(disposition) as f64);
+        }
+        for reason in crate::domain::UNEXPORTED_REASONS {
+            let count = summary
+                .unexported
+                .iter()
+                .filter(|route| route.warning.reason == reason)
+                .count();
+            unexported.with_label_values(&[reason]).set(count as f64);
+        }
+        errors.set(summary.errors as f64);
+    }
+}
 
 // Reconciliation metrics
 pub static RECONCILIATION_RUNS: Lazy<CounterVec> = Lazy::new(|| {
@@ -501,11 +564,14 @@ pub fn init_metrics(pop: &str) {
     }
     for disposition in crate::bgp::ExportDisposition::ALL {
         BLACKHOLE_EXPORT_PEERS.with_label_values(&[disposition.as_str()]);
+        FLOWSPEC_EXPORT_PEERS.with_label_values(&[disposition.as_str()]);
     }
     for reason in crate::domain::UNEXPORTED_REASONS {
         BLACKHOLE_UNEXPORTED.with_label_values(&[reason]);
+        FLOWSPEC_UNEXPORTED.with_label_values(&[reason]);
     }
     Lazy::force(&BLACKHOLE_EXPORT_READ_ERRORS);
+    Lazy::force(&FLOWSPEC_EXPORT_READ_ERRORS);
     Lazy::force(&RECONCILIATION_RUNS);
     Lazy::force(&RECONCILIATION_REPAIRS);
     for status in ["success", "error"] {
@@ -603,6 +669,7 @@ mod tests {
             ("blackhole", 1.0),
             ("blackhole_lease", 0.0),
             ("blackhole_export", 1.0),
+            ("flowspec_export", 1.0),
             ("flowspec_source_prefix", 1.0),
             ("flowspec_source_ports", 1.0),
             ("flowspec_fragment", 1.0),
