@@ -15215,3 +15215,26 @@ mod manual_destination_cidr {
         );
     }
 }
+
+#[tokio::test]
+async fn test_mitigation_search_rejects_oversized_and_nul_queries() {
+    let app = setup_app().await;
+    for (query, expected) in [
+        ("x".repeat(256), StatusCode::OK),
+        ("x".repeat(257), StatusCode::BAD_REQUEST),
+        ("β".repeat(129), StatusCode::BAD_REQUEST),
+        ("bad\0query".into(), StatusCode::BAD_REQUEST),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/mitigations?q={}", urlencoding::encode(&query)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+}

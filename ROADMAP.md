@@ -40,8 +40,9 @@ lease after renewal stops. Existing unleased rules stay unleased until withdrawn
 or expired. Neither local intent nor peer health establishes vendor forwarding.
 
 Controller inventory enumeration and the public mitigation, event, audit and
-signal-group cursors preserve tied timestamps. Complete frontend lists and
-server-backed pagination remain work below.
+signal-group cursors preserve tied timestamps. The mitigation list uses
+server-backed search, filters and cursor navigation; event/audit lists and the
+command palette still need complete pagination.
 
 ## Near-term work
 
@@ -53,9 +54,10 @@ server-backed pagination remain work below.
 - Qualify router receipt and traffic enforcement separately for each tested
   backend, vendor, software version and topology. Preserve historical GoBGP
   results; qualify rustbgpd against FRR/Juniper and Arista/Cisco independently.
-- Replace bounded frontend subsets with complete server-backed filtering and
-  pagination, then verify the operator workflow at the tested scale and
-  accessibility settings.
+- Replace the remaining bounded event/audit and command-palette subsets with
+  complete server-backed filtering and pagination. Verify the operator workflow
+  at the tested scale and accessibility settings; mitigation navigation alone
+  does not complete that qualification.
 - Keep input validation, authentication, dependency audits and native lint gates
   strict. Address concrete findings without adding speculative configuration.
 - Keep documentation and release guidance aligned with source. Exercise the

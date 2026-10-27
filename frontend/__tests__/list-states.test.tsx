@@ -5,16 +5,25 @@ import { formatTimestamp } from "@/lib/format"
 import { MitigationsContentLive } from "@/components/dashboard/mitigations-content-live"
 import { EventsContentLive } from "@/components/dashboard/events-content-live"
 import { AuditLogContentLive } from "@/components/dashboard/audit-log-content-live"
-import { deferred, failure, json, operatorResponse, renderApp, signIn, useFakeController } from "./support/fake-controller"
+import { deferred, failure, json, operatorResponse, renderApp, signIn, useFakeController, type ApiHandler } from "./support/fake-controller"
 
 const controller = useFakeController()
 
-function serveMitigations(answer: () => Response | Promise<Response>) {
+function serveMitigations(answer: ApiHandler) {
   signIn(controller, "credentials", operatorResponse("operator"))
   controller.route("GET", "/v1/mitigations", answer)
 }
 
-const loaded = (mitigations: Mitigation[]) => () => json({ mitigations, count: mitigations.length, next_cursor: null, has_more: false })
+const loaded = (mitigations: Mitigation[]) => ({ query }: { query: URLSearchParams }) => {
+  const q = query.get("q")?.toLowerCase() ?? ""
+  const matching = mitigations.filter((row) => [row.victim_ip, row.vector, row.customer_id ?? "", row.mitigation_id].some((value) => value.toLowerCase().includes(q)))
+  const start = Number(query.get("cursor") ?? 0)
+  const limit = Number(query.get("limit") ?? 100)
+  const rows = matching.slice(start, start + limit)
+  const hasMore = start + rows.length < matching.length
+
+  return json({ mitigations: rows, count: rows.length, next_cursor: hasMore ? String(start + limit) : null, has_more: hasMore })
+}
 
 describe("list states", () => {
   it("shows a failed mitigations fetch as an error with retry, never as an empty table", async () => {
@@ -42,10 +51,10 @@ describe("list states", () => {
     expect(await screen.findByText("No mitigations with these statuses")).toBeInTheDocument()
 
     fireEvent.change(screen.getByPlaceholderText("Search IP, vector or ID…"), { target: { value: "198.51.100.9" } })
-    expect(screen.getByText("No matching mitigations")).toBeInTheDocument()
+    expect(await screen.findByText("No matching mitigations")).toBeInTheDocument()
     fireEvent.click(screen.getByRole("button", { name: "Clear search and filters" }))
     expect(screen.getByPlaceholderText("Search IP, vector or ID…")).toHaveValue("")
-    expect(screen.getByText("No mitigations with these statuses")).toBeInTheDocument()
+    expect(await screen.findByText("No mitigations with these statuses")).toBeInTheDocument()
   })
 
   it("exposes status filters as pressed toggles", async () => {
@@ -229,11 +238,13 @@ describe("list pagination", () => {
 
     serveMitigations(loaded(mitigations))
     renderApp(<MitigationsContentLive />)
-    await screen.findByText("Page 1 of 3")
+    await screen.findByText("Page 1")
     fireEvent.click(screen.getByRole("button", { name: "Next" }))
+    await screen.findByText("Page 2")
     fireEvent.click(screen.getByRole("button", { name: "Next" }))
+    await screen.findByText("Page 3")
     fireEvent.change(screen.getByRole("textbox", { name: "Search mitigations" }), { target: { value: "203.0.113." } })
-    expect(await screen.findByText("Page 1 of 2")).toBeInTheDocument()
+    expect(await screen.findByText("Page 1")).toBeInTheDocument()
     expect(screen.getByRole("link", { name: "203.0.113.2" })).toBeInTheDocument()
   })
 

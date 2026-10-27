@@ -900,6 +900,10 @@ impl RepositoryTrait for Repository {
               AND ($2::text IS NULL OR customer_id = $2)
               AND ($3::text IS NULL OR victim_ip = $3)
               AND ($10::text IS NULL OR pop = $10)
+              AND ($11::text IS NULL OR strpos(lower(victim_ip), lower($11)) > 0
+                   OR strpos(lower(vector), lower($11)) > 0
+                   OR strpos(lower(customer_id), lower($11)) > 0
+                   OR strpos(mitigation_id::text, lower($11)) > 0)
               AND ($4::timestamptz IS NULL OR (created_at, mitigation_id) < ($4, $9::uuid))
               AND ($5::timestamptz IS NULL OR created_at >= $5)
               AND ($6::timestamptz IS NULL OR created_at < $6)
@@ -918,6 +922,7 @@ impl RepositoryTrait for Repository {
         .bind(params.limit as i64)         // $8
         .bind(params.cursor.map(|cursor| cursor.mitigation_id)) // $9
         .bind(params.pop.as_deref())       // $10
+        .bind(params.query.as_deref())     // $11
         .fetch_all(&self.pool)
         .await?;
 

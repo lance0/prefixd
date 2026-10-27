@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { mitigationTargetHref } from "@/lib/destination"
 import { useRouter } from "next/navigation"
-import { Ban, Eye, Search, ShieldPlus, ChevronDown, ChevronUp, Filter, RefreshCw, XCircle, Plus, Download, Trash2 } from "lucide-react"
+import { Ban, Eye, Search, ShieldPlus, Filter, RefreshCw, XCircle, Plus, Download, Trash2 } from "lucide-react"
 import { Checkbox } from "@/components/ui/checkbox"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 import { OriginTag } from "@/components/dashboard/status-pill"
@@ -27,9 +27,9 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { useMitigations } from "@/hooks/use-api"
+import { useConfigInventory, useMitigations, usePops } from "@/hooks/use-api"
 import { usePermissions } from "@/hooks/use-permissions"
-import { withdrawMitigation, bulkWithdrawMitigations, type BulkWithdrawResult, type Mitigation } from "@/lib/api"
+import { getAllMitigations, withdrawMitigation, bulkWithdrawMitigations, type BulkWithdrawResult, type Mitigation } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { downloadCsv } from "@/lib/csv"
 import { MitigateNowDialog } from "@/components/dashboard/mitigate-now-dialog"
@@ -40,10 +40,6 @@ import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/stat
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatRelative, formatTimeRemaining } from "@/lib/format"
 import { useTimeFormat } from "@/components/time-zone-provider"
-
-type SortField = "status" | "victim_ip" | "vector" | "customer_id" | "created_at" | "expires_at"
-
-type SortDirection = "asc" | "desc"
 
 // Escalated is hidden: no code path produces it. Legacy rows still render with a danger pill.
 const STATUS_FILTERS = ["active", "pending", "expired", "withdrawn"] as const
@@ -61,9 +57,10 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   const router = useRouter()
   const [statusFilters, setStatusFilters] = useState<string[]>(initialSearch ? [] : ["active"])
   const [searchQuery, setSearchQuery] = useState(initialSearch ?? "")
-  const [sortField, setSortField] = useState<SortField>("created_at")
-  const [sortDirection, setSortDirection] = useState<SortDirection>("desc")
-  const [currentPage, setCurrentPage] = useState(1)
+  const [cursors, setCursors] = useState<(string | undefined)[]>([undefined])
+  const [isExporting, setIsExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+  const exportInFlight = useRef(false)
   const [showFilters, setShowFilters] = useState(false)
   const [withdrawTarget, setWithdrawTarget] = useState<Mitigation | null>(null)
   const [withdrawReason, setWithdrawReason] = useState("")
@@ -89,26 +86,60 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   const permissions = usePermissions()
   const itemsPerPage = 20
 
-  const { data: mitigationsResp, error, isLoading, mutate } = useMitigations({
+  const filters = {
     status: statusFilters.length > 0 ? statusFilters : undefined,
-    limit: 100,
+    customer_id: customerFilter === "All" ? undefined : customerFilter,
+    pop: popFilter === "All" ? undefined : popFilter,
+    q: searchQuery || undefined,
+  }
+
+  const { data: mitigationsResp, error, isLoading, mutate } = useMitigations({
+    ...filters,
+    limit: itemsPerPage,
+    cursor: cursors.at(-1),
   })
 
+  const { data: inventory, error: inventoryError } = useConfigInventory()
+  const { data: popInventory, error: popsError } = usePops()
+  const customers = inventory?.customers.map((customer) => customer.customer_id).sort() ?? []
+  const pops = popInventory?.map((pop) => pop.pop).sort() ?? []
   const mitigations = mitigationsResp?.mitigations
+  const currentPage = cursors.length
+
+  const resetPage = () => {
+    void mutate(undefined, { revalidate: false })
+    setCursors([undefined])
+    setSelectedIds(new Set())
+  }
 
   const toggleStatusFilter = (status: string) => {
     setStatusFilters((prev) =>
       prev.includes(status) ? prev.filter((s) => s !== status) : [...prev, status]
     )
-    setCurrentPage(1)
+    resetPage()
   }
 
-  const handleSort = (field: SortField) => {
-    if (sortField === field) {
-      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"))
-    } else {
-      setSortField(field)
-      setSortDirection("desc")
+  const handleExport = async () => {
+    if (exportInFlight.current) return
+    exportInFlight.current = true
+    setIsExporting(true)
+    setExportError(null)
+
+    try {
+      const matching = await getAllMitigations(filters)
+      const headers = ["mitigation_id", "status", "victim_ip", "vector", "action_type", "customer_id", "created_at", "expires_at"]
+
+      const rows = matching.map((m) => [
+        m.mitigation_id, m.status, m.victim_ip, m.vector, m.action_type,
+        m.customer_id ?? "", m.created_at, m.expires_at,
+      ])
+
+      downloadCsv(`mitigations-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "Mitigation export failed")
+    } finally {
+      exportInFlight.current = false
+      setIsExporting(false)
     }
   }
 
@@ -132,79 +163,27 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
     }
   }
 
-  const { customers, pops } = useMemo(() => {
-    const customerSet = new Set<string>()
-    const popSet = new Set<string>()
-
-    for (const m of mitigations ?? []) {
-      if (m.customer_id) customerSet.add(m.customer_id)
-
-      if (m.pop) popSet.add(m.pop)
-    }
-
-    return { customers: [...customerSet].sort(), pops: [...popSet].sort() }
-  }, [mitigations])
-
-  const filteredMitigations = useMemo(() => {
-    if (!mitigations) return []
-
-    return mitigations
-      .filter((m) => {
-        if (customerFilter !== "All" && m.customer_id !== customerFilter) return false
-
-        if (popFilter !== "All" && m.pop !== popFilter) return false
-
-        if (searchQuery) {
-          const q = searchQuery.toLowerCase()
-
-          const matches = m.victim_ip.includes(q) ||
-            m.vector.toLowerCase().includes(q) ||
-            (m.customer_id && m.customer_id.toLowerCase().includes(q)) ||
-            m.mitigation_id.toLowerCase().includes(q)
-
-          if (!matches) return false
-        }
-
-        return true
-      })
-      .sort((a, b) => {
-        let comparison = 0
-
-        switch (sortField) {
-          case "status":
-            comparison = a.status.localeCompare(b.status)
-            break
-          case "victim_ip":
-            comparison = a.victim_ip.localeCompare(b.victim_ip)
-            break
-          case "vector":
-            comparison = a.vector.localeCompare(b.vector)
-            break
-          case "customer_id":
-            comparison = (a.customer_id || "").localeCompare(b.customer_id || "")
-            break
-          case "created_at":
-            comparison = new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-            break
-          case "expires_at":
-            comparison = new Date(a.expires_at).getTime() - new Date(b.expires_at).getTime()
-            break
-        }
-
-        return sortDirection === "asc" ? comparison : -comparison
-      })
-  }, [mitigations, customerFilter, popFilter, searchQuery, sortField, sortDirection])
-
   const selectableIds = useMemo(() => {
     return new Set(
-      filteredMitigations
+      (mitigations ?? [])
         .filter((m) => m.status === "active" || m.status === "escalated")
         .map((m) => m.mitigation_id)
     )
-  }, [filteredMitigations])
+  }, [mitigations])
+
+  const allSelected = selectableIds.size > 0 && selectedIds.size === selectableIds.size && [...selectableIds].every((id) => selectedIds.has(id))
+
+  useEffect(() => {
+    if (bulkWithdrawOpen || error || !mitigations) return
+    setSelectedIds((previous) => {
+      const retained = [...previous].filter((id) => selectableIds.has(id))
+
+      return retained.length === previous.size ? previous : new Set(retained)
+    })
+  }, [bulkWithdrawOpen, error, mitigations, selectableIds])
 
   const toggleSelectAll = () => {
-    if (selectedIds.size === selectableIds.size && selectableIds.size > 0) {
+    if (allSelected) {
       setSelectedIds(new Set())
     } else {
       setSelectedIds(new Set(selectableIds))
@@ -259,41 +238,13 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
     }
   }
 
-  const totalPages = Math.ceil(filteredMitigations.length / itemsPerPage)
-
-  const paginatedMitigations = filteredMitigations.slice(
-    (currentPage - 1) * itemsPerPage,
-    currentPage * itemsPerPage
-  )
-
   useEffect(() => {
-    setCurrentPage(1)
-  }, [searchQuery, statusFilters, customerFilter, popFilter])
-
-  useEffect(() => {
-    if (totalPages > 0) {
-      setCurrentPage((page) => Math.min(page, totalPages))
+    if (!bulkWithdrawOpen && !error && mitigations?.length === 0 && cursors.length > 1) {
+      void mutate(undefined, { revalidate: false })
+      setCursors((previous) => previous.slice(0, -1))
+      setSelectedIds(new Set())
     }
-  }, [totalPages])
-
-  const SortIcon = ({ field }: { field: SortField }) => {
-    if (sortField !== field) return null
-
-    return sortDirection === "asc" ? (
-      <ChevronUp className="size-3" aria-hidden="true" />
-    ) : (
-      <ChevronDown className="size-3" aria-hidden="true" />
-    )
-  }
-
-  const sortHeader = (field: SortField, label: string) => (
-    <TableHead aria-sort={sortField === field ? (sortDirection === "asc" ? "ascending" : "descending") : undefined}>
-      <button type="button" onClick={() => handleSort(field)} className="inline-flex items-center gap-1 rounded-sm hover:text-foreground">
-        {label}
-        <SortIcon field={field} />
-      </button>
-    </TableHead>
-  )
+  }, [bulkWithdrawOpen, error, mitigations, cursors.length, mutate])
 
   const filtersActive = searchQuery !== "" || customerFilter !== "All" || popFilter !== "All"
 
@@ -301,6 +252,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
     setSearchQuery("")
     setCustomerFilter("All")
     setPopFilter("All")
+    resetPage()
   }
 
   const now = Date.now()
@@ -345,7 +297,8 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
               placeholder="Search IP, vector or ID…"
               aria-label="Search mitigations"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => { setSearchQuery(e.target.value); resetPage() }}
+              maxLength={256}
               className="h-9 pl-9 text-base sm:text-sm"
               spellCheck={false}
               autoComplete="off"
@@ -390,19 +343,11 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
             variant="outline"
             size="icon"
             className="size-9 shrink-0"
-            onClick={() => {
-              const headers = ["mitigation_id", "status", "victim_ip", "vector", "action_type", "customer_id", "created_at", "expires_at"]
-
-              const rows = filteredMitigations.map((m) => [
-                m.mitigation_id, m.status, m.victim_ip, m.vector, m.action_type,
-                m.customer_id ?? "", m.created_at, m.expires_at,
-              ])
-
-              downloadCsv(`mitigations-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
-            }}
-            disabled={filteredMitigations.length === 0}
+            onClick={handleExport}
+            disabled={!mitigations?.length || isExporting || Boolean(error)}
             aria-label="Export CSV"
-            title="CSV timestamps remain UTC"
+            title="Export all matching mitigations; timestamps remain UTC"
+            aria-busy={isExporting}
           >
             <Download className="size-4" aria-hidden="true" />
           </Button>
@@ -435,8 +380,9 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
           )}
         >
           <Select
+            disabled={!inventory}
             value={customerFilter}
-            onValueChange={(v) => { setCustomerFilter(v); setCurrentPage(1) }}
+            onValueChange={(v) => { setCustomerFilter(v); resetPage() }}
           >
             <SelectTrigger className="h-9 w-full sm:w-40" aria-label="Customer">
               <SelectValue placeholder="Customer" />
@@ -449,8 +395,9 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
             </SelectContent>
           </Select>
           <Select
+            disabled={!popInventory}
             value={popFilter}
-            onValueChange={(v) => { setPopFilter(v); setCurrentPage(1) }}
+            onValueChange={(v) => { setPopFilter(v); resetPage() }}
           >
             <SelectTrigger className="h-9 w-full sm:w-32" aria-label="POP">
               <SelectValue placeholder="POP" />
@@ -486,6 +433,10 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
           </div>
         </div>
 
+        {(inventoryError || popsError) && (
+          <p className="border-b px-4 py-2 text-sm text-destructive">Some filter choices could not be loaded. Search still covers stored customer IDs.</p>
+        )}
+        {exportError && <p role="alert" className="border-b px-4 py-2 text-sm text-destructive">CSV export failed: {exportError}. No file was downloaded.</p>}
         {error ? (
           <ErrorState
             title="Unable to load mitigations"
@@ -495,7 +446,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
           />
         ) : isLoading && !mitigations ? (
           <LoadingRows label="Loading mitigations" rows={5} />
-        ) : paginatedMitigations.length === 0 ? (
+        ) : !mitigations?.length ? (
           filtersActive ? (
             <EmptyState
               title="No matching mitigations"
@@ -517,25 +468,25 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                   {permissions.canWithdraw && (
                     <TableHead className="w-10">
                       <Checkbox
-                        checked={selectableIds.size > 0 && selectedIds.size === selectableIds.size}
+                        checked={allSelected}
                         onCheckedChange={toggleSelectAll}
-                        aria-label="Select all active mitigations"
+                        aria-label="Select all active mitigations on this page"
                         disabled={selectableIds.size === 0}
                       />
                     </TableHead>
                   )}
-                  {sortHeader("victim_ip", "Target")}
-                  {sortHeader("status", "Status")}
+                  <TableHead>Target</TableHead>
+                  <TableHead>Status</TableHead>
                   <TableHead>Action</TableHead>
-                  {sortHeader("vector", "Vector")}
+                  <TableHead>Vector</TableHead>
                   <TableHead>Match</TableHead>
-                  {sortHeader("created_at", "Created")}
-                  {sortHeader("expires_at", "Expires")}
+                  <TableHead aria-sort="descending">Created</TableHead>
+                  <TableHead>Expires</TableHead>
                   <TableHead><span className="sr-only">Row actions</span></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {paginatedMitigations.map((mitigation) => {
+                {mitigations.map((mitigation) => {
                   const live = mitigation.status === "active" || mitigation.status === "escalated" || mitigation.status === "pending"
                   const remaining = Date.parse(mitigation.expires_at) - now
                   const vector = mitigation.vector.replace(/_/g, " ")
@@ -644,34 +595,47 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                 })}
               </TableBody>
             </Table>
-
-            <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-3 text-sm text-muted-foreground">
-              <span className="tabular-nums">
-                Showing {(currentPage - 1) * itemsPerPage + 1}–{Math.min(currentPage * itemsPerPage, filteredMitigations.length)} of {filteredMitigations.length} loaded
-              </span>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                  disabled={currentPage === 1}
-                >
-                  Previous
-                </Button>
-                <span className="tabular-nums">
-                  Page {currentPage} of {totalPages || 1}
-                </span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={currentPage === totalPages || totalPages === 0}
-                >
-                  Next
-                </Button>
-              </div>
-            </div>
           </>
+        )}
+        {(currentPage > 1 || Boolean(mitigations?.length)) && (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-3 text-sm text-muted-foreground">
+            <span className="tabular-nums">
+              {error ? "Page unavailable" : isLoading ? "Loading page…" : `${mitigations?.length ?? 0} on this page · Newest first`}
+            </span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  void mutate(undefined, { revalidate: false })
+                  setCursors((previous) => previous.slice(0, -1))
+                  setSelectedIds(new Set())
+                }}
+                disabled={currentPage === 1 || isLoading}
+              >
+                Previous
+              </Button>
+              <span className="tabular-nums">
+                Page {currentPage}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const nextCursor = mitigationsResp?.next_cursor
+
+                  if (nextCursor) {
+                    void mutate(undefined, { revalidate: false })
+                    setCursors((previous) => [...previous, nextCursor])
+                    setSelectedIds(new Set())
+                  }
+                }}
+                disabled={isLoading || Boolean(error) || !mitigationsResp?.has_more || !mitigationsResp.next_cursor}
+              >
+                Next
+              </Button>
+            </div>
+          </div>
         )}
       </section>
 

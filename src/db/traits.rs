@@ -82,6 +82,8 @@ pub struct MitigationCursor {
 pub struct MitigationListParams {
     /// None lists every POP; Some matches the stored identifier exactly.
     pub pop: Option<String>,
+    /// Literal case-insensitive substring across target, vector, customer and ID.
+    pub query: Option<String>,
     pub limit: u32,
     pub cursor: Option<MitigationCursor>,
     pub start: Option<DateTime<Utc>>,

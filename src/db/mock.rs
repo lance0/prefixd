@@ -712,6 +712,15 @@ impl RepositoryTrait for MockRepository {
                     }
                 });
                 let pop_ok = params.pop.as_deref().is_none_or(|pop| m.pop == pop);
+                let query_ok = params.query.as_deref().is_none_or(|query| {
+                    let query = query.to_lowercase();
+                    m.victim_ip.to_lowercase().contains(&query)
+                        || m.vector.as_str().to_lowercase().contains(&query)
+                        || m.customer_id
+                            .as_deref()
+                            .is_some_and(|customer| customer.to_lowercase().contains(&query))
+                        || m.mitigation_id.to_string().contains(&query)
+                });
                 let cursor_ok = params.cursor.is_none_or(|cursor| {
                     (m.created_at, m.mitigation_id) < (cursor.created_at, cursor.mitigation_id)
                 });
@@ -722,6 +731,7 @@ impl RepositoryTrait for MockRepository {
                     && ip_ok
                     && ack_ok
                     && pop_ok
+                    && query_ok
                     && cursor_ok
                     && start_ok
                     && end_ok

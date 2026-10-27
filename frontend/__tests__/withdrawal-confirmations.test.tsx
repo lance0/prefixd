@@ -113,7 +113,7 @@ async function openSingle(view: "list" | "detail") {
 }
 
 async function openBulk() {
-  fireEvent.click(screen.getByRole("checkbox", { name: "Select all active mitigations" }))
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select all active mitigations on this page" }))
   const trigger = screen.getByRole("button", { name: "Withdraw all" })
   act(() => trigger.focus())
   fireEvent.click(trigger)

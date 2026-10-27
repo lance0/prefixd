@@ -7295,3 +7295,115 @@ async fn test_ip_history_and_incident_fail_on_selected_corrupt_mitigations() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
+
+#[tokio::test]
+async fn test_mitigation_search_is_literal_complete_and_matches_postgres() {
+    use prefixd::db::{MitigationCursor, MitigationListParams, MockRepository, RepositoryTrait};
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    let ctx = TestContext::new().await;
+    let repositories: [Arc<dyn RepositoryTrait>; 2] =
+        [ctx.repo.clone(), Arc::new(MockRepository::new())];
+    let timestamp = "2026-10-27T10:00:00Z".parse().unwrap();
+    for repo in repositories {
+        for id in 1..=125_u128 {
+            let mut mitigation = inventory_mitigation(
+                "203.0.113.10/32",
+                if id % 2 == 0 { "iad1" } else { "dfw1" },
+                timestamp,
+                MitigationStatus::Active,
+            );
+            mitigation.mitigation_id = Uuid::from_u128(id);
+            mitigation.customer_id = Some(if id == 125 { "Literal_%\\β" } else { "Acme" }.into());
+            mitigation.match_criteria.dst_ports = vec![u16::try_from(id).unwrap()];
+            mitigation.scope_hash = mitigation.match_criteria.compute_scope_hash();
+            repo.insert_mitigation(&mitigation).await.unwrap();
+        }
+        for (query, expected) in [
+            ("203.0.113.", 125),
+            ("UDP_FLOOD", 125),
+            ("acME", 124),
+            ("%", 1),
+            ("\\", 1),
+            ("Β", 1),
+            ("x%", 0),
+            ("00000000-0000-0000-0000-00000000007D", 1),
+            ("", 125),
+        ] {
+            let mut cursor = None;
+            let mut ids = Vec::new();
+            loop {
+                let page = repo
+                    .list_mitigations(
+                        None,
+                        None,
+                        None,
+                        None,
+                        &MitigationListParams {
+                            query: Some(query.into()),
+                            limit: 20,
+                            cursor,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(page.len() <= 20);
+                ids.extend(page.iter().map(|row| row.mitigation_id));
+                if page.len() < 20 {
+                    break;
+                }
+                let last = page.last().unwrap();
+                cursor = Some(MitigationCursor {
+                    created_at: last.created_at,
+                    mitigation_id: last.mitigation_id,
+                });
+            }
+            assert_eq!(ids.len(), expected, "query {query:?}");
+            assert!(
+                ids.windows(2).all(|pair| pair[0] > pair[1]),
+                "stable unique order for {query:?}"
+            );
+        }
+        let filtered = repo
+            .list_mitigations(
+                Some(&[MitigationStatus::Active]),
+                Some("Acme"),
+                None,
+                None,
+                &MitigationListParams {
+                    query: Some("UDP_FLOOD".into()),
+                    pop: Some("iad1".into()),
+                    limit: 1000,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(filtered.len(), 62);
+        assert!(
+            filtered
+                .iter()
+                .all(|row| row.pop == "iad1" && row.customer_id.as_deref() == Some("Acme"))
+        );
+    }
+    let response = ctx
+        .router()
+        .await
+        .oneshot(
+            Request::builder()
+                .uri("/v1/mitigations?q=Literal_%25%5C%CE%B2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["count"], 1);
+    assert_eq!(result["mitigations"][0]["customer_id"], "Literal_%\\β");
+}

@@ -413,6 +413,7 @@ Authorization: Bearer <token>
 |-------|------|-------------|
 | `status` | string | Filter by one or more statuses (comma-separated): `pending`, `active`, `withdrawn`, `expired`, `rejected`. Legacy `escalated` is still accepted for stored rows; no code path produces it |
 | `customer_id` | string | Filter by customer |
+| `q` | string | Literal case-insensitive substring of target, vector, customer ID or mitigation UUID; at most 256 UTF-8 bytes and no NUL. Empty matches every row; `%`, `_` and backslash have no wildcard meaning |
 | `victim_ip` | string | Filter by exact stored target: host IP or canonical manual CIDR; no containment matching |
 | `pop` | string | Exact case-sensitive POP identifier; omitted or literal `all` lists every POP |
 | `acknowledged` | boolean | Filter by acknowledged status (`true`/`false`) |
@@ -420,6 +421,10 @@ Authorization: Bearer <token>
 | `cursor` | string | Opaque `m1` continuation from the previous `next_cursor` (maximum 128 bytes) |
 | `start` | string | RFC3339 start (inclusive); see [list filters](#list-filters) |
 | `end` | string | RFC3339 end (exclusive); see [list filters](#list-filters) |
+
+`q` combines with the other filters before ordering, cursor continuation and page limits.
+It searches persisted rows, including customer IDs no longer in the current inventory.
+Oversized searches and searches containing NUL return `400`.
 
 A concrete `pop` filters rows before ordering, cursor continuation and page limits.
 Identifiers match stored values exactly, including case, spaces and Unicode;
@@ -436,6 +441,20 @@ Malformed, oversized and superseded timestamp-only mitigation cursors return
 The `mitigations`, `count`, `next_cursor` and `has_more` response fields are unchanged.
 A persisted row that cannot be decoded fails the entire page with `500`, including
 a corrupt lookahead row; it is never silently omitted or reported as end of history.
+
+`count` is this page's row count, not a global total. The dashboard requests 20-row
+pages in this order, sends search and filters to the server, and keeps only the
+current page's rows. Customer choices come from the current configured inventory;
+POP choices come from `/v1/pops`. Search can still find historical customer IDs.
+Selection and select-all apply to the current page. An open bulk-withdrawal
+confirmation retains its selected IDs across refreshes until completion or cancel.
+
+Dashboard CSV export walks every matching cursor page and downloads a file only
+when all pages succeed. It retains the completed export in browser memory, so
+memory use grows with export size. This is a live traversal, not a point-in-time
+snapshot: status changes during export may change which rows match, and new rows
+above a visited cursor require a fresh listing. A failed page produces an error
+and no partial CSV. CSV timestamps remain UTC.
 
 **Response:**
 

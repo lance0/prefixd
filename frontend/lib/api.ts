@@ -358,6 +358,7 @@ export interface MitigationsResponse {
 export async function getMitigations(params?: {
   status?: string[]
   customer_id?: string
+  q?: string
   victim_ip?: string
   pop?: string
   acknowledged?: boolean
@@ -373,6 +374,8 @@ export async function getMitigations(params?: {
   }
 
   if (params?.customer_id) searchParams.set("customer_id", params.customer_id)
+
+  if (params?.q) searchParams.set("q", params.q)
 
   if (params?.victim_ip) searchParams.set("victim_ip", params.victim_ip)
 
@@ -391,6 +394,26 @@ export async function getMitigations(params?: {
   const query = searchParams.toString()
 
   return fetchApi<MitigationsResponse>(`/v1/mitigations${query ? `?${query}` : ""}`)
+}
+
+/** Walk the complete matching listing; a failed page never produces a partial export. */
+export async function getAllMitigations(params: Omit<NonNullable<Parameters<typeof getMitigations>[0]>, "limit" | "cursor">): Promise<Mitigation[]> {
+  const rows: Mitigation[] = []
+  const cursors = new Set<string>()
+  let cursor: string | undefined
+
+  do {
+    const page = await getMitigations({ ...params, limit: 1000, cursor })
+    rows.push(...page.mitigations)
+
+    if (!page.has_more) break
+
+    if (!page.next_cursor || cursors.has(page.next_cursor)) throw new Error("Incomplete mitigation export: invalid continuation")
+    cursors.add(page.next_cursor)
+    cursor = page.next_cursor
+  } while (cursor)
+
+  return rows
 }
 
 export async function getMitigation(id: string): Promise<Mitigation> {

@@ -463,6 +463,7 @@ pub struct CursorQuery {
 pub struct ListMitigationsQuery {
     status: Option<String>,
     customer_id: Option<String>,
+    q: Option<String>,
     /// Filter by victim IP address
     victim_ip: Option<String>,
     /// Exact POP filter; omission and literal "all" list every POP.
@@ -1751,6 +1752,7 @@ pub async fn list_events(
     params(
         ("status" = Option<String>, Query, description = "Comma-separated exact statuses: pending, active, expired, withdrawn, rejected (legacy escalated is still accepted but never produced); every token must be valid and nonempty"),
         ("customer_id" = Option<String>, Query, description = "Filter by customer ID"),
+        ("q" = Option<String>, Query, description = "Literal case-insensitive substring of target, vector, customer ID or mitigation UUID; maximum 256 UTF-8 bytes, no NUL. Empty matches every row."),
         ("victim_ip" = Option<String>, Query, description = "Filter by exact stored host IP or canonical manual CIDR; no containment matching"),
         ("pop" = Option<String>, Query, description = "Exact case-sensitive POP; omitted or literal 'all' lists every POP. Empty/NUL identifiers are invalid."),
         ("acknowledged" = Option<bool>, Query, description = "Filter by acknowledged status"),
@@ -1761,7 +1763,7 @@ pub async fn list_events(
     ),
     responses(
         (status = 200, description = "List of mitigations", body = MitigationsListResponse),
-        (status = 400, description = "Invalid date/status/POP filter or invalid/superseded mitigation cursor", body = ErrorResponse)
+        (status = 400, description = "Invalid date/status/POP/search filter or invalid/superseded mitigation cursor", body = ErrorResponse)
     )
 )]
 pub async fn list_mitigations(
@@ -1813,8 +1815,19 @@ pub async fn list_mitigations(
         Ok(bounds) => bounds,
         Err(error) => return Ok(AppError(error).into_response()),
     };
+    if query
+        .q
+        .as_ref()
+        .is_some_and(|q| q.len() > 256 || q.contains('\0'))
+    {
+        return Ok(AppError(PrefixdError::InvalidRequest(
+            "invalid mitigation search; q must be at most 256 UTF-8 bytes without NUL".into(),
+        ))
+        .into_response());
+    }
     let params = MitigationListParams {
         pop,
+        query: query.q,
         limit: limit + 1,
         cursor,
         start,

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard mitigation list now uses complete server cursor navigation and
+  server-side search, customer, POP and status filters instead of filtering only
+  the newest 100 rows. Pages stay in newest-first order; column sorting of a
+  bounded subset is removed. Selection is page-scoped, and CSV export walks all
+  matching pages, refusing a partial download on failure. Exports are live
+  traversals and retain matching rows in browser memory.
+- `GET /v1/mitigations` accepts bounded literal substring search through `q`,
+  covering target, vector, customer ID and mitigation UUID before pagination.
+
 ### Added
 
 - An optional `docker-compose.inventory.yml` overlay reads
