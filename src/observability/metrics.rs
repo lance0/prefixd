@@ -242,11 +242,11 @@ pub static BLACKHOLE_EXPORT_READ_ERRORS: Lazy<Gauge> = Lazy::new(|| {
     .unwrap()
 });
 
-/// Established-peer dispositions summed over active enforced FlowSpec rules.
+/// Established-peer dispositions of active FlowSpec rules, excluding recorded dry-run intent.
 pub static FLOWSPEC_EXPORT_PEERS: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!(
         "prefixd_flowspec_export_peers",
-        "Established-peer export dispositions summed over active FlowSpec rules; committed means Adj-RIB-Out, not enforcement",
+        "Established-peer export dispositions of active FlowSpec rules excluding recorded dry-run intent; committed means Adj-RIB-Out, not enforcement",
         &["disposition"]
     ).unwrap()
 });

@@ -1035,13 +1035,13 @@ GET /v1/mitigations/{id}
 | `contributing_sources` | array | List of source names that contributed |
 | `explanation` | string | Human-readable explanation of the correlation decision |
 
-An active (or escalated) blackhole or FlowSpec rule that is not a known
-simulation (`origin_mode != "dry-run"`) also carries `export_evidence`: per-peer
+Active (or escalated) blackholes and FlowSpec rules, excluding those recorded
+as dry-run, also carry `export_evidence`: per-peer
 export from the last reconciliation pass
 ([export evidence](speaker-backends.md#export-evidence)). An untagged legacy
 `origin_mode: null` remains unknown; an actual export observation is separate
 evidence and does not recover its admission mode. Export evidence is absent
-from list responses, known dry-run mitigations and terminal rows. The request
+from list responses, mitigations recorded as dry-run and terminal rows. The request
 reads the controller's snapshot and never calls the speaker.
 
 ```json
@@ -2355,8 +2355,8 @@ not router receipt or enforcement.
 
 `flowspec_exports` is present when `flowspec_export` is true (rustbgpd). It uses
 the same fields, with `rules` instead of `blackholes`, for exact-key export of
-eligible active FlowSpec rules: known simulations and expired rules are
-excluded, while any untagged legacy admission provenance remains unknown.
+active FlowSpec rules, excluding those recorded as dry-run or already expired.
+An untagged legacy admission mode remains unknown.
 Failed reads retain the last complete peer rows and their timestamp;
 `status: error` on mitigation detail means current export is unknown, and its
 current disposition counts are zero. Historical evidence, read errors,

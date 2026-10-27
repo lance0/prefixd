@@ -333,8 +333,8 @@ pub struct MitigationResponse {
     /// drops all traffic to the victim. This is the saved intent, not router state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blackhole: Option<BlackholeRouteResponse>,
-    /// Detail endpoint only, on an active enforced mitigation: per-peer export
-    /// dispositions from the last reconciliation pass. `committed` means the
+    /// Detail endpoint only, on active mitigations excluding those recorded as dry-run.
+    /// Per-peer export dispositions from the last reconciliation pass. `committed` means the
     /// route is in that peer's Adj-RIB-Out, not that a router installed or
     /// enforces it.
     #[serde(skip_serializing_if = "Option::is_none")]

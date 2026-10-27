@@ -69,7 +69,7 @@ export interface DispositionCounts {
   pending: number
 }
 
-/** Shared export evidence for active enforced blackholes and FlowSpec rules. */
+/** Shared export evidence for active rules, excluding those recorded as dry-run. */
 export interface BlackholeExportEvidence {
   /** `error` means current export is unknown; historical rows may remain. */
   status: "observed" | "no_local_route" | "error" | "unsupported" | "not_observed"
@@ -130,7 +130,7 @@ export interface Mitigation {
   correlation?: CorrelationContext | null
   /** Present only for a blackhole, which drops all traffic to the victim. */
   blackhole?: BlackholeRoute | null
-  /** Detail endpoint only, on an active enforced blackhole or FlowSpec rule. */
+  /** Detail endpoint only, on active mitigations excluding those recorded as dry-run. */
   export_evidence?: BlackholeExportEvidence | null
 }
 
