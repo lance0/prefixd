@@ -414,17 +414,17 @@ jobs:
             type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build images (publish on push only)
+      - name: Build images (publish dashboard on push only)
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
-          push: ${{ github.event_name == 'push' }}
+          push: ${{ github.event_name == 'push' && matrix.image != 'prefixd' }}
           load: ${{ matrix.image == 'prefixd' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.image }}
-          # Cache export failures must not fail an otherwise successful image push.
+          # Cache export failures must not fail an otherwise successful build.
           cache-to: type=gha,scope=${{ matrix.image }},mode=max,ignore-error=true
 
       - name: Check Compose profiles, inventory mounts and configuration persistence
@@ -432,3 +432,14 @@ jobs:
         env:
           PREFIXD_IMAGE: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
         run: python3 scripts/test-compose.py
+
+      # Reuse the local BuildKit cache, publishing only after the checks succeed.
+      - name: Publish controller after Compose checks
+        if: github.event_name == 'push' && matrix.image == 'prefixd'
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
