@@ -113,6 +113,19 @@ This manual gate is broader than the optional hooks below. Image builds and
 publication, release/SBOM operations, long labs, performance/fuzz work and
 owned authenticated browser qualification remain separate checks.
 
+`just browser-smoke` reuses the release binaries and production dashboard built
+by `just gate`. It needs installed Chrome in addition to the normal prerequisites.
+The runner starts disposable PostgreSQL and pinned rustbgpd fixtures with temporary
+credentials, then runs the existing browser login, active mitigation, pending
+withdrawal confirmation and persisted/rendered audit checks. Fresh speaker reads
+verify local intent is present before withdrawal and absent afterwards; this does
+not qualify router enforcement. CI runs the same check after the frontend build.
+Owned processes and containers are removed even on failure. Protected receipts
+are written to `target/qualification/browser-smoke`; the runner refuses to
+overwrite an existing directory. Pass `--output-dir /tmp/new-browser-receipt` to
+`python3 scripts/test-browser.py` for another run. Credentials and configuration
+stay in the temporary fixture directory and are excluded from CI artifacts.
+
 ### Scheduled smoke checks
 
 `just bench-smoke` executes each existing Criterion benchmark body once. It
@@ -399,6 +412,6 @@ The dashboard always uses the configured API. Keep response fixtures in tests;
 anti-slop rules in `frontend/tools/oxlint/anti-slop/`; it must report no errors
 or warnings. Fix findings rather than suppressing them. Tests replace the
 controller with `frontend/__tests__/support/fake-controller.tsx` behind the real
-fetch path instead of mocking modules. Automated browser CI remains frontend
-tooling work. Production builds enforce TypeScript checks; `bun run typecheck`
-runs them independently.
+fetch path instead of mocking modules. CI also runs the real authenticated
+withdrawal smoke described above. Production builds enforce TypeScript checks;
+`bun run typecheck` runs them independently.

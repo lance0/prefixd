@@ -96,6 +96,12 @@ frontend:
     bun run test
     bun run build
 
+# Reuse candidate release binaries and the production dashboard from the gate.
+# Requires system Chrome and Docker; owns all fixtures and retains private receipts.
+browser-smoke:
+    python3 scripts/test-browser.py --self-test
+    python3 scripts/test-browser.py
+
 # Audit both locked graphs with CI's sole unfixed exception: rsa is an optional,
 # uncompiled sqlx MySQL dependency. Other vulnerabilities fail; warnings stay visible.
 audit-rust:

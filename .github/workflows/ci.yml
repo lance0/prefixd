@@ -290,10 +290,12 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: prefixd-linux-amd64
-          path: target/release/prefixd
+          path: |
+            target/release/prefixd
+            target/release/prefixdctl
 
   frontend:
-    needs: scope
+    needs: [scope, build]
     if: needs.scope.outputs.docs_only != 'true'
     name: Frontend
     runs-on: ubuntu-latest
@@ -320,6 +322,31 @@ jobs:
 
       - name: Frozen install, lint, native types, tests and production build
         run: just frontend
+
+      - name: Download candidate controller binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: prefixd-linux-amd64
+          path: target/release
+
+      - name: Install Chrome for the existing browser smoke
+        run: bunx playwright install --with-deps chrome
+
+      - name: Authenticated browser withdrawal against an owned stack
+        working-directory: .
+        run: |
+          chmod +x target/release/prefixd target/release/prefixdctl
+          python3 scripts/test-browser.py --self-test
+          python3 scripts/test-browser.py
+
+      - name: Retain browser lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-lifecycle-attempt-${{ github.run_attempt }}
+          path: target/qualification/browser-smoke
+          if-no-files-found: ignore
+          retention-days: 7
 
   security:
     needs: scope
