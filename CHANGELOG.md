@@ -75,6 +75,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- With opt-in rustbgpd leasing, an independent two-second liveness probe now
+  detects a changed daemon incarnation and wakes full leased FlowSpec and
+  blackhole recovery before the next renewal or inventory poll. Failed or
+  unsupported probes do not change lease health, and late probe or renewal
+  replies cannot invalidate or restore a superseded generation. Re-adds retain
+  the existing fence and guardrails; probe cadence is not a recovery SLA or
+  proof of router enforcement.
+
 - A controller running in dry-run continues to observe export for active
   FlowSpec rules retained from an earlier run, while excluding rows recorded
   as dry-run. Observation sends no announcement, withdrawal or lease renewal,

@@ -288,6 +288,10 @@ impl FencedAnnouncer {
 
 #[async_trait]
 impl InjectionLeases for FencedAnnouncer {
+    async fn incarnation(&self) -> Result<Option<u64>> {
+        self.inner_leases()?.incarnation().await
+    }
+
     async fn live_lease(&self, owner: &str) -> Result<Option<Option<LeaseGeneration>>> {
         self.inner_leases()?.live_lease(owner).await
     }

@@ -1040,6 +1040,21 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
 
 #[async_trait]
 impl InjectionLeases for RustBgpdAnnouncer {
+    async fn incarnation(&self) -> Result<Option<u64>> {
+        match self
+            .call("CheckLiveness", || async {
+                pb::control_service_client::ControlServiceClient::new(self.channel.clone())
+                    .check_liveness(self.request(pb::CheckLivenessRequest {}))
+                    .await
+            })
+            .await
+        {
+            Ok(response) => Ok(Some(response.incarnation)),
+            Err(status) if status.code() == Code::Unimplemented => Ok(None),
+            Err(status) => Err(failed("CheckLiveness", &status)),
+        }
+    }
+
     async fn live_lease(&self, owner: &str) -> Result<Option<Option<LeaseGeneration>>> {
         let request = pb::ListInjectionLeasesRequest {
             owner: owner.into(),

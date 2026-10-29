@@ -1343,7 +1343,7 @@ async fn live_rustbgpd_leased_blackhole_renewal_restart_and_expiry() {
     assert_ne!(readded, generation);
     assert_eq!(harness.ours().await.len(), 2);
 
-    // rustbgpd restarts: the renewal is refused and the re-add adopts the new generation.
+    // rustbgpd restarts: liveness invalidates the lease before another renewal.
     harness
         .fixture
         .container
@@ -1353,8 +1353,20 @@ async fn live_rustbgpd_leased_blackhole_renewal_restart_and_expiry() {
     harness.fixture.container.start().await.unwrap();
     harness.fixture.ready().await;
     assert!(harness.ours().await.is_empty());
-    returned.renew_once(harness.speaker.as_ref()).await;
-    assert_eq!(returned.health().last_renewal_result, Some("not_live"));
+    let previous_renewal = returned.health().last_renewal_at;
+    returned.probe_restart(harness.speaker.as_ref()).await;
+    assert_eq!(returned.health().last_renewal_at, previous_renewal);
+    assert_eq!(returned.generation(), None);
+    assert!(
+        !harness
+            .speaker
+            .injection_leases()
+            .unwrap()
+            .renew_lease(&owner, readded, TEST_LEASE_SECONDS)
+            .await
+            .unwrap(),
+        "the old generation remains non-renewable after early detection"
+    );
     assert_eq!(
         returned.health().state,
         prefixd::domain::LeaseState::Expired
@@ -1414,8 +1426,9 @@ async fn live_rustbgpd_leased_blackhole_renewal_restart_and_expiry() {
 /// generation as blackholes; a prefixd restart within the lease adopts it with
 /// no duplicate state; a prefixd stop past the lease lets the daemon expire
 /// the rules without any recorded withdrawal, and the restart re-adds them; a
-/// rustbgpd restart refuses the renewal and the re-add adopts the new
-/// generation. Another owner's rule and an unowned rule stay untouched.
+/// rustbgpd restart changes liveness incarnation and the re-add adopts the new
+/// generation before another renewal. Another owner's rule and an unowned
+/// rule stay untouched.
 #[tokio::test]
 #[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
 async fn live_rustbgpd_leased_flowspec_renewal_restart_and_expiry() {
@@ -1593,7 +1606,7 @@ async fn live_rustbgpd_leased_flowspec_renewal_restart_and_expiry() {
     assert_ne!(readded, generation);
     assert_eq!(rows(owner.clone()).await.len(), 2);
 
-    // rustbgpd restarts: the renewal is refused and the re-add adopts the new generation.
+    // rustbgpd restarts: liveness invalidates the lease before another renewal.
     harness
         .fixture
         .container
@@ -1602,8 +1615,20 @@ async fn live_rustbgpd_leased_flowspec_renewal_restart_and_expiry() {
         .unwrap();
     harness.fixture.container.start().await.unwrap();
     harness.fixture.ready().await;
-    returned.renew_once(harness.speaker.as_ref()).await;
-    assert_eq!(returned.health().last_renewal_result, Some("not_live"));
+    let previous_renewal = returned.health().last_renewal_at;
+    returned.probe_restart(harness.speaker.as_ref()).await;
+    assert_eq!(returned.health().last_renewal_at, previous_renewal);
+    assert_eq!(returned.generation(), None);
+    assert!(
+        !harness
+            .speaker
+            .injection_leases()
+            .unwrap()
+            .renew_lease(&owner, readded, TEST_LEASE_SECONDS)
+            .await
+            .unwrap(),
+        "the old generation remains non-renewable after early detection"
+    );
     harness.reconciler(&returned).reconcile().await.unwrap();
     let after_restart = returned.generation().unwrap();
     assert_ne!(after_restart.incarnation, readded.incarnation);

@@ -12,6 +12,8 @@ use tokio::time::Instant;
 use crate::bgp::{FlowSpecAnnouncer, InjectionLeases, LeaseGeneration};
 use crate::error::{PrefixdError, Result};
 
+const RESTART_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LeaseState {
@@ -184,9 +186,38 @@ impl LeaseKeeper {
         self.readd_requested.notified().await
     }
 
+    /// Detect a daemon restart without waiting for renewal. Only the held
+    /// generation captured before the read can be invalidated by its reply.
+    pub async fn probe_restart(&self, leases: &dyn InjectionLeases) {
+        let Some(generation) = self.generation() else {
+            return;
+        };
+        let Ok(Ok(Some(incarnation))) =
+            tokio::time::timeout(RESTART_PROBE_INTERVAL, leases.incarnation()).await
+        else {
+            return;
+        };
+        if incarnation == 0 || incarnation == generation.incarnation {
+            return;
+        }
+        {
+            let mut held = self.held.lock().unwrap();
+            if held.generation != Some(generation) {
+                return;
+            }
+            held.generation = None;
+            held.state = LeaseState::Expired;
+        }
+        self.publish(self.state());
+        tracing::warn!(owner = %self.owner, ?generation, incarnation,
+            "speaker incarnation changed; re-adding all active leased intent");
+        self.request_readd();
+    }
+
     /// One `RenewLease` with its own deadline. It takes no lifecycle mutex and
     /// touches no database, and it never resurrects: a refused generation is
-    /// dropped and a full re-add requested. A late reply is never a success.
+    /// dropped and a full re-add requested. Replies past the deadline fail;
+    /// replies for superseded generations cannot restore the held lease.
     pub async fn renew_once(&self, leases: &dyn InjectionLeases) {
         if !self.renewing {
             return;
@@ -315,9 +346,9 @@ pub async fn announce_flowspec(
     Ok(())
 }
 
-/// The dedicated renewal task: about every `lease_seconds / 3` while a
-/// generation is held, for the life of the process. It never waits for
-/// reconciliation, the lifecycle mutex or the database.
+/// Independent renewal and restart-probe loops, for the life of the process.
+/// Neither waits for reconciliation, the lifecycle mutex or the database;
+/// a stalled renewal cannot delay restart detection.
 pub async fn run_lease_renewals(
     keeper: std::sync::Arc<LeaseKeeper>,
     announcer: std::sync::Arc<dyn FlowSpecAnnouncer>,
@@ -325,12 +356,23 @@ pub async fn run_lease_renewals(
     let Some(leases) = announcer.injection_leases() else {
         return;
     };
-    let mut interval = tokio::time::interval(keeper.renew_interval());
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        interval.tick().await;
-        keeper.renew_once(leases).await;
-    }
+    let renewals = async {
+        let mut interval = tokio::time::interval(keeper.renew_interval());
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            keeper.renew_once(leases).await;
+        }
+    };
+    let probes = async {
+        let mut interval = tokio::time::interval(RESTART_PROBE_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            keeper.probe_restart(leases).await;
+        }
+    };
+    tokio::join!(renewals, probes);
 }
 
 #[cfg(test)]
@@ -350,6 +392,196 @@ mod tests {
         )
         .unwrap()
         .with_owner(OWNER)
+    }
+
+    #[derive(Default)]
+    struct Probe {
+        incarnation: Option<u64>,
+        fail: bool,
+        block: bool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl InjectionLeases for Probe {
+        async fn incarnation(&self) -> Result<Option<u64>> {
+            self.entered.notify_one();
+            if self.block {
+                self.release.notified().await;
+            }
+            if self.fail {
+                Err(PrefixdError::Internal("probe failed".into()))
+            } else {
+                Ok(self.incarnation)
+            }
+        }
+        async fn live_lease(&self, _: &str) -> Result<Option<Option<LeaseGeneration>>> {
+            unreachable!()
+        }
+        async fn renew_lease(&self, _: &str, _: LeaseGeneration, _: u32) -> Result<bool> {
+            unreachable!()
+        }
+        fn lease_confirmed(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_probe_only_invalidates_a_known_changed_incarnation() {
+        let generation = LeaseGeneration {
+            incarnation: 42,
+            sequence: 1,
+        };
+        for (incarnation, fail, block) in [
+            (Some(42), false, false),
+            (Some(0), false, false),
+            (None, false, false),
+            (Some(43), true, false),
+            (Some(43), false, true),
+            (Some(43), false, false),
+        ] {
+            let keeper = LeaseKeeper::new(OWNER.into(), 60);
+            keeper.take_readd();
+            keeper.observe_add(generation);
+            let live_at = keeper.held.lock().unwrap().live_at;
+            let probe = Probe {
+                incarnation,
+                fail,
+                block,
+                ..Default::default()
+            };
+            let changed = incarnation == Some(43) && !fail && !block;
+            keeper.probe_restart(&probe).await;
+            assert_eq!(
+                keeper.generation(),
+                if changed { None } else { Some(generation) }
+            );
+            assert_eq!(
+                keeper.health().state,
+                if changed {
+                    LeaseState::Expired
+                } else {
+                    LeaseState::Live
+                }
+            );
+            assert_eq!(keeper.take_readd(), changed);
+            assert_eq!(keeper.held.lock().unwrap().live_at, live_at);
+            assert!(keeper.health().last_renewal_at.is_none());
+            assert!(keeper.health().last_renewal_result.is_none());
+            if changed {
+                keeper.readd_requested().await;
+                keeper.probe_restart(&probe).await;
+                assert!(
+                    !keeper.take_readd(),
+                    "no generation means no repeated recovery"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn late_restart_probe_cannot_invalidate_a_concurrent_add_generation() {
+        for next in [
+            LeaseGeneration {
+                incarnation: 42,
+                sequence: 2,
+            },
+            LeaseGeneration {
+                incarnation: 43,
+                sequence: 1,
+            },
+        ] {
+            let keeper = LeaseKeeper::new(OWNER.into(), 60);
+            keeper.take_readd();
+            keeper.observe_add(LeaseGeneration {
+                incarnation: 42,
+                sequence: 1,
+            });
+            let probe = Probe {
+                incarnation: Some(43),
+                block: true,
+                ..Default::default()
+            };
+            let add = async {
+                probe.entered.notified().await;
+                keeper.observe_add(next);
+                assert!(keeper.take_readd());
+                probe.release.notify_one();
+            };
+            tokio::join!(keeper.probe_restart(&probe), add);
+            assert_eq!(keeper.generation(), Some(next));
+            assert_eq!(keeper.health().state, LeaseState::Live);
+            assert!(!keeper.take_readd());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_probe_does_not_restore_failed_renewal_health() {
+        let speaker = FaultyBlackholes::default();
+        speaker.inner.restart().await;
+        let keeper = LeaseKeeper::new(OWNER.into(), 60);
+        keeper.take_readd();
+        keeper.observe_add(
+            speaker
+                .announce_leased_blackhole(&route(), 60)
+                .await
+                .unwrap()
+                .0,
+        );
+        speaker.fail_renewals.store(true, SeqCst);
+        keeper.renew_once(&speaker).await;
+        let before = keeper.health();
+        let live_at = keeper.held.lock().unwrap().live_at;
+        tokio::time::advance(Duration::from_secs(60)).await;
+        keeper.probe_restart(&speaker).await;
+        assert_eq!(keeper.health().state, LeaseState::Expired);
+        assert_eq!(keeper.health().last_renewal_at, before.last_renewal_at);
+        assert_eq!(keeper.health().last_renewal_result, Some("error"));
+        assert_eq!(keeper.held.lock().unwrap().live_at, live_at);
+        assert!(!keeper.take_readd());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_probe_runs_while_renewal_is_blocked_and_late_success_stays_expired() {
+        let speaker = std::sync::Arc::new(FaultyBlackholes::default());
+        let keeper = std::sync::Arc::new(LeaseKeeper::new(OWNER.into(), 60));
+        keeper.take_readd();
+        keeper.observe_add(
+            speaker
+                .announce_leased_blackhole(&route(), 60)
+                .await
+                .unwrap()
+                .0,
+        );
+        speaker.block_renewals.store(true, SeqCst);
+        let task = tokio::spawn(run_lease_renewals(keeper.clone(), speaker.clone()));
+        speaker.renewal_entered.notified().await;
+        speaker.inner.restart().await;
+        tokio::time::advance(RESTART_PROBE_INTERVAL).await;
+        tokio::time::timeout(Duration::from_millis(1), keeper.readd_requested())
+            .await
+            .unwrap();
+        assert_eq!(speaker.renewals.load(SeqCst), 1);
+        assert_eq!(keeper.generation(), None);
+        assert_eq!(keeper.health().state, LeaseState::Expired);
+        assert!(
+            keeper.health().last_renewal_result.is_none(),
+            "renewal still in flight"
+        );
+        assert!(keeper.take_readd());
+        speaker.release_renewal.notify_one();
+        tokio::task::yield_now().await;
+        assert_eq!(keeper.health().last_renewal_result, Some("success"));
+        assert_eq!(
+            keeper.generation(),
+            None,
+            "late renewal cannot restore lost state"
+        );
+        assert_eq!(keeper.health().state, LeaseState::Expired);
+        assert!(!keeper.take_readd());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
     }
 
     #[tokio::test]
@@ -491,6 +723,15 @@ mod tests {
             assert_eq!(health.last_renewal_result, Some("success"), "{health:?}");
             assert_eq!(health.state, LeaseState::Live);
         }
+        inner.restart().await;
+        keeper
+            .probe_restart(fenced.injection_leases().unwrap())
+            .await;
+        assert_eq!(keeper.generation(), None);
+        assert!(
+            keeper.take_readd(),
+            "read-only restart probing stays unfenced"
+        );
         // Adds stay fenced.
         assert!(matches!(
             fenced
@@ -531,6 +772,11 @@ mod tests {
         keeper.renew_once(&speaker).await;
         assert_eq!(speaker.renewals.load(SeqCst), 0);
         assert_eq!(keeper.health().state, LeaseState::NotRenewing);
+        speaker.inner.restart().await;
+        keeper.probe_restart(&speaker).await;
+        assert_eq!(keeper.generation(), None);
+        assert_eq!(keeper.health().state, LeaseState::NotRenewing);
+        assert_eq!(speaker.renewals.load(SeqCst), 0);
     }
 
     #[tokio::test]

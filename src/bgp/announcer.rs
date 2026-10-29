@@ -316,6 +316,12 @@ pub struct LeaseGeneration {
 /// Owner-scoped injection lease RPCs (ADR 027). Availability is not success.
 #[async_trait]
 pub trait InjectionLeases: Send + Sync {
+    /// Process incarnation, when supported. Zero from older daemons is unknown;
+    /// liveness alone never proves that an owner's lease remains live.
+    async fn incarnation(&self) -> Result<Option<u64>> {
+        Ok(None)
+    }
+
     /// `ListInjectionLeases(owner)`: `None` when the daemon does not implement
     /// leases, otherwise the owner's live generation if its lease has time left.
     async fn live_lease(&self, owner: &str) -> Result<Option<Option<LeaseGeneration>>>;
