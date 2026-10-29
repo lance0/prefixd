@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shows that state as unobserved. Unbound interface-only neighbors still use the
   optional session snapshot. No speaker minimum or metric label changes.
 
+- The event dashboard now uses 20-row server cursor navigation, literal search
+  across IP and event UUID, and exact source/vector filters. Ordering
+  is fixed by ingestion time. CSV export traverses every matching page and
+  refuses incomplete, duplicate or nonadvancing results. Exports are live and
+  retained in browser memory; large-history memory qualification remains open.
+  `GET /v1/events` accepts bounded `q`, `source` and `vector` parameters while
+  preserving unfiltered behavior and the existing tuple cursor format.
+- Dashboard CSV exports now quote carriage returns inside fields, preserving
+  detector and audit text as one field instead of creating extra CSV records.
+
 - The dashboard mitigation list now uses complete server cursor navigation and
   server-side search, customer, POP and status filters instead of filtering only
   the newest 100 rows. Pages stay in newest-first order; column sorting of a

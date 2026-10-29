@@ -64,9 +64,9 @@ describe("real API hooks", () => {
 
   it("forwards event filters to the API", async () => {
     controller.route("GET", "/v1/events", () => json({ events: [], count: 0, next_cursor: null, has_more: false }))
-    const filters = { limit: 10, cursor: "event-cursor" }
+    const filters = { limit: 10, cursor: "event-cursor", q: "Β%", source: "All", vector: "udp_flood" }
     renderHook(() => useEvents(filters), wrapper())
-    await waitFor(() => expect(query("GET", "/v1/events")).toEqual([{ limit: "10", cursor: "event-cursor" }]))
+    await waitFor(() => expect(query("GET", "/v1/events")).toEqual([{ limit: "10", cursor: "event-cursor", q: "Β%", source: "All", vector: "udp_flood" }]))
   })
 
   it("does not fetch detail records without an identifier", async () => {

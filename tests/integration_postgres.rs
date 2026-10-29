@@ -7407,3 +7407,149 @@ async fn test_mitigation_search_is_literal_complete_and_matches_postgres() {
     assert_eq!(result["count"], 1);
     assert_eq!(result["mitigations"][0]["customer_id"], "Literal_%\\β");
 }
+
+#[tokio::test]
+async fn test_event_search_is_literal_complete_and_matches_postgres() {
+    use prefixd::db::{EventListParams, ListCursor, ListParams, MockRepository, RepositoryTrait};
+    use prefixd::domain::{AttackEvent, AttackEventInput};
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    let ctx = TestContext::new().await;
+    let repositories: [Arc<dyn RepositoryTrait>; 2] =
+        [ctx.repo.clone(), Arc::new(MockRepository::new())];
+    let timestamp = "2026-10-27T10:00:00Z".parse().unwrap();
+    for repo in repositories {
+        for id in 1..=225_u128 {
+            let input: AttackEventInput = serde_json::from_value(serde_json::json!({
+                "timestamp": timestamp, "source": if id == 1 { "Literal_%\\β" } else if id == 2 { "All" } else { "all" },
+                "victim_ip": if id == 1 { "2001:db8::abc" } else { "203.0.113.10" },
+                "vector": "udp_flood"
+            })).unwrap();
+            let mut event = AttackEvent::from_input(input);
+            event.event_id = Uuid::from_u128(id);
+            event.ingested_at = timestamp;
+            if id == 1 {
+                event.vector = "All".into();
+            } else if id == 2 {
+                event.vector = "Β_%".into();
+            }
+            repo.insert_event(&event).await.unwrap();
+        }
+        for (query, expected) in [
+            ("", 225),
+            ("203.0.113.", 224),
+            ("DB8::ABC", 1),
+            ("UDP_FLOOD", 0),
+            ("literal", 0),
+            ("%", 0),
+            ("\\", 0),
+            ("Β", 0),
+            ("x%", 0),
+            ("00000000-0000-0000-0000-0000000000E1", 1),
+        ] {
+            let mut cursor = None;
+            let mut ids = Vec::new();
+            loop {
+                let page = repo
+                    .list_events_filtered(&EventListParams {
+                        query: Some(query.into()),
+                        pagination: ListParams {
+                            limit: 20,
+                            cursor,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+                assert!(page.len() <= 20);
+                ids.extend(page.iter().map(|row| row.event_id));
+                if page.len() < 20 {
+                    break;
+                }
+                let last = page.last().unwrap();
+                cursor = Some(ListCursor {
+                    timestamp: last.ingested_at,
+                    id: last.event_id,
+                });
+            }
+            assert_eq!(ids.len(), expected, "query {query:?}");
+            assert!(
+                ids.windows(2).all(|pair| pair[0] > pair[1]),
+                "stable unique order for {query:?}"
+            );
+        }
+        for (source, vector, expected) in [
+            (Some("All"), None, 1),
+            (Some("all"), None, 223),
+            (Some("ALL"), None, 0),
+            (Some("Literal_%\\β"), Some("All"), 1),
+            (None, Some("all"), 0),
+            (None, Some("udp_flood"), 223),
+            (Some("All"), Some("Β_%"), 1),
+            (Some("All"), Some("β_%"), 0),
+            (Some("All"), Some("All"), 0),
+        ] {
+            let page = repo
+                .list_events_filtered(&EventListParams {
+                    source: source.map(str::to_owned),
+                    vector: vector.map(str::to_owned),
+                    pagination: ListParams {
+                        limit: 1000,
+                        start: Some(timestamp),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(page.len(), expected, "{source:?} {vector:?}");
+        }
+        let old = repo
+            .list_events(&ListParams {
+                limit: 1000,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(old.len(), 225);
+        assert!(
+            repo.list_events_filtered(&EventListParams {
+                pagination: ListParams {
+                    limit: 20,
+                    end: Some(timestamp),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .is_empty()
+        );
+    }
+    let app = ctx.router().await;
+    for (query, expected) in [
+        ("q=DB8&source=Literal_%25%5C%CE%B2&vector=All", 1),
+        ("source=All", 1),
+        ("source=all", 223),
+        ("vector=all", 0),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/events?limit=1000&{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["count"], expected);
+    }
+}

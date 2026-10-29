@@ -15238,3 +15238,55 @@ async fn test_mitigation_search_rejects_oversized_and_nul_queries() {
         assert_eq!(response.status(), expected);
     }
 }
+
+#[tokio::test]
+async fn test_event_search_filter_validation() {
+    let app = setup_app().await;
+    for filter in [
+        "q=%00".to_string(),
+        format!("q={}", "a".repeat(257)),
+        format!("q={}", "%CE%B2".repeat(129)),
+        "source=".into(),
+        "vector=".into(),
+        "source=%00".into(),
+        "vector=%00".into(),
+        format!("source={}", "a".repeat(257)),
+        format!("vector={}", "%CE%B2".repeat(129)),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/events?{filter}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{filter}");
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"].is_string());
+    }
+    for filter in [
+        "q=".to_string(),
+        "limit=20".into(),
+        "limit=100&q=UDP&source=All&vector=udp_flood".into(),
+        "source=All&vector=all".into(),
+        format!("q={}", "%CE%B2".repeat(128)),
+        format!("source={}&vector={}", "a".repeat(256), "%CE%B2".repeat(128)),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/events?{filter}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{filter}");
+    }
+}

@@ -736,6 +736,9 @@ export interface EventsResponse {
 }
 
 export async function getEvents(params?: {
+  q?: string
+  source?: string
+  vector?: string
   limit?: number
   cursor?: string
   start?: string
@@ -751,9 +754,58 @@ export async function getEvents(params?: {
 
   if (params?.end) searchParams.set("end", params.end)
 
+  for (const name of ["q", "source", "vector"] as const) {
+    if (params?.[name] !== undefined) searchParams.set(name, params[name])
+  }
+
   const query = searchParams.toString()
 
   return fetchApi<EventsResponse>(`/v1/events${query ? `?${query}` : ""}`)
+}
+
+/** Live traversal, retained in memory; reject any incomplete or nonadvancing listing. */
+export async function getAllEvents(params: Omit<NonNullable<Parameters<typeof getEvents>[0]>, "limit" | "cursor">): Promise<Event[]> {
+  const rows: Event[] = []
+  const ids = new Set<string>()
+  const cursors = new Set<string>()
+  let cursor: string | undefined
+  let previous: { millis: number; fraction: string; id: string } | undefined
+
+  do {
+    const page = await getEvents({ ...params, limit: 1000, cursor })
+
+    for (const event of page.events) {
+      // PostgreSQL timestamps retain microseconds that Date.parse alone would discard.
+      const position = {
+        millis: Date.parse(event.ingested_at),
+        fraction: (event.ingested_at.match(/\.(\d+)/)?.[1] ?? "").padEnd(9, "0"),
+        id: event.event_id,
+      }
+
+      const advancing = !previous || position.millis < previous.millis ||
+        (position.millis === previous.millis && (position.fraction < previous.fraction ||
+          (position.fraction === previous.fraction && position.id < previous.id)))
+
+      if (!Number.isFinite(position.millis) || !advancing || ids.has(event.event_id)) {
+        throw new Error("Incomplete event export: duplicate or nonadvancing row")
+      }
+
+      ids.add(event.event_id)
+      rows.push(event)
+      previous = position
+    }
+
+    if (!page.has_more) break
+
+    if (!page.events.length || !page.next_cursor || cursors.has(page.next_cursor)) {
+      throw new Error("Incomplete event export: invalid continuation")
+    }
+
+    cursors.add(page.next_cursor)
+    cursor = page.next_cursor
+  } while (cursor)
+
+  return rows
 }
 
 export interface AuditEntry {

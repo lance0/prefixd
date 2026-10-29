@@ -48,8 +48,8 @@ use the session snapshot. Complete desired/acknowledged state and router
 qualification remain separate work.
 
 Controller inventory enumeration and the public mitigation, event, audit and
-signal-group cursors preserve tied timestamps. The mitigation list uses
-server-backed search, filters and cursor navigation; event/audit lists and the
+signal-group cursors preserve tied timestamps. The mitigation and event lists use
+server-backed search, filters and cursor navigation; audit lists and the
 command palette still need complete pagination.
 
 ## Near-term work
@@ -62,10 +62,10 @@ command palette still need complete pagination.
 - Qualify router receipt and traffic enforcement separately for each tested
   backend, vendor, software version and topology. Preserve historical GoBGP
   results; qualify rustbgpd against FRR/Juniper and Arista/Cisco independently.
-- Replace the remaining bounded event/audit and command-palette subsets with
+- Replace the remaining bounded audit and command-palette subsets with
   complete server-backed filtering and pagination. Verify the operator workflow
   at the tested scale and accessibility settings, including large-history memory
-  and cache growth; mitigation navigation alone does not complete that
+  and cache growth; mitigation and event navigation do not complete that
   qualification.
 - Keep input validation, authentication, dependency audits and native lint gates
   strict. Address concrete findings without adding speculative configuration.
