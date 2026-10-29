@@ -911,11 +911,16 @@ routes the network holds can still apply.
   `(owner_mismatch)`, `(key_unowned)` or `(unspecified)`, and nothing is deleted.
   The `409` body carries the same bounded reason; see
   [speaker ownership refusals](speaker-backends.md#blackhole-lifecycle-and-reconciliation).
-- **Lost lease.** When a renewal is refused, a leased add returns another
-  generation, or the speaker reports one of this owner's routes with no lease
-  time left, prefixd re-adds every active leased blackhole at once. A speaker
-  restart is detected this way. Lease expiry is never recorded as a
-  withdrawal: the database intent stays as it was.
+- **Lost lease.** While an enforced controller holds a generation, a read-only
+  `CheckLiveness` probe runs independently of renewal every two seconds, with a
+  two-second deadline. A different nonzero incarnation drops that generation
+  and wakes reconciliation for a full leased re-add. This is a probe cadence,
+  not a recovery deadline: readiness, fencing, database access and sequential
+  adds still affect completion. A refused renewal, a changed generation from
+  an add, or an owned route with no lease time left also triggers recovery.
+  Failed, unsupported or zero-incarnation probes prove no restart and never
+  refresh lease health. Lease expiry is never recorded as a withdrawal: the
+  database intent stays as it was.
 - **Recorded owner.** Each blackhole keeps the owner it was added under.
   Repair and deletion use that owner and never override another owner's
   route. A blackhole added unleased stays unleased until it is withdrawn or

@@ -494,8 +494,17 @@ blackholes. The owner identity also keys the
   `FAILED_PRECONDITION`, or a leased add returns a generation other than the
   one held, prefixd assumes the owner's state is gone and runs a full leased
   re-add of the active intent immediately, not on its next poll (ADR-0141
-  §2). A late renewal is never counted as success. The speaker restarting
-  produces the same signal (ADR-0141 §9).
+  §2). A renewal reply past its deadline is never counted as success. An
+  in-time reply for a superseded generation records its RPC outcome but cannot
+  restore the held lease. The speaker restarting produces the same signal
+  (ADR-0141 §9). An independent read-only
+  `CheckLiveness` probe now runs every two seconds with a two-second deadline
+  while an enforced controller holds a generation. A changed nonzero
+  incarnation invalidates that generation and wakes the same re-add before
+  renewal. A concurrent add of another generation supersedes the probe reply;
+  unknown or failed reads never renew the lease or prove a restart. This
+  cadence is not an end-to-end recovery deadline and does not complete a
+  Graceful Restart replay fence.
 - **Read-back.** A desired route matches only a row whose `injection_owner`
   equals the owner recorded for it, unset for an unleased route. A leased row
   with `lease_remaining_ms` of 0 is expired with its withdrawal pending
@@ -713,8 +722,9 @@ that should land before the freeze.
   Adj-RIB-In and are lost on restart, and router sessions drop. The blackhole
   lifts and attack traffic resumes until reconciliation re-injects live,
   unexpired, non-safelisted intent under its recorded owner. Once (d) ships,
-  that happens as soon as a renewal returns `FAILED_PRECONDITION` or a read
-  sees the loss (rustbgpd ADR-0141 §9). Graceful Restart on the router can
+  recovery is requested when a liveness probe reports a changed incarnation,
+  a renewal returns `FAILED_PRECONDITION`, or a read sees the loss
+  (rustbgpd ADR-0141 §9). Graceful Restart on the router can
   retain the stale route meanwhile. Qualification must measure this interval.
 - **Speaker expiry task dies.** rustbgpd shuts down rather than silently stop
   expiring leases (ADR-0141 §9). prefixd sees a speaker restart, and

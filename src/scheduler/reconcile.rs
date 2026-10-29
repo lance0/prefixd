@@ -5105,10 +5105,10 @@ mod tests {
     }
 
     /// Leased FlowSpec shares the controller's lease with blackholes: one
-    /// generation, and a refused renewal re-adds both kinds at once, never
+    /// generation, and a changed incarnation re-adds both kinds at once, never
     /// through `AddFlowSpec`.
     #[tokio::test]
-    async fn leased_flowspec_shares_the_lease_and_is_re_added_after_a_refused_renewal() {
+    async fn restart_probe_readds_leased_flowspec_and_blackholes_without_renewal() {
         let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
         let repo = Arc::new(MockRepository::new());
         let speaker = Arc::new(FaultyBlackholes::default());
@@ -5144,7 +5144,12 @@ mod tests {
         assert_eq!(counts(), (1, 1, 1), "converged");
 
         speaker.inner.restart().await;
-        lease.renew_once(speaker.as_ref()).await;
+        lease.probe_restart(speaker.as_ref()).await;
+        tokio::time::timeout(Duration::from_millis(100), lease.readd_requested())
+            .await
+            .expect("incarnation change wakes reconciliation without waiting for its poll");
+        assert_eq!(speaker.renewals.load(SeqCst), 0);
+        assert_eq!(lease.generation(), None);
         reconciler.reconcile().await.unwrap();
         assert_eq!(counts(), (2, 2, 2));
         assert_ne!(lease.generation().unwrap(), generation);

@@ -54,6 +54,21 @@ fn auth<T>(request: &Request<T>) -> std::result::Result<(), Status> {
 
 #[tonic::async_trait]
 impl pb::control_service_server::ControlService for Fake {
+    async fn check_liveness(
+        &self,
+        request: Request<pb::CheckLivenessRequest>,
+    ) -> std::result::Result<Response<pb::CheckLivenessResponse>, Status> {
+        auth(&request)?;
+        match self.mode.load(SeqCst) {
+            40 => Err(Status::unimplemented("secret upstream diagnostic")),
+            41 => Err(Status::permission_denied("secret upstream diagnostic")),
+            42 => Ok(Response::new(pb::CheckLivenessResponse { incarnation: 0 })),
+            _ => Ok(Response::new(pb::CheckLivenessResponse {
+                incarnation: 0xfeed,
+            })),
+        }
+    }
+
     async fn get_health(
         &self,
         request: Request<pb::HealthRequest>,
@@ -192,12 +207,21 @@ async fn authenticated_daemon_metadata_preserves_missing_zero_and_failed_observa
         assert_eq!(fake.health_calls.load(SeqCst), before + expected_attempts);
         assert!(!error.contains("secret"));
     }
+    for (mode, expected) in [(0, Some(0xfeed)), (40, None), (42, Some(0))] {
+        fake.mode.store(mode, SeqCst);
+        assert_eq!(speaker.incarnation().await.unwrap(), expected);
+    }
+    fake.mode.store(41, SeqCst);
+    let error = speaker.incarnation().await.unwrap_err().to_string();
+    assert!(!error.contains("secret"));
+    assert!(error.contains("CheckLiveness"));
     fake.mode.store(0, SeqCst);
     let rejected = RustBgpdAnnouncer::connect_with_token(&config, "wrong-token")
         .await
         .unwrap();
     let before = fake.health_calls.load(SeqCst);
     assert!(rejected.daemon_health().await.is_err());
+    assert!(rejected.incarnation().await.is_err());
     assert_eq!(fake.health_calls.load(SeqCst), before + 1);
     server.abort();
 }

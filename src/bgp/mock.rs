@@ -340,6 +340,10 @@ impl BlackholeSpeaker for MockAnnouncer {
 }
 #[async_trait]
 impl InjectionLeases for MockAnnouncer {
+    async fn incarnation(&self) -> Result<Option<u64>> {
+        Ok(Some(self.leases.lock().unwrap().incarnation))
+    }
+
     async fn live_lease(&self, owner: &str) -> Result<Option<Option<LeaseGeneration>>> {
         let mut leases = self.leases.lock().unwrap();
         leases.confirmed = true;
@@ -469,6 +473,10 @@ pub struct FaultyBlackholes {
     pub lease_seconds: std::sync::Mutex<Vec<u32>>,
     /// Every renewal fails with a transport error.
     pub fail_renewals: std::sync::atomic::AtomicBool,
+    /// A renewal stays in flight until the test releases it.
+    pub block_renewals: std::sync::atomic::AtomicBool,
+    pub renewal_entered: tokio::sync::Notify,
+    pub release_renewal: tokio::sync::Notify,
     pub renewals: std::sync::atomic::AtomicUsize,
     /// Plain `AddFlowSpec` and leased FlowSpec adds, counted apart.
     pub flowspec_adds: std::sync::atomic::AtomicUsize,
@@ -514,6 +522,10 @@ impl FlowSpecAnnouncer for FaultyBlackholes {
 #[cfg(test)]
 #[async_trait]
 impl InjectionLeases for FaultyBlackholes {
+    async fn incarnation(&self) -> Result<Option<u64>> {
+        self.inner.incarnation().await
+    }
+
     async fn live_lease(&self, owner: &str) -> Result<Option<Option<LeaseGeneration>>> {
         self.inner.live_lease(owner).await
     }
@@ -525,6 +537,11 @@ impl InjectionLeases for FaultyBlackholes {
     ) -> Result<bool> {
         use std::sync::atomic::Ordering::SeqCst;
         self.renewals.fetch_add(1, SeqCst);
+        if self.block_renewals.load(SeqCst) {
+            self.renewal_entered.notify_one();
+            self.release_renewal.notified().await;
+            return Ok(true);
+        }
         self.lease_seconds.lock().unwrap().push(lease_seconds);
         if self.fail_renewals.load(SeqCst) {
             return Err(PrefixdError::BgpAnnouncementFailed(

@@ -343,10 +343,12 @@ restored by the running poller within its configured interval after readiness.
 The next converged poll performs no repairs. Unknown local keys are preserved.
 
 On a speaker restart, prefixd's active database rows remain desired state. The
-next successful inventory poll repairs missing rules sequentially; there is no
-additional restart detector or concurrent replay fan-out. Recovery time includes
-speaker readiness, polling and RPC completion, so the configured interval alone
-is not a wall-clock SLA under failures or a large backlog.
+next successful inventory poll repairs missing rules sequentially. With opt-in
+leasing, a changed `CheckLiveness` incarnation also wakes reconciliation before
+the next renewal or inventory poll, as described below. There is no concurrent
+replay fan-out. Recovery time includes speaker readiness, fencing, database
+access and RPC completion; neither polling nor probe cadence is a wall-clock
+recovery SLA under failures or a large backlog.
 
 Monitor `prefixd_reconciliation_repairs_total{status="success"}` for repaired
 local intent and `{status="error"}` for rejected repairs. Repair errors also make
@@ -567,10 +569,24 @@ no lifecycle mutex and no database access, and it is not gated by the
 controller fence: renewal only extends routes this owner already holds and
 can never add or resurrect one, so a database outage that puts the controller
 in standby does not let leased blackholes lapse mid-attack. Adds, deletes and
-re-adds stay fenced. A late reply counts as a failed renewal. In dry-run the
+re-adds stay fenced. A reply past the deadline counts as a failed renewal.
+An in-time reply for a superseded generation records its RPC outcome but cannot
+restore the held lease. In dry-run the
 controller never renews, because `RenewLease` is a speaker mutation; health
 reports the lease as `not_renewing`, and routes left by an enforced run lapse
 within one lease.
+
+Alongside renewal, the same task runs an independent read-only `CheckLiveness`
+probe every two seconds while a generation is held, with a two-second deadline.
+A different nonzero process incarnation invalidates only the generation held
+before that read and wakes the same full leased re-add. A concurrent add of a
+new generation supersedes an older probe reply. A pending renewal cannot block
+the probe, and its late reply cannot restore an invalidated generation. Equal,
+zero, unsupported, failed or timed-out reads do not refresh the lease's proof of
+life or renewal health. The probe adds no speaker mutation and does not release
+Graceful Restart replay holds. The background task remains enforced-only;
+read-only probing and renewal stay available in standby, while re-adds stay
+fenced. Unleased recovery still uses inventory polling.
 
 `FAILED_PRECONDITION` from `RenewLease` means the generation is not live: the
 lease expired or rustbgpd restarted. prefixd drops the generation and wakes

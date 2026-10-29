@@ -37,7 +37,11 @@ later, opt-in [leased blackholes](docs/reference/configuration.md#leased-blackho
 (`blackhole.leased`) and [leased FlowSpec](docs/reference/configuration.md#leased-flowspec)
 (`bgp.rustbgpd.leased_flowspec`) let the speaker remove leased intent within one
 lease after renewal stops. Existing unleased rules stay unleased until withdrawn
-or expired. Neither local intent nor peer health establishes vendor forwarding.
+or expired. An independent two-second liveness probe detects a changed rustbgpd
+incarnation and wakes recovery for held leases; unleased recovery remains
+poll-based. Complete replay fencing and per-owner export evidence remain open.
+Neither probe cadence nor local intent establishes a router recovery deadline
+or vendor forwarding.
 
 Per-peer export observation covers blackholes and FlowSpec on rustbgpd, sharing
 one rotating pass budget. It distinguishes current, retained, unsupported and
