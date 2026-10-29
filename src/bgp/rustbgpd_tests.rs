@@ -2266,8 +2266,8 @@ async fn export_dispositions_page_to_completion_and_keep_every_field() {
         );
         assert_eq!(request.page_size, ROUTE_PAGE_SIZE);
         assert!(
-            !request.include_configured,
-            "Established peers only; NOT_ESTABLISHED rows are not requested"
+            request.include_configured,
+            "configured peers must be part of every export page"
         );
         assert_eq!(request.page_token, token);
     }
@@ -2284,6 +2284,60 @@ async fn export_dispositions_page_to_completion_and_keep_every_field() {
         assert_eq!(peer.detail, row.detail);
         assert_eq!(peer.advertised_path_id, row.advertised_path_id);
     }
+    server.abort();
+}
+
+#[tokio::test]
+async fn configured_peers_decode_for_both_export_rpcs_without_session_observation() {
+    let (speaker, fake, server) = export_speaker().await;
+    let mut rows = export_rows();
+    rows[0] = export_row(
+        "fe80::1",
+        pb::PathExportDisposition::NotEstablished,
+        "not_established",
+        "",
+    );
+    rows[0].peer_interface = "eth0".into();
+    *fake.rows.lock().unwrap() = rows;
+    let nlri = FlowSpecNlri {
+        dst_prefix: "203.0.113.1/32".into(),
+        ..Default::default()
+    };
+    for read in [
+        speaker
+            .blackhole_exports(&"203.0.113.1/32".parse().unwrap())
+            .await,
+        speaker.flowspec_exports(&nlri).await,
+    ] {
+        let peers = read.unwrap().unwrap();
+        assert_eq!(peers[0].disposition, ExportDisposition::NotEstablished);
+        assert_eq!(peers[0].peer_address, "fe80::1%eth0");
+        let evidence = crate::domain::BlackholeExportEvidence::from_read(
+            &Ok(Some(peers)),
+            None,
+            chrono::Utc::now(),
+        );
+        let down = evidence.not_established_peers.unwrap();
+        assert_eq!(down.len(), 1);
+        assert_eq!(down[0].state, None);
+        assert_eq!(evidence.counts.committed, 0);
+        assert_eq!(evidence.counts.withheld, 3);
+        assert_eq!(evidence.counts.pending, 1);
+    }
+    assert!(
+        fake.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.include_configured)
+    );
+    assert!(
+        fake.flowspec_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.include_configured)
+    );
     server.abort();
 }
 
@@ -2439,7 +2493,7 @@ async fn flowspec_export_key_matches_add_for_both_families_and_scoped_peers() {
         for request in fake.flowspec_requests.lock().unwrap().iter() {
             assert_eq!(request.afi_safi, add.afi_safi);
             assert_eq!(request.components, add.components);
-            assert!(!request.include_configured);
+            assert!(request.include_configured);
         }
         server.abort();
     }
@@ -2471,11 +2525,7 @@ async fn flowspec_export_reads_refuse_partial_invalid_and_repeated_snapshots() {
     assert_eq!(speaker.flowspec_exports(&nlri).await.unwrap(), None);
     fake.mode.store(0, SeqCst);
     assert_eq!(speaker.flowspec_exports(&nlri).await.unwrap(), Some(vec![]));
-    for invalid in [
-        pb::PathExportDisposition::Unspecified as i32,
-        pb::PathExportDisposition::NotEstablished as i32,
-        999,
-    ] {
+    for invalid in [pb::PathExportDisposition::Unspecified as i32, 999] {
         let mut row = export_rows().remove(0);
         row.disposition = invalid;
         *fake.rows.lock().unwrap() = vec![row];

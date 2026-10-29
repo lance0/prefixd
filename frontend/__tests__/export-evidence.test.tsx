@@ -40,6 +40,14 @@ const mixed = evidence({
 })
 
 describe("export evidence card", () => {
+  it("shows configured peers when the separate session state is unavailable", () => {
+    render(<ExportEvidenceCard evidence={evidence({
+      not_established_peers: [{ peer_address: "fe80::1%eth1", state: null }],
+    })} />)
+    expect(screen.getByTestId("export-evidence")).toHaveTextContent("fe80::1%eth1 (session state not observed)")
+    expect(screen.queryByText("Configured peers without a session were not observed.")).not.toBeInTheDocument()
+  })
+
   it("formats the retained observation in the selected display timezone", () => {
     function ChooseTimeZone() {
       const { setTimeZone } = useTimeZone()
@@ -184,7 +192,7 @@ describe("export evidence card", () => {
 
   it("says when sessions were not observed rather than implying every peer is Established", () => {
     render(<ExportEvidenceCard evidence={{ ...mixed, not_established_peers: null }} />)
-    expect(screen.getByText(/Peer sessions were not observed/)).toBeInTheDocument()
+    expect(screen.getByText(/Configured peers without a session were not observed/)).toBeInTheDocument()
   })
 })
 

@@ -4287,8 +4287,8 @@ mod tests {
         assert_eq!(evidence(&rows[2]).status, ExportObservation::Error);
         assert!(evidence(&rows[2]).peers.is_empty());
         assert_eq!(evidence(&rows[2]).warning, None);
-        // No peer observer on this speaker: the session join is unknown, not none.
-        assert_eq!(evidence(&rows[0]).not_established_peers, None);
+        // The complete export roster supplies membership without a peer observer.
+        assert_eq!(evidence(&rows[0]).not_established_peers, Some(vec![]));
         assert!(
             store.get(simulated.mitigation_id, Some(0)).is_none(),
             "dry-run origin"

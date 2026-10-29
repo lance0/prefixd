@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- rustbgpd export evidence includes configured addressed peers without an
+  Established session even when the separate peer-session read fails. These
+  peers stay outside Established-peer disposition counts; an all-down roster
+  still warns `no_established_peer`. Their `state`
+  is now nullable when no matching FSM observation is available; the dashboard
+  shows that state as unobserved. Unbound interface-only neighbors still use the
+  optional session snapshot. No speaker minimum or metric label changes.
+
 - The event dashboard now uses 20-row server cursor navigation, literal search
   across IP and event UUID, and exact source/vector filters. Ordering
   is fixed by ingestion time. CSV export traverses every matching page and

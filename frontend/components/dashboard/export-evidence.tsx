@@ -128,14 +128,14 @@ export function ExportEvidenceCard({ evidence, now, kind = "blackhole" }: {
 
         {(evidence.historical || evidence.status === "observed" || evidence.status === "no_local_route") && (
           notEstablished === null ? (
-            <p className="text-sm text-muted-foreground">Peer sessions were not observed, so configured peers without a session are not shown.</p>
+            <p className="text-sm text-muted-foreground">Configured peers without a session were not observed.</p>
           ) : notEstablished.length > 0 ? (
             <p className="text-sm">
               <span className="text-muted-foreground">{evidence.historical && "At the retained observation: "}Configured, not Established (sent nothing): </span>
               {notEstablished.map((peer, index) => (
                 <span key={peer.peer_address}>
                   {index > 0 && ", "}
-                  <span className="font-mono">{peer.peer_address}</span> <span className="text-muted-foreground">({peer.state})</span>
+                  <span className="font-mono">{peer.peer_address}</span> <span className="text-muted-foreground">({peer.state ?? "session state not observed"})</span>
                 </span>
               ))}
             </p>

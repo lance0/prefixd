@@ -282,10 +282,10 @@ that version has passed the deployment or router tests. The stubs follow the
 pinned release, and v0.80.0 is the minimum daemon. At startup prefixd reads
 the version that `GetHealth` reports and refuses a daemon older than v0.80.0,
 or one that reports no readable version, with "upgrade the speaker first".
-Peer identity fields are decoded. New optional RPCs remain unused, and
-export requests leave `include_configured` false, so export rows cover
-Established peers only. A daemon rolled back while prefixd runs is
-still caught at runtime: an `UNIMPLEMENTED` lease RPC withdraws the lease
+Peer identity fields are decoded. Both export RPCs set `include_configured`,
+so complete walks also identify managed peers without an Established session.
+Batch and per-owner key-listing RPCs remain unused. A daemon rolled back while
+prefixd runs is still caught at runtime: an `UNIMPLEMENTED` lease RPC withdraws the lease
 capability and the leased add creates nothing.
 
 prefixd does not call `MarkReplayComplete`. Leave prefixd out of
@@ -651,7 +651,8 @@ without ownership and becomes `degraded` after regain while evidence remains
 historical. The interface labels historical rows without a current green
 export claim. No route mutation behavior changes.
 
-rustbgpd lists one row per Established peer:
+prefixd requests all configured addressed peers from rustbgpd. Its public
+`peers` list keeps one row per Established peer:
 
 - `committed`: the route is in that peer's Adj-RIB-Out, committed to its
   outbound path. BGP carries no acceptance signal, so this does not mean the
@@ -664,10 +665,16 @@ rustbgpd lists one row per Established peer:
 - `pending`: export has not settled (`selection_deferred`, `outbound_resync`,
   `orf_pending` or `not_yet_committed`).
 
-A configured peer without an Established session is absent from that list.
-Absent is not withheld: prefixd joins the list with the session read and
-reports such peers as `not_established_peers`, which is null, not empty, when
-the session read failed.
+The export RPC reports `not_established` rows for managed addressed peers
+without an Established session. prefixd partitions those into
+`not_established_peers`, outside disposition counts and warnings. This membership
+survives a failed separate session read. The nullable `state` is enriched only
+from an exact matching non-Established session; conflicting or unavailable FSM
+observations leave it null. A successful session read also supplies unbound
+`interface:*` neighbors awaiting discovery, unless the export roster already
+contains a bound address on that interface. The two reads are separate snapshots.
+For a failed export read or an absent local route, only the optional session
+snapshot supplies this diagnostic list; null means membership was not observed.
 
 A failed or partial read is an observation error. `NOT_FOUND` on the first page
 means the speaker holds no local route at the key (`no_local_route`, which
@@ -729,10 +736,10 @@ mix with `selection_deferred`, stays `pending`.
 
 rustbgpd v0.80.0 supplies the FlowSpec export-disposition RPC used here, plus
 batch unicast reads, configured-peer rows and typed validation-deny details.
-prefixd does not yet consume those latter additions: blackhole reads remain per
-key and both route kinds join a separate session observation; validation detail
-is not exposed. A read is complete or an error. When the
-daemon aborts a paged read because the route, its Established peers or their
+prefixd consumes configured-peer rows for both route kinds; blackhole reads
+remain per key, and typed validation-deny detail is not exposed. The separate
+session observation enriches FSM state and unbound interfaces. A read is complete
+or an error. When the daemon aborts a paged read because the route, its Established peers or their
 export settings changed between pages, prefixd discards the pages and restarts
 once; a second abort is an error.
 

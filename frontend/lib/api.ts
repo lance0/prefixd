@@ -77,8 +77,8 @@ export interface BlackholeExportEvidence {
   historical: boolean
   observed_at: string | null
   peers: PeerExport[]
-  /** Null when sessions were not observed: unknown, not none. */
-  not_established_peers: { peer_address: string; state: string }[] | null
+  /** Membership from export; FSM state is optional separate session evidence. */
+  not_established_peers: { peer_address: string; state: string | null }[] | null
   counts: DispositionCounts
   warning: ExportWarning | null
   error: string | null
