@@ -52,6 +52,10 @@ Mitigate a target by hand from the dashboard or API inside the same guardrails,
 then withdraw it with a reason that the audit log keeps. Rehearse policy in
 dry-run before you let it announce.
 
+For active rules on rustbgpd, [export evidence](docs/reference/speaker-backends.md#export-evidence)
+separates Established-peer dispositions from configured peers without a session.
+Missing session state is reported as unobserved.
+
 [Manual mitigation](docs/cookbook/manual-mitigation.md) · [Dry-run rollout](docs/cookbook/dry-run-rollout.md) ·
 [Troubleshooting](docs/how-to/troubleshooting.md)
 
@@ -64,9 +68,11 @@ or `prefixdctl`. The controller serves its OpenAPI document at `/openapi.json`.
 [Authentication](docs/how-to/deployment.md#authentication-setup)
 
 prefixd stops at the speaker. Router receipt and enforcement depend on your
-router software, address family and import policy. Existing router receipts are
-scoped to GoBGP; rustbgpd has local and peer tests but no vendor router receipt
-yet. See [vendor compatibility](docs/reference/vendors.md).
+router software, address family and import policy. Dated [FRR receipts](docs/reference/vendors.md#frr--verified-control-plane)
+cover FlowSpec BGP receipt through rustbgpd and GoBGP. The separate
+[rustbgpd blackhole receipt](docs/reference/qualification/blackhole-frr-2026-10-19.md)
+covers discard state in zebra and the container kernel. These do not prove packet
+forwarding; see [vendor compatibility](docs/reference/vendors.md) for their scope.
 
 ## Try it locally
 

@@ -34,8 +34,8 @@ pub enum ExportObservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct NotEstablishedPeer {
     pub peer_address: String,
-    /// Session state, such as `active` or `idle`.
-    pub state: String,
+    /// Optional separately observed FSM state, such as `active` or `idle`.
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, ToSchema)]
@@ -51,6 +51,7 @@ impl DispositionCounts {
             ExportDisposition::Committed => self.committed += 1,
             ExportDisposition::Withheld => self.withheld += 1,
             ExportDisposition::Pending => self.pending += 1,
+            ExportDisposition::NotEstablished => {}
         }
     }
 
@@ -59,6 +60,7 @@ impl DispositionCounts {
             ExportDisposition::Committed => self.committed,
             ExportDisposition::Withheld => self.withheld,
             ExportDisposition::Pending => self.pending,
+            ExportDisposition::NotEstablished => 0,
         }
     }
 }
@@ -159,8 +161,9 @@ pub struct BlackholeExportEvidence {
     pub observed_at: Option<DateTime<Utc>>,
     /// One row per Established peer from a complete read, possibly historical.
     pub peers: Vec<PeerExport>,
-    /// Configured peers without an Established session. Null when the session
-    /// read failed or is unsupported: unknown, not none.
+    /// Configured peers without an Established session. A complete export read
+    /// supplies addressed peers even when optional session observation failed.
+    /// Null when neither read establishes membership: unknown, not none.
     pub not_established_peers: Option<Vec<NotEstablishedPeer>>,
     pub counts: DispositionCounts,
     /// Present when an observed route is committed to no Established peer.
@@ -195,7 +198,7 @@ impl BlackholeExportEvidence {
                 .filter(|peer| !peer.state.is_established())
                 .map(|peer| NotEstablishedPeer {
                     peer_address: peer.address.clone(),
-                    state: peer.state.to_string(),
+                    state: Some(peer.state.to_string()),
                 })
                 .collect()
         });
@@ -206,13 +209,50 @@ impl BlackholeExportEvidence {
         };
         match read {
             Ok(Some(peers)) => {
+                // Export rows fence addressed membership; ListNeighbors only
+                // enriches FSM state and supplies interfaces awaiting discovery.
+                let mut down = Vec::new();
                 for peer in peers {
+                    if peer.disposition == ExportDisposition::NotEstablished {
+                        down.push(NotEstablishedPeer {
+                            peer_address: peer.peer_address.clone(),
+                            state: sessions.and_then(|sessions| {
+                                sessions
+                                    .iter()
+                                    .find(|session| {
+                                        session.address == peer.peer_address
+                                            && !session.state.is_established()
+                                    })
+                                    .map(|session| session.state.to_string())
+                            }),
+                        });
+                        continue;
+                    }
                     evidence.counts.add(peer.disposition);
+                    evidence.peers.push(peer.clone());
                 }
+                down.extend(
+                    evidence
+                        .not_established_peers
+                        .iter()
+                        .flatten()
+                        .filter(|peer| peer.peer_address.starts_with("interface:"))
+                        .filter(|peer| {
+                            !peers.iter().any(|row| {
+                                row.peer_address
+                                    .rsplit_once('%')
+                                    .is_some_and(|(_, interface)| {
+                                        peer.peer_address.strip_prefix("interface:")
+                                            == Some(interface)
+                                    })
+                            })
+                        })
+                        .cloned(),
+                );
+                evidence.not_established_peers = Some(down);
                 if evidence.counts.committed == 0 {
-                    evidence.warning = Some(unexported(peers));
+                    evidence.warning = Some(unexported(&evidence.peers));
                 }
-                evidence.peers = peers.clone();
             }
             Ok(None) => evidence.status = ExportObservation::NoLocalRoute,
             Err(error) => {
@@ -428,6 +468,100 @@ impl ExportEvidenceStore {
 mod tests {
     use super::*;
     use crate::bgp::SessionState;
+
+    #[test]
+    fn configured_export_membership_survives_missing_or_raced_sessions() {
+        use ExportDisposition::{Committed, NotEstablished};
+        let peers = vec![
+            peer("fe80::1%eth0", Committed, ""),
+            peer("fe80::1%eth1", NotEstablished, "not_established"),
+        ];
+        let sessions = [
+            PeerStatus {
+                name: "eth0".into(),
+                address: "fe80::1%eth0".into(),
+                state: SessionState::Active,
+            },
+            PeerStatus {
+                name: "eth1".into(),
+                address: "fe80::1%eth1".into(),
+                state: SessionState::Established,
+            },
+            PeerStatus {
+                name: "stale".into(),
+                address: "192.0.2.99".into(),
+                state: SessionState::Idle,
+            },
+            PeerStatus {
+                name: "interface:swp1".into(),
+                address: "interface:swp1".into(),
+                state: SessionState::Idle,
+            },
+            PeerStatus {
+                name: "interface:eth0".into(),
+                address: "interface:eth0".into(),
+                state: SessionState::Idle,
+            },
+            PeerStatus {
+                name: "interface:eth1".into(),
+                address: "interface:eth1".into(),
+                state: SessionState::Idle,
+            },
+        ];
+        for sessions in [None, Some(sessions.as_slice())] {
+            let evidence =
+                BlackholeExportEvidence::from_read(&Ok(Some(peers.clone())), sessions, Utc::now());
+            assert_eq!(evidence.peers, peers[..1]);
+            assert_eq!(
+                evidence.counts,
+                DispositionCounts {
+                    committed: 1,
+                    withheld: 0,
+                    pending: 0
+                }
+            );
+            assert!(evidence.warning.is_none());
+            let down = evidence.not_established_peers.unwrap();
+            assert_eq!(
+                down[0],
+                NotEstablishedPeer {
+                    peer_address: "fe80::1%eth1".into(),
+                    state: None
+                }
+            );
+            assert_eq!(down.len(), if sessions.is_some() { 2 } else { 1 });
+            if sessions.is_some() {
+                assert_eq!(
+                    down[1],
+                    NotEstablishedPeer {
+                        peer_address: "interface:swp1".into(),
+                        state: Some("idle".into())
+                    }
+                );
+            }
+        }
+        let all_down =
+            BlackholeExportEvidence::from_read(&Ok(Some(peers[1..].to_vec())), None, Utc::now());
+        assert_eq!(all_down.counts, DispositionCounts::default());
+        assert!(all_down.peers.is_empty());
+        assert_eq!(all_down.warning.unwrap().reason, "no_established_peer");
+        let withheld = peer("192.0.2.1", ExportDisposition::Withheld, "export_policy");
+        let denied = BlackholeExportEvidence::from_read(
+            &Ok(Some(vec![withheld.clone(), peers[1].clone()])),
+            None,
+            Utc::now(),
+        );
+        assert_eq!(denied.warning.unwrap().reason, "export_policy");
+        let empty =
+            BlackholeExportEvidence::from_read(&Ok(Some(vec![])), Some(&sessions), Utc::now());
+        assert!(
+            empty
+                .not_established_peers
+                .unwrap()
+                .iter()
+                .all(|peer| peer.peer_address.starts_with("interface:"))
+        );
+    }
 
     fn peer(address: &str, disposition: ExportDisposition, reason: &str) -> PeerExport {
         PeerExport {
@@ -654,14 +788,22 @@ mod tests {
         assert_eq!(missing.status, ExportObservation::NoLocalRoute);
         assert_eq!(missing.warning, None);
         assert_eq!(missing.not_established_peers, None);
-        let empty = BlackholeExportEvidence::from_read(&Ok(Some(vec![])), Some(&sessions), now);
+        let empty = BlackholeExportEvidence::from_read(
+            &Ok(Some(vec![peer(
+                "192.0.2.2",
+                ExportDisposition::NotEstablished,
+                "not_established",
+            )])),
+            Some(&sessions),
+            now,
+        );
         assert_eq!(empty.status, ExportObservation::Observed);
         assert_eq!(empty.warning.unwrap().reason, "no_established_peer");
         assert_eq!(
             empty.not_established_peers.unwrap(),
             [NotEstablishedPeer {
                 peer_address: "192.0.2.2".into(),
-                state: "active".into(),
+                state: Some("active".into()),
             }]
         );
 

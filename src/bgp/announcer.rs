@@ -124,7 +124,7 @@ pub trait DaemonHealthObserver: Send + Sync {
     async fn daemon_health(&self) -> Result<DaemonHealth>;
 }
 
-/// A local unicast route's export state toward one Established peer.
+/// A local route's export state toward one configured peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExportDisposition {
@@ -135,9 +135,12 @@ pub enum ExportDisposition {
     Withheld,
     /// Export has not settled; `reason` names what is outstanding.
     Pending,
+    /// Configured without an Established session; excluded from export counts.
+    NotEstablished,
 }
 
 impl ExportDisposition {
+    /// The Established-peer dispositions used by export metrics.
     pub const ALL: [Self; 3] = [Self::Committed, Self::Withheld, Self::Pending];
 
     pub fn as_str(self) -> &'static str {
@@ -145,11 +148,12 @@ impl ExportDisposition {
             Self::Committed => "committed",
             Self::Withheld => "withheld",
             Self::Pending => "pending",
+            Self::NotEstablished => "not_established",
         }
     }
 }
 
-/// One Established peer's export disposition, as the speaker reports it.
+/// One configured peer's export disposition, as the speaker reports it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 pub struct PeerExport {
     #[schema(example = "192.0.2.10")]
@@ -171,13 +175,13 @@ pub struct PeerExport {
 /// separate from every writer and mutates nothing.
 #[async_trait]
 pub trait ExportObserver: Send + Sync {
-    /// Every Established peer's disposition of the blackhole at `prefix`
+    /// Every configured addressed peer's disposition of the blackhole at `prefix`
     /// (`path_id` 0), read to the last page. `None` when the speaker holds no
-    /// local route at that key. Configured peers without a session are absent.
+    /// local route at that key. Peers without a session use `NotEstablished`.
     /// A failed or partial read is an error, never an empty list.
     async fn blackhole_exports(&self, prefix: &ipnet::IpNet) -> Result<Option<Vec<PeerExport>>>;
 
-    /// Every Established peer's disposition at the exact AddFlowSpec match key.
+    /// Every configured addressed peer's disposition at the exact AddFlowSpec match key.
     /// Partial reads fail; `None` means the speaker holds no local rule.
     async fn flowspec_exports(
         &self,

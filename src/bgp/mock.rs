@@ -388,11 +388,19 @@ impl ExportObserver for MockAnnouncer {
         Ok(Some(
             self.peers
                 .iter()
-                .filter(|peer| peer.state.is_established())
+                .filter(|peer| !peer.address.starts_with("interface:"))
                 .map(|peer| PeerExport {
                     peer_address: peer.address.clone(),
-                    disposition: ExportDisposition::Committed,
-                    reason: String::new(),
+                    disposition: if peer.state.is_established() {
+                        ExportDisposition::Committed
+                    } else {
+                        ExportDisposition::NotEstablished
+                    },
+                    reason: if peer.state.is_established() {
+                        String::new()
+                    } else {
+                        "not_established".into()
+                    },
                     explain_code: String::new(),
                     detail: String::new(),
                     advertised_path_id: 0,
@@ -420,11 +428,19 @@ impl ExportObserver for MockAnnouncer {
         Ok(Some(
             self.peers
                 .iter()
-                .filter(|peer| peer.state.is_established())
+                .filter(|peer| !peer.address.starts_with("interface:"))
                 .map(|peer| PeerExport {
                     peer_address: peer.address.clone(),
-                    disposition: ExportDisposition::Committed,
-                    reason: String::new(),
+                    disposition: if peer.state.is_established() {
+                        ExportDisposition::Committed
+                    } else {
+                        ExportDisposition::NotEstablished
+                    },
+                    reason: if peer.state.is_established() {
+                        String::new()
+                    } else {
+                        "not_established".into()
+                    },
                     explain_code: String::new(),
                     detail: String::new(),
                     advertised_path_id: 0,

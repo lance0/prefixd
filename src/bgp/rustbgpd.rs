@@ -1248,6 +1248,7 @@ fn decode_export(entry: pb::PathExportDispositionEntry) -> Result<PeerExport> {
         Ok(pb::PathExportDisposition::Committed) => ExportDisposition::Committed,
         Ok(pb::PathExportDisposition::Withheld) => ExportDisposition::Withheld,
         Ok(pb::PathExportDisposition::Pending) => ExportDisposition::Pending,
+        Ok(pb::PathExportDisposition::NotEstablished) => ExportDisposition::NotEstablished,
         _ => return Err(invalid("unknown export disposition")),
     };
     Ok(PeerExport {
@@ -1329,7 +1330,7 @@ impl ExportObserver for RustBgpdAnnouncer {
                         path_id: 0,
                         page_size: ROUTE_PAGE_SIZE,
                         page_token,
-                        include_configured: false,
+                        include_configured: true,
                     },
                 ))
                 .await
@@ -1349,7 +1350,7 @@ impl ExportObserver for RustBgpdAnnouncer {
                             components,
                             page_size: ROUTE_PAGE_SIZE,
                             page_token,
-                            include_configured: false,
+                            include_configured: true,
                         },
                     ))
                     .await

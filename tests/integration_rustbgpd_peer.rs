@@ -57,7 +57,13 @@ async fn wait_flow_export(
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let peers = speaker.flowspec_exports(nlri).await.unwrap().unwrap();
-            if peers.len() == 1 && peers[0].disposition == disposition && peers[0].reason == reason
+            let established: Vec<_> = peers
+                .iter()
+                .filter(|peer| peer.disposition != ExportDisposition::NotEstablished)
+                .collect();
+            if established.len() == 1
+                && established[0].disposition == disposition
+                && established[0].reason == reason
             {
                 eprintln!("FlowSpec export {}: {peers:?}", nlri.dst_prefix);
                 break;
@@ -450,9 +456,18 @@ async fn released_blackhole_export_dispositions_join_established_and_configured_
         .await
         .expect("settled export disposition");
         eprintln!("export dispositions for {}: {peers:?}", route.prefix());
-        // Only the Established peer is listed; the configured one is absent, not withheld.
-        assert_eq!(peers.len(), 1, "{peers:?}");
-        let peer = &peers[0];
+        // Configured peers are listed independently of the optional session read.
+        assert_eq!(peers.len(), 2, "{peers:?}");
+        let down = peers
+            .iter()
+            .find(|peer| peer.peer_address == rustbgpd::UNREACHABLE_PEER)
+            .unwrap();
+        assert_eq!(down.disposition, ExportDisposition::NotEstablished);
+        assert_eq!(down.reason, "not_established");
+        let peer = peers
+            .iter()
+            .find(|peer| peer.peer_address == go_address)
+            .unwrap();
         assert_eq!(peer.peer_address, go_address);
         assert_eq!(peer.disposition, *disposition);
         assert_eq!(peer.reason, *reason);
@@ -467,7 +482,28 @@ async fn released_blackhole_export_dispositions_join_established_and_configured_
         let not_established = evidence.not_established_peers.unwrap();
         assert_eq!(not_established.len(), 1);
         assert_eq!(not_established[0].peer_address, rustbgpd::UNREACHABLE_PEER);
+        let without_sessions =
+            BlackholeExportEvidence::from_read(&Ok(Some(peers.clone())), None, chrono::Utc::now());
+        assert_eq!(without_sessions.counts, evidence.counts);
+        assert_eq!(
+            without_sessions.not_established_peers.unwrap()[0].state,
+            None
+        );
     }
+    let flow = rules().remove(0);
+    speaker.announce(&flow).await.unwrap();
+    let exports = speaker.flowspec_exports(&flow.nlri).await.unwrap().unwrap();
+    let down: Vec<_> = exports
+        .iter()
+        .filter(|peer| peer.disposition == ExportDisposition::NotEstablished)
+        .collect();
+    assert_eq!(
+        down.len(),
+        1,
+        "released FlowSpec configured-peer roster: {exports:?}"
+    );
+    assert_eq!(down[0].peer_address, rustbgpd::UNREACHABLE_PEER);
+    speaker.withdraw(&flow).await.unwrap();
     for (route, ..) in &cases {
         speaker
             .withdraw_blackhole(&route.prefix(), "")
