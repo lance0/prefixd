@@ -63,12 +63,27 @@ def assert_routes(snapshot, present):
     assert snapshot["observation_scope"] == "retained_local_flow_spec_intent"
     routes = snapshot["routes"]
     assert isinstance(routes, list)
-    assert len(routes) == int(present), "unexpected retained local FlowSpec inventory"
-    if present:
-        assert routes[0]["nlri"]["dst_prefix"] == f"{VICTIM}/32"
-        assert routes[0]["nlri"]["protocol"] == 17
-        assert routes[0]["nlri"]["dst_ports"] == [53]
-        assert routes[0]["actions"][0]["action_type"] == "discard"
+    expected = {
+        "nlri": {"dst_prefix": f"{VICTIM}/32", "protocol": 17, "dst_ports": [53]},
+        "actions": [{"action_type": "discard"}],
+    }
+    assert routes == ([expected] if present else []), "unexpected retained local FlowSpec inventory"
+
+
+def stop_process_group(process):
+    for requested_signal in (signal.SIGTERM, signal.SIGKILL):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, requested_signal)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            process.poll()  # Reap the leader without mistaking its exit for descendant completion.
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                process.wait(timeout=10)
+                return
+            time.sleep(0.05)
+    raise TimeoutError("owned process group survived SIGKILL")
 
 
 class Stack(contextlib.ExitStack):
@@ -123,15 +138,10 @@ class Stack(contextlib.ExitStack):
             )
 
         def cleanup():
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGTERM)
             try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=10)
-            self.retain(f"{name}.log", path.read_text())
+                stop_process_group(process)
+            finally:
+                self.retain(f"{name}.log", path.read_text())
 
         self.callback(cleanup)
         return process
@@ -379,6 +389,34 @@ prefixd-browser = "operator"
 
 
 class SelfTests(unittest.TestCase):
+    def test_observation_rejects_extra_match_components_and_actions(self):
+        rule = {
+            "nlri": {"dst_prefix": f"{VICTIM}/32", "protocol": 17, "dst_ports": [53]},
+            "actions": [{"action_type": "discard"}],
+        }
+        observed = {
+            "backend": "rustbgpd",
+            "observation_scope": "retained_local_flow_spec_intent",
+            "routes": [rule],
+        }
+        assert_routes(observed, True)
+        for extra in (
+            {"src_prefix": "198.51.100.0/24"},
+            {"src_ports": [123]},
+            {"fragment": "non_first"},
+            {"packet_length": {"min": 1000, "max": 1500}},
+        ):
+            with self.subTest(extra=extra), self.assertRaises(AssertionError):
+                assert_routes(
+                    {**observed, "routes": [{**rule, "nlri": {**rule["nlri"], **extra}}]}, True
+                )
+        for actions in (
+            [{"action_type": "discard", "rate_bps": 1000}],
+            [*rule["actions"], {"action_type": "police", "rate_bps": 1000}],
+        ):
+            with self.subTest(actions=actions), self.assertRaises(AssertionError):
+                assert_routes({**observed, "routes": [{**rule, "actions": actions}]}, True)
+
     def test_observation_refuses_unknown_failed_or_wrong_scope(self):
         empty = {
             "backend": "rustbgpd",
@@ -450,6 +488,49 @@ class SelfTests(unittest.TestCase):
                 self.assertFalse(stack.logs.exists())
         finally:
             signal.signal(signal.SIGTERM, old)
+
+    def test_cleanup_kills_descendant_after_launcher_exits_on_term(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            ready = output / "descendant.pid"
+            launcher = None
+            descendant = None
+            try:
+                with Stack(output) as stack:
+                    launcher = stack.process(
+                        "launcher",
+                        [
+                            sys.executable,
+                            "-c",
+                            "import signal, subprocess, sys, time; "
+                            "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); "
+                            "subprocess.Popen([sys.executable, '-c', "
+                            "'import os, pathlib, signal, sys, time; "
+                            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
+                            "time.sleep(60)', sys.argv[1]]); time.sleep(60)",
+                            str(ready),
+                        ],
+                        ROOT,
+                        os.environ.copy(),
+                    )
+                    wait_ready(ready.is_file, [launcher])
+                    descendant = int(ready.read_text())
+                    self.assertEqual(os.getpgid(descendant), launcher.pid)
+                self.assertEqual(launcher.returncode, 0)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(descendant, 0)
+            finally:
+                # Even the intentionally failing old-cleanup control must reap its descendant.
+                if launcher:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(launcher.pid, signal.SIGKILL)
+                    launcher.wait(timeout=10)
+                if descendant:
+                    deadline = time.monotonic() + 10
+                    while Path(f"/proc/{descendant}").exists():
+                        assert time.monotonic() < deadline, "self-test descendant was not reaped"
+                        time.sleep(0.05)
 
 
 if __name__ == "__main__":
