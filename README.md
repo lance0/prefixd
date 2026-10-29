@@ -96,7 +96,10 @@ Idle until you configure your edge router in `configs/rustbgpd.toml`.
 The dashboard shows **Live** through nginx and **Polling** when the realtime
 feed is unavailable, including direct Next.js servers. See
 [realtime and polling](docs/how-to/deployment.md#realtime-and-polling) for refresh
-intervals and ingress requirements.
+intervals and ingress requirements. Event history uses 20-row server pages,
+IP/UUID search and exact source/vector filters. CSV export walks all matching
+pages; see [event listing](docs/reference/api.md#list-events) for live-export
+and browser-memory limits.
 
 <img src="docs/images/dashboard-overview.png#gh-light-mode-only" alt="Dashboard overview">
 <img src="docs/images/dashboard-overview-dark.png#gh-dark-mode-only" alt="Dashboard overview">

@@ -460,6 +460,17 @@ pub struct CursorQuery {
 }
 
 #[derive(Deserialize)]
+pub struct ListEventsQuery {
+    limit: Option<u32>,
+    cursor: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+    q: Option<String>,
+    source: Option<String>,
+    vector: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct ListMitigationsQuery {
     status: Option<String>,
     customer_id: Option<String>,
@@ -1677,6 +1688,9 @@ async fn rule_owner(
     path = "/v1/events",
     tag = "events",
     params(
+        ("q" = Option<String>, Query, description = "Literal case-insensitive substring of IP or event UUID; maximum 256 UTF-8 bytes, no NUL. Empty matches every row."),
+        ("source" = Option<String>, Query, description = "Exact case-sensitive source, 1-256 UTF-8 bytes without NUL; omit for every source. All and all are literal identifiers."),
+        ("vector" = Option<String>, Query, description = "Exact case-sensitive vector, 1-256 UTF-8 bytes without NUL; omit for every vector."),
         ("limit" = Option<u32>, Query, description = "Max results (default 100, max 1000)"),
         ("cursor" = Option<String>, Query, description = "Opaque e1 continuation from next_cursor (max 128 bytes); superseded timestamp-only cursors are rejected"),
         ("start" = Option<String>, Query, description = "Inclusive RFC3339 start; empty or malformed supplied values are invalid"),
@@ -1684,18 +1698,40 @@ async fn rule_owner(
     ),
     responses(
         (status = 200, description = "List of events", body = EventsListResponse),
-        (status = 400, description = "Invalid date filter or invalid/superseded event cursor", body = ErrorResponse)
+        (status = 400, description = "Invalid search/source/vector/date filter or invalid/superseded event cursor", body = ErrorResponse)
     )
 )]
 pub async fn list_events(
     State(state): State<Arc<AppState>>,
     auth_session: AuthSession,
     headers: HeaderMap,
-    Query(query): Query<CursorQuery>,
+    Query(filters): Query<ListEventsQuery>,
 ) -> Result<axum::response::Response, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
+    if filters
+        .q
+        .as_ref()
+        .is_some_and(|q| q.len() > 256 || q.contains('\0'))
+    {
+        return Ok(AppError(PrefixdError::InvalidRequest(
+            "invalid event search; q must be at most 256 UTF-8 bytes without NUL".into(),
+        ))
+        .into_response());
+    }
+    for (name, value) in [("source", &filters.source), ("vector", &filters.vector)] {
+        if value
+            .as_ref()
+            .is_some_and(|v| v.is_empty() || v.len() > 256 || v.contains('\0'))
+        {
+            return Ok(AppError(PrefixdError::InvalidRequest(format!(
+                "invalid event {name} filter; expected 1-256 UTF-8 bytes without NUL"
+            )))
+            .into_response());
+        }
+    }
+    let query = &filters;
     let limit = clamp_limit(query.limit.unwrap_or(100));
     let cursor = match query.cursor.as_deref() {
         None => None,
@@ -1719,7 +1755,12 @@ pub async fn list_events(
 
     let mut events = state
         .repo
-        .list_events(&params)
+        .list_events_filtered(&crate::db::EventListParams {
+            pagination: params,
+            query: filters.q,
+            source: filters.source,
+            vector: filters.vector,
+        })
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
