@@ -48,6 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- CI runs the authenticated browser withdrawal smoke against disposable
+  PostgreSQL and pinned rustbgpd, reusing the candidate controller binaries and
+  production dashboard build. It checks pending confirmation, persisted/rendered
+  audit and fresh local speaker intent before and after withdrawal, retains
+  protected failure evidence, and removes its owned stack. No router enforcement
+  qualification is implied.
+
 - FastNetMon guidance distinguishes its source-build native rustbgpd RTBH
   action from the prefixd notify path, and explains the exclusive speaker-target
   requirement and leased/unleased route conflicts.

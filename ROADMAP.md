@@ -21,6 +21,12 @@ the existing authentication modes and the repository boundary remain the runtime
 baseline. The operator overview puts active mitigations, signals, observation
 limits and expiry ahead of historical activity.
 
+CI exercises authenticated browser login, active mitigation, pending withdrawal
+confirmation and persisted/rendered audit against disposable PostgreSQL and
+pinned rustbgpd. Fresh speaker reads check retained local intent before and after
+withdrawal; fault recovery, API type drift, scale and router qualification remain
+separate work.
+
 Polling reconciliation repairs missing rules and supported discard/policing action
 drift for uniquely owned intent. This assumes one running controller per POP and
 exclusive administration of its physical speaker target.
