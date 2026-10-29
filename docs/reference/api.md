@@ -353,6 +353,9 @@ Authorization: Bearer <token>
 
 | Param | Type | Description |
 |-------|------|-------------|
+| `q` | string | Literal case-insensitive substring of IP or event UUID; at most 256 UTF-8 bytes without NUL. Empty matches all rows. |
+| `source` | string | Exact case-sensitive source, 1–256 UTF-8 bytes without NUL; omit for all sources. `All` and `all` are literal identifiers. |
+| `vector` | string | Exact case-sensitive vector, 1–256 UTF-8 bytes without NUL; omit for all vectors. |
 | `limit` | integer | Max results (default 100, max 1000) |
 | `cursor` | string | Opaque `e1` continuation from the previous `next_cursor` (maximum 128 bytes) |
 | `start` | string | RFC3339 start (inclusive); see [list filters](#list-filters) |
@@ -365,6 +368,23 @@ cursors return `400` with a JSON `error`. Restart from the first page to obtain 
 current event cursor. Filters apply before pagination. Undecodable eligible stored rows
 cause `500`, including the lookahead row used for
 `has_more`. Response fields are unchanged; terminal pages have `next_cursor: null`.
+
+Search and exact filters combine before pagination; `%`, `_` and `\` in `q`
+are ordinary characters, not wildcard syntax. Invalid filters return `400`.
+
+The dashboard renders 20 rows per page in newest-ingested order and displays
+page counts, not a total. Source and vector use exact text inputs because there
+is no complete historical catalog; a blank input omits that filter. An event
+UUID deep link starts a server search, so older events can open their detail
+panel. Invalid filter drafts retain the last valid results and disable export.
+
+Event CSV export walks all matching pages and downloads only after the traversal
+succeeds. Failed pages, repeated cursors, duplicate rows and nonadvancing tuples
+abort without a partial file. This is a live traversal, not a snapshot: new rows
+above a visited cursor need a fresh listing and retention may remove rows during
+the walk. Export retains matching rows in browser memory; normal SWR caching
+also retains visited pages for the app lifetime. Large-history memory and
+100,000-row qualification remain open.
 
 **Response:**
 

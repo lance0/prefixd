@@ -70,6 +70,16 @@ pub struct ListParams {
     pub end: Option<DateTime<Utc>>,
 }
 
+/// Event-only filters, applied before tuple pagination.
+#[derive(Debug, Clone, Default)]
+pub struct EventListParams {
+    pub pagination: ListParams,
+    /// Literal case-insensitive substring across IP and event UUID.
+    pub query: Option<String>,
+    pub source: Option<String>,
+    pub vector: Option<String>,
+}
+
 /// Stable continuation position for public mitigation listings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MitigationCursor {
@@ -158,7 +168,14 @@ pub trait RepositoryTrait: Send + Sync {
         source: &str,
         external_id: &str,
     ) -> Result<Option<AttackEvent>>;
-    async fn list_events(&self, params: &ListParams) -> Result<Vec<AttackEvent>>;
+    async fn list_events(&self, params: &ListParams) -> Result<Vec<AttackEvent>> {
+        self.list_events_filtered(&EventListParams {
+            pagination: params.clone(),
+            ..Default::default()
+        })
+        .await
+    }
+    async fn list_events_filtered(&self, params: &EventListParams) -> Result<Vec<AttackEvent>>;
 
     // Audit Log
     async fn insert_audit(&self, entry: &AuditEntry) -> Result<()>;

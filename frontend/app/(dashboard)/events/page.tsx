@@ -14,7 +14,7 @@ export default function EventsPage() {
     <div className="space-y-6">
       <PageHeader title="Events" description="Attack signals received from detectors and operators, newest first." />
       <Suspense fallback={<div className="rounded-md border bg-card"><LoadingRows label="Loading events" rows={5} /></div>}>
-        <EventsContentLive initialEventId={eventId} />
+        <EventsContentLive key={eventId ?? ""} initialEventId={eventId} />
       </Suspense>
     </div>
   )

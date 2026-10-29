@@ -443,7 +443,11 @@ impl RepositoryTrait for Repository {
         Ok(event)
     }
 
-    async fn list_events(&self, params: &ListParams) -> Result<Vec<AttackEvent>> {
+    async fn list_events_filtered(
+        &self,
+        filters: &super::EventListParams,
+    ) -> Result<Vec<AttackEvent>> {
+        let params = &filters.pagination;
         let events = sqlx::query_as::<_, AttackEvent>(
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
@@ -453,6 +457,10 @@ impl RepositoryTrait for Repository {
             WHERE ($2::timestamptz IS NULL OR (ingested_at, event_id) < ($2, $5))
               AND ($3::timestamptz IS NULL OR ingested_at >= $3)
               AND ($4::timestamptz IS NULL OR ingested_at < $4)
+              AND ($6::text IS NULL OR source = $6)
+              AND ($7::text IS NULL OR vector = $7)
+              AND ($8::text IS NULL OR strpos(lower(victim_ip), lower($8)) > 0
+                   OR strpos(event_id::text, lower($8)) > 0)
             ORDER BY ingested_at DESC, event_id DESC LIMIT $1
             "#,
         )
@@ -461,6 +469,9 @@ impl RepositoryTrait for Repository {
         .bind(params.start)
         .bind(params.end)
         .bind(params.cursor.map(|c| c.id))
+        .bind(filters.source.as_deref())
+        .bind(filters.vector.as_deref())
+        .bind(filters.query.as_deref())
         .fetch_all(&self.pool)
         .await?;
         Ok(events)
