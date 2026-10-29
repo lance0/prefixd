@@ -53,6 +53,15 @@ describe("CSV export", () => {
     expect(await getContent()).toBe('name\n"say ""hi"""')
   })
 
+  it.each(["\r", "\r\n", "\n"])("quotes record separators %j within one field", async (separator) => {
+    const getContent = mockCsvEnvironment()
+    const { downloadCsv } = await import("@/lib/csv")
+
+    downloadCsv("test.csv", ["source"], [[`normal${separator}=1+1`]])
+
+    expect(await getContent()).toBe(`source\n"normal${separator}=1+1"`)
+  })
+
   it("sanitizes formula injection characters", async () => {
     const getContent = mockCsvEnvironment()
     const { downloadCsv } = await import("@/lib/csv")

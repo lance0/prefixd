@@ -263,7 +263,12 @@ impl RepositoryTrait for MockRepository {
             .cloned())
     }
 
-    async fn list_events(&self, params: &ListParams) -> Result<Vec<AttackEvent>> {
+    async fn list_events_filtered(
+        &self,
+        filters: &super::EventListParams,
+    ) -> Result<Vec<AttackEvent>> {
+        let params = &filters.pagination;
+        let query = filters.query.as_ref().map(|q| q.to_lowercase());
         let events = self.events.lock().unwrap();
         let mut matching: Vec<_> = events
             .iter()
@@ -274,6 +279,25 @@ impl RepositoryTrait for MockRepository {
             })
             .filter(|e| params.start.is_none_or(|s| e.ingested_at >= s))
             .filter(|e| params.end.is_none_or(|end| e.ingested_at < end))
+            .filter(|e| {
+                filters
+                    .source
+                    .as_ref()
+                    .is_none_or(|source| &e.source == source)
+            })
+            .filter(|e| {
+                filters
+                    .vector
+                    .as_ref()
+                    .is_none_or(|vector| &e.vector == vector)
+            })
+            .filter(|e| {
+                query.as_ref().is_none_or(|q| {
+                    [&e.victim_ip, &e.event_id.to_string()]
+                        .iter()
+                        .any(|value| value.to_lowercase().contains(q))
+                })
+            })
             .collect();
         matching.sort_unstable_by_key(|e| std::cmp::Reverse((e.ingested_at, e.event_id)));
         Ok(matching
