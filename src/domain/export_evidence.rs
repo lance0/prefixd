@@ -240,7 +240,7 @@ impl BlackholeExportEvidence {
                         .filter(|peer| {
                             !peers.iter().any(|row| {
                                 row.peer_address
-                                    .rsplit_once('%')
+                                    .split_once('%')
                                     .is_some_and(|(_, interface)| {
                                         peer.peer_address.strip_prefix("interface:")
                                             == Some(interface)
@@ -468,6 +468,32 @@ impl ExportEvidenceStore {
 mod tests {
     use super::*;
     use crate::bgp::SessionState;
+
+    #[test]
+    fn bound_interfaces_keep_percent_in_their_identity() {
+        let sessions = ["eth%0", "0"].map(|interface| PeerStatus {
+            name: format!("interface:{interface}"),
+            address: format!("interface:{interface}"),
+            state: SessionState::Idle,
+        });
+        let evidence = BlackholeExportEvidence::from_read(
+            &Ok(Some(vec![peer(
+                "fe80::1%eth%0",
+                ExportDisposition::Committed,
+                "",
+            )])),
+            Some(&sessions),
+            Utc::now(),
+        );
+        assert_eq!(
+            evidence.not_established_peers,
+            Some(vec![NotEstablishedPeer {
+                peer_address: "interface:0".into(),
+                state: Some("idle".into()),
+            }])
+        );
+        assert_eq!(evidence.counts.committed, 1);
+    }
 
     #[test]
     fn configured_export_membership_survives_missing_or_raced_sessions() {
