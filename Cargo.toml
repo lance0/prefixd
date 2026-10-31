@@ -20,7 +20,7 @@ tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "limi
 axum-login = "0.18"
 tower-sessions = "0.14"
 tower-sessions-sqlx-store = { version = "0.15", features = ["postgres"] }
-argon2 = "0.5"
+argon2 = "0.6"
 password-hash = "0.5"
 inquire = { version = "0.9", default-features = false, features = ["crossterm"] }
 
