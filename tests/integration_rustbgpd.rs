@@ -227,7 +227,7 @@ async fn live_rustbgpd_v081_inventory_refuses_unrepresented_attributes_without_m
     assert!(before.received_routes.iter().any(|entry| {
         entry.route.as_ref().unwrap().ipv6_extended_communities == [community.clone()]
     }));
-    assert!(speaker.list_rules().await.is_err());
+    assert!(speaker.list_active().await.is_err());
     assert_eq!(fixture.received_flow_spec(3, "0.0.0.0").await, before);
     raw.delete_flow_spec(request(pb::DeleteFlowSpecRequest {
         afi_safi: opaque.afi_safi,
@@ -270,7 +270,7 @@ async fn live_rustbgpd_v081_inventory_refuses_unrepresented_attributes_without_m
         let route = entry.route.as_ref().unwrap();
         route.injection_owner == format!("guarded:{owner}") && route.admission_revision == Some(7)
     }));
-    assert!(speaker.list_rules().await.is_err());
+    assert!(speaker.list_active().await.is_err());
     // Remaining lease time changes between reads; compare the immutable rule payload.
     let after = fixture.received_flow_spec(3, "0.0.0.0").await;
     for (before, after) in before.received_routes.iter().zip(&after.received_routes) {
