@@ -10,7 +10,7 @@ struct Fake {
     repo: Arc<MockRepository>,
     pop: String,
     rows: StdMutex<HashMap<String, (GuardedRule, Instant)>>,
-    other_keys: StdMutex<Vec<FlowSpecNlri>>,
+    other_matches: StdMutex<Vec<FlowSpecNlri>>,
     windows: StdMutex<HashMap<u64, (String, Instant)>>,
     sequence: AtomicU64,
     writes: AtomicUsize,
@@ -175,7 +175,7 @@ impl GuardedFlowSpecSpeaker for Fake {
                     remaining_ms: (*until - Instant::now()).as_millis() as u32,
                 })
                 .collect(),
-            other_keys: self.other_keys.lock().unwrap().clone(),
+            other_matches: self.other_matches.lock().unwrap().clone(),
         })
     }
 }
@@ -219,7 +219,7 @@ async fn fixture(mode: OperationMode) -> (Arc<AppState>, Arc<MockRepository>, Ar
         repo: repo.clone(),
         pop: settings.pop.clone(),
         rows: Default::default(),
-        other_keys: Default::default(),
+        other_matches: Default::default(),
         windows: Default::default(),
         sequence: AtomicU64::new(1),
         writes: AtomicUsize::new(0),
@@ -613,7 +613,7 @@ async fn untracked_local_victim_overlaps_refuse_diversion_without_touching_forei
                 (rule, Instant::now() + Duration::from_secs(30)),
             );
         } else {
-            fake.other_keys.lock().unwrap().push(foreign.clone());
+            fake.other_matches.lock().unwrap().push(foreign.clone());
         }
         let row = state
             .scrubber
@@ -631,7 +631,7 @@ async fn untracked_local_victim_overlaps_refuse_diversion_without_touching_forei
     }
     let (state, _repo, fake) = fixture(OperationMode::Enforced).await;
     ready(&state).await;
-    fake.other_keys.lock().unwrap().push(FlowSpecNlri {
+    fake.other_matches.lock().unwrap().push(FlowSpecNlri {
         dst_prefix: "203.0.113.21/32".into(),
         ..Default::default()
     });

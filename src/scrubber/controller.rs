@@ -555,7 +555,7 @@ impl ScrubberController {
         for nlri in inventory
             .iter()
             .map(|entry| &entry.rule.nlri)
-            .chain(inventory.other_keys.iter())
+            .chain(inventory.other_matches.iter())
         {
             let prefix = nlri
                 .dst_prefix
