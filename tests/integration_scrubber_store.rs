@@ -381,6 +381,23 @@ async fn released_controller_lifecycle_uses_https_postgres_and_independent_guard
         DiversionStatus::Withdrawn
     );
     drop(state);
+    // Stop every controller mutation. The released daemon must expire the
+    // remaining profile's local rule without losing its durable obligation.
+    tokio::time::sleep(Duration::from_secs(32)).await;
+    assert!(
+        speaker.guarded_inventory().await.unwrap().is_empty(),
+        "controller-stop lease expiry is independent of reconciliation"
+    );
+    assert_eq!(
+        database
+            .repo
+            .list_diversions(&settings.pop)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "local expiry alone cannot release durable victim exclusion"
+    );
     let restarted = AppState::new(
         settings,
         common::test_inventory(),
