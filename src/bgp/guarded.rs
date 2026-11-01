@@ -87,6 +87,29 @@ pub struct GuardedObservation {
     pub remaining_ms: u32,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct GuardedInventory {
+    pub entries: Vec<GuardedObservation>,
+    /// Ordinary local rules are retained as occupied keys, never mistaken for absence.
+    pub other_keys: Vec<String>,
+}
+impl std::ops::Deref for GuardedInventory {
+    type Target = [GuardedObservation];
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+impl GuardedInventory {
+    pub fn has_key(&self, nlri: &FlowSpecNlri) -> bool {
+        let key = nlri.compute_hash();
+        self.other_keys.contains(&key)
+            || self
+                .entries
+                .iter()
+                .any(|entry| entry.rule.nlri.compute_hash() == key)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IssuedWindow {
     pub stamp: GuardedStamp,
@@ -113,7 +136,7 @@ pub trait GuardedFlowSpecSpeaker: Send + Sync {
     ) -> Result<u32>;
     async fn delete_guarded(&self, rule: &GuardedRule) -> Result<()>;
     /// Complete dual-family retained inventory. Expired rows remain distinguishable.
-    async fn guarded_inventory(&self) -> Result<Vec<GuardedObservation>>;
+    async fn guarded_inventory(&self) -> Result<GuardedInventory>;
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use super::*;
 use crate::bgp::{
-    GuardedFlowSpecSpeaker, GuardedObservation, GuardedRule, GuardedStamp, IssuedWindow,
+    GuardedFlowSpecSpeaker, GuardedInventory, GuardedObservation, GuardedRule, GuardedStamp,
+    IssuedWindow,
 };
 
 impl From<GuardedStamp> for pb::MutationWindow {
@@ -147,8 +148,9 @@ impl RustBgpdAnnouncer {
         }
     }
 
-    async fn raw_guarded_inventory(&self) -> Result<Vec<GuardedObservation>> {
+    async fn raw_guarded_inventory(&self) -> Result<GuardedInventory> {
         let mut entries = vec![];
+        let mut other_keys = vec![];
         let mut keys = std::collections::HashSet::new();
         for family in [3, 4] {
             let mut client = pb::rib_service_client::RibServiceClient::new(self.channel.clone());
@@ -178,10 +180,20 @@ impl RustBgpdAnnouncer {
                         return Err(invalid("repeated guarded key"));
                     }
                     entries.push(observation);
+                } else {
+                    let ordinary = decode(route, family)?;
+                    let key = ordinary.nlri.compute_hash();
+                    if !keys.insert(key.clone()) {
+                        return Err(invalid("repeated local key"));
+                    }
+                    other_keys.push(key);
                 }
             }
         }
-        Ok(entries)
+        Ok(GuardedInventory {
+            entries,
+            other_keys,
+        })
     }
 }
 
@@ -310,7 +322,7 @@ impl GuardedFlowSpecSpeaker for RustBgpdAnnouncer {
         }
     }
 
-    async fn guarded_inventory(&self) -> Result<Vec<GuardedObservation>> {
+    async fn guarded_inventory(&self) -> Result<GuardedInventory> {
         self.raw_guarded_inventory().await
     }
 }

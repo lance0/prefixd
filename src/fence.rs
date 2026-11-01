@@ -322,7 +322,7 @@ impl crate::bgp::GuardedFlowSpecSpeaker for FencedAnnouncer {
             .delete_guarded(rule)
             .await
     }
-    async fn guarded_inventory(&self) -> Result<Vec<crate::bgp::GuardedObservation>> {
+    async fn guarded_inventory(&self) -> Result<crate::bgp::GuardedInventory> {
         self.inner
             .guarded_flowspec()
             .ok_or_else(|| PrefixdError::Config("guarded FlowSpec unsupported".into()))?
