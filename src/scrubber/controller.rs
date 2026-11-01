@@ -543,6 +543,31 @@ impl ScrubberController {
         ))
     }
 
+    fn foreign_victim_overlap(inventory: &GuardedInventory, row: &Diversion) -> Result<bool> {
+        let victim = row
+            .rule
+            .nlri
+            .dst_prefix
+            .parse::<ipnet::IpNet>()
+            .map_err(|_| PrefixdError::Internal("invalid saved diversion".into()))?
+            .addr();
+        let key = row.rule.nlri.compute_hash();
+        for nlri in inventory
+            .iter()
+            .map(|entry| &entry.rule.nlri)
+            .chain(inventory.other_keys.iter())
+        {
+            let prefix = nlri
+                .dst_prefix
+                .parse::<ipnet::IpNet>()
+                .map_err(|_| PrefixdError::Internal("invalid local speaker inventory".into()))?;
+            if nlri.compute_hash() != key && prefix.contains(&victim) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub async fn create(
         &self,
         state: &AppState,
@@ -744,6 +769,11 @@ impl ScrubberController {
             return Ok(());
         }
         let inventory = speaker.guarded_inventory().await?;
+        if Self::foreign_victim_overlap(&inventory, row)? {
+            return Err(PrefixdError::Conflict(
+                "another local rule affects the diversion victim".into(),
+            ));
+        }
         let durable = state.repo.list_diversions(&state.settings.pop).await?;
         let owned: Vec<_> = durable
             .iter()
@@ -865,6 +895,11 @@ impl ScrubberController {
             );
         }
         let observed = speaker.guarded_inventory().await?;
+        if Self::foreign_victim_overlap(&observed, row)? {
+            return Err(PrefixdError::Conflict(
+                "local victim overlap appeared during mutation".into(),
+            ));
+        }
         if !observed.iter().any(|entry| {
             entry.rule.same_admission(&row.rule)
                 && entry.remaining_ms > 0

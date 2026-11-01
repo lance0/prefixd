@@ -10,6 +10,7 @@ struct Fake {
     repo: Arc<MockRepository>,
     pop: String,
     rows: StdMutex<HashMap<String, (GuardedRule, Instant)>>,
+    other_keys: StdMutex<Vec<FlowSpecNlri>>,
     windows: StdMutex<HashMap<u64, (String, Instant)>>,
     sequence: AtomicU64,
     writes: AtomicUsize,
@@ -174,7 +175,7 @@ impl GuardedFlowSpecSpeaker for Fake {
                     remaining_ms: (*until - Instant::now()).as_millis() as u32,
                 })
                 .collect(),
-            other_keys: vec![],
+            other_keys: self.other_keys.lock().unwrap().clone(),
         })
     }
 }
@@ -218,6 +219,7 @@ async fn fixture(mode: OperationMode) -> (Arc<AppState>, Arc<MockRepository>, Ar
         repo: repo.clone(),
         pop: settings.pop.clone(),
         rows: Default::default(),
+        other_keys: Default::default(),
         windows: Default::default(),
         sequence: AtomicU64::new(1),
         writes: AtomicUsize::new(0),
@@ -581,6 +583,67 @@ async fn unknown_same_owner_inventory_stops_renewal_without_deleting_foreign_int
             .iter()
             .any(|entry| entry.rule.same_admission(&unknown)),
         "untracked intent is retained for expiry, never broadly deleted"
+    );
+}
+
+#[tokio::test]
+async fn untracked_local_victim_overlaps_refuse_diversion_without_touching_foreign_rules() {
+    for (prefix, guarded) in [
+        ("203.0.113.20/32", false),
+        ("203.0.113.0/24", false),
+        ("203.0.113.20/32", true),
+    ] {
+        let (state, _repo, fake) = fixture(OperationMode::Enforced).await;
+        ready(&state).await;
+        let foreign = FlowSpecNlri {
+            dst_prefix: prefix.into(),
+            protocol: Some(17),
+            dst_ports: vec![53],
+            ..Default::default()
+        };
+        if guarded {
+            let rule = GuardedRule {
+                nlri: foreign.clone(),
+                target: "192.0.2.98".parse().unwrap(),
+                owner: "another-tool".into(),
+                revision: 999,
+            };
+            fake.rows.lock().unwrap().insert(
+                foreign.compute_hash(),
+                (rule, Instant::now() + Duration::from_secs(30)),
+            );
+        } else {
+            fake.other_keys.lock().unwrap().push(foreign.clone());
+        }
+        let row = state
+            .scrubber
+            .create(&state, &confirmed(&state, "a", 20).await, "admin")
+            .await
+            .unwrap();
+        assert_eq!(row.status, DiversionStatus::Withdrawing);
+        assert_eq!(
+            fake.writes.load(SeqCst),
+            0,
+            "a different selector for the same victim cannot bypass exclusion"
+        );
+        assert!(fake.guarded_inventory().await.unwrap().has_key(&foreign));
+        assert!(!state.scrubber.profiles().await["a"].armed);
+    }
+    let (state, _repo, fake) = fixture(OperationMode::Enforced).await;
+    ready(&state).await;
+    fake.other_keys.lock().unwrap().push(FlowSpecNlri {
+        dst_prefix: "203.0.113.21/32".into(),
+        ..Default::default()
+    });
+    let row = state
+        .scrubber
+        .create(&state, &confirmed(&state, "a", 20).await, "admin")
+        .await
+        .unwrap();
+    assert_eq!(
+        row.status,
+        DiversionStatus::Active,
+        "unaffected victims remain independent"
     );
 }
 

@@ -145,6 +145,8 @@ RPC. Creation repeats the checks. Existing ownership, safelist, source/match,
 lifetime, customer/POP/global quota and creation-rate limits still apply; profile
 caps can only narrow them. Live and pending diversion excludes every other
 mitigation affecting that victim, including an overlapping destination CIDR.
+Observed local rules from another tool also refuse diversion when they affect
+the victim, even with a different traffic selector; prefixd leaves them untouched.
 
 Dry-run records a simulation and sends no window, add, renewal or delete.
 Simulations do not acquire a speaker lease or reserve a live victim. Every
