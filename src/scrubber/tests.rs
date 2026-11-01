@@ -444,6 +444,47 @@ async fn failed_profile_cannot_renew_through_a_healthy_profile() {
     assert!(inventory.has_key(&b.rule.nlri));
 }
 
+#[tokio::test(start_paused = true)]
+async fn an_expired_report_latches_even_when_fresh_readiness_later_returns() {
+    let (state, _repo, fake) = fixture(OperationMode::Enforced).await;
+    ready(&state).await;
+    let mut row = state
+        .scrubber
+        .create(&state, &confirmed(&state, "a", 20).await, "admin")
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(11)).await;
+    // An authenticated status read must latch the stale authorization in memory.
+    assert!(!state.scrubber.profiles().await["a"].armed);
+    {
+        let mut runtime = state.scrubber.runtime.lock().await;
+        let profile = runtime.profiles.get_mut("a").unwrap();
+        profile.ready = true;
+        profile.readiness = ReadinessState::Ready;
+        profile.valid_until = Some(Instant::now() + Duration::from_secs(10));
+        state
+            .scrubber
+            .drive(&state, &mut runtime, &mut row)
+            .await
+            .unwrap();
+    }
+    assert_eq!(row.status, DiversionStatus::Withdrawing);
+    assert!(fake.guarded_inventory().await.unwrap().is_empty());
+    let writes = fake.writes.load(SeqCst);
+    assert!(
+        state
+            .scrubber
+            .create(&state, &confirmed(&state, "a", 21).await, "admin")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fake.writes.load(SeqCst),
+        writes,
+        "fresh reports never re-arm a latched profile"
+    );
+}
+
 #[tokio::test]
 async fn storage_and_fence_loss_stop_renewal_and_latch_in_memory() {
     let (state, repo, fake) = fixture(OperationMode::Enforced).await;
@@ -547,11 +588,24 @@ async fn unknown_same_owner_inventory_stops_renewal_without_deleting_foreign_int
 async fn withdrawal_retries_preserve_the_requesting_operator() {
     let (state, repo, _fake) = fixture(OperationMode::Enforced).await;
     ready(&state).await;
+    let mut updates = state.ws_broadcast.subscribe();
     let row = state
         .scrubber
         .create(&state, &confirmed(&state, "a", 20).await, "creator")
         .await
         .unwrap();
+    let crate::ws::WsMessage::DiversionUpdated { diversion } = updates.try_recv().unwrap() else {
+        panic!("admission must publish its durable diversion snapshot")
+    };
+    assert_eq!(diversion.id, row.id);
+    assert_eq!(
+        repo.get_diversion(diversion.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        diversion.status
+    );
     let row = state
         .scrubber
         .withdraw(&state, row.id, "withdrawing-admin")
@@ -570,6 +624,10 @@ async fn withdrawal_retries_preserve_the_requesting_operator() {
     assert_eq!(row.withdrawal_actor.as_deref(), Some("withdrawing-admin"));
     let audit = row.audit("scrubber_withdrawn");
     assert_eq!(audit.actor_id.as_deref(), Some("withdrawing-admin"));
+    assert_eq!(
+        audit.details["match"],
+        serde_json::to_value(&row.rule.nlri).unwrap()
+    );
 }
 
 #[tokio::test]

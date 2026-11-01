@@ -90,7 +90,12 @@ impl Speaker {
             release["source_commit"],
             std::env::consts::ARCH
         );
-        let files = tempfile::tempdir().unwrap();
+        // Inner-Docker runners need a directory visible to their sibling
+        // fixture containers; ordinary temporary files may stay Linux-local.
+        let directory = std::env::var_os("PREFIXD_RUSTBGPD_TEST_TMPDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let files = tempfile::tempdir_in(directory).unwrap();
         std::fs::set_permissions(files.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let metadata = files.path().metadata().unwrap();
         let sockets: Vec<_> = (0..3)

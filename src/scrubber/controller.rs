@@ -19,7 +19,7 @@ pub const WINDOW_SECONDS: u32 = 30;
 #[path = "tests.rs"]
 mod tests;
 
-#[derive(Debug, Clone, Copy, Default, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadinessState {
     Ready,
@@ -292,6 +292,22 @@ impl ScrubberController {
         Self::publish_profiles(&runtime.profiles);
     }
 
+    fn expire_readiness(runtime: &mut Runtime) {
+        for (id, profile) in &mut runtime.profiles {
+            if !profile
+                .valid_until
+                .is_some_and(|until| Instant::now() < until)
+            {
+                profile.ready = false;
+                profile.readiness = ReadinessState::Unknown;
+                if profile.armed {
+                    profile.latch("readiness expired; explicit re-arm required");
+                    runtime.windows.remove(id);
+                }
+            }
+        }
+    }
+
     fn ensure_epoch(state: &AppState, runtime: &mut Runtime) -> Result<()> {
         let epoch = state.fence.with_observation_epoch(|epoch| epoch);
         if epoch.is_none() || epoch != runtime.epoch {
@@ -302,18 +318,10 @@ impl ScrubberController {
     }
 
     pub async fn profiles(&self) -> HashMap<String, ProfileState> {
-        let mut states = self.runtime.lock().await.profiles.clone();
-        for profile in states.values_mut() {
-            if !profile
-                .valid_until
-                .is_some_and(|until| Instant::now() < until)
-            {
-                profile.ready = false;
-                profile.readiness = ReadinessState::Unknown;
-            }
-        }
-        Self::publish_profiles(&states);
-        states
+        let mut runtime = self.runtime.lock().await;
+        Self::expire_readiness(&mut runtime);
+        Self::publish_profiles(&runtime.profiles);
+        runtime.profiles.clone()
     }
 
     pub async fn arm(&self, state: &AppState, id: &str, revision: &str, actor: &str) -> Result<()> {
@@ -323,6 +331,7 @@ impl ScrubberController {
         }
         let fresh = self.probe(profile).await?;
         let mut runtime = self.runtime.lock().await;
+        Self::expire_readiness(&mut runtime);
         let _guard = state.mitigation_lock.lock().await;
         state.fence.ensure_active()?;
         state.verified_speaker_binding()?;
@@ -397,6 +406,12 @@ impl ScrubberController {
         );
         runtime.windows.remove(id);
         Self::publish_profiles(&runtime.profiles);
+        let _ = state
+            .ws_broadcast
+            .send(crate::ws::WsMessage::ScrubberUpdated {
+                profile: id.into(),
+                state: runtime.profiles[id].clone(),
+            });
         Ok(())
     }
 
@@ -535,6 +550,7 @@ impl ScrubberController {
         actor: &str,
     ) -> Result<Diversion> {
         let mut runtime = self.runtime.lock().await;
+        Self::expire_readiness(&mut runtime);
         let _guard = state.mitigation_lock.lock().await;
         state.fence.ensure_active()?;
         if state.settings.mode == OperationMode::Enforced {
@@ -600,6 +616,11 @@ impl ScrubberController {
             }
             Self::ensure_epoch(state, &mut runtime)?;
         }
+        let _ = state
+            .ws_broadcast
+            .send(crate::ws::WsMessage::DiversionUpdated {
+                diversion: row.clone(),
+            });
         Ok(row)
     }
 
@@ -645,6 +666,11 @@ impl ScrubberController {
             }
             Self::ensure_epoch(state, &mut runtime)?;
         }
+        let _ = state
+            .ws_broadcast
+            .send(crate::ws::WsMessage::DiversionUpdated {
+                diversion: row.clone(),
+            });
         Ok(row)
     }
 
@@ -654,6 +680,7 @@ impl ScrubberController {
         runtime: &mut Runtime,
         row: &mut Diversion,
     ) -> Result<()> {
+        Self::expire_readiness(runtime);
         state.fence.ensure_active()?;
         state.verified_speaker_binding()?;
         let speaker = state
@@ -820,9 +847,10 @@ impl ScrubberController {
             .profiles
             .get(&row.profile.id)
             .is_some_and(ProfileState::eligible)
+            || row.expires_at <= Utc::now()
         {
             return Err(PrefixdError::Conflict(
-                "scrubber readiness expired before mutation".into(),
+                "scrubber readiness or diversion lifetime expired before mutation".into(),
             ));
         }
         if let Some(generation) = row.generation {
@@ -897,6 +925,8 @@ impl ScrubberController {
         )
         .await;
         let mut runtime = self.runtime.lock().await;
+        // A fresh report cannot erase a gap in readiness since the last pass.
+        Self::expire_readiness(&mut runtime);
         let epoch = state.fence.with_observation_epoch(|epoch| epoch);
         if epoch.is_none() || runtime.epoch.is_some() && runtime.epoch != epoch {
             Self::latch_all(&mut runtime, "controller ownership lost");
@@ -919,6 +949,7 @@ impl ScrubberController {
                 .profiles
                 .get_mut(id)
                 .expect("configured profile state");
+            let before = (current.armed, current.readiness);
             match probe {
                 Ok(fresh) => {
                     current.ready = fresh.ready;
@@ -936,6 +967,20 @@ impl ScrubberController {
                     current.latch("scrubber readiness unknown");
                 }
             }
+            if before != (current.armed, current.readiness) {
+                let audit = crate::observability::AuditEntry::new(
+                    crate::observability::ActorType::System,
+                    Some("scrubber".into()),
+                    "scrubber_readiness",
+                    Some("scrubber_profile"),
+                    Some(id.clone()),
+                    serde_json::json!({"revision":Self::profile(state,id)?.revision,"state":current}),
+                );
+                if let Err(error) = state.repo.insert_audit(&audit).await {
+                    Self::latch_all(&mut runtime, "readiness audit unavailable");
+                    return Err(error);
+                }
+            }
         }
         if !runtime.initialized {
             Self::latch_all(&mut runtime, "startup drain: explicit re-arm required");
@@ -948,7 +993,7 @@ impl ScrubberController {
                 DiversionStatus::Withdrawing,
             ] {
                 crate::observability::metrics::SCRUBBER_INTENTS
-                    .with_label_values(&[&profile.id, status.as_str()])
+                    .with_label_values(&[profile.id.as_str(), status.as_str()])
                     .set(
                         rows.iter()
                             .filter(|row| row.profile.id == profile.id && row.status == status)
@@ -957,6 +1002,12 @@ impl ScrubberController {
             }
         }
         for mut row in rows {
+            let before = (
+                row.status,
+                row.generation,
+                row.withdrawal_reason.clone(),
+                row.last_error.clone(),
+            );
             if let Err(error) = self.drive(state, &mut runtime, &mut row).await {
                 if state.fence.with_observation_epoch(|epoch| epoch) != runtime.epoch {
                     return Err(PrefixdError::Standby);
@@ -972,8 +1023,28 @@ impl ScrubberController {
                     return Err(storage);
                 }
             }
+            if before
+                != (
+                    row.status,
+                    row.generation,
+                    row.withdrawal_reason.clone(),
+                    row.last_error.clone(),
+                )
+            {
+                let _ = state
+                    .ws_broadcast
+                    .send(crate::ws::WsMessage::DiversionUpdated { diversion: row });
+            }
         }
         Self::publish_profiles(&runtime.profiles);
+        for (id, profile) in &runtime.profiles {
+            let _ = state
+                .ws_broadcast
+                .send(crate::ws::WsMessage::ScrubberUpdated {
+                    profile: id.clone(),
+                    state: profile.clone(),
+                });
+        }
         Ok(())
     }
 

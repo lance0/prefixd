@@ -161,6 +161,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
               return k !== null && (
                 k.startsWith("mitigations") ||
                 k.startsWith("events") ||
+                k.startsWith("scrubber-") ||
                 k === "stats" ||
                 k === "dashboard" ||
                 k.startsWith("signal-groups")
@@ -207,6 +208,10 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
           if (message.type === "event_ingested") {
             mutate((key) => swrResource(key)?.startsWith("events") ?? false)
             mutate("stats")
+          }
+
+          if (message.type === "diversion_updated" || message.type === "scrubber_updated") {
+            mutate((key) => swrResource(key)?.startsWith("scrubber-") ?? false)
           }
         } catch (e) {
           console.error("Failed to parse WebSocket message:", e)

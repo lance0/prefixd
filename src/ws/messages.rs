@@ -21,6 +21,17 @@ pub enum WsMessage {
     /// A new event was ingested
     EventIngested { event: EventResponse },
 
+    /// A durable diversion admission or lifecycle transition.
+    DiversionUpdated {
+        diversion: crate::scrubber::Diversion,
+    },
+
+    /// Current bounded readiness and re-arm state for a configured profile.
+    ScrubberUpdated {
+        profile: String,
+        state: crate::scrubber::ProfileState,
+    },
+
     /// Client fell behind, needs to resync
     ResyncRequired {},
 }

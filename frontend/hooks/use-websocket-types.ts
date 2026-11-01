@@ -1,4 +1,4 @@
-import type { EventResponse } from "@/lib/api"
+import type { EventResponse, ScrubberDiversion, ScrubberState } from "@/lib/api"
 
 export type WsMessageType =
   | "mitigation_created"
@@ -6,6 +6,8 @@ export type WsMessageType =
   | "mitigation_expired"
   | "mitigation_withdrawn"
   | "event_ingested"
+  | "diversion_updated"
+  | "scrubber_updated"
   | "resync_required"
 
 export interface WsMessage {
@@ -27,6 +29,9 @@ export interface WsMessage {
   mitigation_id?: string
   // event_ingested
   event?: EventResponse
+  diversion?: ScrubberDiversion
+  profile?: string
+  state?: ScrubberState
 }
 
 export type ConnectionState = "connecting" | "connected" | "polling" | "disconnected" | "error"

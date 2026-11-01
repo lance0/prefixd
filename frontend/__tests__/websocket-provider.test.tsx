@@ -61,6 +61,8 @@ const cacheKeys: Key[] = [
   "stats",
   "dashboard",
   ["signal-groups", { status: "open" }],
+  "scrubber-profiles",
+  "scrubber-diversions",
   "notification-preferences",
   "settings",
 ]
@@ -310,9 +312,18 @@ describe("WebSocketProvider server frames", () => {
     act(() => socket.receive({ type: "resync_required" }))
     await settle()
 
-    expect(invalidatedKeys(preferenceReads)).toEqual(cacheKeys.slice(0, 7))
+    expect(invalidatedKeys(preferenceReads)).toEqual(cacheKeys.slice(0, 9))
     const toast = await screen.findByText("Refreshing live data after missed updates")
     expect(toast.closest("[data-sonner-toast]")).toHaveAttribute("data-type", "info")
+  })
+
+  it.each(["diversion_updated", "scrubber_updated"] as const)("refreshes scrubber resources for %s without changing ordinary mitigation state", async (type) => {
+    const { socket, preferenceReads } = await mountProvider()
+
+    act(() => socket.receive({ type }))
+    await settle()
+    expect(invalidatedKeys(preferenceReads)).toEqual(["scrubber-profiles", "scrubber-diversions"])
+    expect(toasts()).toEqual([])
   })
 
   it.each([

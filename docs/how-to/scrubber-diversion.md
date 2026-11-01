@@ -183,6 +183,11 @@ configured-profile labels for `prefixd_scrubber_ready`,
 use `prefixd_scrubber_lifecycle_failures_total`. Addresses and operation IDs are
 not metric labels.
 
+The authenticated WebSocket feed publishes durable `diversion_updated`
+transitions and `scrubber_updated` readiness/re-arm observations. The dashboard
+refreshes these resources from the API and also polls every five seconds;
+missed-feed resync refreshes both resources.
+
 Before rollback, withdraw every enforced diversion, wait for confirmed local
 absence, and verify router removal separately. Keep the durable snapshots and
 withdrawal records. An older controller does not understand their exclusion
