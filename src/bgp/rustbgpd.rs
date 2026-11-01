@@ -513,6 +513,9 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
         || route.afi_safi != family
         || !route.communities.is_empty()
         || !route.as_path.is_empty()
+        || !route.ipv6_extended_communities.is_empty()
+        || route.admission_revision.is_some()
+        || route.injection_owner.starts_with("guarded:")
     {
         return Err(invalid("unsupported local route attributes"));
     }
@@ -1576,6 +1579,47 @@ mod tests {
             afi_safi: encoded.afi_safi,
             extended_communities: vec![0x8006_u64 << 48],
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn v081_readback_rejects_unrepresented_attributes_and_guarded_admissions() {
+        for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
+            let rule = FlowSpecRule::new(
+                FlowSpecNlri {
+                    dst_prefix: prefix.into(),
+                    ..Default::default()
+                },
+                FlowSpecAction::discard(),
+            );
+            let original = route(&rule);
+            assert!(decode(original.clone(), original.afi_safi).is_ok());
+            for case in 0..5 {
+                let mut bad = original.clone();
+                match case {
+                    0 => bad.ipv6_extended_communities = vec![vec![0; 20]],
+                    1 => bad.admission_revision = Some(0),
+                    2 => bad.admission_revision = Some(7),
+                    3 => {
+                        bad.injection_owner = "guarded:profile".into();
+                        bad.lease_generation = Some(pb::LeaseGeneration {
+                            incarnation: 1,
+                            sequence: 1,
+                        });
+                        bad.lease_remaining_ms = Some(5_000);
+                    }
+                    4 => {
+                        bad.actions[0].action = Some(pb::flow_spec_action::Action::RedirectIp(
+                            pb::FlowSpecRedirectIp {
+                                address: "2001:db8::99".into(),
+                                copy: false,
+                            },
+                        ));
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(decode(bad, original.afi_safi).is_err(), "case {case}");
+            }
         }
     }
 

@@ -31,10 +31,30 @@ the protection; drain affected rules or accept that policy change explicitly.
   [mitigation origin mode](#mitigation-origin-mode).
 - **Always back up the database** before upgrading.
 
+## rustbgpd v0.81
+
+Compose and the default controller fixture now pin rustbgpd v0.81.0. The minimum
+daemon remains v0.80.0; CI also retains v0.80.0 and v0.80.1. This change requires
+no prefixd database migration. Keep the same POP, endpoint, credentials and mode,
+and follow the [speaker release notes](https://github.com/lance0/rustbgpd/releases/tag/v0.81.0)
+before recreating the speaker. Reconciliation must restore its process-local
+injections after the restart; verify exact rules, lease state and receiving
+routers afterward.
+
+v0.81.0 allows local FlowSpec and RTBH injections to compete during Graceful
+Restart selection deferral, while received candidates and End-of-RIB can remain
+held. Policy and admission still apply. This changes the v0.80 hold behavior
+described below; it provides no router recovery deadline.
+
+The new direct target-IP and guarded FlowSpec APIs do not enable prefixd scrubber
+diversion. Local inventory reads refuse IPv6 extended communities and guarded
+admission state that prefixd cannot represent. See
+[speaker backends](../reference/speaker-backends.md#rustbgpd-configuration).
+
 ## rustbgpd v0.80
 
-prefixd now requires rustbgpd v0.80.0 or later, and Compose pins the immutable
-v0.80.1 image. Upgrade the speaker before prefixd: the new controller refuses
+The v0.80 upgrade raised prefixd's minimum to rustbgpd v0.80.0 and pinned the
+immutable v0.80.1 image. Upgrade the speaker before prefixd: the controller refuses
 to start against v0.79.0 (see [rustbgpd minimum version](#rustbgpd-minimum-version)).
 Existing GoBGP selection is unchanged. There is no prefixd database migration
 or target transfer for this speaker version change. Keep the same POP,

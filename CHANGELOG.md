@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Pin rustbgpd v0.81.0 for Compose, labs and default fixtures, vendor its
+  unmodified release proto and retain v0.80.0/v0.80.1 controller qualification.
+  Local FlowSpec reads now refuse unrepresented IPv6 extended communities and
+  guarded admission state. Direct target-IP diversion remains unavailable.
+
 - rustbgpd export evidence includes configured addressed peers without an
   Established session even when the separate peer-session read fails. These
   peers stay outside Established-peer disposition counts; an all-down roster

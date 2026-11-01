@@ -1,10 +1,9 @@
 //! Generated rustbgpd client stubs (ADR 023).
 //!
 //! `proto/rustbgpd.proto` (package `rustbgpd.v1`) is the unmodified
-//! `rustbgpd.proto` asset of the rustbgpd v0.80.1 release,
-//! <https://github.com/lance0/rustbgpd/releases/download/v0.80.1/rustbgpd.proto>,
-//! sha256 `cc1cac82881d3ac42e91ccdd13daebb649dee550e446a48d7e1a8f2bafe83927`
-//! (byte-identical to v0.80.0).
+//! `rustbgpd.proto` asset of the rustbgpd v0.81.0 release,
+//! <https://github.com/lance0/rustbgpd/releases/download/v0.81.0/rustbgpd.proto>,
+//! sha256 `78c10c4a11bcec56b6feb84c675fb2b38bd1a9087d522c7fa8a196370a73a0f1`
 //! `proto/rustbgpd.proto.sha256` is that release's checksum asset, and
 //! `just proto` checks the file against it offline. To move the pin, download
 //! both assets of the new release, run `sha256sum --check --strict` on them, copy
@@ -47,6 +46,7 @@ mod tests {
             actions: Vec::new(),
             communities: Vec::new(),
             extended_communities: Vec::new(),
+            ipv6_extended_communities: Vec::new(),
         };
         assert_eq!(add.afi_safi, afi);
         assert_eq!(pb::FlowSpecInjectOutcome::Created as i32, 1);

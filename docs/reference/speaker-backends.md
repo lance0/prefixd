@@ -275,7 +275,7 @@ Initial network connections and TLS handshakes have a ten-second budget;
 complete RPC attempts are bounded separately.
 
 `proto/rustbgpd.proto` is the unmodified `rustbgpd.proto` asset of the
-rustbgpd `v0.80.1` release, checked offline against the release's sha256 by
+rustbgpd `v0.81.0` release, checked offline against the release's sha256 by
 `just proto`. The controller message fields prefixd uses were checked against
 it. This is a protocol baseline, not proof that an arbitrary binary reporting
 that version has passed the deployment or router tests. The stubs follow the
@@ -294,15 +294,25 @@ configured grace deadline. Reconciliation still restores desired state on its
 normal poll. The daemon's optional timer-only grace window needs a separately
 qualified replay budget and does not prove downstream retention or enforcement.
 
-Injected routes are held from selection after a speaker restart until its
-Graceful Restart peers send End-of-RIB or the restart window
-(`gr_restart_time`, 120 seconds by default) expires; the local view reads
-`selected: false` meanwhile. `MarkReplayComplete` does not end that hold, and a
-Graceful Restart peer that never comes up holds it for the full window. The
-shipped `configs/rustbgpd.toml` sets `graceful_restart = false` on its
-placeholder neighbor for that reason. Enable Graceful Restart on real peers
-that support it. [Export evidence](#export-evidence) describes how prefixd
-reports a held blackhole.
+On v0.80.x, injected routes can be held from selection after a speaker restart
+until Graceful Restart peers send End-of-RIB or the restart window
+(`gr_restart_time`, 120 seconds by default) expires. v0.81.0 lets local FlowSpec
+and RTBH injections compete during that hold: IPv4 `/32`, IPv6 `/128` or routes
+carrying BLACKHOLE `65535:666`. This covers prefixd's host blackholes and
+FlowSpec rules. Export policy and admission still apply; local acceptance does
+not prove router receipt. Received candidates and End-of-RIB remain held.
+On v0.81.0, a configured peer that never reconnects no longer holds selection.
+`MarkReplayComplete` releases only the separate replay grace window. The
+shipped example keeps Graceful Restart disabled on its placeholder neighbor;
+enable it on real peers that support it. [Export evidence](#export-evidence)
+describes how prefixd reports a held blackhole on older supported daemons.
+
+The v0.81.0 proto includes direct target-IP actions and guarded mutation RPCs.
+prefixd does not enable scrubber diversion or call those RPCs. Its local-rule
+reader refuses IPv6 extended communities, guarded admission revisions and
+guarded owners rather than dropping attributes it cannot represent. Keep such
+rules off a speaker whose complete local inventory prefixd reconciles until
+the [scrubber lifecycle](../project/scrubber-diversion-contract.md) is implemented.
 
 ### Scoped and interface-only neighbors
 
@@ -322,8 +332,8 @@ safely. This does not change route injection or withdrawal. See the
 ## Released controller qualification
 
 The scoped controller promotion is released: v0.80.0 is the minimum controller
-contract version; v0.80.1 is the Compose and default fixture pin. CI runs the
-lifecycle, TTL and restart suite against both immutable image references in
+contract version; v0.81.0 is the Compose and default fixture pin. CI runs the
+lifecycle, TTL and restart suite against v0.80.0, v0.80.1 and v0.81.0 image references in
 [releases.json](../../tests/fixtures/rustbgpd/releases.json). Image OCI source
 revisions match the dereferenced release-tag commits. This qualifies the local
 controller boundary on Linux amd64, independently of router interoperability.
@@ -331,8 +341,9 @@ controller boundary on Linux amd64, independently of router interoperability.
 Run the same isolated suite locally with Docker available:
 
 ```bash
-scripts/test-rustbgpd.sh # 0.80.1
+scripts/test-rustbgpd.sh # 0.81.0
 PREFIXD_RUSTBGPD_TEST_VERSION=0.80.0 scripts/test-rustbgpd.sh
+PREFIXD_RUSTBGPD_TEST_VERSION=0.80.1 scripts/test-rustbgpd.sh
 ```
 
 Fixtures bind ephemeral loopback ports, create an owner-only bearer token, and

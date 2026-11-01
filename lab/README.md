@@ -16,7 +16,7 @@ prefixd ── loopback gRPC ── speaker (AS 65010, 10.0.0.1) ── eBGP ─
 
 | Leg | Topology | Speaker image |
 |-----|----------|---------------|
-| rustbgpd | `interop/frr-rustbgpd.clab.yml` | `ghcr.io/lance0/rustbgpd:0.80.1`, digest-pinned |
+| rustbgpd | `interop/frr-rustbgpd.clab.yml` | `ghcr.io/lance0/rustbgpd:0.81.0`, digest-pinned |
 | GoBGP | `interop/frr-gobgp.clab.yml` | `jauderho/gobgp` digest that CI pins as 4.10.0 |
 
 CI runs `flowspec` and `amplification` with both speakers, plus `blackhole` with
