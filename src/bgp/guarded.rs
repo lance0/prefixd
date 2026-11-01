@@ -17,6 +17,7 @@ pub struct GuardedStamp {
 #[serde(deny_unknown_fields)]
 pub struct GuardedRule {
     pub nlri: FlowSpecNlri,
+    #[schema(value_type = String, example = "192.0.2.99")]
     pub target: IpAddr,
     /// The profile owner without the speaker's `guarded:` namespace prefix.
     pub owner: String,
