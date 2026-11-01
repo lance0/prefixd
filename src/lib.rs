@@ -19,6 +19,7 @@ pub mod guardrails;
 pub mod observability;
 pub mod policy;
 pub mod scheduler;
+pub mod scrubber;
 pub mod ws;
 
 mod state;

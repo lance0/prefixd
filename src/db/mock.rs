@@ -46,7 +46,13 @@ pub struct MockRepository {
     /// Simulate transactional audit failure before committing an expiry change.
     #[cfg(test)]
     pub fail_extension_audit: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub fail_diversion_reads: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub fail_diversion_saves: std::sync::atomic::AtomicBool,
     mitigations: Mutex<Vec<Mitigation>>,
+    diversions: Mutex<Vec<crate::scrubber::Diversion>>,
+    diversion_revision: std::sync::atomic::AtomicU64,
     withdrawals: Mutex<Vec<WithdrawalRequest>>,
     safelist: Mutex<Vec<SafelistEntry>>,
     audit: Mutex<Vec<AuditEntry>>,
@@ -98,7 +104,13 @@ impl MockRepository {
             fail_active_reads: Default::default(),
             #[cfg(test)]
             fail_extension_audit: Default::default(),
+            #[cfg(test)]
+            fail_diversion_reads: Default::default(),
+            #[cfg(test)]
+            fail_diversion_saves: Default::default(),
             mitigations: Mutex::new(Vec::new()),
+            diversions: Mutex::new(Vec::new()),
+            diversion_revision: std::sync::atomic::AtomicU64::new(1),
             withdrawals: Mutex::new(Vec::new()),
             safelist: Mutex::new(Vec::new()),
             audit: Mutex::new(Vec::new()),
@@ -119,6 +131,192 @@ impl Default for MockRepository {
 
 #[async_trait]
 impl RepositoryTrait for MockRepository {
+    async fn list_diversions(&self, pop: &str) -> Result<Vec<crate::scrubber::Diversion>> {
+        #[cfg(test)]
+        if self
+            .fail_diversion_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::error::PrefixdError::Internal(
+                "durable diversion read unavailable".into(),
+            ));
+        }
+        Ok(self
+            .diversions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| row.pop == pop && row.status.outstanding())
+            .cloned()
+            .collect())
+    }
+    async fn get_diversion(&self, id: Uuid) -> Result<Option<crate::scrubber::Diversion>> {
+        Ok(self
+            .diversions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|row| row.id == id)
+            .cloned())
+    }
+    async fn admit_diversion(
+        &self,
+        intent: &crate::scrubber::Diversion,
+        profile: &crate::scrubber::ScrubberProfile,
+        quotas: &crate::config::QuotasConfig,
+    ) -> Result<crate::scrubber::Diversion> {
+        use crate::error::PrefixdError;
+        let mitigations = self.mitigations.lock().unwrap();
+        let pending = self.withdrawals.lock().unwrap();
+        let mut diversions = self.diversions.lock().unwrap();
+        let address = intent
+            .rule
+            .nlri
+            .dst_prefix
+            .parse::<ipnet::IpNet>()
+            .map_err(|_| PrefixdError::InvalidRequest("invalid diversion".into()))?
+            .addr();
+        if mitigations.iter().any(|row| {
+            row.pop == intent.pop
+                && (row.is_active()
+                    || pending
+                        .iter()
+                        .any(|w| w.mitigation_id == row.mitigation_id && w.completed_at.is_none()))
+                && row
+                    .match_criteria
+                    .dst_prefix
+                    .parse::<ipnet::IpNet>()
+                    .map_or(true, |net| net.contains(&address))
+        }) || diversions.iter().any(|row| {
+            row.pop == intent.pop && row.status.outstanding() && row.victim() == intent.victim()
+        }) {
+            return Err(PrefixdError::Conflict(
+                "victim has live or pending mitigation intent".into(),
+            ));
+        }
+        let active = diversions
+            .iter()
+            .filter(|row| row.status.outstanding())
+            .collect::<Vec<_>>();
+        super::repository::check_active_quota(
+            "scrubber_inventory",
+            active
+                .iter()
+                .filter(|row| row.pop == intent.pop)
+                .count()
+                .try_into()
+                .unwrap_or(u32::MAX),
+            1000,
+        )?;
+        super::repository::check_active_quota(
+            "scrubber_profile",
+            active
+                .iter()
+                .filter(|row| row.pop == intent.pop && row.profile.id == profile.id)
+                .count()
+                .try_into()
+                .unwrap_or(u32::MAX),
+            profile.max_active,
+        )?;
+        for (scope, limit) in [
+            ("customer", quotas.max_active_per_customer),
+            ("pop", quotas.max_active_per_pop),
+            ("global", quotas.max_active_global),
+        ] {
+            let count = active
+                .iter()
+                .filter(|row| match scope {
+                    "customer" => row.customer_id == intent.customer_id,
+                    "pop" => row.pop == intent.pop,
+                    _ => true,
+                })
+                .count()
+                + mitigations
+                    .iter()
+                    .filter(|row| {
+                        row.is_active()
+                            && row.action_type != crate::domain::ActionType::Blackhole
+                            && match scope {
+                                "customer" => row.customer_id.as_ref() == Some(&intent.customer_id),
+                                "pop" => row.pop == intent.pop,
+                                _ => true,
+                            }
+                    })
+                    .count();
+            super::repository::check_active_quota(
+                scope,
+                count.try_into().unwrap_or(u32::MAX),
+                limit,
+            )?;
+        }
+        let since = Utc::now() - super::repository::NEW_MITIGATION_WINDOW;
+        let new_profile = diversions
+            .iter()
+            .filter(|row| {
+                row.pop == intent.pop && row.profile.id == profile.id && row.created_at > since
+            })
+            .count();
+        super::repository::check_new_mitigation_rate(
+            new_profile.try_into().unwrap_or(u32::MAX),
+            profile.max_new_per_minute,
+        )?;
+        let total = diversions
+            .iter()
+            .filter(|row| row.pop == intent.pop && row.created_at > since)
+            .count()
+            + mitigations
+                .iter()
+                .filter(|row| row.pop == intent.pop && row.created_at > since)
+                .count();
+        super::repository::check_new_mitigation_rate(
+            total.try_into().unwrap_or(u32::MAX),
+            quotas.max_new_per_minute,
+        )?;
+        let mut intent = intent.clone();
+        intent.rule.revision = self
+            .diversion_revision
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.audit
+            .lock()
+            .unwrap()
+            .push(intent.audit("scrubber_admit"));
+        diversions.push(intent.clone());
+        Ok(intent)
+    }
+    async fn save_diversion(
+        &self,
+        intent: &crate::scrubber::Diversion,
+        action: &str,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_diversion_saves
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::error::PrefixdError::Internal(
+                "durable diversion write unavailable".into(),
+            ));
+        }
+        let mut rows = self.diversions.lock().unwrap();
+        let row = rows
+            .iter_mut()
+            .find(|row| {
+                row.id == intent.id
+                    && row.rule.revision == intent.rule.revision
+                    && row.pop == intent.pop
+            })
+            .ok_or_else(|| {
+                crate::error::PrefixdError::Conflict("scrubber intent changed".into())
+            })?;
+        if row.immutable_snapshot()? != intent.immutable_snapshot()? {
+            return Err(crate::error::PrefixdError::Conflict(
+                "diversion action snapshot is immutable".into(),
+            ));
+        }
+        *row = intent.clone();
+        self.audit.lock().unwrap().push(intent.audit(action));
+        Ok(())
+    }
     fn for_bounded_reads(
         self: std::sync::Arc<Self>,
         _deadline: tokio::time::Instant,
@@ -475,6 +673,26 @@ impl RepositoryTrait for MockRepository {
         actor: &crate::observability::CreationActor,
     ) -> Result<()> {
         let mut mitigations = self.mitigations.lock().unwrap();
+        let diversion_rows = self.diversions.lock().unwrap();
+        let prefix: ipnet::IpNet = m.match_criteria.dst_prefix.parse().map_err(|_| {
+            crate::error::PrefixdError::InvalidRequest("invalid mitigation prefix".into())
+        })?;
+        if diversion_rows.iter().any(|row| {
+            row.pop == m.pop
+                && row.status.outstanding()
+                && prefix.contains(
+                    &row.rule
+                        .nlri
+                        .dst_prefix
+                        .parse::<ipnet::IpNet>()
+                        .expect("validated diversion")
+                        .addr(),
+                )
+        }) {
+            return Err(crate::error::PrefixdError::Conflict(
+                "victim has live or pending scrubber diversion".into(),
+            ));
+        }
         if m.action_type != crate::domain::ActionType::Blackhole {
             if let Some(customer_id) = &m.customer_id {
                 let count = mitigations
@@ -487,7 +705,18 @@ impl RepositoryTrait for MockRepository {
                     .count();
                 super::repository::check_active_quota(
                     "customer",
-                    u32::try_from(count).unwrap_or(u32::MAX),
+                    u32::try_from(
+                        count
+                            + diversion_rows
+                                .iter()
+                                .filter(|existing| {
+                                    existing.status.outstanding()
+                                        && existing.customer_id
+                                            == m.customer_id.clone().unwrap_or_default()
+                                })
+                                .count(),
+                    )
+                    .unwrap_or(u32::MAX),
                     quotas.max_active_per_customer,
                 )?;
             }
@@ -501,7 +730,16 @@ impl RepositoryTrait for MockRepository {
                 .count();
             super::repository::check_active_quota(
                 "pop",
-                u32::try_from(count).unwrap_or(u32::MAX),
+                u32::try_from(
+                    count
+                        + diversion_rows
+                            .iter()
+                            .filter(|existing| {
+                                existing.status.outstanding() && existing.pop == m.pop
+                            })
+                            .count(),
+                )
+                .unwrap_or(u32::MAX),
                 quotas.max_active_per_pop,
             )?;
             let count = mitigations
@@ -513,7 +751,14 @@ impl RepositoryTrait for MockRepository {
                 .count();
             super::repository::check_active_quota(
                 "global",
-                u32::try_from(count).unwrap_or(u32::MAX),
+                u32::try_from(
+                    count
+                        + diversion_rows
+                            .iter()
+                            .filter(|existing| existing.status.outstanding())
+                            .count(),
+                )
+                .unwrap_or(u32::MAX),
                 quotas.max_active_global,
             )?;
         }
@@ -551,7 +796,14 @@ impl RepositoryTrait for MockRepository {
             .filter(|existing| existing.pop == m.pop && existing.created_at > since)
             .count();
         super::repository::check_new_mitigation_rate(
-            u32::try_from(count).unwrap_or(u32::MAX),
+            u32::try_from(
+                count
+                    + diversion_rows
+                        .iter()
+                        .filter(|existing| existing.pop == m.pop && existing.created_at > since)
+                        .count(),
+            )
+            .unwrap_or(u32::MAX),
             quotas.max_new_per_minute,
         )?;
         mitigations.push(m.clone());

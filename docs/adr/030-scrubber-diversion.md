@@ -2,8 +2,12 @@
 
 ## Status
 
-Proposed 2026-10-22. Design only; the actions, profiles, readiness monitor and
-qualification below are not implemented. Addresses
+Proposed 2026-10-22; manual runtime implemented 2026-11-01 behind disabled-by-default
+profiles. rustbgpd v0.81.0 supplies the guarded speaker contract. The controller
+implements persisted admission snapshots, independent owners, authenticated
+readiness, withdrawal latching and manual re-arm. Exact router/scrubber forwarding
+qualification remains a separate gate. See the
+[operator workflow](../how-to/scrubber-diversion.md). Addresses
 [the redirect-to-IP request](https://github.com/lance0/prefixd/issues/305).
 Extends [ADR 025](025-pluggable-speaker-backends.md) and
 [ADR 027](027-blackhole-mitigations.md); complements

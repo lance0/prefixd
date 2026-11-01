@@ -45,6 +45,24 @@ fn session_routes() -> Router<Arc<AppState>> {
 fn api_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/speaker/routes", get(handlers::list_speaker_routes))
+        .route("/v1/scrubbers", get(crate::scrubber::api::profiles))
+        .route(
+            "/v1/scrubbers/{profile}/arm",
+            post(crate::scrubber::api::arm),
+        )
+        .route(
+            "/v1/diversions",
+            get(crate::scrubber::api::list).post(crate::scrubber::api::create),
+        )
+        .route(
+            "/v1/diversions/preview",
+            post(crate::scrubber::api::preview),
+        )
+        .route("/v1/diversions/{id}", get(crate::scrubber::api::get))
+        .route(
+            "/v1/diversions/{id}/withdraw",
+            post(crate::scrubber::api::withdraw),
+        )
         .route(
             "/v1/events",
             get(handlers::list_events).post(handlers::ingest_event),

@@ -1106,6 +1106,7 @@ fn test_settings() -> Settings {
         correlation: Default::default(),
         blackhole: Default::default(),
         amplification: Default::default(),
+        scrubber: Default::default(),
     }
 }
 

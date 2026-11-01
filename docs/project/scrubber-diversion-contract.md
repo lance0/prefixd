@@ -1,15 +1,22 @@
 # Redirect-to-IP speaker contract and qualification plan
 
-**Status:** Proposed prerequisite for [ADR 030](../adr/030-scrubber-diversion.md).
-**Checked:** 2026-10-23 against prefixd `010c86b` and released rustbgpd `v0.79.0`
-(`60cb5c9910eb1380661dd4c80d55563b2d80099a`).
+**Status:** The speaker prerequisite is released in rustbgpd v0.81.0. prefixd's
+manual controller is implemented behind disabled-by-default profiles; exact
+router/scrubber forwarding qualification remains open. See the
+[manual workflow](../how-to/scrubber-diversion.md) and the
+[released guarded contract](https://github.com/lance0/rustbgpd/blob/v0.81.0/docs/adr/0144-guarded-flowspec-mutations.md).
 
-[Issue #305](https://github.com/lance0/prefixd/issues/305) asks for diversion to a
-scrubber and source-prefix selection. Source-prefix matching shipped in
-[PR #307](https://github.com/lance0/prefixd/pull/307). Redirect-to-IP still needs
-the contract and qualification below. This plan enables no action and leaves
-ADR 030 Proposed. Its first runtime slice keeps host destinations, manual
-admission, configured targets and the readiness/withdrawal latch from that ADR.
+**Historical audit:** 2026-10-23 against prefixd `010c86b` and released rustbgpd
+`v0.79.0` (`60cb5c9910eb1380661dd4c80d55563b2d80099a`). The boundary table and
+proposal below preserve that audit's provenance. v0.81.0 now provides typed
+IPv4/IPv6 target-IP actions, lossless read-back, server-issued mutation windows
+and admission-revision-fenced deletion.
+
+[Issue #305](https://github.com/lance0/prefixd/issues/305) also requested source
+selection, delivered in [PR #307](https://github.com/lance0/prefixd/pull/307).
+The manual diversion workflow retains host destinations, configured targets,
+readiness latching and explicit re-arm. It does not establish router forwarding
+or enable detector/playbook diversion.
 
 ## Released boundary and remaining dependencies
 
@@ -42,8 +49,9 @@ same ownership, failure and forwarding controls.
 
 ## Contract to agree upstream
 
-The following requirements describe prefixd's dependency. They do not assign
-protobuf field numbers or claim that rustbgpd implements a proposed RPC.
+The following requirements describe the dependency as it was proposed. The
+released v0.81.0 RPCs now satisfy the speaker shape and commit/revision fences;
+the qualification cases remain regression controls.
 
 ### Action and rollback refusal
 
@@ -252,8 +260,7 @@ withdrawal, receiver RIB, installed PBR/FIB state and dirty/clean traffic. Recor
 the last successful mutation and window expiry when measuring controller-stop
 behavior. Include the still-renewing profile control from the table above.
 
-Only after these dependencies pass should a runtime PR add persisted profiles
-and action snapshots, readiness/re-arm, manual operator workflow and metrics.
-Link each PR and its receipt to ADR 030's slices. Keep redirect disabled until
-the required backend/family/profile gates pass; source-prefix selection alone
-does not complete issue #305.
+The manual runtime now adds persisted profiles/action snapshots, readiness and
+re-arm, operator controls and bounded metrics. Keep redirect disabled until the
+required backend/family/profile forwarding gates pass. Local controller receipts
+and source-prefix selection alone do not complete issue #305's forwarding scope.

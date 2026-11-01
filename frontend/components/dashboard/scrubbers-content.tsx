@@ -1,0 +1,113 @@
+"use client"
+
+import { useRef, useState } from "react"
+import useSWR from "swr"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import { usePermissions } from "@/hooks/use-permissions"
+import { armScrubber, createDiversion, getDiversions, getScrubbers, previewDiversion, withdrawDiversion, type DiversionPreview, type DiversionRequest } from "@/lib/api"
+
+export function ScrubbersContent() {
+  const permissions = usePermissions()
+  const profiles = useSWR("scrubber-profiles", getScrubbers, { refreshInterval: 5000 })
+  const diversions = useSWR("scrubber-diversions", getDiversions, { refreshInterval: 5000 })
+  const [profile, setProfile] = useState("")
+  const [victim, setVictim] = useState("")
+  const [source, setSource] = useState("")
+  const [protocol, setProtocol] = useState("6")
+  const [ports, setPorts] = useState("")
+  const [sourcePorts, setSourcePorts] = useState("")
+  const [ttl, setTtl] = useState("60")
+  const [reason, setReason] = useState("")
+  const [preview, setPreview] = useState<DiversionPreview | null>(null)
+  const [request, setRequest] = useState<DiversionRequest | null>(null)
+  const [confirmed, setConfirmed] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState("")
+  const [error, setError] = useState("")
+  const editVersion = useRef(0)
+  const invalidate = () => { editVersion.current += 1; setPreview(null); setRequest(null); setConfirmed(false); setMessage("") }
+
+  async function action(work: () => Promise<void>) {
+    setBusy(true); setError(""); setMessage("")
+
+    try { await work(); await Promise.all([profiles.mutate(), diversions.mutate()]) }
+    catch (error) { setError(error instanceof Error ? error.message : "The operation could not be confirmed.") }
+    finally { setBusy(false) }
+  }
+
+  if (!permissions.isAdmin) return <p>Scrubber diversion requires an administrator.</p>
+
+  return <div className="space-y-6 p-6">
+    <div><h1 className="text-2xl font-semibold">Scrubbers</h1><p className="text-sm text-muted-foreground">Manual traffic diversion through a configured scrubber. Withdrawal returns traffic to ordinary routing and may expose the victim to the attack again.</p></div>
+    {(error || profiles.error || diversions.error) && <p role="alert" className="text-destructive">{error || "Scrubber observations could not be refreshed. Current state is unknown."}</p>}
+    {message && <p role="status">{message}</p>}
+    {profiles.data?.enabled === false && <p>Scrubber diversion is disabled. Enable qualified profiles in the controller configuration.</p>}
+    {!profiles.data && !profiles.error && <p role="status">Loading scrubber profiles…</p>}
+    {profiles.data?.configuration.map(config => {
+      const state = profiles.error ? undefined : profiles.data?.profiles[config.id]
+
+      return <Card key={config.id}><CardHeader><CardTitle>{config.id} <span className="text-sm font-normal text-muted-foreground">{config.revision}</span></CardTitle></CardHeader>
+        <CardContent className="space-y-2 text-sm">
+          <p>Targets: {config.ipv4_target ?? "IPv4 unavailable"} · {config.ipv6_target ?? "IPv6 unavailable"}</p>
+          <p>{state?.ready ? "Fresh readiness" : state?.readiness === "not_ready" ? "Not ready" : "Readiness unknown"} · {state?.armed ? "Armed" : "Unarmed"}</p>
+          {state?.latch_reason && <p>{state.latch_reason}</p>}
+          <Button variant="outline" disabled={busy || !profiles.data?.enabled || !state?.ready || state?.armed} onClick={() => action(async () => { await armScrubber(config.id, config.revision); setMessage(`Profile ${config.id} re-armed. New intent requires a separate confirmation.`) })}>Re-arm {config.id}</Button>
+        </CardContent></Card>
+    })}
+    {profiles.data?.enabled && <Card><CardHeader><CardTitle>New diversion</CardTitle></CardHeader><CardContent>
+      <form className="grid gap-4 sm:grid-cols-2" onChange={invalidate} onSubmit={event => {
+        event.preventDefault()
+        action(async () => {
+          const parsePorts = (value: string) => value.trim() ? value.split(",").map(port => Number(port.trim())) : []
+          const scope: DiversionRequest["scope"] = { dst_prefix: victim, protocol: protocol ? Number(protocol) : null, dst_ports: parsePorts(ports) }
+
+          if (source) scope.src_prefix = source
+
+          if (sourcePorts) scope.src_ports = parsePorts(sourcePorts)
+
+          const next: DiversionRequest = { profile, scope, ttl_seconds: Number(ttl), reason }
+          const version = editVersion.current
+          const result = await previewDiversion(next)
+
+          if (version !== editVersion.current) return
+          setRequest(next); setPreview(result); setConfirmed(false)
+        })
+      }}>
+        <label className="space-y-1 text-sm">Profile<select aria-label="Profile" className="h-9 w-full rounded-md border bg-background px-3" required value={profile} onChange={event => setProfile(event.target.value)}><option value="">Select profile</option>{profiles.data.configuration.map(config => <option key={config.id} value={config.id}>{config.id}</option>)}</select></label>
+        <label className="space-y-1 text-sm">Victim host CIDR<Input required value={victim} onChange={event => setVictim(event.target.value)} placeholder="203.0.113.10/32" /></label>
+        <label className="space-y-1 text-sm">Source prefix (optional)<Input value={source} onChange={event => setSource(event.target.value)} /></label>
+        <label className="space-y-1 text-sm">Protocol<select aria-label="Protocol" className="h-9 w-full rounded-md border bg-background px-3" value={protocol} onChange={event => setProtocol(event.target.value)}><option value="6">TCP</option><option value="17">UDP</option><option value="">Any</option></select></label>
+        <label className="space-y-1 text-sm">Destination ports (optional)<Input value={ports} onChange={event => setPorts(event.target.value)} placeholder="80, 443" /></label>
+        <label className="space-y-1 text-sm">UDP source ports (optional)<Input value={sourcePorts} onChange={event => setSourcePorts(event.target.value)} /></label>
+        <label className="space-y-1 text-sm">Lifetime in seconds<Input required type="number" min="5" max="3600" value={ttl} onChange={event => setTtl(event.target.value)} /></label>
+        <label className="space-y-1 text-sm">Reason<Input required maxLength={1024} value={reason} onChange={event => setReason(event.target.value)} /></label>
+        <Button type="submit" disabled={busy}>Preview diversion</Button>
+      </form>
+      {preview && <div className="mt-4 space-y-3 rounded-md border p-4">
+        <p>{preview.candidate.dry_run ? "Simulation only" : "Proposed diversion"}: {preview.candidate.rule.nlri.dst_prefix} → {preview.candidate.rule.target} via {preview.candidate.profile.id}@{preview.candidate.profile.revision}</p>
+        <pre className="overflow-x-auto whitespace-pre-wrap text-xs">{JSON.stringify(preview.candidate.rule.nlri, null, 2)}</pre>
+        <p className="text-sm text-muted-foreground">{preview.evidence}</p>
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />I confirm this traffic match and scrubber target.</label>
+        <Button disabled={busy || !confirmed || !request || !preview.candidate.dry_run && (Boolean(profiles.error) || !profiles.data.profiles[request?.profile ?? ""]?.armed || !profiles.data.profiles[request?.profile ?? ""]?.ready)} onClick={() => action(async () => {
+          if (!request) return
+          const result = await createDiversion({ ...request, confirmation: preview.confirmation })
+          invalidate(); setMessage(result.dry_run ? "Simulation recorded; no speaker mutation sent." : `Diversion intent recorded: ${result.status}. Router forwarding remains separately qualified.`)
+        })}>{preview.candidate.dry_run ? "Record simulation" : "Create diversion"}</Button>
+      </div>}
+    </CardContent></Card>}
+    <Card><CardHeader><CardTitle>Outstanding diversions</CardTitle></CardHeader><CardContent className="space-y-3">
+      {diversions.data?.length === 0 && <p className="text-sm text-muted-foreground">No outstanding diversion intent.</p>}
+      {diversions.data?.map(row => <div key={row.id} className="space-y-2 rounded-md border p-3 text-sm">
+        <p>{row.rule.nlri.dst_prefix} → {row.rule.target} · {row.profile.id}@{row.profile.revision}</p>
+        <p>{row.status === "active" ? "Local intent observed" : row.status} · Expires {row.expires_at}</p>
+        {row.status === "withdrawing" && <p>Withdrawal stays pending until outstanding authorization has expired and local absence is confirmed.</p>}
+        {row.export_observation && <details><summary>Last peer export observation: {row.export_observation.observed_at}</summary><ul className="mt-2 space-y-1">{row.export_observation.peers.map(peer => <li key={peer.peer_address}>{peer.peer_address}: {peer.disposition}{peer.reason ? ` (${peer.reason})` : ""}</li>)}</ul></details>}
+        {(row.withdrawal_reason || row.last_error) && <p>{row.withdrawal_reason || row.last_error}</p>}
+        <Button variant="outline" disabled={busy || row.status === "withdrawing"} onClick={() => action(async () => { await withdrawDiversion(row.id); setMessage("Withdrawal requested. Victim exclusion remains until local absence is confirmed.") })}>Withdraw {row.rule.nlri.dst_prefix}</Button>
+      </div>)}
+      <p className="text-xs text-muted-foreground">Local observation and peer export do not prove router installation or scrubber forwarding.</p>
+    </CardContent></Card>
+  </div>
+}

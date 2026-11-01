@@ -61,6 +61,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add disabled-by-default manual scrubber diversion through rustbgpd's guarded
+  FlowSpec contract: immutable persisted profile/action snapshots, independent
+  owners, authenticated bounded readiness, withdrawal latching and explicit
+  re-arm. API/OpenAPI, CLI and dashboard controls preserve full host matches and
+  require target confirmation. Dry-run sends no speaker mutation; pending
+  withdrawal retains victim exclusion through the authorization barrier and
+  final revision-checked local absence. Router forwarding requires a separate
+  qualified profile receipt.
+
 - Add a separate guarded FlowSpec speaker boundary for direct target-IP
   diversion, with exact IPv4/IPv6 action read-back, independent owner windows
   and revision-fenced deletion. All guarded mutations require the controller

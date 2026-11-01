@@ -307,12 +307,18 @@ shipped example keeps Graceful Restart disabled on its placeholder neighbor;
 enable it on real peers that support it. [Export evidence](#export-evidence)
 describes how prefixd reports a held blackhole on older supported daemons.
 
-The v0.81.0 proto includes direct target-IP actions and guarded mutation RPCs.
-prefixd does not enable scrubber diversion or call those RPCs. Its local-rule
-reader refuses IPv6 extended communities, guarded admission revisions and
-guarded owners rather than dropping attributes it cannot represent. Keep such
-rules off a speaker whose complete local inventory prefixd reconciles until
-the [scrubber lifecycle](../project/scrubber-diversion-contract.md) is implemented.
+The v0.81.0 guarded speaker boundary supports direct target-IP actions through
+separate, revision-fenced RPCs. The ordinary reader and scrubber reader validate
+the complete action bytes and admission state before separating their lifecycles.
+Unsupported or inconsistent attributes fail observation; neither reader drops an
+unknown selector or action. Guarded window issuance and renewal require the
+controller fence, independently of ordinary lease renewal.
+
+[Manual scrubber diversion](../how-to/scrubber-diversion.md) is disabled by
+default. It requires configured per-POP profiles, qualified forwarding and export
+isolation, fresh authenticated readiness and explicit arm/re-arm. It supports
+host destinations and same-family targets, with no copying or legacy fallback.
+
 
 ### Scoped and interface-only neighbors
 

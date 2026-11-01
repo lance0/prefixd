@@ -252,7 +252,7 @@ impl Repository {
         max: u32,
     ) -> Result<()> {
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM mitigations WHERE pop = $1 AND created_at > $2",
+            "SELECT (SELECT COUNT(*) FROM mitigations WHERE pop = $1 AND created_at > $2) + (SELECT COUNT(*) FROM scrubber_diversions WHERE pop=$1 AND created_at>$2)",
         )
         .bind(pop)
         .bind(Utc::now() - NEW_MITIGATION_WINDOW)
@@ -264,6 +264,97 @@ impl Repository {
 
 #[async_trait]
 impl RepositoryTrait for Repository {
+    async fn list_diversions(&self, pop: &str) -> Result<Vec<crate::scrubber::Diversion>> {
+        let rows: Vec<String> = sqlx::query_scalar("SELECT snapshot_json FROM scrubber_diversions WHERE pop=$1 AND status IN ('pending','active','withdrawing') ORDER BY created_at,id LIMIT 1001")
+            .bind(pop).fetch_all(&mut *self.bounded_read_connection().await?).await?;
+        if rows.len() > 1000 {
+            return Err(PrefixdError::Internal(
+                "scrubber inventory exceeds its read bound".into(),
+            ));
+        }
+        rows.iter()
+            .map(|row| {
+                let intent: crate::scrubber::Diversion = serde_json::from_str(row)?;
+                intent.rule.validate()?;
+                if intent.pop != pop || !intent.status.outstanding() {
+                    return Err(PrefixdError::Internal(
+                        "inconsistent scrubber snapshot".into(),
+                    ));
+                }
+                Ok(intent)
+            })
+            .collect()
+    }
+    async fn get_diversion(&self, id: Uuid) -> Result<Option<crate::scrubber::Diversion>> {
+        let row: Option<String> =
+            sqlx::query_scalar("SELECT snapshot_json FROM scrubber_diversions WHERE id=$1")
+                .bind(id)
+                .fetch_optional(&mut *self.bounded_read_connection().await?)
+                .await?;
+        row.map(|row| {
+            let intent: crate::scrubber::Diversion = serde_json::from_str(&row)?;
+            intent.rule.validate()?;
+            Ok(intent)
+        })
+        .transpose()
+    }
+    async fn admit_diversion(
+        &self,
+        intent: &crate::scrubber::Diversion,
+        profile: &crate::scrubber::ScrubberProfile,
+        quotas: &QuotasConfig,
+    ) -> Result<crate::scrubber::Diversion> {
+        let (tx, intent) = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut tx = self.pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED").await?;
+            sqlx::query("SET LOCAL lock_timeout='5s'").execute(&mut *tx).await?;
+            sqlx::query("SET LOCAL statement_timeout='5s'").execute(&mut *tx).await?;
+            sqlx::query("SELECT pg_advisory_xact_lock(1886545528, 1903522164)").execute(&mut *tx).await?;
+            let conflict: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mitigations m WHERE m.pop=$1 AND $2::inet <<= (m.match_json::jsonb->>'dst_prefix')::inet AND (m.status IN ('pending','active','escalated') OR EXISTS(SELECT 1 FROM withdrawal_requests w WHERE w.mitigation_id=m.mitigation_id AND w.completed_at IS NULL))) OR EXISTS(SELECT 1 FROM scrubber_diversions WHERE pop=$1 AND victim=$2::inet AND status IN ('pending','active','withdrawing'))")
+                .bind(&intent.pop).bind(intent.victim()).fetch_one(&mut *tx).await?;
+            if conflict { return Err(PrefixdError::Conflict("victim has live or pending mitigation intent".into())); }
+            let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scrubber_diversions WHERE pop=$1 AND status IN ('pending','active','withdrawing')").bind(&intent.pop).fetch_one(&mut *tx).await?;
+            check_active_quota("scrubber_inventory", u32::try_from(total).unwrap_or(u32::MAX),1000)?;
+            let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scrubber_diversions WHERE pop=$1 AND profile_id=$2 AND status IN ('pending','active','withdrawing')")
+                .bind(&intent.pop).bind(&profile.id).fetch_one(&mut *tx).await?;
+            check_active_quota("scrubber_profile", u32::try_from(active).unwrap_or(u32::MAX), profile.max_active)?;
+            let new: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scrubber_diversions WHERE pop=$1 AND profile_id=$2 AND created_at>$3")
+                .bind(&intent.pop).bind(&profile.id).bind(Utc::now()-NEW_MITIGATION_WINDOW).fetch_one(&mut *tx).await?;
+            check_new_mitigation_rate(u32::try_from(new).unwrap_or(u32::MAX), profile.max_new_per_minute)?;
+            for (scope, limit) in [("customer",quotas.max_active_per_customer),("pop",quotas.max_active_per_pop),("global",quotas.max_active_global)] {
+                let count: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM mitigations WHERE action_type!='blackhole' AND status IN ('pending','active','escalated') AND ($1!='customer' OR customer_id=$2) AND ($1!='pop' OR pop=$3)) + (SELECT COUNT(*) FROM scrubber_diversions WHERE status IN ('pending','active','withdrawing') AND ($1!='customer' OR customer_id=$2) AND ($1!='pop' OR pop=$3))")
+                    .bind(scope).bind(&intent.customer_id).bind(&intent.pop).fetch_one(&mut *tx).await?;
+                check_active_quota(scope, u32::try_from(count).unwrap_or(u32::MAX),limit)?;
+            }
+            Self::check_new_mitigation_rate_on(&mut tx, &intent.pop,quotas.max_new_per_minute).await?;
+            let revision: i64 = sqlx::query_scalar("SELECT nextval('scrubber_admission_revision')").fetch_one(&mut *tx).await?;
+            let mut intent = intent.clone(); intent.rule.revision = revision.try_into().map_err(|_| PrefixdError::Internal("scrubber revision exhausted".into()))?;
+            intent.rule.validate()?;
+            sqlx::query("INSERT INTO scrubber_diversions(id,pop,victim,customer_id,profile_id,profile_revision,admission_revision,status,created_at,snapshot_json) VALUES($1,$2,$3::inet,$4,$5,$6,$7,$8,$9,$10)")
+                .bind(intent.id).bind(&intent.pop).bind(intent.victim()).bind(&intent.customer_id).bind(&intent.profile.id).bind(&intent.profile.revision).bind(revision).bind(intent.status.as_str()).bind(intent.created_at).bind(serde_json::to_string(&intent)?).execute(&mut *tx).await?;
+            Self::insert_audit_on(&mut tx,&intent.audit("scrubber_admit")).await?;
+            Ok::<_,PrefixdError>((tx,intent))
+        }).await.map_err(|_| PrefixdError::Internal("scrubber admission timed out".into()))??;
+        tx.commit().await?;
+        Ok(intent)
+    }
+    async fn save_diversion(
+        &self,
+        intent: &crate::scrubber::Diversion,
+        action: &str,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout='5s'")
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query("UPDATE scrubber_diversions SET status=$2,snapshot_json=$3 WHERE id=$1 AND pop=$4 AND admission_revision=$5 AND (snapshot_json::jsonb - ARRAY['status','withdrawal_reason','withdrawal_actor','windows','generation','last_error','export_observation']) = ($3::jsonb - ARRAY['status','withdrawal_reason','withdrawal_actor','windows','generation','last_error','export_observation'])")
+            .bind(intent.id).bind(intent.status.as_str()).bind(serde_json::to_string(intent)?).bind(&intent.pop).bind(i64::try_from(intent.rule.revision).unwrap_or(-1)).execute(&mut *tx).await?;
+        if result.rows_affected() != 1 {
+            return Err(PrefixdError::Conflict("scrubber intent changed".into()));
+        }
+        Self::insert_audit_on(&mut tx, &intent.audit(action)).await?;
+        tx.commit().await?;
+        Ok(())
+    }
     fn for_bounded_reads(
         self: std::sync::Arc<Self>,
         deadline: tokio::time::Instant,
@@ -654,19 +745,25 @@ impl RepositoryTrait for Repository {
             sqlx::query("SELECT pg_advisory_xact_lock(1886545528, 1903522164)")
                 .execute(&mut *tx).await?;
             if m.action_type != ActionType::Blackhole {
+                let conflict: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM scrubber_diversions WHERE pop=$1 AND victim <<= $2::inet AND status IN ('pending','active','withdrawing'))")
+                    .bind(&m.pop).bind(&m.match_criteria.dst_prefix).fetch_one(&mut *tx).await?;
+                if conflict { return Err(PrefixdError::Conflict("victim has live or pending scrubber diversion".into())); }
                 if let Some(customer_id) = &m.customer_id {
-                    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND customer_id = $1 AND status IN ('pending', 'active', 'escalated')")
+                    let count: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND customer_id = $1 AND status IN ('pending', 'active', 'escalated')) + (SELECT COUNT(*) FROM scrubber_diversions WHERE customer_id = $1 AND status IN ('pending','active','withdrawing'))")
                         .bind(customer_id).fetch_one(&mut *tx).await?;
                     check_active_quota("customer", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_per_customer)?;
                 }
-                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND pop = $1 AND status IN ('pending', 'active', 'escalated')")
+                let count: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND pop = $1 AND status IN ('pending', 'active', 'escalated')) + (SELECT COUNT(*) FROM scrubber_diversions WHERE pop = $1 AND status IN ('pending','active','withdrawing'))")
                     .bind(&m.pop).fetch_one(&mut *tx).await?;
                 check_active_quota("pop", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_per_pop)?;
-                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND status IN ('pending', 'active', 'escalated')")
+                let count: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND status IN ('pending', 'active', 'escalated')) + (SELECT COUNT(*) FROM scrubber_diversions WHERE status IN ('pending','active','withdrawing'))")
                     .fetch_one(&mut *tx).await?;
                 check_active_quota("global", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_global)?;
             }
             if m.action_type == ActionType::Blackhole {
+                let conflict: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM scrubber_diversions WHERE pop=$1 AND victim <<= $2::inet AND status IN ('pending','active','withdrawing'))")
+                    .bind(&m.pop).bind(&m.match_criteria.dst_prefix).fetch_one(&mut *tx).await?;
+                if conflict { return Err(PrefixdError::Conflict("victim has live or pending scrubber diversion".into())); }
                 let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE action_type = 'blackhole' AND pop = $1 AND status IN ('pending', 'active', 'escalated')")
                     .bind(&m.pop).fetch_one(&mut *tx).await?;
                 check_active_quota("blackhole_pop", u32::try_from(count).unwrap_or(u32::MAX), blackhole.max_active_per_pop)?;
@@ -999,7 +1096,7 @@ impl RepositoryTrait for Repository {
     async fn count_active_flowspec_by_customer(&self, customer_id: &str) -> Result<u32> {
         let mut connection = self.bounded_read_connection().await?;
         let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND customer_id = $1 AND status IN ('pending', 'active', 'escalated')",
+            "SELECT (SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND customer_id = $1 AND status IN ('pending', 'active', 'escalated')) + (SELECT COUNT(*) FROM scrubber_diversions WHERE customer_id = $1 AND status IN ('pending','active','withdrawing'))",
         )
         .bind(customer_id)
         .fetch_one(&mut *connection)
@@ -1010,7 +1107,7 @@ impl RepositoryTrait for Repository {
     async fn count_active_flowspec_by_pop(&self, pop: &str) -> Result<u32> {
         let mut connection = self.bounded_read_connection().await?;
         let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND pop = $1 AND status IN ('pending', 'active', 'escalated')",
+            "SELECT (SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND pop = $1 AND status IN ('pending', 'active', 'escalated')) + (SELECT COUNT(*) FROM scrubber_diversions WHERE pop = $1 AND status IN ('pending','active','withdrawing'))",
         )
         .bind(pop)
         .fetch_one(&mut *connection)
@@ -1021,7 +1118,7 @@ impl RepositoryTrait for Repository {
     async fn count_active_flowspec_global(&self) -> Result<u32> {
         let mut connection = self.bounded_read_connection().await?;
         let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND status IN ('pending', 'active', 'escalated')",
+            "SELECT (SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND status IN ('pending', 'active', 'escalated')) + (SELECT COUNT(*) FROM scrubber_diversions WHERE status IN ('pending','active','withdrawing'))",
         )
         .fetch_one(&mut *connection)
         .await?;

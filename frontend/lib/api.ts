@@ -4,6 +4,62 @@ import { parseDestination } from "./destination"
 // This allows the dashboard to work on any host without hardcoded URLs
 const API_BASE = "/api/prefixd"
 
+export interface ScrubberState {
+  readiness?: "ready" | "not_ready" | "unknown"
+  armed: boolean
+  ready: boolean
+  observed_at: string | null
+  latch_reason: string | null
+}
+
+export interface ScrubberProfiles {
+  enabled: boolean
+  profiles: Record<string, ScrubberState>
+  configuration: { id: string; revision: string; ipv4_target: string | null; ipv6_target: string | null }[]
+}
+
+export interface DiversionMatch {
+  dst_prefix: string
+  src_prefix?: string
+  protocol: number | null
+  dst_ports: number[]
+  src_ports?: number[]
+}
+
+export interface DiversionRequest {
+  profile: string
+  scope: DiversionMatch
+  ttl_seconds: number
+  reason: string
+  confirmation?: string
+}
+
+export interface ScrubberDiversion {
+  id: string
+  profile: { id: string; revision: string }
+  rule: { nlri: DiversionMatch; target: string; owner: string; revision: number }
+  expires_at: string
+  status: "pending" | "active" | "withdrawing" | "withdrawn" | "simulated"
+  dry_run: boolean
+  withdrawal_reason: string | null
+  last_error: string | null
+  export_observation?: { observed_at: string; peers: { peer_address: string; disposition: string; reason: string }[] } | null
+}
+
+export interface DiversionPreview {
+  candidate: ScrubberDiversion
+  confirmation: string
+  readiness: ScrubberState | null
+  evidence: string
+}
+
+export const getScrubbers = () => fetchApi<ScrubberProfiles>("/v1/scrubbers")
+export const getDiversions = () => fetchApi<ScrubberDiversion[]>("/v1/diversions")
+export const previewDiversion = (request: DiversionRequest) => fetchApi<DiversionPreview>("/v1/diversions/preview", { method: "POST", body: JSON.stringify(request) })
+export const createDiversion = (request: DiversionRequest) => fetchApi<ScrubberDiversion>("/v1/diversions", { method: "POST", body: JSON.stringify(request) })
+export const armScrubber = (id: string, revision: string) => fetchApi<null>(`/v1/scrubbers/${encodeURIComponent(id)}/arm`, { method: "POST", body: JSON.stringify({ revision }) })
+export const withdrawDiversion = (id: string) => fetchApi<ScrubberDiversion>(`/v1/diversions/${encodeURIComponent(id)}/withdraw`, { method: "POST", body: "{}" })
+
 // Cache for deduplicating in-flight requests (client-swr-dedup pattern)
 const requestCache = new Map<string, Promise<unknown>>()
 

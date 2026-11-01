@@ -3361,3 +3361,27 @@ X-RateLimit-Reset: 1705578600
   "retry_after_seconds": 5
 }
 ```
+
+## Manual scrubber diversion
+
+All reads require authentication; manual mutations and preview require Admin.
+The feature is disabled by default and needs rustbgpd v0.81.0. Detector and
+playbook requests cannot choose a scrubber target.
+
+| Method and path | Meaning |
+| --- | --- |
+| `GET /v1/scrubbers` | Configured targets/revisions, readiness and arm/latch state |
+| `POST /v1/scrubbers/{profile}/arm` | Fresh readiness and completed withdrawal, with exact `revision` |
+| `POST /v1/diversions/preview` | Read-only controller checks and exact match/target confirmation |
+| `POST /v1/diversions` | Persist manual intent before guarded mutation; returns `202` |
+| `GET /v1/diversions` | Outstanding intent, including pending withdrawals |
+| `GET /v1/diversions/{id}` | Saved match/action/profile, revision and timestamped export observation |
+| `POST /v1/diversions/{id}/withdraw` | Retain withdrawal until authorization expiry and confirmed local absence |
+
+Creation takes `profile`, `scope` (a complete host FlowSpec match), bounded
+`ttl_seconds`, `reason` and the exact `confirmation` returned by preview.
+Arbitrary targets, owners and health URLs are rejected. A live/pending diversion
+excludes every other mitigation affecting its victim. Dry-run creates a
+simulation without any speaker mutation. `active` establishes exact local
+read-back; per-peer export and router forwarding remain distinct evidence.
+See the [workflow and payloads](../how-to/scrubber-diversion.md).
