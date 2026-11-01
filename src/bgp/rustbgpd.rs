@@ -29,6 +29,9 @@ pub struct RustBgpdAnnouncer {
 /// aborts export walks whose pages disagree.
 const MINIMUM_DAEMON_VERSION: [u64; 3] = [0, 80, 0];
 
+#[path = "rustbgpd_guarded.rs"]
+mod guarded;
+
 /// `major.minor.patch`, ignoring any pre-release or build suffix.
 fn parse_version(version: &str) -> Option<[u64; 3]> {
     let core = version.split(['-', '+']).next()?;
@@ -749,6 +752,9 @@ fn decode_blackhole(
 const ROUTE_PAGE_SIZE: u32 = 100;
 
 impl FlowSpecAnnouncer for RustBgpdAnnouncer {
+    fn guarded_flowspec(&self) -> Option<&dyn super::GuardedFlowSpecSpeaker> {
+        Some(self)
+    }
     fn backend(&self) -> &'static str {
         "rustbgpd"
     }
@@ -910,6 +916,14 @@ impl FlowSpecReader for RustBgpdAnnouncer {
                     return Err(invalid("invalid local intent row"));
                 }
                 let route = row.route.ok_or_else(|| invalid("missing local route"))?;
+                if route.injection_owner.starts_with("guarded:")
+                    || route.admission_revision.is_some()
+                {
+                    // Account for the complete guarded payload before routing it
+                    // to the separate diversion reader and lifecycle.
+                    guarded::decode_guarded(route, family)?;
+                    continue;
+                }
                 // Zero remaining means expired with its withdrawal pending: lost, not retained.
                 let expired = route.lease_remaining_ms == Some(0);
                 let rule = decode(route, family)?;

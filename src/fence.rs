@@ -226,6 +226,11 @@ impl FlowSpecWriter for FencedAnnouncer {
 }
 
 impl FlowSpecAnnouncer for FencedAnnouncer {
+    fn guarded_flowspec(&self) -> Option<&dyn crate::bgp::GuardedFlowSpecSpeaker> {
+        self.inner
+            .guarded_flowspec()
+            .map(|_| self as &dyn crate::bgp::GuardedFlowSpecSpeaker)
+    }
     fn backend(&self) -> &'static str {
         self.inner.backend()
     }
@@ -269,6 +274,60 @@ impl FlowSpecAnnouncer for FencedAnnouncer {
         self.inner
             .injection_leases()
             .map(|_| self as &dyn InjectionLeases)
+    }
+}
+
+#[async_trait]
+impl crate::bgp::GuardedFlowSpecSpeaker for FencedAnnouncer {
+    async fn issue_window(&self, owner: &str, seconds: u32) -> Result<crate::bgp::IssuedWindow> {
+        self.fence.ensure_active()?;
+        self.inner
+            .guarded_flowspec()
+            .ok_or_else(|| PrefixdError::Config("guarded FlowSpec unsupported".into()))?
+            .issue_window(owner, seconds)
+            .await
+    }
+    async fn add_guarded(
+        &self,
+        rule: &crate::bgp::GuardedRule,
+        window: crate::bgp::GuardedStamp,
+        seconds: u32,
+    ) -> Result<crate::bgp::GuardedStamp> {
+        self.fence.ensure_active()?;
+        self.inner
+            .guarded_flowspec()
+            .ok_or_else(|| PrefixdError::Config("guarded FlowSpec unsupported".into()))?
+            .add_guarded(rule, window, seconds)
+            .await
+    }
+    async fn renew_guarded(
+        &self,
+        owner: &str,
+        generation: crate::bgp::GuardedStamp,
+        window: crate::bgp::GuardedStamp,
+        seconds: u32,
+    ) -> Result<u32> {
+        self.fence.ensure_active()?;
+        self.inner
+            .guarded_flowspec()
+            .ok_or_else(|| PrefixdError::Config("guarded FlowSpec unsupported".into()))?
+            .renew_guarded(owner, generation, window, seconds)
+            .await
+    }
+    async fn delete_guarded(&self, rule: &crate::bgp::GuardedRule) -> Result<()> {
+        self.fence.ensure_active()?;
+        self.inner
+            .guarded_flowspec()
+            .ok_or_else(|| PrefixdError::Config("guarded FlowSpec unsupported".into()))?
+            .delete_guarded(rule)
+            .await
+    }
+    async fn guarded_inventory(&self) -> Result<Vec<crate::bgp::GuardedObservation>> {
+        self.inner
+            .guarded_flowspec()
+            .ok_or_else(|| PrefixdError::Config("guarded FlowSpec unsupported".into()))?
+            .guarded_inventory()
+            .await
     }
 }
 
