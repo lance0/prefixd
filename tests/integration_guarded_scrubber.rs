@@ -54,11 +54,29 @@ async fn guarded_contract_preserves_targets_revisions_and_independent_owners() {
     let wa = speaker.issue_window(&a.owner, 30).await.unwrap();
     let wb = speaker.issue_window(&b.owner, 30).await.unwrap();
     let ga = speaker.add_guarded(&a, wa.stamp, 30).await.unwrap();
+    let raw_v4 = fixture.received_flow_spec(3, "0.0.0.0").await;
+    assert_eq!(
+        raw_v4.received_routes[0]
+            .route
+            .as_ref()
+            .unwrap()
+            .extended_communities,
+        [0x010c_c000_0263_0000]
+    );
     assert_eq!(
         speaker.add_guarded(&sibling, wa.stamp, 30).await.unwrap(),
         ga
     );
     let gb = speaker.add_guarded(&b, wb.stamp, 30).await.unwrap();
+    let raw_v6 = fixture.received_flow_spec(4, "0.0.0.0").await;
+    assert_eq!(
+        raw_v6.received_routes[0]
+            .route
+            .as_ref()
+            .unwrap()
+            .ipv6_extended_communities,
+        [hex::decode("000c20010db80000000000000000000000990000").unwrap()]
+    );
     assert_eq!(speaker.add_guarded(&a, wa.stamp, 30).await.unwrap(), ga);
     let inventory = speaker.guarded_inventory().await.unwrap();
     for expected in [&a, &b, &sibling] {

@@ -61,6 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add a separate guarded FlowSpec speaker boundary for direct target-IP
+  diversion, with exact IPv4/IPv6 action read-back, independent owner windows
+  and revision-fenced deletion. All guarded mutations require the controller
+  fence and use no legacy fallback. Manual controller enablement follows separately.
+
 - CI runs the authenticated browser withdrawal smoke against disposable
   PostgreSQL and pinned rustbgpd, reusing the candidate controller binaries and
   production dashboard build. It checks pending confirmation, persisted/rendered

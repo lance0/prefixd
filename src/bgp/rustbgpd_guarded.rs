@@ -1,4 +1,7 @@
 use super::*;
+#[cfg(test)]
+#[path = "guarded_decode_tests.rs"]
+mod tests;
 use crate::bgp::{
     GuardedFlowSpecSpeaker, GuardedInventory, GuardedObservation, GuardedRule, GuardedStamp,
     IssuedWindow,
