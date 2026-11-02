@@ -54,6 +54,7 @@ pub struct AppState {
     pub export_evidence: crate::domain::ExportEvidenceStore,
     /// FlowSpec uses the same epoch-fenced snapshot contract as blackholes.
     pub flowspec_export_evidence: crate::domain::ExportEvidenceStore,
+    pub scrubber: crate::scrubber::ScrubberController,
     /// Directory containing config files (for hot-reload)
     pub config_dir: PathBuf,
     shutting_down: AtomicBool,
@@ -114,6 +115,7 @@ impl AppState {
         };
 
         let correlation_config = settings.correlation.clone();
+        let scrubber = crate::scrubber::ScrubberController::new(&settings)?;
 
         Ok(Arc::new(Self {
             settings,
@@ -136,6 +138,7 @@ impl AppState {
             lease: None,
             export_evidence: Default::default(),
             flowspec_export_evidence: Default::default(),
+            scrubber,
             db_pool,
             config_dir,
             shutting_down: AtomicBool::new(false),

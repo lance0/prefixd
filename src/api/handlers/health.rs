@@ -65,6 +65,8 @@ pub struct SpeakerHealth {
     #[serde(skip_serializing_if = "Option::is_none")]
     flowspec_exports: Option<crate::domain::FlowSpecExportSummary>,
     daemon: DaemonHealthObservation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scrubbers: Option<std::collections::HashMap<String, crate::scrubber::ProfileState>>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -316,6 +318,11 @@ pub async fn health_detail(
             blackhole_exports,
             flowspec_exports,
             daemon,
+            scrubbers: if state.settings.scrubber.enabled {
+                Some(state.scrubber.profiles().await)
+            } else {
+                None
+            },
         },
         auth_mode: resolve_auth_mode(&state),
     }))

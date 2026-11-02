@@ -1,15 +1,22 @@
 # Redirect-to-IP speaker contract and qualification plan
 
-**Status:** Proposed prerequisite for [ADR 030](../adr/030-scrubber-diversion.md).
-**Checked:** 2026-10-23 against prefixd `010c86b` and released rustbgpd `v0.79.0`
-(`60cb5c9910eb1380661dd4c80d55563b2d80099a`).
+**Status:** The speaker prerequisite is released in rustbgpd v0.81.0. prefixd's
+manual controller is implemented behind disabled-by-default profiles; exact
+router/scrubber forwarding qualification remains open. See the
+[manual workflow](../how-to/scrubber-diversion.md) and the
+[released guarded contract](https://github.com/lance0/rustbgpd/blob/v0.81.0/docs/adr/0144-guarded-flowspec-mutations.md).
 
-[Issue #305](https://github.com/lance0/prefixd/issues/305) asks for diversion to a
-scrubber and source-prefix selection. Source-prefix matching shipped in
-[PR #307](https://github.com/lance0/prefixd/pull/307). Redirect-to-IP still needs
-the contract and qualification below. This plan enables no action and leaves
-ADR 030 Proposed. Its first runtime slice keeps host destinations, manual
-admission, configured targets and the readiness/withdrawal latch from that ADR.
+**Historical audit:** 2026-10-23 against prefixd `010c86b` and released rustbgpd
+`v0.79.0` (`60cb5c9910eb1380661dd4c80d55563b2d80099a`). The boundary table and
+proposal below preserve that audit's provenance. v0.81.0 now provides typed
+IPv4/IPv6 target-IP actions, lossless read-back, server-issued mutation windows
+and admission-revision-fenced deletion.
+
+[Issue #305](https://github.com/lance0/prefixd/issues/305) also requested source
+selection, delivered in [PR #307](https://github.com/lance0/prefixd/pull/307).
+The manual diversion workflow retains host destinations, configured targets,
+readiness latching and explicit re-arm. It does not establish router forwarding
+or enable detector/playbook diversion.
 
 ## Released boundary and remaining dependencies
 
@@ -42,8 +49,9 @@ same ownership, failure and forwarding controls.
 
 ## Contract to agree upstream
 
-The following requirements describe prefixd's dependency. They do not assign
-protobuf field numbers or claim that rustbgpd implements a proposed RPC.
+The following requirements describe the dependency as it was proposed. The
+released v0.81.0 RPCs now satisfy the speaker shape and commit/revision fences;
+the qualification cases remain regression controls.
 
 ### Action and rollback refusal
 
@@ -235,6 +243,34 @@ add contract: release a queued add after its client timeout and record that it
 can start a later lease. Keep that control in an isolated fixture. No live
 operator route or existing lab belongs in this experiment.
 
+### Qualification coverage
+
+The table maps each case to the tests that currently cover it. prefixd's
+released-daemon tests run against rustbgpd v0.81.0 through
+`scripts/test-rustbgpd.sh`; controller tests use a fake guarded speaker. The
+upstream column cites rustbgpd's
+[guarded contract receipt](https://github.com/lance0/rustbgpd/blob/v0.81.0/docs/artifacts/interop/guarded-flowspec-qualification-20261030/README.md),
+recorded on the tree that added it and included in v0.81.0, and its
+[in-process qualification tests](https://github.com/lance0/rustbgpd/blob/v0.81.0/crates/api/src/guarded_flowspec_qualification_tests.rs).
+A row marked open has no test yet.
+
+| Case | prefixd | rustbgpd upstream | Open |
+| --- | --- | --- | --- |
+| Canonical add/read/peer receipt | `guarded_contract_preserves_targets_revisions_and_independent_owners` checks both target vectors at a receiving peer and owner, revision and generation read-back; `guarded_readback_requires_exact_supported_action_and_lease_fields` checks typed/raw agreement | — | — |
+| Unsupported server/family | The same released test refuses windows and adds against an older `PREFIXD_RUSTBGPD_TEST_VERSION` and finds no new state | Case 1, rollback to 0.80.1 | prefixd runs against an older daemon only when that version is selected |
+| Invalid action | `GuardedRule::validate` refuses cross-family targets before mutation; `guarded_readback_requires_exact_supported_action_and_lease_fields` refuses copy, reserved-bit, duplicate and stray IPv6 action bytes on read-back; the released contract test refuses a changed target under the same revision | — | Copy, reserved-bit and malformed IPv6-length requests sent to the daemon |
+| Exact deletion | The released contract test refuses older-revision and foreign-owner deletes, repeats an absent delete and keeps siblings | Case 6 | — |
+| Pending-add withdrawal | `held_guarded_mutations_cannot_remove_a_reused_key_or_outlive_their_window`, with its recreation negative control, keeps a sibling live and refuses the replay after window expiry; `ambiguous_add_keeps_exclusion_until_window_barrier_and_final_absence` keeps victim exclusion and re-arm blocked through the barrier | Cases 2 and 3 | Controller-level drain against the released daemon with a held add |
+| Delayed delete and key reuse | The same released test holds D1, completes D2, reuses the key under a fresh revision and keeps the sibling; its legacy owner-only control removes the replacement | Case 6, with its legacy control | Drain alternative: not used |
+| Queue after timeout | — | Case 2 | prefixd cannot stall the daemon's RIB |
+| Delayed retry and renewal | The released contract test refuses an expired-window add and renewal | Case 4 | — |
+| Delay before handler receipt | The released contract test sends a formed add after its window expires | Case 3 | — |
+| Generation/restart | — | — | Old-window and old-generation mutations after a daemon restart |
+| Independent profiles | `released_controller_lifecycle_uses_https_postgres_and_independent_guarded_leases` drains profile A while B renews; `failed_profile_cannot_renew_through_a_healthy_profile` | — | Ordinary FlowSpec and blackhole leases renewing in the same run |
+| Storage or leadership loss | `storage_and_fence_loss_stop_renewal_and_latch_in_memory` uses the fake speaker | Case 5, controller loss | The same faults against the released daemon |
+| Observation failure | Read-back decoding refuses unsupported or inconsistent rows; `many_active_diversions_renew_once_per_owner_and_slow_exports_only_degrade_evidence` keeps failed export reads distinct | — | Partial or failed inventory against the released daemon |
+| Cap exhaustion | `profile_shares_windows_within_the_speaker_cap_and_refuses_retargeting` stays within the fake's window cap | Case 7, window cap | Owner and key cap exhaustion at the daemon |
+
 ## Qualify forwarding after the contract passes
 
 The [FRR 10.4 guide](https://docs.frrouting.org/en/stable-10.4/bgp.html#flowspec)
@@ -252,8 +288,7 @@ withdrawal, receiver RIB, installed PBR/FIB state and dirty/clean traffic. Recor
 the last successful mutation and window expiry when measuring controller-stop
 behavior. Include the still-renewing profile control from the table above.
 
-Only after these dependencies pass should a runtime PR add persisted profiles
-and action snapshots, readiness/re-arm, manual operator workflow and metrics.
-Link each PR and its receipt to ADR 030's slices. Keep redirect disabled until
-the required backend/family/profile gates pass; source-prefix selection alone
-does not complete issue #305.
+The manual runtime now adds persisted profiles/action snapshots, readiness and
+re-arm, operator controls and bounded metrics. Keep redirect disabled until the
+required backend/family/profile forwarding gates pass. Local controller receipts
+and source-prefix selection alone do not complete issue #305's forwarding scope.

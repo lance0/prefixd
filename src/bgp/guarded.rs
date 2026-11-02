@@ -90,8 +90,9 @@ pub struct GuardedObservation {
 #[derive(Debug, Clone, Default)]
 pub struct GuardedInventory {
     pub entries: Vec<GuardedObservation>,
-    /// Ordinary local rules are retained as occupied keys, never mistaken for absence.
-    pub other_keys: Vec<String>,
+    /// Ordinary and foreign guarded local rules: occupied keys, never mistaken
+    /// for absence, whose selectors also count for victim overlap checks.
+    pub other_matches: Vec<FlowSpecNlri>,
 }
 impl std::ops::Deref for GuardedInventory {
     type Target = [GuardedObservation];
@@ -102,7 +103,9 @@ impl std::ops::Deref for GuardedInventory {
 impl GuardedInventory {
     pub fn has_key(&self, nlri: &FlowSpecNlri) -> bool {
         let key = nlri.compute_hash();
-        self.other_keys.contains(&key)
+        self.other_matches
+            .iter()
+            .any(|other| other.compute_hash() == key)
             || self
                 .entries
                 .iter()

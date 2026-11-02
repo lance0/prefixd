@@ -102,6 +102,35 @@ pub struct MitigationListParams {
 
 #[async_trait]
 pub trait RepositoryTrait: Send + Sync {
+    async fn list_diversions(&self, _pop: &str) -> Result<Vec<crate::scrubber::Diversion>> {
+        Err(crate::error::PrefixdError::Internal(
+            "scrubber persistence unsupported".into(),
+        ))
+    }
+    async fn get_diversion(&self, _id: Uuid) -> Result<Option<crate::scrubber::Diversion>> {
+        Err(crate::error::PrefixdError::Internal(
+            "scrubber persistence unsupported".into(),
+        ))
+    }
+    async fn admit_diversion(
+        &self,
+        _intent: &crate::scrubber::Diversion,
+        _profile: &crate::scrubber::ScrubberProfile,
+        _quotas: &crate::config::QuotasConfig,
+    ) -> Result<crate::scrubber::Diversion> {
+        Err(crate::error::PrefixdError::Internal(
+            "scrubber persistence unsupported".into(),
+        ))
+    }
+    async fn save_diversion(
+        &self,
+        _intent: &crate::scrubber::Diversion,
+        _action: &str,
+    ) -> Result<()> {
+        Err(crate::error::PrefixdError::Internal(
+            "scrubber persistence unsupported".into(),
+        ))
+    }
     /// Bound read-only preparation's mitigation lookup, ownership inventory,
     /// pending-withdrawal, safelist and FlowSpec quota/rate reads by an absolute
     /// deadline. The implementation must bound server work and must not hand

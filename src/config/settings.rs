@@ -26,6 +26,8 @@ pub struct Settings {
     pub blackhole: BlackholeConfig,
     #[serde(default)]
     pub amplification: AmplificationConfig,
+    #[serde(default)]
+    pub scrubber: crate::scrubber::ScrubberConfig,
 }
 
 fn default_mode() -> OperationMode {
@@ -756,6 +758,10 @@ impl Settings {
         settings.http.validate_auth_transport()?;
         settings.blackhole.validate()?;
         settings.amplification.validate()?;
+        settings.scrubber.validate()?;
+        if settings.scrubber.enabled && settings.bgp.mode != BgpMode::Rustbgpd {
+            anyhow::bail!("scrubber diversion requires the rustbgpd backend");
+        }
         settings
             .guardrails
             .validate_for_backend(settings.bgp.mode)?;

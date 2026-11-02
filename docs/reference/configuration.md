@@ -1374,3 +1374,19 @@ Common validation errors:
 - `Invalid TTL` - TTL outside min/max bounds
 - `Missing required field` - Check YAML structure
 - `Invalid customer_id` - Must be unique
+
+## Scrubber profiles
+
+`scrubber.enabled` defaults to `false`; `scrubber.profiles` defaults to an empty
+list. An enabled configuration requires rustbgpd and at least one profile.
+Profiles freeze their revision, owned destinations, same-family targets, ingress
+peer set, policy binding and qualification reference into each admission. At
+most 32 profiles are configured, with at most 1,000 outstanding diversions per
+POP. Each profile has nonzero active and creation-rate caps and a maximum
+lifetime of 5–3,600 seconds, further constrained by existing guardrails.
+
+Readiness uses a configuration-owned HTTPS URL and bearer-token environment
+variable. `scrubber.readiness_ca_cert` optionally adds a PEM trust anchor.
+Profiles start unarmed. Their configuration requires restart, and outstanding
+intent prevents retargeting, removal, disabling or mode changes until drained.
+See the [profile example and readiness schema](../how-to/scrubber-diversion.md).

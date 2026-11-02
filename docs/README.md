@@ -20,6 +20,7 @@ covers the daemon.
 |------------|-----------|
 | Run prefixd and rustbgpd on my machine | [Quickstart](tutorials/quickstart.md) |
 | Mitigate a target by hand and withdraw it | [Manual mitigation and withdrawal](cookbook/manual-mitigation.md) |
+| Manually divert a host through a configured scrubber | [Scrubber diversion](how-to/scrubber-diversion.md) |
 | Keep an existing FlowSpec rule for longer | [Extend a mitigation](how-to/extending-mitigations.md) |
 | See what policy would do before it announces | [Dry-run rollout](cookbook/dry-run-rollout.md) |
 | Connect FastNetMon | [FastNetMon](how-to/detectors/fastnetmon.md) |
@@ -56,6 +57,7 @@ Follow a procedure for a specific task.
 | Page | Scope |
 |------|-------|
 | [Deployment](how-to/deployment.md) | Configure authentication, peers, TLS, databases and deployment. |
+| [Scrubber diversion](how-to/scrubber-diversion.md) | Configure disabled-by-default profiles, readiness, re-arm and guarded withdrawal. |
 | [Upgrading and rollback](how-to/upgrading.md) | Back up state and apply version-specific upgrade procedures. |
 | [Troubleshooting](how-to/troubleshooting.md) | Diagnose API, mitigation and BGP problems. |
 | [Grafana and monitoring](how-to/grafana.md) | Set up dashboards and investigate operational metrics. |

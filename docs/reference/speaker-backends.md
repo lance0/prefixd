@@ -307,15 +307,21 @@ Restart disabled on its placeholder neighbor; enable it on real peers that
 support it. On v0.80.x, before the minimum rose, the hold also applied to
 injected routes.
 
-The v0.81.0 proto includes direct target-IP actions and guarded mutation RPCs.
-prefixd does not enable scrubber diversion. Its local-rule reader refuses IPv6
-extended communities, unguarded redirect actions and malformed guarded rules in
-prefixd's `prefixd.scrub.` owner namespace rather than dropping attributes it
-cannot represent. Keep such rules off a speaker whose complete local inventory
-prefixd reconciles until the
-[scrubber lifecycle](../project/scrubber-diversion-contract.md) is implemented.
-A guarded rule of any other owner is excluded from that reader and appears only
-as an occupied key in the guarded inventory; prefixd never deletes it.
+The v0.81.0 guarded speaker boundary supports direct target-IP actions through
+separate, revision-fenced RPCs. The ordinary reader and scrubber reader validate
+the complete action bytes and admission state of rules in prefixd's
+`prefixd.scrub.` owner namespace before separating their lifecycles.
+Unsupported or inconsistent attributes fail observation; neither reader drops an
+unknown selector or action. A guarded rule of any other owner is excluded from
+the ordinary reader and appears in the guarded inventory only as an occupied key
+whose match still counts for victim overlap; prefixd never deletes it. Guarded
+window issuance and renewal require the controller fence, independently of
+ordinary lease renewal.
+
+[Manual scrubber diversion](../how-to/scrubber-diversion.md) is disabled by
+default. It requires configured per-POP profiles, qualified forwarding and export
+isolation, fresh authenticated readiness and explicit arm/re-arm. It supports
+host destinations and same-family targets, with no copying or legacy fallback.
 
 ### Scoped and interface-only neighbors
 

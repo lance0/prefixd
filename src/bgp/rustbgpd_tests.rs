@@ -2676,7 +2676,7 @@ async fn foreign_guarded_rules_are_occupied_keys_never_read_failures() {
         .await
         .expect("a foreign guarded rule must not fail the scrubber read");
     assert!(inventory.is_empty(), "foreign guarded rules are never ours");
-    assert_eq!(inventory.other_keys.len(), 3);
+    assert_eq!(inventory.other_matches.len(), 3);
     assert!(inventory.has_key(&ordinary.nlri));
     for prefix in ["198.51.100.0/24", "2001:db8::5/128"] {
         assert!(

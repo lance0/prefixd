@@ -4,6 +4,38 @@ use prometheus::{
     register_counter_vec, register_gauge, register_gauge_vec, register_histogram_vec,
 };
 
+pub static SCRUBBER_READY: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_scrubber_ready",
+        "Fresh authenticated scrubber readiness by configured profile",
+        &["profile"]
+    )
+    .unwrap()
+});
+pub static SCRUBBER_ARMED: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_scrubber_armed",
+        "Explicit scrubber arm state by configured profile",
+        &["profile"]
+    )
+    .unwrap()
+});
+pub static SCRUBBER_INTENTS: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_scrubber_intents",
+        "Outstanding durable diversion intent, not router forwarding",
+        &["profile", "status"]
+    )
+    .unwrap()
+});
+pub static SCRUBBER_LIFECYCLE_FAILURES: Lazy<Counter> = Lazy::new(|| {
+    register_counter!(
+        "prefixd_scrubber_lifecycle_failures_total",
+        "Scrubber lifecycle operations or passes that could not be confirmed"
+    )
+    .unwrap()
+});
+
 // Event metrics
 pub static EVENTS_INGESTED: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(

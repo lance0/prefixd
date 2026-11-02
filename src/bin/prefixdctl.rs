@@ -17,6 +17,10 @@ struct Cli {
     #[arg(short, long, env = "PREFIXD_API_TOKEN")]
     token: Option<String>,
 
+    /// Cookie header from an authenticated administrator session
+    #[arg(long, env = "PREFIXD_SESSION_COOKIE", hide_env_values = true)]
+    session_cookie: Option<String>,
+
     /// Output format
     #[arg(short, long, default_value = "table")]
     format: OutputFormat,
@@ -34,6 +38,12 @@ enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Inspect or explicitly re-arm configured scrubber profiles
+    #[command(subcommand)]
+    Scrubbers(ScrubberCommands),
+    /// Preview, create or withdraw a manual guarded diversion
+    #[command(subcommand)]
+    Diversions(DiversionCommands),
     /// Show daemon status and health
     Status,
 
@@ -92,6 +102,39 @@ enum Commands {
         /// Confidence (0.0–1.0)
         #[arg(long)]
         confidence: Option<f32>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScrubberCommands {
+    List,
+    Arm {
+        profile: String,
+        #[arg(long)]
+        revision: String,
+    },
+}
+#[derive(Subcommand)]
+enum DiversionCommands {
+    List,
+    Get {
+        id: uuid::Uuid,
+    },
+    Preview {
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+    Create {
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long)]
+        confirmation: String,
+    },
+    Withdraw {
+        id: uuid::Uuid,
+        /// Recorded with the first withdrawal request in the audit log
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -393,6 +436,7 @@ struct Client {
     base_url: String,
     token: Option<String>,
     http: reqwest::Client,
+    session_cookie: Option<String>,
 }
 
 impl Client {
@@ -401,6 +445,7 @@ impl Client {
             base_url,
             token,
             http: reqwest::Client::new(),
+            session_cookie: None,
         }
     }
 
@@ -409,6 +454,9 @@ impl Client {
         let mut req = self.http.request(method, &url);
         if let Some(ref token) = self.token {
             req = req.header("Authorization", format!("Bearer {}", token));
+        }
+        if let Some(cookie) = &self.session_cookie {
+            req = req.header(reqwest::header::COOKIE, cookie);
         }
         req
     }
@@ -495,9 +543,12 @@ impl Client {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let client = Client::new(cli.api, cli.token);
+    let mut client = Client::new(cli.api, cli.token);
+    client.session_cookie = cli.session_cookie;
 
     let result = match cli.command {
+        Commands::Scrubbers(command) => cmd_scrubbers(&client, command).await,
+        Commands::Diversions(command) => cmd_diversions(&client, command).await,
         Commands::Status => cmd_status(&client, cli.format).await,
         Commands::Mitigations(cmd) => cmd_mitigations(&client, cmd, cli.format).await,
         Commands::Safelist(cmd) => cmd_safelist(&client, cmd, cli.format).await,
@@ -539,6 +590,77 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+async fn cmd_scrubbers(client: &Client, command: ScrubberCommands) -> Result<(), String> {
+    let value: serde_json::Value = match command {
+        ScrubberCommands::List => client.get("/v1/scrubbers").await?,
+        ScrubberCommands::Arm { profile, revision } => {
+            if !profile
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+            {
+                return Err("invalid profile identifier".into());
+            }
+            client
+                .post(
+                    &format!("/v1/scrubbers/{profile}/arm"),
+                    &serde_json::json!({"revision":revision}),
+                )
+                .await?
+        }
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+async fn cmd_diversions(client: &Client, command: DiversionCommands) -> Result<(), String> {
+    let value: serde_json::Value = match command {
+        DiversionCommands::List => client.get("/v1/diversions").await?,
+        DiversionCommands::Get { id } => client.get(&format!("/v1/diversions/{id}")).await?,
+        DiversionCommands::Withdraw { id, reason } => {
+            let body = match reason {
+                Some(reason) => serde_json::json!({ "reason": reason }),
+                None => serde_json::json!({}),
+            };
+            client
+                .post(&format!("/v1/diversions/{id}/withdraw"), &body)
+                .await?
+        }
+        DiversionCommands::Preview { file } => {
+            let bytes = std::fs::read(file).map_err(|_| "cannot read diversion request file")?;
+            if bytes.len() > 16_384 {
+                return Err("diversion request file is too large".into());
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|_| "invalid diversion request JSON")?;
+            client.post("/v1/diversions/preview", &body).await?
+        }
+        DiversionCommands::Create { file, confirmation } => {
+            let bytes = std::fs::read(file).map_err(|_| "cannot read diversion request file")?;
+            if bytes.len() > 16_384 {
+                return Err("diversion request file is too large".into());
+            }
+            let mut body: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|_| "invalid diversion request JSON")?;
+            let object = body
+                .as_object_mut()
+                .ok_or("diversion request must be a JSON object")?;
+            object.insert(
+                "confirmation".into(),
+                serde_json::Value::String(confirmation),
+            );
+            client.post("/v1/diversions", &body).await?
+        }
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?
+    );
+    Ok(())
 }
 
 async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String> {

@@ -125,7 +125,9 @@ pub trait DaemonHealthObserver: Send + Sync {
 }
 
 /// A local route's export state toward one configured peer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ExportDisposition {
     /// In the peer's Adj-RIB-Out. Not proof that the peer received, accepted,
@@ -154,7 +156,7 @@ impl ExportDisposition {
 }
 
 /// One configured peer's export disposition, as the speaker reports it.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct PeerExport {
     #[schema(example = "192.0.2.10")]
     pub peer_address: String,

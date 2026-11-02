@@ -254,7 +254,7 @@ impl RustBgpdAnnouncer {
 
     async fn raw_guarded_inventory(&self) -> Result<GuardedInventory> {
         let mut entries = vec![];
-        let mut other_keys = vec![];
+        let mut other_matches = vec![];
         let mut keys = std::collections::HashSet::new();
         for family in [3, 4] {
             let mut client = pb::rib_service_client::RibServiceClient::new(self.channel.clone());
@@ -277,11 +277,11 @@ impl RustBgpdAnnouncer {
                 }
                 let route = row.route.ok_or_else(|| invalid("missing local route"))?;
                 if foreign_guarded(&route) {
-                    let key = foreign_match(route, family)?.compute_hash();
-                    if !keys.insert(key.clone()) {
+                    let nlri = foreign_match(route, family)?;
+                    if !keys.insert(nlri.compute_hash()) {
                         return Err(invalid("repeated local key"));
                     }
-                    other_keys.push(key);
+                    other_matches.push(nlri);
                 } else if route.injection_owner.starts_with("guarded:")
                     || route.admission_revision.is_some()
                 {
@@ -292,17 +292,16 @@ impl RustBgpdAnnouncer {
                     entries.push(observation);
                 } else {
                     let ordinary = decode(route, family)?;
-                    let key = ordinary.nlri.compute_hash();
-                    if !keys.insert(key.clone()) {
+                    if !keys.insert(ordinary.nlri.compute_hash()) {
                         return Err(invalid("repeated local key"));
                     }
-                    other_keys.push(key);
+                    other_matches.push(ordinary.nlri);
                 }
             }
         }
         Ok(GuardedInventory {
             entries,
-            other_keys,
+            other_matches,
         })
     }
 }

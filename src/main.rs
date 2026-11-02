@@ -261,6 +261,12 @@ async fn main() -> anyhow::Result<()> {
         None => state,
     };
 
+    // Recover durable diversion obligations before accepting manual mutations.
+    prefixd::scrubber::ScrubberController::check_startup(&state).await?;
+    if state.settings.scrubber.enabled {
+        tokio::spawn(prefixd::scrubber::ScrubberController::run(state.clone()));
+    }
+
     // Create auth layer for session-based auth
     // Secure cookies require HTTPS - check if TLS is configured
     let secure_cookies = config.settings.http.tls.is_some();

@@ -460,3 +460,19 @@ prefixdctl -f json mitigations list --status active | \
   jq -r '.[].id' | \
   xargs -I {} prefixdctl mitigations withdraw {} --reason "bulk cleanup"
 ```
+
+## Scrubber profiles and diversions
+
+`prefixdctl scrubbers list` inspects readiness. `scrubbers arm PROFILE --revision
+REVISION` explicitly re-arms a profile after a completed drain. `diversions
+preview --file REQUEST.json` returns the complete match/target confirmation;
+`diversions create --file REQUEST.json --confirmation VALUE` records that manual
+intent. `diversions list`, `diversions get ID` and `diversions withdraw ID
+[--reason TEXT]` inspect and drain it; the reason is recorded in the audit log.
+These commands print JSON.
+
+Writes require an administrator. Supply an authenticated administrator session
+through `--session-cookie` or `PREFIXD_SESSION_COOKIE`; the value is a complete
+Cookie header and is hidden from help output. Sign in with
+[`POST /v1/auth/login`](api.md#login) and copy the session cookie it sets. Ordinary bearer tokens retain the
+Operator role. See [manual scrubber diversion](../how-to/scrubber-diversion.md).
