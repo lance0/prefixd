@@ -240,7 +240,8 @@ async fn live_rustbgpd_v081_inventory_refuses_unrepresented_attributes_without_m
         .await
         .unwrap();
 
-    let owner = "prefixd.fixture.guarded";
+    // A malformed guarded rule of ours fails closed; another owner's is foreign.
+    let owner = "prefixd.scrub.fixture";
     let window = raw
         .issue_mutation_window(request(pb::IssueMutationWindowRequest {
             owner: owner.into(),

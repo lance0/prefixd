@@ -25,7 +25,7 @@ async fn guarded_contract_preserves_targets_revisions_and_independent_owners() {
     let fixture = fixture::Speaker::start().await;
     let speaker = fixture.connect().await;
     let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
-    let a = rule("192.0.2.1/32", "192.0.2.99", "scrubber.a", 1);
+    let a = rule("192.0.2.1/32", "192.0.2.99", "prefixd.scrub.a", 1);
     if version != "0.81.0" {
         assert!(speaker.issue_window(&a.owner, 30).await.is_err());
         assert!(
@@ -49,8 +49,8 @@ async fn guarded_contract_preserves_targets_revisions_and_independent_owners() {
         fixture.container.rm().await.unwrap();
         return;
     }
-    let b = rule("2001:db8::2/128", "2001:db8::99", "scrubber.b", 2);
-    let sibling = rule("192.0.2.3/32", "192.0.2.99", "scrubber.a", 3);
+    let b = rule("2001:db8::2/128", "2001:db8::99", "prefixd.scrub.b", 2);
+    let sibling = rule("192.0.2.3/32", "192.0.2.99", "prefixd.scrub.a", 3);
     let wa = speaker.issue_window(&a.owner, 30).await.unwrap();
     let wb = speaker.issue_window(&b.owner, 30).await.unwrap();
     let ga = speaker.add_guarded(&a, wa.stamp, 30).await.unwrap();
@@ -156,5 +156,14 @@ async fn guarded_contract_preserves_targets_revisions_and_independent_owners() {
     speaker.delete_guarded(&sibling).await.unwrap();
     speaker.delete_guarded(&b).await.unwrap();
     assert!(speaker.guarded_inventory().await.unwrap().is_empty());
+    // Another tool's guarded rule is an occupied key, never ours, never a read failure.
+    let foreign = rule("192.0.2.4/32", "192.0.2.99", "other.tool", 5);
+    let wf = speaker.issue_window(&foreign.owner, 30).await.unwrap();
+    speaker.add_guarded(&foreign, wf.stamp, 30).await.unwrap();
+    assert!(speaker.list_active().await.unwrap().is_empty());
+    let inventory = speaker.guarded_inventory().await.unwrap();
+    assert!(inventory.is_empty());
+    assert!(inventory.has_key(&foreign.nlri));
+    speaker.delete_guarded(&foreign).await.unwrap();
     fixture.container.rm().await.unwrap();
 }

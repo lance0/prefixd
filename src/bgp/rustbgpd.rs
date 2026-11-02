@@ -68,6 +68,16 @@ fn injection_refusal_reason(status: &tonic::Status) -> Option<InjectionRefusalRe
     if status.code() != Code::FailedPrecondition {
         return None;
     }
+    match error_reason(status)?.as_str() {
+        "OWNER_MISMATCH" => Some(InjectionRefusalReason::OwnerMismatch),
+        "KEY_UNOWNED" => Some(InjectionRefusalReason::KeyUnowned),
+        "GENERATION_NOT_LIVE" => Some(InjectionRefusalReason::GenerationNotLive),
+        _ => None,
+    }
+}
+
+/// The one `rustbgpd` ErrorInfo reason of a status whose rich code matches it.
+fn error_reason(status: &tonic::Status) -> Option<String> {
     let rich = RpcStatus::decode(status.details()).ok()?;
     if rich.code != status.code() as i32 {
         return None;
@@ -81,15 +91,7 @@ fn injection_refusal_reason(status: &tonic::Status) -> Option<InjectionRefusalRe
         return None;
     }
     let info = ErrorInfo::decode(detail.value.as_slice()).ok()?;
-    if info.domain != "rustbgpd" {
-        return None;
-    }
-    match info.reason.as_str() {
-        "OWNER_MISMATCH" => Some(InjectionRefusalReason::OwnerMismatch),
-        "KEY_UNOWNED" => Some(InjectionRefusalReason::KeyUnowned),
-        "GENERATION_NOT_LIVE" => Some(InjectionRefusalReason::GenerationNotLive),
-        _ => None,
-    }
+    (info.domain == "rustbgpd").then_some(info.reason)
 }
 
 impl RustBgpdAnnouncer {
@@ -919,9 +921,12 @@ impl FlowSpecReader for RustBgpdAnnouncer {
                 if route.injection_owner.starts_with("guarded:")
                     || route.admission_revision.is_some()
                 {
-                    // Account for the complete guarded payload before routing it
-                    // to the separate diversion reader and lifecycle.
-                    guarded::decode_guarded(route, family)?;
+                    // Account for the complete payload of our guarded rows before
+                    // routing them to the separate diversion reader and lifecycle.
+                    // Another owner's guarded rule is never ours to read or fail on.
+                    if !guarded::foreign_guarded(&route) {
+                        guarded::decode_guarded(route, family)?;
+                    }
                     continue;
                 }
                 // Zero remaining means expired with its withdrawal pending: lost, not retained.
