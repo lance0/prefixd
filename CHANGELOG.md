@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Update the build-time Markdown parser `pulldown-cmark` to 0.13.6 in both
+  lockfiles for RUSTSEC-2026-0433. It is used by protobuf code generation;
+  no advisory exception or runtime behavior change is introduced.
+
 - Update the build-time Markdown parser `pulldown-cmark` to 0.13.5 in both
   lockfiles for RUSTSEC-2026-0414. It is used by protobuf code generation;
   no advisory exception or runtime behavior change is introduced.
