@@ -3156,10 +3156,10 @@ mod tests {
             name: &str,
             role: OperatorRole,
         ) -> String {
-            use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
-            let salt = SaltString::encode_b64(b"blackhole-api-test").unwrap();
+            use argon2::{Argon2, PasswordHasher};
+            let salt = b"blackhole-api-test";
             let hash = Argon2::default()
-                .hash_password(b"blackhole-password", &salt)
+                .hash_password_with_salt(b"blackhole-password", salt)
                 .unwrap()
                 .to_string();
             repo.create_operator(name, &hash, role, None).await.unwrap();

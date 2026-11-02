@@ -261,14 +261,11 @@ async fn local_inventory_scope_is_explicit_and_reads_work_unbound_in_standby_and
 
 #[tokio::test]
 async fn viewer_sessions_can_observe_local_rules() {
-    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    use argon2::{Argon2, PasswordHasher};
     const PASSWORD: &str = "inventory-viewer-password";
     let repo = Arc::new(MockRepository::new());
     let hash = Argon2::default()
-        .hash_password(
-            PASSWORD.as_bytes(),
-            &SaltString::encode_b64(b"inventory-viewer").unwrap(),
-        )
+        .hash_password_with_salt(PASSWORD.as_bytes(), b"inventory-viewer")
         .unwrap()
         .to_string();
     repo.create_operator("inventory-viewer", &hash, OperatorRole::Viewer, None)

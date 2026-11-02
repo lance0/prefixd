@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   excluded from these reads instead; a malformed guarded rule in prefixd's own
   scrubber owner namespace still fails them.
 
+- Update the password hashing dependency `argon2` to 0.6 and drop the unused
+  direct `password-hash` 0.5 dependency. New operator hashes keep the same
+  Argon2id parameters and PHC format; existing stored password hashes are
+  unchanged and still authenticate.
+
 - rustbgpd export evidence includes configured addressed peers without an
   Established session even when the separate peer-session read fails. These
   peers stay outside Established-peer disposition counts; an all-down roster
