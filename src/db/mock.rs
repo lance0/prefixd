@@ -308,7 +308,7 @@ impl RepositoryTrait for MockRepository {
             .ok_or_else(|| {
                 crate::error::PrefixdError::Conflict("scrubber intent changed".into())
             })?;
-        if row.immutable_snapshot()? != intent.immutable_snapshot()? {
+        if row.immutable_snapshot()? != intent.immutable_snapshot()? || !intent.may_replace(row) {
             return Err(crate::error::PrefixdError::Conflict(
                 "diversion action snapshot is immutable".into(),
             ));

@@ -29,7 +29,8 @@ pub struct Diversion {
     pub withdrawal_reason: Option<String>,
     #[serde(default)]
     pub withdrawal_actor: Option<String>,
-    /// Every window used by an attempted add or renewal is durable before dispatch.
+    /// Every window authorizing an attempted add is durable before dispatch.
+    /// Renewals use the profile's current window and are not recorded here.
     pub windows: Vec<GuardedStamp>,
     pub generation: Option<GuardedStamp>,
     pub last_error: Option<String>,
@@ -37,10 +38,18 @@ pub struct Diversion {
     pub export_observation: Option<DiversionExportObservation>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+/// Last per-peer export evidence. A recheck that finds the same peers keeps
+/// `observed_at`; a failed or timed-out read keeps the earlier peers as
+/// historical evidence and sets `error`. An empty `peers` with no `error` is a
+/// successful empty observation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DiversionExportObservation {
+    /// When these peers were first observed.
     pub observed_at: DateTime<Utc>,
     pub peers: Vec<crate::bgp::PeerExport>,
+    /// The latest read failed; `peers` is historical.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -69,6 +78,19 @@ impl DiversionStatus {
 }
 
 impl Diversion {
+    /// Durable lifecycle only moves forward, and the first withdrawal reason
+    /// and requester are immutable once recorded.
+    pub fn may_replace(&self, saved: &Self) -> bool {
+        use DiversionStatus::*;
+        (self.status == saved.status
+            || matches!(
+                (saved.status, self.status),
+                (Pending, Active | Withdrawing) | (Active, Withdrawing) | (Withdrawing, Withdrawn)
+            ))
+            && (saved.withdrawal_reason.is_none()
+                || saved.withdrawal_reason == self.withdrawal_reason)
+            && (saved.withdrawal_actor.is_none() || saved.withdrawal_actor == self.withdrawal_actor)
+    }
     pub fn immutable_snapshot(&self) -> crate::error::Result<serde_json::Value> {
         let mut value = serde_json::to_value(self)?;
         if let Some(object) = value.as_object_mut() {

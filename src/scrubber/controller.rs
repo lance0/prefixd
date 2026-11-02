@@ -11,9 +11,25 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time::Instant};
 
-/// Every used authorization expires within this interval of its issue. A drain
-/// waits a full interval on this process's monotonic clock, including at startup.
+/// Every window this controller issues expires within this interval of issue.
 pub const WINDOW_SECONDS: u32 = 30;
+/// rustbgpd's cap on any window's lifetime (ADR-0144 `H`). Draining intent that
+/// another controller process admitted waits this long, because that process
+/// may have issued longer windows than this one.
+const SERVER_WINDOW_CAP: Duration = Duration::from_secs(120);
+/// Lifecycle passes start this often. A pass still running after its budget is
+/// cancelled and latches every profile, so consecutive renewals of one owner
+/// are at most a period plus a budget apart.
+const PASS_PERIOD_SECONDS: u64 = 5;
+const PASS_BUDGET_SECONDS: u64 = 4;
+/// A renewal caps the owner's deadline at its window's expiry. Reuse a cached
+/// window only while it outlives the next renewal by a margin.
+const WINDOW_REUSE: Duration = Duration::from_secs(PASS_PERIOD_SECONDS + PASS_BUDGET_SECONDS + 3);
+/// Export reads stop this long after a pass starts, leaving the rest of the
+/// budget to persist changes. Unread rows keep their earlier evidence.
+const EXPORT_BUDGET: Duration = Duration::from_secs(3);
+/// One export read never waits longer than this.
+const EXPORT_READ: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
 #[path = "tests.rs"]
@@ -59,6 +75,120 @@ struct Runtime {
     windows: HashMap<String, (GuardedStamp, Instant)>,
     initialized: bool,
     epoch: Option<u64>,
+    /// Rotates export reads so a fixed budget cannot always skip the same rows.
+    export_cursor: usize,
+}
+
+/// One guarded inventory read, parsed once so per-row checks stay linear.
+struct Observed<'a> {
+    /// Destination and key of every local rule, guarded or ordinary.
+    selectors: Vec<(ipnet::IpNet, String)>,
+    /// Key to guarded entry.
+    guarded: HashMap<String, &'a GuardedObservation>,
+}
+
+impl<'a> Observed<'a> {
+    fn new(inventory: &'a GuardedInventory) -> Result<Self> {
+        let mut selectors = Vec::with_capacity(inventory.len() + inventory.other_matches.len());
+        let mut guarded = HashMap::with_capacity(inventory.len());
+        for nlri in inventory
+            .iter()
+            .map(|entry| &entry.rule.nlri)
+            .chain(inventory.other_matches.iter())
+        {
+            let prefix = nlri
+                .dst_prefix
+                .parse::<ipnet::IpNet>()
+                .map_err(|_| PrefixdError::Internal("invalid local speaker inventory".into()))?;
+            selectors.push((prefix, nlri.compute_hash()));
+        }
+        for (entry, (_, key)) in inventory.iter().zip(&selectors) {
+            guarded.insert(key.clone(), entry);
+        }
+        Ok(Self { selectors, guarded })
+    }
+    /// Another local rule, guarded or ordinary, affects this row's victim.
+    fn foreign_victim_overlap(&self, row: &Diversion, key: &str) -> Result<bool> {
+        let victim = row
+            .rule
+            .nlri
+            .dst_prefix
+            .parse::<ipnet::IpNet>()
+            .map_err(|_| PrefixdError::Internal("invalid saved diversion".into()))?
+            .addr();
+        Ok(self
+            .selectors
+            .iter()
+            .any(|(prefix, other)| prefix.contains(&victim) && other != key))
+    }
+    fn has_key(&self, key: &str) -> bool {
+        self.selectors.iter().any(|(_, other)| other == key)
+    }
+}
+
+/// The safelist read once per pass, with the repository's overlap semantics.
+fn safelisted(entries: &[crate::db::SafelistEntry], victim: std::net::IpAddr) -> Result<bool> {
+    for entry in entries {
+        let prefix = entry
+            .prefix
+            .parse::<ipnet::IpNet>()
+            .or_else(|_| {
+                entry
+                    .prefix
+                    .parse::<std::net::IpAddr>()
+                    .map(ipnet::IpNet::from)
+            })
+            .map_err(|_| PrefixdError::Internal("invalid safelist prefix".into()))?;
+        if prefix.contains(&victim) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Replace export evidence, keeping unchanged evidence and its first
+/// observation time so a steady pass writes nothing. A failed read keeps the
+/// last successful peers as historical evidence beside the error.
+fn observe_exports(row: &mut Diversion, result: std::result::Result<Vec<PeerExport>, &str>) {
+    let previous = row.export_observation.take();
+    let next = match result {
+        Ok(peers) => DiversionExportObservation {
+            observed_at: Utc::now(),
+            peers,
+            error: None,
+        },
+        Err(error) => DiversionExportObservation {
+            error: Some(error.into()),
+            ..previous.clone().unwrap_or(DiversionExportObservation {
+                observed_at: Utc::now(),
+                peers: vec![],
+                error: None,
+            })
+        },
+    };
+    row.export_observation = Some(match previous {
+        Some(previous) if previous.peers == next.peers && previous.error == next.error => previous,
+        _ => next,
+    });
+}
+
+/// The persisted lifecycle fields a pass may change.
+fn lifecycle(
+    row: &Diversion,
+) -> (
+    DiversionStatus,
+    Option<GuardedStamp>,
+    Option<String>,
+    Option<String>,
+    Option<DiversionExportObservation>,
+) {
+    (
+        row.status,
+        row.generation,
+        row.withdrawal_reason.clone(),
+        row.last_error.clone(),
+        row.export_observation.clone(),
+    )
 }
 
 pub struct ScrubberController {
@@ -134,7 +264,11 @@ impl ScrubberController {
                     "drain enforced diversions before disabling scrubbers or changing mode".into(),
                 ));
             }
-            let profile = Self::profile(state, &row.profile.id)?;
+            let profile = Self::profile(state, &row.profile.id).map_err(|_| {
+                PrefixdError::Config(
+                    "drain outstanding diversion before removing its profile".into(),
+                )
+            })?;
             if profile.snapshot() != row.profile
                 || profile.target(row.rule.target.is_ipv4())? != row.rule.target
                 || Self::owner(state, &profile.id)? != row.rule.owner
@@ -209,7 +343,7 @@ impl ScrubberController {
 
     fn profile<'a>(state: &'a AppState, id: &str) -> Result<&'a ScrubberProfile> {
         if !state.settings.scrubber.enabled {
-            return Err(PrefixdError::Config(
+            return Err(PrefixdError::Conflict(
                 "scrubber diversion is disabled".into(),
             ));
         }
@@ -219,7 +353,7 @@ impl ScrubberController {
             .profiles
             .iter()
             .find(|p| p.id == id)
-            .ok_or_else(|| PrefixdError::InvalidRequest("unknown scrubber profile".into()))
+            .ok_or_else(|| PrefixdError::NotFound("unknown scrubber profile".into()))
     }
 
     async fn probe(&self, profile: &ScrubberProfile) -> Result<ProfileState> {
@@ -543,31 +677,6 @@ impl ScrubberController {
         ))
     }
 
-    fn foreign_victim_overlap(inventory: &GuardedInventory, row: &Diversion) -> Result<bool> {
-        let victim = row
-            .rule
-            .nlri
-            .dst_prefix
-            .parse::<ipnet::IpNet>()
-            .map_err(|_| PrefixdError::Internal("invalid saved diversion".into()))?
-            .addr();
-        let key = row.rule.nlri.compute_hash();
-        for nlri in inventory
-            .iter()
-            .map(|entry| &entry.rule.nlri)
-            .chain(inventory.other_matches.iter())
-        {
-            let prefix = nlri
-                .dst_prefix
-                .parse::<ipnet::IpNet>()
-                .map_err(|_| PrefixdError::Internal("invalid local speaker inventory".into()))?;
-            if nlri.compute_hash() != key && prefix.contains(&victim) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     pub async fn create(
         &self,
         state: &AppState,
@@ -649,7 +758,21 @@ impl ScrubberController {
         Ok(row)
     }
 
-    pub async fn withdraw(&self, state: &AppState, id: Uuid, actor: &str) -> Result<Diversion> {
+    pub async fn withdraw(
+        &self,
+        state: &AppState,
+        id: Uuid,
+        actor: &str,
+        reason: Option<String>,
+    ) -> Result<Diversion> {
+        if reason
+            .as_deref()
+            .is_some_and(|reason| reason.trim().is_empty() || reason.len() > 1024)
+        {
+            return Err(PrefixdError::InvalidRequest(
+                "reason must contain text and be at most 1024 UTF-8 bytes".into(),
+            ));
+        }
         let mut runtime = self.runtime.lock().await;
         let _guard = state.mitigation_lock.lock().await;
         state.fence.ensure_active()?;
@@ -660,7 +783,7 @@ impl ScrubberController {
             .repo
             .get_diversion(id)
             .await?
-            .ok_or_else(|| PrefixdError::InvalidRequest("unknown diversion".into()))?;
+            .ok_or_else(|| PrefixdError::NotFound("unknown diversion".into()))?;
         if row.pop != state.settings.pop {
             return Err(PrefixdError::Conflict(
                 "diversion belongs to another POP".into(),
@@ -668,8 +791,10 @@ impl ScrubberController {
         }
         if row.status.outstanding() {
             row.status = DiversionStatus::Withdrawing;
+            // The first withdrawal reason and requester are immutable.
             if row.withdrawal_reason.is_none() {
-                row.withdrawal_reason = Some(format!("operator withdrawal by {actor}"));
+                row.withdrawal_reason =
+                    Some(reason.unwrap_or_else(|| format!("operator withdrawal by {actor}")));
             }
             row.withdrawal_actor.get_or_insert(actor.into());
             state
@@ -678,12 +803,14 @@ impl ScrubberController {
                 .await?;
             if let Err(error) = self.drive(state, &mut runtime, &mut row).await {
                 Self::ensure_epoch(state, &mut runtime)?;
+                let before = lifecycle(&row);
                 Self::failed(&mut runtime, &mut row, "withdrawal could not be confirmed");
                 tracing::warn!(code = %error.status_code(), "scrubber withdrawal remains pending");
-                if let Err(error) = state
-                    .repo
-                    .save_diversion(&row, "scrubber_withdraw_unconfirmed")
-                    .await
+                if before != lifecycle(&row)
+                    && let Err(error) = state
+                        .repo
+                        .save_diversion(&row, "scrubber_withdraw_unconfirmed")
+                        .await
                 {
                     Self::latch_all(&mut runtime, "durable withdrawal unavailable");
                     return Err(error);
@@ -699,12 +826,87 @@ impl ScrubberController {
         Ok(row)
     }
 
+    /// Reconcile one row outside a lifecycle pass: admission or withdrawal.
     async fn drive(
         &self,
         state: &AppState,
         runtime: &mut Runtime,
         row: &mut Diversion,
     ) -> Result<()> {
+        let durable = if row.status == DiversionStatus::Withdrawing {
+            vec![]
+        } else {
+            state.repo.list_diversions(&state.settings.pop).await?
+        };
+        let deadline = Instant::now() + EXPORT_READ;
+        match self
+            .reconcile(
+                state,
+                runtime,
+                std::slice::from_mut(row),
+                &durable,
+                deadline,
+            )
+            .await?
+            .pop()
+            .flatten()
+        {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether durable intent still authorizes a live diversion.
+    fn authorized(
+        &self,
+        state: &AppState,
+        runtime: &Runtime,
+        inventory: &crate::config::Inventory,
+        safelist: &[crate::db::SafelistEntry],
+        row: &Diversion,
+    ) -> Result<bool> {
+        let prefix: ipnet::IpNet = row
+            .rule
+            .nlri
+            .dst_prefix
+            .parse()
+            .map_err(|_| PrefixdError::InvalidRequest("invalid saved diversion".into()))?;
+        Ok(row.controller_incarnation == self.incarnation
+            && Some(row.controller_epoch) == runtime.epoch
+            && runtime
+                .profiles
+                .get(&row.profile.id)
+                .is_some_and(ProfileState::eligible)
+            && row.expires_at > Utc::now()
+            && Self::profile(state, &row.profile.id).is_ok_and(|p| {
+                p.snapshot() == row.profile
+                    && p.target(row.rule.target.is_ipv4()).ok() == Some(row.rule.target)
+            })
+            && Self::owner(state, &row.profile.id)? == row.rule.owner
+            && !safelisted(safelist, prefix.addr())?
+            && inventory
+                .lookup_prefix(&prefix)?
+                .is_some_and(|owner| owner.customer_id == row.customer_id))
+    }
+
+    /// One serialized lifecycle step over durable rows. It reads the guarded
+    /// inventory once, issues at most one window and one renewal per owner,
+    /// reads back once and bounds export reads by `export_deadline`. Speaker
+    /// work therefore grows with the number of profiles, not diversions.
+    ///
+    /// Returns each row's failure for the caller to latch. Authorization loss
+    /// and a slow or failed export read are not failures: the first withdraws
+    /// the row and the second degrades its evidence. `Err` applies to every row.
+    async fn reconcile(
+        &self,
+        state: &AppState,
+        runtime: &mut Runtime,
+        rows: &mut [Diversion],
+        durable: &[Diversion],
+        export_deadline: Instant,
+    ) -> Result<Vec<Option<PrefixdError>>> {
+        use DiversionStatus::{Active, Pending, Withdrawing, Withdrawn};
+        let conflict = |reason: &str| Some(PrefixdError::Conflict(reason.into()));
         Self::expire_readiness(runtime);
         state.fence.ensure_active()?;
         state.verified_speaker_binding()?;
@@ -713,243 +915,399 @@ impl ScrubberController {
             .guarded_flowspec()
             .ok_or_else(|| PrefixdError::Config("guarded FlowSpec unsupported".into()))?;
         Self::ensure_epoch(state, runtime)?;
-        if row.status != DiversionStatus::Withdrawing {
-            let safe = row.controller_incarnation == self.incarnation
-                && Some(row.controller_epoch) == runtime.epoch
-                && runtime
-                    .profiles
-                    .get(&row.profile.id)
-                    .is_some_and(ProfileState::eligible)
-                && row.expires_at > Utc::now()
-                && Self::profile(state, &row.profile.id).is_ok_and(|p| {
-                    p.snapshot() == row.profile
-                        && p.target(row.rule.target.is_ipv4()).ok() == Some(row.rule.target)
-                })
-                && Self::owner(state, &row.profile.id)? == row.rule.owner
-                && !state.repo.is_safelisted(&row.rule.nlri.dst_prefix).await?
-                && state
-                    .inventory
-                    .read()
-                    .await
-                    .lookup_prefix(&row.rule.nlri.dst_prefix.parse().map_err(|_| {
-                        PrefixdError::InvalidRequest("invalid saved diversion".into())
-                    })?)?
-                    .is_some_and(|owner| owner.customer_id == row.customer_id);
-            if !safe {
-                row.status = DiversionStatus::Withdrawing;
-                row.withdrawal_reason.get_or_insert("readiness, lifetime, ownership or configuration no longer authorizes diversion".into());
-                state
+        let mut failures: Vec<Option<PrefixdError>> = rows.iter().map(|_| None).collect();
+        let before: Vec<_> = rows.iter().map(lifecycle).collect();
+
+        // Durable withdrawal precedes any delete for intent that lost authorization.
+        if rows.iter().any(|row| row.status != Withdrawing) {
+            let safelist = state.repo.list_safelist().await?;
+            let authorized = {
+                let inventory = state.inventory.read().await;
+                rows.iter()
+                    .map(|row| {
+                        Ok(row.status == Withdrawing
+                            || self.authorized(state, runtime, &inventory, &safelist, row)?)
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            };
+            for ((row, failure), authorized) in rows.iter_mut().zip(&mut failures).zip(authorized) {
+                if authorized {
+                    continue;
+                }
+                row.status = Withdrawing;
+                row.withdrawal_reason.get_or_insert(
+                    "readiness, lifetime, ownership or configuration no longer authorizes diversion"
+                        .into(),
+                );
+                if let Err(error) = state
                     .repo
                     .save_diversion(row, "scrubber_withdraw_requested")
-                    .await?;
+                    .await
+                {
+                    *failure = Some(error);
+                }
             }
         }
-        if row.status == DiversionStatus::Withdrawing {
-            let now = Instant::now();
+
+        // Delete early to restore ordinary routing, but retain durable exclusion
+        // until old adds are unable to commit and a final exact delete/read passes.
+        let mut finalize = vec![];
+        for (index, row) in rows.iter().enumerate() {
+            if failures[index].is_some() || row.status != Withdrawing {
+                continue;
+            }
+            // Only this process's windows have a known lifetime.
+            let wait = if row.controller_incarnation == self.incarnation {
+                Duration::from_secs(WINDOW_SECONDS.into())
+            } else {
+                SERVER_WINDOW_CAP
+            };
             let barrier = *runtime
                 .drains
                 .entry(row.id)
-                .or_insert(now + Duration::from_secs(WINDOW_SECONDS.into()));
-            // Delete early to restore ordinary routing, but retain durable exclusion
-            // until old adds are unable to commit and a final exact delete/read passes.
-            speaker.delete_guarded(&row.rule).await?;
-            if Instant::now() >= barrier {
-                let inventory = speaker.guarded_inventory().await?;
-                if inventory.has_key(&row.rule.nlri) {
-                    return Err(PrefixdError::Conflict(
-                        "diversion withdrawal is not confirmed".into(),
-                    ));
-                }
-                row.status = DiversionStatus::Withdrawn;
-                row.last_error = None;
-                Self::ensure_epoch(state, runtime)?;
-                state.repo.save_diversion(row, "scrubber_withdrawn").await?;
-                runtime.drains.remove(&row.id);
+                .or_insert_with(|| Instant::now() + wait);
+            match speaker.delete_guarded(&row.rule).await {
+                Ok(()) if Instant::now() >= barrier => finalize.push(index),
+                Ok(()) => {}
+                Err(error) => failures[index] = Some(error),
             }
-            return Ok(());
         }
-        let inventory = speaker.guarded_inventory().await?;
-        if Self::foreign_victim_overlap(&inventory, row)? {
-            return Err(PrefixdError::Conflict(
-                "another local rule affects the diversion victim".into(),
-            ));
-        }
-        let durable = state.repo.list_diversions(&state.settings.pop).await?;
-        let owned: Vec<_> = durable
-            .iter()
-            .filter(|intent| intent.rule.owner == row.rule.owner)
+
+        let live: Vec<usize> = (0..rows.len())
+            .filter(|&index| failures[index].is_none() && rows[index].status != Withdrawing)
             .collect();
-        if owned.iter().any(|intent| {
-            intent.controller_incarnation != self.incarnation
-                || Some(intent.controller_epoch) != runtime.epoch
-        }) || inventory
-            .iter()
-            .filter(|entry| entry.rule.owner == row.rule.owner)
-            .any(|entry| {
-                !owned
-                    .iter()
-                    .any(|intent| intent.rule.same_admission(&entry.rule))
-            })
-        {
-            return Err(PrefixdError::Conflict(
-                "guarded owner inventory disagrees with this controller's durable intent".into(),
-            ));
+        if live.is_empty() && finalize.is_empty() {
+            return Ok(failures);
         }
-        let existing = inventory
-            .iter()
-            .find(|entry| entry.rule.nlri.compute_hash() == row.rule.nlri.compute_hash());
-        if existing.is_none() && inventory.has_key(&row.rule.nlri) {
-            return Err(PrefixdError::Conflict(
-                "diversion key is held by ordinary or foreign intent".into(),
-            ));
-        }
-        if let Some(existing) = existing {
-            if !existing.rule.same_admission(&row.rule)
-                || existing.remaining_ms == 0
-                || row
-                    .generation
-                    .is_some_and(|generation| generation != existing.generation)
-            {
-                return Err(PrefixdError::Conflict(
-                    "guarded ownership or generation does not match durable intent".into(),
-                ));
-            }
-            row.generation = Some(existing.generation);
-        } else if row.status == DiversionStatus::Active {
-            return Err(PrefixdError::Conflict(
-                "active diversion lost its speaker generation; drain and re-arm".into(),
-            ));
-        }
-        if !runtime
-            .profiles
-            .get(&row.profile.id)
-            .is_some_and(ProfileState::eligible)
-        {
-            return Err(PrefixdError::Conflict(
-                "scrubber readiness expired before dispatch".into(),
-            ));
-        }
-        if row.windows.len() >= 2048 {
-            return Err(PrefixdError::Conflict(
-                "diversion mutation history exhausted".into(),
-            ));
-        }
-        let started = Instant::now();
-        let window = match runtime.windows.get(&row.profile.id).copied() {
-            Some((stamp, until)) if until > started + Duration::from_secs(5) => stamp,
-            _ => {
-                let issued = speaker
-                    .issue_window(&row.rule.owner, WINDOW_SECONDS)
-                    .await?;
-                // Anchor the conservative cache horizon before the RPC, rather
-                // than adding network delay to the server's remaining time.
-                let until = started
-                    + Duration::from_millis(issued.remaining_ms.saturating_sub(1000).into());
-                runtime
-                    .windows
-                    .insert(row.profile.id.clone(), (issued.stamp, until));
-                issued.stamp
+        let inventory = match speaker.guarded_inventory().await {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                tracing::warn!(code = %error.status_code(), "guarded inventory unavailable");
+                for &index in live.iter().chain(&finalize) {
+                    failures[index] = conflict("guarded inventory unavailable");
+                }
+                return Ok(failures);
             }
         };
-        if row.windows.last() != Some(&window) {
-            row.windows.push(window);
+        let observed = Observed::new(&inventory)?;
+        for index in finalize {
+            let row = &mut rows[index];
+            if observed.has_key(&row.rule.nlri.compute_hash()) {
+                failures[index] = conflict("diversion withdrawal is not confirmed");
+                continue;
+            }
+            row.status = Withdrawn;
+            row.last_error = None;
+            Self::ensure_epoch(state, runtime)?;
+            match state.repo.save_diversion(row, "scrubber_withdrawn").await {
+                Ok(()) => {
+                    runtime.drains.remove(&row.id);
+                }
+                Err(error) => failures[index] = Some(error),
+            }
         }
-        state.repo.save_diversion(row, "scrubber_window").await?;
-        state.fence.ensure_active()?;
-        Self::ensure_epoch(state, runtime)?;
-        if state.repo.is_safelisted(&row.rule.nlri.dst_prefix).await?
-            || !state
-                .inventory
-                .read()
-                .await
-                .lookup_prefix(
-                    &row.rule.nlri.dst_prefix.parse().map_err(|_| {
-                        PrefixdError::InvalidRequest("invalid saved diversion".into())
-                    })?,
-                )?
-                .is_some_and(|owner| owner.customer_id == row.customer_id)
-        {
-            return Err(PrefixdError::Conflict(
-                "fresh ownership or safelist check refused diversion".into(),
-            ));
+        if live.is_empty() {
+            return Ok(failures);
         }
-        if !runtime
-            .profiles
-            .get(&row.profile.id)
-            .is_some_and(ProfileState::eligible)
-            || row.expires_at <= Utc::now()
-        {
-            return Err(PrefixdError::Conflict(
-                "scrubber readiness or diversion lifetime expired before mutation".into(),
-            ));
+
+        // Adopt an owner only when its complete inventory matches this
+        // controller's durable intent.
+        let mut known: HashMap<&str, std::collections::HashSet<(String, u64, std::net::IpAddr)>> =
+            HashMap::new();
+        let mut disputed = std::collections::HashSet::new();
+        for intent in durable {
+            known
+                .entry(intent.rule.owner.as_str())
+                .or_default()
+                .insert((
+                    intent.rule.nlri.compute_hash(),
+                    intent.rule.revision,
+                    intent.rule.target,
+                ));
+            if intent.controller_incarnation != self.incarnation
+                || Some(intent.controller_epoch) != runtime.epoch
+            {
+                disputed.insert(intent.rule.owner.as_str());
+            }
         }
-        if let Some(generation) = row.generation {
-            speaker
-                .renew_guarded(&row.rule.owner, generation, window, WINDOW_SECONDS)
-                .await?;
-        } else {
-            row.generation = Some(
-                speaker
-                    .add_guarded(&row.rule, window, WINDOW_SECONDS)
-                    .await?,
-            );
+        for (key, entry) in &observed.guarded {
+            if known
+                .get(entry.rule.owner.as_str())
+                .is_some_and(|admissions| {
+                    !admissions.contains(&(key.clone(), entry.rule.revision, entry.rule.target))
+                })
+            {
+                disputed.insert(entry.rule.owner.as_str());
+            }
         }
-        let observed = speaker.guarded_inventory().await?;
-        if Self::foreign_victim_overlap(&observed, row)? {
-            return Err(PrefixdError::Conflict(
-                "local victim overlap appeared during mutation".into(),
-            ));
+        let mut owners: HashMap<String, Vec<usize>> = HashMap::new();
+        for &index in &live {
+            let row = &mut rows[index];
+            let key = row.rule.nlri.compute_hash();
+            let existing = observed.guarded.get(&key);
+            failures[index] = if disputed.contains(row.rule.owner.as_str())
+                || !known.contains_key(row.rule.owner.as_str())
+            {
+                conflict("guarded owner inventory disagrees with this controller's durable intent")
+            } else if observed.foreign_victim_overlap(row, &key)? {
+                conflict("another local rule affects the diversion victim")
+            } else if existing.is_none() && observed.has_key(&key) {
+                conflict("diversion key is held by ordinary or foreign intent")
+            } else if existing.is_some_and(|existing| {
+                !existing.rule.same_admission(&row.rule)
+                    || existing.remaining_ms == 0
+                    || row
+                        .generation
+                        .is_some_and(|generation| generation != existing.generation)
+            }) {
+                conflict("guarded ownership or generation does not match durable intent")
+            } else if existing.is_none() && row.status == Active {
+                conflict("active diversion lost its speaker generation; drain and re-arm")
+            } else if !runtime
+                .profiles
+                .get(&row.profile.id)
+                .is_some_and(ProfileState::eligible)
+            {
+                conflict("scrubber readiness expired before dispatch")
+            } else if existing.is_none() && row.windows.len() >= 2048 {
+                conflict("diversion mutation history exhausted")
+            } else {
+                None
+            };
+            if failures[index].is_none() {
+                if let Some(existing) = existing {
+                    row.generation = Some(existing.generation);
+                }
+                owners
+                    .entry(row.profile.id.clone())
+                    .or_default()
+                    .push(index);
+            }
         }
-        if !observed.iter().any(|entry| {
-            entry.rule.same_admission(&row.rule)
-                && entry.remaining_ms > 0
-                && Some(entry.generation) == row.generation
-        }) {
-            return Err(PrefixdError::Conflict(
-                "guarded add is not confirmed by read-back".into(),
-            ));
+
+        let mut mutated = vec![];
+        for (profile, members) in owners {
+            let owner = rows[members[0]].rule.owner.clone();
+            let window = match self.window(runtime, speaker, &profile, &owner).await {
+                Ok(window) => window,
+                Err(error) => {
+                    tracing::warn!(code = %error.status_code(), "scrubber window unavailable");
+                    for &index in &members {
+                        failures[index] = conflict("mutation window unavailable");
+                    }
+                    continue;
+                }
+            };
+            // A window authorizing an add is durable before dispatch, so an
+            // unknown outcome stays bounded by a recorded authorization.
+            let mut adds = vec![];
+            let mut renewals = vec![];
+            for &index in &members {
+                let row = &mut rows[index];
+                if row.generation.is_some() {
+                    renewals.push(index);
+                    continue;
+                }
+                if row.windows.last() != Some(&window) {
+                    row.windows.push(window);
+                }
+                match state.repo.save_diversion(row, "scrubber_window").await {
+                    Ok(()) => adds.push(index),
+                    Err(error) => failures[index] = Some(error),
+                }
+            }
+            state.fence.ensure_active()?;
+            Self::ensure_epoch(state, runtime)?;
+            let eligible = runtime
+                .profiles
+                .get(&profile)
+                .is_some_and(ProfileState::eligible);
+            for &index in adds.iter().chain(&renewals) {
+                if !eligible || rows[index].expires_at <= Utc::now() {
+                    failures[index] = conflict(
+                        "scrubber readiness or diversion lifetime expired before mutation",
+                    );
+                }
+            }
+            renewals.retain(|&index| failures[index].is_none());
+            adds.retain(|&index| failures[index].is_none());
+            // The owner's rules share one generation and one lease deadline.
+            let generation = renewals.first().and_then(|&index| rows[index].generation);
+            let uniform = renewals
+                .iter()
+                .all(|&index| rows[index].generation == generation);
+            if let (Some(generation), true) = (generation, uniform) {
+                match speaker
+                    .renew_guarded(&owner, generation, window, WINDOW_SECONDS)
+                    .await
+                {
+                    Ok(_) => mutated.extend(&renewals),
+                    Err(error) => {
+                        tracing::warn!(code = %error.status_code(), "scrubber renewal failed");
+                        for &index in renewals.iter().chain(&adds) {
+                            failures[index] = conflict("guarded renewal failed");
+                        }
+                        continue;
+                    }
+                }
+            } else if !renewals.is_empty() {
+                for &index in renewals.iter().chain(&adds) {
+                    failures[index] = conflict("guarded owner reports several generations");
+                }
+                continue;
+            }
+            for index in adds {
+                match speaker
+                    .add_guarded(&rows[index].rule, window, WINDOW_SECONDS)
+                    .await
+                {
+                    Ok(generation) => {
+                        rows[index].generation = Some(generation);
+                        mutated.push(index);
+                    }
+                    Err(error) => failures[index] = Some(error),
+                }
+            }
         }
-        if let Some(exports) = state.announcer.flowspec_export_observer() {
-            let peers = tokio::time::timeout(
-                Duration::from_secs(2),
+        if mutated.is_empty() {
+            return Ok(failures);
+        }
+
+        let inventory = match speaker.guarded_inventory().await {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                tracing::warn!(code = %error.status_code(), "guarded read-back unavailable");
+                for &index in &mutated {
+                    failures[index] = conflict("guarded read-back unavailable");
+                }
+                return Ok(failures);
+            }
+        };
+        let observed = Observed::new(&inventory)?;
+        let mut confirmed = vec![];
+        for index in mutated {
+            let row = &rows[index];
+            let key = row.rule.nlri.compute_hash();
+            if observed.foreign_victim_overlap(row, &key)? {
+                failures[index] = conflict("local victim overlap appeared during mutation");
+            } else if !observed.guarded.get(&key).is_some_and(|entry| {
+                entry.rule.same_admission(&row.rule)
+                    && entry.remaining_ms > 0
+                    && Some(entry.generation) == row.generation
+            }) {
+                failures[index] = conflict("guarded add is not confirmed by read-back");
+            } else {
+                confirmed.push(index);
+            }
+        }
+
+        // Read new admissions first, then rotate established rows across passes.
+        let Some(exports) = state.announcer.flowspec_export_observer() else {
+            for index in confirmed {
+                failures[index] = Some(PrefixdError::Config(
+                    "scrubber export observation unsupported".into(),
+                ));
+            }
+            return Ok(failures);
+        };
+        let (new, mut established): (Vec<usize>, Vec<usize>) = confirmed
+            .iter()
+            .partition(|&&index| rows[index].status == Pending);
+        if !established.is_empty() {
+            let start = runtime.export_cursor % established.len();
+            established.rotate_left(start);
+        }
+        let mut read = 0;
+        for &index in new.iter().chain(&established) {
+            let now = Instant::now();
+            if now >= export_deadline {
+                break;
+            }
+            let row = &mut rows[index];
+            let result = match tokio::time::timeout_at(
+                export_deadline.min(now + EXPORT_READ),
                 exports.flowspec_exports(&row.rule.nlri),
             )
             .await
-            .map_err(|_| PrefixdError::Internal("scrubber export observation timed out".into()))??
-            .ok_or_else(|| {
-                PrefixdError::Internal("scrubber export inventory unavailable".into())
-            })?;
-            if peers.iter().any(|peer| {
-                peer.disposition == ExportDisposition::Committed
-                    && !row.profile.router_peers.contains(&peer.peer_address)
-            }) {
-                return Err(PrefixdError::Conflict(
-                    "diversion exported outside configured router scope".into(),
-                ));
+            {
+                Ok(Ok(Some(peers))) => Ok(peers),
+                Ok(Ok(None)) => Err("scrubber export inventory unavailable"),
+                Ok(Err(_)) => Err("scrubber export observation failed"),
+                Err(_) => Err("scrubber export observation timed out"),
+            };
+            if row.status != Pending {
+                read += 1;
             }
-            row.export_observation = Some(DiversionExportObservation {
-                observed_at: Utc::now(),
-                peers,
-            });
-        } else {
-            return Err(PrefixdError::Config(
-                "scrubber export observation unsupported".into(),
-            ));
+            if result.as_ref().is_ok_and(|peers| {
+                peers.iter().any(|peer| {
+                    peer.disposition == ExportDisposition::Committed
+                        && !row.profile.router_peers.contains(&peer.peer_address)
+                })
+            }) {
+                failures[index] = conflict("diversion exported outside configured router scope");
+                continue;
+            }
+            observe_exports(row, result);
         }
-        row.status = DiversionStatus::Active;
-        row.last_error = None;
+        runtime.export_cursor = runtime.export_cursor.wrapping_add(read);
+
+        // Persist only real transitions; a steady renewal writes nothing.
         Self::ensure_epoch(state, runtime)?;
-        state
-            .repo
-            .save_diversion(row, "scrubber_observed_local")
-            .await?;
-        Ok(())
+        for index in confirmed {
+            if failures[index].is_some() {
+                continue;
+            }
+            let row = &mut rows[index];
+            row.status = Active;
+            row.last_error = None;
+            let (status, generation, ..) = &before[index];
+            let action = if *status != Active {
+                "scrubber_observed_local"
+            } else if *generation != row.generation {
+                "scrubber_generation"
+            } else {
+                "scrubber_export_observed"
+            };
+            if before[index] != lifecycle(row)
+                && let Err(error) = state.repo.save_diversion(row, action).await
+            {
+                failures[index] = Some(error);
+            }
+        }
+        Ok(failures)
+    }
+
+    /// A profile's cached window, or a fresh one when the cache would expire
+    /// before the next renewal could run.
+    async fn window(
+        &self,
+        runtime: &mut Runtime,
+        speaker: &dyn GuardedFlowSpecSpeaker,
+        profile: &str,
+        owner: &str,
+    ) -> Result<GuardedStamp> {
+        let started = Instant::now();
+        if let Some((stamp, until)) = runtime.windows.get(profile)
+            && *until > started + WINDOW_REUSE
+        {
+            return Ok(*stamp);
+        }
+        let issued = speaker.issue_window(owner, WINDOW_SECONDS).await?;
+        // Anchor the conservative cache horizon before the RPC, rather than
+        // adding network delay to the server's remaining time.
+        let until =
+            started + Duration::from_millis(issued.remaining_ms.saturating_sub(1000).into());
+        runtime
+            .windows
+            .insert(profile.into(), (issued.stamp, until));
+        Ok(issued.stamp)
     }
 
     pub async fn tick(&self, state: &AppState) -> Result<()> {
         if !state.settings.scrubber.enabled || state.settings.mode == OperationMode::DryRun {
             return Ok(());
         }
+        let started = Instant::now();
         let probes = futures_util::future::join_all(
             state
                 .settings
@@ -959,6 +1317,16 @@ impl ScrubberController {
                 .map(|p| async move { (&p.id, self.probe(p).await) }),
         )
         .await;
+        self.pass(state, probes, started + EXPORT_BUDGET).await
+    }
+
+    /// Apply readiness probes, then reconcile every outstanding row once.
+    async fn pass(
+        &self,
+        state: &AppState,
+        probes: Vec<(&String, Result<ProfileState>)>,
+        export_deadline: Instant,
+    ) -> Result<()> {
         let mut runtime = self.runtime.lock().await;
         // A fresh report cannot erase a gap in readiness since the last pass.
         Self::expire_readiness(&mut runtime);
@@ -972,7 +1340,7 @@ impl ScrubberController {
         }
         let _guard = state.mitigation_lock.lock().await;
         state.verified_speaker_binding()?;
-        let rows = match state.repo.list_diversions(&state.settings.pop).await {
+        let mut rows = match state.repo.list_diversions(&state.settings.pop).await {
             Ok(rows) => rows,
             Err(error) => {
                 Self::latch_all(&mut runtime, "durable intent unavailable");
@@ -1036,36 +1404,40 @@ impl ScrubberController {
                     );
             }
         }
-        for mut row in rows {
-            let before = (
-                row.status,
-                row.generation,
-                row.withdrawal_reason.clone(),
-                row.last_error.clone(),
-            );
-            if let Err(error) = self.drive(state, &mut runtime, &mut row).await {
+        let before: Vec<_> = rows.iter().map(lifecycle).collect();
+        let durable = rows.clone();
+        let failures = match self
+            .reconcile(state, &mut runtime, &mut rows, &durable, export_deadline)
+            .await
+        {
+            Ok(failures) => failures,
+            Err(error) => {
+                tracing::warn!(code = %error.status_code(), "scrubber lifecycle pass failed");
+                rows.iter()
+                    .map(|_| Some(PrefixdError::Internal("lifecycle pass failed".into())))
+                    .collect()
+            }
+        };
+        for ((mut row, failure), before) in rows.into_iter().zip(failures).zip(before) {
+            if let Some(error) = failure {
                 if state.fence.with_observation_epoch(|epoch| epoch) != runtime.epoch {
                     return Err(PrefixdError::Standby);
                 }
                 tracing::warn!(code = %error.status_code(), "scrubber lifecycle latched");
+                let unchanged = lifecycle(&row);
                 Self::failed(
                     &mut runtime,
                     &mut row,
                     "diversion lifecycle failed; explicit re-arm required",
                 );
-                if let Err(storage) = state.repo.save_diversion(&row, "scrubber_latched").await {
+                if unchanged != lifecycle(&row)
+                    && let Err(storage) = state.repo.save_diversion(&row, "scrubber_latched").await
+                {
                     Self::latch_all(&mut runtime, "durable withdrawal unavailable");
                     return Err(storage);
                 }
             }
-            if before
-                != (
-                    row.status,
-                    row.generation,
-                    row.withdrawal_reason.clone(),
-                    row.last_error.clone(),
-                )
-            {
+            if before != lifecycle(&row) {
                 let _ = state
                     .ws_broadcast
                     .send(crate::ws::WsMessage::DiversionUpdated { diversion: row });
@@ -1085,13 +1457,13 @@ impl ScrubberController {
 
     pub async fn run(state: Arc<AppState>) {
         let mut shutdown = state.subscribe_shutdown();
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        let mut interval = tokio::time::interval(Duration::from_secs(PASS_PERIOD_SECONDS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _=shutdown.recv()=>break,
                 _=interval.tick()=>{
-                    if !matches!(tokio::time::timeout(Duration::from_secs(4),state.scrubber.tick(&state)).await,Ok(Ok(()))) {
+                    if !matches!(tokio::time::timeout(Duration::from_secs(PASS_BUDGET_SECONDS),state.scrubber.tick(&state)).await,Ok(Ok(()))) {
                         Self::latch_all(&mut *state.scrubber.runtime.lock().await,"scrubber reconciliation incomplete");
                         crate::observability::metrics::SCRUBBER_LIFECYCLE_FAILURES.inc();
                         tracing::warn!("scrubber profiles latched after incomplete reconciliation");

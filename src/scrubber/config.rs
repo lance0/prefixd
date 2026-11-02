@@ -70,7 +70,12 @@ impl ScrubberProfile {
 
 impl ScrubberConfig {
     pub fn validate(&self) -> Result<()> {
-        if self.profiles.len() > 32 || self.enabled && self.profiles.is_empty() {
+        if self.enabled && self.profiles.is_empty() {
+            return Err(PrefixdError::Config(
+                "enabled scrubber diversion needs at least one profile".into(),
+            ));
+        }
+        if self.profiles.len() > 32 {
             return Err(PrefixdError::Config(
                 "at most 32 scrubber profiles are allowed".into(),
             ));
@@ -103,8 +108,11 @@ impl ScrubberConfig {
                     .into_iter()
                     .chain(profile.ipv6_target)
                     .any(|v| {
+                        // A target inside its own destinations could divert
+                        // the scrubber's traffic back through itself.
                         !validate_redirect_target(v)
                             || profile.reserved_targets.iter().any(|net| net.contains(&v))
+                            || profile.destinations.iter().any(|net| net.contains(&v))
                     })
                 || !(5..=3600).contains(&profile.max_ttl_seconds)
                 || !(1..=1000).contains(&profile.max_active)

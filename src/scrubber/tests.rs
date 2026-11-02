@@ -16,6 +16,13 @@ struct Fake {
     writes: AtomicUsize,
     queue_add: AtomicBool,
     queued: StdMutex<Option<(GuardedRule, GuardedStamp)>>,
+    /// Hold a guarded add in flight until released, then report an unknown outcome.
+    stall_add: AtomicBool,
+    gate: tokio::sync::Notify,
+    reads: AtomicUsize,
+    renewals: AtomicUsize,
+    export_reads: AtomicUsize,
+    export_delay: AtomicU64,
 }
 impl Fake {
     fn live_window(&self, owner: &str, stamp: GuardedStamp) -> Result<Instant> {
@@ -67,6 +74,8 @@ impl ExportObserver for Fake {
         Ok(Some(vec![]))
     }
     async fn flowspec_exports(&self, _: &FlowSpecNlri) -> Result<Option<Vec<PeerExport>>> {
+        self.export_reads.fetch_add(1, SeqCst);
+        tokio::time::sleep(Duration::from_millis(self.export_delay.load(SeqCst))).await;
         Ok(Some(vec![]))
     }
 }
@@ -118,6 +127,10 @@ impl GuardedFlowSpecSpeaker for Fake {
         );
         self.writes.fetch_add(1, SeqCst);
         let until = self.live_window(&rule.owner, window)?;
+        if self.stall_add.load(SeqCst) {
+            self.gate.notified().await;
+            return Err(PrefixdError::Internal("unknown add outcome".into()));
+        }
         if self.queue_add.load(SeqCst) {
             *self.queued.lock().unwrap() = Some((rule.clone(), window));
             return Err(PrefixdError::Internal("unknown add outcome".into()));
@@ -139,6 +152,7 @@ impl GuardedFlowSpecSpeaker for Fake {
         _: u32,
     ) -> Result<u32> {
         self.writes.fetch_add(1, SeqCst);
+        self.renewals.fetch_add(1, SeqCst);
         let until = self.live_window(owner, window)?;
         for (rule, deadline) in self.rows.lock().unwrap().values_mut() {
             if rule.owner == owner {
@@ -161,6 +175,7 @@ impl GuardedFlowSpecSpeaker for Fake {
         Ok(())
     }
     async fn guarded_inventory(&self) -> Result<GuardedInventory> {
+        self.reads.fetch_add(1, SeqCst);
         let mut rows = self.rows.lock().unwrap();
         rows.retain(|_, (_, until)| *until > Instant::now());
         Ok(GuardedInventory {
@@ -225,6 +240,12 @@ async fn fixture(mode: OperationMode) -> (Arc<AppState>, Arc<MockRepository>, Ar
         writes: AtomicUsize::new(0),
         queue_add: AtomicBool::new(false),
         queued: Default::default(),
+        stall_add: AtomicBool::new(false),
+        gate: Default::default(),
+        reads: AtomicUsize::new(0),
+        renewals: AtomicUsize::new(0),
+        export_reads: AtomicUsize::new(0),
+        export_delay: AtomicU64::new(0),
     });
     let binding = repo
         .register_speaker_target(
@@ -308,7 +329,7 @@ async fn dry_run_sends_no_window_add_renew_or_delete() {
     state.scrubber.tick(&state).await.unwrap();
     state
         .scrubber
-        .withdraw(&state, row.id, "admin")
+        .withdraw(&state, row.id, "admin", None)
         .await
         .unwrap();
     assert_eq!(fake.writes.load(SeqCst), 0);
@@ -365,7 +386,7 @@ async fn ambiguous_add_keeps_exclusion_until_window_barrier_and_final_absence() 
     assert!(!state.scrubber.profiles().await["a"].armed);
     let row = state
         .scrubber
-        .withdraw(&state, row.id, "admin")
+        .withdraw(&state, row.id, "admin", None)
         .await
         .unwrap();
     assert_eq!(row.status, DiversionStatus::Withdrawing);
@@ -385,14 +406,14 @@ async fn ambiguous_add_keeps_exclusion_until_window_barrier_and_final_absence() 
     );
     let row = state
         .scrubber
-        .withdraw(&state, row.id, "admin")
+        .withdraw(&state, row.id, "admin", None)
         .await
         .unwrap();
     assert_eq!(row.status, DiversionStatus::Withdrawing);
     tokio::time::advance(Duration::from_secs(20)).await;
     let row = state
         .scrubber
-        .withdraw(&state, row.id, "admin")
+        .withdraw(&state, row.id, "admin", None)
         .await
         .unwrap();
     assert_eq!(row.status, DiversionStatus::Withdrawn);
@@ -671,14 +692,14 @@ async fn withdrawal_retries_preserve_the_requesting_operator() {
     );
     let row = state
         .scrubber
-        .withdraw(&state, row.id, "withdrawing-admin")
+        .withdraw(&state, row.id, "withdrawing-admin", None)
         .await
         .unwrap();
     assert_eq!(row.withdrawal_actor.as_deref(), Some("withdrawing-admin"));
     tokio::time::advance(Duration::from_secs(30)).await;
     let row = state
         .scrubber
-        .withdraw(&state, row.id, "retrying-admin")
+        .withdraw(&state, row.id, "retrying-admin", None)
         .await
         .unwrap();
     assert_eq!(row.status, DiversionStatus::Withdrawn);
@@ -812,6 +833,7 @@ async fn manual_api_refuses_arbitrary_targets_and_operator_role() {
     let mut body = body;
     body.as_object_mut().unwrap().remove("target");
     let response = router
+        .clone()
         .oneshot(
             Request::post("/v1/diversions/preview")
                 .header("authorization", "Bearer fixture-token")
@@ -827,6 +849,22 @@ async fn manual_api_refuses_arbitrary_targets_and_operator_role() {
         "detector/operator tokens cannot divert traffic"
     );
     assert_eq!(fake.writes.load(SeqCst), 0);
+    for path in [
+        "/v1/scrubbers".to_string(),
+        "/v1/diversions".to_string(),
+        format!("/v1/diversions/{}", Uuid::new_v4()),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(Request::get(&path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{path} exposes targets, victims and router peers"
+        );
+    }
 }
 
 #[tokio::test]
@@ -865,10 +903,6 @@ async fn profile_shares_windows_within_the_speaker_cap_and_refuses_retargeting()
     );
 }
 
-// Uses the repository's long-lived private transport certificate. macOS's
-// platform verifier imposes additional certificate validity policy; qualify
-// this Linux service's HTTPS transport in the Linux fixture environment.
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn authenticated_https_readiness_refuses_redirects_large_bodies_and_bad_credentials() {
     use axum::{
@@ -940,4 +974,386 @@ async fn authenticated_https_readiness_refuses_redirects_large_bodies_and_bad_cr
         .unwrap()
         .unwrap()
         .unwrap();
+}
+
+async fn audits(repo: &MockRepository) -> usize {
+    repo.list_audit(&crate::db::ListParams {
+        limit: u32::MAX,
+        cursor: None,
+        start: None,
+        end: None,
+    })
+    .await
+    .unwrap()
+    .len()
+}
+
+/// One lifecycle pass with readiness already refreshed, then the saved rows.
+async fn renew_pass(state: &AppState, rows: &mut [Diversion]) {
+    state
+        .scrubber
+        .pass(state, vec![], Instant::now() + EXPORT_BUDGET)
+        .await
+        .unwrap();
+    for row in rows.iter_mut() {
+        *row = state.repo.get_diversion(row.id).await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn renewal_survives_the_worst_gap_between_lifecycle_passes() {
+    // Passes start every five seconds and may each use their whole budget, so
+    // consecutive renewals of one owner can be a period plus a budget apart.
+    for offset in 0..9 {
+        let (state, _repo, _fake) = fixture(OperationMode::Enforced).await;
+        ready(&state).await;
+        let mut rows = vec![];
+        for host in [20, 21] {
+            rows.push(
+                state
+                    .scrubber
+                    .create(&state, &confirmed(&state, "a", host).await, "admin")
+                    .await
+                    .unwrap(),
+            );
+        }
+        tokio::time::advance(Duration::from_secs(offset)).await;
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_secs(9)).await;
+            ready(&state).await;
+            renew_pass(&state, &mut rows).await;
+            assert!(
+                rows.iter().all(|row| row.status == DiversionStatus::Active),
+                "offset {offset}"
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn steady_lifecycle_passes_write_no_audit_rows() {
+    let (state, repo, _fake) = fixture(OperationMode::Enforced).await;
+    ready(&state).await;
+    let mut rows = vec![
+        state
+            .scrubber
+            .create(&state, &confirmed(&state, "a", 20).await, "admin")
+            .await
+            .unwrap(),
+    ];
+    let before = audits(&repo).await;
+    for _ in 0..12 {
+        tokio::time::advance(Duration::from_secs(5)).await;
+        ready(&state).await;
+        renew_pass(&state, &mut rows).await;
+    }
+    assert_eq!(
+        audits(&repo).await,
+        before,
+        "steady renewal is not an audit event"
+    );
+    state
+        .scrubber
+        .withdraw(&state, rows[0].id, "admin", None)
+        .await
+        .unwrap();
+    assert!(
+        audits(&repo).await > before,
+        "a real transition still audits"
+    );
+}
+
+#[tokio::test]
+async fn abandoned_create_requests_still_record_ambiguous_outcomes() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    let (state, repo, fake) = fixture(OperationMode::Enforced).await;
+    ready(&state).await;
+    fake.stall_add.store(true, SeqCst);
+    let request = confirmed(&state, "a", 20).await;
+    let body = serde_json::json!({"profile":"a","scope":request.scope,"ttl_seconds":request.ttl_seconds,"reason":request.reason,"confirmation":request.confirmation});
+    let call = crate::api::create_test_router(state.clone()).oneshot(
+        Request::post("/v1/diversions")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    );
+    // The client disconnects while the guarded add is in flight.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), call)
+            .await
+            .is_err()
+    );
+    fake.gate.notify_one();
+    let mut rows = vec![];
+    for _ in 0..200 {
+        rows = repo.list_diversions(&state.settings.pop).await.unwrap();
+        if rows
+            .iter()
+            .all(|row| row.status == DiversionStatus::Withdrawing)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].status,
+        DiversionStatus::Withdrawing,
+        "an abandoned request cannot leave an unrecorded ambiguous add"
+    );
+    assert!(rows[0].last_error.is_some());
+    assert!(!state.scrubber.profiles().await["a"].armed);
+}
+
+#[tokio::test]
+async fn saved_withdrawal_cannot_move_backwards_or_change_its_reason() {
+    let (state, repo, _fake) = fixture(OperationMode::Enforced).await;
+    ready(&state).await;
+    let row = state
+        .scrubber
+        .create(&state, &confirmed(&state, "a", 20).await, "admin")
+        .await
+        .unwrap();
+    let row = state
+        .scrubber
+        .withdraw(&state, row.id, "admin", Some("investigated".into()))
+        .await
+        .unwrap();
+    assert_eq!(row.status, DiversionStatus::Withdrawing);
+    assert_eq!(row.withdrawal_reason.as_deref(), Some("investigated"));
+    let audit = row.audit("scrubber_withdraw_requested");
+    assert_eq!(audit.details["reason"], "investigated");
+    assert!(
+        state
+            .scrubber
+            .withdraw(&state, row.id, "admin", Some(" ".into()))
+            .await
+            .is_err(),
+        "an explicit reason must contain text"
+    );
+    let mut backwards = row.clone();
+    backwards.status = DiversionStatus::Active;
+    assert!(repo.save_diversion(&backwards, "invalid").await.is_err());
+    let mut reason = row.clone();
+    reason.withdrawal_reason = Some("rewritten".into());
+    assert!(repo.save_diversion(&reason, "invalid").await.is_err());
+    let mut actor = row.clone();
+    actor.withdrawal_actor = Some("someone-else".into());
+    assert!(repo.save_diversion(&actor, "invalid").await.is_err());
+    let saved = repo.get_diversion(row.id).await.unwrap().unwrap();
+    assert_eq!(saved.status, DiversionStatus::Withdrawing);
+    assert_eq!(saved.withdrawal_reason, row.withdrawal_reason);
+}
+
+#[test]
+fn profile_targets_cannot_fall_inside_their_own_destinations() {
+    let mut config = ScrubberConfig {
+        enabled: true,
+        profiles: vec![profile("a")],
+        readiness_ca_cert: None,
+    };
+    config.validate().unwrap();
+    config.profiles[0].ipv4_target = Some("203.0.113.99".parse().unwrap());
+    assert!(config.validate().is_err());
+    config.profiles.clear();
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("at least one profile")
+    );
+}
+
+#[tokio::test]
+async fn api_statuses_distinguish_disabled_and_unknown_resources() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let (state, _repo, _fake) = fixture(OperationMode::DryRun).await;
+    let router = crate::api::create_test_router(state.clone());
+    let status = |request: Request<Body>| {
+        let router = router.clone();
+        async move { router.oneshot(request).await.unwrap().status() }
+    };
+    let unknown = Uuid::new_v4();
+    assert_eq!(
+        status(
+            Request::get(format!("/v1/diversions/{unknown}"))
+                .body(Body::empty())
+                .unwrap()
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        status(
+            Request::post(format!("/v1/diversions/{unknown}/withdraw"))
+                .body(Body::empty())
+                .unwrap()
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        status(
+            Request::post("/v1/scrubbers/missing/arm")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"revision":"fixture-v1"}"#))
+                .unwrap()
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+    let (mut state, _repo, _fake) = fixture(OperationMode::DryRun).await;
+    Arc::get_mut(&mut state).unwrap().settings.scrubber.enabled = false;
+    let router = crate::api::create_test_router(state);
+    let body = serde_json::json!({"profile":"a","scope":{"dst_prefix":"203.0.113.20/32","protocol":6,"dst_ports":[443]},"ttl_seconds":60,"reason":"fixture"});
+    let response = router
+        .oneshot(
+            Request::post("/v1/diversions/preview")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "disabled is not a server error"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn many_active_diversions_renew_once_per_owner_and_slow_exports_only_degrade_evidence() {
+    let (mut state, repo, fake) = fixture(OperationMode::Enforced).await;
+    let settings = &mut Arc::get_mut(&mut state).unwrap().settings;
+    settings.scrubber.profiles[0].max_active = 1000;
+    settings.scrubber.profiles[0].max_new_per_minute = 1000;
+    settings.quotas.max_active_per_customer = 1000;
+    settings.quotas.max_active_per_pop = 1000;
+    settings.quotas.max_active_global = 1000;
+    settings.quotas.max_new_per_minute = 1000;
+    ready(&state).await;
+    for host in 1..=250 {
+        let row = state
+            .scrubber
+            .create(&state, &confirmed(&state, "a", host).await, "admin")
+            .await
+            .unwrap();
+        assert_eq!(row.status, DiversionStatus::Active);
+    }
+    let (reads, renewals, windows) = (
+        fake.reads.load(SeqCst),
+        fake.renewals.load(SeqCst),
+        fake.sequence.load(SeqCst),
+    );
+    fake.export_delay.store(400, SeqCst);
+    let before = audits(&repo).await;
+    ready(&state).await;
+    let started = Instant::now();
+    state
+        .scrubber
+        .pass(&state, vec![], started + EXPORT_BUDGET)
+        .await
+        .unwrap();
+    assert!(
+        Instant::now() - started <= EXPORT_BUDGET,
+        "export reads stop inside the pass budget"
+    );
+    assert_eq!(
+        fake.reads.load(SeqCst) - reads,
+        2,
+        "one inventory read and one read-back per pass"
+    );
+    assert_eq!(
+        fake.renewals.load(SeqCst) - renewals,
+        1,
+        "one renewal per owner"
+    );
+    assert!(
+        fake.sequence.load(SeqCst) - windows <= 1,
+        "at most one window per owner"
+    );
+    // Seven reads complete and the eighth reaches the budget.
+    assert_eq!(fake.export_reads.load(SeqCst), 250 + 8);
+    assert_eq!(state.scrubber.runtime.lock().await.export_cursor, 8);
+    let rows = repo.list_diversions(&state.settings.pop).await.unwrap();
+    assert!(rows.iter().all(|row| row.status == DiversionStatus::Active));
+    let degraded: Vec<_> = rows
+        .iter()
+        .filter_map(|row| row.export_observation.as_ref()?.error.as_ref())
+        .collect();
+    assert_eq!(degraded.len(), 1, "a cut-off read is historical evidence");
+    assert_eq!(
+        audits(&repo).await,
+        before + 1,
+        "only the changed evidence is persisted"
+    );
+    assert!(state.scrubber.profiles().await["a"].armed);
+    // A stalled export observer degrades evidence and never latches.
+    fake.export_delay.store(60_000, SeqCst);
+    ready(&state).await;
+    let started = Instant::now();
+    state
+        .scrubber
+        .pass(&state, vec![], started + EXPORT_BUDGET)
+        .await
+        .unwrap();
+    assert!(Instant::now() - started <= EXPORT_BUDGET);
+    assert!(state.scrubber.profiles().await["a"].armed);
+    assert!(
+        repo.list_diversions(&state.settings.pop)
+            .await
+            .unwrap()
+            .iter()
+            .all(|row| row.status == DiversionStatus::Active)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn draining_another_controllers_admission_waits_the_server_window_cap() {
+    let (state, repo, fake) = fixture(OperationMode::Enforced).await;
+    ready(&state).await;
+    let mut late = state
+        .scrubber
+        .prepare(&state, &request("a", 20), "original-admin")
+        .await
+        .unwrap();
+    // A previous process may have issued windows longer than this one's.
+    late.controller_incarnation = Uuid::new_v4();
+    let mut row = repo
+        .admit_diversion(&late, &profile("a"), &state.settings.quotas)
+        .await
+        .unwrap();
+    let mut runtime = state.scrubber.runtime.lock().await;
+    state
+        .scrubber
+        .drive(&state, &mut runtime, &mut row)
+        .await
+        .unwrap();
+    assert_eq!(row.status, DiversionStatus::Withdrawing);
+    tokio::time::advance(Duration::from_secs(u64::from(WINDOW_SECONDS) + 1)).await;
+    state
+        .scrubber
+        .drive(&state, &mut runtime, &mut row)
+        .await
+        .unwrap();
+    assert_eq!(
+        row.status,
+        DiversionStatus::Withdrawing,
+        "this process's window lifetime cannot bound another's"
+    );
+    tokio::time::advance(SERVER_WINDOW_CAP).await;
+    state
+        .scrubber
+        .drive(&state, &mut runtime, &mut row)
+        .await
+        .unwrap();
+    assert_eq!(row.status, DiversionStatus::Withdrawn);
+    assert!(fake.windows.lock().unwrap().is_empty());
 }

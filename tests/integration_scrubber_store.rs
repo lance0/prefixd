@@ -150,6 +150,43 @@ async fn postgres_serializes_diversion_conflicts_and_preserves_immutable_snapsho
     let restored = context.repo.get_diversion(row.id).await.unwrap().unwrap();
     assert_eq!(restored.windows, row.windows);
     assert_eq!(restored.status, DiversionStatus::Withdrawing);
+    // The SQL guard, not only the controller, keeps withdrawal moving forward
+    // and its first reason and requester immutable.
+    let mut requester = row.clone();
+    requester.withdrawal_actor = Some("first-requester".into());
+    context
+        .repo
+        .save_diversion(&requester, "scrubber_withdraw_requested")
+        .await
+        .unwrap();
+    let mut backwards = requester.clone();
+    backwards.status = DiversionStatus::Active;
+    let mut reason = requester.clone();
+    reason.withdrawal_reason = Some("rewritten".into());
+    let mut other_requester = requester.clone();
+    other_requester.withdrawal_actor = Some("fixture-admin".into());
+    for refused in [&backwards, &reason, &other_requester] {
+        assert_eq!(
+            context
+                .repo
+                .save_diversion(refused, "invalid")
+                .await
+                .unwrap_err()
+                .status_code(),
+            axum::http::StatusCode::CONFLICT
+        );
+    }
+    let restored = context.repo.get_diversion(row.id).await.unwrap().unwrap();
+    assert_eq!(restored.status, DiversionStatus::Withdrawing);
+    assert_eq!(
+        restored.withdrawal_reason.as_deref(),
+        Some("fixture withdrawal")
+    );
+    assert_eq!(
+        restored.withdrawal_actor.as_deref(),
+        Some("first-requester")
+    );
+    let row = restored;
     let cidr = ordinary(pop, "203.0.113.0/24");
     let error = context
         .repo

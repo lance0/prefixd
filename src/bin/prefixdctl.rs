@@ -135,6 +135,9 @@ enum DiversionCommands {
     },
     Withdraw {
         id: uuid::Uuid,
+        /// Recorded with the first withdrawal request in the audit log
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -621,12 +624,13 @@ async fn cmd_diversions(client: &Client, command: DiversionCommands) -> Result<(
     let value: serde_json::Value = match command {
         DiversionCommands::List => client.get("/v1/diversions").await?,
         DiversionCommands::Get { id } => client.get(&format!("/v1/diversions/{id}")).await?,
-        DiversionCommands::Withdraw { id } => {
+        DiversionCommands::Withdraw { id, reason } => {
+            let body = match reason {
+                Some(reason) => serde_json::json!({ "reason": reason }),
+                None => serde_json::json!({}),
+            };
             client
-                .post(
-                    &format!("/v1/diversions/{id}/withdraw"),
-                    &serde_json::json!({}),
-                )
+                .post(&format!("/v1/diversions/{id}/withdraw"), &body)
                 .await?
         }
         DiversionCommands::Preview { file } => {

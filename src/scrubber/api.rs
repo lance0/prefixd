@@ -1,4 +1,5 @@
 use super::*;
+use crate::api::handlers::ErrorResponse;
 use crate::{
     AppState,
     auth::AuthSession,
@@ -28,6 +29,29 @@ pub struct CreateDiversion {
 pub struct ArmProfile {
     pub revision: String,
 }
+#[derive(Debug, Clone, Default, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WithdrawDiversion {
+    /// Recorded with the first withdrawal request; 1 to 1,024 UTF-8 bytes of
+    /// text. Omitted, the controller records `operator withdrawal by <user>`.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct ScrubberProfiles {
+    pub enabled: bool,
+    pub profiles: std::collections::HashMap<String, ProfileState>,
+    pub configuration: Vec<ConfiguredProfile>,
+}
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct ConfiguredProfile {
+    pub id: String,
+    pub revision: String,
+    #[schema(value_type = Option<String>, example = "192.0.2.99")]
+    pub ipv4_target: Option<std::net::IpAddr>,
+    #[schema(value_type = Option<String>, example = "2001:db8::99")]
+    pub ipv6_target: Option<std::net::IpAddr>,
+}
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct DiversionPreview {
     pub candidate: Diversion,
@@ -49,6 +73,28 @@ fn admin(
     )
     .map(|user| user.username)
 }
+fn reader(
+    state: &AppState,
+    session: &AuthSession,
+    headers: &HeaderMap,
+) -> std::result::Result<(), StatusCode> {
+    crate::api::require_auth(
+        state,
+        session,
+        headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok()),
+    )
+}
+/// Run a mutation to completion even if the client disconnects, so an
+/// ambiguous speaker outcome is always recorded and latched.
+async fn detached<T, F>(state: &Arc<AppState>, work: impl FnOnce(Arc<AppState>) -> F) -> Result<T>
+where
+    T: Send + 'static,
+    F: Future<Output = Result<T>> + Send + 'static,
+{
+    tokio::spawn(work(state.clone()))
+        .await
+        .unwrap_or_else(|_| Err(PrefixdError::Internal("scrubber task failed".into())))
+}
 fn response<T: Serialize>(result: Result<T>, status: StatusCode) -> Response {
     match result {
         Ok(value) => (status, Json(value)).into_response(),
@@ -64,11 +110,44 @@ fn response<T: Serialize>(result: Result<T>, status: StatusCode) -> Response {
     }
 }
 
-#[utoipa::path(get,path="/v1/scrubbers",tag="scrubbers",responses((status=200,description="Configured profile readiness and arm state")))]
-pub async fn profiles(State(state): State<Arc<AppState>>) -> Response {
-    Json(serde_json::json!({"enabled":state.settings.scrubber.enabled,"profiles":state.scrubber.profiles().await,"configuration":state.settings.scrubber.profiles.iter().map(|profile|serde_json::json!({"id":profile.id,"revision":profile.revision,"ipv4_target":profile.ipv4_target,"ipv6_target":profile.ipv6_target})).collect::<Vec<_>>()})).into_response()
+#[utoipa::path(get,path="/v1/scrubbers",tag="scrubbers",responses(
+    (status=200,body=ScrubberProfiles,description="Configured profile targets, readiness and arm state"),
+    (status=401,description="Authentication required"),
+))]
+pub async fn profiles(
+    State(state): State<Arc<AppState>>,
+    session: AuthSession,
+    headers: HeaderMap,
+) -> std::result::Result<Response, StatusCode> {
+    reader(&state, &session, &headers)?;
+    let body = ScrubberProfiles {
+        enabled: state.settings.scrubber.enabled,
+        profiles: state.scrubber.profiles().await,
+        configuration: state
+            .settings
+            .scrubber
+            .profiles
+            .iter()
+            .map(|profile| ConfiguredProfile {
+                id: profile.id.clone(),
+                revision: profile.revision.clone(),
+                ipv4_target: profile.ipv4_target,
+                ipv6_target: profile.ipv6_target,
+            })
+            .collect(),
+    };
+    Ok(Json(body).into_response())
 }
-#[utoipa::path(post,path="/v1/scrubbers/{profile}/arm",tag="scrubbers",request_body=ArmProfile,params(("profile"=String,Path)),responses((status=200,description="Explicitly re-armed after fresh readiness and completed withdrawal")))]
+#[utoipa::path(post,path="/v1/scrubbers/{profile}/arm",tag="scrubbers",request_body=ArmProfile,params(("profile"=String,Path)),responses(
+    (status=200,description="Explicitly re-armed after fresh readiness and completed withdrawal"),
+    (status=401,description="Authentication required"),
+    (status=403,description="Administrator role required"),
+    (status=404,body=ErrorResponse,description="Unknown scrubber profile"),
+    (status=409,body=ErrorResponse,description="Scrubbers disabled, revision changed, profile already armed, stale readiness, outstanding withdrawal or retained guarded intent"),
+    (status=422,description="Malformed request body"),
+    (status=503,body=ErrorResponse,description="Controller in standby"),
+    (status=500,body=ErrorResponse,description="Readiness or speaker outcome could not be confirmed"),
+))]
 pub async fn arm(
     State(state): State<Arc<AppState>>,
     session: AuthSession,
@@ -85,7 +164,16 @@ pub async fn arm(
         StatusCode::OK,
     ))
 }
-#[utoipa::path(post,path="/v1/diversions/preview",tag="scrubbers",request_body=CreateDiversion,responses((status=200,body=DiversionPreview,description="Controller checks only; no persistence or speaker RPC")))]
+#[utoipa::path(post,path="/v1/diversions/preview",tag="scrubbers",request_body=CreateDiversion,responses(
+    (status=200,body=DiversionPreview,description="Controller checks only; no persistence or speaker RPC"),
+    (status=400,body=ErrorResponse,description="Invalid host, match, lifetime or reason, or no unambiguous inventory owner"),
+    (status=401,description="Authentication required"),
+    (status=403,description="Administrator role required"),
+    (status=404,body=ErrorResponse,description="Unknown scrubber profile"),
+    (status=409,body=ErrorResponse,description="Scrubber diversion disabled"),
+    (status=422,body=ErrorResponse,description="Guardrail rejection, or a malformed body including an arbitrary target or owner"),
+    (status=503,body=ErrorResponse,description="Controller in standby"),
+))]
 pub async fn preview(
     State(state): State<Arc<AppState>>,
     session: AuthSession,
@@ -101,7 +189,17 @@ pub async fn preview(
     }.await;
     Ok(response(result, StatusCode::OK))
 }
-#[utoipa::path(post,path="/v1/diversions",tag="scrubbers",request_body=CreateDiversion,responses((status=202,body=Diversion,description="Durable manual intent; local read-back is separate from router forwarding")))]
+#[utoipa::path(post,path="/v1/diversions",tag="scrubbers",request_body=CreateDiversion,responses(
+    (status=202,body=Diversion,description="Durable manual intent; local read-back is separate from router forwarding. An unconfirmed mutation returns the latched, withdrawing row."),
+    (status=400,body=ErrorResponse,description="Invalid host, match, lifetime or reason, or a confirmation that does not match preview"),
+    (status=401,description="Authentication required"),
+    (status=403,description="Administrator role required"),
+    (status=404,body=ErrorResponse,description="Unknown scrubber profile"),
+    (status=409,body=ErrorResponse,description="Scrubbers disabled, profile not ready and armed, or the victim has live or pending mitigation intent"),
+    (status=422,body=ErrorResponse,description="Guardrail or quota rejection, or a malformed body"),
+    (status=503,body=ErrorResponse,description="Controller in standby"),
+    (status=500,body=ErrorResponse,description="Durable admission could not be confirmed; every profile is latched"),
+))]
 pub async fn create(
     State(state): State<Arc<AppState>>,
     session: AuthSession,
@@ -109,41 +207,74 @@ pub async fn create(
     Json(req): Json<CreateDiversion>,
 ) -> std::result::Result<Response, StatusCode> {
     let actor = admin(&state, &session, &headers)?;
-    Ok(response(
-        state.scrubber.create(&state, &req, &actor).await,
-        StatusCode::ACCEPTED,
-    ))
+    let result = detached(&state, move |state| async move {
+        state.scrubber.create(&state, &req, &actor).await
+    })
+    .await;
+    Ok(response(result, StatusCode::ACCEPTED))
 }
-#[utoipa::path(get,path="/v1/diversions",tag="scrubbers",responses((status=200,body=Vec<Diversion>,description="All outstanding local intents, including pending withdrawals")))]
-pub async fn list(State(state): State<Arc<AppState>>) -> Response {
-    response(
+#[utoipa::path(get,path="/v1/diversions",tag="scrubbers",responses(
+    (status=200,body=Vec<Diversion>,description="All outstanding local intents, including pending withdrawals"),
+    (status=401,description="Authentication required"),
+    (status=500,body=ErrorResponse,description="Durable intent unavailable"),
+))]
+pub async fn list(
+    State(state): State<Arc<AppState>>,
+    session: AuthSession,
+    headers: HeaderMap,
+) -> std::result::Result<Response, StatusCode> {
+    reader(&state, &session, &headers)?;
+    Ok(response(
         state.repo.list_diversions(&state.settings.pop).await,
         StatusCode::OK,
-    )
+    ))
 }
-#[utoipa::path(get,path="/v1/diversions/{id}",tag="scrubbers",params(("id"=Uuid,Path)),responses((status=200,body=Diversion,description="Immutable diversion snapshot and local lifecycle state")))]
-pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<Uuid>) -> Response {
+#[utoipa::path(get,path="/v1/diversions/{id}",tag="scrubbers",params(("id"=Uuid,Path)),responses(
+    (status=200,body=Diversion,description="Immutable diversion snapshot and local lifecycle state"),
+    (status=401,description="Authentication required"),
+    (status=404,body=ErrorResponse,description="Unknown diversion in this POP"),
+))]
+pub async fn get(
+    State(state): State<Arc<AppState>>,
+    session: AuthSession,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> std::result::Result<Response, StatusCode> {
+    reader(&state, &session, &headers)?;
     let result = async {
         state
             .repo
             .get_diversion(id)
             .await?
             .filter(|row| row.pop == state.settings.pop)
-            .ok_or_else(|| PrefixdError::InvalidRequest("unknown diversion".into()))
+            .ok_or_else(|| PrefixdError::NotFound("unknown diversion".into()))
     }
     .await;
-    response(result, StatusCode::OK)
+    Ok(response(result, StatusCode::OK))
 }
-#[utoipa::path(post,path="/v1/diversions/{id}/withdraw",tag="scrubbers",params(("id"=Uuid,Path)),responses((status=202,body=Diversion,description="Withdrawal retained until authorization expiry, final fenced delete and complete local absence")))]
+#[utoipa::path(post,path="/v1/diversions/{id}/withdraw",tag="scrubbers",params(("id"=Uuid,Path)),request_body(content=WithdrawDiversion,description="Optional; omit the body or send {}"),responses(
+    (status=202,body=Diversion,description="Withdrawal retained until authorization expiry, final fenced delete and complete local absence"),
+    (status=400,body=ErrorResponse,description="Empty or oversized reason"),
+    (status=401,description="Authentication required"),
+    (status=403,description="Administrator role required"),
+    (status=404,body=ErrorResponse,description="Unknown diversion"),
+    (status=409,body=ErrorResponse,description="Diversion belongs to another POP"),
+    (status=422,description="Malformed request body"),
+    (status=503,body=ErrorResponse,description="Controller in standby"),
+    (status=500,body=ErrorResponse,description="Durable withdrawal could not be confirmed"),
+))]
 pub async fn withdraw(
     State(state): State<Arc<AppState>>,
     session: AuthSession,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
+    body: Option<Json<WithdrawDiversion>>,
 ) -> std::result::Result<Response, StatusCode> {
     let actor = admin(&state, &session, &headers)?;
-    Ok(response(
-        state.scrubber.withdraw(&state, id, &actor).await,
-        StatusCode::ACCEPTED,
-    ))
+    let reason = body.and_then(|Json(body)| body.reason);
+    let result = detached(&state, move |state| async move {
+        state.scrubber.withdraw(&state, id, &actor, reason).await
+    })
+    .await;
+    Ok(response(result, StatusCode::ACCEPTED))
 }

@@ -346,7 +346,9 @@ impl RepositoryTrait for Repository {
         sqlx::query("SET LOCAL statement_timeout='5s'")
             .execute(&mut *tx)
             .await?;
-        let result = sqlx::query("UPDATE scrubber_diversions SET status=$2,snapshot_json=$3 WHERE id=$1 AND pop=$4 AND admission_revision=$5 AND (snapshot_json::jsonb - ARRAY['status','withdrawal_reason','withdrawal_actor','windows','generation','last_error','export_observation']) = ($3::jsonb - ARRAY['status','withdrawal_reason','withdrawal_actor','windows','generation','last_error','export_observation'])")
+        // Mirrors Diversion::may_replace: lifecycle only moves forward, and the
+        // first withdrawal reason and requester are immutable.
+        let result = sqlx::query("UPDATE scrubber_diversions SET status=$2,snapshot_json=$3 WHERE id=$1 AND pop=$4 AND admission_revision=$5 AND (snapshot_json::jsonb - ARRAY['status','withdrawal_reason','withdrawal_actor','windows','generation','last_error','export_observation']) = ($3::jsonb - ARRAY['status','withdrawal_reason','withdrawal_actor','windows','generation','last_error','export_observation']) AND (status=$2 OR (status='pending' AND $2 IN ('active','withdrawing')) OR (status='active' AND $2='withdrawing') OR (status='withdrawing' AND $2='withdrawn')) AND COALESCE(snapshot_json::jsonb->'withdrawal_reason','null'::jsonb) IN ('null'::jsonb, $3::jsonb->'withdrawal_reason') AND COALESCE(snapshot_json::jsonb->'withdrawal_actor','null'::jsonb) IN ('null'::jsonb, $3::jsonb->'withdrawal_actor')")
             .bind(intent.id).bind(intent.status.as_str()).bind(serde_json::to_string(intent)?).bind(&intent.pop).bind(i64::try_from(intent.rule.revision).unwrap_or(-1)).execute(&mut *tx).await?;
         if result.rows_affected() != 1 {
             return Err(PrefixdError::Conflict("scrubber intent changed".into()));
