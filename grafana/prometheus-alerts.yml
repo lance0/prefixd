@@ -66,9 +66,9 @@ groups:
     rules:
       - alert: PrefixdBlackholeNotExported
         expr: prefixd_blackhole_unexported > 0
-        # Outlasts rustbgpd's default 120-second restart selection deferral
-        # (reason selection_deferred), so a planned speaker restart does not
-        # fire it. Keep it longer than the speaker's gr_restart_time.
+        # Rides out brief pending export while sessions settle. Since rustbgpd
+        # v0.81.0, prefixd's blackholes bypass restart selection deferral
+        # (reason selection_deferred), so that reason is not expected here.
         for: 5m
         labels:
           severity: warning
@@ -80,8 +80,9 @@ groups:
             no router is sent them.{{ if eq $labels.reason "export_policy" }}
             Export policy denies them toward every Established peer; check
             the speaker's export policy.{{ end }}{{ if eq $labels.reason "selection_deferred" }}
-            The speaker still holds them from selection after a restart;
-            check that its Graceful Restart peers have sent End-of-RIB.{{ end }} Health
+            The speaker holds them from selection after a restart, which
+            rustbgpd v0.81.0 and later do not do for prefixd's blackholes;
+            check the speaker version.{{ end }} Health
             detail lists each blackhole under speaker.blackhole_exports.
 
   # Local-replacement evidence from the last hour. Startup exports the

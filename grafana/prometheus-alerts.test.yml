@@ -99,8 +99,8 @@ tests:
         alertname: PrefixdDown
         exp_alerts: []
   # Blackholes exported to no peer for 5 minutes fire per reason; a brief
-  # pending export or a default 120-second restart selection hold does not,
-  # and a hold that outlasts the window does.
+  # pending export or selection hold does not, and a hold that outlasts the
+  # window does.
   - interval: 1m
     input_series:
       - series: 'prefixd_blackhole_unexported{job="prefixd",instance="a",reason="export_policy"}'
@@ -131,7 +131,7 @@ tests:
           - exp_labels: {severity: warning, job: prefixd, instance: b, reason: selection_deferred}
             exp_annotations:
               summary: "Active blackhole exported to no peer"
-              description: "1 active blackhole(s) on b are committed to no Established peer, reason selection_deferred, so no router is sent them. The speaker still holds them from selection after a restart; check that its Graceful Restart peers have sent End-of-RIB. Health detail lists each blackhole under speaker.blackhole_exports."
+              description: "1 active blackhole(s) on b are committed to no Established peer, reason selection_deferred, so no router is sent them. The speaker holds them from selection after a restart, which rustbgpd v0.81.0 and later do not do for prefixd's blackholes; check the speaker version. Health detail lists each blackhole under speaker.blackhole_exports."
 
   # Startup exports the series at zero, so the first replacement fires. Only
   # the affected POP fires, and the alert clears once the last increase
