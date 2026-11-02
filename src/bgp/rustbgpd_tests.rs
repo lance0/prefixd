@@ -91,9 +91,9 @@ impl pb::control_service_server::ControlService for Fake {
             _ => {}
         }
         let daemon_version = match self.mode.load(SeqCst) {
-            23 => "0.79.0",
-            24 => "0.80.0",
-            25 => "0.81.0-dev",
+            23 => "0.80.1",
+            24 => "0.81.0",
+            25 => "0.82.0-dev",
             _ => "observed-daemon-version",
         };
         Ok(Response::new(pb::HealthResponse {
@@ -150,7 +150,7 @@ async fn startup_refuses_a_daemon_older_than_the_minimum_contract() {
         .to_string();
     assert_eq!(
         error,
-        "rustbgpd 0.79.0 is older than the minimum 0.80.0; upgrade the speaker first"
+        "rustbgpd 0.80.1 is older than the minimum 0.81.0; upgrade the speaker first"
     );
     // No version, an unreadable one or a failed read refuses too, without upstream detail.
     for (mode, expected) in [

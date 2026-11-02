@@ -1,12 +1,4 @@
 {
-  "0.80.0": {
-    "image": "ghcr.io/lance0/rustbgpd:0.80.0@sha256:9945c2f8cc6fabf73d408018a4aa6cb50fe5095bd7d8bbf28d1bad847ff0e9d8",
-    "source_commit": "871d9d269dd791d6f600236a9445af8767bf7cc5"
-  },
-  "0.80.1": {
-    "image": "ghcr.io/lance0/rustbgpd:0.80.1@sha256:a7a6c4533ba0976f73525ef4d932ad04ef1b034115dc684511fd2679c02513f1",
-    "source_commit": "2fb2cbf276eaa6a2eb6005e956ce47b23a377dc3"
-  },
   "0.81.0": {
     "image": "ghcr.io/lance0/rustbgpd:0.81.0@sha256:f8a6d62ced049e415d702e31c43cbd6dac62fa9bcfdd0f410938f3c6cc418a64",
     "source_commit": "eb1749d7018cd9691e4f4c9adef3b9adb830e9a8"

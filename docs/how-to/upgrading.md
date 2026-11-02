@@ -33,10 +33,12 @@ the protection; drain affected rules or accept that policy change explicitly.
 
 ## rustbgpd v0.81
 
-Compose and the default controller fixture now pin rustbgpd v0.81.0. The minimum
-daemon remains v0.80.0; CI also retains v0.80.0 and v0.80.1. This change requires
-no prefixd database migration. Keep the same POP, endpoint, credentials and mode,
-and follow the [speaker release notes](https://github.com/lance0/rustbgpd/releases/tag/v0.81.0)
+prefixd now requires rustbgpd v0.81.0, and Compose pins the immutable v0.81.0
+image. Upgrade rustbgpd to v0.81.0 first: the new controller refuses to start
+against v0.80.x (see [rustbgpd minimum version](#rustbgpd-minimum-version)).
+This change requires no prefixd database migration. Keep the same POP,
+endpoint, credentials and mode, and follow the
+[speaker release notes](https://github.com/lance0/rustbgpd/releases/tag/v0.81.0)
 before recreating the speaker. Reconciliation must restore its process-local
 injections after the restart; verify exact rules, lease state and receiving
 routers afterward.
@@ -45,6 +47,7 @@ v0.81.0 allows local FlowSpec and RTBH injections to compete during Graceful
 Restart selection deferral, while received candidates and End-of-RIB can remain
 held. Policy and admission still apply. This changes the v0.80 hold behavior
 described below; it provides no router recovery deadline.
+`MarkReplayComplete` still ends only the End-of-RIB grace window.
 
 The new direct target-IP and guarded FlowSpec APIs do not enable prefixd scrubber
 diversion. Local inventory reads refuse IPv6 extended communities and guarded
@@ -78,6 +81,7 @@ not end that hold. Remove or disable Graceful Restart on configured neighbors
 that never come up. The shipped example sets
 `graceful_restart = false` on its placeholder neighbor. See
 [speaker backends](../reference/speaker-backends.md#rustbgpd-configuration).
+As of v0.81.0, the hold no longer applies to prefixd's injections.
 
 Health, peer metrics and blackhole export evidence now distinguish scoped IPv6
 link-local neighbors (`fe80::1%eth0`). Interface-only peers use `interface:eth0`
@@ -244,21 +248,22 @@ A production write-only backend remains gated on a durable announcement ledger.
 
 ## rustbgpd minimum version
 
-prefixd requires rustbgpd 0.80.0 or later. At startup it reads the version
+prefixd requires rustbgpd 0.81.0 or later. At startup it reads the version
 that rustbgpd's `GetHealth` reports and exits before reading or writing any
 intent if the daemon is older or reports no readable version:
 
 ```text
-rustbgpd 0.79.0 is older than the minimum 0.80.0; upgrade the speaker first
+rustbgpd 0.80.1 is older than the minimum 0.81.0; upgrade the speaker first
 ```
 
 Upgrade rustbgpd before prefixd. A rustbgpd restart drops its injected rules;
 the running controller re-adds desired rules on its next reconciliation poll.
-Then upgrade prefixd as usual. Don't roll rustbgpd back below 0.80.0 under a
-newer prefixd: the next start refuses. A daemon rolled back while prefixd runs
-reports link-local export rows without interface scope, which fail export
-observation, and below 0.79.0 the lease RPCs are unsupported, so leased adds
-fail and create nothing. GoBGP is unaffected.
+Then upgrade prefixd as usual. Don't roll rustbgpd back below 0.81.0 under a
+newer prefixd: the next start refuses. A daemon rolled back to v0.80.x while
+prefixd runs holds replayed routes from selection after its restart; below
+0.80.0 it reports link-local export rows without interface scope, which fail
+export observation, and below 0.79.0 the lease RPCs are unsupported, so leased
+adds fail and create nothing. GoBGP is unaffected.
 
 ## Controller fence and rolling deploys
 

@@ -9,7 +9,7 @@
 //! both assets of the new release, run `sha256sum --check --strict` on them, copy
 //! both here and update this comment.
 //!
-//! The generated stubs follow the pinned release. v0.80.0 is the minimum
+//! The generated stubs follow the pinned release. v0.81.0 is the minimum
 //! daemon, and `RustBgpdAnnouncer::connect` refuses anything older. Peer
 //! identity fields are decoded; new optional read-back and replay RPCs remain
 //! unused until a change adopts them. The stubs are compiled only when the
