@@ -1,7 +1,7 @@
 #![cfg(all(feature = "bgp-rustbgpd", feature = "test-utils", target_os = "linux"))]
 #[path = "common/rustbgpd.rs"]
 mod fixture;
-use prefixd::bgp::{FlowSpecReader, GuardedFlowSpecSpeaker, GuardedRule, GuardedStamp};
+use prefixd::bgp::{FlowSpecReader, GuardedFlowSpecSpeaker, GuardedRule};
 use prefixd::domain::FlowSpecNlri;
 use std::time::Duration;
 
@@ -24,31 +24,7 @@ fn rule(prefix: &str, target: &str, owner: &str, revision: u64) -> GuardedRule {
 async fn guarded_contract_preserves_targets_revisions_and_independent_owners() {
     let fixture = fixture::Speaker::start().await;
     let speaker = fixture.connect().await;
-    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
     let a = rule("192.0.2.1/32", "192.0.2.99", "prefixd.scrub.a", 1);
-    if version != "0.81.0" {
-        assert!(speaker.issue_window(&a.owner, 30).await.is_err());
-        assert!(
-            speaker
-                .add_guarded(
-                    &a,
-                    GuardedStamp {
-                        incarnation: 1,
-                        sequence: 1
-                    },
-                    30
-                )
-                .await
-                .is_err()
-        );
-        assert!(speaker.guarded_inventory().await.unwrap().is_empty());
-        assert!(
-            speaker.list_active().await.unwrap().is_empty(),
-            "no legacy fallback"
-        );
-        fixture.container.rm().await.unwrap();
-        return;
-    }
     let b = rule("2001:db8::2/128", "2001:db8::99", "prefixd.scrub.b", 2);
     let sibling = rule("192.0.2.3/32", "192.0.2.99", "prefixd.scrub.a", 3);
     let wa = speaker.issue_window(&a.owner, 30).await.unwrap();

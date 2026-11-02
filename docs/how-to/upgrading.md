@@ -50,8 +50,9 @@ described below; it provides no router recovery deadline.
 `MarkReplayComplete` still ends only the End-of-RIB grace window.
 
 The new direct target-IP and guarded FlowSpec APIs do not enable prefixd scrubber
-diversion. Local inventory reads refuse IPv6 extended communities and guarded
-admission state that prefixd cannot represent. See
+diversion. Local inventory reads refuse IPv6 extended communities and malformed
+guarded rules in prefixd's own owner namespace; another owner's guarded rule is
+excluded and never deleted. See
 [speaker backends](../reference/speaker-backends.md#rustbgpd-configuration).
 
 ## rustbgpd v0.80
