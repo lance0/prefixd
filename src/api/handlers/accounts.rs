@@ -294,10 +294,7 @@ pub async fn create_operator(
 ) -> Result<(StatusCode, Json<OperatorInfo>), StatusCode> {
     use crate::api::auth::require_role;
     use crate::domain::OperatorRole;
-    use argon2::{
-        Argon2, PasswordHasher,
-        password_hash::{SaltString, rand_core::OsRng},
-    };
+    use argon2::{Argon2, PasswordHasher};
 
     let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
 
@@ -328,9 +325,8 @@ pub async fn create_operator(
     }
 
     // Hash password
-    let salt = SaltString::generate(&mut OsRng);
     let password_hash = Argon2::default()
-        .hash_password(req.password.as_bytes(), &salt)
+        .hash_password(req.password.as_bytes())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .to_string();
 
@@ -436,10 +432,7 @@ pub async fn change_password(
 ) -> Result<StatusCode, StatusCode> {
     use crate::api::auth::require_role;
     use crate::domain::OperatorRole;
-    use argon2::{
-        Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
-        password_hash::{SaltString, rand_core::OsRng},
-    };
+    use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 
     let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
 
@@ -485,9 +478,8 @@ pub async fn change_password(
     }
 
     // Hash new password
-    let salt = SaltString::generate(&mut OsRng);
     let password_hash = Argon2::default()
-        .hash_password(req.new_password.as_bytes(), &salt)
+        .hash_password(req.new_password.as_bytes())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .to_string();
 

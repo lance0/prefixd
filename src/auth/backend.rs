@@ -11,12 +11,7 @@ use crate::domain::Operator;
 
 static DUMMY_HASH: LazyLock<String> = LazyLock::new(|| {
     Argon2::default()
-        .hash_password(
-            b"dummy-password-not-a-real-password",
-            &argon2::password_hash::SaltString::generate(
-                &mut argon2::password_hash::rand_core::OsRng,
-            ),
-        )
+        .hash_password(b"dummy-password-not-a-real-password")
         .map(|h| h.to_string())
         .unwrap_or_default()
 });
