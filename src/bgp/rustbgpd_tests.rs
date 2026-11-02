@@ -21,6 +21,8 @@ struct Fake {
     owners: Arc<Mutex<Vec<HeldOwner>>>,
     leased: Arc<Mutex<Vec<pb::AddLeasedFlowSpecRequest>>>,
     delete_owners: Arc<Mutex<Vec<String>>>,
+    /// Raw guarded rows returned after the ordinary rules of their family.
+    guarded_rows: Arc<Mutex<Vec<pb::FlowSpecRouteEntry>>>,
 }
 
 /// FlowSpec fake modes for the lease: a rolled-back daemon, and leased rows with no time left.
@@ -89,9 +91,9 @@ impl pb::control_service_server::ControlService for Fake {
             _ => {}
         }
         let daemon_version = match self.mode.load(SeqCst) {
-            23 => "0.79.0",
-            24 => "0.80.0",
-            25 => "0.81.0-dev",
+            23 => "0.80.1",
+            24 => "0.81.0",
+            25 => "0.82.0-dev",
             _ => "observed-daemon-version",
         };
         Ok(Response::new(pb::HealthResponse {
@@ -148,7 +150,7 @@ async fn startup_refuses_a_daemon_older_than_the_minimum_contract() {
         .to_string();
     assert_eq!(
         error,
-        "rustbgpd 0.79.0 is older than the minimum 0.80.0; upgrade the speaker first"
+        "rustbgpd 0.80.1 is older than the minimum 0.81.0; upgrade the speaker first"
     );
     // No version, an unreadable one or a failed read refuses too, without upstream detail.
     for (mode, expected) in [
@@ -352,7 +354,7 @@ impl pb::rib_service_server::RibService for Fake {
         assert_eq!(request.received_peer_address, "0.0.0.0");
         assert!(request.advertised_peer_address.is_empty());
         self.families.lock().unwrap().push(request.afi_safi);
-        let received_routes = self
+        let mut received_routes: Vec<_> = self
             .rules
             .lock()
             .unwrap()
@@ -400,6 +402,18 @@ impl pb::rib_service_server::RibService for Fake {
                 }
             })
             .collect();
+        received_routes.extend(
+            self.guarded_rows
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|route| route.afi_safi == request.afi_safi)
+                .map(|route| pb::ReceivedFlowSpecRouteEntry {
+                    route: Some(route.clone()),
+                    validation: 3,
+                    ..Default::default()
+                }),
+        );
         Ok(Response::new(pb::ListFlowSpecResponse {
             received_view: self.mode.load(SeqCst) != 6,
             received_routes,
@@ -2587,4 +2601,113 @@ async fn flowspec_export_walk_restarts_once_even_when_first_page_is_aborted() {
             server.abort();
         }
     }
+}
+
+/// A guarded row as rustbgpd v0.81 reads it back: one target-IP action.
+fn guarded_row(owner: &str, prefix: &str, target: &str, copy: bool) -> pb::FlowSpecRouteEntry {
+    let address: std::net::IpAddr = target.parse().unwrap();
+    let (extended, ipv6_extended) = match address {
+        std::net::IpAddr::V4(ip) => {
+            let [a, b, c, d] = ip.octets();
+            (
+                vec![u64::from_be_bytes([1, 12, a, b, c, d, 0, u8::from(copy)])],
+                vec![],
+            )
+        }
+        std::net::IpAddr::V6(ip) => {
+            let mut raw = vec![0, 12];
+            raw.extend(ip.octets());
+            raw.extend([0, u8::from(copy)]);
+            (vec![], vec![raw])
+        }
+    };
+    pb::FlowSpecRouteEntry {
+        components: vec![pb::FlowSpecComponent {
+            r#type: 1,
+            prefix: prefix.into(),
+            ..Default::default()
+        }],
+        actions: vec![pb::FlowSpecAction {
+            action: Some(pb::flow_spec_action::Action::RedirectIp(
+                pb::FlowSpecRedirectIp {
+                    address: target.into(),
+                    copy,
+                },
+            )),
+        }],
+        peer_address: "0.0.0.0".into(),
+        afi_safi: if address.is_ipv4() { 3 } else { 4 },
+        extended_communities: extended,
+        ipv6_extended_communities: ipv6_extended,
+        injection_owner: format!("guarded:{owner}"),
+        lease_generation: Some(LIVE),
+        lease_remaining_ms: Some(20_000),
+        admission_revision: Some(7),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn foreign_guarded_rules_are_occupied_keys_never_read_failures() {
+    use crate::bgp::GuardedFlowSpecSpeaker;
+    let (speaker, fake, server) = flowspec_speaker().await;
+    let ordinary = rule("192.0.2.231/32", 8_000);
+    speaker.announce(&ordinary).await.unwrap();
+    // Another tool's CIDR copy diversion, and another owner's host diversion
+    // carrying attributes prefixd never writes.
+    let mut foreign_v6 = guarded_row("other.tool", "2001:db8::5/128", "2001:db8::99", false);
+    foreign_v6.communities = vec![1];
+    *fake.guarded_rows.lock().unwrap() = vec![
+        guarded_row("other.tool", "198.51.100.0/24", "192.0.2.99", true),
+        foreign_v6,
+    ];
+    let active = speaker
+        .list_active()
+        .await
+        .expect("a foreign guarded rule must not fail ordinary reconciliation");
+    assert_eq!(
+        active.len(),
+        1,
+        "foreign guarded rules are never prefixd intent"
+    );
+    assert_eq!(active[0].nlri_hash(), ordinary.nlri_hash());
+    let inventory = speaker
+        .guarded_inventory()
+        .await
+        .expect("a foreign guarded rule must not fail the scrubber read");
+    assert!(inventory.is_empty(), "foreign guarded rules are never ours");
+    assert_eq!(inventory.other_matches.len(), 3);
+    assert!(inventory.has_key(&ordinary.nlri));
+    for prefix in ["198.51.100.0/24", "2001:db8::5/128"] {
+        assert!(
+            inventory.has_key(&FlowSpecNlri {
+                dst_prefix: prefix.into(),
+                ..Default::default()
+            }),
+            "{prefix} stays an occupied key"
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn malformed_guarded_rules_of_ours_still_fail_both_reads() {
+    use crate::bgp::GuardedFlowSpecSpeaker;
+    let (speaker, fake, server) = flowspec_speaker().await;
+    let ours = guarded_row("prefixd.scrub.a", "192.0.2.1/32", "192.0.2.99", false);
+    *fake.guarded_rows.lock().unwrap() = vec![ours.clone()];
+    assert!(speaker.list_active().await.unwrap().is_empty());
+    assert_eq!(speaker.guarded_inventory().await.unwrap().len(), 1);
+    let mut no_owner = ours.clone();
+    no_owner.injection_owner = "prefixd.scrub.a".into();
+    for bad in [
+        guarded_row("prefixd.scrub.a", "192.0.2.0/24", "192.0.2.99", false),
+        guarded_row("prefixd.scrub.a", "192.0.2.1/32", "192.0.2.99", true),
+        no_owner,
+    ] {
+        *fake.guarded_rows.lock().unwrap() = vec![bad.clone()];
+        assert!(speaker.list_active().await.is_err(), "{bad:?}");
+        assert!(speaker.guarded_inventory().await.is_err(), "{bad:?}");
+    }
+    server.abort();
 }

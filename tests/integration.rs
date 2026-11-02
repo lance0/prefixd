@@ -459,15 +459,15 @@ async fn test_repair_yields_to_operator_and_rechecks_stale_candidate() {
 
 #[tokio::test]
 async fn test_authenticated_single_and_bulk_withdrawals_record_session_actor() {
-    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    use argon2::{Argon2, PasswordHasher};
     use prefixd::domain::{
         ActionParams, ActionType, MatchCriteria, Mitigation, MitigationIntent, OperatorRole,
         mitigation_rule,
     };
     let repo = Arc::new(MockRepository::new());
-    let salt = SaltString::encode_b64(b"withdrawal-audit-test").unwrap();
+    let salt = b"withdrawal-audit-test";
     let hash = Argon2::default()
-        .hash_password(b"audit-test-password", &salt)
+        .hash_password_with_salt(b"audit-test-password", salt)
         .unwrap()
         .to_string();
     repo.create_operator("withdraw-auditor", &hash, OperatorRole::Operator, None)
@@ -10827,7 +10827,7 @@ async fn test_openapi_creation_outcome_is_optional_and_manual_accepted_is_docume
 
 mod anonymous_auth {
     use super::*;
-    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    use argon2::{Argon2, PasswordHasher};
     use axum::Router;
     use axum_login::AuthnBackend;
     use prefixd::api::create_test_router_with_session_store;
@@ -10866,9 +10866,9 @@ mod anonymous_auth {
     }
 
     async fn operator(repo: &MockRepository, username: &str) -> prefixd::domain::Operator {
-        let salt = SaltString::encode_b64(b"anonymous-auth-test").unwrap();
+        let salt = b"anonymous-auth-test";
         let hash = Argon2::default()
-            .hash_password(PASSWORD.as_bytes(), &salt)
+            .hash_password_with_salt(PASSWORD.as_bytes(), salt)
             .unwrap()
             .to_string();
         repo.create_operator(username, &hash, OperatorRole::Admin, None)
@@ -11114,7 +11114,7 @@ mod anonymous_auth {
                     stored.password_hash
                 );
             }
-            let salt = SaltString::encode_b64(b"credential-boundary-test").unwrap();
+            let salt = b"credential-boundary-test";
             for (index, (password, bytes, accepted)) in [
                 (String::new(), 0, false),
                 ("!".into(), 1, true),
@@ -11130,7 +11130,7 @@ mod anonymous_auth {
             {
                 assert_eq!(password.len(), bytes);
                 let hash = Argon2::default()
-                    .hash_password(password.as_bytes(), &salt)
+                    .hash_password_with_salt(password.as_bytes(), salt)
                     .unwrap()
                     .to_string();
                 let username = format!("credential-login-byte-{index}");
@@ -11912,6 +11912,53 @@ mod anonymous_auth {
         let spec: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(spec["paths"]["/v1/auth/login"]["post"]["responses"]["403"].is_object());
     }
+
+    // PHC strings produced by argon2 0.5.3, embedded so stored operator hashes stay valid.
+    // Random salt: Argon2::default().hash_password(pw, &SaltString::generate(&mut OsRng)).
+    const ARGON2_0_5_RANDOM_SALT: &str = "$argon2id$v=19$m=19456,t=2,p=1$N/4Gj/pDAxnEtUjPcbLPbA$1gHQ75OVU8khVxoFuPx5ZqcLP5BSvN1XrQwm9IwgFz8";
+    // Fixed salt: SaltString::encode_b64(b"blackhole-api-test"), password "fixture-pw".
+    const ARGON2_0_5_FIXED_SALT: &str = "$argon2id$v=19$m=19456,t=2,p=1$YmxhY2tob2xlLWFwaS10ZXN0$q1flCYmjNyVISdgVT2UfIpfIYVf+kvvlWYg9YOsC3kc";
+
+    #[tokio::test]
+    async fn argon2_0_5_hashes_still_authenticate() {
+        async fn accepts(backend: &AuthBackend, username: &str, password: &str) -> bool {
+            backend
+                .authenticate(Credentials {
+                    username: username.into(),
+                    password: password.into(),
+                })
+                .await
+                .unwrap()
+                .is_some()
+        }
+        let repo = Arc::new(MockRepository::new());
+        repo.create_operator("legacy", ARGON2_0_5_RANDOM_SALT, OperatorRole::Admin, None)
+            .await
+            .unwrap();
+        let fresh = Argon2::default()
+            .hash_password(b"new-password-123")
+            .unwrap()
+            .to_string();
+        assert!(
+            fresh.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+            "{fresh}"
+        );
+        repo.create_operator("fresh", &fresh, OperatorRole::Viewer, None)
+            .await
+            .unwrap();
+        let backend = AuthBackend::new(repo, AuthMode::Credentials);
+        assert!(accepts(&backend, "legacy", "correct horse battery").await);
+        assert!(!accepts(&backend, "legacy", "wrong horse battery").await);
+        assert!(accepts(&backend, "fresh", "new-password-123").await);
+        assert!(!accepts(&backend, "fresh", "new-password-124").await);
+
+        // Fixed-salt fixtures reproduce the 0.5 PHC string byte for byte.
+        let same = Argon2::default()
+            .hash_password_with_salt(b"fixture-pw", b"blackhole-api-test")
+            .unwrap()
+            .to_string();
+        assert_eq!(same, ARGON2_0_5_FIXED_SALT);
+    }
 }
 
 #[tokio::test]
@@ -12022,7 +12069,7 @@ async fn test_public_list_cursor_mock_tuple_order_and_filters() {
 
 mod list_filter_validation {
     use super::*;
-    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    use argon2::{Argon2, PasswordHasher};
     use axum::Router;
     use chrono::{DateTime, Duration, Utc};
     use prefixd::correlation::{CorrelationEngine, SignalGroupStatus};
@@ -12446,10 +12493,7 @@ mod list_filter_validation {
         let repo = Arc::new(MockRepository::new());
         let password = "filter-validation-password";
         let hash = Argon2::default()
-            .hash_password(
-                password.as_bytes(),
-                &SaltString::encode_b64(b"list-filter-test").unwrap(),
-            )
+            .hash_password_with_salt(password.as_bytes(), b"list-filter-test")
             .unwrap()
             .to_string();
         repo.create_operator("filter-viewer", &hash, OperatorRole::Viewer, None)

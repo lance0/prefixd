@@ -64,3 +64,87 @@ fn guarded_readback_requires_exact_supported_action_and_lease_fields() {
         assert!(decode_guarded(bad, 3).is_err(), "case {case}");
     }
 }
+
+fn status(code: Code, domain: &str, reason: Option<&str>) -> tonic::Status {
+    let details = reason.map(|reason| prost_types::Any {
+        type_url: "type.googleapis.com/google.rpc.ErrorInfo".into(),
+        value: ErrorInfo {
+            reason: reason.into(),
+            domain: domain.into(),
+        }
+        .encode_to_vec(),
+    });
+    let rich = RpcStatus {
+        code: code as i32,
+        details: details.into_iter().collect(),
+    };
+    tonic::Status::with_details(code, "private diagnostic", rich.encode_to_vec().into())
+}
+
+#[test]
+fn guarded_refusals_name_their_cause_and_other_failures_stay_unconfirmed() {
+    let precondition = |reason| status(Code::FailedPrecondition, "rustbgpd", Some(reason));
+    for (refused, expected) in [
+        (
+            precondition("WINDOW_NOT_LIVE"),
+            GuardedRefusal::WindowNotLive,
+        ),
+        (
+            precondition("REVISION_MISMATCH"),
+            GuardedRefusal::RevisionMismatch,
+        ),
+        (
+            precondition("OWNER_MISMATCH"),
+            GuardedRefusal::OwnerMismatch,
+        ),
+        (precondition("KEY_UNOWNED"), GuardedRefusal::KeyUnowned),
+        (
+            precondition("GENERATION_NOT_LIVE"),
+            GuardedRefusal::GenerationNotLive,
+        ),
+        (
+            tonic::Status::resource_exhausted("window cap"),
+            GuardedRefusal::ResourceExhausted,
+        ),
+        (
+            tonic::Status::invalid_argument("bad"),
+            GuardedRefusal::InvalidArgument,
+        ),
+        (
+            tonic::Status::unimplemented("old"),
+            GuardedRefusal::Unimplemented,
+        ),
+        (
+            tonic::Status::permission_denied("role"),
+            GuardedRefusal::PermissionDenied,
+        ),
+    ] {
+        assert_eq!(GuardedRefusal::of(&refused), Some(expected));
+        let text = guarded_status_error("AddGuardedFlowSpec", &refused).to_string();
+        assert!(
+            text.contains(&format!("refused ({})", expected.as_str()))
+                && text.contains("nothing changed")
+                && !text.contains("private"),
+            "{text}"
+        );
+    }
+    for unknown in [
+        tonic::Status::failed_precondition("WINDOW_NOT_LIVE"),
+        status(Code::FailedPrecondition, "rustbgpd", None),
+        precondition("A_NEW_REASON"),
+        status(Code::FailedPrecondition, "other", Some("WINDOW_NOT_LIVE")),
+        tonic::Status::unavailable("gone"),
+        tonic::Status::deadline_exceeded("slow"),
+        tonic::Status::cancelled("dropped"),
+        tonic::Status::internal("panic"),
+        tonic::Status::unknown("?"),
+        tonic::Status::aborted("raced"),
+    ] {
+        assert_eq!(GuardedRefusal::of(&unknown), None, "{unknown:?}");
+        let text = guarded_status_error("AddGuardedFlowSpec", &unknown).to_string();
+        assert!(
+            text.contains("outcome unconfirmed") && !text.contains("nothing changed"),
+            "{text}"
+        );
+    }
+}

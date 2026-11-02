@@ -25,6 +25,12 @@ pub const EXPORT_DENIED: &str = "203.0.113.99/32";
 pub const UNREACHABLE_PEER: &str = "192.0.2.250";
 /// Missing interface in the dedicated v0.80 observation fixture's own namespace.
 pub const UNBOUND_INTERFACE: &str = "pd-unbound";
+/// rustbgpd v0.80.1: released, immutable and older than prefixd's minimum.
+pub const REFUSED_RELEASE: (&str, &str, &str) = (
+    "0.80.1",
+    "ghcr.io/lance0/rustbgpd:0.80.1@sha256:a7a6c4533ba0976f73525ef4d932ad04ef1b034115dc684511fd2679c02513f1",
+    "2fb2cbf276eaa6a2eb6005e956ce47b23a377dc3",
+);
 
 pub struct Speaker {
     pub container: ContainerAsync<GenericImage>,
@@ -71,6 +77,12 @@ impl Speaker {
         Self::start_configured("bearer", None, Some("bridge"), false, true).await
     }
 
+    /// The newest release below the minimum, bearer-authenticated and unpeered,
+    /// for proving startup refuses a rolled-back daemon.
+    pub async fn start_refused_release() -> Self {
+        Self::start_release(REFUSED_RELEASE, "bearer", None, None, false, false).await
+    }
+
     async fn start_configured(
         transport: &str,
         peer: Option<(&str, u32)>,
@@ -78,16 +90,36 @@ impl Speaker {
         unicast: bool,
         observation_neighbors: bool,
     ) -> Self {
-        let bridged = network.is_some();
         let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
         let releases: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/rustbgpd/releases.json")).unwrap();
         let release = &releases[&version];
         let image = release["image"].as_str().expect("unknown test release");
+        let source = release["source_commit"].as_str().unwrap();
+        Self::start_release(
+            (&version, image, source),
+            transport,
+            peer,
+            network,
+            unicast,
+            observation_neighbors,
+        )
+        .await
+    }
+
+    async fn start_release(
+        (version, image, source): (&str, &str, &str),
+        transport: &str,
+        peer: Option<(&str, u32)>,
+        network: Option<&str>,
+        unicast: bool,
+        observation_neighbors: bool,
+    ) -> Self {
+        let bridged = network.is_some();
+        let version = version.to_owned();
         let (name, tag) = image.split_once(':').unwrap();
         eprintln!(
-            "rustbgpd fixture: image={image}, source={}, host={}",
-            release["source_commit"],
+            "rustbgpd fixture: image={image}, source={source}, host={}",
             std::env::consts::ARCH
         );
         let files = tempfile::tempdir().unwrap();

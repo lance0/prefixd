@@ -172,15 +172,38 @@ async fn live_rustbgpd_controller_roundtrip() {
     assert!(health.ready);
 }
 
+/// The local read refuses the whole inventory, never drops the row it cannot represent.
+fn assert_unrepresented<T: std::fmt::Debug>(read: prefixd::error::Result<T>) {
+    match read {
+        Err(prefixd::error::PrefixdError::Internal(message)) => {
+            assert_eq!(message, "rustbgpd: unsupported local route attributes")
+        }
+        other => panic!("expected an unrepresented-attribute refusal, got {other:?}"),
+    }
+}
+
+/// A speaker rolled back below the minimum is refused before any intent is read or written.
+#[tokio::test]
+#[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
+async fn live_rustbgpd_startup_refuses_a_release_older_than_the_minimum() {
+    let fixture = fixture::Speaker::start_refused_release().await;
+    let error = prefixd::bgp::RustBgpdAnnouncer::connect(&fixture.config)
+        .await
+        .err()
+        .expect("prefixd connected to a daemon older than its minimum")
+        .to_string();
+    assert_eq!(
+        error,
+        "rustbgpd 0.80.1 is older than the minimum 0.81.0; upgrade the speaker first"
+    );
+    fixture.container.rm().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
 async fn live_rustbgpd_v081_inventory_refuses_unrepresented_attributes_without_mutation() {
     use prefixd::bgp::rustbgpd_pb as pb;
 
-    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
-    if version != "0.81.0" {
-        return;
-    }
     fn request<T>(body: T) -> tonic::Request<T> {
         let mut request = tonic::Request::new(body);
         let token = std::env::var("PREFIXD_RUSTBGPD_TEST_TOKEN").unwrap();
@@ -227,7 +250,7 @@ async fn live_rustbgpd_v081_inventory_refuses_unrepresented_attributes_without_m
     assert!(before.received_routes.iter().any(|entry| {
         entry.route.as_ref().unwrap().ipv6_extended_communities == [community.clone()]
     }));
-    assert!(speaker.list_active().await.is_err());
+    assert_unrepresented(speaker.list_active().await);
     assert_eq!(fixture.received_flow_spec(3, "0.0.0.0").await, before);
     raw.delete_flow_spec(request(pb::DeleteFlowSpecRequest {
         afi_safi: opaque.afi_safi,
@@ -240,7 +263,8 @@ async fn live_rustbgpd_v081_inventory_refuses_unrepresented_attributes_without_m
         .await
         .unwrap();
 
-    let owner = "prefixd.fixture.guarded";
+    // A malformed guarded rule of ours fails closed; another owner's is foreign.
+    let owner = "prefixd.scrub.fixture";
     let window = raw
         .issue_mutation_window(request(pb::IssueMutationWindowRequest {
             owner: owner.into(),
@@ -270,7 +294,15 @@ async fn live_rustbgpd_v081_inventory_refuses_unrepresented_attributes_without_m
         let route = entry.route.as_ref().unwrap();
         route.injection_owner == format!("guarded:{owner}") && route.admission_revision == Some(7)
     }));
-    assert!(speaker.list_active().await.is_err());
+    match speaker.list_active().await {
+        Err(prefixd::error::PrefixdError::Internal(message)) => {
+            assert_eq!(
+                message,
+                "rustbgpd: guarded rule requires a target-IP action"
+            )
+        }
+        other => panic!("expected a malformed guarded refusal, got {other:?}"),
+    }
     // Remaining lease time changes between reads; compare the immutable rule payload.
     let after = fixture.received_flow_spec(3, "0.0.0.0").await;
     for (before, after) in before.received_routes.iter().zip(&after.received_routes) {

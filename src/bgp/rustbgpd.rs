@@ -26,8 +26,9 @@ pub struct RustBgpdAnnouncer {
 
 /// The oldest daemon prefixd runs against: 0.79.0 adds the injection lease
 /// (rustbgpd ADR-0141); 0.80.0 scopes link-local export rows by interface and
-/// aborts export walks whose pages disagree.
-const MINIMUM_DAEMON_VERSION: [u64; 3] = [0, 80, 0];
+/// aborts export walks whose pages disagree; 0.81.0 adds the guarded FlowSpec
+/// mutations that scrubber diversion uses.
+const MINIMUM_DAEMON_VERSION: [u64; 3] = [0, 81, 0];
 
 #[path = "rustbgpd_guarded.rs"]
 mod guarded;
@@ -68,6 +69,16 @@ fn injection_refusal_reason(status: &tonic::Status) -> Option<InjectionRefusalRe
     if status.code() != Code::FailedPrecondition {
         return None;
     }
+    match error_reason(status)?.as_str() {
+        "OWNER_MISMATCH" => Some(InjectionRefusalReason::OwnerMismatch),
+        "KEY_UNOWNED" => Some(InjectionRefusalReason::KeyUnowned),
+        "GENERATION_NOT_LIVE" => Some(InjectionRefusalReason::GenerationNotLive),
+        _ => None,
+    }
+}
+
+/// The one `rustbgpd` ErrorInfo reason of a status whose rich code matches it.
+fn error_reason(status: &tonic::Status) -> Option<String> {
     let rich = RpcStatus::decode(status.details()).ok()?;
     if rich.code != status.code() as i32 {
         return None;
@@ -81,15 +92,7 @@ fn injection_refusal_reason(status: &tonic::Status) -> Option<InjectionRefusalRe
         return None;
     }
     let info = ErrorInfo::decode(detail.value.as_slice()).ok()?;
-    if info.domain != "rustbgpd" {
-        return None;
-    }
-    match info.reason.as_str() {
-        "OWNER_MISMATCH" => Some(InjectionRefusalReason::OwnerMismatch),
-        "KEY_UNOWNED" => Some(InjectionRefusalReason::KeyUnowned),
-        "GENERATION_NOT_LIVE" => Some(InjectionRefusalReason::GenerationNotLive),
-        _ => None,
-    }
+    (info.domain == "rustbgpd").then_some(info.reason)
 }
 
 impl RustBgpdAnnouncer {
@@ -106,7 +109,7 @@ impl RustBgpdAnnouncer {
         Ok(speaker)
     }
 
-    /// Startup contract check: refuse a daemon older than 0.80.0, or one whose
+    /// Startup contract check: refuse a daemon older than 0.81.0, or one whose
     /// version cannot be read, before any intent is read or written.
     async fn require_minimum_version(&self) -> anyhow::Result<()> {
         let version = self
@@ -919,9 +922,12 @@ impl FlowSpecReader for RustBgpdAnnouncer {
                 if route.injection_owner.starts_with("guarded:")
                     || route.admission_revision.is_some()
                 {
-                    // Account for the complete guarded payload before routing it
-                    // to the separate diversion reader and lifecycle.
-                    guarded::decode_guarded(route, family)?;
+                    // Account for the complete payload of our guarded rows before
+                    // routing them to the separate diversion reader and lifecycle.
+                    // Another owner's guarded rule is never ours to read or fail on.
+                    if !guarded::foreign_guarded(&route) {
+                        guarded::decode_guarded(route, family)?;
+                    }
                     continue;
                 }
                 // Zero remaining means expired with its withdrawal pending: lost, not retained.

@@ -52,6 +52,110 @@ fn encode_guarded(rule: &GuardedRule) -> Result<pb::AddFlowSpecRequest> {
     })
 }
 
+/// prefixd's scrubber owners all live in this namespace. A guarded rule of any
+/// other owner is foreign: never deleted, never prefixd intent, and never a
+/// reason to fail a read. A malformed row of ours still fails the read.
+const OWNER_NAMESPACE: &str = "prefixd.scrub.";
+
+pub(super) fn foreign_guarded(route: &pb::FlowSpecRouteEntry) -> bool {
+    route
+        .injection_owner
+        .strip_prefix("guarded:")
+        .is_some_and(|owner| !owner.starts_with(OWNER_NAMESPACE))
+}
+
+/// Only the match of a foreign guarded rule: its action, target and other
+/// attributes belong to another owner. Its key still counts as occupied.
+fn foreign_match(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecNlri> {
+    let route = pb::FlowSpecRouteEntry {
+        components: route.components,
+        peer_address: route.peer_address,
+        afi_safi: route.afi_safi,
+        extended_communities: vec![0x8006_u64 << 48],
+        actions: vec![pb::FlowSpecAction {
+            action: Some(pb::flow_spec_action::Action::TrafficRate(
+                pb::FlowSpecTrafficRate { rate: 0.0 },
+            )),
+        }],
+        ..Default::default()
+    };
+    Ok(decode(route, family)?.nlri)
+}
+
+/// A definitive guarded refusal: the daemon changed nothing (rustbgpd v0.81
+/// guarded FlowSpec mutations). Every other failure is an unconfirmed outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GuardedRefusal {
+    InvalidArgument,
+    WindowNotLive,
+    RevisionMismatch,
+    OwnerMismatch,
+    KeyUnowned,
+    GenerationNotLive,
+    ResourceExhausted,
+    Unimplemented,
+    PermissionDenied,
+}
+
+impl GuardedRefusal {
+    pub(super) fn of(status: &tonic::Status) -> Option<Self> {
+        Some(match status.code() {
+            Code::InvalidArgument => Self::InvalidArgument,
+            Code::ResourceExhausted => Self::ResourceExhausted,
+            Code::Unimplemented => Self::Unimplemented,
+            Code::PermissionDenied => Self::PermissionDenied,
+            // A precondition refusal without a known typed reason stays unconfirmed.
+            Code::FailedPrecondition => match error_reason(status)?.as_str() {
+                "WINDOW_NOT_LIVE" => Self::WindowNotLive,
+                "REVISION_MISMATCH" => Self::RevisionMismatch,
+                "OWNER_MISMATCH" => Self::OwnerMismatch,
+                "KEY_UNOWNED" => Self::KeyUnowned,
+                "GENERATION_NOT_LIVE" => Self::GenerationNotLive,
+                _ => return None,
+            },
+            _ => return None,
+        })
+    }
+
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidArgument => "invalid_argument",
+            Self::WindowNotLive => "window_not_live",
+            Self::RevisionMismatch => "revision_mismatch",
+            Self::OwnerMismatch => "owner_mismatch",
+            Self::KeyUnowned => "key_unowned",
+            Self::GenerationNotLive => "generation_not_live",
+            Self::ResourceExhausted => "resource_exhausted",
+            Self::Unimplemented => "unimplemented",
+            Self::PermissionDenied => "permission_denied",
+        }
+    }
+}
+
+/// Both kinds fail closed; the text names the cause for diagnosis.
+pub(super) fn guarded_status_error(operation: &str, status: &tonic::Status) -> PrefixdError {
+    match GuardedRefusal::of(status) {
+        Some(refusal) => {
+            tracing::warn!(
+                operation,
+                reason = refusal.as_str(),
+                "rustbgpd refused guarded call"
+            );
+            invalid(&format!(
+                "{operation} refused ({}); nothing changed",
+                refusal.as_str()
+            ))
+        }
+        None => {
+            tracing::warn!(operation, code = ?status.code(), "rustbgpd guarded outcome unconfirmed");
+            invalid(&format!(
+                "{operation} outcome unconfirmed ({:?}); resolve by read-back, never legacy retry",
+                status.code()
+            ))
+        }
+    }
+}
+
 pub(super) fn decode_guarded(
     mut route: pb::FlowSpecRouteEntry,
     family: i32,
@@ -141,12 +245,9 @@ impl RustBgpdAnnouncer {
     ) -> Result<T> {
         match tokio::time::timeout(Duration::from_secs(3), call).await {
             Ok(Ok(response)) => Ok(response.into_inner()),
-            Ok(Err(status)) => Err(invalid(&format!(
-                "{operation} failed: {:?}; resolve by read-back, never legacy retry",
-                status.code()
-            ))),
+            Ok(Err(status)) => Err(guarded_status_error(operation, &status)),
             Err(_) => Err(invalid(&format!(
-                "{operation} outcome unknown after deadline; resolve by read-back"
+                "{operation} outcome unconfirmed after deadline; resolve by read-back"
             ))),
         }
     }
@@ -175,7 +276,13 @@ impl RustBgpdAnnouncer {
                     return Err(invalid("invalid guarded local intent row"));
                 }
                 let route = row.route.ok_or_else(|| invalid("missing local route"))?;
-                if route.injection_owner.starts_with("guarded:")
+                if foreign_guarded(&route) {
+                    let nlri = foreign_match(route, family)?;
+                    if !keys.insert(nlri.compute_hash()) {
+                        return Err(invalid("repeated local key"));
+                    }
+                    other_matches.push(nlri);
+                } else if route.injection_owner.starts_with("guarded:")
                     || route.admission_revision.is_some()
                 {
                     let observation = decode_guarded(route, family)?;
@@ -185,8 +292,7 @@ impl RustBgpdAnnouncer {
                     entries.push(observation);
                 } else {
                     let ordinary = decode(route, family)?;
-                    let key = ordinary.nlri.compute_hash();
-                    if !keys.insert(key) {
+                    if !keys.insert(ordinary.nlri.compute_hash()) {
                         return Err(invalid("repeated local key"));
                     }
                     other_matches.push(ordinary.nlri);

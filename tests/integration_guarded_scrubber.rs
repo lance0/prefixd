@@ -1,7 +1,7 @@
 #![cfg(all(feature = "bgp-rustbgpd", feature = "test-utils", target_os = "linux"))]
 #[path = "common/rustbgpd.rs"]
 mod fixture;
-use prefixd::bgp::{FlowSpecReader, GuardedFlowSpecSpeaker, GuardedRule, GuardedStamp};
+use prefixd::bgp::{FlowSpecReader, GuardedFlowSpecSpeaker, GuardedRule};
 use prefixd::domain::FlowSpecNlri;
 use std::time::Duration;
 
@@ -24,33 +24,9 @@ fn rule(prefix: &str, target: &str, owner: &str, revision: u64) -> GuardedRule {
 async fn guarded_contract_preserves_targets_revisions_and_independent_owners() {
     let fixture = fixture::Speaker::start().await;
     let speaker = fixture.connect().await;
-    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
-    let a = rule("192.0.2.1/32", "192.0.2.99", "scrubber.a", 1);
-    if version != "0.81.0" {
-        assert!(speaker.issue_window(&a.owner, 30).await.is_err());
-        assert!(
-            speaker
-                .add_guarded(
-                    &a,
-                    GuardedStamp {
-                        incarnation: 1,
-                        sequence: 1
-                    },
-                    30
-                )
-                .await
-                .is_err()
-        );
-        assert!(speaker.guarded_inventory().await.unwrap().is_empty());
-        assert!(
-            speaker.list_active().await.unwrap().is_empty(),
-            "no legacy fallback"
-        );
-        fixture.container.rm().await.unwrap();
-        return;
-    }
-    let b = rule("2001:db8::2/128", "2001:db8::99", "scrubber.b", 2);
-    let sibling = rule("192.0.2.3/32", "192.0.2.99", "scrubber.a", 3);
+    let a = rule("192.0.2.1/32", "192.0.2.99", "prefixd.scrub.a", 1);
+    let b = rule("2001:db8::2/128", "2001:db8::99", "prefixd.scrub.b", 2);
+    let sibling = rule("192.0.2.3/32", "192.0.2.99", "prefixd.scrub.a", 3);
     let wa = speaker.issue_window(&a.owner, 30).await.unwrap();
     let wb = speaker.issue_window(&b.owner, 30).await.unwrap();
     let ga = speaker.add_guarded(&a, wa.stamp, 30).await.unwrap();
@@ -156,6 +132,15 @@ async fn guarded_contract_preserves_targets_revisions_and_independent_owners() {
     speaker.delete_guarded(&sibling).await.unwrap();
     speaker.delete_guarded(&b).await.unwrap();
     assert!(speaker.guarded_inventory().await.unwrap().is_empty());
+    // Another tool's guarded rule is an occupied key, never ours, never a read failure.
+    let foreign = rule("192.0.2.4/32", "192.0.2.99", "other.tool", 5);
+    let wf = speaker.issue_window(&foreign.owner, 30).await.unwrap();
+    speaker.add_guarded(&foreign, wf.stamp, 30).await.unwrap();
+    assert!(speaker.list_active().await.unwrap().is_empty());
+    let inventory = speaker.guarded_inventory().await.unwrap();
+    assert!(inventory.is_empty());
+    assert!(inventory.has_key(&foreign.nlri));
+    speaker.delete_guarded(&foreign).await.unwrap();
     fixture.container.rm().await.unwrap();
 }
 
@@ -169,14 +154,10 @@ async fn held_guarded_mutations_cannot_remove_a_reused_key_or_outlive_their_wind
     use prefixd::domain::{FlowSpecAction, FlowSpecRule};
     let fixture = fixture::Speaker::start().await;
     let speaker = fixture.connect().await;
-    if std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into()) != "0.81.0" {
-        fixture.container.rm().await.unwrap();
-        return;
-    }
 
     // Delayed delete D1, retry D2, then a new admission of the same key while a
     // same-owner sibling keeps the owner generation live.
-    let owner = "scrubber.reuse";
+    let owner = "prefixd.scrub.reuse";
     let sibling = rule("192.0.2.30/32", "192.0.2.99", owner, 10);
     let first = rule("192.0.2.31/32", "192.0.2.99", owner, 11);
     let window = speaker.issue_window(owner, 30).await.unwrap();
@@ -261,7 +242,7 @@ async fn held_guarded_mutations_cannot_remove_a_reused_key_or_outlive_their_wind
 
     // Pending-add withdrawal: an add held past the first delete recreates the
     // key while its window lives; only the window's expiry bars the replay.
-    let owner = "scrubber.pending";
+    let owner = "prefixd.scrub.pending";
     let sibling = rule("192.0.2.50/32", "192.0.2.99", owner, 20);
     let pending = rule("192.0.2.51/32", "192.0.2.99", owner, 21);
     let short = speaker.issue_window(owner, 5).await.unwrap();
@@ -321,7 +302,7 @@ async fn held_guarded_mutations_cannot_remove_a_reused_key_or_outlive_their_wind
     for rule in [
         &sibling,
         &replacement,
-        &rule("192.0.2.30/32", "192.0.2.99", "scrubber.reuse", 10),
+        &rule("192.0.2.30/32", "192.0.2.99", "prefixd.scrub.reuse", 10),
     ] {
         speaker.delete_guarded(rule).await.unwrap();
     }

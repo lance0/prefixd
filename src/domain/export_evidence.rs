@@ -139,8 +139,7 @@ fn unexported(peers: &[PeerExport]) -> ExportWarning {
         "export_rule" => "Another export rule stops it toward every Established peer.",
         "pending" => "Export to every Established peer has not settled yet.",
         "selection_deferred" => {
-            "The speaker accepted it but holds it from selection after a speaker restart \
-             until its Graceful Restart peers send End-of-RIB or the restart window expires."
+            "The speaker accepted it and holds it from selection after its restart."
         }
         "mixed" => "It is withheld or pending toward every Established peer; see each peer.",
         _ => {

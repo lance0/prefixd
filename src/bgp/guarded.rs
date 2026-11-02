@@ -90,7 +90,8 @@ pub struct GuardedObservation {
 #[derive(Debug, Clone, Default)]
 pub struct GuardedInventory {
     pub entries: Vec<GuardedObservation>,
-    /// Ordinary local matches retain their selectors for victim overlap checks.
+    /// Ordinary and foreign guarded local rules: occupied keys, never mistaken
+    /// for absence, whose selectors also count for victim overlap checks.
     pub other_matches: Vec<FlowSpecNlri>,
 }
 impl std::ops::Deref for GuardedInventory {

@@ -685,7 +685,7 @@ mod tests {
     #[tokio::test]
     async fn authenticated_endpoint_enforces_roles_reason_and_records_session_actor() {
         use crate::domain::OperatorRole;
-        use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+        use argon2::{Argon2, PasswordHasher};
         use axum::{
             body::{Body, to_bytes},
             http::{Request, StatusCode},
@@ -695,10 +695,7 @@ mod tests {
         let m = rule("203.0.113.10/32");
         repo.insert_mitigation(&m).await.unwrap();
         let hash = Argon2::default()
-            .hash_password(
-                b"test-password",
-                &SaltString::encode_b64(b"extension-test-salt").unwrap(),
-            )
+            .hash_password_with_salt(b"test-password", b"extension-test-salt")
             .unwrap()
             .to_string();
         for (name, role) in [

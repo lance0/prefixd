@@ -1126,7 +1126,7 @@ reads the controller's snapshot and never calls the speaker.
 | `peers` | One row per Established peer. `disposition` is `committed` (in that peer's Adj-RIB-Out, not proof of receipt, installation or enforcement), `withheld` or `pending`; `reason` and `explain_code` are rustbgpd's bounded codes and `detail` its unstable text |
 | `not_established_peers` | Configured peers without an Established session, which were sent nothing. Addressed membership comes from the complete export walk even when the separate session read fails; `state` is a nullable FSM state enriched from a matching non-Established session. A successful session read also supplies unbound `interface:*` neighbors absent from the export roster. Failed export reads and absent local routes use the separate session snapshot when available; `null` means membership was not observed |
 | `counts` | Current peer rows by disposition; zero on a failed FlowSpec refresh even if prior peer rows are retained |
-| `warning` | Present when an observed route is committed to no Established peer: a bounded `reason` (`no_established_peer`, `export_policy`, `family_suppressed`, `family_not_negotiated`, `not_selected`, `outbound_prefix_limit`, `exact_export_rejected`, `export_rule`, `pending`, `selection_deferred`, `mixed` or `other`) and a `message`. `export_policy` means a speaker export policy denied the route. `selection_deferred` means every Established peer is pending because the speaker holds route selection after its restart; other or mixed pending reasons are `pending`. With `status` `error`, it is the last complete read's warning, kept so a transient read error does not clear degraded health |
+| `warning` | Present when an observed route is committed to no Established peer: a bounded `reason` (`no_established_peer`, `export_policy`, `family_suppressed`, `family_not_negotiated`, `not_selected`, `outbound_prefix_limit`, `exact_export_rejected`, `export_rule`, `pending`, `selection_deferred`, `mixed` or `other`) and a `message`. `export_policy` means a speaker export policy denied the route. `selection_deferred` means every Established peer is pending because the speaker holds the route from selection after its restart; prefixd's own blackholes and FlowSpec rules bypass that hold on supported rustbgpd releases, so the reason is not expected for them; other or mixed pending reasons are `pending`. With `status` `error`, it is the last complete read's warning, kept so a transient read error does not clear degraded health |
 | `error` | The read error when `status` is `error` |
 
 An ordinary failed blackhole read has no peer rows; a failed FlowSpec refresh
@@ -2403,9 +2403,9 @@ blackholes, read from the controller's snapshot: `observed_at` (null before the
 first pass), `blackholes`, peer `counts` by disposition, `errors` (reads that
 failed, so export is unknown), `no_local_route`, and `unexported`. Each
 `unexported` entry is an observed blackhole committed to no Established peer,
-with `mitigation_id`, `prefix`, a bounded `reason` and a `message`; any entry,
-including a `selection_deferred` hold after a speaker restart, makes `status`
-`degraded`. A committed disposition is the peer's Adj-RIB-Out,
+with `mitigation_id`, `prefix`, a bounded `reason` and a `message`; any entry
+makes `status` `degraded`, including `selection_deferred`, which supported
+rustbgpd releases no longer apply to prefixd's blackholes after a restart. A committed disposition is the peer's Adj-RIB-Out,
 not router receipt or enforcement.
 
 `flowspec_exports` is present when `flowspec_export` is true (rustbgpd). It uses
