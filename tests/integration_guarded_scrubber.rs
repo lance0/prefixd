@@ -158,3 +158,173 @@ async fn guarded_contract_preserves_targets_revisions_and_independent_owners() {
     assert!(speaker.guarded_inventory().await.unwrap().is_empty());
     fixture.container.rm().await.unwrap();
 }
+
+/// Delayed-delete key reuse and pending-add withdrawal from the
+/// scrubber-diversion contract. A "held" request is formed but not sent until
+/// the stated point, so the daemon first receives it then.
+#[tokio::test]
+#[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
+async fn held_guarded_mutations_cannot_remove_a_reused_key_or_outlive_their_window() {
+    use prefixd::bgp::FlowSpecWriter;
+    use prefixd::domain::{FlowSpecAction, FlowSpecRule};
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    if std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into()) != "0.81.0" {
+        fixture.container.rm().await.unwrap();
+        return;
+    }
+
+    // Delayed delete D1, retry D2, then a new admission of the same key while a
+    // same-owner sibling keeps the owner generation live.
+    let owner = "scrubber.reuse";
+    let sibling = rule("192.0.2.30/32", "192.0.2.99", owner, 10);
+    let first = rule("192.0.2.31/32", "192.0.2.99", owner, 11);
+    let window = speaker.issue_window(owner, 30).await.unwrap();
+    let generation = speaker
+        .add_guarded(&sibling, window.stamp, 30)
+        .await
+        .unwrap();
+    assert_eq!(
+        speaker.add_guarded(&first, window.stamp, 30).await.unwrap(),
+        generation
+    );
+    let d1 = speaker.delete_guarded(&first);
+    speaker.delete_guarded(&first).await.unwrap();
+    assert!(
+        !speaker
+            .guarded_inventory()
+            .await
+            .unwrap()
+            .has_key(&first.nlri)
+    );
+    let mut replacement = first.clone();
+    replacement.revision = 12;
+    assert_eq!(
+        speaker
+            .add_guarded(&replacement, window.stamp, 30)
+            .await
+            .unwrap(),
+        generation,
+        "the sibling keeps the owner generation live across key reuse"
+    );
+    assert!(
+        d1.await.is_err(),
+        "the held delete names the older admission revision"
+    );
+    let inventory = speaker.guarded_inventory().await.unwrap();
+    assert!(
+        inventory
+            .iter()
+            .any(|entry| entry.rule.same_admission(&replacement) && entry.remaining_ms > 0)
+    );
+    assert!(
+        inventory
+            .iter()
+            .any(|entry| { entry.rule.same_admission(&sibling) && entry.generation == generation })
+    );
+
+    // Negative control: the owner-only legacy delete has no admission fence,
+    // so the same held delete removes the replacement.
+    let legacy = |prefix: &str| {
+        FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: prefix.into(),
+                protocol: Some(6),
+                dst_ports: vec![443],
+                ..Default::default()
+            },
+            FlowSpecAction::discard(),
+        )
+        .with_owner("legacy.reuse")
+    };
+    let (legacy_sibling, legacy_first) = (legacy("192.0.2.40/32"), legacy("192.0.2.41/32"));
+    speaker.announce_leased(&legacy_sibling, 30).await.unwrap();
+    speaker.announce_leased(&legacy_first, 30).await.unwrap();
+    let d1 = speaker.withdraw(&legacy_first);
+    speaker.withdraw(&legacy_first).await.unwrap();
+    let held = |rules: &[FlowSpecRule], rule: &FlowSpecRule| {
+        rules
+            .iter()
+            .any(|other| other.nlri_hash() == rule.nlri_hash())
+    };
+    assert!(!held(&speaker.list_active().await.unwrap(), &legacy_first));
+    speaker.announce_leased(&legacy_first, 30).await.unwrap();
+    assert!(held(&speaker.list_active().await.unwrap(), &legacy_first));
+    d1.await.unwrap();
+    let active = speaker.list_active().await.unwrap();
+    assert!(
+        !held(&active, &legacy_first),
+        "the owner-only delete removes the replacement"
+    );
+    assert!(held(&active, &legacy_sibling));
+    speaker.withdraw(&legacy_sibling).await.unwrap();
+
+    // Pending-add withdrawal: an add held past the first delete recreates the
+    // key while its window lives; only the window's expiry bars the replay.
+    let owner = "scrubber.pending";
+    let sibling = rule("192.0.2.50/32", "192.0.2.99", owner, 20);
+    let pending = rule("192.0.2.51/32", "192.0.2.99", owner, 21);
+    let short = speaker.issue_window(owner, 5).await.unwrap();
+    let generation = speaker
+        .add_guarded(&sibling, short.stamp, 30)
+        .await
+        .unwrap();
+    let held_add = speaker.add_guarded(&pending, short.stamp, 30);
+    speaker.delete_guarded(&pending).await.unwrap();
+    assert!(
+        !speaker
+            .guarded_inventory()
+            .await
+            .unwrap()
+            .has_key(&pending.nlri),
+        "the initial delete reads absent"
+    );
+    assert_eq!(held_add.await.unwrap(), generation);
+    assert!(
+        speaker
+            .guarded_inventory()
+            .await
+            .unwrap()
+            .iter()
+            .any(|entry| entry.rule.same_admission(&pending)),
+        "negative control: a still-authorized add recreates the key after the absence read"
+    );
+    // Keep the sibling's lease beyond the short window.
+    let long = speaker.issue_window(owner, 30).await.unwrap();
+    speaker
+        .renew_guarded(owner, generation, long.stamp, 30)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(u64::from(short.remaining_ms) + 500)).await;
+    speaker.delete_guarded(&pending).await.unwrap();
+    assert!(
+        !speaker
+            .guarded_inventory()
+            .await
+            .unwrap()
+            .has_key(&pending.nlri)
+    );
+    assert!(
+        speaker
+            .add_guarded(&pending, short.stamp, 30)
+            .await
+            .is_err(),
+        "a replay after the window cannot recreate the key"
+    );
+    let inventory = speaker.guarded_inventory().await.unwrap();
+    assert!(!inventory.has_key(&pending.nlri));
+    assert!(inventory.iter().any(|entry| {
+        entry.rule.same_admission(&sibling)
+            && entry.generation == generation
+            && entry.remaining_ms > 0
+    }));
+    for rule in [
+        &sibling,
+        &replacement,
+        &rule("192.0.2.30/32", "192.0.2.99", "scrubber.reuse", 10),
+    ] {
+        speaker.delete_guarded(rule).await.unwrap();
+    }
+    assert!(speaker.guarded_inventory().await.unwrap().is_empty());
+    fixture.container.rm().await.unwrap();
+}
