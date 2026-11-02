@@ -1,7 +1,8 @@
 # Upgrade Guide
 
-Upgrading a v0.23.0 deployment? Follow [v0.23.0 → 0.23.1](#v0230--0231).
-From v0.22.1, follow [v0.22.1 → 0.23.0](#v0221--0230) first; from v0.22.0,
+Upgrading a v0.23.1 deployment? Follow [v0.23.1 → 0.24.0](#v0231--0240).
+From v0.23.0, follow [v0.23.0 → 0.23.1](#v0230--0231) first; from v0.22.1,
+[v0.22.1 → 0.23.0](#v0221--0230) before that; from v0.22.0,
 [v0.22.0 → 0.22.1](#v0220--0221) before that; from v0.21.0,
 [v0.21.0 → 0.22.0](#v0210--0220) before that; from v0.20.0,
 [v0.20.0 → 0.21.0](#v0200--0210) before that; and from v0.19.1,
@@ -724,6 +725,159 @@ prefixdctl migrations
 ---
 
 ## Version-Specific Notes
+
+### v0.23.1 → 0.24.0
+
+This upgrade needs rustbgpd v0.81.0, upgraded before prefixd. Migration 019
+applies on startup and needs no adoption step. Scrubber diversion is new and
+stays disabled unless you configure it; a 0.23.1 `prefixd.yaml` loads as it
+is. Keep the POP, speaker target and `mode` unchanged. GoBGP deployments skip
+the rustbgpd step.
+
+#### Before you start
+
+1. **Back up PostgreSQL** and keep the 0.23.1 image or binaries and a copy of
+   the configuration for the [rollback rules](#rollback).
+2. **Upgrade rustbgpd to v0.81.0 first.** prefixd 0.24.0 refuses to start
+   against an older daemon, before it reads or writes any intent:
+
+   ```text
+   rustbgpd 0.80.1 is older than the minimum 0.81.0; upgrade the speaker first
+   ```
+
+   The refusal comes after startup has applied migration 019, which 0.23.1
+   ignores, so a 0.23.1 controller still runs on that database. 0.23.1 runs
+   against v0.81.0, so the speaker can go first. Read
+   [rustbgpd v0.81](#rustbgpd-v081) for the speaker's own notes. The 0.23.1
+   advice to set `graceful_restart = false` on neighbors that never come up
+   applied only to v0.80.x.
+3. **Expect migration 019.** It adds the `scrubber_diversions` table and its
+   admission-revision sequence. It is additive: it creates no rows and changes
+   no existing table or mitigation. See
+   [scrubber diversion and downgrade](#scrubber-diversion-and-downgrade).
+4. **Leave scrubber diversion off for this upgrade.** The only new
+   configuration keys are under `scrubber`: `scrubber.enabled` defaults to
+   `false` and `scrubber.profiles` to an empty list. With them unset,
+   `GET /v1/scrubbers` still requires authentication and reports
+   `"enabled": false`, and no diversion endpoint changes the speaker. To use
+   diversion, enable it in a separate restart after this upgrade is verified;
+   see [manual scrubber diversion](scrubber-diversion.md) and
+   [General Principles](#general-principles).
+5. **Copy the alert rules.** `grafana/prometheus-alerts.yml` changed only in
+   `PrefixdBlackholeNotExported`'s comment and its `selection_deferred` hint;
+   its expression and five-minute window are unchanged. If your Prometheus
+   loads its own copy, copy the new one after the upgrade.
+6. **Keep your passwords.** The password hashing library moves to argon2 0.6.
+   Existing operator password hashes are unchanged and still authenticate, and
+   new hashes use the same Argon2id parameters and format.
+7. **Check API clients and monitoring** against these other changes:
+   - On rustbgpd, authenticated health now also reports FlowSpec export under
+     `speaker.flowspec_exports`. An active FlowSpec rule committed to no
+     Established peer, a failed FlowSpec export read or a missing local rule
+     makes `status` `degraded`. A deployment whose rules reach no
+     Established peer was `healthy` on 0.23.1 and is `degraded` on 0.24.0.
+     The new `prefixd_flowspec_export_peers`, `prefixd_flowspec_unexported`
+     and `prefixd_flowspec_export_read_errors` gauges have no shipped alert.
+   - In export evidence, `not_established_peers[].state` can now be `null`
+     when no matching session state was observed.
+   - On rustbgpd, a local FlowSpec rule that prefixd cannot represent, such
+     as another tool's rule with IPv6 extended communities, now fails the
+     whole speaker read instead of being skipped: reconciliation fails,
+     `GET /v1/speaker/routes` returns `502`, and startup is refused when
+     `bgp.rustbgpd.leased_flowspec` is set. Remove such rules from the
+     speaker before you upgrade prefixd.
+   - Ownership refusals add `(owner_mismatch)`, `(key_unowned)` or
+     `(unspecified)` to the `409` error text and to the local retirement
+     audit reason. Match these messages by prefix, not exact text.
+   - `GET /v1/mitigations` accepts `q`, and `GET /v1/events` accepts `q`,
+     `source` and `vector`. Requests without them behave as before, and the
+     cursor format is unchanged, so existing API clients are unaffected. The
+     dashboard now pages both histories from the server, 20 rows at a time,
+     and no longer sorts mitigation columns.
+
+#### Compose
+
+Run these in the deployment's checkout, keeping your configuration files and
+image references. Step 3 leaves the 0.23.1 controller running:
+
+```bash
+# 1. Back up the database
+docker compose exec -T postgres pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+
+# 2. Update the checkout; it pins rustbgpd 0.81.0
+git fetch --tags && git checkout v0.24.0
+
+# 3. Upgrade only rustbgpd
+docker compose --profile rustbgpd pull rustbgpd
+docker compose --profile rustbgpd up -d --no-deps rustbgpd
+```
+
+The new rustbgpd process starts with an empty local RIB. The running 0.23.1
+controller repairs every active rule on its next reconciliation pass, within
+`timers.reconciliation_interval_seconds` (30 by default), and logs
+`repairing local announcement` for each. Rules are not announced until then.
+Wait for that pass and check that the local RIB holds your active rules
+([commands below](#check-the-upgrade)) before you continue:
+
+```bash
+# 4. Pin and pull the 0.24.0 controller and dashboard
+export PREFIXD_IMAGE=ghcr.io/lance0/prefixd:0.24.0
+export PREFIXD_DASHBOARD_IMAGE=ghcr.io/lance0/prefixd-dashboard:0.24.0
+docker compose --profile rustbgpd pull prefixd-rustbgpd dashboard
+
+# 5. Replace the controller and dashboard; rustbgpd keeps its routes
+docker compose --profile rustbgpd up -d --no-deps --no-build prefixd-rustbgpd dashboard
+
+# 6. Recreate Prometheus to load the new alert rules
+docker compose up -d --no-deps --force-recreate prometheus
+```
+
+Keep both variables set for later Compose commands, or put them in `.env`.
+For GoBGP, skip step 3 and use profile `gobgp` and service `prefixd-gobgp`.
+
+#### Bare metal
+
+Upgrade rustbgpd to 0.81.0 as its release notes describe and wait for one
+reconciliation pass of the running 0.23.1 controller, as above. Then:
+
+```bash
+pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+git fetch --tags && git checkout v0.24.0
+cargo build --release --locked
+sudo systemctl stop prefixd
+sudo cp target/release/prefixd target/release/prefixdctl /usr/local/bin/
+sudo systemctl start prefixd
+```
+
+Then copy `grafana/prometheus-alerts.yml` to your Prometheus and reload it.
+
+#### Check the 0.24.0 upgrade
+
+Run the [0.21.0 checks](#check-the-upgrade) with the 0.24.0 controller.
+Startup logs `versions: [1, ..., 19]`, and `prefixdctl migrations` lists
+`019 scrubber_diversions` after the earlier rows, which keep their original
+timestamps. `prefixdctl status` reports daemon version 0.81.0, and the grep
+for repairs and failures should print nothing from the 0.24.0 controller.
+Scrubber diversion is off:
+
+```bash
+docker compose exec prefixd-rustbgpd prefixdctl --api http://127.0.0.1:8080 scrubbers list
+# Expect: "enabled": false, with no profiles
+```
+
+On rustbgpd, `speaker.flowspec_exports` in authenticated health counts your
+active rules, and its `unexported` list is empty when each rule reaches an
+Established peer.
+
+#### Downgrading to 0.23.1
+
+0.23.1 ignores the `scrubber_diversions` table and runs on the upgraded
+database and against rustbgpd 0.81.0, so keep the speaker at 0.81.0. If you
+enabled scrubber diversion, first withdraw every diversion and wait for the
+drain described in
+[scrubber diversion and downgrade](#scrubber-diversion-and-downgrade). Then
+follow the [rollback](#rollback) steps and restore the 0.23.1 alert file.
+0.23.1 does not report FlowSpec export in health.
 
 ### v0.23.0 → 0.23.1
 
