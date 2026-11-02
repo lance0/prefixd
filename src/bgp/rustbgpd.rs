@@ -26,8 +26,9 @@ pub struct RustBgpdAnnouncer {
 
 /// The oldest daemon prefixd runs against: 0.79.0 adds the injection lease
 /// (rustbgpd ADR-0141); 0.80.0 scopes link-local export rows by interface and
-/// aborts export walks whose pages disagree.
-const MINIMUM_DAEMON_VERSION: [u64; 3] = [0, 80, 0];
+/// aborts export walks whose pages disagree; 0.81.0 adds the guarded FlowSpec
+/// mutations that scrubber diversion uses.
+const MINIMUM_DAEMON_VERSION: [u64; 3] = [0, 81, 0];
 
 /// `major.minor.patch`, ignoring any pre-release or build suffix.
 fn parse_version(version: &str) -> Option<[u64; 3]> {
@@ -103,7 +104,7 @@ impl RustBgpdAnnouncer {
         Ok(speaker)
     }
 
-    /// Startup contract check: refuse a daemon older than 0.80.0, or one whose
+    /// Startup contract check: refuse a daemon older than 0.81.0, or one whose
     /// version cannot be read, before any intent is read or written.
     async fn require_minimum_version(&self) -> anyhow::Result<()> {
         let version = self

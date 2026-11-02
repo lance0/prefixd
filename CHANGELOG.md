@@ -13,12 +13,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lockfiles for RUSTSEC-2026-0414. It is used by protobuf code generation;
   no advisory exception or runtime behavior change is introduced.
 
+### Upgrade notes
+
+- rustbgpd v0.81.0 is required. Upgrade the speaker first: prefixd refuses to
+  start against v0.80.x with "upgrade the speaker first". See
+  [rustbgpd v0.81](docs/how-to/upgrading.md#rustbgpd-v081).
+
 ### Changed
 
-- Pin rustbgpd v0.81.0 for Compose, labs and default fixtures, vendor its
-  unmodified release proto and retain v0.80.0/v0.80.1 controller qualification.
-  Local FlowSpec reads now refuse unrepresented IPv6 extended communities and
-  guarded admission state. Direct target-IP diversion remains unavailable.
+- Require and pin rustbgpd v0.81.0 for Compose, labs and fixtures, and vendor
+  its unmodified release proto. CI qualifies v0.81.0 and checks that startup
+  refuses the released v0.80.1 image. Direct target-IP diversion remains
+  unavailable.
+
+- On rustbgpd v0.81.0, replayed blackholes and FlowSpec rules are selected
+  immediately after a speaker restart instead of waiting for Graceful Restart
+  selection deferral. The 0.23.1 advice to set `graceful_restart = false` on
+  neighbors that never come up only mattered on v0.80.x. `selection_deferred`
+  remains a decoded export reason; the `PrefixdBlackholeNotExported` hint for
+  it and its operator message no longer describe the old hold.
+
+- prefixd refuses to read a local FlowSpec rule it cannot represent on its
+  rustbgpd speaker, such as one with IPv6 extended communities, a redirect-to-IP
+  action or guarded admission state that another tool injected. The whole read
+  fails rather than dropping the row: reconciliation fails, startup is refused
+  when `bgp.rustbgpd.leased_flowspec` is set, and `GET /v1/speaker/routes`
+  returns `502`. Remove the foreign rule to recover.
 
 - rustbgpd export evidence includes configured addressed peers without an
   Established session even when the separate peer-session read fails. These

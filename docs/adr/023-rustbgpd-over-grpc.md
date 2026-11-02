@@ -3,8 +3,8 @@
 ## Status
 
 Accepted; refreshed 2026-10-18. Updates [ADR 001](001-gobgp-sidecar.md).
-The minimum controller version rose to rustbgpd v0.79.0 on 2026-10-20 and to
-v0.80.0 on 2026-10-26.
+The minimum controller version rose to rustbgpd v0.79.0 on 2026-10-20, to
+v0.80.0 on 2026-10-26 and to v0.81.0 on 2026-11-02.
 GoBGP remains supported under [ADR 025](025-pluggable-speaker-backends.md).
 
 ## Date
@@ -72,12 +72,15 @@ The release gate for the controller promotion is resolved: v0.79.0 contains
 ADR 0139 and adds the injection lease (rustbgpd ADR-0141). It became the
 minimum controller version and qualification pin on 2026-10-20. On 2026-10-26
 the minimum rose to v0.80.0: scoped peer identity requires interface-scoped
-export and peer rows, which v0.79 omits. The current qualification pin is
-v0.80.1, whose proto is byte-identical to v0.80.0. prefixd reads the daemon
-version from `GetHealth` at startup and refuses an older or unreadable one. The
-immutable image identities live in
-[the release fixture](../../tests/fixtures/rustbgpd/releases.json), and CI runs
-local lifecycle/TTL/restart checks on the minimum and the pin. Owner-only UDS
+export and peer rows, which v0.79 omits. The pin was then v0.80.1, whose
+proto is byte-identical to v0.80.0. On 2026-11-02 the minimum rose to v0.81.0:
+scrubber diversion uses its guarded FlowSpec mutations, which v0.80.x answers
+with `UNIMPLEMENTED`. The current qualification pin is also v0.81.0. prefixd
+reads the daemon version from `GetHealth` at startup and refuses an older or
+unreadable one. The immutable image identities live in
+[the release fixture](../../tests/fixtures/rustbgpd/releases.json). CI runs
+local lifecycle/TTL/restart checks on the pin and checks that startup refuses
+the released v0.80.1 image. Owner-only UDS
 and verified client-certificate mTLS are implemented. Both secure deployment profiles have
 [dated qualification](../reference/qualification/speaker-profiles-2026-10-18.md).
 This does not qualify router enforcement.
