@@ -263,7 +263,8 @@ async fn live_rustbgpd_v081_inventory_refuses_unrepresented_attributes_without_m
         .await
         .unwrap();
 
-    let owner = "prefixd.fixture.guarded";
+    // A malformed guarded rule of ours fails closed; another owner's is foreign.
+    let owner = "prefixd.scrub.fixture";
     let window = raw
         .issue_mutation_window(request(pb::IssueMutationWindowRequest {
             owner: owner.into(),
@@ -293,7 +294,15 @@ async fn live_rustbgpd_v081_inventory_refuses_unrepresented_attributes_without_m
         let route = entry.route.as_ref().unwrap();
         route.injection_owner == format!("guarded:{owner}") && route.admission_revision == Some(7)
     }));
-    assert_unrepresented(speaker.list_active().await);
+    match speaker.list_active().await {
+        Err(prefixd::error::PrefixdError::Internal(message)) => {
+            assert_eq!(
+                message,
+                "rustbgpd: guarded rule requires a target-IP action"
+            )
+        }
+        other => panic!("expected a malformed guarded refusal, got {other:?}"),
+    }
     // Remaining lease time changes between reads; compare the immutable rule payload.
     let after = fixture.received_flow_spec(3, "0.0.0.0").await;
     for (before, after) in before.received_routes.iter().zip(&after.received_routes) {

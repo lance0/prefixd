@@ -308,11 +308,14 @@ support it. On v0.80.x, before the minimum rose, the hold also applied to
 injected routes.
 
 The v0.81.0 proto includes direct target-IP actions and guarded mutation RPCs.
-prefixd does not enable scrubber diversion or call those RPCs. Its local-rule
-reader refuses IPv6 extended communities, guarded admission revisions and
-guarded owners rather than dropping attributes it cannot represent. Keep such
-rules off a speaker whose complete local inventory prefixd reconciles until
-the [scrubber lifecycle](../project/scrubber-diversion-contract.md) is implemented.
+prefixd does not enable scrubber diversion. Its local-rule reader refuses IPv6
+extended communities, unguarded redirect actions and malformed guarded rules in
+prefixd's `prefixd.scrub.` owner namespace rather than dropping attributes it
+cannot represent. Keep such rules off a speaker whose complete local inventory
+prefixd reconciles until the
+[scrubber lifecycle](../project/scrubber-diversion-contract.md) is implemented.
+A guarded rule of any other owner is excluded from that reader and appears only
+as an occupied key in the guarded inventory; prefixd never deletes it.
 
 ### Scoped and interface-only neighbors
 

@@ -38,11 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it and its operator message no longer describe the old hold.
 
 - prefixd refuses to read a local FlowSpec rule it cannot represent on its
-  rustbgpd speaker, such as one with IPv6 extended communities, a redirect-to-IP
-  action or guarded admission state that another tool injected. The whole read
-  fails rather than dropping the row: reconciliation fails, startup is refused
-  when `bgp.rustbgpd.leased_flowspec` is set, and `GET /v1/speaker/routes`
-  returns `502`. Remove the foreign rule to recover.
+  rustbgpd speaker, such as one with IPv6 extended communities or an unguarded
+  redirect-to-IP action that another tool injected. The whole read fails rather
+  than dropping the row: reconciliation fails, startup is refused when
+  `bgp.rustbgpd.leased_flowspec` is set, and `GET /v1/speaker/routes` returns
+  `502`. Remove the foreign rule to recover. A guarded rule of another owner is
+  excluded from these reads instead; a malformed guarded rule in prefixd's own
+  scrubber owner namespace still fails them.
 
 - Update the password hashing dependency `argon2` to 0.6 and drop the unused
   direct `password-hash` 0.5 dependency. New operator hashes keep the same
@@ -89,6 +91,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `generation_not_live` diagnostic when the speaker supplies it.
 
 ### Added
+
+- Add a separate guarded FlowSpec speaker boundary for direct target-IP
+  diversion, with exact IPv4/IPv6 action read-back, independent owner windows
+  and revision-fenced deletion. All guarded mutations require the controller
+  fence and use no legacy fallback. Manual controller enablement follows separately.
+  Another owner's guarded rule is an occupied key in the guarded inventory,
+  never prefixd intent, and is never deleted. Definitive guarded refusals, such
+  as a window that is not live or a revision mismatch, are named in logs and
+  errors; other failures remain unconfirmed until read back.
 
 - CI runs the authenticated browser withdrawal smoke against disposable
   PostgreSQL and pinned rustbgpd, reusing the candidate controller binaries and

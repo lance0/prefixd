@@ -30,6 +30,9 @@ pub struct RustBgpdAnnouncer {
 /// mutations that scrubber diversion uses.
 const MINIMUM_DAEMON_VERSION: [u64; 3] = [0, 81, 0];
 
+#[path = "rustbgpd_guarded.rs"]
+mod guarded;
+
 /// `major.minor.patch`, ignoring any pre-release or build suffix.
 fn parse_version(version: &str) -> Option<[u64; 3]> {
     let core = version.split(['-', '+']).next()?;
@@ -66,6 +69,16 @@ fn injection_refusal_reason(status: &tonic::Status) -> Option<InjectionRefusalRe
     if status.code() != Code::FailedPrecondition {
         return None;
     }
+    match error_reason(status)?.as_str() {
+        "OWNER_MISMATCH" => Some(InjectionRefusalReason::OwnerMismatch),
+        "KEY_UNOWNED" => Some(InjectionRefusalReason::KeyUnowned),
+        "GENERATION_NOT_LIVE" => Some(InjectionRefusalReason::GenerationNotLive),
+        _ => None,
+    }
+}
+
+/// The one `rustbgpd` ErrorInfo reason of a status whose rich code matches it.
+fn error_reason(status: &tonic::Status) -> Option<String> {
     let rich = RpcStatus::decode(status.details()).ok()?;
     if rich.code != status.code() as i32 {
         return None;
@@ -79,15 +92,7 @@ fn injection_refusal_reason(status: &tonic::Status) -> Option<InjectionRefusalRe
         return None;
     }
     let info = ErrorInfo::decode(detail.value.as_slice()).ok()?;
-    if info.domain != "rustbgpd" {
-        return None;
-    }
-    match info.reason.as_str() {
-        "OWNER_MISMATCH" => Some(InjectionRefusalReason::OwnerMismatch),
-        "KEY_UNOWNED" => Some(InjectionRefusalReason::KeyUnowned),
-        "GENERATION_NOT_LIVE" => Some(InjectionRefusalReason::GenerationNotLive),
-        _ => None,
-    }
+    (info.domain == "rustbgpd").then_some(info.reason)
 }
 
 impl RustBgpdAnnouncer {
@@ -750,6 +755,9 @@ fn decode_blackhole(
 const ROUTE_PAGE_SIZE: u32 = 100;
 
 impl FlowSpecAnnouncer for RustBgpdAnnouncer {
+    fn guarded_flowspec(&self) -> Option<&dyn super::GuardedFlowSpecSpeaker> {
+        Some(self)
+    }
     fn backend(&self) -> &'static str {
         "rustbgpd"
     }
@@ -911,6 +919,17 @@ impl FlowSpecReader for RustBgpdAnnouncer {
                     return Err(invalid("invalid local intent row"));
                 }
                 let route = row.route.ok_or_else(|| invalid("missing local route"))?;
+                if route.injection_owner.starts_with("guarded:")
+                    || route.admission_revision.is_some()
+                {
+                    // Account for the complete payload of our guarded rows before
+                    // routing them to the separate diversion reader and lifecycle.
+                    // Another owner's guarded rule is never ours to read or fail on.
+                    if !guarded::foreign_guarded(&route) {
+                        guarded::decode_guarded(route, family)?;
+                    }
+                    continue;
+                }
                 // Zero remaining means expired with its withdrawal pending: lost, not retained.
                 let expired = route.lease_remaining_ms == Some(0);
                 let rule = decode(route, family)?;

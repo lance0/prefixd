@@ -379,6 +379,10 @@ pub trait BlackholeSpeaker: Send + Sync {
 pub trait FlowSpecAnnouncer: FlowSpecWriter {
     fn backend(&self) -> &'static str;
 
+    fn guarded_flowspec(&self) -> Option<&dyn super::GuardedFlowSpecSpeaker> {
+        None
+    }
+
     fn reader(&self) -> Option<&dyn FlowSpecReader> {
         None
     }
