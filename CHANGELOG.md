@@ -7,21 +7,122 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Security
+## [0.24.0] - 2026-11-02
 
-- Update the build-time Markdown parser `pulldown-cmark` to 0.13.6 in both
-  lockfiles for RUSTSEC-2026-0433. It is used by protobuf code generation;
-  no advisory exception or runtime behavior change is introduced.
-
-- Update the build-time Markdown parser `pulldown-cmark` to 0.13.5 in both
-  lockfiles for RUSTSEC-2026-0414. It is used by protobuf code generation;
-  no advisory exception or runtime behavior change is introduced.
+prefixd 0.24.0 adds manual scrubber diversion through rustbgpd's guarded
+FlowSpec contract. It is disabled by default and needs an administrator, a
+configured profile and fresh readiness. The release also reports per-peer
+FlowSpec export on rustbgpd, searches and pages the complete mitigation and
+event history on the server, and, with opt-in leasing, detects a rustbgpd
+restart before the next lease renewal. It requires rustbgpd v0.81.0, which
+must be upgraded first, and migration 019 adds the scrubber diversion table on
+startup.
 
 ### Upgrade notes
 
-- rustbgpd v0.81.0 is required. Upgrade the speaker first: prefixd refuses to
-  start against v0.80.x with "upgrade the speaker first". See
-  [rustbgpd v0.81](docs/how-to/upgrading.md#rustbgpd-v081).
+- Follow
+  [v0.23.1 → 0.24.0](https://github.com/lance0/prefixd/blob/v0.24.0/docs/how-to/upgrading.md#v0231--0240)
+  in the upgrade guide: upgrade rustbgpd to v0.81.0, then replace the
+  controller and dashboard, then copy `grafana/prometheus-alerts.yml`.
+  prefixd refuses to start against v0.80.x with "upgrade the speaker first".
+  See [rustbgpd v0.81](https://github.com/lance0/prefixd/blob/v0.24.0/docs/how-to/upgrading.md#rustbgpd-v081).
+- Migration 019 applies on startup. It adds the `scrubber_diversions` table,
+  creates no rows and changes no existing mitigation; no adoption step runs.
+- Scrubber diversion stays off unless `scrubber.enabled` is set; the only new
+  configuration keys are under `scrubber`, and a 0.23.1 `prefixd.yaml` loads
+  as it is. Enable diversion in a separate restart, and drain every diversion
+  before disabling it or downgrading; see
+  [scrubber diversion and downgrade](https://github.com/lance0/prefixd/blob/v0.24.0/docs/how-to/upgrading.md#scrubber-diversion-and-downgrade).
+- On rustbgpd, health is now `degraded` when an active FlowSpec rule reaches
+  no Established peer or its export read fails, and a local FlowSpec rule that
+  prefixd cannot represent fails the whole speaker read; remove such foreign
+  rules before upgrading. Existing password hashes keep working, and the new
+  history search parameters leave existing API clients unaffected. The guide
+  lists the other API changes.
+
+### Known limitations
+
+- TTL expiry needs the running controller. Unleased FlowSpec rules and
+  blackholes stay announced if prefixd stops while the speaker stays up; the
+  leased modes, which bound that to one lease, are opt-in and rustbgpd-only.
+- prefixd qualifies control-plane receipts only: local speaker intent,
+  per-peer export and, in fixtures, a peer's received routes. Router
+  forwarding and scrubber behavior are not qualified. A scrubber profile's
+  `qualification_receipt` is an operator reference that prefixd does not
+  verify.
+- A diversion withdrawal that meets another owner's rule at its match stays
+  outstanding. prefixd never deletes a foreign rule, and there is no
+  break-glass override yet.
+- The dashboard's Scrubbers page is shown only to administrators, although
+  `GET /v1/scrubbers` and `GET /v1/diversions` allow any authenticated user.
+- prefixd now reads rustbgpd's per-peer FlowSpec export, but still uses
+  neither its batch reads nor replay-complete signaling. Do not list prefixd
+  in `global.gr_eor_replay_owners`.
+- The 0.23.0 known limitations otherwise still apply.
+
+### Security
+
+- Update the build-time Markdown parser `pulldown-cmark` to 0.13.6 in both
+  lockfiles for RUSTSEC-2026-0414 and RUSTSEC-2026-0433. It is used by
+  protobuf code generation; no advisory exception or runtime behavior change
+  is introduced.
+
+### Added
+
+- Add disabled-by-default manual scrubber diversion through rustbgpd's guarded
+  FlowSpec contract: immutable persisted profile/action snapshots, independent
+  owners, authenticated bounded readiness, withdrawal latching and explicit
+  re-arm. API/OpenAPI, CLI and dashboard controls preserve full host matches and
+  require target confirmation. Dry-run sends no speaker mutation; pending
+  withdrawal retains victim exclusion through the authorization barrier and
+  final revision-checked local absence. Router forwarding requires a separate
+  qualified profile receipt. Requires rustbgpd v0.81.0; migration 019 adds the
+  `scrubber_diversions` table. See the upgrade guide before disabling profiles
+  or downgrading with outstanding diversions.
+- Every `/v1/scrubbers` and `/v1/diversions` endpoint requires authentication;
+  arm, preview, create and withdraw also require Admin. Unknown profiles and
+  diversions return `404`, disabled scrubbers `409`, and an unconfirmed outcome
+  `500`. Withdrawal takes an optional `reason`, also through `prefixdctl
+  diversions withdraw --reason`, and the dashboard confirms withdrawal with a
+  warning that attack traffic returns to ordinary routing. Create and withdraw
+  finish and record their outcome even if the client disconnects.
+- Each scrubber lifecycle pass reads the guarded inventory once, renews each
+  profile owner once with a window that outlives the next renewal, and bounds
+  rotating export reads. A slow export read marks evidence historical rather
+  than latching; steady passes write no diversion or audit rows. Draining
+  intent admitted by another controller process waits rustbgpd's 120-second
+  window cap. Saved withdrawals cannot return to `active` or change their first
+  reason or requester. A profile target inside its own destinations is refused.
+
+- Add a separate guarded FlowSpec speaker boundary for direct target-IP
+  diversion, with exact IPv4/IPv6 action read-back, independent owner windows
+  and revision-fenced deletion. All guarded mutations require the controller
+  fence and use no legacy fallback.
+  Another owner's guarded rule is an occupied key in the guarded inventory,
+  never prefixd intent, and is never deleted. Definitive guarded refusals, such
+  as a window that is not live or a revision mismatch, are named in logs and
+  errors; other failures remain unconfirmed until read back.
+
+- CI runs the authenticated browser withdrawal smoke against disposable
+  PostgreSQL and pinned rustbgpd, reusing the candidate controller binaries and
+  production dashboard build. It checks pending confirmation, persisted/rendered
+  audit and fresh local speaker intent before and after withdrawal, retains
+  protected failure evidence, and removes its owned stack. No router enforcement
+  qualification is implied.
+
+- Per-peer FlowSpec export evidence on rustbgpd, keyed by the full canonical
+  match and shown on mitigation detail, authenticated health and the dashboard.
+  Separate bounded FlowSpec metrics preserve the existing blackhole metrics.
+  Both kinds share one fair, rotating 10-second observation budget. Failed and
+  historical reads remain distinct from empty or unsupported observation;
+  committed means the peer's Adj-RIB-Out, not router enforcement. No configuration
+  or schema migration is required, and the existing blackhole alert stays scoped
+  to blackholes.
+
+- An optional `docker-compose.inventory.yml` overlay reads
+  `configs/inventory.yaml` directly from the host for either speaker profile.
+  Existing volume-managed inventories remain the default. The quickstart covers
+  switching workflows, reloading edits and recreating stale file mounts.
 
 ### Changed
 
@@ -89,66 +190,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leased re-add and retain the existing `not_live` health result, with a typed
   `generation_not_live` diagnostic when the speaker supplies it.
 
-### Added
-
-- Add disabled-by-default manual scrubber diversion through rustbgpd's guarded
-  FlowSpec contract: immutable persisted profile/action snapshots, independent
-  owners, authenticated bounded readiness, withdrawal latching and explicit
-  re-arm. API/OpenAPI, CLI and dashboard controls preserve full host matches and
-  require target confirmation. Dry-run sends no speaker mutation; pending
-  withdrawal retains victim exclusion through the authorization barrier and
-  final revision-checked local absence. Router forwarding requires a separate
-  qualified profile receipt. Requires rustbgpd v0.81.0; migration 019 adds the
-  `scrubber_diversions` table. See the upgrade guide before disabling profiles
-  or downgrading with outstanding diversions.
-- Every `/v1/scrubbers` and `/v1/diversions` endpoint requires authentication;
-  arm, preview, create and withdraw also require Admin. Unknown profiles and
-  diversions return `404`, disabled scrubbers `409`, and an unconfirmed outcome
-  `500`. Withdrawal takes an optional `reason`, also through `prefixdctl
-  diversions withdraw --reason`, and the dashboard confirms withdrawal with a
-  warning that attack traffic returns to ordinary routing. Create and withdraw
-  finish and record their outcome even if the client disconnects.
-- Each scrubber lifecycle pass reads the guarded inventory once, renews each
-  profile owner once with a window that outlives the next renewal, and bounds
-  rotating export reads. A slow export read marks evidence historical rather
-  than latching; steady passes write no diversion or audit rows. Draining
-  intent admitted by another controller process waits rustbgpd's 120-second
-  window cap. Saved withdrawals cannot return to `active` or change their first
-  reason or requester. A profile target inside its own destinations is refused.
-
-- Add a separate guarded FlowSpec speaker boundary for direct target-IP
-  diversion, with exact IPv4/IPv6 action read-back, independent owner windows
-  and revision-fenced deletion. All guarded mutations require the controller
-  fence and use no legacy fallback.
-  Another owner's guarded rule is an occupied key in the guarded inventory,
-  never prefixd intent, and is never deleted. Definitive guarded refusals, such
-  as a window that is not live or a revision mismatch, are named in logs and
-  errors; other failures remain unconfirmed until read back.
-
-- CI runs the authenticated browser withdrawal smoke against disposable
-  PostgreSQL and pinned rustbgpd, reusing the candidate controller binaries and
-  production dashboard build. It checks pending confirmation, persisted/rendered
-  audit and fresh local speaker intent before and after withdrawal, retains
-  protected failure evidence, and removes its owned stack. No router enforcement
-  qualification is implied.
-
-- FastNetMon guidance distinguishes its source-build native rustbgpd RTBH
-  action from the prefixd notify path, and explains the exclusive speaker-target
-  requirement and leased/unleased route conflicts.
-- Per-peer FlowSpec export evidence on rustbgpd, keyed by the full canonical
-  match and shown on mitigation detail, authenticated health and the dashboard.
-  Separate bounded FlowSpec metrics preserve the existing blackhole metrics.
-  Both kinds share one fair, rotating 10-second observation budget. Failed and
-  historical reads remain distinct from empty or unsupported observation;
-  committed means the peer's Adj-RIB-Out, not router enforcement. No configuration
-  or schema migration is required, and the existing blackhole alert stays scoped
-  to blackholes.
-
-- An optional `docker-compose.inventory.yml` overlay reads
-  `configs/inventory.yaml` directly from the host for either speaker profile.
-  Existing volume-managed inventories remain the default. The quickstart covers
-  switching workflows, reloading edits and recreating stale file mounts.
-
 ### Fixed
 
 - With opt-in rustbgpd leasing, an independent two-second liveness probe now
@@ -168,6 +209,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from before the controller lost ownership, including during standby and after
   regain before the next observation pass. Read-error metrics still describe
   attempted reads; ownership loss alone does not count as a failed RPC.
+
+### Documentation
+
+- FastNetMon guidance distinguishes its source-build native rustbgpd RTBH
+  action from the prefixd notify path, and explains the exclusive speaker-target
+  requirement and leased/unleased route conflicts.
+- The IPv6 customer prefix in the configuration reference's inventory
+  example is now `2001:db8:ac00::/48`. The previous `2001:db8:acme::/48` is not
+  a valid prefix, and inventory load rejects it.
 
 ## [0.23.1] - 2026-10-26
 
@@ -1740,7 +1790,6 @@ Startup now refuses the configuration keys removed in 0.20.0, and requires
 - **Docker dashboard build.** Frontend Dockerfile now uses Bun 1.3.14 (compatible with Next.js 16.3 Turbopack). The `force-dynamic` export added to the catch-all API proxy route prevents build-time page data collection errors.
 - **Docker Compose port conflict.** Nginx port mapped to 8088 to avoid conflict with host nginx on port 80.
 
-
 ### Security
 
 - **Rate limiting middleware activated.** The `RateLimiter` implementation (previously dead code) is now wired into the router via `common_layers`. All API endpoints are rate-limited using a global token bucket (configurable via `http.rate_limit.events_per_second` and `burst`, always-on with defaults).
@@ -2711,7 +2760,8 @@ Startup now refuses the configuration keys removed in 0.20.0, and requires
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.23.1...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/lance0/prefixd/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/lance0/prefixd/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/lance0/prefixd/compare/v0.22.1...v0.23.0
 [0.22.1]: https://github.com/lance0/prefixd/compare/v0.22.0...v0.22.1
