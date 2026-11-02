@@ -979,12 +979,15 @@ message OutboundPrefixLimitState {
   // "ipv4_unicast" or "ipv6_unicast".
   string family = 1;
   // Distinct prefixes currently admitted into this peer's advertised state,
-  // post-policy, post-OTC, and post-exact-export. Agrees with advertised-route
-  // queries; never the shared update-group table's count.
+  // post-policy, post-OTC, and post-exact-export; never the shared update-group
+  // table's count. UINT64_MAX (18446744073709551615) means unique-prefix
+  // usage is temporarily unknown during incomplete admission recovery.
+  // Route/path and stale counts remain exact; only this capacity is unknown.
   uint64 usage = 2;
   // Configured maximum. Absence means unlimited, never zero.
   optional uint32 limit = 3;
-  // Saturating limit - usage. Absent while the family is unlimited.
+  // Saturating limit - usage. Absent while unlimited or usage is unknown.
+  // A present limit remains the configured maximum even with no headroom.
   optional uint32 headroom = 4;
   // Whether a blocking episode is currently open for this family.
   bool blocking = 5;
@@ -1101,13 +1104,15 @@ enum UpdateGroupComparisonDifference {
 message SelectionDeferralFamilyState {
   uint32 afi = 1;
   uint32 safi = 2;
+  // False for a dormant startup roster as well as a released family.
   bool active = 3;
   string waiter_state = 4;
   // Process-local session stamp; explicitly unstable.
   optional uint64 waiter_session_id = 5;
   uint64 blocking_waiters = 6;
   uint64 remaining_millis = 7;
-  // Empty while active; "all_eor" or "timer" after release.
+  // Empty while dormant or active; all_eor, timer, collision_refresh or
+  // all_excluded after release.
   string release_reason = 8;
   // Canonical family label for afi/safi, for example "ipv4_unicast", using
   // the configuration spelling. Empty from an older daemon.
@@ -2796,7 +2801,8 @@ message ExplainAdvertisedRouteRequest {
 
 // Stable identity of one route in an Adj-RIB-In. RFC 7911 path identifiers
 // are assigned locally by the advertising speaker, so this inbound identity
-// is independent of the outbound rank returned as `path_id` by export explain.
+// is independent of the outbound path ID returned as `path_id` by export
+// explain.
 message RouteSourceIdentity {
   // Bare IP literal of the advertising neighbor. A request may instead
   // give an IPv6 link-local neighbor in scoped form (fe80::1%eth0).
@@ -2929,6 +2935,10 @@ message ExplainAdvertisedRouteResponse {
   // numbered neighbors. The addresses stay bare IP literals.
   string peer_interface = 18;
   string route_peer_interface = 19;
+  // Validation states tested by the deciding export-policy deny term.
+  // Empty unless the export policy gate stopped with policy_denied;
+  // uses the same codes and semantics as PathExportDispositionEntry.
+  repeated string deny_validation = 20;
 }
 
 message ExplainBestPathRequest {
@@ -2948,12 +2958,13 @@ message ExplainBestPathRequest {
   // export policy + sendable-family check + split-horizon / RR
   // suppression and falls within the peer's effective
   // `add_path_send_max` — gets a non-zero
-  // `advertised_path_id` reflecting its advertised rank.
-  // Everything else stays at `advertised_path_id = 0`. Note
-  // that ranks in `candidates` may start at 2 when the
-  // selected winner (in `best_route`) is itself advertised at
-  // rank 1 to the peer; rank 1 is therefore not always present
-  // in the `candidates` list. Empty = global view, the v0.7.0
+  // `advertised_path_id`: the outbound Add-Path path ID the peer
+  // has or would get. A path keeps its ID while it is sent, so IDs
+  // follow no rank order and need not be contiguous; the selected
+  // winner (in `best_route`) is not repeated in `candidates`, so
+  // its ID is absent from that list.
+  // Everything else stays at `advertised_path_id = 0`. Empty =
+  // global view, the v0.7.0
   // behavior. Unknown peer → NOT_FOUND. Named `peer_address`
   // to match the convention used elsewhere in this file (see
   // e.g. `ExplainAdvertisedRouteRequest.peer_address`).
@@ -3739,27 +3750,38 @@ message BgpEvent {
 service InjectionService {
   // Inject or replace a locally originated unicast route. The route is an
   // upsert keyed on (prefix, prefix_length, path_id): repeating an identical
-  // request is idempotent, and a request with the same key but a different
-  // next hop or attributes replaces the local route. The response reports
-  // which of these happened. OK confirms that the route was accepted into
-  // the local Adj-RIB-In (peer 0.0.0.0). Selection and outbound distribution
-  // normally run in the same RIB turn, before the reply, but are deferred
-  // while Graceful Restart selection deferral is active for the family. OK
-  // does not mean any peer received or installed the route, and a received
-  // route for the same prefix can out-select it. Injected routes are
-  // process-local and lost on a daemon restart, so a controller reconciles
-  // periodically and after every reconnect by re-adding its desired routes
-  // (an UNCHANGED re-add is cheap). A lower ControlService.GetHealth
-  // uptime_seconds is an extra trigger, not a reliable restart detector.
-  // A key held by a lease owner (ADR-0141) returns FAILED_PRECONDITION with
-  // ErrorInfo reason OWNER_MISMATCH; see AddLeasedPath.
+  // request is idempotent, and a request with the same key but a different next
+  // hop or attributes replaces the local route. The response reports which of
+  // these happened. OK confirms that the route was accepted into the local
+  // Adj-RIB-In (peer 0.0.0.0). Selection and outbound distribution for an
+  // eligible changed route run in the same RIB turn, before the reply.
+  // During Graceful Restart selection deferral, only local RTBH candidates
+  // compete in ordinary best path, Add-Path, ORR and per-client best selection:
+  // an IPv4 /32, IPv6 /128, or any prefix carrying standard BLACKHOLE
+  // 65535:666. This covers every path_id. Other injected unicast, including
+  // untagged defaults and aggregates, and received candidates remain retained
+  // but ineligible until selection becomes available, including staged
+  // collision failback. Existing export policy, next-hop-self and admission
+  // checks still apply. End-of-RIB and the existing convergence and refresh
+  // holds are unchanged. MarkReplayComplete releases only the separate
+  // End-of-RIB grace window, never selection deferral or those other holds.
+  // OK does not mean any peer received or installed the route, and a received
+  // route for the same prefix can out-select it once selection is available.
+  // Injected routes are process-local and lost on a daemon restart, so a
+  // controller reconciles periodically and after every reconnect by
+  // re-adding its desired routes (an UNCHANGED re-add is cheap). A lower
+  // ControlService.GetHealth uptime_seconds is an extra trigger, not a reliable
+  // restart detector. A key held by a lease owner (ADR-0141) returns
+  // FAILED_PRECONDITION with ErrorInfo reason OWNER_MISMATCH; see AddLeasedPath.
   rpc AddPath(AddPathRequest) returns (AddPathResponse);
   // Withdraw a locally injected unicast route by its (prefix, prefix_length,
   // path_id) key. Only routes added through AddPath are affected; routes
   // received from peers are never removed. A key with no local route returns
   // NOT_FOUND unless allow_missing is set. As for AddPath, OK confirms the
   // change to the local Adj-RIB-In; selection and distribution follow in the
-  // same RIB turn unless Graceful Restart selection deferral is active.
+  // same RIB turn, also during Graceful Restart selection deferral. Removing
+  // the last eligible local RTBH candidate withdraws it without selecting a
+  // received fallback while selection is deferred.
   rpc DeletePath(DeletePathRequest) returns (DeletePathResponse);
   // Per-peer export disposition of one locally injected unicast route,
   // identified by its exact AddPath key (prefix, prefix_length, path_id).
@@ -3774,7 +3796,10 @@ service InjectionService {
   // means the
   // route sits in that peer's Adj-RIB-Out: committed to its outbound path,
   // not received, accepted or installed by the peer, which BGP does not
-  // report. A key with no local route returns NOT_FOUND. A resumed page
+  // report. Selection deferral holds injected unicast except local /32, /128
+  // or BLACKHOLE 65535:666 routes; held routes report selection_deferred.
+  // Ordinary policy and admission still apply.
+  // A key with no local route returns NOT_FOUND. A resumed page
   // returns ABORTED when, since the walk's first page, the route's content
   // changed (including its removal), a peer joined or left the Established
   // set, or an Established peer's export policy, a dataset it or an
@@ -3815,25 +3840,28 @@ service InjectionService {
   // ListPathExportDispositions for one locally injected FlowSpec rule,
   // identified by its exact AddFlowSpec key (afi_safi, components), with the
   // same rows, peer order, paging, include_configured, ABORTED and
-  // INVALID_ARGUMENT contract. A received rule with the same key never
-  // counts as this rule's export: when it is the selected rule, this rule is
-  // WITHHELD with reason not_selected. Export policy evaluates a FlowSpec
-  // rule with RPKI state not_found and ASPA state unknown, so deny_validation
-  // carries those states when the deciding statement tests them. A key with
-  // no local rule returns NOT_FOUND. This new diagnostic RPC is outside v1.
+  // INVALID_ARGUMENT contract. A received rule with the same key never counts
+  // as this rule's export: when it is the selected rule, this rule is WITHHELD
+  // with reason not_selected. Selection deferral does not hold a local rule, so
+  // selection_deferred is not reported for it. Export policy evaluates a
+  // FlowSpec rule with RPKI state not_found and ASPA state unknown, so
+  // deny_validation carries those states when the deciding statement tests
+  // them. A key with no local rule returns NOT_FOUND. This new diagnostic RPC
+  // is outside v1.
   rpc ListFlowSpecExportDispositions(ListFlowSpecExportDispositionsRequest) returns (ListPathExportDispositionsResponse);
-  // Inject or replace a locally originated FlowSpec rule. The rule is an
-  // upsert keyed on (afi_safi, components): repeating an identical request
-  // is idempotent, and a request with the same key but different actions or
-  // communities replaces the local rule. The response reports which of
-  // these happened. OK confirms that the rule was accepted into the local
-  // Adj-RIB-In (peer 0.0.0.0). Selection and outbound distribution normally
-  // run in the same RIB turn, before the reply, but are deferred while
-  // Graceful Restart selection deferral is active for the family. OK does
-  // not mean any peer received or installed the rule, and a received rule
-  // with the same key can out-select it. Injected rules are process-local:
-  // a controller must re-inject them after a daemon restart. A key held by a
-  // lease owner returns FAILED_PRECONDITION with ErrorInfo reason
+  // Inject or replace a locally originated FlowSpec rule. The rule is an upsert
+  // keyed on (afi_safi, components): repeating an identical request is
+  // idempotent, and a request with the same key but different actions or
+  // communities replaces the local rule. The response reports which of these
+  // happened. OK confirms that the rule was accepted into the local Adj-RIB-In
+  // (peer 0.0.0.0). Selection and outbound distribution run in the same RIB
+  // turn, before the reply, also while Graceful Restart selection deferral
+  // holds the family after a planned restart: local rules are then the only
+  // candidates, while received rules and the family's End-of-RIB wait for the
+  // release. OK does not mean any peer received or installed the rule, and a
+  // received rule with the same key can out-select it. Injected rules are
+  // process-local: a controller must re-inject them after a daemon restart. A
+  // key held by a lease owner returns FAILED_PRECONDITION with ErrorInfo reason
   // OWNER_MISMATCH; see AddLeasedPath.
   rpc AddFlowSpec(AddFlowSpecRequest) returns (AddFlowSpecResponse);
   // Withdraw a locally injected FlowSpec rule by its (afi_safi, components)
@@ -3841,19 +3869,22 @@ service InjectionService {
   // from peers are never removed. A key with no local rule returns
   // NOT_FOUND unless allow_missing is set. As for AddFlowSpec, OK confirms
   // the change to the local Adj-RIB-In; selection and distribution follow
-  // in the same RIB turn unless Graceful Restart selection deferral is
-  // active.
+  // in the same RIB turn, also during Graceful Restart selection deferral.
   rpc DeleteFlowSpec(DeleteFlowSpecRequest) returns (DeleteFlowSpecResponse);
   // Owner-scoped leases (ADR-0141). A leased add is AddPath or AddFlowSpec
   // with the same request, outcome and validation, plus an owner and a
   // lease. Every entry an owner adds shares that owner's one lease; when the
   // lease's deadline passes without a renewal or a further leased add, the
   // daemon withdraws all of the owner's routes and rules in one batch.
-  // Expiry removes local intent only: an equal or better route, or a
-  // received FlowSpec rule with the same key, keeps applying, and the daemon
-  // promises no remote acceptance or enforcement. The lease bounds how long
-  // a stopped controller's state outlives it; it does not cover the daemon
-  // itself stopping.
+  // Selection and distribution follow the same rules during selection
+  // deferral as the unleased RPCs. Expiry withdraws local intent during the
+  // hold without selecting a received fallback.
+  // Expiry removes local intent only: other eligible routes or rules can
+  // keep applying. During selection deferral only local RTBH unicast
+  // (/32, /128 or BLACKHOLE 65535:666) and local FlowSpec candidates are
+  // eligible. The daemon promises no remote acceptance or enforcement.
+  // The lease bounds how long a stopped controller's state outlives it;
+  // it does not cover the daemon itself stopping.
   //
   // A leased add joins the owner's live lease and extends its deadline to
   // max(current, now + lease_seconds), never shortening it, or starts a new
@@ -3935,12 +3966,61 @@ service InjectionService {
   // accepted, and a token is valid only for the owner it was issued for
   // (another owner's token is INVALID_ARGUMENT).
   rpc ListLeasedKeys(ListLeasedKeysRequest) returns (ListLeasedKeysResponse);
+  // Guarded FlowSpec mutations (ADR-0144). A guarded owner's rules and lease
+  // live in their own namespace and are reported as `guarded:<owner>`
+  // (ListInjectionLeases, ListLeasedKeys, FlowSpecRouteEntry.injection_owner);
+  // the leased and unleased methods cannot add, renew or delete them, apart
+  // from DeleteFlowSpec's override_owner. Inventoried in v1 (API shape only).
+  //
+  // IssueMutationWindow issues a window to an owner, living window_seconds
+  // (1..=120). An owner holds at most 64 live windows and the daemon 4,096;
+  // past either cap the call is RESOURCE_EXHAUSTED and changes nothing.
+  // AddGuardedFlowSpec and RenewGuardedLease are checked against the window
+  // when they commit, not when they arrive: an expired window, or one issued
+  // to another owner or by another daemon process, is FAILED_PRECONDITION
+  // with ErrorInfo reason WINDOW_NOT_LIVE and changes nothing. A guarded add
+  // sets the owner's deadline to max(current, min(now + lease_seconds,
+  // window expiry)): it caps any extension at its window but keeps a later
+  // deadline set under another window, which the new rule then shares. A
+  // guarded renewal sets exactly min(now + lease_seconds, window expiry).
+  // The lease never outlives the latest-expiring window the owner used, but
+  // one window's expiry is not a rule's withdrawal deadline: read the
+  // deadline back instead of inferring it.
+  //
+  // Every guarded add carries a nonzero client-chosen revision, stored with
+  // the rule. A present rule held at another revision, or at the same
+  // revision with a different payload, is FAILED_PRECONDITION with reason
+  // REVISION_MISMATCH. The same revision with the same payload is UNCHANGED.
+  // DeleteGuardedFlowSpec removes the rule only at its revision: an absent
+  // rule is NOT_PRESENT; another revision is REVISION_MISMATCH; another
+  // owner, or no owner, is OWNER_MISMATCH or KEY_UNOWNED. A delete needs no
+  // window.
+  //
+  // Definitive refusals leave the RIB, the lease table and the wire
+  // unchanged by that request: FAILED_PRECONDITION (WINDOW_NOT_LIVE,
+  // REVISION_MISMATCH, OWNER_MISMATCH, KEY_UNOWNED, GENERATION_NOT_LIVE),
+  // RESOURCE_EXHAUSTED, INVALID_ARGUMENT, UNIMPLEMENTED and
+  // PERMISSION_DENIED. Any other outcome, such as DEADLINE_EXCEEDED,
+  // UNAVAILABLE or a dropped connection, is unknown: the add may have
+  // committed. Resolve it by reading the rule's revision back, or by
+  // retrying with the same revision under a live window. A daemon without
+  // these methods answers UNIMPLEMENTED (or PERMISSION_DENIED to a
+  // non-operator credential) and changes nothing; never retry a guarded
+  // mutation through the legacy methods.
+  rpc IssueMutationWindow(IssueMutationWindowRequest) returns (IssueMutationWindowResponse);
+  rpc AddGuardedFlowSpec(AddGuardedFlowSpecRequest) returns (AddGuardedFlowSpecResponse);
+  rpc DeleteGuardedFlowSpec(DeleteGuardedFlowSpecRequest) returns (DeleteGuardedFlowSpecResponse);
+  rpc RenewGuardedLease(RenewGuardedLeaseRequest) returns (RenewGuardedLeaseResponse);
   // A controller's replay-complete signal for the planned-restart
-  // End-of-RIB grace window (gr_eor_grace_time). The daemon releases the
-  // held End-of-RIB once every owner listed in [global]
+  // End-of-RIB grace window (gr_eor_grace_time). The daemon releases this
+  // grace hold once every owner listed in [global]
   // gr_eor_replay_owners has signalled for the current incarnation, or at
   // the window's deadline, whichever comes first. An empty list keeps the
   // timer-only window.
+  // This signal does not release selection deferral or other convergence
+  // and refresh holds. Local RTBH unicast (/32, /128 or BLACKHOLE 65535:666)
+  // and FlowSpec injection are eligible during selection deferral without
+  // it, subject to policy and admission. Other injected unicast waits.
   //
   // Protocol: read incarnation I (CheckLivenessResponse.incarnation or
   // LeaseGeneration.incarnation) before replaying, replay the full desired
@@ -4100,8 +4180,9 @@ message PathExportDispositionEntry {
   // export_policy, outbound_prefix_limit, exact_export_rejected (optionally
   // a colon and the exact-export reason, e.g.
   // exact_export_rejected:missing_ipv6_next_hop), export_rule (any other
-  // export gate; explain_code names it). PENDING: selection_deferred,
-  // outbound_resync, orf_pending, not_yet_committed. NOT_ESTABLISHED:
+  // export gate; explain_code names it). PENDING: outbound_resync,
+  // orf_pending, not_yet_committed, selection_deferred (injected unicast other
+  // than local /32, /128 or BLACKHOLE 65535:666 routes). NOT_ESTABLISHED:
   // not_established. New codes may be added.
   string reason = 3;
   // Stop code of the export explain ladder behind the reason, in the
@@ -4204,6 +4285,8 @@ message FlowSpecAction {
     // still finds the action community in
     // FlowSpecRouteEntry.extended_communities.
     FlowSpecTrafficRatePackets traffic_rate_packets = 5;
+    // Direct target-IP action, distinct from route-target/VRF redirect.
+    FlowSpecRedirectIp redirect_ip = 6;
   }
 }
 
@@ -4244,6 +4327,17 @@ message FlowSpecRedirect {
   string route_target = 1;
 }
 
+// Direct IPv4 (0x010c) or IPv6 (0x000c) target from
+// draft-ietf-idr-flowspec-redirect-ip-16. IPv6 uses the twenty-octet
+// RFC 5701 community in path attribute 25, never a uint64 or MP_REACH next hop.
+// The address must be a unicast IP literal. Local acceptance or observation
+// does not establish router installation or forwarding.
+message FlowSpecRedirectIp {
+  string address = 1;
+  // false diverts originals; true mirrors copies.
+  bool copy = 2;
+}
+
 // FlowSpec route as seen in the RIB.
 message FlowSpecRouteEntry {
   repeated FlowSpecComponent components = 1;
@@ -4265,6 +4359,13 @@ message FlowSpecRouteEntry {
   string injection_owner = 8;
   LeaseGeneration lease_generation = 9;
   optional uint32 lease_remaining_ms = 10;
+  // Every RFC 5701 community, including interpreted redirect_ip actions.
+  // Each value contains exactly twenty octets, preserving reserved bits and
+  // unmodelled types independently of extended_communities.
+  repeated bytes ipv6_extended_communities = 11;
+  // The admission revision of a rule added with AddGuardedFlowSpec, set
+  // with injection_owner.
+  optional uint64 admission_revision = 12;
 }
 
 message AddFlowSpecRequest {
@@ -4282,6 +4383,10 @@ message AddFlowSpecRequest {
   // AddFlowSpec does not deduplicate the two lists: give an action either
   // typed in actions or raw here, not both.
   repeated uint64 extended_communities = 5;
+  // Raw RFC 5701 communities, each containing exactly twenty octets.
+  // A typed redirect_ip must not also be supplied as a raw target-IP action
+  // in either community list. Other raw communities retain their bytes.
+  repeated bytes ipv6_extended_communities = 6;
 }
 
 message AddFlowSpecResponse {
@@ -4397,7 +4502,7 @@ message ListInjectionLeasesResponse {
 }
 
 message ListLeasedKeysRequest {
-  // Required lease owner.
+  // Required lease owner; a guarded owner is named `guarded:<owner>`.
   string owner = 1;
   // Keys per page: 0 selects 100, and larger values are capped at 1000.
   uint32 page_size = 2;
@@ -4428,6 +4533,8 @@ message LeasedKey {
   LeaseGeneration generation = 3;
   // Time to the lease deadline; 0 means expired, withdrawal pending.
   uint32 lease_remaining_ms = 4;
+  // The admission revision of a key added with AddGuardedFlowSpec.
+  optional uint64 admission_revision = 5;
 }
 
 message ListLeasedKeysResponse {
@@ -4437,6 +4544,75 @@ message ListLeasedKeysResponse {
   // The owner's live generation this walk is bound to; absent when the
   // owner has no live lease.
   LeaseGeneration generation = 3;
+}
+
+// A mutation window (ADR-0144). Both fields must match; a window never
+// survives a daemon restart.
+message MutationWindow {
+  fixed64 incarnation = 1;
+  uint64 sequence = 2;
+}
+
+message IssueMutationWindowRequest {
+  // 1-64 bytes of [A-Za-z0-9._-], without the "guarded:" prefix.
+  string owner = 1;
+  // 1..=120. Out of range is INVALID_ARGUMENT.
+  uint32 window_seconds = 2;
+}
+
+message IssueMutationWindowResponse {
+  MutationWindow window = 1;
+  // The window's lifetime, from the daemon's monotonic clock.
+  uint32 window_remaining_ms = 2;
+}
+
+message AddGuardedFlowSpecRequest {
+  AddFlowSpecRequest rule = 1;
+  // Required. The owner is given without the "guarded:" prefix.
+  InjectionLease lease = 2;
+  // Required: a window issued to this owner.
+  MutationWindow window = 3;
+  // Required, nonzero. Never reuse a revision for a different admission of
+  // the same key.
+  uint64 revision = 4;
+}
+
+message AddGuardedFlowSpecResponse {
+  AddFlowSpecResponse result = 1;
+  // The owner's live generation after this add.
+  LeaseGeneration generation = 2;
+}
+
+message DeleteGuardedFlowSpecRequest {
+  AddressFamily afi_safi = 1;
+  // Same identity and ordering rules as AddFlowSpecRequest.components.
+  repeated FlowSpecComponent components = 2;
+  // Required, without the "guarded:" prefix.
+  string owner = 3;
+  // Required, nonzero: the revision the rule was added with.
+  uint64 revision = 4;
+}
+
+message DeleteGuardedFlowSpecResponse {
+  // DELETED or NOT_PRESENT.
+  FlowSpecDeleteOutcome outcome = 1;
+}
+
+message RenewGuardedLeaseRequest {
+  // Without the "guarded:" prefix.
+  string owner = 1;
+  LeaseGeneration generation = 2;
+  // 5..=3600; the deadline becomes exactly
+  // min(now + lease_seconds, window expiry).
+  uint32 lease_seconds = 3;
+  // Required: a window issued to this owner.
+  MutationWindow window = 4;
+}
+
+message RenewGuardedLeaseResponse {
+  LeaseGeneration generation = 1;
+  // Time to the new deadline, from the daemon's monotonic clock.
+  uint32 lease_remaining_ms = 2;
 }
 
 message MarkReplayCompleteRequest {
@@ -4483,12 +4659,16 @@ enum FlowSpecDeleteOutcome {
 
 message ListFlowSpecRequest {
   AddressFamily afi_safi = 1;
-  // When both peer selectors are empty, select the Loc-RIB. An IP address here selects retained
-  // received candidates from that peer, including infeasible/nonselected rules.
-  // "0.0.0.0" selects the locally injected rules: exactly what AddFlowSpec
-  // holds, including rules a received candidate currently out-selects
-  // (selected = false). Their validation is DISABLED by default and LOCAL
-  // when receive-side validation is enabled; it is never FEASIBLE or
+  // When both peer selectors are empty, select the Loc-RIB. An IP address here
+  // selects retained received candidates from that peer, including
+  // infeasible/nonselected rules. "0.0.0.0" selects the locally injected rules:
+  // exactly what AddFlowSpec holds, including rules a received candidate
+  // currently out-selects (selected = false). Selection deferral never holds a
+  // local rule, so selected = false there always means such an out-selection. A
+  // received rule can also read selected = false while Graceful Restart
+  // selection deferral holds its family after a planned restart
+  // (NeighborState.selection_deferral). Local validation is DISABLED by default
+  // and LOCAL when receive-side validation is enabled; it is never FEASIBLE or
   // INFEASIBLE. Controllers reconcile against this view.
   string received_peer_address = 2;
   // Destination peer whose committed post-export-policy Adj-RIB-Out is read.
@@ -5316,9 +5496,9 @@ message HealthResponse {
   // obtain that snapshot is an RPC error, not a successful healthy=false reply.
   bool healthy = 1;
   uint64 uptime_seconds = 2;
-  // Number of non-stale peers observed Established in that snapshot. Peers
-  // whose session state could not be read are excluded even if their last
-  // known state was Established; exclusion does not prove they are down.
+  // Number of configured peers whose session reports Established, from the
+  // state each session publishes on every FSM transition (no per-session
+  // query). A session that has ended is not counted.
   uint32 active_peers = 3;
   uint32 total_routes = 4;
   // Daemon package version (e.g. "0.50.0"). Empty when answered by a

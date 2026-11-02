@@ -275,12 +275,12 @@ Initial network connections and TLS handshakes have a ten-second budget;
 complete RPC attempts are bounded separately.
 
 `proto/rustbgpd.proto` is the unmodified `rustbgpd.proto` asset of the
-rustbgpd `v0.80.1` release, checked offline against the release's sha256 by
+rustbgpd `v0.81.0` release, checked offline against the release's sha256 by
 `just proto`. The controller message fields prefixd uses were checked against
 it. This is a protocol baseline, not proof that an arbitrary binary reporting
 that version has passed the deployment or router tests. The stubs follow the
-pinned release, and v0.80.0 is the minimum daemon. At startup prefixd reads
-the version that `GetHealth` reports and refuses a daemon older than v0.80.0,
+pinned release, and v0.81.0 is the minimum daemon. At startup prefixd reads
+the version that `GetHealth` reports and refuses a daemon older than v0.81.0,
 or one that reports no readable version, with "upgrade the speaker first".
 Peer identity fields are decoded. Both export RPCs set `include_configured`,
 so complete walks also identify managed peers without an Established session.
@@ -294,15 +294,25 @@ configured grace deadline. Reconciliation still restores desired state on its
 normal poll. The daemon's optional timer-only grace window needs a separately
 qualified replay budget and does not prove downstream retention or enforcement.
 
-Injected routes are held from selection after a speaker restart until its
-Graceful Restart peers send End-of-RIB or the restart window
-(`gr_restart_time`, 120 seconds by default) expires; the local view reads
-`selected: false` meanwhile. `MarkReplayComplete` does not end that hold, and a
-Graceful Restart peer that never comes up holds it for the full window. The
-shipped `configs/rustbgpd.toml` sets `graceful_restart = false` on its
-placeholder neighbor for that reason. Enable Graceful Restart on real peers
-that support it. [Export evidence](#export-evidence) describes how prefixd
-reports a held blackhole.
+After a speaker restart, Graceful Restart selection deferral holds received
+candidates and End-of-RIB until Graceful Restart peers send End-of-RIB or the
+restart window (`gr_restart_time`, 120 seconds by default) expires. Since
+v0.81.0, local FlowSpec and RTBH injections compete during that hold: IPv4
+`/32`, IPv6 `/128` or routes carrying BLACKHOLE `65535:666`. This covers
+prefixd's host blackholes and FlowSpec rules. Export policy and admission still
+apply; local acceptance does not prove router receipt. A configured peer that
+never reconnects no longer holds selection. `MarkReplayComplete` releases only
+the separate End-of-RIB replay grace window. The shipped example keeps Graceful
+Restart disabled on its placeholder neighbor; enable it on real peers that
+support it. On v0.80.x, before the minimum rose, the hold also applied to
+injected routes.
+
+The v0.81.0 proto includes direct target-IP actions and guarded mutation RPCs.
+prefixd does not enable scrubber diversion or call those RPCs. Its local-rule
+reader refuses IPv6 extended communities, guarded admission revisions and
+guarded owners rather than dropping attributes it cannot represent. Keep such
+rules off a speaker whose complete local inventory prefixd reconciles until
+the [scrubber lifecycle](../project/scrubber-diversion-contract.md) is implemented.
 
 ### Scoped and interface-only neighbors
 
@@ -321,18 +331,18 @@ safely. This does not change route injection or withdrawal. See the
 
 ## Released controller qualification
 
-The scoped controller promotion is released: v0.80.0 is the minimum controller
-contract version; v0.80.1 is the Compose and default fixture pin. CI runs the
-lifecycle, TTL and restart suite against both immutable image references in
-[releases.json](../../tests/fixtures/rustbgpd/releases.json). Image OCI source
+The scoped controller promotion is released: v0.81.0 is the minimum controller
+contract version and the Compose and default fixture pin. CI runs the
+lifecycle, TTL and restart suite against the v0.81.0 image reference in
+[releases.json](../../tests/fixtures/rustbgpd/releases.json), and checks that
+startup refuses the released v0.80.1 image. Image OCI source
 revisions match the dereferenced release-tag commits. This qualifies the local
 controller boundary on Linux amd64, independently of router interoperability.
 
 Run the same isolated suite locally with Docker available:
 
 ```bash
-scripts/test-rustbgpd.sh # 0.80.1
-PREFIXD_RUSTBGPD_TEST_VERSION=0.80.0 scripts/test-rustbgpd.sh
+scripts/test-rustbgpd.sh # 0.81.0, plus the v0.80.1 refusal
 ```
 
 Fixtures bind ephemeral loopback ports, create an owner-only bearer token, and
@@ -738,17 +748,16 @@ wins the same match key; `export_rule` groups the speaker's bounded suppression
 codes. Neither reason nor a committed export proves router receipt or traffic
 enforcement.
 
-After a planned rustbgpd restart, Graceful Restart selection deferral holds
-injected routes, prefixd's blackholes included, until the Graceful Restart
-peers send End-of-RIB or the restart window (`gr_restart_time`, 120 seconds by
-default) expires. Every Established peer then reports `pending` with
-`selection_deferred`, and prefixd reports the unexported reason
-`selection_deferred`: the speaker accepted the route, but it is exported to no
-peer. Health stays `degraded` until export settles, and the five-minute alert
-window outlasts the default hold. The hold is not a missing route:
-reconciliation repairs only routes absent from the speaker's local RIB, so it
-neither re-adds nor retries a held blackhole. Any other pending reason, or a
-mix with `selection_deferred`, stays `pending`.
+When every Established peer reports `pending` with `selection_deferred`,
+prefixd reports the unexported reason `selection_deferred`: the speaker
+accepted the route and holds it from selection after its restart, so it is
+exported to no peer. Health stays `degraded` until export settles. On
+supported daemons, prefixd's own blackholes and FlowSpec rules bypass
+[Graceful Restart selection deferral](#rustbgpd-configuration), so they no
+longer hit this reason; it remains decoded for any route the speaker does hold.
+A held route is not a missing route: reconciliation repairs only routes absent
+from the speaker's local RIB, so it neither re-adds nor retries one. Any other
+pending reason, or a mix with `selection_deferred`, stays `pending`.
 
 rustbgpd v0.80.0 supplies the FlowSpec export-disposition RPC used here, plus
 batch unicast reads, configured-peer rows and typed validation-deny details.

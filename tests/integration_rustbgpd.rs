@@ -167,15 +167,162 @@ async fn live_rustbgpd_controller_roundtrip() {
     let speaker = fixture.connect().await;
     contract::run_readable_contract(&speaker).await.unwrap();
     let health = speaker.daemon_health().await.unwrap();
-    let expected = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.80.1".into());
+    let expected = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
     assert_eq!(health.version.as_deref(), Some(expected.as_str()));
     assert!(health.ready);
+}
+
+/// The local read refuses the whole inventory, never drops the row it cannot represent.
+fn assert_unrepresented<T: std::fmt::Debug>(read: prefixd::error::Result<T>) {
+    match read {
+        Err(prefixd::error::PrefixdError::Internal(message)) => {
+            assert_eq!(message, "rustbgpd: unsupported local route attributes")
+        }
+        other => panic!("expected an unrepresented-attribute refusal, got {other:?}"),
+    }
+}
+
+/// A speaker rolled back below the minimum is refused before any intent is read or written.
+#[tokio::test]
+#[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
+async fn live_rustbgpd_startup_refuses_a_release_older_than_the_minimum() {
+    let fixture = fixture::Speaker::start_refused_release().await;
+    let error = prefixd::bgp::RustBgpdAnnouncer::connect(&fixture.config)
+        .await
+        .err()
+        .expect("prefixd connected to a daemon older than its minimum")
+        .to_string();
+    assert_eq!(
+        error,
+        "rustbgpd 0.80.1 is older than the minimum 0.81.0; upgrade the speaker first"
+    );
+    fixture.container.rm().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
+async fn live_rustbgpd_v081_inventory_refuses_unrepresented_attributes_without_mutation() {
+    use prefixd::bgp::rustbgpd_pb as pb;
+
+    fn request<T>(body: T) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(body);
+        let token = std::env::var("PREFIXD_RUSTBGPD_TEST_TOKEN").unwrap();
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        request.set_timeout(std::time::Duration::from_secs(5));
+        request
+    }
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    let supported = rule();
+    speaker.announce(&supported).await.unwrap();
+    let mut raw =
+        pb::injection_service_client::InjectionServiceClient::connect(fixture.endpoint.clone())
+            .await
+            .unwrap();
+    let mut community = vec![0; 20];
+    community[1] = 2; // RFC 5701 IPv6 route target, outside prefixd's rule model.
+    community[2..18].copy_from_slice(
+        &"2001:db8::99"
+            .parse::<std::net::Ipv6Addr>()
+            .unwrap()
+            .octets(),
+    );
+    community[19] = 7;
+    let opaque = pb::AddFlowSpecRequest {
+        afi_safi: 3,
+        components: vec![pb::FlowSpecComponent {
+            r#type: 1,
+            prefix: "192.0.2.232/32".into(),
+            ..Default::default()
+        }],
+        actions: vec![pb::FlowSpecAction {
+            action: Some(pb::flow_spec_action::Action::TrafficRate(
+                pb::FlowSpecTrafficRate { rate: 0.0 },
+            )),
+        }],
+        ipv6_extended_communities: vec![community.clone()],
+        ..Default::default()
+    };
+    raw.add_flow_spec(request(opaque.clone())).await.unwrap();
+    let before = fixture.received_flow_spec(3, "0.0.0.0").await;
+    assert!(before.received_routes.iter().any(|entry| {
+        entry.route.as_ref().unwrap().ipv6_extended_communities == [community.clone()]
+    }));
+    assert_unrepresented(speaker.list_active().await);
+    assert_eq!(fixture.received_flow_spec(3, "0.0.0.0").await, before);
+    raw.delete_flow_spec(request(pb::DeleteFlowSpecRequest {
+        afi_safi: opaque.afi_safi,
+        components: opaque.components.clone(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    contract::wait_inventory(&speaker, std::slice::from_ref(&supported))
+        .await
+        .unwrap();
+
+    let owner = "prefixd.fixture.guarded";
+    let window = raw
+        .issue_mutation_window(request(pb::IssueMutationWindowRequest {
+            owner: owner.into(),
+            window_seconds: 30,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .window;
+    let guarded = pb::AddFlowSpecRequest {
+        ipv6_extended_communities: vec![],
+        ..opaque
+    };
+    raw.add_guarded_flow_spec(request(pb::AddGuardedFlowSpecRequest {
+        rule: Some(guarded.clone()),
+        lease: Some(pb::InjectionLease {
+            owner: owner.into(),
+            lease_seconds: 60,
+        }),
+        window,
+        revision: 7,
+    }))
+    .await
+    .unwrap();
+    let before = fixture.received_flow_spec(3, "0.0.0.0").await;
+    assert!(before.received_routes.iter().any(|entry| {
+        let route = entry.route.as_ref().unwrap();
+        route.injection_owner == format!("guarded:{owner}") && route.admission_revision == Some(7)
+    }));
+    assert_unrepresented(speaker.list_active().await);
+    // Remaining lease time changes between reads; compare the immutable rule payload.
+    let after = fixture.received_flow_spec(3, "0.0.0.0").await;
+    for (before, after) in before.received_routes.iter().zip(&after.received_routes) {
+        let mut before = before.route.clone().unwrap();
+        let mut after = after.route.clone().unwrap();
+        before.lease_remaining_ms = None;
+        after.lease_remaining_ms = None;
+        assert_eq!(before, after);
+    }
+    assert_eq!(before.received_routes.len(), after.received_routes.len());
+    raw.delete_guarded_flow_spec(request(pb::DeleteGuardedFlowSpecRequest {
+        afi_safi: guarded.afi_safi,
+        components: guarded.components,
+        owner: owner.into(),
+        revision: 7,
+    }))
+    .await
+    .unwrap();
+    contract::wait_inventory(&speaker, std::slice::from_ref(&supported))
+        .await
+        .unwrap();
+    speaker.withdraw(&supported).await.unwrap();
+    fixture.container.rm().await.unwrap();
 }
 
 #[tokio::test]
 #[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
 async fn live_rustbgpd_v080_observes_unbound_interface_neighbor_identity() {
-    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.80.1".into());
+    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
     let fixture = fixture::Speaker::start_observation_neighbors().await;
     let speaker = fixture.connect().await;
     let interface_name = format!("interface:{}", fixture::UNBOUND_INTERFACE);
@@ -245,7 +392,7 @@ async fn live_rustbgpd_source_prefix_components_are_retained_in_both_families() 
 async fn live_rustbgpd_amplification_components_inject_read_and_delete() {
     let fixture = fixture::Speaker::start().await;
     let speaker = fixture.connect().await;
-    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.80.1".into());
+    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
     // The daemon's own rendering of the injected components (ADR 028 read-back column).
     let rules = contract::amplification_rules();
     for rule in &rules {

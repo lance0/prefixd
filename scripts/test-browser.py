@@ -157,7 +157,7 @@ def run(binary_dir, output):
         assert all(path.is_file() and os.access(path, os.X_OK) for path in binaries)
         assert (ROOT / "frontend/.next/BUILD_ID").is_file(), "run just frontend first"
         revision = command("git", "rev-parse", "HEAD", cwd=ROOT)
-        release = json.loads((ROOT / "tests/fixtures/rustbgpd/releases.json").read_text())["0.80.1"]
+        release = json.loads((ROOT / "tests/fixtures/rustbgpd/releases.json").read_text())["0.81.0"]
         receipt.update(
             candidate_revision=revision,
             binary_sha256={
