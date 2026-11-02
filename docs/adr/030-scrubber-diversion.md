@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed 2026-10-22; manual runtime implemented 2026-11-01 behind disabled-by-default
+Accepted 2026-11-02, with the decision recorded below. Proposed 2026-10-22;
+manual runtime implemented 2026-11-01 behind disabled-by-default
 profiles. rustbgpd v0.81.0 supplies the guarded speaker contract. The controller
 implements persisted admission snapshots, independent owners, authenticated
 readiness, withdrawal latching and manual re-arm. Exact router/scrubber forwarding
@@ -123,7 +124,7 @@ An unhealthy scrubber cannot safely share that renewal domain.
   configure xFW's normal traffic profiles and filtration rules externally;
   this ADR does not add an xFW configuration client.
 
-## Proposed decision
+## Decision
 
 ### 1. Select a configured scrubber, never an arbitrary request next hop
 
@@ -350,14 +351,17 @@ does not expose target addresses, monitor credentials or router details.
 
 ## Qualification and slices
 
-These are acceptance gates for future implementation, not results of this PR.
-Each slice is independently reviewable; the feature remains disabled until the
-required gates for its family/backend/profile pass.
+These are the acceptance gates for each slice. Slices 1 to 4 are implemented
+for rustbgpd v0.81.0 behind disabled-by-default profiles. Slices 5 and 6 remain
+open. The feature stays disabled until the required gates for its
+family/backend/profile pass.
 
 The [speaker contract and qualification plan](../project/scrubber-diversion-contract.md)
 records the 2026-10-23 released-contract audit, canonical target-action vectors,
 rollback refusal and concrete queued-mutation acceptance cases for slice 1.
-It remains a proposal; it supplies no runtime or forwarding qualification.
+Its [coverage table](../project/scrubber-diversion-contract.md#qualification-coverage)
+records which cases prefixd and rustbgpd tests cover and which remain open. It
+supplies no forwarding qualification.
 
 | Slice | Deliverable and acceptance |
 | --- | --- |
@@ -388,9 +392,10 @@ failure-time or production-scrubbing guarantee.
 
 ## Consequences
 
-Direct target-address diversion has a concrete delivery path but remains later
-work. The first product slice is manual and narrow; it cannot be shipped as a
-small action-enum extension. Health and lease isolation add real implementation
+Manual direct target-address diversion is implemented behind disabled-by-default
+profiles; router forwarding qualification remains a separate gate. The first
+product slice is manual and narrow; it could not ship as a small action-enum
+extension. Health and lease isolation add real implementation
 work, while the existing writer, ownership, fence and immutable withdrawal
 patterns provide reusable foundations. A stopped controller can eventually stop
 attracting traffic only when the speaker lease and router cleanup both work as

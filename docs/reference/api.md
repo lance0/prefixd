@@ -2434,6 +2434,12 @@ neighbors remain non-Established. These strings distinguish neighbors on
 different links; they are not all bare IP literals. See
 [scoped neighbors](speaker-backends.md#scoped-and-interface-only-neighbors).
 
+`speaker.scrubbers` is present only when `scrubber.enabled` is true. It maps
+each configured profile ID to its `armed` and `ready` flags, `readiness`
+(`ready`, `not_ready` or `unknown`), the monitor's `observed_at` and any
+`latch_reason`. It carries no target, victim or monitor credential; see
+[manual scrubber diversion](#manual-scrubber-diversion).
+
 Top-level `version` and `uptime_seconds` describe prefixd. `speaker.daemon`
 independently reports authenticated speaker process metadata: `observed`, `error`
 or `unsupported`. Successful observations carry receipt time `observed_at`,
@@ -2925,6 +2931,8 @@ Requires session authentication (send session cookie).
 {"type": "mitigation_expired", "mitigation_id": "mit_abc123"}
 {"type": "mitigation_withdrawn", "mitigation_id": "mit_abc123"}
 {"type": "event_ingested", "event": {...}}
+{"type": "diversion_updated", "diversion": {...}}
+{"type": "scrubber_updated", "profile": "scrubber-a", "state": {...}}
 {"type": "resync_required"}
 ```
 
@@ -2933,6 +2941,12 @@ Requires session authentication (send session cookie).
 `mitigation` uses the [mitigation response](#get-mitigation) shape, including
 the `blackhole` object for blackholes. A manual blackhole broadcasts
 `mitigation_created`.
+
+`diversion_updated` carries a [diversion](#manual-scrubber-diversion) after
+admission, withdrawal and each durable lifecycle transition; a steady renewal
+sends nothing. `scrubber_updated` carries one profile's readiness and arm state,
+the same object as `GET /v1/scrubbers` `profiles`, after re-arm and each
+lifecycle pass. Neither replaces a refresh after `resync_required`.
 
 `event_ingested` is defined in the message schema but is not currently broadcast
 by event ingestion. Event lists retain their periodic API refresh.
@@ -3376,7 +3390,7 @@ playbook requests cannot choose a scrubber target.
 | `POST /v1/diversions` | Persist manual intent before guarded mutation; returns `202` |
 | `GET /v1/diversions` | Outstanding intent, including pending withdrawals |
 | `GET /v1/diversions/{id}` | Saved match/action/profile, revision and timestamped export observation |
-| `POST /v1/diversions/{id}/withdraw` | Retain withdrawal until authorization expiry and confirmed local absence |
+| `POST /v1/diversions/{id}/withdraw` | Retain withdrawal until authorization expiry and confirmed local absence; optional `reason` |
 
 Creation takes `profile`, `scope` (a complete host FlowSpec match), bounded
 `ttl_seconds`, `reason` and the exact `confirmation` returned by preview.
@@ -3384,4 +3398,24 @@ Arbitrary targets, owners and health URLs are rejected. A live/pending diversion
 excludes every other mitigation affecting its victim. Dry-run creates a
 simulation without any speaker mutation. `active` establishes exact local
 read-back; per-peer export and router forwarding remain distinct evidence.
+`export_observation` keeps `observed_at` while rechecks find the same peers. A
+failed or timed-out read sets `error` and keeps the earlier peers as historical
+evidence; an empty `peers` with no `error` is a successful empty observation.
+
+Withdrawal accepts an optional JSON body `{"reason": "..."}` of 1 to 1,024
+UTF-8 bytes of text. An omitted body or reason records `operator withdrawal by
+<user>`. The first withdrawal reason and requester are immutable; a later
+request, or a controller latch that already recorded a reason, keeps them.
+
+| Status | Meaning |
+| --- | --- |
+| `400` | Invalid host, match, lifetime or reason, an unowned destination, or a confirmation that does not match preview |
+| `401` | Missing or invalid credentials, on every endpoint above |
+| `403` | Arm, preview, create or withdraw without the Admin role |
+| `404` | Unknown profile, or unknown diversion in this POP |
+| `409` | Scrubbers disabled, profile not ready and armed, stale readiness, revision changed, victim held by other intent, or a diversion from another POP |
+| `422` | Guardrail or quota rejection, or a malformed body, including an arbitrary `target` or `owner` |
+| `503` | Controller in standby |
+| `500` | Durable or speaker outcome could not be confirmed; the body says only that |
+
 See the [workflow and payloads](../how-to/scrubber-diversion.md).

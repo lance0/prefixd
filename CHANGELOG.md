@@ -68,7 +68,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   require target confirmation. Dry-run sends no speaker mutation; pending
   withdrawal retains victim exclusion through the authorization barrier and
   final revision-checked local absence. Router forwarding requires a separate
-  qualified profile receipt.
+  qualified profile receipt. Requires rustbgpd v0.81.0; migration 019 adds the
+  `scrubber_diversions` table. See the upgrade guide before disabling profiles
+  or downgrading with outstanding diversions.
+- Every `/v1/scrubbers` and `/v1/diversions` endpoint requires authentication;
+  arm, preview, create and withdraw also require Admin. Unknown profiles and
+  diversions return `404`, disabled scrubbers `409`, and an unconfirmed outcome
+  `500`. Withdrawal takes an optional `reason`, also through `prefixdctl
+  diversions withdraw --reason`, and the dashboard confirms withdrawal with a
+  warning that attack traffic returns to ordinary routing. Create and withdraw
+  finish and record their outcome even if the client disconnects.
+- Each scrubber lifecycle pass reads the guarded inventory once, renews each
+  profile owner once with a window that outlives the next renewal, and bounds
+  rotating export reads. A slow export read marks evidence historical rather
+  than latching; steady passes write no diversion or audit rows. Draining
+  intent admitted by another controller process waits rustbgpd's 120-second
+  window cap. Saved withdrawals cannot return to `active` or change their first
+  reason or requester. A profile target inside its own destinations is refused.
 
 - Add a separate guarded FlowSpec speaker boundary for direct target-IP
   diversion, with exact IPv4/IPv6 action read-back, independent owner windows

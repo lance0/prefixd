@@ -98,8 +98,16 @@ for these checks. The monitor owns the checks and their canary scope.
 
 Requests have a two-second timeout, a 4 KiB response limit and no redirects.
 The controller polls every five seconds, with a four-second lifecycle-pass
-budget. A failed, stale, malformed or mismatched report, storage failure, lost
-controller fence or incomplete pass latches affected profiles unarmed. New
+budget. Each pass reads the guarded inventory once, issues at most one mutation
+window and one renewal per profile, and reads the result back once, so speaker
+work grows with profiles rather than diversions. It reuses a window only while
+at least twelve seconds remain, longer than the gap between two renewals.
+Per-peer export reads stop three seconds into the pass and rotate across
+passes; a slow or failed read marks that diversion's export evidence as
+historical without latching. A pass writes and audits a diversion only when its
+status, generation or export evidence changes. A failed, stale, malformed or
+mismatched report, storage failure, lost controller fence, failed renewal, lost
+ownership or incomplete pass latches affected profiles unarmed. New
 adds and renewals then stop. Healthy profiles use independent owners and cannot
 extend an unhealthy profile's lease. Recovery never clears the latch by itself.
 
@@ -111,9 +119,13 @@ traffic selector, target and profile revision. Editing a field invalidates that
 preview. Withdrawal returns traffic to ordinary routing, potentially exposing
 the victim to attack again; there is no automatic discard, blackhole or fallback.
 
-The CLI offers the same workflow. Administrative requests may use a cookie from
-an authenticated administrator session through `PREFIXD_SESSION_COOKIE`.
-Ordinary bearer tokens retain their Operator role and cannot divert traffic.
+The CLI offers the same workflow. Administrative requests use a cookie from an
+authenticated administrator session through `--session-cookie` or
+`PREFIXD_SESSION_COOKIE`. Obtain one by signing in with
+[`POST /v1/auth/login`](../reference/api.md#login), then pass the returned
+`Set-Cookie` name and value as a Cookie header, for example
+`PREFIXD_SESSION_COOKIE='id=...'`. Treat it as a credential. Ordinary bearer
+tokens retain their Operator role and cannot divert traffic.
 
 ```bash
 prefixdctl scrubbers list
@@ -122,7 +134,7 @@ prefixdctl diversions preview --file diversion.json
 prefixdctl diversions create --file diversion.json --confirmation '<exact preview confirmation>'
 prefixdctl diversions list
 prefixdctl diversions get <id>
-prefixdctl diversions withdraw <id>
+prefixdctl diversions withdraw <id> --reason 'Attack ended; verified at the edge'
 ```
 
 `diversion.json` contains a profile name, never an arbitrary target, owner,
@@ -165,14 +177,14 @@ tested path, not proof that every victim packet is scrubbed.
 
 Unknown add outcomes and every withdrawal remain durable. The controller stops
 issuing authorization for that admission, deletes its exact revision early,
-then waits a full thirty seconds on a monotonic clock before the final exact
-delete and complete local absence check. A restarted controller waits the full
-interval again. Client cancellation, wall-clock jumps and an initial empty read
+then waits on a monotonic clock before the final exact delete and complete local
+absence check: thirty seconds, its own window lifetime, for intent it admitted,
+or rustbgpd's 120-second window cap for intent another controller process
+admitted, including after a restart. Client cancellation, wall-clock jumps and an initial empty read
 cannot release victim exclusion. Revision-fenced deletion prevents a late old
 delete from removing a newer admission under a still-live sibling lease.
 
-The thirty-second mutation window bounds authorization, not a router removal
-deadline. RIB queue lag, speaker loss and remote Graceful Restart can extend
+The mutation window bounds authorization, not a router removal deadline. RIB queue lag, speaker loss and remote Graceful Restart can extend
 retention. Unavailable or inconsistent observation stays pending. The controller
 does not override foreign owners or guess that an unknown rule disappeared.
 An untracked rule under a profile's own owner also blocks re-arm and renewal;

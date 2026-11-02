@@ -46,8 +46,9 @@ Restart selection deferral, while received candidates and End-of-RIB can remain
 held. Policy and admission still apply. This changes the v0.80 hold behavior
 described below; it provides no router recovery deadline.
 
-The new direct target-IP and guarded FlowSpec APIs do not enable prefixd scrubber
-diversion. Local inventory reads refuse IPv6 extended communities and guarded
+prefixd uses the direct target-IP and guarded FlowSpec APIs only for
+[scrubber diversion](#scrubber-diversion-and-downgrade), which is disabled by
+default. Local inventory reads refuse IPv6 extended communities and guarded
 admission state that prefixd cannot represent. See
 [speaker backends](../reference/speaker-backends.md#rustbgpd-configuration).
 
@@ -469,6 +470,41 @@ Withdrawn and expired rows are safe for the speaker. Manual amplification
 rules use the `unknown` vector, which older releases decode, so step 2 selects
 rules by match rather than by vector. Older releases refuse to decode rows with
 the `udp_amplification` vector, so pages that include them fail closed there.
+
+## Scrubber diversion and downgrade
+
+Manual [scrubber diversion](scrubber-diversion.md) is disabled by default and
+requires rustbgpd v0.81.0, prefixd's minimum speaker. An older daemon refuses
+the guarded RPCs; prefixd never retries them through ordinary leased or
+unleased methods. Migration 019 adds the `scrubber_diversions` table and its
+admission-revision sequence. It creates no rows and changes no existing
+mitigation; with scrubbers disabled, the upgrade needs no further action.
+
+To enable diversion, configure profiles, their readiness credentials and any
+monitor CA as the [how-to](scrubber-diversion.md) describes, then restart.
+Profiles start unarmed after every restart; an administrator re-arms each one
+after fresh readiness. Profile settings change only on restart.
+
+Outstanding diversion is any row in `pending`, `active` or `withdrawing`:
+
+```sql
+SELECT pop, profile_id, status, count(*) AS outstanding
+FROM scrubber_diversions
+WHERE status IN ('pending', 'active', 'withdrawing')
+GROUP BY pop, profile_id, status;
+```
+
+Before disabling scrubbers, changing the operation mode, removing or changing a
+profile, changing the POP or speaker target, downgrading rustbgpd below v0.81.0
+or downgrading prefixd to a release without this feature, withdraw every
+enforced diversion with the current controller. Wait until the query returns no
+rows, then verify router removal separately. This controller refuses to start
+while outstanding intent conflicts with its configuration. An older controller
+ignores the table: it neither renews nor withdraws diversions and does not
+exclude their victims from new mitigations. Speaker leases still expire within
+rustbgpd's 120-second window cap after the last renewal, but lease expiry is
+not router cleanup. Keep the rows for audit; do not delete them to bypass the
+drain.
 
 ## Mitigation origin mode
 
