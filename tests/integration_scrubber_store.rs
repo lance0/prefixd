@@ -454,10 +454,36 @@ async fn released_controller_lifecycle_uses_https_postgres_and_independent_guard
         !restarted.scrubber.profiles().await["b"].armed,
         "restart drains rather than replaying retained intent"
     );
+    // The restarted controller cannot know the windows its predecessor issued,
+    // so it keeps victim exclusion for rustbgpd's 120-second window cap.
+    let drain_started = std::time::Instant::now();
     for _ in 0..16 {
         tokio::time::sleep(Duration::from_secs(2)).await;
         restarted.scrubber.tick(&restarted).await.unwrap();
     }
+    assert_eq!(
+        database
+            .repo
+            .list_diversions(&restarted.settings.pop)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "a restart cannot finalize within this controller's own window lifetime"
+    );
+    while database
+        .repo
+        .list_diversions(&restarted.settings.pop)
+        .await
+        .unwrap()
+        .len()
+        == 1
+        && drain_started.elapsed() < Duration::from_secs(135)
+    {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        restarted.scrubber.tick(&restarted).await.unwrap();
+    }
+    assert!(drain_started.elapsed() >= Duration::from_secs(120));
     assert!(speaker.guarded_inventory().await.unwrap().is_empty());
     assert!(
         database
