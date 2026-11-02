@@ -2,11 +2,15 @@
 
 import { useRef, useState } from "react"
 import useSWR from "swr"
+import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { usePermissions } from "@/hooks/use-permissions"
-import { armScrubber, createDiversion, getDiversions, getScrubbers, previewDiversion, withdrawDiversion, type DiversionPreview, type DiversionRequest } from "@/lib/api"
+import { armScrubber, createDiversion, getDiversions, getScrubbers, previewDiversion, withdrawDiversion, type DiversionPreview, type DiversionRequest, type ScrubberDiversion } from "@/lib/api"
 
 export function ScrubbersContent() {
   const permissions = usePermissions()
@@ -26,6 +30,11 @@ export function ScrubbersContent() {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState("")
   const [error, setError] = useState("")
+  const [withdrawTarget, setWithdrawTarget] = useState<ScrubberDiversion | null>(null)
+  const [withdrawReason, setWithdrawReason] = useState("")
+  const [withdrawError, setWithdrawError] = useState("")
+  const withdrawTrigger = useRef<HTMLButtonElement | null>(null)
+  const heading = useRef<HTMLHeadingElement | null>(null)
   const editVersion = useRef(0)
   const invalidate = () => { editVersion.current += 1; setPreview(null); setRequest(null); setConfirmed(false); setMessage("") }
 
@@ -37,10 +46,25 @@ export function ScrubbersContent() {
     finally { setBusy(false) }
   }
 
+  async function confirmWithdraw() {
+    if (!withdrawTarget || busy) return
+    setBusy(true); setWithdrawError(""); setMessage("")
+
+    try {
+      await withdrawDiversion(withdrawTarget.id, withdrawReason)
+      setWithdrawTarget(null); setWithdrawReason("")
+      setMessage("Withdrawal requested. Victim exclusion remains until local absence is confirmed.")
+    } catch (error) { setWithdrawError(error instanceof Error ? error.message : "The withdrawal could not be confirmed.") }
+    finally {
+      setBusy(false)
+      await Promise.all([profiles.mutate(), diversions.mutate()])
+    }
+  }
+
   if (!permissions.isAdmin) return <p>Scrubber diversion requires an administrator.</p>
 
   return <div className="space-y-6 p-6">
-    <div><h1 className="text-2xl font-semibold">Scrubbers</h1><p className="text-sm text-muted-foreground">Manual traffic diversion through a configured scrubber. Withdrawal returns traffic to ordinary routing and may expose the victim to the attack again.</p></div>
+    <div><h1 ref={heading} tabIndex={-1} className="text-2xl font-semibold outline-none">Scrubbers</h1><p className="text-sm text-muted-foreground">Manual traffic diversion through a configured scrubber. Withdrawal returns traffic to ordinary routing and may expose the victim to the attack again.</p></div>
     {(error || profiles.error || diversions.error) && <p role="alert" className="text-destructive">{error || "Scrubber observations could not be refreshed. Current state is unknown."}</p>}
     {message && <p role="status">{message}</p>}
     {profiles.data?.enabled === false && <p>Scrubber diversion is disabled. Enable qualified profiles in the controller configuration.</p>}
@@ -61,7 +85,7 @@ export function ScrubbersContent() {
         event.preventDefault()
         action(async () => {
           const parsePorts = (value: string) => value.trim() ? value.split(",").map(port => Number(port.trim())) : []
-          const scope: DiversionRequest["scope"] = { dst_prefix: victim, protocol: protocol ? Number(protocol) : null, dst_ports: parsePorts(ports) }
+          const scope: DiversionRequest["scope"] = { dst_prefix: victim, protocol: protocol === "any" ? null : Number(protocol), dst_ports: parsePorts(ports) }
 
           if (source) scope.src_prefix = source
 
@@ -75,10 +99,10 @@ export function ScrubbersContent() {
           setRequest(next); setPreview(result); setConfirmed(false)
         })
       }}>
-        <label className="space-y-1 text-sm">Profile<select aria-label="Profile" className="h-9 w-full rounded-md border bg-background px-3" required value={profile} onChange={event => setProfile(event.target.value)}><option value="">Select profile</option>{profiles.data.configuration.map(config => <option key={config.id} value={config.id}>{config.id}</option>)}</select></label>
+        <label className="space-y-1 text-sm">Profile<Select required value={profile} onValueChange={value => { invalidate(); setProfile(value) }}><SelectTrigger aria-label="Profile" className="w-full"><SelectValue placeholder="Select profile" /></SelectTrigger><SelectContent>{profiles.data.configuration.map(config => <SelectItem key={config.id} value={config.id}>{config.id}</SelectItem>)}</SelectContent></Select></label>
         <label className="space-y-1 text-sm">Victim host CIDR<Input required value={victim} onChange={event => setVictim(event.target.value)} placeholder="203.0.113.10/32" /></label>
         <label className="space-y-1 text-sm">Source prefix (optional)<Input value={source} onChange={event => setSource(event.target.value)} /></label>
-        <label className="space-y-1 text-sm">Protocol<select aria-label="Protocol" className="h-9 w-full rounded-md border bg-background px-3" value={protocol} onChange={event => setProtocol(event.target.value)}><option value="6">TCP</option><option value="17">UDP</option><option value="">Any</option></select></label>
+        <label className="space-y-1 text-sm">Protocol<Select value={protocol} onValueChange={value => { invalidate(); setProtocol(value) }}><SelectTrigger aria-label="Protocol" className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="6">TCP</SelectItem><SelectItem value="17">UDP</SelectItem><SelectItem value="any">Any</SelectItem></SelectContent></Select></label>
         <label className="space-y-1 text-sm">Destination ports (optional)<Input value={ports} onChange={event => setPorts(event.target.value)} placeholder="80, 443" /></label>
         <label className="space-y-1 text-sm">UDP source ports (optional)<Input value={sourcePorts} onChange={event => setSourcePorts(event.target.value)} /></label>
         <label className="space-y-1 text-sm">Lifetime in seconds<Input required type="number" min="5" max="3600" value={ttl} onChange={event => setTtl(event.target.value)} /></label>
@@ -89,7 +113,7 @@ export function ScrubbersContent() {
         <p>{preview.candidate.dry_run ? "Simulation only" : "Proposed diversion"}: {preview.candidate.rule.nlri.dst_prefix} → {preview.candidate.rule.target} via {preview.candidate.profile.id}@{preview.candidate.profile.revision}</p>
         <pre className="overflow-x-auto whitespace-pre-wrap text-xs">{JSON.stringify(preview.candidate.rule.nlri, null, 2)}</pre>
         <p className="text-sm text-muted-foreground">{preview.evidence}</p>
-        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />I confirm this traffic match and scrubber target.</label>
+        <label className="flex items-center gap-2 text-sm"><Checkbox checked={confirmed} onCheckedChange={checked => setConfirmed(checked === true)} />I confirm this traffic match and scrubber target.</label>
         <Button disabled={busy || !confirmed || !request || !preview.candidate.dry_run && (Boolean(profiles.error) || !profiles.data.profiles[request?.profile ?? ""]?.armed || !profiles.data.profiles[request?.profile ?? ""]?.ready)} onClick={() => action(async () => {
           if (!request) return
           const result = await createDiversion({ ...request, confirmation: preview.confirmation })
@@ -103,11 +127,50 @@ export function ScrubbersContent() {
         <p>{row.rule.nlri.dst_prefix} → {row.rule.target} · {row.profile.id}@{row.profile.revision}</p>
         <p>{row.status === "active" ? "Local intent observed" : row.status} · Expires {row.expires_at}</p>
         {row.status === "withdrawing" && <p>Withdrawal stays pending until outstanding authorization has expired and local absence is confirmed.</p>}
-        {row.export_observation && <details><summary>Last peer export observation: {row.export_observation.observed_at}</summary><ul className="mt-2 space-y-1">{row.export_observation.peers.map(peer => <li key={peer.peer_address}>{peer.peer_address}: {peer.disposition}{peer.reason ? ` (${peer.reason})` : ""}</li>)}</ul></details>}
+        {row.export_observation && <details><summary>{row.export_observation.error ? `Historical peer export observation from ${row.export_observation.observed_at}; current export unknown (${row.export_observation.error})` : `Peer export observed since ${row.export_observation.observed_at}`}</summary><ul className="mt-2 space-y-1">{row.export_observation.peers.map(peer => <li key={peer.peer_address}>{peer.peer_address}: {peer.disposition}{peer.reason ? ` (${peer.reason})` : ""}</li>)}</ul></details>}
         {(row.withdrawal_reason || row.last_error) && <p>{row.withdrawal_reason || row.last_error}</p>}
-        <Button variant="outline" disabled={busy || row.status === "withdrawing"} onClick={() => action(async () => { await withdrawDiversion(row.id); setMessage("Withdrawal requested. Victim exclusion remains until local absence is confirmed.") })}>Withdraw {row.rule.nlri.dst_prefix}</Button>
+        <Button variant="outline" disabled={busy || row.status === "withdrawing"} onClick={event => { withdrawTrigger.current = event.currentTarget; setWithdrawError(""); setWithdrawReason(""); setWithdrawTarget(row) }}>Withdraw {row.rule.nlri.dst_prefix}</Button>
       </div>)}
       <p className="text-xs text-muted-foreground">Local observation and peer export do not prove router installation or scrubber forwarding.</p>
     </CardContent></Card>
+    <AlertDialog open={!!withdrawTarget} onOpenChange={open => { if (!open && !busy) { setWithdrawTarget(null); setWithdrawReason(""); setWithdrawError("") } }}>
+      <AlertDialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" onCloseAutoFocus={event => {
+        event.preventDefault()
+        const trigger = withdrawTrigger.current
+        const target = trigger?.isConnected && !trigger.disabled ? trigger : heading.current
+        target?.focus()
+      }}>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Withdraw diversion</AlertDialogTitle>
+          <AlertDialogDescription>
+            Request withdrawal of the diversion matching <span className="font-mono font-semibold">{withdrawTarget && describeMatch(withdrawTarget)}</span> to scrubber target <span className="font-mono font-semibold">{withdrawTarget?.rule.target}</span> via profile <span className="font-mono">{withdrawTarget?.profile.id}@{withdrawTarget?.profile.revision}</span>.
+            Withdrawal returns attack traffic to ordinary routing and may expose the victim to the attack again. No automatic discard, blackhole or fallback replaces it. The request and reason are recorded in the audit log.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className="py-4">
+          <Label htmlFor="diversion-withdraw-reason">Withdrawal reason (optional)</Label>
+          <Input id="diversion-withdraw-reason" className="mt-2" maxLength={1024} placeholder="e.g., Attack subsided" value={withdrawReason} disabled={busy} onChange={event => setWithdrawReason(event.target.value)} />
+          {withdrawError && <p role="alert" className="mt-2 text-sm text-destructive">{withdrawError}</p>}
+          <p role="status" className="mt-2 text-sm text-muted-foreground">{busy ? "Waiting for the controller to record the withdrawal..." : ""}</p>
+        </div>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+          <Button type="button" onClick={confirmWithdraw} disabled={busy} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">{busy ? "Withdrawing..." : "Withdraw"}</Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   </div>
+}
+
+function describeMatch({ rule: { nlri } }: ScrubberDiversion) {
+  const parts = [`dst ${nlri.dst_prefix}`]
+
+  if (nlri.src_prefix) parts.push(`src ${nlri.src_prefix}`)
+  parts.push(nlri.protocol === null ? "any protocol" : `protocol ${nlri.protocol}`)
+
+  if (nlri.dst_ports.length) parts.push(`dst ports ${nlri.dst_ports.join(", ")}`)
+
+  if (nlri.src_ports?.length) parts.push(`src ports ${nlri.src_ports.join(", ")}`)
+
+  return parts.join(" · ")
 }

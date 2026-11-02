@@ -43,7 +43,7 @@ export interface ScrubberDiversion {
   dry_run: boolean
   withdrawal_reason: string | null
   last_error: string | null
-  export_observation?: { observed_at: string; peers: { peer_address: string; disposition: string; reason: string }[] } | null
+  export_observation?: { observed_at: string; peers: { peer_address: string; disposition: string; reason: string }[]; error?: string | null } | null
 }
 
 export interface DiversionPreview {
@@ -58,7 +58,7 @@ export const getDiversions = () => fetchApi<ScrubberDiversion[]>("/v1/diversions
 export const previewDiversion = (request: DiversionRequest) => fetchApi<DiversionPreview>("/v1/diversions/preview", { method: "POST", body: JSON.stringify(request) })
 export const createDiversion = (request: DiversionRequest) => fetchApi<ScrubberDiversion>("/v1/diversions", { method: "POST", body: JSON.stringify(request) })
 export const armScrubber = (id: string, revision: string) => fetchApi<null>(`/v1/scrubbers/${encodeURIComponent(id)}/arm`, { method: "POST", body: JSON.stringify({ revision }) })
-export const withdrawDiversion = (id: string) => fetchApi<ScrubberDiversion>(`/v1/diversions/${encodeURIComponent(id)}/withdraw`, { method: "POST", body: "{}" })
+export const withdrawDiversion = (id: string, reason?: string) => fetchApi<ScrubberDiversion>(`/v1/diversions/${encodeURIComponent(id)}/withdraw`, { method: "POST", body: JSON.stringify(reason?.trim() ? { reason: reason.trim() } : {}) })
 
 // Cache for deduplicating in-flight requests (client-swr-dedup pattern)
 const requestCache = new Map<string, Promise<unknown>>()

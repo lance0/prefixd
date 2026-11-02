@@ -1,10 +1,26 @@
-import { act, fireEvent, screen, waitFor } from "@testing-library/react"
-import { describe, expect, it } from "vitest"
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { ScrubbersContent } from "@/components/dashboard/scrubbers-content"
-import type { DiversionPreview } from "@/lib/api"
-import { deferred, json, operatorResponse, renderApp, settle, signIn, useFakeController } from "./support/fake-controller"
+import type { DiversionPreview, ScrubberDiversion } from "@/lib/api"
+import type { OperatorRole } from "@/lib/auth"
+import { deferred, failure, json, operatorResponse, renderApp, settle, signIn, useFakeController } from "./support/fake-controller"
 
 const controller = useFakeController()
+
+// jsdom lacks the pointer-capture and scrolling APIs Radix Select calls while opening.
+const pointerApis = ["hasPointerCapture", "releasePointerCapture", "scrollIntoView"] as const
+const originals = new Map(pointerApis.map(name => [name, Object.getOwnPropertyDescriptor(Element.prototype, name)]))
+
+beforeEach(() => {
+  for (const name of pointerApis) Object.defineProperty(Element.prototype, name, { configurable: true, value: vi.fn(() => false) })
+})
+
+afterEach(() => {
+  for (const [name, descriptor] of originals) {
+    if (descriptor) Object.defineProperty(Element.prototype, name, descriptor)
+    else Reflect.deleteProperty(Element.prototype, name)
+  }
+})
 
 function result(dryRun = false): DiversionPreview {
   return {
@@ -18,22 +34,50 @@ function result(dryRun = false): DiversionPreview {
   }
 }
 
+const active = { ...result().candidate, status: "active" as const }
+
+function profiles(armed: boolean, ready: boolean) {
+  return { enabled: true, profiles: { a: { armed, ready, readiness: ready ? "ready" : "unknown", observed_at: null, latch_reason: null } }, configuration: [{ id: "a", revision: "v1", ipv4_target: "192.0.2.99", ipv6_target: null }] }
+}
+
+interface View { armed?: boolean; ready?: boolean; rows?: ScrubberDiversion[]; role?: OperatorRole; scrubbers?: () => Response }
+
+async function render({ armed = true, ready = true, rows = [active], role = "admin", scrubbers = () => json(profiles(armed, ready)) }: View = {}) {
+  signIn(controller, "credentials", operatorResponse(role))
+  controller.route("GET", "/v1/scrubbers", scrubbers)
+  controller.route("GET", "/v1/diversions", () => json(rows))
+  renderApp(<ScrubbersContent />, { url: "/scrubbers" })
+  await settle()
+}
+
+function mutations() {
+  return controller.requests.filter(request => request.method !== "GET")
+}
+
+async function openWithdraw() {
+  fireEvent.click(await screen.findByRole("button", { name: "Withdraw 203.0.113.20/32" }))
+
+  return screen.findByRole("alertdialog", { name: "Withdraw diversion" })
+}
+
 async function setup(dryRun = false) {
   signIn(controller, "credentials", operatorResponse("admin"))
-  controller.route("GET", "/v1/scrubbers", () => json({ enabled: true, profiles: { a: { armed: !dryRun, ready: !dryRun, readiness: dryRun ? "unknown" : "ready", observed_at: null, latch_reason: null } }, configuration: [{ id: "a", revision: "v1", ipv4_target: "192.0.2.99", ipv6_target: null }] }))
+  controller.route("GET", "/v1/scrubbers", () => json(profiles(!dryRun, !dryRun)))
   controller.route("GET", "/v1/diversions", () => json([]))
   controller.route("POST", "/v1/diversions/preview", () => json(result(dryRun)))
   controller.route("POST", "/v1/diversions", () => json({ ...result(dryRun).candidate, status: dryRun ? "simulated" : "active" }, 202))
   renderApp(<ScrubbersContent />, { url: "/scrubbers" })
   await screen.findByText("New diversion")
-  fireEvent.change(screen.getByRole("combobox", { name: "Profile" }), { target: { value: "a" } })
+  fireEvent.keyDown(screen.getByRole("combobox", { name: "Profile" }), { key: "Enter" })
+  fireEvent.click(await screen.findByRole("option", { name: "a" }))
   fireEvent.change(screen.getByLabelText("Victim host CIDR"), { target: { value: "203.0.113.20/32" } })
   fireEvent.change(screen.getByLabelText("Source prefix (optional)"), { target: { value: "198.51.100.0/24" } })
   fireEvent.change(screen.getByLabelText("Destination ports (optional)"), { target: { value: "443" } })
   fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Investigated attack" } })
 }
 
-describe("manual scrubber workflow", () => {
+// Real Radix form interactions on throttled runners; see CONTRIBUTING.md.
+describe("manual scrubber workflow", { timeout: 10_000 }, () => {
   it("requires explicit match/target confirmation and preserves the source selector", async () => {
     await setup()
     fireEvent.click(screen.getByRole("button", { name: "Preview diversion" }))
@@ -73,5 +117,120 @@ describe("manual scrubber workflow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Record simulation" }))
     await screen.findByText("Simulation recorded; no speaker mutation sent.")
     expect(controller.calls("POST", "/v1/scrubbers/a/arm")).toHaveLength(0)
+  })
+
+  it("previews the protocol chosen from the select and treats Any as no protocol", async () => {
+    await setup()
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Protocol" }), { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "Any" }))
+    fireEvent.click(screen.getByRole("button", { name: "Preview diversion" }))
+    await waitFor(() => expect(controller.calls("POST", "/v1/diversions/preview")).toHaveLength(1))
+    expect(JSON.parse(controller.calls("POST", "/v1/diversions/preview")[0].body ?? "{}").scope.protocol).toBeNull()
+  })
+
+  it("discards a shown preview when the protocol changes", async () => {
+    await setup()
+    fireEvent.click(screen.getByRole("button", { name: "Preview diversion" }))
+    await screen.findByRole("checkbox", { name: "I confirm this traffic match and scrubber target." })
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Protocol" }), { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "UDP" }))
+    await waitFor(() => expect(screen.queryByRole("checkbox", { name: "I confirm this traffic match and scrubber target." })).not.toBeInTheDocument())
+  })
+})
+
+describe("diversion withdrawal", () => {
+  it("opens a confirmation that sends nothing until confirmed, and Cancel sends nothing", async () => {
+    await render()
+    const dialog = await openWithdraw()
+
+    expect(dialog).toHaveTextContent("dst 203.0.113.20/32 · src 198.51.100.0/24 · protocol 6 · dst ports 443")
+    expect(dialog).toHaveTextContent("192.0.2.99")
+    expect(dialog).toHaveTextContent("a@v1")
+    expect(dialog).toHaveTextContent("may expose the victim to the attack again")
+    expect(dialog).toHaveTextContent("No automatic discard, blackhole or fallback")
+    expect(mutations()).toHaveLength(0)
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }))
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+    await settle()
+    expect(mutations()).toHaveLength(0)
+  })
+
+  it("sends the typed reason once on confirm", async () => {
+    await render()
+    controller.route("POST", "/v1/diversions/operation-1/withdraw", () => json({ ...active, status: "withdrawing" }, 202))
+    const dialog = await openWithdraw()
+
+    fireEvent.change(within(dialog).getByLabelText("Withdrawal reason (optional)"), { target: { value: "  Attack subsided  " } })
+    fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" }))
+    await screen.findByText("Withdrawal requested. Victim exclusion remains until local absence is confirmed.")
+    expect(mutations()).toHaveLength(1)
+    expect(controller.calls("POST", "/v1/diversions/operation-1/withdraw")).toHaveLength(1)
+    expect(JSON.parse(controller.calls("POST", "/v1/diversions/operation-1/withdraw")[0].body ?? "")).toEqual({ reason: "Attack subsided" })
+  })
+
+  it("sends an empty body when no reason is given", async () => {
+    await render()
+    controller.route("POST", "/v1/diversions/operation-1/withdraw", () => json({ ...active, status: "withdrawing" }, 202))
+    const dialog = await openWithdraw()
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" }))
+    await waitFor(() => expect(controller.calls("POST", "/v1/diversions/operation-1/withdraw")).toHaveLength(1))
+    expect(JSON.parse(controller.calls("POST", "/v1/diversions/operation-1/withdraw")[0].body ?? "")).toEqual({})
+  })
+
+  it.each([409, 500])("shows a failed withdrawal (%i) and keeps the diversion row", async status => {
+    await render()
+    controller.route("POST", "/v1/diversions/operation-1/withdraw", () => json({ error: "withdrawal not accepted" }, status))
+    const dialog = await openWithdraw()
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" }))
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("withdrawal not accepted")
+    expect(screen.getByText("203.0.113.20/32 → 192.0.2.99 · a@v1")).toBeInTheDocument()
+    expect(screen.queryByText("Withdrawal requested. Victim exclusion remains until local absence is confirmed.")).not.toBeInTheDocument()
+  })
+})
+
+describe("scrubber re-arm and access", () => {
+  it("re-arms a ready, unarmed profile with its configured revision", async () => {
+    await render({ armed: false, rows: [] })
+    controller.route("POST", "/v1/scrubbers/a/arm", () => json(null))
+    const rearm = await screen.findByRole("button", { name: "Re-arm a" })
+
+    await waitFor(() => expect(rearm).toBeEnabled())
+    fireEvent.click(rearm)
+    await screen.findByText("Profile a re-armed. New intent requires a separate confirmation.")
+    expect(controller.calls("POST", "/v1/scrubbers/a/arm")).toHaveLength(1)
+    expect(JSON.parse(controller.calls("POST", "/v1/scrubbers/a/arm")[0].body ?? "")).toEqual({ revision: "v1" })
+  })
+
+  it.each([{ armed: true, ready: true }, { armed: false, ready: false }])("disables re-arm when armed=$armed and ready=$ready", async ({ armed, ready }) => {
+    await render({ armed, ready, rows: [] })
+    const rearm = await screen.findByRole("button", { name: "Re-arm a" })
+
+    await settle()
+    expect(rearm).toBeDisabled()
+    fireEvent.click(rearm)
+    await settle()
+    expect(mutations()).toHaveLength(0)
+  })
+
+  it("shows non-administrators the requirement and sends no mutations", async () => {
+    await render({ role: "operator" })
+    await settle()
+    expect(screen.getByText("Scrubber diversion requires an administrator.")).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /Withdraw|Re-arm|Preview/ })).not.toBeInTheDocument()
+    expect(mutations()).toHaveLength(0)
+  })
+
+  it("reports unknown state when scrubber observations cannot be refreshed", async () => {
+    await render({ scrubbers: () => failure(500) })
+    expect(await screen.findByRole("alert")).toHaveTextContent("Scrubber observations could not be refreshed. Current state is unknown.")
+  })
+
+  it("labels export evidence from a failed read as historical", async () => {
+    const peers = [{ peer_address: "192.0.2.2", disposition: "committed", reason: "" }]
+
+    await render({ rows: [{ ...active, export_observation: { observed_at: "2030-01-01T00:00:00Z", peers, error: "scrubber export observation timed out" } }] })
+    expect(await screen.findByText(/Historical peer export observation from 2030-01-01T00:00:00Z; current export unknown/)).toBeInTheDocument()
   })
 })
