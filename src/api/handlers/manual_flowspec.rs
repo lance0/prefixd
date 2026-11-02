@@ -1067,15 +1067,12 @@ mod tests {
 
     #[tokio::test]
     async fn viewer_sessions_cannot_preview() {
-        use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+        use argon2::{Argon2, PasswordHasher};
         let mut settings = Fixture::settings();
         settings.http.auth.mode = AuthMode::Credentials;
         let fixture = Fixture::new(settings, FlowSpecMatchSupport::ALL);
         let hash = Argon2::default()
-            .hash_password(
-                b"preview-viewer-password",
-                &SaltString::encode_b64(b"preview-viewer").unwrap(),
-            )
+            .hash_password_with_salt(b"preview-viewer-password", b"preview-viewer")
             .unwrap()
             .to_string();
         fixture

@@ -344,7 +344,7 @@ async fn test_mitigation_withdrawal() {
 
 #[tokio::test]
 async fn test_authenticated_withdrawal_audit_success_and_failure_boundaries() {
-    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    use argon2::{Argon2, PasswordHasher};
     use prefixd::{
         AppState,
         auth::create_auth_layer,
@@ -450,9 +450,9 @@ async fn test_authenticated_withdrawal_audit_success_and_failure_boundaries() {
 
     let context = TestContext::new().await;
     let started_at = chrono::Utc::now();
-    let salt = SaltString::encode_b64(b"postgres-audit-test").unwrap();
+    let salt = b"postgres-audit-test";
     let hash = Argon2::default()
-        .hash_password(b"audit-test-password", &salt)
+        .hash_password_with_salt(b"audit-test-password", salt)
         .unwrap()
         .to_string();
     context
@@ -6745,7 +6745,7 @@ async fn checked_timestamp_cli_rows_fail_with_database_errors_after_valid_contro
 
 #[tokio::test]
 async fn test_authenticated_timeseries_duration_overflow_matches_postgres_bounds() {
-    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    use argon2::{Argon2, PasswordHasher};
     use chrono::{DateTime, Duration, Utc};
     use prefixd::{
         AppState,
@@ -6782,9 +6782,9 @@ async fn test_authenticated_timeseries_duration_overflow_matches_postgres_bounds
     }
 
     let ctx = TestContext::new().await;
-    let salt = SaltString::encode_b64(b"timeseries-duration-test").unwrap();
+    let salt = b"timeseries-duration-test";
     let hash = Argon2::default()
-        .hash_password(b"timeseries-test-password", &salt)
+        .hash_password_with_salt(b"timeseries-test-password", salt)
         .unwrap()
         .to_string();
     ctx.repo
