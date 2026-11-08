@@ -60,7 +60,9 @@ new request types.
 
 Manual admission selects a scope; configured scrubber profiles select their
 scope. An operator-configured `default_scope` on the speaker target selects
-scope for automatic FlowSpec mitigation. Omission retains global automation.
+scope for automatic FlowSpec mitigation. Accept a single name or an explicit
+`{ipv4: TRANSIT, ipv6: TRANSIT6}` mapping; each selected scope must match the
+victim family, with no global fallback. Omission retains global automation.
 Detector payloads cannot select or override scope, and an unknown default is
 a configuration error. Automatic admission uses the same immutable snapshot
 and identity as manual admission; default changes affect new admissions only.
