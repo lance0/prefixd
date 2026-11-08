@@ -292,6 +292,7 @@ describe.each(["list", "detail"] as const)("source-only %s confirmation", { time
     expect(within(dialog).getByText("TRANSIT · VPNv4 · RD 44407:40 · RT 44407:777")).toBeVisible()
     expect(within(dialog).getByText("198.51.100.0/24")).toBeVisible()
     expect(dialog).toHaveTextContent("(discard).")
+
     if (view === "detail") {
       expect(screen.queryByRole("button", { name: "Report" })).not.toBeInTheDocument()
     }
