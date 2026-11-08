@@ -647,15 +647,27 @@ fn encode_scope_targets(
 }
 
 fn encode(rule: &FlowSpecRule) -> Result<pb::AddFlowSpecRequest> {
+    super::announcer::validate_rule_scope(rule)?;
     let (afi_safi, components) = encode_match(&rule.nlri)?;
     let (route_targets, extended_communities) =
         encode_scope_targets(rule.nlri.scope.as_ref(), &rule.route_targets)?;
-    if rule.actions.len() != 1 {
-        return Err(invalid("exactly one traffic rate action is required"));
-    }
-    let rate = rule.actions[0]
-        .traffic_rate_bytes_per_second()
+    let [action] = rule.actions.as_slice() else {
+        return Err(invalid("exactly one FlowSpec action is required"));
+    };
+    action
+        .validate()
         .map_err(|error| invalid(&error.to_string()))?;
+    let action = if action.action_type == crate::domain::ActionType::Mark {
+        pb::flow_spec_action::Action::TrafficMarking(pb::FlowSpecTrafficMarking {
+            dscp: u32::from(action.dscp.ok_or_else(|| invalid("mark requires dscp"))?),
+        })
+    } else {
+        pb::flow_spec_action::Action::TrafficRate(pb::FlowSpecTrafficRate {
+            rate: action
+                .traffic_rate_bytes_per_second()
+                .map_err(|error| invalid(&error.to_string()))?,
+        })
+    };
     Ok(pb::AddFlowSpecRequest {
         afi_safi,
         components,
@@ -667,9 +679,7 @@ fn encode(rule: &FlowSpecRule) -> Result<pb::AddFlowSpecRequest> {
         route_targets,
         extended_communities,
         actions: vec![pb::FlowSpecAction {
-            action: Some(pb::flow_spec_action::Action::TrafficRate(
-                pb::FlowSpecTrafficRate { rate },
-            )),
+            action: Some(action),
         }],
         ..Default::default()
     })
@@ -806,15 +816,32 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
     {
         return Err(invalid("missing destination or unsupported actions"));
     }
-    let Some(pb::flow_spec_action::Action::TrafficRate(rate)) = &route.actions[0].action else {
-        return Err(invalid("unsupported action"));
+    let (action, expected_ec) = match &route.actions[0].action {
+        Some(pb::flow_spec_action::Action::TrafficRate(rate)) => {
+            let bps = f64::from(rate.rate) * 8.0;
+            if !bps.is_finite() || bps < 0.0 || bps >= u64::MAX as f64 || bps.fract() != 0.0 {
+                return Err(invalid("invalid traffic rate"));
+            }
+            let action = if bps == 0.0 {
+                FlowSpecAction::discard()
+            } else {
+                FlowSpecAction::police(bps as u64)
+            };
+            (action, (0x8006_u64 << 48) | u64::from(rate.rate.to_bits()))
+        }
+        Some(pb::flow_spec_action::Action::TrafficMarking(mark)) => {
+            let dscp = u8::try_from(mark.dscp)
+                .ok()
+                .filter(|dscp| *dscp <= 63)
+                .ok_or_else(|| invalid("DSCP must be between 0 and 63"))?;
+            let action = FlowSpecAction::mark(dscp);
+            let community = action
+                .extended_community()
+                .map_err(|error| invalid(&error.to_string()))?;
+            (action, community)
+        }
+        _ => return Err(invalid("unsupported action")),
     };
-    let bps = rate.rate as f64 * 8.0;
-    if !bps.is_finite() || bps < 0.0 || bps >= u64::MAX as f64 || bps.fract() != 0.0 {
-        return Err(invalid("invalid traffic rate"));
-    }
-    // rustbgpd exposes each traffic-rate both as a typed action and a raw EC.
-    let expected_ec = (0x8006_u64 << 48) | u64::from(rate.rate.to_bits());
     let mut expected_communities = vec![expected_ec];
     let mut targets = route
         .route_targets
@@ -826,11 +853,6 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
     if route.extended_communities != expected_communities {
         return Err(invalid("unsupported or inconsistent extended communities"));
     }
-    let action = if bps == 0.0 {
-        FlowSpecAction::discard()
-    } else {
-        FlowSpecAction::police(bps as u64)
-    };
     let rule = FlowSpecRule::new(nlri, action)
         .with_owner(route.injection_owner)
         .with_route_targets(route.route_targets);
@@ -1797,6 +1819,7 @@ mod tests {
                 vec![],
                 vec![FlowSpecAction::discard(), FlowSpecAction::police(8)],
                 vec![FlowSpecAction {
+                    dscp: None,
                     action_type: ActionType::Police,
                     rate_bps: None,
                 }],
@@ -1804,6 +1827,7 @@ mod tests {
                 vec![FlowSpecAction::police(16_777_217)],
                 vec![FlowSpecAction::police(u64::MAX)],
                 vec![FlowSpecAction {
+                    dscp: None,
                     action_type: ActionType::Discard,
                     rate_bps: Some(8),
                 }],
@@ -2419,6 +2443,72 @@ mod tests {
                 let mut bad = route(&rule);
                 mutate(&mut bad.components);
                 assert!(decode(bad, route(&rule).afi_safi).is_err());
+            }
+        }
+    }
+    #[test]
+    fn scoped_marking_codec_preserves_exact_dscp_and_rejects_lossy_readback() {
+        for (family, prefix, source) in [
+            (VpnFlowSpecFamily::Ipv4, "192.0.2.1/32", "198.51.100.0/24"),
+            (VpnFlowSpecFamily::Ipv6, "2001:db8::1/128", "2001:db9::/64"),
+        ] {
+            for dscp in [0, 63] {
+                let rule = FlowSpecRule::new(
+                    FlowSpecNlri {
+                        scope: Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap()),
+                        dst_prefix: prefix.into(),
+                        ..Default::default()
+                    },
+                    FlowSpecAction::mark(dscp),
+                )
+                .with_route_targets(vec!["44407:777".into()]);
+                let encoded = encode(&rule).unwrap();
+                assert!(
+                    matches!(encoded.actions[0].action,Some(pb::flow_spec_action::Action::TrafficMarking(ref mark)) if mark.dscp==u32::from(dscp))
+                );
+                assert!(
+                    encoded.extended_communities.is_empty(),
+                    "typed actions/RTs must not include raw twins"
+                );
+                let mut components = encoded.components.clone();
+                read_back(&mut components);
+                let raw = pb::FlowSpecRouteEntry {
+                    afi_safi: encoded.afi_safi,
+                    components,
+                    actions: encoded.actions.clone(),
+                    rd: encoded.rd.clone(),
+                    route_targets: encoded.route_targets.clone(),
+                    peer_address: "0.0.0.0".into(),
+                    extended_communities: vec![
+                        (0x8009_u64 << 48) | u64::from(dscp),
+                        crate::domain::route_target_bytes("44407:777").unwrap(),
+                    ],
+                    ..Default::default()
+                };
+                let restored = decode(raw.clone(), family.afi_safi()).unwrap();
+                assert_eq!(restored.actions[0].dscp, Some(dscp));
+                assert_eq!(
+                    restored.actions[0].action_type,
+                    crate::domain::ActionType::Mark
+                );
+                let replay = encode(&restored).unwrap();
+                assert_eq!(replay, encoded);
+                let mut bad = raw.clone();
+                bad.extended_communities[0] |= 0x100;
+                assert!(decode(bad, family.afi_safi()).is_err());
+                let mut bad = raw;
+                bad.actions[0].action = Some(pb::flow_spec_action::Action::TrafficMarking(
+                    pb::FlowSpecTrafficMarking { dscp: 64 },
+                ));
+                assert!(decode(bad, family.afi_safi()).is_err());
+                let mut global = rule.clone();
+                global.nlri.scope = None;
+                global.route_targets.clear();
+                assert!(encode(&global).is_err());
+                let mut source_only = rule;
+                source_only.nlri.dst_prefix.clear();
+                source_only.nlri.src_prefix = Some(source.into());
+                assert!(encode(&source_only).is_err());
             }
         }
     }

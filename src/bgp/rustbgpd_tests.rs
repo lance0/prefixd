@@ -508,6 +508,7 @@ async fn authenticated_controller_rpc_contract() {
             vec![],
             vec![FlowSpecAction::discard(), FlowSpecAction::police(8)],
             vec![FlowSpecAction {
+                dscp: None,
                 action_type: crate::domain::ActionType::Police,
                 rate_bps: None,
             }],
@@ -515,6 +516,7 @@ async fn authenticated_controller_rpc_contract() {
             vec![FlowSpecAction::police(16_777_217)],
             vec![FlowSpecAction::police(u64::MAX)],
             vec![FlowSpecAction {
+                dscp: None,
                 action_type: crate::domain::ActionType::Discard,
                 rate_bps: Some(8),
             }],

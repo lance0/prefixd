@@ -249,10 +249,13 @@ struct ManualMitigationArgs {
     protocol: String,
     #[arg(long, value_delimiter = ',')]
     dst_ports: Vec<u16>,
-    #[arg(long, default_value = "discard", value_parser = ["discard", "police"])]
+    #[arg(long, default_value = "discard", value_parser = ["discard", "police", "mark"])]
     action: String,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     rate_bps: Option<u64>,
+    /// Exact DSCP for mark; only a VPN destination rule accepts marking
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=63))]
+    dscp: Option<u8>,
     /// Explicit requested lifetime, subject to current controller policy
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     ttl_seconds: u32,
@@ -268,6 +271,12 @@ impl ManualMitigationArgs {
     fn request(&self, confirmed: bool) -> Result<(&'static str, serde_json::Value), String> {
         if (self.action == "police") != self.rate_bps.is_some() {
             return Err("--rate-bps is required for police and must be omitted for discard".into());
+        }
+        if (self.action == "mark") != self.dscp.is_some() {
+            return Err("--dscp is required for mark and refused for other actions".into());
+        }
+        if self.action == "mark" && (self.vpn_scope().is_none() || self.source_only) {
+            return Err("mark requires a VPN destination rule".into());
         }
         if self.source_only {
             let scope = self
@@ -288,11 +297,14 @@ impl ManualMitigationArgs {
             ));
         }
         let victim = self.victim_ip.as_deref().ok_or("destination is required")?;
-        let rule = serde_json::json!({
+        let mut rule = serde_json::json!({
             "victim_ip": victim, "protocol": self.protocol, "src_prefix": self.src_prefix,
             "dst_ports": self.dst_ports, "action": self.action, "rate_bps": self.rate_bps,
             "ttl_seconds": self.ttl_seconds, "reason": self.reason,
         });
+        if let Some(dscp) = self.dscp {
+            rule["dscp"] = serde_json::json!(dscp);
+        }
         Ok(match self.vpn_scope() {
             Some(scope) => (
                 "/v1/vpn/mitigations",
@@ -396,6 +408,8 @@ struct MitigationResponse {
     vector: String,
     action_type: String,
     rate_bps: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dscp: Option<u8>,
     #[serde(default)]
     protocol: Option<u8>,
     #[serde(default)]
@@ -977,6 +991,12 @@ fn require_manual_preview(
             preview["reason"].as_str().unwrap_or("unavailable")
         ));
     }
+    if rule.action == "mark"
+        && (preview["candidate"]["action"]["action_type"] != "mark"
+            || preview["candidate"]["action"]["dscp"] != serde_json::json!(rule.dscp))
+    {
+        return Err("controller did not acknowledge the requested DSCP marking action".into());
+    }
     if let Some(name) = rule.vpn_scope() {
         let scope: prefixd::domain::VpnScopeSnapshot =
             serde_json::from_value(preview["candidate"]["vpn_scope"].clone())
@@ -1100,7 +1120,17 @@ async fn cmd_mitigations(
                             m.status,
                             m.destination_label(),
                             m.vector,
-                            m.action_type,
+                            if m.action_type == "mark" {
+                                format!(
+                                    "mark DSCP {}",
+                                    m.dscp.map_or_else(
+                                        || "unavailable".into(),
+                                        |dscp| dscp.to_string()
+                                    )
+                                )
+                            } else {
+                                m.action_type.clone()
+                            },
                             expires,
                             m.match_summary()
                         );
@@ -1136,6 +1166,9 @@ async fn cmd_mitigations(
                                 .map_or(&[], |scope| scope.route_targets.as_slice())
                         )
                     );
+                    if let Some(dscp) = m.dscp {
+                        println!("DSCP:           {dscp}");
+                    }
                     if let Some(rate) = m.rate_bps {
                         println!("Rate (bps):     {}", rate);
                     }
@@ -1340,9 +1373,10 @@ async fn cmd_speaker_routes(client: &Client, format: OutputFormat) -> Result<(),
                 let actions = rule
                     .actions
                     .iter()
-                    .map(|action| match action.rate_bps {
-                        Some(rate) => format!("{} {rate} bps", action.action_type),
-                        None => action.action_type.to_string(),
+                    .map(|action| match (action.dscp, action.rate_bps) {
+                        (Some(dscp), _) => format!("mark DSCP {dscp}"),
+                        (_, Some(rate)) => format!("{} {rate} bps", action.action_type),
+                        _ => action.action_type.to_string(),
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -2273,5 +2307,56 @@ mod tests {
                 if status == "observed" { Some(0) } else { None }
             );
         }
+    }
+    #[test]
+    fn manual_marking_requires_exact_dscp_and_scoped_preview_acknowledgement() {
+        for dscp in ["0", "63"] {
+            let mark = manual_args(&[
+                "203.0.113.10",
+                "--scope",
+                "TRANSIT",
+                "--action",
+                "mark",
+                "--dscp",
+                dscp,
+                "--ttl-seconds",
+                "30",
+                "--reason",
+                "mark test",
+            ]);
+            let (path, body) = mark.request(false).unwrap();
+            assert_eq!(path, "/v1/vpn/mitigations");
+            assert_eq!(body["rule"]["dscp"], dscp.parse::<u8>().unwrap());
+            let mut acknowledged = vpn_preview("ipv4");
+            acknowledged["candidate"]["action"] =
+                serde_json::json!({"action_type":"mark","dscp":dscp.parse::<u8>().unwrap()});
+            require_manual_preview(&mark, &acknowledged).unwrap();
+            acknowledged["candidate"]["action"]["dscp"] = serde_json::json!(64);
+            assert!(require_manual_preview(&mark, &acknowledged).is_err());
+        }
+        let global = manual_args(&[
+            "203.0.113.10",
+            "--action",
+            "mark",
+            "--dscp",
+            "0",
+            "--ttl-seconds",
+            "30",
+            "--reason",
+            "refuse global",
+        ]);
+        assert!(global.request(false).is_err());
+        let missing = manual_args(&[
+            "203.0.113.10",
+            "--scope",
+            "TRANSIT",
+            "--action",
+            "mark",
+            "--ttl-seconds",
+            "30",
+            "--reason",
+            "missing dscp",
+        ]);
+        assert!(missing.request(false).is_err());
     }
 }

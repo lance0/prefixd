@@ -213,6 +213,11 @@ impl FlowSpecWriter for MockAnnouncer {
 
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
         self.validate_flowspec(rule)?;
+        for action in &rule.actions {
+            action
+                .validate()
+                .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+        }
         let mut rules = self.rules.write().await;
         let hash = rule.nlri_hash();
         if !rule.owner.is_empty()
@@ -242,6 +247,11 @@ impl FlowSpecWriter for MockAnnouncer {
         _lease_seconds: u32,
     ) -> Result<LeaseGeneration> {
         self.validate_flowspec(rule)?;
+        for action in &rule.actions {
+            action
+                .validate()
+                .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+        }
         let mut rules = self.rules.write().await;
         let hash = rule.nlri_hash();
         if rule.owner.is_empty()
@@ -724,6 +734,37 @@ impl BlackholeSpeaker for FaultyBlackholes {
 mod tests {
     use super::*;
     use crate::domain::{FlowSpecAction, FlowSpecNlri};
+
+    #[tokio::test]
+    async fn invalid_mark_payload_refuses_add_but_keeps_exact_key_cleanup() {
+        let speaker = MockAnnouncer::new();
+        let global = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "192.0.2.1/32".into(),
+                ..Default::default()
+            },
+            FlowSpecAction::discard(),
+        );
+        speaker.announce(&global).await.unwrap();
+        let mut scoped = global.clone();
+        scoped.nlri.scope = Some(
+            crate::domain::VpnFlowSpecIdentity::new(
+                crate::domain::VpnFlowSpecFamily::Ipv4,
+                "44407:40",
+            )
+            .unwrap(),
+        );
+        scoped.route_targets = vec!["44407:777".into()];
+        scoped.actions = vec![FlowSpecAction::mark(46)];
+        speaker.announce(&scoped).await.unwrap();
+        scoped.actions[0].dscp = None;
+        assert!(speaker.announce(&scoped).await.is_err());
+        assert_eq!(speaker.list_active().await.unwrap().len(), 2);
+        speaker.withdraw(&scoped).await.unwrap();
+        let retained = speaker.list_active().await.unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].nlri_hash(), global.nlri_hash());
+    }
 
     #[tokio::test]
     async fn vpn_keys_and_attributes_are_isolated_and_unsupported_scope_cannot_mutate() {

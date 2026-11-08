@@ -1221,6 +1221,7 @@ mod tests {
         let announcer = make_announcer();
 
         let actions = vec![FlowSpecAction {
+            dscp: None,
             action_type: ActionType::Discard,
             rate_bps: None,
         }];
@@ -1238,6 +1239,7 @@ mod tests {
         let announcer = make_announcer();
 
         let actions = vec![FlowSpecAction {
+            dscp: None,
             action_type: ActionType::Police,
             rate_bps: Some(1_000_000_000), // 1 Gbps
         }];
@@ -1284,6 +1286,7 @@ mod tests {
                 vec![],
                 vec![FlowSpecAction::discard(), FlowSpecAction::police(8)],
                 vec![FlowSpecAction {
+                    dscp: None,
                     action_type: ActionType::Police,
                     rate_bps: None,
                 }],
@@ -1291,6 +1294,7 @@ mod tests {
                 vec![FlowSpecAction::police(16_777_217)],
                 vec![FlowSpecAction::police(u64::MAX)],
                 vec![FlowSpecAction {
+                    dscp: None,
                     action_type: ActionType::Discard,
                     rate_bps: Some(8),
                 }],
@@ -1317,6 +1321,7 @@ mod tests {
                 ..Default::default()
             },
             FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Discard,
                 rate_bps: None,
             },
@@ -1346,6 +1351,7 @@ mod tests {
                 ..Default::default()
             },
             FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Police,
                 rate_bps: Some(500_000_000),
             },
@@ -1390,6 +1396,7 @@ mod tests {
                 ..Default::default()
             },
             FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Discard,
                 rate_bps: None,
             },
@@ -1426,6 +1433,7 @@ mod tests {
                 ..Default::default()
             },
             FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Police,
                 rate_bps: Some(100_000_000), // 100 Mbps
             },
@@ -1456,6 +1464,7 @@ mod tests {
                 ..Default::default()
             },
             FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Police,
                 rate_bps: Some(500_000_000),
             },
@@ -1483,6 +1492,7 @@ mod tests {
                 ..Default::default()
             },
             FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Discard,
                 rate_bps: None,
             },
@@ -1599,10 +1609,12 @@ mod proptests {
     fn flowspec_action() -> impl Strategy<Value = FlowSpecAction> {
         prop_oneof![
             Just(FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Discard,
                 rate_bps: None,
             }),
             (1u64..=0xff_ffff, 0u32..=40).prop_map(|(significand, shift)| FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Police,
                 rate_bps: Some(significand << shift),
             }),

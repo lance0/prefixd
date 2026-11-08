@@ -36,6 +36,7 @@ export interface FlowSpecFields {
   packet_length?: PacketLengthRange | null
   action_type: string
   rate_bps: number | null
+  dscp?: number | null
 }
 
 /** Readable match for operators, for example "UDP src 123, 389" or "UDP non-first fragments". */
@@ -89,6 +90,8 @@ export function formatFlowSpecRule(fields: FlowSpecFields): string {
 
   if (fields.action_type === "discard") {
     parts.push("then discard")
+  } else if (fields.action_type === "mark") {
+    parts.push("then mark DSCP", fields.dscp === undefined || fields.dscp === null ? "unavailable" : String(fields.dscp))
   } else {
     parts.push("then rate-limit", ruleRate(fields.rate_bps))
   }

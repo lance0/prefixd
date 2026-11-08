@@ -25,10 +25,11 @@ pub enum MitigationRoute {
 impl MitigationRoute {
     pub fn new(action_type: ActionType, criteria: &MatchCriteria, params: &ActionParams) -> Self {
         match action_type {
-            ActionType::Police | ActionType::Discard => Self::FlowSpec(
+            ActionType::Police | ActionType::Discard | ActionType::Mark => Self::FlowSpec(
                 FlowSpecRule::new(
                     FlowSpecNlri::from(criteria),
                     FlowSpecAction {
+                        dscp: params.dscp,
                         action_type,
                         rate_bps: params.rate_bps,
                     },

@@ -6,10 +6,10 @@ path requires rustbgpd 0.82.0 and a successful read-only probe of family 13
 (IPv4) or 14 (IPv6). Global FlowSpec keeps the 0.81.0 minimum. GoBGP refuses
 VPN requests before an RPC.
 
-The current implementation covers discard, police and guarded target-IP or
-VRF route-target scrubber diversion. Marking remains the next action slice.
+The current implementation covers discard, police, manual destination DSCP
+marking and guarded target-IP or VRF route-target scrubber diversion.
 [The scrubber procedure](scrubber-diversion.md) distinguishes scope RTs from
-the configured redirect action RT and describes readiness requirements.
+its configured redirect action RT and describes readiness requirements.
 IPv6 prefixes use offset zero. Nonzero IPv6 prefix offsets are outside the
 CIDR model and fail the pinned GoBGP 4.11.0 interoperability check.
 
@@ -97,6 +97,28 @@ prefixdctl mitigations create 203.0.113.10 --scope TRANSIT \
 Use an IPv6 scope and destination for VPNv6. Withdrawal and lifetime extension
 select the mitigation ID and retain the original wire identity. Local intent,
 RPC acceptance, peer export and receiver enforcement are separate evidence.
+
+## Mark DSCP on a VPN destination rule
+
+Select action `mark` with an integer `dscp` from 0 to 63. DSCP zero is valid;
+`rate_bps` must be absent. Marking uses the same destination ownership,
+safelist, TTL and quota checks as discard/police and snapshots its exact DSCP
+for repair, restart recovery and immutable withdrawal.
+
+```bash
+prefixdctl mitigations preview 203.0.113.10 --scope TRANSIT \
+  --protocol udp --action mark --dscp 46 --ttl-seconds 30 --reason 'Mark confirmed attack traffic'
+prefixdctl mitigations create 203.0.113.10 --scope TRANSIT \
+  --protocol udp --action mark --dscp 46 --ttl-seconds 30 --reason 'Mark confirmed attack traffic'
+```
+
+The VPN JSON request uses `"action": "mark", "dscp": 46` inside `rule`.
+CLI/dashboard creation requires a preview acknowledging that exact marking
+action and DSCP. Source-only, global and automatic/playbook marking remain
+refused. A detector cannot extend an existing manual marking rule. Marking
+rules expire or withdraw by ID; lifetime extension is unavailable in this
+slice. A packet marking community proves encoding, not that a receiver applies
+the DSCP. Qualify receiver installation and packet marking on the pilot.
 
 ## Guarded scrubber scope
 

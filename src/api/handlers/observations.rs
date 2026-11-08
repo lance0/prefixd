@@ -705,6 +705,13 @@ pub async fn generate_incident_report(
                     && let Some(rate) = m.action_params.rate_bps
                 {
                     format!("police {rate} bps")
+                } else if m.action_type == crate::domain::ActionType::Mark {
+                    format!(
+                        "mark DSCP {}",
+                        m.action_params
+                            .dscp
+                            .map_or_else(|| "unavailable".into(), |dscp| dscp.to_string())
+                    )
                 } else {
                     m.action_type.to_string()
                 },

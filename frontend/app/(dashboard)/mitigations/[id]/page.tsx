@@ -223,7 +223,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
             <>
               <StatusBadge status={mitigation.status} />
               <OriginTag origin={mitigation.origin_mode} showUnknown />
-              <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} />
+              <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} dscp={mitigation.dscp} />
               <Tag>{mitigation.vector.replace(/_/g, " ")}</Tag>
               <span className="text-muted-foreground">POP <span className="font-mono text-foreground">{mitigation.pop}</span></span>
               <span className="text-muted-foreground tabular-nums">
@@ -321,7 +321,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                     </Field>
                   ) : null}
                   <Field label="Action applied">
-                    <span className="font-medium">{mitigation.action_type === "discard" ? "discard" : `rate-limit ${formatBps(mitigation.rate_bps)}`}</span>
+                    <span className="font-medium">{mitigation.action_type === "discard" ? "discard" : mitigation.action_type === "mark" ? `mark DSCP ${mitigation.dscp ?? "unavailable"}` : `rate-limit ${formatBps(mitigation.rate_bps)}`}</span>
                   </Field>
                 </FieldList>
               </CardContent>
@@ -338,7 +338,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                     {siblings.map((sibling) => (
                       <li key={sibling.mitigation_id} className="flex flex-wrap items-center gap-2 text-sm">
                         <StatusBadge status={sibling.status} />
-                        <ActionBadge actionType={sibling.action_type} rateBps={sibling.rate_bps} />
+                        <ActionBadge actionType={sibling.action_type} rateBps={sibling.rate_bps} dscp={sibling.dscp} />
                         <Link href={`/mitigations/${sibling.mitigation_id}`} className="min-w-0 break-words rounded-sm hover:underline">
                           {describeMatch(sibling)}
                         </Link>

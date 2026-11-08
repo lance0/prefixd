@@ -9,13 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Manual VPN destination rules can mark DSCP 0–63 through rustbgpd, with exact
+  action read-back, immutable withdrawal, repair and restart recovery. API and
+  CSV expose the exact DSCP; CLI and dashboard require an exact marking preview. Global, source-only and automatic
+  marking and marking lifetime extension remain refused; router packet marking
+  requires separate platform qualification.
 - Opt-in VPNv4 and VPNv6 FlowSpec scopes on rustbgpd 0.82.0, with immutable
   RD/RT identity through admission, withdrawal and recovery. Manual and automatic
   family defaults preserve global behavior when omitted; GoBGP refuses VPN.
 - Manual source-only VPN discard/police with explicit whole-VRF authorization,
   source protection, short TTL and scoped quotas. CLI/dashboard previews show
   destination any and require confirmation. Guarded target-IP diversion can use
-  a configured VPN scope. Marking remains pending.
+  a configured VPN scope.
 - Profile-configured guarded redirect-to-VRF for VPNv4 and VPNv6. The controller
   preserves the action route target separately from scope RTs, retains existing
   readiness/re-arm checks and freezes the action through withdrawal retries.

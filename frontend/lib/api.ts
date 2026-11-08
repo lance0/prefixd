@@ -266,8 +266,9 @@ export interface Mitigation {
   pop: string
   victim_ip: string
   vector: string
-  action_type: "police" | "discard" | "blackhole"
+  action_type: "police" | "discard" | "mark" | "blackhole"
   rate_bps: number | null
+  dscp?: number | null
   dst_prefix: string
   vpn_scope?: VpnScopeSnapshot | null
   /** Source CIDR; null or absent means no source constraint. */
@@ -511,7 +512,7 @@ export interface LocalFlowSpecRule {
     scope?: VpnScopeIdentity | null
   }
   route_targets?: string[]
-  actions: { action_type: "police" | "discard"; rate_bps?: number }[]
+  actions: { action_type: "police" | "discard" | "mark"; rate_bps?: number; dscp?: number }[]
   /** Injection identity only; absent or empty does not establish controller ownership. */
   owner?: string
 }
@@ -632,8 +633,9 @@ export interface CreateFlowSpecRequest {
   src_prefix?: string
   /** udp, tcp, icmp, icmpv6 or any. Source ports, fragment and packet length need udp. */
   protocol: string
-  action: "discard" | "police"
+  action: "discard" | "police" | "mark"
   rate_bps?: number
+  dscp?: number
   ttl_seconds: number
   reason: string
   dst_ports?: number[]
@@ -664,7 +666,7 @@ export interface FlowSpecAdmissionPreview {
       packet_length?: PacketLengthRange | null
       scope?: VpnScopeIdentity | null
     }
-    action: { action_type: "discard" | "police"; rate_bps?: number | null }
+    action: { action_type: "discard" | "police" | "mark"; rate_bps?: number | null; dscp?: number | null }
     ttl_seconds: number
     expires_at_cap: string | null
   } | null
@@ -728,18 +730,20 @@ function admissionCandidate(value: JsonValue | undefined): FlowSpecAdmissionPrev
 
   // A future match component must not be silently dropped from an operator preview.
   if (Object.keys(scope).some((key) => !scopeKeys.includes(key)) ||
-    Object.keys(action).some((key) => key !== "action_type" && key !== "rate_bps") ||
+    Object.keys(action).some((key) => key !== "action_type" && key !== "rate_bps" && key !== "dscp") ||
     !isText(scope.dst_prefix) || (!scope.dst_prefix && !sourceOnly) ||
     !(scope.src_prefix === undefined || scope.src_prefix === null || isText(scope.src_prefix)) ||
     !(scope.protocol === null || (isWholeNumber(scope.protocol) && scope.protocol >= 0 && scope.protocol <= 255)) ||
     !isPortList(scope.dst_ports) || !(scope.src_ports === undefined || isPortList(scope.src_ports)) ||
     !(scope.fragment === undefined || scope.fragment === null || scope.fragment === "non_first") ||
-    (action.action_type !== "discard" && action.action_type !== "police") ||
+    (action.action_type !== "discard" && action.action_type !== "police" && action.action_type !== "mark") ||
     !(action.rate_bps === undefined || action.rate_bps === null || (isWholeNumber(action.rate_bps) && action.rate_bps > 0))) return undefined
 
   const destination = parseDestination(scope.dst_prefix)
   const source = isText(scope.src_prefix) ? parseDestination(scope.src_prefix) : null
   const identity = vpnIdentity(scope.scope)
+
+  if (action.action_type === "mark" ? !identity || sourceOnly || !isWholeNumber(action.dscp) || action.dscp < 0 || action.dscp > 63 || action.rate_bps != null : action.dscp != null) return undefined
 
   if ((value.destination !== undefined && !sourceOnly) ||
     (value.vpn_scope !== undefined && !snapshot) || (scope.scope !== undefined && scope.scope !== null && !identity) ||
@@ -775,6 +779,8 @@ function admissionCandidate(value: JsonValue | undefined): FlowSpecAdmissionPrev
     },
     action: { action_type: action.action_type, rate_bps: action.rate_bps },
   }
+
+  if (isWholeNumber(action.dscp)) candidate.action.dscp = action.dscp
 
   if (snapshot) candidate.vpn_scope = snapshot
 
@@ -870,7 +876,10 @@ function requireVpnAcknowledgement(preview: FlowSpecAdmissionPreview, scope: str
 }
 
 export async function createVpnFlowSpec(scope: string, rule: CreateFlowSpecRequest): Promise<Mitigation> {
-  requireVpnAcknowledgement(await previewVpnFlowSpec(scope, rule), scope, false)
+  const preview = await previewVpnFlowSpec(scope, rule)
+  requireVpnAcknowledgement(preview, scope, false)
+
+  if (rule.action === "mark" && (preview.candidate?.action.action_type !== "mark" || preview.candidate.action.dscp !== rule.dscp)) throw new Error("The controller did not acknowledge the requested DSCP marking action.")
 
   return fetchApi<Mitigation>("/v1/vpn/mitigations", { method: "POST", body: JSON.stringify({ scope, rule }) })
 }

@@ -33,7 +33,8 @@ export interface RuleForm {
   confirmDestinationAny?: boolean
   victimIp: string
   protocol: string
-  action: "discard" | "police"
+  action: "discard" | "police" | "mark"
+  dscp?: string
   rateBps: string
   dstPorts: string
   srcPrefix: string
@@ -162,6 +163,12 @@ export function validateRule(form: RuleForm, guardrails: RuleGuardrails): RuleEr
     errors.protocol = "Protocol does not match the destination's address family."
   }
 
+  if (form.action === "mark") {
+    if (!form.routingScope || form.routingScope === "global" || form.sourceOnly) errors.action = "Marking requires a VPN destination rule."
+
+    if (!/^\d{1,2}$/.test(form.dscp ?? "") || Number(form.dscp) > 63) errors.dscp = "Enter an exact DSCP value from 0 to 63."
+  }
+
   const rate = Number(form.rateBps)
 
   if (form.action === "police" && !(Number.isInteger(rate) && rate > 0)) {
@@ -240,6 +247,8 @@ export function toRequest(form: RuleForm): CreateFlowSpecRequest {
   const srcPorts = parsePorts(form.srcPorts) ?? []
 
   if (form.action === "police") request.rate_bps = Number(form.rateBps)
+
+  if (form.action === "mark") request.dscp = Number(form.dscp)
 
   if (dstPorts.length > 0) request.dst_ports = dstPorts
 
@@ -329,6 +338,8 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
   const selectedSnapshot = scopePolicy ? { name: scopeName, identity: { family: scopePolicy.family, rd: scopePolicy.rd }, route_targets: scopePolicy.route_targets } : undefined
 
   const sourceRequest = (): SourceOnlyVpnRequest => {
+    if (form.action === "mark") throw new Error("Source-only marking is unavailable.")
+
     const request: SourceOnlyVpnRequest = {
       scope: scopeName, src_prefix: form.srcPrefix.trim(), protocol: form.protocol, action: form.action,
       ttl_seconds: Number(form.ttl), reason: form.reason,
@@ -352,6 +363,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
     packet_length: request.packet_length,
     action_type: form.action,
     rate_bps: form.action === "police" ? Number(form.rateBps) : null,
+    dscp: form.action === "mark" ? Number(form.dscp) : undefined,
   }) : null
 
   const shown = (field: keyof RuleForm) => (submitted || touched.has(field) ? errors[field] : undefined)
@@ -460,7 +472,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
               Create FlowSpec rule
             </DialogTitle>
             <DialogDescription className="text-pretty text-xs">
-              Define the traffic to discard or police. The controller checks ownership, safelists
+              Define the traffic match and action. The controller checks ownership, safelists
               and deployment guardrails before saving intent.
             </DialogDescription>
           </DialogHeader>
@@ -469,7 +481,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
             <Label htmlFor="fs-scope">Routing scope</Label>
             <Select value={scopeName} onValueChange={(value) => {
               invalidateAdmission()
-              setForm((prev) => ({ ...prev, routingScope: value, sourceOnly: false, confirmDestinationAny: false }))
+              setForm((prev) => ({ ...prev, routingScope: value, action: value === "global" && prev.action === "mark" ? "discard" : prev.action, sourceOnly: false, confirmDestinationAny: false }))
             }}>
               <SelectTrigger id="fs-scope" className="h-9"><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -482,7 +494,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
             {scopePolicy ? <div className="flex items-center gap-2">
               <Checkbox id="fs-source-only" checked={form.sourceOnly === true} disabled={!scopePolicy.allow_source_only} onCheckedChange={(checked) => {
                 invalidateAdmission()
-                setForm((prev) => ({ ...prev, sourceOnly: checked === true, confirmDestinationAny: false, victimIp: "", dstPorts: "", srcPorts: "", nonFirstFragments: false, lengthMin: "", lengthMax: "", ttl: String(scopePolicy.max_source_only_ttl_seconds) }))
+                setForm((prev) => ({ ...prev, action: checked === true && prev.action === "mark" ? "discard" : prev.action, sourceOnly: checked === true, confirmDestinationAny: false, victimIp: "", dstPorts: "", srcPorts: "", nonFirstFragments: false, lengthMin: "", lengthMax: "", ttl: String(scopePolicy.max_source_only_ttl_seconds) }))
               }} />
               <Label htmlFor="fs-source-only">Source-only rule (destination: any)</Label>
             </div> : null}
@@ -550,16 +562,21 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="fs-action">Action</Label>
-              <Select value={form.action} onValueChange={(value) => { if (value === "discard" || value === "police") update("action", value) }}>
+              <Select value={form.action} onValueChange={(value) => { if (value === "discard" || value === "police" || value === "mark") update("action", value) }}>
                 <SelectTrigger id="fs-action" className="h-9">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="discard">discard</SelectItem>
                   <SelectItem value="police">police</SelectItem>
+                  {scopePolicy && !form.sourceOnly && <SelectItem value="mark">mark DSCP</SelectItem>}
                 </SelectContent>
               </Select>
             </div>
+            {form.action === "mark" && <div className="space-y-1.5">
+              <Label htmlFor="fs-dscp">DSCP (0–63)</Label>
+              <Input id="fs-dscp" inputMode="numeric" value={form.dscp ?? ""} onChange={(event) => update("dscp", event.target.value)} aria-invalid={Boolean(shown("dscp"))} aria-describedby={describedBy("dscp", "fs-dscp")} className="h-9 font-mono tabular-nums" />
+            </div>}
             {form.action === "police" && (
               <div className="space-y-1.5">
                 <Label htmlFor="fs-rate">Rate (bps)</Label>
@@ -577,6 +594,8 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
           </div>
           {fieldError("protocol", "fs-protocol")}
           {fieldError("rateBps", "fs-rate")}
+          {fieldError("action", "fs-action")}
+          {fieldError("dscp", "fs-dscp")}
 
           {!form.sourceOnly ? <>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -710,7 +729,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
                   {admission.reason && <p className="break-words">{admission.reason}</p>}
                   {admission.candidate && (
                     <>
-                      <p className="break-words font-mono">{formatFlowSpecRule({ ...admission.candidate.scope, vpn_scope: admission.candidate.vpn_scope, action_type: admission.candidate.action.action_type, rate_bps: admission.candidate.action.rate_bps ?? null })}</p>
+                      <p className="break-words font-mono">{formatFlowSpecRule({ ...admission.candidate.scope, vpn_scope: admission.candidate.vpn_scope, action_type: admission.candidate.action.action_type, dscp: admission.candidate.action.dscp, rate_bps: admission.candidate.action.rate_bps ?? null })}</p>
                       {admission.candidate.action.action_type === "police" && <p className="font-mono">Police rate: {admission.candidate.action.rate_bps} bps</p>}
                       <p className="text-muted-foreground">
                         {admission.candidate.customer_id ? `Customer ${admission.candidate.customer_id}` : "No customer attribution"}

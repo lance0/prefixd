@@ -60,6 +60,7 @@ impl SourceOnlyVpnRequest {
             action: self.action,
             confirm_victim_ip: None,
             rate_bps: self.rate_bps,
+            dscp: None,
             ttl_seconds: self.ttl_seconds,
             expires_at_cap: None,
         }

@@ -3454,3 +3454,18 @@ The inner request is the existing diversion request. The outer scope must be a
 configured VPN scope and match the selected profile; nested identity mismatch
 fails before mutation. Existing admin authorization, confirmation and guarded
 lifecycle rules apply. Legacy endpoints remain for global clients.
+
+### VPN DSCP marking
+
+For `POST /v1/vpn/mitigations[/preview]`, a destination-based `rule` may use
+`"action": "mark"` and a required integer `"dscp": 0` through `63`.
+`rate_bps` is refused for marking; `dscp` is refused for other actions. DSCP
+appears in the preview action and mitigation response and is persisted with
+immutable intent. A mark requires an explicit named VPN scope and a destination
+component. Source-only and global marking remain refused. Marking rules use
+ordinary TTL expiry and withdrawal; the lifetime-extension endpoint refuses
+marking before mutation. Automatic policy cannot create or extend marking.
+
+A scoped preview establishes controller admission and speaker encoding
+capability, not receiver installation or packet marking. Use pilot receipts
+for platform/release-specific enforcement claims.

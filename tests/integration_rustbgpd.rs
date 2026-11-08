@@ -807,6 +807,7 @@ async fn live_rustbgpd_restart_recovers_with_the_same_client_and_desired_state()
         let rule = FlowSpecRule::new(
             (&mitigation.match_criteria).into(),
             FlowSpecAction {
+                dscp: None,
                 action_type,
                 rate_bps,
             },
@@ -2016,5 +2017,103 @@ async fn live_vpn_release_matrix_never_mutates_identical_global_keys() {
     cleanup.withdraw(&global4).await.unwrap();
     cleanup.withdraw(&global6).await.unwrap();
     assert!(cleanup.list_active().await.unwrap().is_empty());
+    fixture.container.rm().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
+async fn live_marking_release_matrix_preserves_dscp_in_both_vpn_families() {
+    use prefixd::{
+        domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity},
+        error::PrefixdError,
+    };
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    let version = speaker.daemon_health().await.unwrap().version.unwrap();
+    assert!(matches!(version.as_str(), "0.81.0" | "0.82.0"));
+    for (family, prefix) in [
+        (VpnFlowSpecFamily::Ipv4, "192.0.2.231/32"),
+        (VpnFlowSpecFamily::Ipv6, "2001:db8::231/128"),
+    ] {
+        for dscp in [0, 63] {
+            let marked = FlowSpecRule::new(
+                FlowSpecNlri {
+                    scope: Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap()),
+                    dst_prefix: prefix.into(),
+                    ..Default::default()
+                },
+                FlowSpecAction::mark(dscp),
+            )
+            .with_route_targets(vec!["44407:777".into()]);
+            if version == "0.81.0" {
+                for leased in [false, true] {
+                    let error = if leased {
+                        speaker
+                            .announce_leased(&marked.clone().with_owner("prefixd.test.mark"), 60)
+                            .await
+                            .unwrap_err()
+                    } else {
+                        speaker.announce(&marked).await.unwrap_err()
+                    };
+                    assert!(
+                        matches!(error,PrefixdError::UnsupportedFlowSpecScope{family:actual,..} if actual==family.afi_safi()),
+                        "{error}"
+                    );
+                    for global in [3, 4] {
+                        assert!(
+                            fixture
+                                .received_flow_spec(global, "0.0.0.0")
+                                .await
+                                .received_routes
+                                .is_empty()
+                        );
+                    }
+                }
+            } else {
+                for leased in [false, true] {
+                    let desired = if leased {
+                        marked.clone().with_owner("prefixd.test.mark")
+                    } else {
+                        marked.clone()
+                    };
+                    if leased {
+                        speaker.announce_leased(&desired, 60).await.unwrap();
+                    } else {
+                        speaker.announce(&desired).await.unwrap();
+                    }
+                    let rows = speaker.list_active().await.unwrap();
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(
+                        rows[0].actions[0].action_type,
+                        prefixd::domain::ActionType::Mark
+                    );
+                    assert_eq!(rows[0].actions[0].dscp, Some(dscp));
+                    assert_eq!(rows[0].owner, desired.owner);
+                    let raw = fixture
+                        .received_flow_spec(family.afi_safi(), "0.0.0.0")
+                        .await;
+                    let route = raw.received_routes[0].route.as_ref().unwrap();
+                    assert!(
+                        matches!(route.actions[0].action,Some(prefixd::bgp::rustbgpd_pb::flow_spec_action::Action::TrafficMarking(ref mark)) if mark.dscp==u32::from(dscp))
+                    );
+                    assert_eq!(
+                        route.extended_communities,
+                        vec![
+                            (0x8009u64 << 48) | u64::from(dscp),
+                            prefixd::domain::route_target_bytes("44407:777").unwrap()
+                        ]
+                    );
+                    // Replay uses the typed marking once, without its raw twin.
+                    if leased {
+                        speaker.announce_leased(&rows[0], 60).await.unwrap();
+                    } else {
+                        speaker.announce(&rows[0]).await.unwrap();
+                    }
+                    speaker.withdraw(&desired).await.unwrap();
+                    assert!(speaker.list_active().await.unwrap().is_empty());
+                }
+            }
+        }
+    }
     fixture.container.rm().await.unwrap();
 }

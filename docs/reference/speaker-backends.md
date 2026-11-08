@@ -912,3 +912,13 @@ target-IP and VRF redirect diversion. [The operator procedure](../how-to/vpn-flo
 source-only safeguards and the remaining marking qualification. Receiver action
 installation and forwarding remain separate qualification for both redirects.
 These controller paths do not establish router installation or enforcement.
+
+### VPN marking boundary
+
+rustbgpd VPN destination rules support one typed traffic-marking action with
+DSCP 0–63. Read-back must account for the matching raw `0x8009` extended
+community and all scope RTs exactly. Marking plus rate-limit or additional
+unmodelled attributes fails observation rather than becoming a partial rule.
+GoBGP refuses VPN scope before an RPC. Global and source-only marking remain
+refused. These are controller/encoding semantics; receiver packet marking
+needs a dated platform receipt.

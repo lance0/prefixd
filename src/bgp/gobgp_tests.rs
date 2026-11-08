@@ -625,6 +625,7 @@ async fn invalid_actions_never_announce_but_can_withdraw_the_exact_match() {
             vec![],
             vec![FlowSpecAction::discard(), FlowSpecAction::police(8)],
             vec![FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Police,
                 rate_bps: None,
             }],
@@ -632,6 +633,7 @@ async fn invalid_actions_never_announce_but_can_withdraw_the_exact_match() {
             vec![FlowSpecAction::police(16_777_217)],
             vec![FlowSpecAction::police(u64::MAX)],
             vec![FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Discard,
                 rate_bps: Some(8),
             }],
