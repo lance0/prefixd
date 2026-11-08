@@ -1672,9 +1672,9 @@ impl ExportObserver for RustBgpdAnnouncer {
 
     async fn flowspec_exports(&self, nlri: &FlowSpecNlri) -> Result<Option<Vec<PeerExport>>> {
         let (afi_safi, components) = encode_match(nlri)?;
-        // Export observation is a read, not a mutation. Register the family for
-        // inventory, but do not spend a full-family capability read per rule.
-        self.register_scope(nlri.scope.as_ref())?;
+        // Older daemons must refuse a scoped export read explicitly; the
+        // disposition RPC alone can ignore scope fields.
+        self.validate_scope(nlri.scope.as_ref()).await?;
         let rd = nlri
             .scope
             .as_ref()
