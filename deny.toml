@@ -2,8 +2,13 @@
 # cargo deny --workspace --all-features --locked check advisories bans licenses sources
 
 [advisories]
-# No exceptions for cargo-deny's selected graph. The separate full-lock
-# cargo-audit gate retains the explicit RSA/optional SQLx MySQL exception.
+# RUSTSEC-2026-0440: astral-tokio-tar is unmaintained. It is a dev-only
+# transitive dependency of testcontainers, which requires ^0.6; the maintained
+# 0.7.1 release has an incompatible requirement. Revisit when testcontainers
+# accepts 0.7 or replaces the crate.
+# The separate full-lock cargo-audit gate retains the explicit RSA/optional
+# SQLx MySQL exception.
+ignore = ["RUSTSEC-2026-0440"]
 
 [licenses]
 # prefixd is MIT. SPDX OR expressions may select an allowed alternative;

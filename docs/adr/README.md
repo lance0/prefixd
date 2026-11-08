@@ -39,5 +39,6 @@ Format follows [Michael Nygard's template](https://cognitect.com/blog/2011/11/15
 | [029](029-upstream-blackholing.md) | Provider-scoped upstream blackholing | Accepted (design only) | 2026-10-24 |
 | [030](030-scrubber-diversion.md) | Guarded diversion to an external scrubber | Accepted | 2026-11-02 |
 | [031](031-source-prefix-matches.md) | Manual source-prefix FlowSpec matches | Proposed | 2026-10-22 |
+| [032](032-vpn-flowspec-scope.md) | Scoped VPN FlowSpec origination | Accepted (implementation in progress) | 2026-11-08 |
 
 ADRs are numbered sequentially as written. Retroactive ADRs (009-013) were documented on 2026-02-18 but dated to when the decision was originally made.
