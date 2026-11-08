@@ -18,6 +18,7 @@ fn profile() -> ScrubberProfile {
         scope: "global".into(),
         ipv4_target: Some("192.0.2.99".parse().unwrap()),
         ipv6_target: None,
+        redirect_route_target: None,
         destinations: vec!["203.0.113.0/24".parse().unwrap()],
         router_peers: vec!["192.0.2.2".into()],
         policy_binding: "fixture-policy".into(),
@@ -46,7 +47,8 @@ fn diversion(pop: &str, host: u8) -> Diversion {
                 dst_ports: vec![443],
                 ..Default::default()
             },
-            target: "192.0.2.99".parse().unwrap(),
+            target: Some("192.0.2.99".parse().unwrap()),
+            redirect_route_target: None,
             owner: "prefixd.scrubber.fixture".into(),
             revision: 1,
         },
@@ -128,7 +130,7 @@ async fn postgres_serializes_diversion_conflicts_and_preserves_immutable_snapsho
         .unwrap();
     assert!(row.rule.revision > 0);
     let mut changed = row.clone();
-    changed.rule.target = "192.0.2.98".parse().unwrap();
+    changed.rule.target = Some("192.0.2.98".parse().unwrap());
     assert!(
         context
             .repo

@@ -1704,6 +1704,34 @@ mod tests {
     }
 
     #[test]
+    fn vrf_diversion_confirmation_keeps_action_target_for_both_families() {
+        for family in ["ipv4", "ipv6"] {
+            let (body, mut preview) = diversion_cli_fixture(family);
+            let request = vpn_diversion_request(&body).unwrap().unwrap();
+            let mut candidate: prefixd::scrubber::Diversion =
+                serde_json::from_value(preview["candidate"].clone()).unwrap();
+            candidate.rule.target = None;
+            candidate.rule.redirect_route_target = Some("44407:888".into());
+            candidate.profile.redirect_route_target = Some("44407:888".into());
+            preview["confirmation"] =
+                prefixd::scrubber::ScrubberController::confirmation(&candidate)
+                    .unwrap()
+                    .into();
+            preview["candidate"] = serde_json::to_value(candidate).unwrap();
+            assert!(
+                require_vpn_diversion_preview(&request, &preview)
+                    .unwrap()
+                    .contains("VRF RT 44407:888")
+            );
+            preview["candidate"]["rule"]["redirect_route_target"] = "44407:889".into();
+            assert!(
+                require_vpn_diversion_preview(&request, &preview).is_err(),
+                "changed VRF target requires new confirmation"
+            );
+        }
+    }
+
+    #[test]
     fn diversion_envelopes_and_scope_acknowledgements_fail_closed() {
         for family in ["ipv4", "ipv6"] {
             let (body, preview) = diversion_cli_fixture(family);

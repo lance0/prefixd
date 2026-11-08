@@ -298,7 +298,7 @@ async fn live_rustbgpd_v081_inventory_refuses_unrepresented_attributes_without_m
         Err(prefixd::error::PrefixdError::Internal(message)) => {
             assert_eq!(
                 message,
-                "rustbgpd: guarded rule requires a target-IP action"
+                "rustbgpd: guarded rule requires a target-IP or VRF redirect action"
             )
         }
         other => panic!("expected a malformed guarded refusal, got {other:?}"),

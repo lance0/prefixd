@@ -6,8 +6,10 @@ path requires rustbgpd 0.82.0 and a successful read-only probe of family 13
 (IPv4) or 14 (IPv6). Global FlowSpec keeps the 0.81.0 minimum. GoBGP refuses
 VPN requests before an RPC.
 
-The current implementation covers discard, police and guarded target-IP
-scrubber diversion. Marking and redirect-to-VRF remain the next action slice.
+The current implementation covers discard, police and guarded target-IP or
+VRF route-target scrubber diversion. Marking remains the next action slice.
+[The scrubber procedure](scrubber-diversion.md) distinguishes scope RTs from
+the configured redirect action RT and describes readiness requirements.
 IPv6 prefixes use offset zero. Nonzero IPv6 prefix offsets are outside the
 CIDR model and fail the pinned GoBGP 4.11.0 interoperability check.
 

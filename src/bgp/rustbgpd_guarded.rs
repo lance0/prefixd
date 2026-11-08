@@ -39,6 +39,16 @@ fn encode_guarded(rule: &GuardedRule) -> Result<pb::AddFlowSpecRequest> {
     let (afi_safi, components) = encode_match(&rule.nlri)?;
     let (route_targets, extended_communities) =
         encode_scope_targets(rule.nlri.scope.as_ref(), &rule.route_targets)?;
+    let action = match (rule.target, &rule.redirect_route_target) {
+        (Some(target), None) => pb::flow_spec_action::Action::RedirectIp(pb::FlowSpecRedirectIp {
+            address: target.to_string(),
+            copy: false,
+        }),
+        (None, Some(target)) => pb::flow_spec_action::Action::Redirect(pb::FlowSpecRedirect {
+            route_target: target.clone(),
+        }),
+        _ => return Err(invalid("invalid guarded redirect target")),
+    };
     Ok(pb::AddFlowSpecRequest {
         afi_safi,
         components,
@@ -51,12 +61,7 @@ fn encode_guarded(rule: &GuardedRule) -> Result<pb::AddFlowSpecRequest> {
         route_targets,
         extended_communities,
         actions: vec![pb::FlowSpecAction {
-            action: Some(pb::flow_spec_action::Action::RedirectIp(
-                pb::FlowSpecRedirectIp {
-                    address: rule.target.to_string(),
-                    copy: false,
-                },
-            )),
+            action: Some(action),
         }],
         ..Default::default()
     })
@@ -212,37 +217,59 @@ pub(super) fn decode_guarded(
         .take()
         .ok_or_else(|| invalid("missing guarded lease time"))?;
     let [action] = route.actions.as_slice() else {
-        return Err(invalid("guarded rule requires one target-IP action"));
+        return Err(invalid("guarded rule requires one redirect action"));
     };
-    let Some(pb::flow_spec_action::Action::RedirectIp(target)) = &action.action else {
-        return Err(invalid("guarded rule requires a target-IP action"));
-    };
-    let address: std::net::IpAddr = target
-        .address
-        .parse()
-        .map_err(|_| invalid("invalid redirect target"))?;
-    if target.copy {
-        return Err(invalid("copy action is unsupported"));
-    }
-    let (mut extended, ipv6_extended) = match address {
-        std::net::IpAddr::V4(ip) => (
-            vec![u64::from_be_bytes([
-                1,
-                12,
-                ip.octets()[0],
-                ip.octets()[1],
-                ip.octets()[2],
-                ip.octets()[3],
-                0,
-                0,
-            ])],
-            vec![],
-        ),
-        std::net::IpAddr::V6(ip) => {
-            let mut raw = vec![0, 12];
-            raw.extend(ip.octets());
-            raw.extend([0, 0]);
-            (vec![], vec![raw])
+    let (target, redirect_route_target, mut extended, ipv6_extended) = match &action.action {
+        Some(pb::flow_spec_action::Action::RedirectIp(target)) => {
+            let address: std::net::IpAddr = target
+                .address
+                .parse()
+                .map_err(|_| invalid("invalid redirect target"))?;
+            if target.copy {
+                return Err(invalid("copy action is unsupported"));
+            }
+            let (extended, ipv6_extended) = match address {
+                std::net::IpAddr::V4(ip) => (
+                    vec![u64::from_be_bytes([
+                        1,
+                        12,
+                        ip.octets()[0],
+                        ip.octets()[1],
+                        ip.octets()[2],
+                        ip.octets()[3],
+                        0,
+                        0,
+                    ])],
+                    vec![],
+                ),
+                std::net::IpAddr::V6(ip) => {
+                    let mut raw = vec![0, 12];
+                    raw.extend(ip.octets());
+                    raw.extend([0, 0]);
+                    (vec![], vec![raw])
+                }
+            };
+            (Some(address), None, extended, ipv6_extended)
+        }
+        Some(pb::flow_spec_action::Action::Redirect(target)) => {
+            let canonical = crate::domain::canonical_route_target(&target.route_target)
+                .map_err(|error| invalid(&error.to_string()))?;
+            let mut bytes = crate::domain::route_target_bytes(&canonical)
+                .map_err(|error| invalid(&error.to_string()))?
+                .to_be_bytes();
+            bytes[0] |= 0x80;
+            bytes[1] = 8;
+            (
+                None,
+                Some(canonical),
+                vec![u64::from_be_bytes(bytes)],
+                vec![],
+            )
+        }
+        _ => {
+            return Err(invalid(
+                "guarded rule requires a target-IP or VRF redirect action",
+            ));
         }
     };
     let scope_targets = scope_rt_bytes(&route)?;
@@ -266,7 +293,8 @@ pub(super) fn decode_guarded(
     let rule = GuardedRule {
         nlri: decoded.nlri,
         route_targets: decoded.route_targets,
-        target: address,
+        target,
+        redirect_route_target,
         owner,
         revision,
     };

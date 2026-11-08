@@ -77,7 +77,7 @@ export function ScrubbersContent() {
 
       return <Card key={config.id}><CardHeader><CardTitle>{config.id} <span className="text-sm font-normal text-muted-foreground">{config.revision}</span></CardTitle></CardHeader>
         <CardContent className="space-y-2 text-sm">
-          <p>Targets: {config.ipv4_target ?? "IPv4 unavailable"} · {config.ipv6_target ?? "IPv6 unavailable"}</p>
+          {config.redirect_route_target ? <p>Redirect to VRF RT {config.redirect_route_target}</p> : <p>Targets: {config.ipv4_target ?? "IPv4 unavailable"} · {config.ipv6_target ?? "IPv6 unavailable"}</p>}
           {config.scope && config.scope !== "global" ? <p>Routing scope: {config.scope}</p> : null}
           <p>{state?.ready ? "Fresh readiness" : state?.readiness === "not_ready" ? "Not ready" : "Readiness unknown"} · {state?.armed ? "Armed" : "Unarmed"}</p>
           {state?.latch_reason && <p>{state.latch_reason}</p>}
@@ -116,7 +116,7 @@ export function ScrubbersContent() {
         <Button type="submit" disabled={busy}>Preview diversion</Button>
       </form>
       {preview && <div className="mt-4 space-y-3 rounded-md border p-4">
-        <p>{preview.candidate.dry_run ? "Simulation only" : "Proposed diversion"}: {preview.candidate.rule.nlri.dst_prefix} → {preview.candidate.rule.target} via {preview.candidate.profile.id}@{preview.candidate.profile.revision}{preview.candidate.rule.nlri.scope ? ` · VPN${preview.candidate.rule.nlri.scope.family === "ipv4" ? "v4" : "v6"} RD ${preview.candidate.rule.nlri.scope.rd} · RT ${(preview.candidate.rule.route_targets ?? []).join(", ")}` : ""}</p>
+        <p>{preview.candidate.dry_run ? "Simulation only" : "Proposed diversion"}: {preview.candidate.rule.nlri.dst_prefix} → {describeTarget(preview.candidate.rule)} via {preview.candidate.profile.id}@{preview.candidate.profile.revision}{preview.candidate.rule.nlri.scope ? ` · VPN${preview.candidate.rule.nlri.scope.family === "ipv4" ? "v4" : "v6"} RD ${preview.candidate.rule.nlri.scope.rd} · RT ${(preview.candidate.rule.route_targets ?? []).join(", ")}` : ""}</p>
         {requestScope !== "global" ? <p className="text-sm">Confirmed routing scope: {requestScope}</p> : null}
         <pre className="overflow-x-auto whitespace-pre-wrap text-xs">{JSON.stringify(preview.candidate.rule.nlri, null, 2)}</pre>
         <p className="text-sm text-muted-foreground">{preview.evidence}</p>
@@ -131,7 +131,7 @@ export function ScrubbersContent() {
     <Card><CardHeader><CardTitle>Outstanding diversions</CardTitle></CardHeader><CardContent className="space-y-3">
       {diversions.data?.length === 0 && <p className="text-sm text-muted-foreground">No outstanding diversion intent.</p>}
       {diversions.data?.map(row => <div key={row.id} className="space-y-2 rounded-md border p-3 text-sm">
-        <p>{row.rule.nlri.dst_prefix} → {row.rule.target} · {row.profile.id}@{row.profile.revision}{row.rule.nlri.scope ? ` · VPN${row.rule.nlri.scope.family === "ipv4" ? "v4" : "v6"} RD ${row.rule.nlri.scope.rd} · RT ${(row.rule.route_targets ?? []).join(", ")}` : ""}</p>
+        <p>{row.rule.nlri.dst_prefix} → {describeTarget(row.rule)} · {row.profile.id}@{row.profile.revision}{row.rule.nlri.scope ? ` · VPN${row.rule.nlri.scope.family === "ipv4" ? "v4" : "v6"} RD ${row.rule.nlri.scope.rd} · RT ${(row.rule.route_targets ?? []).join(", ")}` : ""}</p>
         <p>{row.status === "active" ? "Local intent observed" : row.status} · Expires {row.expires_at}</p>
         {row.status === "withdrawing" && <p>Withdrawal stays pending until outstanding authorization has expired and local absence is confirmed.</p>}
         {row.export_observation && <details><summary>{row.export_observation.error ? `Historical peer export observation from ${row.export_observation.observed_at}; current export unknown (${row.export_observation.error})` : `Peer export observed since ${row.export_observation.observed_at}`}</summary><ul className="mt-2 space-y-1">{row.export_observation.peers.map(peer => <li key={peer.peer_address}>{peer.peer_address}: {peer.disposition}{peer.reason ? ` (${peer.reason})` : ""}</li>)}</ul></details>}
@@ -150,7 +150,7 @@ export function ScrubbersContent() {
         <AlertDialogHeader>
           <AlertDialogTitle>Withdraw diversion</AlertDialogTitle>
           <AlertDialogDescription>
-            Request withdrawal of the diversion matching <span className="font-mono font-semibold">{withdrawTarget && describeMatch(withdrawTarget)}</span> to scrubber target <span className="font-mono font-semibold">{withdrawTarget?.rule.target}</span> via profile <span className="font-mono">{withdrawTarget?.profile.id}@{withdrawTarget?.profile.revision}</span>.
+            Request withdrawal of the diversion matching <span className="font-mono font-semibold">{withdrawTarget && describeMatch(withdrawTarget)}</span> to scrubber target <span className="font-mono font-semibold">{withdrawTarget && describeTarget(withdrawTarget.rule)}</span> via profile <span className="font-mono">{withdrawTarget?.profile.id}@{withdrawTarget?.profile.revision}</span>.
             Withdrawal returns attack traffic to ordinary routing and may expose the victim to the attack again. No automatic discard, blackhole or fallback replaces it. The request and reason are recorded in the audit log.
           </AlertDialogDescription>
         </AlertDialogHeader>
@@ -182,4 +182,8 @@ function describeMatch({ rule: { nlri } }: ScrubberDiversion) {
   if (nlri.src_ports?.length) parts.push(`src ports ${nlri.src_ports.join(", ")}`)
 
   return parts.join(" · ")
+}
+
+function describeTarget(rule: ScrubberDiversion["rule"]) {
+  return rule.redirect_route_target ? `VRF RT ${rule.redirect_route_target}` : rule.target ?? "Target unavailable"
 }
