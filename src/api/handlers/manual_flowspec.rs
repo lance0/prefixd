@@ -1525,7 +1525,7 @@ mod tests {
                 "ttl-zero" => body["ttl_seconds"] = json!(0),
                 "ttl-long" => body["ttl_seconds"] = json!(61),
                 "family" => body["src_prefix"] = json!("2001:db9::/64"),
-                "marking" => body["action"] = json!("marking"),
+                "marking" => body["action"] = json!("mark"),
                 "redirect" => body["action"] = json!("redirect"),
                 "confirmation" => body["confirm_destination_any"] = json!(false),
                 "configured-safelist" => {

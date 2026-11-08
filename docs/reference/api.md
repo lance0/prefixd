@@ -527,9 +527,11 @@ and no partial CSV. CSV timestamps remain UTC.
 }
 ```
 
-`action_type` is `discard`, `police` or `blackhole`. A blackhole also carries
-the optional `blackhole` object described under
-[manual blackhole](#manual-blackhole); FlowSpec rows omit it.
+`action_type` is `discard`, `police`, `mark` (manual VPN destination rules) or
+`blackhole`. Mark rows carry the optional exact `dscp` value (0-63). VPN rows
+carry optional `vpn_scope` and may carry `route_targets`; a blackhole carries the
+optional `blackhole` object described under
+[manual blackhole](#manual-blackhole). Global FlowSpec rows omit these fields.
 
 `src_ports`, `fragment` and `packet_length` are the
 [ADR 028](../adr/028-amplification-matches.md) match components, in canonical
@@ -606,17 +608,18 @@ A successful check returns `200`:
 component. Destination scope is canonical even when legacy bare-host identity
 spelling is retained. `ttl_seconds` is the requested lifetime, not a reserved
 expiry; the optional `expires_at_cap` remains an absolute ceiling. `mode` is the
-configured controller mode. A preview never saves an event, mitigation, audit
+configured controller mode. A global preview never saves an event, mitigation, audit
 entry or withdrawal, and never sends a speaker RPC or updates mutation counters.
+A scoped VPN preview performs one read-only family capability probe.
 It neither consumes nor reserves a quota/rate slot. Ordinary HTTP request
 metrics and rate limiting still apply.
 
 | HTTP | Outcome | Meaning |
 |------|---------|---------|
 | 200 | `admissible` | Controller-side checks passed at `checked_at` |
-| 400 | `refused` | Invalid destination, action, rate, protocol or source input; blackholes unsupported |
+| 400 | `refused` | Invalid destination, action, rate, protocol, source prefix or TTL policy; blackholes unsupported |
 | 409 | `refused` | Stored ownership, pending withdrawal or target conflict |
-| 422 | `refused` | Guardrail, quota, rate or lifetime refusal |
+| 422 | `refused` | Guardrail, configured safelist or quota refusal |
 | 503 | `unavailable` | A required safety read could not complete; diagnostics are sanitized |
 
 `failed_check` identifies `input`, `target`, `ownership`, `safelist`,
@@ -2554,7 +2557,7 @@ Returns the running daemon configuration with sensitive fields redacted (allowli
     "pop": "iad1",
     "mode": "enforced",
     "http": { "listen": "0.0.0.0:8080", "auth": { "mode": "bearer" }, "rate_limit": { "events_per_second": 100, "burst": 500 } },
-    "bgp": { "mode": "sidecar", "local_asn": 65010, "neighbors": [{ "name": "172.30.30.3", "address": "172.30.30.3", "peer_asn": 65001, "afi_safi": ["ipv4-flowspec"] }] },
+    "bgp": { "mode": "sidecar", "local_asn": 65010, "default_scope": "global", "vpn_scopes": { "TRANSIT": { "family": "ipv4", "rd": "44407:40", "route_targets": ["44407:777"], "allow_source_only": false } }, "neighbors": [{ "name": "172.30.30.3", "address": "172.30.30.3", "peer_asn": 65001, "afi_safi": ["ipv4-flowspec"] }] },
     "guardrails": { "require_ttl": true, "dst_prefix_minlen": 32, "dst_prefix_maxlen": 32, "max_ports": 5 },
     "quotas": { "max_active_per_customer": 20, "max_active_global": 500 },
     "timers": { "default_ttl_seconds": 120, "reconciliation_interval_seconds": 30 },
@@ -2567,7 +2570,7 @@ Returns the running daemon configuration with sensitive fields redacted (allowli
 }
 ```
 
-> **Note:** TLS paths, bearer token env vars, BGP passwords, gRPC endpoints, router ID, and safelist prefixes are omitted. New config fields are hidden by default.
+> **Note:** TLS paths, bearer token env vars, BGP passwords, gRPC endpoints, router ID, and safelist prefixes are omitted. `bgp.default_scope` and `bgp.vpn_scopes` are included for authenticated readers; RD, route-target and infrastructure-prefix selectors are routing configuration, not credentials.
 
 ### Config Inventory
 
@@ -3187,7 +3190,10 @@ the reason gauge.
 
 FlowSpec uses separate `prefixd_flowspec_export_peers{disposition}`,
 `prefixd_flowspec_unexported{reason}` and `prefixd_flowspec_export_read_errors`
-gauges with the same bounded labels and evidence limits. Candidate-inventory
+gauges with the same bounded labels and evidence limits.
+`prefixd_flowspec_active_by_family{family}` counts saved intent for
+`ipv4_flowspec`, `ipv6_flowspec`, `l3vpn_ipv4_flowspec` and
+`l3vpn_ipv6_flowspec`; it does not prove export or enforcement. Candidate-inventory
 failure counts all retained keys as read errors, or one inventory-level failure
 when no keys are known yet; it clears current disposition counts. Failed FlowSpec reads
 retain peer rows in detail for inspection but contribute no current disposition

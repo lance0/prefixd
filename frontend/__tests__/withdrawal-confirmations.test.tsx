@@ -283,16 +283,18 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
   })
 })
 
-describe("source-only withdrawal confirmation", { timeout: 10_000 }, () => {
+describe.each(["list", "detail"] as const)("source-only %s confirmation", { timeout: 10_000 }, (view) => {
   it("names the VPN scope and source, and hides the destination-only report action", async () => {
     serveMitigations([sourceOnly], sourceOnly)
-    await renderView("detail")
-    const { dialog } = await openSingle("detail")
+    await renderView(view)
+    const { dialog } = await openSingle(view)
 
     expect(within(dialog).getByText("TRANSIT · VPNv4 · RD 44407:40 · RT 44407:777")).toBeVisible()
     expect(within(dialog).getByText("198.51.100.0/24")).toBeVisible()
     expect(dialog).toHaveTextContent("(discard).")
-    expect(screen.queryByRole("button", { name: "Report" })).not.toBeInTheDocument()
+    if (view === "detail") {
+      expect(screen.queryByRole("button", { name: "Report" })).not.toBeInTheDocument()
+    }
   })
 })
 
