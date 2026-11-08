@@ -136,7 +136,7 @@ impl GoBgpAnnouncer {
     /// Build a FlowSpec Path for GoBGP v4 API (uses typed oneof fields, not Any)
     fn build_flowspec_path(&self, rule: &FlowSpecRule) -> Result<Path> {
         self.register_scope(rule.nlri.scope.as_ref())?;
-        super::announcer::validate_rule_scope(rule)?;
+        super::announcer::validate_add_scope(rule)?;
         let is_v6 = rule.nlri.ip_version() == IpVersion::V6;
         let afi = if is_v6 { AFI_IP6 } else { AFI_IP };
 
@@ -480,7 +480,7 @@ impl FlowSpecWriter for GoBgpAnnouncer {
 
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
         self.register_scope(rule.nlri.scope.as_ref())?;
-        super::announcer::validate_rule_scope(rule)?;
+        super::announcer::validate_add_scope(rule)?;
         // GoBGP has no injection lease; a leased rule never becomes an unleased one.
         if !rule.owner.is_empty() {
             return Err(PrefixdError::Config(
@@ -522,7 +522,6 @@ impl FlowSpecWriter for GoBgpAnnouncer {
     }
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
         self.register_scope(rule.nlri.scope.as_ref())?;
-        super::announcer::validate_rule_scope(rule)?;
         let path = self.build_flowspec_withdraw_path(&rule.nlri)?;
         let is_v6 = rule.nlri.ip_version() == IpVersion::V6;
         let afi = if is_v6 { AFI_IP6 } else { AFI_IP };

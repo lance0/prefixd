@@ -128,7 +128,8 @@ pub(crate) fn require_global_scope(
     }
 }
 
-pub(crate) fn validate_rule_scope(rule: &FlowSpecRule) -> Result<()> {
+/// Announcement policy must not prevent deletion of a historical routing key.
+pub(crate) fn validate_add_scope(rule: &FlowSpecRule) -> Result<()> {
     use crate::domain::{ActionType, canonical_route_target};
     for action in &rule.actions {
         if action.action_type == ActionType::Mark

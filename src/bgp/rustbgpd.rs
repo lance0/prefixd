@@ -647,7 +647,7 @@ fn encode_scope_targets(
 }
 
 fn encode(rule: &FlowSpecRule) -> Result<pb::AddFlowSpecRequest> {
-    super::announcer::validate_rule_scope(rule)?;
+    super::announcer::validate_add_scope(rule)?;
     let (afi_safi, components) = encode_match(&rule.nlri)?;
     let (route_targets, extended_communities) =
         encode_scope_targets(rule.nlri.scope.as_ref(), &rule.route_targets)?;
@@ -1136,7 +1136,6 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
     }
 
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
-        super::announcer::validate_rule_scope(rule)?;
         let (afi_safi, components) = encode_match(&rule.nlri)?;
         // The recorded owner and never override_owner: a mismatch is FAILED_PRECONDITION.
         let payload = pb::DeleteFlowSpecRequest {
