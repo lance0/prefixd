@@ -110,6 +110,19 @@ existing diversion request. The client requires an acknowledgment of the
 profile scope and exact scoped rule before it can create. It never retries
 through the global endpoint.
 
+Use that envelope in the request file for the CLI too:
+
+```sh
+prefixdctl diversions preview --file vpn-diversion.json > preview.json
+prefixdctl diversions create --file vpn-diversion.json \
+  --confirmation "$(jq -r '.confirmation' preview.json)"
+```
+
+Creation repeats the scoped preview and compares the full confirmation with
+what the operator supplied. If the target, match, RD, RTs or profile revision
+changed, review a new preview before confirming again. The CLI refuses malformed
+envelopes or missing scope acknowledgments; it does not fall back to global.
+
 ## Source-only rules
 
 Source-only is a distinct manual VPN operation with no destination component.

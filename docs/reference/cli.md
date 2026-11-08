@@ -471,6 +471,27 @@ intent. `diversions list`, `diversions get ID` and `diversions withdraw ID
 [--reason TEXT]` inspect and drain it; the reason is recorded in the audit log.
 These commands print JSON.
 
+For VPN diversion, the file must use a named-scope envelope:
+
+```json
+{
+  "scope": "TRANSIT",
+  "diversion": {
+    "profile": "scrubber-v4",
+    "scope": {"dst_prefix": "203.0.113.10/32", "protocol": 6, "dst_ports": [443]},
+    "ttl_seconds": 60,
+    "reason": "Confirmed attack"
+  }
+}
+```
+
+Use a profile configured for that scope and address family. The CLI sends VPN
+files to `/v1/vpn/diversions/preview` and `/v1/vpn/diversions`; creation repeats
+the preview and requires the same complete confirmation, including RD and RTs.
+A missing scope acknowledgment, a changed confirmation or an unavailable
+controller stops creation. It never retries through a global endpoint.
+Plain global request files retain their existing format and endpoint.
+
 Writes require an administrator. Supply an authenticated administrator session
 through `--session-cookie` or `PREFIXD_SESSION_COOKIE`; the value is a complete
 Cookie header and is hidden from help output. Sign in with
