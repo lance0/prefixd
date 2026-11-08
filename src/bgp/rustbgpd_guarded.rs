@@ -71,6 +71,8 @@ fn foreign_match(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecN
         components: route.components,
         peer_address: route.peer_address,
         afi_safi: route.afi_safi,
+        rd: route.rd,
+        route_targets: route.route_targets,
         extended_communities: vec![0x8006_u64 << 48],
         actions: vec![pb::FlowSpecAction {
             action: Some(pb::flow_spec_action::Action::TrafficRate(
@@ -418,6 +420,7 @@ impl GuardedFlowSpecSpeaker for RustBgpdAnnouncer {
                 client.delete_guarded_flow_spec(self.request(pb::DeleteGuardedFlowSpecRequest {
                     afi_safi: payload.afi_safi,
                     components: payload.components,
+                    rd: payload.rd,
                     owner: rule.owner.clone(),
                     revision: rule.revision,
                 })),

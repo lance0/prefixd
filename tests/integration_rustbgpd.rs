@@ -318,6 +318,7 @@ async fn live_rustbgpd_v081_inventory_refuses_unrepresented_attributes_without_m
         components: guarded.components,
         owner: owner.into(),
         revision: 7,
+        rd: guarded.rd,
     }))
     .await
     .unwrap();
