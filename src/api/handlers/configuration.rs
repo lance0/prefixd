@@ -89,6 +89,8 @@ pub async fn get_config_settings(
         "bgp": {
             "mode": s.bgp.mode,
             "local_asn": s.bgp.local_asn,
+            "default_scope": s.bgp.default_scope,
+            "vpn_scopes": s.bgp.vpn_scopes,
             "neighbors": s.bgp.neighbors.iter().map(|n| serde_json::json!({
                 "name": n.name,
                 "address": n.address,

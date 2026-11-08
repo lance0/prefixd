@@ -1,4 +1,4 @@
-import type { FragmentMatch, PacketLengthRange } from "@/lib/api"
+import type { FragmentMatch, PacketLengthRange, VpnScopeSnapshot } from "@/lib/api"
 
 function protocolName(proto: number | null): string {
   if (proto === null) return ""
@@ -27,6 +27,7 @@ function ruleRate(bps: number | null): string {
 
 export interface FlowSpecFields {
   dst_prefix: string
+  vpn_scope?: VpnScopeSnapshot | null
   src_prefix?: string | null
   protocol: number | null
   dst_ports: number[]
@@ -59,7 +60,8 @@ export function describeMatch(fields: Omit<FlowSpecFields, "dst_prefix" | "rate_
 }
 
 export function formatFlowSpecRule(fields: FlowSpecFields): string {
-  const parts: string[] = ["match destination", fields.dst_prefix]
+  const parts: string[] = fields.vpn_scope ? ["scope", fields.vpn_scope.name, fields.vpn_scope.identity.family, "rd", fields.vpn_scope.identity.rd, "rt", fields.vpn_scope.route_targets.join(",")] : []
+  parts.push("match destination", fields.dst_prefix || "any")
 
   if (fields.src_prefix) parts.push("source", fields.src_prefix)
 

@@ -26,6 +26,7 @@ export function ScrubbersContent() {
   const [reason, setReason] = useState("")
   const [preview, setPreview] = useState<DiversionPreview | null>(null)
   const [request, setRequest] = useState<DiversionRequest | null>(null)
+  const [requestScope, setRequestScope] = useState("global")
   const [confirmed, setConfirmed] = useState(false)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState("")
@@ -36,7 +37,7 @@ export function ScrubbersContent() {
   const withdrawTrigger = useRef<HTMLButtonElement | null>(null)
   const heading = useRef<HTMLHeadingElement | null>(null)
   const editVersion = useRef(0)
-  const invalidate = () => { editVersion.current += 1; setPreview(null); setRequest(null); setConfirmed(false); setMessage("") }
+  const invalidate = () => { editVersion.current += 1; setPreview(null); setRequest(null); setRequestScope("global"); setConfirmed(false); setMessage("") }
 
   async function action(work: () => Promise<void>) {
     setBusy(true); setError(""); setMessage("")
@@ -61,6 +62,8 @@ export function ScrubbersContent() {
     }
   }
 
+  const selectedProfile = profiles.data?.configuration.find(config => config.id === profile)
+
   if (!permissions.isAdmin) return <p>Scrubber diversion requires an administrator.</p>
 
   return <div className="space-y-6 p-6">
@@ -75,6 +78,7 @@ export function ScrubbersContent() {
       return <Card key={config.id}><CardHeader><CardTitle>{config.id} <span className="text-sm font-normal text-muted-foreground">{config.revision}</span></CardTitle></CardHeader>
         <CardContent className="space-y-2 text-sm">
           <p>Targets: {config.ipv4_target ?? "IPv4 unavailable"} · {config.ipv6_target ?? "IPv6 unavailable"}</p>
+          {config.scope && config.scope !== "global" ? <p>Routing scope: {config.scope}</p> : null}
           <p>{state?.ready ? "Fresh readiness" : state?.readiness === "not_ready" ? "Not ready" : "Readiness unknown"} · {state?.armed ? "Armed" : "Unarmed"}</p>
           {state?.latch_reason && <p>{state.latch_reason}</p>}
           <Button variant="outline" disabled={busy || !profiles.data?.enabled || !state?.ready || state?.armed} onClick={() => action(async () => { await armScrubber(config.id, config.revision); setMessage(`Profile ${config.id} re-armed. New intent requires a separate confirmation.`) })}>Re-arm {config.id}</Button>
@@ -92,14 +96,16 @@ export function ScrubbersContent() {
           if (sourcePorts) scope.src_ports = parsePorts(sourcePorts)
 
           const next: DiversionRequest = { profile, scope, ttl_seconds: Number(ttl), reason }
+          const expectedScope = selectedProfile?.scope ?? "global"
           const version = editVersion.current
-          const result = await previewDiversion(next)
+          const result = await previewDiversion(next, expectedScope)
 
           if (version !== editVersion.current) return
-          setRequest(next); setPreview(result); setConfirmed(false)
+          setRequest(next); setRequestScope(expectedScope); setPreview(result); setConfirmed(false)
         })
       }}>
         <label className="space-y-1 text-sm">Profile<Select required value={profile} onValueChange={value => { invalidate(); setProfile(value) }}><SelectTrigger aria-label="Profile" className="w-full"><SelectValue placeholder="Select profile" /></SelectTrigger><SelectContent>{profiles.data.configuration.map(config => <SelectItem key={config.id} value={config.id}>{config.id}</SelectItem>)}</SelectContent></Select></label>
+        {selectedProfile?.scope && selectedProfile.scope !== "global" ? <p className="text-sm">Requested routing scope: {selectedProfile.scope}</p> : null}
         <label className="space-y-1 text-sm">Victim host CIDR<Input required value={victim} onChange={event => setVictim(event.target.value)} placeholder="203.0.113.10/32" /></label>
         <label className="space-y-1 text-sm">Source prefix (optional)<Input value={source} onChange={event => setSource(event.target.value)} /></label>
         <label className="space-y-1 text-sm">Protocol<Select value={protocol} onValueChange={value => { invalidate(); setProtocol(value) }}><SelectTrigger aria-label="Protocol" className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="6">TCP</SelectItem><SelectItem value="17">UDP</SelectItem><SelectItem value="any">Any</SelectItem></SelectContent></Select></label>
@@ -110,13 +116,14 @@ export function ScrubbersContent() {
         <Button type="submit" disabled={busy}>Preview diversion</Button>
       </form>
       {preview && <div className="mt-4 space-y-3 rounded-md border p-4">
-        <p>{preview.candidate.dry_run ? "Simulation only" : "Proposed diversion"}: {preview.candidate.rule.nlri.dst_prefix} → {preview.candidate.rule.target} via {preview.candidate.profile.id}@{preview.candidate.profile.revision}</p>
+        <p>{preview.candidate.dry_run ? "Simulation only" : "Proposed diversion"}: {preview.candidate.rule.nlri.dst_prefix} → {preview.candidate.rule.target} via {preview.candidate.profile.id}@{preview.candidate.profile.revision}{preview.candidate.rule.nlri.scope ? ` · VPN${preview.candidate.rule.nlri.scope.family === "ipv4" ? "v4" : "v6"} RD ${preview.candidate.rule.nlri.scope.rd} · RT ${(preview.candidate.rule.route_targets ?? []).join(", ")}` : ""}</p>
+        {requestScope !== "global" ? <p className="text-sm">Confirmed routing scope: {requestScope}</p> : null}
         <pre className="overflow-x-auto whitespace-pre-wrap text-xs">{JSON.stringify(preview.candidate.rule.nlri, null, 2)}</pre>
         <p className="text-sm text-muted-foreground">{preview.evidence}</p>
         <label className="flex items-center gap-2 text-sm"><Checkbox checked={confirmed} onCheckedChange={checked => setConfirmed(checked === true)} />I confirm this traffic match and scrubber target.</label>
         <Button disabled={busy || !confirmed || !request || !preview.candidate.dry_run && (Boolean(profiles.error) || !profiles.data.profiles[request?.profile ?? ""]?.armed || !profiles.data.profiles[request?.profile ?? ""]?.ready)} onClick={() => action(async () => {
           if (!request) return
-          const result = await createDiversion({ ...request, confirmation: preview.confirmation })
+          const result = await createDiversion({ ...request, confirmation: preview.confirmation }, requestScope)
           invalidate(); setMessage(result.dry_run ? "Simulation recorded; no speaker mutation sent." : `Diversion intent recorded: ${result.status}. Router forwarding remains separately qualified.`)
         })}>{preview.candidate.dry_run ? "Record simulation" : "Create diversion"}</Button>
       </div>}
@@ -124,7 +131,7 @@ export function ScrubbersContent() {
     <Card><CardHeader><CardTitle>Outstanding diversions</CardTitle></CardHeader><CardContent className="space-y-3">
       {diversions.data?.length === 0 && <p className="text-sm text-muted-foreground">No outstanding diversion intent.</p>}
       {diversions.data?.map(row => <div key={row.id} className="space-y-2 rounded-md border p-3 text-sm">
-        <p>{row.rule.nlri.dst_prefix} → {row.rule.target} · {row.profile.id}@{row.profile.revision}</p>
+        <p>{row.rule.nlri.dst_prefix} → {row.rule.target} · {row.profile.id}@{row.profile.revision}{row.rule.nlri.scope ? ` · VPN${row.rule.nlri.scope.family === "ipv4" ? "v4" : "v6"} RD ${row.rule.nlri.scope.rd} · RT ${(row.rule.route_targets ?? []).join(", ")}` : ""}</p>
         <p>{row.status === "active" ? "Local intent observed" : row.status} · Expires {row.expires_at}</p>
         {row.status === "withdrawing" && <p>Withdrawal stays pending until outstanding authorization has expired and local absence is confirmed.</p>}
         {row.export_observation && <details><summary>{row.export_observation.error ? `Historical peer export observation from ${row.export_observation.observed_at}; current export unknown (${row.export_observation.error})` : `Peer export observed since ${row.export_observation.observed_at}`}</summary><ul className="mt-2 space-y-1">{row.export_observation.peers.map(peer => <li key={peer.peer_address}>{peer.peer_address}: {peer.disposition}{peer.reason ? ` (${peer.reason})` : ""}</li>)}</ul></details>}
@@ -164,6 +171,8 @@ export function ScrubbersContent() {
 
 function describeMatch({ rule: { nlri } }: ScrubberDiversion) {
   const parts = [`dst ${nlri.dst_prefix}`]
+
+  if (nlri.scope) parts.unshift(`VPN${nlri.scope.family === "ipv4" ? "v4" : "v6"} RD ${nlri.scope.rd}`)
 
   if (nlri.src_prefix) parts.push(`src ${nlri.src_prefix}`)
   parts.push(nlri.protocol === null ? "any protocol" : `protocol ${nlri.protocol}`)

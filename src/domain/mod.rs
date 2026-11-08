@@ -8,6 +8,7 @@ mod lifetime;
 mod mitigation;
 mod operator;
 mod speaker_target;
+mod vpn_scope;
 mod withdrawal;
 
 pub use blackhole::*;
@@ -20,4 +21,5 @@ pub use lifetime::*;
 pub use mitigation::*;
 pub use operator::*;
 pub use speaker_target::*;
+pub use vpn_scope::*;
 pub use withdrawal::*;

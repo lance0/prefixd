@@ -65,6 +65,15 @@ pub static MITIGATIONS_ACTIVE: Lazy<GaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Desired ordinary FlowSpec intent by bounded routing family, not installed routes.
+pub static FLOWSPEC_ACTIVE_BY_FAMILY: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_flowspec_active_by_family",
+        "Active desired FlowSpec mitigations by routing family, not speaker acceptance or router enforcement",
+        &["family"]
+    ).unwrap()
+});
+
 pub static MITIGATIONS_CREATED: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
         "prefixd_mitigations_created_total",
@@ -576,6 +585,7 @@ pub fn init_metrics(pop: &str) {
     Lazy::force(&EVENTS_INGESTED);
     Lazy::force(&EVENTS_REJECTED);
     Lazy::force(&MITIGATIONS_ACTIVE);
+    Lazy::force(&FLOWSPEC_ACTIVE_BY_FAMILY);
     Lazy::force(&MITIGATIONS_CREATED);
     Lazy::force(&MITIGATIONS_EXPIRED);
     Lazy::force(&MITIGATIONS_WITHDRAWN);

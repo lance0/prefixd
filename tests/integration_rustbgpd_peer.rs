@@ -15,7 +15,7 @@ mod rustbgpd;
 
 use peer_receipt::{wait_go_received, wait_rust_views};
 use prefixd::{
-    bgp::{ExportDisposition, ExportObserver, FlowSpecWriter},
+    bgp::{ExportDisposition, ExportObserver, FlowSpecWriter, PeerObserver},
     domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule},
 };
 
@@ -518,5 +518,264 @@ async fn released_blackhole_export_dispositions_join_established_and_configured_
             .unwrap(),
         None
     );
+    pair.remove().await;
+}
+
+/// HTTP admission through prefixd, released speaker, and negotiated peer RIB.
+/// These are local intent and wire receipts; there is no router enforcement oracle.
+#[tokio::test]
+#[ignore = "requires isolated pinned Docker speakers; run scripts/test-rustbgpd.sh with version 0.82.0"]
+async fn released_vpn_http_rules_reach_only_negotiated_peers_with_exact_scope() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use prefixd::{
+        AppState,
+        api::create_test_router,
+        bgp::FlowSpecReader,
+        config::{BgpMode, Customer, Inventory, OperationMode, Playbooks, PolicyProfile},
+        db::{MockRepository, RepositoryTrait},
+        domain::{SpeakerTarget, VpnFlowSpecFamily, VpnFlowSpecIdentity},
+    };
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    // The minimum-release matrix keeps its existing global cases; this test
+    // explicitly qualifies the released contract containing VPN families.
+    if std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").as_deref() != Ok("0.82.0") {
+        eprintln!("VPN wire receipt not applicable to this release; requires 0.82.0");
+        return;
+    }
+    let pair = peer_receipt::Pair::start_vpn().await;
+    let speaker = Arc::new(pair.rust.connect().await);
+    let global_peer = pair.global_only.as_ref().unwrap();
+    let mut settings = common::test_settings();
+    settings.mode = OperationMode::Enforced;
+    settings.bgp.mode = BgpMode::Rustbgpd;
+    settings.bgp.rustbgpd = Some(pair.rust.config.clone());
+    settings.guardrails.allow_src_prefix_match = true;
+    settings.bgp.vpn_scopes = serde_json::from_value(json!({
+        "TRANSIT": {"family":"ipv4","rd":"44407:40","route_targets":["44407:777"],"allow_source_only":true},
+        "TRANSIT6": {"family":"ipv6","rd":"44407:41","route_targets":["44407:778"],"allow_source_only":true}
+    })).unwrap();
+    for (name, scope) in &settings.bgp.vpn_scopes {
+        speaker
+            .validate_scope(Some(&scope.snapshot(name).unwrap().identity))
+            .await
+            .unwrap();
+    }
+    let repo = Arc::new(MockRepository::new());
+    let binding = repo
+        .register_speaker_target(
+            &settings.pop,
+            &SpeakerTarget::from_config(&settings.bgp).unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+    let inventory = Inventory::new(vec![Customer {
+        customer_id: "wire-pilot".into(),
+        name: "Wire pilot".into(),
+        prefixes: vec!["203.0.113.0/24".into(), "2001:db8:100::/48".into()],
+        policy_profile: PolicyProfile::Normal,
+        services: vec![],
+    }]);
+    let state = AppState::new(
+        settings,
+        inventory,
+        Playbooks { playbooks: vec![] },
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap()
+    .with_speaker_binding(binding)
+    .unwrap();
+    let app = create_test_router(state);
+    async fn post(app: &axum::Router, path: &str, body: Value, expected: StatusCode) -> Value {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, expected, "{path}: {value}");
+        value
+    }
+    for peer in [&pair.go, global_peer] {
+        contract::wait_peer_state(&peer.connect().await, &peer.peer_address, true)
+            .await
+            .unwrap();
+    }
+    let expected_peers = [
+        pair.rust.peer_address.clone(),
+        global_peer
+            .container
+            .get_bridge_ip_address()
+            .await
+            .unwrap()
+            .to_string(),
+    ];
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let peers = speaker.session_status().await.unwrap();
+            if peers.len() == 2
+                && expected_peers.iter().all(|address| {
+                    peers
+                        .iter()
+                        .any(|peer| &peer.address == address && peer.state.is_established())
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("both isolated peers Established");
+    let mut created: Vec<(String, FlowSpecRule)> = vec![];
+    let global=post(&app,"/v1/mitigations",json!({"victim_ip":"203.0.113.10","src_prefix":"198.51.100.0/24",
+        "protocol":"udp","dst_ports":[443],"action":"discard","ttl_seconds":60,"reason":"global scope control"}),StatusCode::CREATED).await;
+    created.push((
+        global["mitigation_id"].as_str().unwrap().into(),
+        FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "203.0.113.10/32".into(),
+                src_prefix: Some("198.51.100.0/24".into()),
+                protocol: Some(17),
+                dst_ports: vec![443],
+                ..Default::default()
+            },
+            FlowSpecAction::discard(),
+        ),
+    ));
+    let families = [
+        (
+            "TRANSIT",
+            VpnFlowSpecFamily::Ipv4,
+            "44407:40",
+            "44407:777",
+            ["203.0.113.10", "203.0.113.11"],
+            ["198.51.100.0/24", "198.51.101.0/24"],
+        ),
+        (
+            "TRANSIT6",
+            VpnFlowSpecFamily::Ipv6,
+            "44407:41",
+            "44407:778",
+            ["2001:db8:100::10", "2001:db8:100::11"],
+            ["2001:db9::/64", "2001:db9:1::/64"],
+        ),
+    ];
+    for (name, family, rd, rt, destinations, sources) in families {
+        for (index, action) in ["discard", "police"].into_iter().enumerate() {
+            let response=post(&app,"/v1/vpn/mitigations",json!({"scope":name,"rule":{
+                "victim_ip":destinations[index],"src_prefix":sources[index],"protocol":"udp","dst_ports":[443],
+                "action":action,"rate_bps":if index==0 {None} else {Some(8_000_000u64)},"ttl_seconds":60,"reason":"VPN wire receipt"}}),StatusCode::CREATED).await;
+            created.push((
+                response["mitigation_id"].as_str().unwrap().into(),
+                FlowSpecRule::new(
+                    FlowSpecNlri {
+                        scope: Some(VpnFlowSpecIdentity::new(family, rd).unwrap()),
+                        dst_prefix: format!(
+                            "{}/{}",
+                            destinations[index],
+                            if family == VpnFlowSpecFamily::Ipv4 {
+                                32
+                            } else {
+                                128
+                            }
+                        ),
+                        src_prefix: Some(sources[index].into()),
+                        protocol: Some(17),
+                        dst_ports: vec![443],
+                        ..Default::default()
+                    },
+                    if index == 0 {
+                        FlowSpecAction::discard()
+                    } else {
+                        FlowSpecAction::police(8_000_000)
+                    },
+                )
+                .with_route_targets(vec![rt.into()]),
+            ));
+        }
+    }
+    // Whole-VRF authorization includes protected destinations; source protection
+    // still applies. The scoped source ranges are outside this owned inventory.
+    repo.insert_safelist("203.0.113.10/32", "config", None)
+        .await
+        .unwrap();
+    for (name, family, rd, rt, _, sources) in families {
+        for (index, action) in ["discard", "police"].into_iter().enumerate() {
+            let request = json!({"scope":name,"src_prefix":sources[index],"protocol":"udp","action":action,
+                "rate_bps":if index==0 {None} else {Some(8_000_000u64)},"ttl_seconds":30,
+                "confirm_destination_any":true,"reason":"source-only VPN wire receipt"});
+            let preview = post(
+                &app,
+                "/v1/vpn/source-rules/preview",
+                request.clone(),
+                StatusCode::OK,
+            )
+            .await;
+            assert_eq!(preview["candidate"]["destination"], "any");
+            let response = post(&app, "/v1/vpn/source-rules", request, StatusCode::CREATED).await;
+            created.push((
+                response["mitigation_id"].as_str().unwrap().into(),
+                FlowSpecRule::new(
+                    FlowSpecNlri {
+                        scope: Some(VpnFlowSpecIdentity::new(family, rd).unwrap()),
+                        src_prefix: Some(sources[index].into()),
+                        protocol: Some(17),
+                        ..Default::default()
+                    },
+                    if index == 0 {
+                        FlowSpecAction::discard()
+                    } else {
+                        FlowSpecAction::police(8_000_000)
+                    },
+                )
+                .with_route_targets(vec![rt.into()]),
+            ));
+        }
+    }
+    loop {
+        let expected: Vec<_> = created.iter().map(|(_, rule)| rule.clone()).collect();
+        assert!(peer_receipt::exact_wire_inventory(
+            &speaker.list_active().await.unwrap(),
+            &expected
+        ));
+        peer_receipt::wait_go_scoped_received(&pair.go, &expected).await;
+        let global: Vec<_> = expected
+            .iter()
+            .filter(|rule| rule.nlri.scope.is_none())
+            .cloned()
+            .collect();
+        peer_receipt::wait_go_scoped_received(global_peer, &global).await;
+        if created.is_empty() {
+            break;
+        }
+        // Withdraw each scoped identity independently; retain the global control
+        // until last so a cross-scope delete cannot masquerade as success.
+        let (id, _) = created.remove(if created.len() > 1 { 1 } else { 0 });
+        post(
+            &app,
+            &format!("/v1/mitigations/{id}/withdraw"),
+            json!({"reason":"VPN receipt cleanup"}),
+            StatusCode::OK,
+        )
+        .await;
+    }
     pair.remove().await;
 }

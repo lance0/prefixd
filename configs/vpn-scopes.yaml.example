@@ -1,0 +1,23 @@
+# Merge this BGP section into prefixd.yaml; keep the other required settings.
+bgp:
+  backend: rustbgpd
+  local_asn: 44407
+  router_id: 192.0.2.1
+  rustbgpd:
+    endpoint: http://127.0.0.1:50051
+    bearer_token_env: PREFIXD_RUSTBGPD_TOKEN
+    leased_flowspec: true
+  default_scope:
+    ipv4: TRANSIT
+    ipv6: TRANSIT6
+  vpn_scopes:
+    TRANSIT:
+      family: ipv4
+      rd: "44407:40"
+      route_targets: ["44407:777"]
+      allow_source_only: false
+    TRANSIT6:
+      family: ipv6
+      rd: "44407:40"
+      route_targets: ["44407:777"]
+      allow_source_only: false

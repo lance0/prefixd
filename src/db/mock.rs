@@ -182,11 +182,26 @@ impl RepositoryTrait for MockRepository {
                     || pending
                         .iter()
                         .any(|w| w.mitigation_id == row.mitigation_id && w.completed_at.is_none()))
-                && row
-                    .match_criteria
-                    .dst_prefix
-                    .parse::<ipnet::IpNet>()
-                    .map_or(true, |net| net.contains(&address))
+                && if row.match_criteria.dst_prefix.is_empty() {
+                    if crate::domain::FlowSpecNlri::from(&row.match_criteria)
+                        .validate()
+                        .is_err()
+                    {
+                        true
+                    } else {
+                        row.match_criteria.scope.as_ref().is_none_or(|scope| {
+                            match scope.identity.family {
+                                crate::domain::VpnFlowSpecFamily::Ipv4 => address.is_ipv4(),
+                                crate::domain::VpnFlowSpecFamily::Ipv6 => address.is_ipv6(),
+                            }
+                        })
+                    }
+                } else {
+                    row.match_criteria
+                        .dst_prefix
+                        .parse::<ipnet::IpNet>()
+                        .map_or(true, |net| net.contains(&address))
+                }
         }) || diversions.iter().any(|row| {
             row.pop == intent.pop && row.status.outstanding() && row.victim() == intent.victim()
         }) {
@@ -674,7 +689,46 @@ impl RepositoryTrait for MockRepository {
     ) -> Result<()> {
         let mut mitigations = self.mitigations.lock().unwrap();
         let diversion_rows = self.diversions.lock().unwrap();
-        let prefix: ipnet::IpNet = m.match_criteria.dst_prefix.parse().map_err(|_| {
+        let destination = if m.match_criteria.dst_prefix.is_empty() {
+            let scope = m.match_criteria.scope.as_ref().ok_or_else(|| {
+                crate::error::PrefixdError::InvalidRequest(
+                    "source-only admission requires VPN scope".into(),
+                )
+            })?;
+            let max = quotas.source_only_limit.ok_or_else(|| {
+                crate::error::PrefixdError::InvalidRequest(
+                    "source-only admission requires its scope quota".into(),
+                )
+            })?;
+            crate::domain::FlowSpecNlri::from(&m.match_criteria)
+                .validate()
+                .map_err(|error| crate::error::PrefixdError::InvalidRequest(error.to_string()))?;
+            let count = mitigations
+                .iter()
+                .filter(|existing| {
+                    existing.is_active()
+                        && existing.pop == m.pop
+                        && existing.match_criteria.dst_prefix.is_empty()
+                        && existing
+                            .match_criteria
+                            .scope
+                            .as_ref()
+                            .is_some_and(|other| other.identity == scope.identity)
+                })
+                .count();
+            super::repository::check_active_quota(
+                "source_only",
+                u32::try_from(count).unwrap_or(u32::MAX),
+                max,
+            )?;
+            match scope.identity.family {
+                crate::domain::VpnFlowSpecFamily::Ipv4 => "0.0.0.0/0",
+                crate::domain::VpnFlowSpecFamily::Ipv6 => "::/0",
+            }
+        } else {
+            &m.match_criteria.dst_prefix
+        };
+        let prefix: ipnet::IpNet = destination.parse().map_err(|_| {
             crate::error::PrefixdError::InvalidRequest("invalid mitigation prefix".into())
         })?;
         if diversion_rows.iter().any(|row| {
@@ -845,9 +899,19 @@ impl RepositoryTrait for MockRepository {
                 "mitigation has a pending withdrawal".into(),
             ));
         }
-        let destination =
-            crate::domain::parse_flowspec_destination(&current.match_criteria.dst_prefix)
-                .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+        let protection_prefix = if current.match_criteria.dst_prefix.is_empty() {
+            current
+                .match_criteria
+                .src_prefix
+                .as_deref()
+                .ok_or_else(|| {
+                    PrefixdError::InvalidRequest("source-only rule has no source prefix".into())
+                })?
+        } else {
+            &current.match_criteria.dst_prefix
+        };
+        let destination = crate::domain::parse_flowspec_destination(protection_prefix)
+            .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
         for protected in safelist.iter() {
             let prefix = protected
                 .prefix

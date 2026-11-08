@@ -17,6 +17,8 @@ pub struct GuardedStamp {
 #[serde(deny_unknown_fields)]
 pub struct GuardedRule {
     pub nlri: FlowSpecNlri,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route_targets: Vec<String>,
     #[schema(value_type = String, example = "192.0.2.99")]
     pub target: IpAddr,
     /// The profile owner without the speaker's `guarded:` namespace prefix.
@@ -67,6 +69,25 @@ impl GuardedRule {
                 "invalid host diversion, target, owner or admission revision".into(),
             ));
         }
+        match &self.nlri.scope {
+            Some(_) => {
+                if self.route_targets.is_empty() {
+                    return Err(PrefixdError::InvalidRequest(
+                        "VPN diversion needs scope route targets".into(),
+                    ));
+                }
+                for target in &self.route_targets {
+                    crate::domain::route_target_bytes(target)
+                        .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+                }
+            }
+            None if !self.route_targets.is_empty() => {
+                return Err(PrefixdError::InvalidRequest(
+                    "global diversion cannot carry scope route targets".into(),
+                ));
+            }
+            None => {}
+        }
         self.nlri
             .validate()
             .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))
@@ -76,6 +97,7 @@ impl GuardedRule {
         self.owner == other.owner
             && self.revision == other.revision
             && self.target == other.target
+            && self.route_targets == other.route_targets
             && self.nlri.compute_hash() == other.nlri.compute_hash()
     }
 }

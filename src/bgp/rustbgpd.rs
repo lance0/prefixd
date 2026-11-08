@@ -6,7 +6,10 @@ use super::{
 };
 use crate::{
     config::RustBgpdConfig,
-    domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule, FragmentMatch, PacketLengthRange},
+    domain::{
+        FlowSpecAction, FlowSpecNlri, FlowSpecRule, FragmentMatch, PacketLengthRange,
+        VpnFlowSpecFamily, VpnFlowSpecIdentity, canonical_route_target, route_target_bytes,
+    },
     error::{InjectionRefusalReason, PrefixdError, Result},
 };
 use async_trait::async_trait;
@@ -22,6 +25,12 @@ pub struct RustBgpdAnnouncer {
     token: Option<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>,
     /// The daemon last answered `ListInjectionLeases`; an `UNIMPLEMENTED` lease RPC clears it.
     lease_confirmed: std::sync::atomic::AtomicBool,
+    vpn_families: std::sync::atomic::AtomicU8,
+}
+
+enum ScopedRpcError {
+    Probe(PrefixdError),
+    Mutation(tonic::Status),
 }
 
 /// The oldest daemon prefixd runs against: 0.79.0 adds the injection lease
@@ -245,6 +254,109 @@ impl RustBgpdAnnouncer {
         Ok(Self::new(channel, token))
     }
 
+    async fn probe_vpn_family(&self, family: i32) -> Result<()> {
+        let bit = match family {
+            13 => 1,
+            14 => 2,
+            _ => return Err(invalid("invalid VPN FlowSpec family")),
+        };
+        self.vpn_families
+            .fetch_or(bit, std::sync::atomic::Ordering::Relaxed);
+        let response = self
+            .call("ListFlowSpecRoutes", || async {
+                pb::rib_service_client::RibServiceClient::new(self.channel.clone())
+                    .list_flow_spec_routes(self.request(pb::ListFlowSpecRequest {
+                        afi_safi: family,
+                        received_peer_address: "0.0.0.0".into(),
+                        advertised_peer_address: String::new(),
+                    }))
+                    .await
+            })
+            .await
+            .map_err(|status| {
+                if status.code() == Code::InvalidArgument {
+                    PrefixdError::UnsupportedFlowSpecScope {
+                        backend: "rustbgpd",
+                        family,
+                    }
+                } else {
+                    failed("ListFlowSpecRoutes", &status)
+                }
+            })?;
+        acknowledge_local_intent(&response)
+    }
+
+    /// Each scoped retry probes again before dispatch; reconnects may change capability.
+    async fn call_with_probes<T, F, Fut>(
+        &self,
+        operation: &str,
+        families: &[i32],
+        mut call: F,
+    ) -> std::result::Result<T, ScopedRpcError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
+    {
+        if families.is_empty() {
+            return self
+                .call(operation, call)
+                .await
+                .map_err(ScopedRpcError::Mutation);
+        }
+        for attempt in 0..3 {
+            for family in families {
+                self.probe_vpn_family(*family)
+                    .await
+                    .map_err(ScopedRpcError::Probe)?;
+            }
+            let result = tokio::time::timeout(Duration::from_secs(30), call())
+                .await
+                .unwrap_or_else(|_| Err(tonic::Status::deadline_exceeded("RPC deadline elapsed")));
+            match result {
+                Ok(response) => return Ok(response.into_inner()),
+                Err(status)
+                    if attempt < 2
+                        && matches!(status.code(), Code::Unavailable | Code::DeadlineExceeded) =>
+                {
+                    tracing::warn!(operation, attempt = attempt + 1, code = ?status.code(), "retrying rustbgpd RPC");
+                    tokio::time::sleep(Duration::from_millis(100 << attempt)).await;
+                }
+                Err(status) => return Err(ScopedRpcError::Mutation(status)),
+            }
+        }
+        unreachable!()
+    }
+
+    async fn mutation_call<T, F, Fut>(
+        &self,
+        operation: &str,
+        families: &[i32],
+        call: F,
+    ) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
+    {
+        self.call_with_probes(operation, families, call)
+            .await
+            .map_err(|error| match error {
+                ScopedRpcError::Probe(error) => error,
+                ScopedRpcError::Mutation(status) => self.mutation_error(operation, &status),
+            })
+    }
+
+    fn inventory_families(&self) -> Vec<i32> {
+        let required = self.vpn_families.load(std::sync::atomic::Ordering::Relaxed);
+        [3, 4]
+            .into_iter()
+            .chain(
+                [(1, 13), (2, 14)]
+                    .into_iter()
+                    .filter_map(|(bit, family)| (required & bit != 0).then_some(family)),
+            )
+            .collect()
+    }
+
     fn new(
         channel: Channel,
         token: Option<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>,
@@ -253,6 +365,7 @@ impl RustBgpdAnnouncer {
             channel,
             token,
             lease_confirmed: Default::default(),
+            vpn_families: Default::default(),
         }
     }
 
@@ -399,22 +512,30 @@ use super::RUSTBGPD_MAX_PORTS_PER_LIST as MAX_PORTS_PER_LIST;
 
 /// Components in strictly ascending type order; the daemon does not reorder them.
 fn encode_match(nlri: &FlowSpecNlri) -> Result<(i32, Vec<pb::FlowSpecComponent>)> {
-    if nlri.src_prefix.is_some() {
+    if nlri.src_prefix.is_some() || nlri.scope.is_some() {
         nlri.validate()
             .map_err(|error| invalid(&error.to_string()))?;
     }
-    let prefix: ipnet::IpNet = nlri
-        .dst_prefix
-        .parse()
-        .map_err(|_| invalid("invalid destination prefix"))?;
-    if prefix != prefix.trunc() {
-        return Err(invalid("destination prefix has host bits"));
+    let prefix = if nlri.dst_prefix.is_empty() && nlri.scope.is_some() {
+        None
+    } else {
+        let prefix: ipnet::IpNet = nlri
+            .dst_prefix
+            .parse()
+            .map_err(|_| invalid("invalid destination prefix"))?;
+        if prefix != prefix.trunc() {
+            return Err(invalid("destination prefix has host bits"));
+        }
+        Some(prefix)
+    };
+    let mut components = Vec::new();
+    if let Some(prefix) = prefix {
+        components.push(pb::FlowSpecComponent {
+            r#type: 1,
+            prefix: prefix.to_string(),
+            ..Default::default()
+        });
     }
-    let mut components = vec![pb::FlowSpecComponent {
-        r#type: 1,
-        prefix: prefix.to_string(),
-        ..Default::default()
-    }];
     if let Some(source) = &nlri.src_prefix {
         components.push(pb::FlowSpecComponent {
             r#type: 2,
@@ -467,16 +588,56 @@ fn encode_match(nlri: &FlowSpecNlri) -> Result<(i32, Vec<pb::FlowSpecComponent>)
             ..Default::default()
         });
     }
-    let family = if prefix.addr().is_ipv4() {
-        pb::AddressFamily::Ipv4Flowspec
-    } else {
-        pb::AddressFamily::Ipv6Flowspec
+    let family = match &nlri.scope {
+        Some(scope) => scope.family.afi_safi(),
+        None if nlri.ip_version() == crate::domain::IpVersion::V4 => 3,
+        None => 4,
     };
-    Ok((family as i32, components))
+    Ok((family, components))
+}
+
+/// Scope RTs are sorted by encoded value by rustbgpd, including raw duplicates.
+fn encode_scope_targets(
+    scope: Option<&VpnFlowSpecIdentity>,
+    route_targets: &[String],
+) -> Result<(Vec<String>, Vec<u64>)> {
+    match scope {
+        None if !route_targets.is_empty() => {
+            return Err(invalid("global FlowSpec cannot carry scope route targets"));
+        }
+        Some(_) if route_targets.is_empty() => {
+            return Err(invalid("VPN FlowSpec requires scope route targets"));
+        }
+        _ => {}
+    }
+    let mut targets = route_targets
+        .iter()
+        .map(|target| {
+            Ok((
+                route_target_bytes(target).map_err(|error| invalid(&error.to_string()))?,
+                canonical_route_target(target).map_err(|error| invalid(&error.to_string()))?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    targets.sort_unstable_by_key(|(bytes, _)| *bytes);
+    if targets.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        // Raw replay preserves duplicate scope RTs without a typed/raw twin.
+        Ok((
+            Vec::new(),
+            targets.into_iter().map(|(bytes, _)| bytes).collect(),
+        ))
+    } else {
+        Ok((
+            targets.into_iter().map(|(_, text)| text).collect(),
+            Vec::new(),
+        ))
+    }
 }
 
 fn encode(rule: &FlowSpecRule) -> Result<pb::AddFlowSpecRequest> {
     let (afi_safi, components) = encode_match(&rule.nlri)?;
+    let (route_targets, extended_communities) =
+        encode_scope_targets(rule.nlri.scope.as_ref(), &rule.route_targets)?;
     if rule.actions.len() != 1 {
         return Err(invalid("exactly one traffic rate action is required"));
     }
@@ -486,6 +647,13 @@ fn encode(rule: &FlowSpecRule) -> Result<pb::AddFlowSpecRequest> {
     Ok(pb::AddFlowSpecRequest {
         afi_safi,
         components,
+        rd: rule
+            .nlri
+            .scope
+            .as_ref()
+            .map_or_else(String::new, |scope| scope.rd().to_owned()),
+        route_targets,
+        extended_communities,
         actions: vec![pb::FlowSpecAction {
             action: Some(pb::flow_spec_action::Action::TrafficRate(
                 pb::FlowSpecTrafficRate { rate },
@@ -510,6 +678,21 @@ fn numbers(value: &str) -> Result<Vec<u16>> {
 }
 
 fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
+    let scope = match family {
+        3 | 4 if route.rd.is_empty() && route.route_targets.is_empty() => None,
+        13 | 14 => {
+            let family = if family == 13 {
+                VpnFlowSpecFamily::Ipv4
+            } else {
+                VpnFlowSpecFamily::Ipv6
+            };
+            Some(
+                VpnFlowSpecIdentity::new(family, &route.rd)
+                    .map_err(|error| invalid(&error.to_string()))?,
+            )
+        }
+        _ => return Err(invalid("invalid FlowSpec family or scope")),
+    };
     // Leased rows carry an owner, generation and remaining time together (rustbgpd ADR-0141 §3).
     let leased = !route.injection_owner.is_empty();
     if leased != route.lease_generation.is_some() || leased != route.lease_remaining_ms.is_some() {
@@ -520,14 +703,13 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
         || !route.communities.is_empty()
         || !route.as_path.is_empty()
         || !route.ipv6_extended_communities.is_empty()
-        || !route.rd.is_empty()
-        || !route.route_targets.is_empty()
         || route.admission_revision.is_some()
         || route.injection_owner.starts_with("guarded:")
     {
         return Err(invalid("unsupported local route attributes"));
     }
     let mut nlri = FlowSpecNlri {
+        scope,
         dst_prefix: String::new(),
         protocol: None,
         dst_ports: vec![],
@@ -545,7 +727,8 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
                     .prefix
                     .parse()
                     .map_err(|_| invalid("invalid prefix"))?;
-                if prefix != prefix.trunc() || (prefix.addr().is_ipv4() != (family == 3)) {
+                if prefix != prefix.trunc() || (prefix.addr().is_ipv4() != matches!(family, 3 | 13))
+                {
                     return Err(invalid("invalid prefix family or host bits"));
                 }
                 if component.r#type == 1 {
@@ -606,7 +789,9 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
             _ => return Err(invalid("unsupported component")),
         }
     }
-    if nlri.dst_prefix.is_empty() || route.actions.len() != 1 {
+    if (nlri.dst_prefix.is_empty() && (nlri.scope.is_none() || nlri.src_prefix.is_none()))
+        || route.actions.len() != 1
+    {
         return Err(invalid("missing destination or unsupported actions"));
     }
     let Some(pb::flow_spec_action::Action::TrafficRate(rate)) = &route.actions[0].action else {
@@ -618,7 +803,15 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
     }
     // rustbgpd exposes each traffic-rate both as a typed action and a raw EC.
     let expected_ec = (0x8006_u64 << 48) | u64::from(rate.rate.to_bits());
-    if route.extended_communities.as_slice() != [expected_ec] {
+    let mut expected_communities = vec![expected_ec];
+    let mut targets = route
+        .route_targets
+        .iter()
+        .map(|target| route_target_bytes(target).map_err(|error| invalid(&error.to_string())))
+        .collect::<Result<Vec<_>>>()?;
+    targets.sort_unstable();
+    expected_communities.extend(targets);
+    if route.extended_communities != expected_communities {
         return Err(invalid("unsupported or inconsistent extended communities"));
     }
     let action = if bps == 0.0 {
@@ -626,7 +819,9 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
     } else {
         FlowSpecAction::police(bps as u64)
     };
-    let rule = FlowSpecRule::new(nlri, action).with_owner(route.injection_owner);
+    let rule = FlowSpecRule::new(nlri, action)
+        .with_owner(route.injection_owner)
+        .with_route_targets(route.route_targets);
     encode(&rule)?;
     Ok(rule)
 }
@@ -753,6 +948,13 @@ fn decode_blackhole(
     Ok(())
 }
 
+fn acknowledge_local_intent(response: &pb::ListFlowSpecResponse) -> Result<()> {
+    if !response.received_view || response.advertised_view || !response.routes.is_empty() {
+        return Err(invalid("rustbgpd did not acknowledge local intent view"));
+    }
+    Ok(())
+}
+
 /// Explicit, so a daemon default change cannot alter the walk.
 const ROUTE_PAGE_SIZE: u32 = 100;
 
@@ -793,8 +995,28 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
 
 #[async_trait]
 impl FlowSpecWriter for RustBgpdAnnouncer {
+    fn register_scope(&self, scope: Option<&VpnFlowSpecIdentity>) -> Result<()> {
+        if let Some(scope) = scope {
+            let bit = match scope.family {
+                VpnFlowSpecFamily::Ipv4 => 1,
+                VpnFlowSpecFamily::Ipv6 => 2,
+            };
+            self.vpn_families
+                .fetch_or(bit, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    async fn validate_scope(&self, scope: Option<&VpnFlowSpecIdentity>) -> Result<()> {
+        self.register_scope(scope)?;
+        if let Some(scope) = scope {
+            self.probe_vpn_family(scope.family.afi_safi()).await?;
+        }
+        Ok(())
+    }
+
     fn matches_nlri(&self, left: &FlowSpecNlri, right: &FlowSpecNlri) -> Result<bool> {
-        Ok(encode_match(left)? == encode_match(right)?)
+        Ok(left.scope == right.scope && encode_match(left)? == encode_match(right)?)
     }
 
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
@@ -803,20 +1025,27 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
         }
         let payload = encode(rule)?;
         let response = self
-            .call("AddFlowSpec", || async {
-                pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                    .add_flow_spec(self.request(payload.clone()))
-                    .await
-            })
-            .await
-            .map_err(|status| self.mutation_error("AddFlowSpec", &status))?;
+            .mutation_call(
+                "AddFlowSpec",
+                rule.nlri
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.family.afi_safi())
+                    .as_slice(),
+                || async {
+                    pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                        .add_flow_spec(self.request(payload.clone()))
+                        .await
+                },
+            )
+            .await?;
         match pb::FlowSpecInjectOutcome::try_from(response.outcome) {
             Ok(
                 pb::FlowSpecInjectOutcome::Created
                 | pb::FlowSpecInjectOutcome::Replaced
                 | pb::FlowSpecInjectOutcome::Unchanged,
             ) => {
-                tracing::debug!(outcome = response.outcome, "rustbgpd injection accepted");
+                tracing::debug!(outcome = response.outcome, dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd injection accepted");
                 Ok(())
             }
             _ => Err(invalid("unsupported rustbgpd injection outcome")),
@@ -832,21 +1061,29 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
         if rule.owner.is_empty() {
             return Err(invalid("a leased add needs an injection owner"));
         }
+        let encoded = encode(rule)?;
         let payload = pb::AddLeasedFlowSpecRequest {
-            rule: Some(encode(rule)?),
+            rule: Some(encoded),
             lease: Some(pb::InjectionLease {
                 owner: rule.owner.clone(),
                 lease_seconds,
             }),
         };
         let response = self
-            .call("AddLeasedFlowSpec", || async {
-                pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                    .add_leased_flow_spec(self.request(payload.clone()))
-                    .await
-            })
-            .await
-            .map_err(|status| self.mutation_error("AddLeasedFlowSpec", &status))?;
+            .mutation_call(
+                "AddLeasedFlowSpec",
+                rule.nlri
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.family.afi_safi())
+                    .as_slice(),
+                || async {
+                    pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                        .add_leased_flow_spec(self.request(payload.clone()))
+                        .await
+                },
+            )
+            .await?;
         match response
             .result
             .map(|result| pb::FlowSpecInjectOutcome::try_from(result.outcome))
@@ -855,12 +1092,17 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
                 pb::FlowSpecInjectOutcome::Created
                 | pb::FlowSpecInjectOutcome::Replaced
                 | pb::FlowSpecInjectOutcome::Unchanged,
-            )) => generation(response.generation),
+            )) => {
+                let generation = generation(response.generation)?;
+                tracing::debug!(dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd leased injection accepted");
+                Ok(generation)
+            }
             _ => Err(invalid("unsupported rustbgpd leased injection outcome")),
         }
     }
 
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+        super::announcer::validate_rule_scope(rule)?;
         let (afi_safi, components) = encode_match(&rule.nlri)?;
         // The recorded owner and never override_owner: a mismatch is FAILED_PRECONDITION.
         let payload = pb::DeleteFlowSpecRequest {
@@ -868,29 +1110,42 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
             components,
             allow_missing: true,
             owner: rule.owner.clone(),
+            rd: rule
+                .nlri
+                .scope
+                .as_ref()
+                .map_or_else(String::new, |scope| scope.rd().to_owned()),
             ..Default::default()
         };
         let response = self
-            .call("DeleteFlowSpec", || {
-                let mut client =
-                    pb::injection_service_client::InjectionServiceClient::new(self.channel.clone());
-                let request = self.request(payload.clone());
-                async move {
-                    match client.delete_flow_spec(request).await {
-                        Err(status) if status.code() == Code::NotFound => {
-                            Ok(tonic::Response::new(pb::DeleteFlowSpecResponse {
-                                outcome: 2,
-                            }))
+            .mutation_call(
+                "DeleteFlowSpec",
+                rule.nlri
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.family.afi_safi())
+                    .as_slice(),
+                || {
+                    let mut client = pb::injection_service_client::InjectionServiceClient::new(
+                        self.channel.clone(),
+                    );
+                    let request = self.request(payload.clone());
+                    async move {
+                        match client.delete_flow_spec(request).await {
+                            Err(status) if status.code() == Code::NotFound => {
+                                Ok(tonic::Response::new(pb::DeleteFlowSpecResponse {
+                                    outcome: 2,
+                                }))
+                            }
+                            result => result,
                         }
-                        result => result,
                     }
-                }
-            })
-            .await
-            .map_err(|status| self.mutation_error("DeleteFlowSpec", &status))?;
+                },
+            )
+            .await?;
         match pb::FlowSpecDeleteOutcome::try_from(response.outcome) {
             Ok(pb::FlowSpecDeleteOutcome::Deleted | pb::FlowSpecDeleteOutcome::NotPresent) => {
-                tracing::debug!(outcome = response.outcome, "rustbgpd withdrawal accepted");
+                tracing::debug!(outcome = response.outcome, dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd withdrawal accepted");
                 Ok(())
             }
             _ => Err(invalid("unsupported rustbgpd deletion outcome")),
@@ -901,7 +1156,7 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
 impl FlowSpecReader for RustBgpdAnnouncer {
     async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
         let mut rules = vec![];
-        for family in [3, 4] {
+        for family in self.inventory_families() {
             let response = self
                 .rpc("ListFlowSpecRoutes", || async {
                     pb::rib_service_client::RibServiceClient::new(self.channel.clone())
@@ -913,9 +1168,7 @@ impl FlowSpecReader for RustBgpdAnnouncer {
                         .await
                 })
                 .await?;
-            if !response.received_view || response.advertised_view || !response.routes.is_empty() {
-                return Err(invalid("rustbgpd did not acknowledge local intent view"));
-            }
+            acknowledge_local_intent(&response)?;
             for row in response.received_routes {
                 if !matches!(row.validation, 1 | 3) || row.path_id != 0 || !row.reason.is_empty() {
                     return Err(invalid("invalid local intent row"));
@@ -1128,8 +1381,13 @@ impl InjectionLeases for RustBgpdAnnouncer {
             }),
             lease_seconds,
         };
+        let families: Vec<_> = self
+            .inventory_families()
+            .into_iter()
+            .filter(|family| *family > 4)
+            .collect();
         match self
-            .call("RenewLease", || async {
+            .call_with_probes("RenewLease", &families, || async {
                 pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
                     .renew_lease(self.request(request.clone()))
                     .await
@@ -1138,7 +1396,7 @@ impl InjectionLeases for RustBgpdAnnouncer {
         {
             Ok(_) => Ok(true),
             // Preserve code-only recovery if an older or malformed server omits ErrorInfo.
-            Err(status) if status.code() == Code::FailedPrecondition => {
+            Err(ScopedRpcError::Mutation(status)) if status.code() == Code::FailedPrecondition => {
                 let reason = match injection_refusal_reason(&status) {
                     Some(InjectionRefusalReason::GenerationNotLive) => {
                         InjectionRefusalReason::GenerationNotLive
@@ -1151,7 +1409,8 @@ impl InjectionLeases for RustBgpdAnnouncer {
                 );
                 Ok(false)
             }
-            Err(status) => {
+            Err(ScopedRpcError::Probe(error)) => Err(error),
+            Err(ScopedRpcError::Mutation(status)) => {
                 self.lease_unsupported(&status);
                 Err(failed("RenewLease", &status))
             }
@@ -1380,8 +1639,14 @@ impl ExportObserver for RustBgpdAnnouncer {
 
     async fn flowspec_exports(&self, nlri: &FlowSpecNlri) -> Result<Option<Vec<PeerExport>>> {
         let (afi_safi, components) = encode_match(nlri)?;
+        self.validate_scope(nlri.scope.as_ref()).await?;
+        let rd = nlri
+            .scope
+            .as_ref()
+            .map_or_else(String::new, |scope| scope.rd().to_owned());
         self.export_dispositions("ListFlowSpecExportDispositions", |page_token| {
             let components = components.clone();
+            let rd = rd.clone();
             async move {
                 pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
                     .list_flow_spec_export_dispositions(self.request(
@@ -1391,7 +1656,7 @@ impl ExportObserver for RustBgpdAnnouncer {
                             page_size: ROUTE_PAGE_SIZE,
                             page_token,
                             include_configured: true,
-                            rd: String::new(),
+                            rd,
                         },
                     ))
                     .await
@@ -1603,6 +1868,271 @@ mod tests {
             extended_communities: vec![0x8006_u64 << 48],
             ..Default::default()
         }
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[tokio::test]
+    async fn vpn_probe_refuses_before_mutation_and_is_not_cached_across_calls() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering::SeqCst},
+        };
+        #[derive(Clone, Default)]
+        struct Service {
+            mode: Arc<AtomicUsize>,
+            probes: Arc<AtomicUsize>,
+            mutations: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl pb::rib_service_server::RibService for Service {
+            async fn list_flow_spec_routes(
+                &self,
+                request: Request<pb::ListFlowSpecRequest>,
+            ) -> std::result::Result<tonic::Response<pb::ListFlowSpecResponse>, tonic::Status>
+            {
+                let request = request.into_inner();
+                assert_eq!(request.received_peer_address, "0.0.0.0");
+                assert!(request.advertised_peer_address.is_empty());
+                if request.afi_safi > 4 {
+                    assert!(matches!(request.afi_safi, 13 | 14));
+                    self.probes.fetch_add(1, SeqCst);
+                    match self.mode.load(SeqCst) {
+                        1 => return Err(tonic::Status::invalid_argument("unsupported family")),
+                        2 => return Err(tonic::Status::unauthenticated("test rejection")),
+                        3 => return Ok(tonic::Response::new(pb::ListFlowSpecResponse::default())),
+                        _ => {}
+                    }
+                }
+                Ok(tonic::Response::new(pb::ListFlowSpecResponse {
+                    received_view: true,
+                    ..Default::default()
+                }))
+            }
+        }
+        #[async_trait]
+        impl pb::injection_service_server::InjectionService for Service {
+            async fn add_flow_spec(
+                &self,
+                _: Request<pb::AddFlowSpecRequest>,
+            ) -> std::result::Result<tonic::Response<pb::AddFlowSpecResponse>, tonic::Status>
+            {
+                self.mutations.fetch_add(1, SeqCst);
+                if self.mode.load(SeqCst) == 4 {
+                    self.mode.store(1, SeqCst);
+                    return Err(tonic::Status::unavailable("daemon changed after dispatch"));
+                }
+                Ok(tonic::Response::new(pb::AddFlowSpecResponse { outcome: 1 }))
+            }
+            async fn add_leased_flow_spec(
+                &self,
+                _: Request<pb::AddLeasedFlowSpecRequest>,
+            ) -> std::result::Result<tonic::Response<pb::AddLeasedFlowSpecResponse>, tonic::Status>
+            {
+                self.mutations.fetch_add(1, SeqCst);
+                Ok(tonic::Response::new(pb::AddLeasedFlowSpecResponse {
+                    result: Some(pb::AddFlowSpecResponse { outcome: 1 }),
+                    generation: Some(pb::LeaseGeneration {
+                        incarnation: 1,
+                        sequence: 1,
+                    }),
+                }))
+            }
+            async fn delete_flow_spec(
+                &self,
+                _: Request<pb::DeleteFlowSpecRequest>,
+            ) -> std::result::Result<tonic::Response<pb::DeleteFlowSpecResponse>, tonic::Status>
+            {
+                self.mutations.fetch_add(1, SeqCst);
+                Ok(tonic::Response::new(pb::DeleteFlowSpecResponse {
+                    outcome: 1,
+                }))
+            }
+        }
+        let service = Service::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures_util::stream::unfold(listener, |listener| async move {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(pb::rib_service_server::RibServiceServer::new(
+                    service.clone(),
+                ))
+                .add_service(pb::injection_service_server::InjectionServiceServer::new(
+                    service.clone(),
+                ))
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = stopped.await;
+                }),
+        );
+        let channel = Endpoint::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let speaker = RustBgpdAnnouncer::new(channel, None);
+        let global = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "192.0.2.1/32".into(),
+                ..Default::default()
+            },
+            FlowSpecAction::discard(),
+        );
+        assert_eq!(speaker.inventory_families(), [3, 4]);
+        speaker.announce(&global).await.unwrap();
+        assert_eq!(service.probes.load(SeqCst), 0);
+        for family in [VpnFlowSpecFamily::Ipv4, VpnFlowSpecFamily::Ipv6] {
+            let rule = FlowSpecRule::new(
+                FlowSpecNlri {
+                    scope: Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap()),
+                    dst_prefix: if family == VpnFlowSpecFamily::Ipv4 {
+                        "192.0.2.1/32"
+                    } else {
+                        "2001:db8::1/128"
+                    }
+                    .into(),
+                    ..Default::default()
+                },
+                FlowSpecAction::discard(),
+            )
+            .with_route_targets(vec!["44407:777".into()]);
+            service.mode.store(0, SeqCst);
+            let before = service.probes.load(SeqCst);
+            speaker.announce(&rule).await.unwrap();
+            let leased = rule.clone().with_owner("prefixd.test");
+            speaker.announce_leased(&leased, 30).await.unwrap();
+            speaker.withdraw(&leased).await.unwrap();
+            assert_eq!(service.probes.load(SeqCst), before + 3);
+            let held = service.mutations.load(SeqCst);
+            for mode in [1, 2, 3] {
+                service.mode.store(mode, SeqCst);
+                let errors = [
+                    speaker.announce(&rule).await.unwrap_err(),
+                    speaker.announce_leased(&leased, 30).await.unwrap_err(),
+                    speaker.withdraw(&leased).await.unwrap_err(),
+                ];
+                for error in errors {
+                    assert_eq!(
+                        matches!(error, PrefixdError::UnsupportedFlowSpecScope { .. }),
+                        mode == 1
+                    );
+                }
+                assert_eq!(service.mutations.load(SeqCst), held);
+                assert!(
+                    speaker.list_active().await.is_err(),
+                    "a registered failed VPN read cannot become empty inventory"
+                );
+            }
+            service.mode.store(4, SeqCst);
+            let probes = service.probes.load(SeqCst);
+            assert!(matches!(
+                speaker.announce(&rule).await,
+                Err(PrefixdError::UnsupportedFlowSpecScope { .. })
+            ));
+            assert_eq!(service.probes.load(SeqCst), probes + 2);
+            assert_eq!(
+                service.mutations.load(SeqCst),
+                held + 1,
+                "retry must re-probe before a second dispatch"
+            );
+        }
+        assert_eq!(speaker.inventory_families(), [3, 4, 13, 14]);
+        stop.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn vpn_codec_preserves_family_rd_targets_and_source_only_identity() {
+        for (family, destination, source) in [
+            (VpnFlowSpecFamily::Ipv4, "192.0.2.1/32", "198.51.100.0/24"),
+            (
+                VpnFlowSpecFamily::Ipv6,
+                "2001:db8::1/128",
+                "2001:db8:1::/48",
+            ),
+        ] {
+            for destination in [destination, ""] {
+                let rule = FlowSpecRule::new(
+                    FlowSpecNlri {
+                        scope: Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap()),
+                        dst_prefix: destination.into(),
+                        src_prefix: Some(source.into()),
+                        ..Default::default()
+                    },
+                    FlowSpecAction::discard(),
+                )
+                .with_route_targets(vec!["44407:777".into(), "0.44407:777".into()]);
+                let encoded = encode(&rule).unwrap();
+                assert_eq!(encoded.afi_safi, family.afi_safi());
+                assert_eq!(encoded.rd, "44407:40");
+                assert!(encoded.extended_communities.is_empty());
+                assert_eq!(encoded.route_targets, rule.route_targets);
+                assert_eq!(
+                    encoded.components[0].r#type,
+                    if destination.is_empty() { 2 } else { 1 }
+                );
+                let mut components = encoded.components.clone();
+                read_back(&mut components);
+                let mut raw = vec![0x8006_u64 << 48];
+                raw.extend(
+                    encoded
+                        .route_targets
+                        .iter()
+                        .map(|target| route_target_bytes(target).unwrap()),
+                );
+                let row = pb::FlowSpecRouteEntry {
+                    afi_safi: encoded.afi_safi,
+                    rd: encoded.rd,
+                    route_targets: encoded.route_targets,
+                    components,
+                    actions: encoded.actions,
+                    extended_communities: raw,
+                    peer_address: "0.0.0.0".into(),
+                    ..Default::default()
+                };
+                let decoded = decode(row.clone(), family.afi_safi()).unwrap();
+                assert_eq!(decoded.nlri.scope, rule.nlri.scope);
+                assert_eq!(decoded.nlri_hash(), rule.nlri_hash());
+                assert_eq!(decoded.route_targets, rule.route_targets);
+                let mut invalid = row.clone();
+                invalid.rd.clear();
+                assert!(decode(invalid, family.afi_safi()).is_err());
+                let mut invalid = row.clone();
+                invalid.extended_communities.pop();
+                assert!(decode(invalid, family.afi_safi()).is_err());
+                let mut invalid = row;
+                invalid.afi_safi = if family == VpnFlowSpecFamily::Ipv4 {
+                    3
+                } else {
+                    4
+                };
+                assert!(decode(invalid.clone(), invalid.afi_safi).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn raw_duplicate_scope_targets_replay_without_typed_twins() {
+        let scope = VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "44407:40").unwrap();
+        let mut rule = FlowSpecRule::new(
+            FlowSpecNlri {
+                scope: Some(scope),
+                dst_prefix: "192.0.2.1/32".into(),
+                ..Default::default()
+            },
+            FlowSpecAction::discard(),
+        )
+        .with_route_targets(vec!["44407:777".into(); 2]);
+        let encoded = encode(&rule).unwrap();
+        assert!(encoded.route_targets.is_empty());
+        assert_eq!(
+            encoded.extended_communities,
+            vec![route_target_bytes("44407:777").unwrap(); 2]
+        );
+        rule.nlri.scope = None;
+        assert!(encode(&rule).is_err());
     }
 
     #[test]

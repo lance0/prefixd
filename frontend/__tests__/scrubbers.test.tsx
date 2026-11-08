@@ -1,7 +1,7 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { ScrubbersContent } from "@/components/dashboard/scrubbers-content"
-import type { DiversionPreview, ScrubberDiversion } from "@/lib/api"
+import { createDiversion, previewDiversion, type DiversionPreview, type DiversionRequest, type ScrubberDiversion, type ScrubberProfiles } from "@/lib/api"
 import type { OperatorRole } from "@/lib/auth"
 import { deferred, failure, json, operatorResponse, renderApp, settle, signIn, useFakeController } from "./support/fake-controller"
 
@@ -36,7 +36,7 @@ function result(dryRun = false): DiversionPreview {
 
 const active = { ...result().candidate, status: "active" as const }
 
-function profiles(armed: boolean, ready: boolean) {
+function profiles(armed: boolean, ready: boolean): ScrubberProfiles {
   return { enabled: true, profiles: { a: { armed, ready, readiness: ready ? "ready" : "unknown", observed_at: null, latch_reason: null } }, configuration: [{ id: "a", revision: "v1", ipv4_target: "192.0.2.99", ipv6_target: null }] }
 }
 
@@ -60,9 +60,15 @@ async function openWithdraw() {
   return screen.findByRole("alertdialog", { name: "Withdraw diversion" })
 }
 
-async function setup(dryRun = false) {
+async function setup(dryRun = false, routingScope?: string) {
   signIn(controller, "credentials", operatorResponse("admin"))
-  controller.route("GET", "/v1/scrubbers", () => json(profiles(!dryRun, !dryRun)))
+  controller.route("GET", "/v1/scrubbers", () => {
+    const configured = profiles(!dryRun, !dryRun)
+
+    if (routingScope) configured.configuration[0].scope = routingScope
+
+    return json(configured)
+  })
   controller.route("GET", "/v1/diversions", () => json([]))
   controller.route("POST", "/v1/diversions/preview", () => json(result(dryRun)))
   controller.route("POST", "/v1/diversions", () => json({ ...result(dryRun).candidate, status: dryRun ? "simulated" : "active" }, 202))
@@ -232,5 +238,90 @@ describe("scrubber re-arm and access", () => {
 
     await render({ rows: [{ ...active, export_observation: { observed_at: "2030-01-01T00:00:00Z", peers, error: "scrubber export observation timed out" } }] })
     expect(await screen.findByText(/Historical peer export observation from 2030-01-01T00:00:00Z; current export unknown/)).toBeInTheDocument()
+  })
+})
+
+function vpnResult(family: "ipv4" | "ipv6", routingScope = "TRANSIT"): DiversionPreview {
+  const preview = result()
+  preview.candidate.profile.scope = routingScope
+  preview.candidate.rule.nlri.scope = { family, rd: "44407:40" }
+  preview.candidate.rule.route_targets = ["44407:777"]
+
+  if (family === "ipv6") {
+    preview.candidate.rule.nlri.dst_prefix = "2001:db8::20/128"
+    preview.candidate.rule.nlri.src_prefix = "2001:db8:bad::/64"
+    preview.candidate.rule.target = "2001:db8::99"
+  }
+
+  return preview
+}
+
+function vpnRequest(family: "ipv4" | "ipv6"): DiversionRequest {
+  const preview = vpnResult(family)
+
+  return { profile: "a", scope: preview.candidate.rule.nlri, ttl_seconds: 60, reason: "Investigated attack", confirmation: preview.confirmation }
+}
+
+describe("VPN diversion boundary", { timeout: 10_000 }, () => {
+  it.each(["ipv4", "ipv6"] as const)("uses only scope-aware endpoints for %s and rechecks before creation", async family => {
+    const preview = vpnResult(family)
+    const request = vpnRequest(family)
+    controller.route("POST", "/v1/vpn/diversions/preview", () => json(preview))
+    controller.route("POST", "/v1/vpn/diversions", () => json(preview.candidate))
+    await expect(previewDiversion(request, "TRANSIT")).resolves.toMatchObject({ candidate: { profile: { scope: "TRANSIT" } } })
+    await createDiversion(request, "TRANSIT")
+    expect(controller.calls("POST", "/v1/vpn/diversions/preview")).toHaveLength(2)
+    expect(JSON.parse(controller.calls("POST", "/v1/vpn/diversions")[0].body ?? "{}")).toEqual({ scope: "TRANSIT", diversion: request })
+    expect(controller.calls("POST", "/v1/diversions/preview")).toHaveLength(0)
+    expect(controller.calls("POST", "/v1/diversions")).toHaveLength(0)
+  })
+
+  it("refuses an older controller without global fallback", async () => {
+    controller.route("POST", "/v1/vpn/diversions/preview", () => json({ error: "not found" }, 404))
+    await expect(createDiversion(vpnRequest("ipv4"), "TRANSIT")).rejects.toThrow("404")
+    expect(controller.calls("POST", "/v1/vpn/diversions")).toHaveLength(0)
+    expect(controller.calls("POST", "/v1/diversions/preview")).toHaveLength(0)
+    expect(controller.calls("POST", "/v1/diversions")).toHaveLength(0)
+  })
+
+  it.each(["scope", "identity", "targets"])("refuses a missing or mismatched %s acknowledgement before creation", async field => {
+    const preview = vpnResult("ipv4")
+
+    if (field === "scope") preview.candidate.profile.scope = "OTHER"
+
+    if (field === "identity") delete preview.candidate.rule.nlri.scope
+
+    if (field === "targets") preview.candidate.rule.route_targets = []
+
+    controller.route("POST", "/v1/vpn/diversions/preview", () => json(preview))
+    await expect(createDiversion(vpnRequest("ipv4"), "TRANSIT")).rejects.toThrow("did not acknowledge")
+    expect(controller.calls("POST", "/v1/vpn/diversions")).toHaveLength(0)
+    expect(controller.calls("POST", "/v1/diversions")).toHaveLength(0)
+  })
+
+  it("requires a new confirmation when fresh scoped preview changes", async () => {
+    const preview = vpnResult("ipv4")
+    preview.confirmation = "new-scope-or-target"
+    controller.route("POST", "/v1/vpn/diversions/preview", () => json(preview))
+    await expect(createDiversion(vpnRequest("ipv4"), "TRANSIT")).rejects.toThrow("changed after confirmation")
+    expect(controller.calls("POST", "/v1/vpn/diversions")).toHaveLength(0)
+  })
+
+  it("keeps the acknowledged scope through operator confirmation", async () => {
+    await setup(false, "TRANSIT")
+    const preview = vpnResult("ipv4")
+    controller.route("POST", "/v1/vpn/diversions/preview", () => json(preview))
+    controller.route("POST", "/v1/vpn/diversions", () => json({ ...preview.candidate, status: "active" }, 202))
+    expect(screen.getByText("Requested routing scope: TRANSIT")).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "Preview diversion" }))
+    const confirm = await screen.findByRole("checkbox", { name: "I confirm this traffic match and scrubber target." })
+
+    expect(screen.getByText("Confirmed routing scope: TRANSIT")).toBeInTheDocument()
+    fireEvent.click(confirm)
+    fireEvent.click(screen.getByRole("button", { name: "Create diversion" }))
+    await waitFor(() => expect(controller.calls("POST", "/v1/vpn/diversions")).toHaveLength(1))
+    expect(JSON.parse(controller.calls("POST", "/v1/vpn/diversions")[0].body ?? "{}").scope).toBe("TRANSIT")
+    expect(controller.calls("POST", "/v1/diversions/preview")).toHaveLength(0)
+    expect(controller.calls("POST", "/v1/diversions")).toHaveLength(0)
   })
 })

@@ -203,6 +203,8 @@ mod tests {
 
     fn config(endpoint: &str) -> BgpConfig {
         BgpConfig {
+            vpn_scopes: Default::default(),
+            default_scope: "global".into(),
             mode: BgpMode::Sidecar,
             gobgp_grpc: endpoint.into(),
             rustbgpd: None,

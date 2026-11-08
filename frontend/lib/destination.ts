@@ -66,7 +66,7 @@ export function parseDestination(value: string): Destination | null {
 
 /** Keep CIDRs on their mitigation details, never substitute a base-IP history. */
 export function mitigationTargetHref(mitigation: { victim_ip: string; mitigation_id: string }): string {
-  return mitigation.victim_ip.includes("/")
+  return mitigation.victim_ip === "any" || mitigation.victim_ip.includes("/")
     ? `/mitigations/${mitigation.mitigation_id}`
     : `/ip-history?ip=${encodeURIComponent(mitigation.victim_ip)}`
 }

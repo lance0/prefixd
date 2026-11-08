@@ -47,6 +47,9 @@ impl Fake {
 }
 #[async_trait]
 impl FlowSpecWriter for Fake {
+    async fn validate_scope(&self, _: Option<&VpnFlowSpecIdentity>) -> Result<()> {
+        Ok(())
+    }
     async fn announce(&self, _: &FlowSpecRule) -> Result<()> {
         panic!("no ordinary add fallback")
     }
@@ -199,6 +202,7 @@ fn profile(id: &str) -> ScrubberProfile {
     ScrubberProfile {
         id: id.into(),
         revision: "fixture-v1".into(),
+        scope: "global".into(),
         ipv4_target: Some("192.0.2.99".parse().unwrap()),
         ipv6_target: None,
         destinations: vec!["203.0.113.0/24".parse().unwrap()],
@@ -624,6 +628,7 @@ async fn untracked_local_victim_overlaps_refuse_diversion_without_touching_forei
         };
         if guarded {
             let rule = GuardedRule {
+                route_targets: vec![],
                 nlri: foreign.clone(),
                 target: "192.0.2.98".parse().unwrap(),
                 owner: "another-tool".into(),
@@ -1356,4 +1361,275 @@ async fn draining_another_controllers_admission_waits_the_server_window_cap() {
         .unwrap();
     assert_eq!(row.status, DiversionStatus::Withdrawn);
     assert!(fake.windows.lock().unwrap().is_empty());
+}
+
+#[test]
+fn source_only_inventory_blocks_diversion_across_rds() {
+    let source_only = FlowSpecNlri {
+        scope: Some(VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "44407:41").unwrap()),
+        src_prefix: Some("198.51.100.0/24".into()),
+        ..Default::default()
+    };
+    let inventory = GuardedInventory {
+        entries: vec![],
+        other_matches: vec![source_only],
+    };
+    let observed = Observed::new(&inventory).unwrap();
+    let victim: std::net::IpAddr = "203.0.113.1".parse().unwrap();
+    assert!(
+        observed
+            .selectors
+            .iter()
+            .any(|(prefix, _)| prefix.contains(&victim))
+    );
+}
+
+#[tokio::test]
+async fn configured_vpn_profile_freezes_rd_and_rt_in_guarded_admission() {
+    let (mut state, _, _) = fixture(OperationMode::DryRun).await;
+    let configured = Arc::get_mut(&mut state).unwrap();
+    let scope: crate::config::VpnScopeConfig =
+        crate::config::parse_yaml("family: ipv4\nrd: '44407:40'\nroute_targets: ['44407:777']")
+            .unwrap();
+    configured
+        .settings
+        .bgp
+        .vpn_scopes
+        .insert("TRANSIT".into(), scope);
+    configured.settings.scrubber.profiles[0].scope = "TRANSIT".into();
+    let row = state
+        .scrubber
+        .prepare(&state, &request("a", 20), "admin")
+        .await
+        .unwrap();
+    assert_eq!(row.rule.nlri.scope.as_ref().unwrap().rd(), "44407:40");
+    assert_eq!(row.rule.route_targets, ["44407:777"]);
+    let original_confirmation = ScrubberController::confirmation(&row).unwrap();
+    let mut changed_targets = row.clone();
+    changed_targets.rule.route_targets = vec!["44407:778".into()];
+    assert_ne!(
+        original_confirmation,
+        ScrubberController::confirmation(&changed_targets).unwrap()
+    );
+    assert!(
+        ScrubberController::scope_agrees(&state, &state.settings.scrubber.profiles[0], &row.rule)
+            .unwrap()
+    );
+    let mut saved = row.rule.clone();
+    saved.route_targets = vec!["44407:778".into()];
+    assert!(
+        !ScrubberController::scope_agrees(&state, &state.settings.scrubber.profiles[0], &saved)
+            .unwrap()
+    );
+    let mut wrong = request("a", 20);
+    wrong.scope.scope =
+        Some(VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "44407:41").unwrap());
+    assert!(
+        state
+            .scrubber
+            .prepare(&state, &wrong, "admin")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn vpn_diversion_routes_authenticate_before_scope_lookup_and_refuse_mismatches() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    for authorized in [false, true] {
+        let (mut state, repo, fake) = fixture(OperationMode::DryRun).await;
+        let inner = Arc::get_mut(&mut state).unwrap();
+        inner.settings.http.auth.mode = crate::config::AuthMode::Bearer;
+        inner.bearer_token = Some("fixture-token".into());
+        let router = crate::api::create_test_router(state.clone());
+        for path in ["/v1/vpn/diversions", "/v1/vpn/diversions/preview"] {
+            let body = serde_json::json!({"scope":"MISSING","diversion":{
+                "profile":"missing","scope":{"dst_prefix":"203.0.113.20/32","protocol":6,"dst_ports":[443]},
+                "ttl_seconds":60,"reason":"fixture"
+            }});
+            let mut req = Request::post(path).header("content-type", "application/json");
+            if authorized {
+                req = req.header("authorization", "Bearer fixture-token");
+            }
+            let response = router
+                .clone()
+                .oneshot(req.body(Body::from(body.to_string())).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if authorized {
+                    StatusCode::FORBIDDEN
+                } else {
+                    StatusCode::UNAUTHORIZED
+                }
+            );
+        }
+        assert!(
+            repo.list_diversions(&state.settings.pop)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(fake.writes.load(SeqCst), 0);
+        assert_eq!(fake.reads.load(SeqCst), 0);
+    }
+    let (mut state, repo, fake) = fixture(OperationMode::DryRun).await;
+    let inner = Arc::get_mut(&mut state).unwrap();
+    inner.settings.bgp.vpn_scopes.insert(
+        "TRANSIT".into(),
+        crate::config::parse_yaml("family: ipv4\nrd: '44407:40'\nroute_targets: ['44407:777']")
+            .unwrap(),
+    );
+    inner.settings.scrubber.profiles[0].scope = "TRANSIT".into();
+    let router = crate::api::create_test_router(state.clone());
+    for path in ["/v1/vpn/diversions", "/v1/vpn/diversions/preview"] {
+        for case in ["global", "unknown", "profile", "rd", "extra"] {
+            let mut body = serde_json::json!({"scope":"TRANSIT","diversion":{
+                "profile":"a","scope":{"dst_prefix":"203.0.113.20/32","protocol":6,"dst_ports":[443]},
+                "ttl_seconds":60,"reason":"fixture"
+            }});
+            match case {
+                "global" => body["scope"] = "global".into(),
+                "unknown" => body["scope"] = "MISSING".into(),
+                "profile" => body["diversion"]["profile"] = "b".into(),
+                "rd" => {
+                    body["diversion"]["scope"]["scope"] =
+                        serde_json::json!({"family":"ipv4","rd":"44407:41"})
+                }
+                "extra" => body["fallback"] = true.into(),
+                _ => unreachable!(),
+            }
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if case == "extra" {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                } else {
+                    StatusCode::BAD_REQUEST
+                },
+                "{path}: {case}"
+            );
+        }
+    }
+    assert!(
+        repo.list_diversions(&state.settings.pop)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(fake.writes.load(SeqCst), 0);
+    assert_eq!(fake.reads.load(SeqCst), 0);
+}
+
+#[tokio::test]
+async fn vpn_diversion_routes_acknowledge_both_families_and_keep_confirmation() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    for (family, name, prefix, target) in [
+        ("ipv4", "TRANSIT4", "203.0.113.20/32", "192.0.2.99"),
+        ("ipv6", "TRANSIT6", "2001:db8:100::20/128", "2001:db8::99"),
+    ] {
+        let (mut state, repo, fake) = fixture(OperationMode::DryRun).await;
+        let inner = Arc::get_mut(&mut state).unwrap();
+        inner.settings.bgp.vpn_scopes.insert(
+            name.into(),
+            crate::config::parse_yaml(&format!(
+                "family: {family}\nrd: '44407:40'\nroute_targets: ['44407:777']"
+            ))
+            .unwrap(),
+        );
+        let profile = &mut inner.settings.scrubber.profiles[0];
+        profile.scope = name.into();
+        if family == "ipv6" {
+            profile.ipv6_target = Some(target.parse().unwrap());
+            profile.destinations = vec!["2001:db8:100::/48".parse().unwrap()];
+        }
+        if family == "ipv6" {
+            let mut inventory = state.inventory.write().await;
+            let mut customer = inventory.customers[0].clone();
+            customer.prefixes = vec!["2001:db8:100::/48".into()];
+            customer.services.clear();
+            *inventory = crate::config::Inventory::new(vec![customer]);
+        }
+        let router = crate::api::create_test_router(state.clone());
+        let mut body = serde_json::json!({"scope":name,"diversion":{
+            "profile":"a","scope":{"dst_prefix":prefix,"protocol":6,"dst_ports":[443]},
+            "ttl_seconds":60,"reason":"operator scope confirmation"
+        }});
+        let preview = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/vpn/diversions/preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(preview.status(), StatusCode::OK, "{family}");
+        let preview: serde_json::Value =
+            serde_json::from_slice(&to_bytes(preview.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(preview["candidate"]["profile"]["scope"], name);
+        assert_eq!(
+            preview["candidate"]["rule"]["nlri"]["scope"],
+            serde_json::json!({"family":family,"rd":"44407:40"})
+        );
+        assert_eq!(
+            preview["candidate"]["rule"]["route_targets"],
+            serde_json::json!(["44407:777"])
+        );
+        assert!(
+            repo.list_diversions(&state.settings.pop)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(fake.writes.load(SeqCst), 0);
+        body["diversion"]["confirmation"] = preview["confirmation"].clone();
+        let created = router
+            .oneshot(
+                Request::post("/v1/vpn/diversions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::ACCEPTED, "{family}");
+        let created: Diversion =
+            serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let saved = repo.get_diversion(created.id).await.unwrap().unwrap();
+        assert_eq!(saved.status, DiversionStatus::Simulated);
+        assert_eq!(saved.profile.scope, name);
+        assert_eq!(saved.rule.nlri.scope.as_ref().unwrap().rd(), "44407:40");
+        assert_eq!(saved.rule.route_targets, ["44407:777"]);
+        assert_eq!(saved.reason, "operator scope confirmation");
+        assert_eq!(saved.actor, "anonymous");
+        assert!(
+            repo.list_diversions(&state.settings.pop)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(fake.writes.load(SeqCst), 0);
+    }
 }

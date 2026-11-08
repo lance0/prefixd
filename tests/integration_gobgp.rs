@@ -180,6 +180,8 @@ async fn action_drift_reconciles_exactly_once() {
     let fixture = fixture::Speaker::start().await;
     let speaker = std::sync::Arc::new(fixture.connect().await);
     let config = prefixd::config::BgpConfig {
+        vpn_scopes: Default::default(),
+        default_scope: "global".into(),
         mode: prefixd::config::BgpMode::Gobgp,
         gobgp_grpc: fixture.endpoint.clone(),
         local_asn: 65010,
@@ -215,6 +217,8 @@ async fn action_reconciliation_rejects_port_order_alias_without_mutation() {
     let fixture = fixture::Speaker::start().await;
     let speaker = std::sync::Arc::new(fixture.connect().await);
     let config = prefixd::config::BgpConfig {
+        vpn_scopes: Default::default(),
+        default_scope: "global".into(),
         mode: prefixd::config::BgpMode::Gobgp,
         gobgp_grpc: fixture.endpoint.clone(),
         local_asn: 65010,
@@ -389,6 +393,8 @@ async fn restart_recovers_through_the_same_client_and_reconciler() {
     let speaker = Arc::new(fixture.connect().await);
     let repo = Arc::new(MockRepository::new());
     let settings = prefixd::config::BgpConfig {
+        vpn_scopes: Default::default(),
+        default_scope: "global".into(),
         mode: prefixd::config::BgpMode::Gobgp,
         gobgp_grpc: fixture.endpoint.clone(),
         local_asn: 65010,
@@ -703,6 +709,8 @@ async fn manual_destination_cidrs_survive_restart_then_withdraw_and_expire_exact
     let fixture = fixture::Speaker::start().await;
     let speaker = std::sync::Arc::new(fixture.connect().await);
     let bgp = prefixd::config::BgpConfig {
+        vpn_scopes: Default::default(),
+        default_scope: "global".into(),
         mode: prefixd::config::BgpMode::Gobgp,
         gobgp_grpc: fixture.endpoint.clone(),
         local_asn: 65010,

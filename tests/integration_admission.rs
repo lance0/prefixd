@@ -242,3 +242,93 @@ async fn postgres_previews_reuse_pooled_connections() {
     assert_eq!(timeout, "0");
     pool.close().await;
 }
+
+fn source_only_quota_row(
+    family: prefixd::domain::VpnFlowSpecFamily,
+    rd: &str,
+    source: &str,
+) -> prefixd::domain::Mitigation {
+    use prefixd::domain::*;
+    let scope = VpnScopeSnapshot::new(
+        "TRANSIT",
+        VpnFlowSpecIdentity::new(family, rd).unwrap(),
+        &["44407:777".into()],
+    )
+    .unwrap();
+    let mut row = Mitigation::from_intent(
+        MitigationIntent {
+            event_id: uuid::Uuid::new_v4(),
+            customer_id: None,
+            service_id: None,
+            pop: "vpn-quota".into(),
+            match_criteria: MatchCriteria {
+                scope: Some(scope),
+                dst_prefix: String::new(),
+                src_prefix: Some(source.into()),
+                ..Default::default()
+            },
+            action_type: ActionType::Discard,
+            action_params: ActionParams::default(),
+            ttl_seconds: 60,
+            reason: "source quota regression".into(),
+        },
+        "any".into(),
+        AttackVector::Unknown,
+    );
+    row.activate();
+    row
+}
+
+async fn exercise_atomic_source_only_quota(repo: Arc<dyn RepositoryTrait>) {
+    use prefixd::domain::{MitigationStatus, VpnFlowSpecFamily};
+    let settings = common::test_settings();
+    let mut quotas = settings.quotas;
+    quotas.source_only_limit = Some(1);
+    let actor = prefixd::observability::CreationActor::Operator("quota-test".into());
+    for (family, sources) in [
+        (
+            VpnFlowSpecFamily::Ipv4,
+            ["198.51.100.0/24", "198.51.101.0/24"],
+        ),
+        (VpnFlowSpecFamily::Ipv6, ["2001:db9::/64", "2001:dba::/64"]),
+    ] {
+        let first = source_only_quota_row(family, "44407:40", sources[0]);
+        let second = source_only_quota_row(family, "44407:40", sources[1]);
+        // Both bypass API preflight. The repository lock must admit only one.
+        let (left, right) = tokio::join!(
+            repo.admit_mitigation(&first, &quotas, &settings.blackhole, &actor),
+            repo.admit_mitigation(&second, &quotas, &settings.blackhole, &actor),
+        );
+        assert_ne!(left.is_ok(), right.is_ok(), "{left:?} {right:?}");
+        let refusal = left
+            .as_ref()
+            .err()
+            .or_else(|| right.as_ref().err())
+            .unwrap();
+        assert!(
+            matches!(refusal, prefixd::error::PrefixdError::GuardrailViolation(prefixd::error::GuardrailError::QuotaExceeded { quota_type, .. }) if quota_type == "source_only")
+        );
+        let other = source_only_quota_row(family, "44407:41", sources[0]);
+        repo.admit_mitigation(&other, &quotas, &settings.blackhole, &actor)
+            .await
+            .unwrap();
+        let mut admitted = if left.is_ok() { first } else { second };
+        admitted.status = MitigationStatus::Expired;
+        repo.update_mitigation(&admitted).await.unwrap();
+        let replacement = source_only_quota_row(family, "44407:40", sources[0]);
+        repo.admit_mitigation(&replacement, &quotas, &settings.blackhole, &actor)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn postgres_source_only_quota_is_atomic_and_scoped() {
+    let context = common::TestContext::new().await;
+    exercise_atomic_source_only_quota(context.repo.clone()).await;
+}
+
+#[tokio::test]
+async fn mock_source_only_quota_is_atomic_and_scoped() {
+    exercise_atomic_source_only_quota(Arc::new(prefixd::db::MockRepository::new())).await;
+}

@@ -28,6 +28,7 @@ pub struct MockAnnouncer {
     peers: Vec<PeerStatus>,
     /// Test seam: report no ADR 028 match support, like an adapter that has not opted in.
     no_match_support: bool,
+    no_vpn_support: bool,
     /// Test seam: export reads for these prefixes return this instead; `Err`
     /// fails the read.
     export_overrides: std::sync::Mutex<ExportOverrides>,
@@ -51,6 +52,7 @@ impl MockAnnouncer {
                 state: SessionState::Established,
             }],
             no_match_support: false,
+            no_vpn_support: false,
             export_overrides: Default::default(),
             flowspec_export_overrides: Default::default(),
             stall_exports: Default::default(),
@@ -64,6 +66,7 @@ impl MockAnnouncer {
             leases: Default::default(),
             peers,
             no_match_support: false,
+            no_vpn_support: false,
             export_overrides: Default::default(),
             flowspec_export_overrides: Default::default(),
             stall_exports: Default::default(),
@@ -76,6 +79,25 @@ impl MockAnnouncer {
             no_match_support: true,
             ..Self::new()
         }
+    }
+
+    /// Reports a scope-unaware speaker without changing global behavior.
+    pub fn without_vpn_support() -> Self {
+        Self {
+            no_vpn_support: true,
+            ..Self::new()
+        }
+    }
+
+    fn validate_flowspec(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.register_scope(rule.nlri.scope.as_ref())?;
+        super::announcer::validate_rule_scope(rule)?;
+        if rule.nlri.scope.is_some() {
+            rule.nlri
+                .validate()
+                .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Export reads for `prefix` return `exports`, or fail with the message.
@@ -181,7 +203,16 @@ impl FlowSpecAnnouncer for MockAnnouncer {
 
 #[async_trait]
 impl FlowSpecWriter for MockAnnouncer {
+    fn register_scope(&self, scope: Option<&crate::domain::VpnFlowSpecIdentity>) -> Result<()> {
+        if self.no_vpn_support {
+            super::announcer::require_global_scope("mock", scope)
+        } else {
+            Ok(())
+        }
+    }
+
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.validate_flowspec(rule)?;
         let mut rules = self.rules.write().await;
         let hash = rule.nlri_hash();
         if !rule.owner.is_empty()
@@ -210,6 +241,7 @@ impl FlowSpecWriter for MockAnnouncer {
         rule: &FlowSpecRule,
         _lease_seconds: u32,
     ) -> Result<LeaseGeneration> {
+        self.validate_flowspec(rule)?;
         let mut rules = self.rules.write().await;
         let hash = rule.nlri_hash();
         if rule.owner.is_empty()
@@ -231,6 +263,7 @@ impl FlowSpecWriter for MockAnnouncer {
         Ok(generation)
     }
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.validate_flowspec(rule)?;
         let mut rules = self.rules.write().await;
         let hash = rule.nlri_hash();
         if rules
@@ -576,6 +609,10 @@ impl InjectionLeases for FaultyBlackholes {
 #[cfg(test)]
 #[async_trait]
 impl FlowSpecWriter for FaultyBlackholes {
+    fn register_scope(&self, scope: Option<&crate::domain::VpnFlowSpecIdentity>) -> Result<()> {
+        self.inner.register_scope(scope)
+    }
+
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
         self.flowspec_adds
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -687,6 +724,57 @@ impl BlackholeSpeaker for FaultyBlackholes {
 mod tests {
     use super::*;
     use crate::domain::{FlowSpecAction, FlowSpecNlri};
+
+    #[tokio::test]
+    async fn vpn_keys_and_attributes_are_isolated_and_unsupported_scope_cannot_mutate() {
+        use crate::domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity};
+        let speaker = MockAnnouncer::new();
+        let global = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "192.0.2.1/32".into(),
+                ..Default::default()
+            },
+            FlowSpecAction::discard(),
+        );
+        speaker.announce(&global).await.unwrap();
+        let mut scoped = Vec::new();
+        for rd in ["44407:40", "44407:41"] {
+            let mut rule = global.clone();
+            rule.nlri.scope = Some(VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, rd).unwrap());
+            rule.route_targets = vec!["44407:777".into()];
+            assert!(!speaker.matches_nlri(&global.nlri, &rule.nlri).unwrap());
+            speaker.announce(&rule).await.unwrap();
+            scoped.push(rule);
+        }
+        assert_eq!(speaker.list_active().await.unwrap().len(), 3);
+        let mut replacement = scoped[0].clone();
+        replacement.route_targets = vec!["44407:778".into()];
+        speaker.announce(&replacement).await.unwrap();
+        assert_eq!(speaker.list_active().await.unwrap().len(), 3);
+        speaker.withdraw(&replacement).await.unwrap();
+        let remaining = speaker.list_active().await.unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(
+            remaining
+                .iter()
+                .any(|rule| rule.nlri_hash() == global.nlri_hash())
+        );
+        assert!(
+            remaining
+                .iter()
+                .any(|rule| rule.nlri_hash() == scoped[1].nlri_hash())
+        );
+        let unsupported = MockAnnouncer::without_vpn_support();
+        assert!(matches!(
+            unsupported.announce(&scoped[0]).await,
+            Err(PrefixdError::UnsupportedFlowSpecScope { .. })
+        ));
+        assert!(unsupported.list_active().await.unwrap().is_empty());
+        let mut invalid = scoped[0].clone();
+        invalid.route_targets.clear();
+        assert!(speaker.announce(&invalid).await.is_err());
+        assert_eq!(speaker.list_active().await.unwrap().len(), 2);
+    }
 
     #[tokio::test]
     async fn test_mock_announce_withdraw() {

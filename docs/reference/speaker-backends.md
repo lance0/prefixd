@@ -900,3 +900,14 @@ router's FlowSpec table is checked separately for each speaker against FRR by
 the [FlowSpec interop lab](../../lab/README.md#flowspec-interop-lab-maintained);
 that is also control-plane evidence only. ExaBGP and other
 write-only backends are not qualified by this readable suite.
+
+## Scoped VPN FlowSpec
+
+Opt-in VPNv4 and VPNv6 controller paths require rustbgpd 0.82.0 and positive
+read-only local-intent probes for families 13/14. Global rules retain the 0.81.0
+floor. GoBGP returns a typed unsupported-scope error before any VPN RPC. Scope
+identity and RT snapshots survive withdrawal/recovery; no refused VPN operation
+falls back globally. The current action slice covers discard, police and guarded
+target-IP diversion. [The operator procedure](../how-to/vpn-flowspec.md) records
+source-only safeguards and the remaining marking/redirect-to-VRF qualification.
+These controller paths do not establish router installation or enforcement.

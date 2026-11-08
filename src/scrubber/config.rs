@@ -19,6 +19,8 @@ pub struct ScrubberConfig {
 pub struct ScrubberProfile {
     pub id: String,
     pub revision: String,
+    #[serde(default = "global_scope", skip_serializing_if = "is_global_scope")]
+    pub scope: String,
     pub ipv4_target: Option<IpAddr>,
     pub ipv6_target: Option<IpAddr>,
     pub destinations: Vec<ipnet::IpNet>,
@@ -39,10 +41,20 @@ pub struct ScrubberProfile {
 pub struct ProfileSnapshot {
     pub id: String,
     pub revision: String,
+    #[serde(default = "global_scope", skip_serializing_if = "is_global_scope")]
+    pub scope: String,
     pub router_peers: Vec<String>,
     pub policy_binding: String,
     pub qualification_receipt: String,
     pub destinations: Vec<String>,
+}
+
+fn global_scope() -> String {
+    "global".into()
+}
+
+fn is_global_scope(scope: &str) -> bool {
+    scope == "global"
 }
 
 impl ScrubberProfile {
@@ -60,6 +72,7 @@ impl ScrubberProfile {
         ProfileSnapshot {
             id: self.id.clone(),
             revision: self.revision.clone(),
+            scope: self.scope.clone(),
             router_peers: self.router_peers.clone(),
             policy_binding: self.policy_binding.clone(),
             qualification_receipt: self.qualification_receipt.clone(),

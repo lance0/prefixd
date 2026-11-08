@@ -7,6 +7,7 @@ use std::time::Duration;
 
 fn rule(prefix: &str, target: &str, owner: &str, revision: u64) -> GuardedRule {
     GuardedRule {
+        route_targets: vec![],
         nlri: FlowSpecNlri {
             dst_prefix: prefix.into(),
             protocol: Some(6),
@@ -308,4 +309,103 @@ async fn held_guarded_mutations_cannot_remove_a_reused_key_or_outlive_their_wind
     }
     assert!(speaker.guarded_inventory().await.unwrap().is_empty());
     fixture.container.rm().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
+async fn guarded_vpn_scope_keeps_rd_targets_and_held_revision() {
+    use prefixd::domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity};
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    let supported = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").as_deref() == Ok("0.82.0");
+    let window = speaker
+        .issue_window("prefixd.scrub.vpnfixture", 30)
+        .await
+        .unwrap();
+    for (family, global_family, prefix, target) in [
+        (VpnFlowSpecFamily::Ipv4, 3, "192.0.2.21/32", "192.0.2.99"),
+        (
+            VpnFlowSpecFamily::Ipv6,
+            4,
+            "2001:db8::21/128",
+            "2001:db8::99",
+        ),
+    ] {
+        let global = rule(prefix, target, "prefixd.scrub.vpnfixture", 1);
+        speaker
+            .add_guarded(&global, window.stamp, 30)
+            .await
+            .unwrap();
+        let mut a = global.clone();
+        a.nlri.scope = Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap());
+        a.route_targets = vec!["44407:777".into()];
+        let mut b = a.clone();
+        b.nlri.scope = Some(VpnFlowSpecIdentity::new(family, "44407:41").unwrap());
+        if !supported {
+            for error in [
+                speaker.add_guarded(&a, window.stamp, 30).await.unwrap_err(),
+                speaker.delete_guarded(&a).await.unwrap_err(),
+            ] {
+                assert!(
+                    matches!(error, prefixd::error::PrefixdError::UnsupportedFlowSpecScope { backend: "rustbgpd", family: observed } if observed == family.afi_safi())
+                );
+            }
+            assert!(speaker.guarded_inventory().await.is_err());
+            let rows = fixture.received_flow_spec(global_family, "0.0.0.0").await;
+            assert_eq!(rows.received_routes.len(), 1);
+            let held = rows.received_routes[0].route.as_ref().unwrap();
+            assert!(held.rd.is_empty());
+            assert!(held.route_targets.is_empty());
+            speaker.delete_guarded(&global).await.unwrap();
+            continue;
+        }
+        speaker.add_guarded(&a, window.stamp, 30).await.unwrap();
+        speaker.add_guarded(&b, window.stamp, 30).await.unwrap();
+        let inventory = speaker.guarded_inventory().await.unwrap();
+        for expected in [&global, &a, &b] {
+            assert!(
+                inventory
+                    .iter()
+                    .any(|entry| entry.rule.same_admission(expected))
+            );
+        }
+        let mut replaced = a.clone();
+        replaced.route_targets = vec!["44407:778".into()];
+        assert!(
+            speaker
+                .add_guarded(&replaced, window.stamp, 30)
+                .await
+                .is_err()
+        );
+        assert!(
+            speaker
+                .guarded_inventory()
+                .await
+                .unwrap()
+                .iter()
+                .any(|entry| entry.rule.same_admission(&a))
+        );
+        speaker.delete_guarded(&a).await.unwrap();
+        replaced.revision = 2;
+        speaker
+            .add_guarded(&replaced, window.stamp, 30)
+            .await
+            .unwrap();
+        assert!(
+            speaker.delete_guarded(&a).await.is_err(),
+            "stale revision cannot delete replacement"
+        );
+        let inventory = speaker.guarded_inventory().await.unwrap();
+        for expected in [&global, &replaced, &b] {
+            assert!(
+                inventory
+                    .iter()
+                    .any(|entry| entry.rule.same_admission(expected))
+            );
+        }
+        speaker.delete_guarded(&b).await.unwrap();
+        speaker.delete_guarded(&replaced).await.unwrap();
+        speaker.delete_guarded(&global).await.unwrap();
+        assert!(speaker.guarded_inventory().await.unwrap().is_empty());
+    }
 }

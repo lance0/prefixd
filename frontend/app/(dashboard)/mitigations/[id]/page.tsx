@@ -20,7 +20,7 @@ import { useTimeFormat } from "@/components/time-zone-provider"
 import { FlowSpecPreview, describeMatch, formatFlowSpecRule } from "@/components/dashboard/flowspec-preview"
 import { ExtendLifetimeDialog } from "@/components/dashboard/extend-lifetime-dialog"
 import { IncidentReportDialog } from "@/components/dashboard/incident-report-dialog"
-import { withdrawMitigation, getIncidentReport, isNotFound, type Mitigation } from "@/lib/api"
+import { formatRoutingScope, withdrawMitigation, getIncidentReport, isNotFound, type Mitigation } from "@/lib/api"
 import { copyText } from "@/lib/clipboard"
 import { toast } from "sonner"
 import {
@@ -302,7 +302,8 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                   </p>
                 )}
                 <FieldList className="grid-cols-2 sm:grid-cols-4">
-                  <Field label="Destination prefix"><span className="font-mono">{mitigation.dst_prefix}</span></Field>
+                  <Field label="Routing scope"><span className="break-words font-mono">{formatRoutingScope(mitigation.vpn_scope)}</span></Field>
+                  <Field label="Destination prefix"><span className="font-mono">{mitigation.dst_prefix || "any"}</span></Field>
                   <Field label="Protocol">{protocolName(mitigation.protocol)}</Field>
                   <Field label="Destination ports"><span className="font-mono">{mitigation.dst_ports.length > 0 ? mitigation.dst_ports.join(", ") : "any"}</span></Field>
                   {mitigation.src_prefix ? (

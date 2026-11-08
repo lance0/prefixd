@@ -820,8 +820,9 @@ Manual discard and police rules may include `src_prefix`, for example
 The response echoes the canonical network (`"198.51.100.0/24"` in the first
 example), and mitigation list/detail responses expose `src_prefix: null` when
 absent. The source and victim must have the same address family. Invalid CIDRs
-are refused, and source-only rules are unavailable: `victim_ip` must also
-select a destination permitted by [destination CIDR admission](#destination-cidrs). An explicit `/0` matches all sources and has its own rule
+are refused. The global manual endpoint requires `victim_ip` to select a
+destination permitted by [destination CIDR admission](#destination-cidrs).
+Destination-less rules use the separate opt-in [VPN source-only operation](#vpn-flowspec-admission). An explicit `/0` matches all sources and has its own rule
 identity; omit the field to leave the source component absent.
 
 Set `guardrails.allow_src_prefix_match: true` before use. Otherwise creation
@@ -3419,3 +3420,32 @@ request, or a controller latch that already recorded a reason, keeps them.
 | `500` | Durable or speaker outcome could not be confirmed; the body says only that |
 
 See the [workflow and payloads](../how-to/scrubber-diversion.md).
+
+## VPN FlowSpec admission
+
+`POST /v1/vpn/mitigations/preview` and `/v1/vpn/mitigations` accept
+`{"scope":"TRANSIT","rule":{...}}`, with the existing manual FlowSpec fields
+inside `rule`. VPN-only endpoints fail on older controllers; clients never
+retry globally. Requests reject unknown fields. Mitigation responses add optional
+`vpn_scope` containing `name`, `identity: {family, rd}` and `route_targets`.
+The wire match's optional `scope` holds identity only; RTs remain attributes.
+
+`POST /v1/vpn/source-rules/preview` and `/v1/vpn/source-rules` accept `scope`,
+`src_prefix`, `protocol`, `action`, optional `rate_bps`, explicit `ttl_seconds`
+and `reason`; creation also requires `confirm_destination_any: true`. Destination
+fields are refused. A preview acknowledges `destination: "any"` and `vpn_scope`.
+Source-only supports discard/police with the configured source safeguards,
+short TTL and quota; it never creates a global rule. See the
+[VPN procedure](../how-to/vpn-flowspec.md) for complete examples and boundaries.
+
+Authenticated `speaker.vpn_families` health entries report `family` and a fresh
+`supported`, `unsupported` or `error` result. A transport/auth error remains an
+error. Raw local inventory rules carry optional NLRI `scope` and rule
+`route_targets`; these are local intent evidence, not router installation.
+
+Guarded VPN preview and creation use `POST /v1/vpn/diversions/preview` and
+`/v1/vpn/diversions`, accepting `{"scope":"TRANSIT","diversion":{...}}`.
+The inner request is the existing diversion request. The outer scope must be a
+configured VPN scope and match the selected profile; nested identity mismatch
+fails before mutation. Existing admin authorization, confirmation and guarded
+lifecycle rules apply. Legacy endpoints remain for global clients.

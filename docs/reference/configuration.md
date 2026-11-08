@@ -1390,3 +1390,20 @@ variable. `scrubber.readiness_ca_cert` optionally adds a PEM trust anchor.
 Profiles start unarmed. Their configuration requires restart, and outstanding
 intent prevents retargeting, removal, disabling or mode changes until drained.
 See the [profile example and readiness schema](../how-to/scrubber-diversion.md).
+
+## VPN FlowSpec scopes
+
+`bgp.vpn_scopes` maps names to `family` (`ipv4` or `ipv6`), `rd`, and nonempty
+`route_targets`. Names resolve to immutable snapshots at admission; global is
+reserved. `bgp.default_scope` is `global` by default, a named scope for one AFI,
+or an explicit `{ipv4: NAME, ipv6: NAME}` mapping. A family mismatch fails closed.
+Scope settings require restart and draining outstanding intent before RD/RT
+changes. GoBGP refuses configured VPN scope before connecting.
+
+The [VPN procedure](../how-to/vpn-flowspec.md) documents source-only opt-in,
+family-specific source prefix floors, short TTL and independent quota fields,
+plus the [TRANSIT BGP example](../../configs/vpn-scopes.yaml.example).
+
+A scrubber profile's optional `scope` selects the named VPN scope; omission is
+global. Use separate profiles for IPv4 and IPv6 scope names. Scope changes need
+a drained lifecycle and matching readiness/policy qualification before re-arm.

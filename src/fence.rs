@@ -201,6 +201,17 @@ impl FencedAnnouncer {
 
 #[async_trait]
 impl FlowSpecWriter for FencedAnnouncer {
+    fn register_scope(&self, scope: Option<&crate::domain::VpnFlowSpecIdentity>) -> Result<()> {
+        self.inner.register_scope(scope)
+    }
+
+    async fn validate_scope(
+        &self,
+        scope: Option<&crate::domain::VpnFlowSpecIdentity>,
+    ) -> Result<()> {
+        self.inner.validate_scope(scope).await
+    }
+
     fn matches_nlri(&self, left: &FlowSpecNlri, right: &FlowSpecNlri) -> Result<bool> {
         self.inner.matches_nlri(left, right)
     }

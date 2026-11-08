@@ -57,6 +57,7 @@ export function LocalFlowSpecInventory() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Destination</TableHead>
+                  <TableHead>Routing scope</TableHead>
                   <TableHead>Match</TableHead>
                   <TableHead>Actions</TableHead>
                   <TableHead>Injection owner</TableHead>
@@ -66,7 +67,8 @@ export function LocalFlowSpecInventory() {
               <TableBody>
                 {data.routes.map((rule) => (
                   <TableRow key={JSON.stringify(rule)}>
-                    <TableCell className="font-mono">{rule.nlri.dst_prefix}</TableCell>
+                    <TableCell className="font-mono">{rule.nlri.dst_prefix || "any"}</TableCell>
+                    <TableCell className="max-w-72 whitespace-normal break-words font-mono text-xs">{rule.nlri.scope ? `VPN${rule.nlri.scope.family === "ipv4" ? "v4" : "v6"} · RD ${rule.nlri.scope.rd} · RT ${(rule.route_targets ?? []).join(", ")}` : "Global"}</TableCell>
                     <TableCell className="min-w-48 max-w-96 whitespace-normal break-words">
                       {describeMatch({ ...rule.nlri, action_type: rule.actions[0]?.action_type ?? "" })}
                     </TableCell>
@@ -80,7 +82,7 @@ export function LocalFlowSpecInventory() {
                     <TableCell className="max-w-64 break-all font-mono text-xs">{rule.owner || "No injection owner"}</TableCell>
                     <TableCell>
                       <details>
-                        <summary className="cursor-pointer rounded-sm whitespace-nowrap text-xs focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">Full rule for {rule.nlri.dst_prefix}</summary>
+                        <summary className="cursor-pointer rounded-sm whitespace-nowrap text-xs focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">Full rule for {rule.nlri.dst_prefix || "any destination"}</summary>
                         <pre className="mt-2 max-w-md overflow-x-auto text-xs">{JSON.stringify(rule, null, 2)}</pre>
                       </details>
                     </TableCell>

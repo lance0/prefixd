@@ -63,6 +63,32 @@ impl Speaker {
         .await
     }
 
+    /// Scoped fixture enables both VPN families and a global-only control neighbor.
+    pub async fn start_peered_vpn(
+        network: &str,
+        peer: &str,
+        peer_asn: u32,
+        global_only_peer: &str,
+    ) -> Self {
+        let fixture = Self::start_peered(network, peer, peer_asn).await;
+        assert_eq!(
+            fixture.version, "0.82.0",
+            "VPN wire receipt needs released v0.82.0"
+        );
+        let path = fixture._files.path().join("config.toml");
+        let config = std::fs::read_to_string(&path).unwrap();
+        let global = "families = [\"ipv4_flowspec\", \"ipv6_flowspec\"]";
+        assert_eq!(config.matches(global).count(), 1);
+        let mut config = config.replacen(global,
+            "families = [\"ipv4_flowspec\", \"ipv6_flowspec\", \"l3vpn_ipv4_flowspec\", \"l3vpn_ipv6_flowspec\"]",1);
+        config.push_str(&format!("\n[[neighbors]]\naddress = \"{global_only_peer}\"\nremote_asn = {peer_asn}\ndescription = \"global-only family control\"\nfamilies = [\"ipv4_flowspec\", \"ipv6_flowspec\"]\nhold_time = 9\n"));
+        std::fs::write(path, config).unwrap();
+        fixture.container.stop_with_timeout(Some(0)).await.unwrap();
+        fixture.container.start().await.unwrap();
+        fixture.ready().await;
+        fixture
+    }
+
     /// The peer also negotiates IPv4/IPv6 unicast. Export policy denies
     /// [`EXPORT_DENIED`], and [`UNREACHABLE_PEER`] is configured but never
     /// Established.

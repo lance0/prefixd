@@ -150,6 +150,86 @@ fn guarded_refusals_name_their_cause_and_other_failures_stay_unconfirmed() {
 }
 
 #[test]
+fn vpn_guarded_readback_preserves_scope_and_revision_payload() {
+    use crate::domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity};
+    for (family, kind, prefix, target) in [
+        (13, VpnFlowSpecFamily::Ipv4, "192.0.2.1/32", "192.0.2.99"),
+        (
+            14,
+            VpnFlowSpecFamily::Ipv6,
+            "2001:db8::1/128",
+            "2001:db8::99",
+        ),
+    ] {
+        let mut scoped = route();
+        scoped.afi_safi = family;
+        scoped.rd = "44407:40".into();
+        scoped.route_targets = vec!["44407:777".into()];
+        scoped.components[0].prefix = prefix.into();
+        let ip: std::net::IpAddr = target.parse().unwrap();
+        let mut action = vec![];
+        match ip {
+            std::net::IpAddr::V4(_) => action.push(0x010c_c000_0263_0000),
+            std::net::IpAddr::V6(ip) => {
+                let mut raw = vec![0, 12];
+                raw.extend(ip.octets());
+                raw.extend([0, 0]);
+                scoped.ipv6_extended_communities = vec![raw];
+            }
+        }
+        scoped.actions[0].action = Some(pb::flow_spec_action::Action::RedirectIp(
+            pb::FlowSpecRedirectIp {
+                address: target.into(),
+                copy: false,
+            },
+        ));
+        action.push(crate::domain::route_target_bytes("44407:777").unwrap());
+        scoped.extended_communities = action;
+        let decoded = decode_guarded(scoped.clone(), family).unwrap();
+        assert_eq!(
+            decoded.rule.nlri.scope,
+            Some(VpnFlowSpecIdentity::new(kind, "44407:40").unwrap())
+        );
+        assert_eq!(decoded.rule.route_targets, ["44407:777"]);
+        let encoded = encode_guarded(&decoded.rule).unwrap();
+        assert_eq!(encoded.rd, "44407:40");
+        assert_eq!(encoded.afi_safi, family);
+        assert_eq!(encoded.route_targets, ["44407:777"]);
+        assert!(encoded.extended_communities.is_empty());
+        let mut changed = decoded.rule.clone();
+        changed.route_targets = vec!["44407:778".into()];
+        assert!(!decoded.rule.same_admission(&changed));
+        changed = decoded.rule.clone();
+        changed.nlri.scope = Some(VpnFlowSpecIdentity::new(kind, "44407:41").unwrap());
+        assert!(!decoded.rule.same_admission(&changed));
+        scoped.extended_communities.pop();
+        assert!(
+            decode_guarded(scoped, family).is_err(),
+            "missing raw scope RT"
+        );
+    }
+}
+
+#[test]
+fn guarded_duplicate_raw_targets_replay_without_typed_twins() {
+    use crate::domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity};
+    let mut scoped = route();
+    scoped.afi_safi = 13;
+    scoped.rd = "44407:40".into();
+    scoped.route_targets = vec!["44407:777".into(); 2];
+    let rt = crate::domain::route_target_bytes("44407:777").unwrap();
+    scoped.extended_communities.extend([rt, rt]);
+    let decoded = decode_guarded(scoped.clone(), 13).unwrap();
+    let encoded = encode_guarded(&decoded.rule).unwrap();
+    assert!(encoded.route_targets.is_empty());
+    assert_eq!(encoded.extended_communities, [rt, rt]);
+    assert_eq!(
+        foreign_match(scoped, 13).unwrap().scope,
+        Some(VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "44407:40").unwrap())
+    );
+}
+
+#[test]
 fn foreign_match_never_normalizes_scoped_fields_into_global_occupancy() {
     let baseline = route();
     assert_eq!(

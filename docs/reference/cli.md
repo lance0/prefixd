@@ -476,3 +476,15 @@ through `--session-cookie` or `PREFIXD_SESSION_COOKIE`; the value is a complete
 Cookie header and is hidden from help output. Sign in with
 [`POST /v1/auth/login`](api.md#login) and copy the session cookie it sets. Ordinary bearer tokens retain the
 Operator role. See [manual scrubber diversion](../how-to/scrubber-diversion.md).
+
+## Manual VPN FlowSpec
+
+`prefixdctl mitigations preview VICTIM` and `mitigations create VICTIM` accept
+`--scope`, `--protocol`, `--src-prefix`, `--dst-ports`, `--action discard|police`,
+`--rate-bps`, `--ttl-seconds` and `--reason`. TTL and reason are explicit.
+Scoped creation repeats a scope-aware preview and never falls back to global.
+
+For source-only, omit VICTIM and use `--source-only --scope NAME --src-prefix CIDR`.
+Creation also needs `--confirm-destination-any`; preview does not. Family/RD/RT
+appear in mitigation and local inventory output. See the
+[VPN procedure](../how-to/vpn-flowspec.md) for authorization and receiver limits.

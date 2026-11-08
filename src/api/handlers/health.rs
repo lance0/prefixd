@@ -49,6 +49,8 @@ pub struct HealthResponse {
 #[derive(Serialize, ToSchema)]
 pub struct SpeakerHealth {
     backend: &'static str,
+    /// Fresh read-only VPN family probes for configured scopes.
+    vpn_families: Vec<VpnFamilyCapability>,
     capabilities: crate::bgp::SpeakerCapabilities,
     /// Enforced detector blackholes run without the rustbgpd injection lease, so
     /// they stay announced if prefixd stops while the speaker runs.
@@ -67,6 +69,45 @@ pub struct SpeakerHealth {
     daemon: DaemonHealthObservation,
     #[serde(skip_serializing_if = "Option::is_none")]
     scrubbers: Option<std::collections::HashMap<String, crate::scrubber::ProfileState>>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct VpnFamilyCapability {
+    family: crate::domain::VpnFlowSpecFamily,
+    /// supported, unsupported, or error; a transport failure is not unsupported.
+    status: &'static str,
+}
+
+async fn observe_vpn_families(state: &AppState) -> Vec<VpnFamilyCapability> {
+    use crate::domain::VpnFlowSpecFamily::{Ipv4, Ipv6};
+    let probes = [Ipv4, Ipv6].into_iter().filter_map(|family| {
+        let (name, policy) = state
+            .settings
+            .bgp
+            .vpn_scopes
+            .iter()
+            .find(|(_, policy)| policy.family == family)?;
+        Some(async move {
+            let result = match policy.snapshot(name) {
+                Ok(snapshot) => tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    state.announcer.validate_scope(Some(&snapshot.identity)),
+                )
+                .await
+                .ok(),
+                Err(error) => Some(Err(error)),
+            };
+            let status = match result {
+                Some(Ok(())) => "supported",
+                Some(Err(crate::error::PrefixdError::UnsupportedFlowSpecScope { .. })) => {
+                    "unsupported"
+                }
+                _ => "error",
+            };
+            VpnFamilyCapability { family, status }
+        })
+    });
+    futures_util::future::join_all(probes).await
 }
 
 #[derive(Serialize, ToSchema)]
@@ -308,6 +349,7 @@ pub async fn health_detail(
         database: db_status,
         gobgp: gobgp_health,
         speaker: SpeakerHealth {
+            vpn_families: observe_vpn_families(&state).await,
             backend: state.announcer.backend(),
             capabilities: state.announcer.capabilities(),
             detector_unleased: crate::guardrails::detector_unleased(

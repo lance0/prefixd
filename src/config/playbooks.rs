@@ -251,6 +251,22 @@ impl Playbooks {
         speaker: crate::bgp::SpeakerCapabilities,
     ) -> Vec<String> {
         let mut errors = self.check_match_settings(&settings.guardrails, speaker.flowspec_match);
+        if !settings.bgp.default_scope.is_global()
+            && self
+                .playbooks
+                .iter()
+                .flat_map(|book| &book.steps)
+                .any(|step| {
+                    step.action == Some(PlaybookAction::Blackhole)
+                        || step
+                            .rules
+                            .iter()
+                            .any(|rule| rule.action == PlaybookAction::Blackhole)
+                })
+        {
+            errors.push("blackhole playbooks cannot use a VPN automatic default scope".into());
+        }
+
         if let Err(error) =
             crate::guardrails::check_blackhole_playbooks(settings, speaker.blackhole_lease, self)
         {

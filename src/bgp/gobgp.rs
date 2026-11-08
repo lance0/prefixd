@@ -135,6 +135,8 @@ impl GoBgpAnnouncer {
 
     /// Build a FlowSpec Path for GoBGP v4 API (uses typed oneof fields, not Any)
     fn build_flowspec_path(&self, rule: &FlowSpecRule) -> Result<Path> {
+        self.register_scope(rule.nlri.scope.as_ref())?;
+        super::announcer::validate_rule_scope(rule)?;
         let is_v6 = rule.nlri.ip_version() == IpVersion::V6;
         let afi = if is_v6 { AFI_IP6 } else { AFI_IP };
 
@@ -184,6 +186,7 @@ impl GoBgpAnnouncer {
     }
 
     fn build_flowspec_withdraw_path(&self, nlri: &FlowSpecNlri) -> Result<Path> {
+        self.register_scope(nlri.scope.as_ref())?;
         let is_v6 = nlri.ip_version() == IpVersion::V6;
         let flowspec = if is_v6 {
             self.build_flowspec_nlri_v6(nlri)?
@@ -464,7 +467,20 @@ impl FlowSpecAnnouncer for GoBgpAnnouncer {
 
 #[async_trait]
 impl FlowSpecWriter for GoBgpAnnouncer {
+    fn register_scope(&self, scope: Option<&crate::domain::VpnFlowSpecIdentity>) -> Result<()> {
+        super::announcer::require_global_scope("gobgp", scope)
+    }
+
+    fn matches_nlri(&self, left: &FlowSpecNlri, right: &FlowSpecNlri) -> Result<bool> {
+        self.register_scope(left.scope.as_ref())?;
+        self.register_scope(right.scope.as_ref())?;
+        Ok(self.build_flowspec_withdraw_path(left)?.nlri
+            == self.build_flowspec_withdraw_path(right)?.nlri)
+    }
+
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.register_scope(rule.nlri.scope.as_ref())?;
+        super::announcer::validate_rule_scope(rule)?;
         // GoBGP has no injection lease; a leased rule never becomes an unleased one.
         if !rule.owner.is_empty() {
             return Err(PrefixdError::Config(
@@ -505,6 +521,8 @@ impl FlowSpecWriter for GoBgpAnnouncer {
         Ok(())
     }
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.register_scope(rule.nlri.scope.as_ref())?;
+        super::announcer::validate_rule_scope(rule)?;
         let path = self.build_flowspec_withdraw_path(&rule.nlri)?;
         let is_v6 = rule.nlri.ip_version() == IpVersion::V6;
         let afi = if is_v6 { AFI_IP6 } else { AFI_IP };
@@ -887,6 +905,7 @@ impl GoBgpAnnouncer {
         }
 
         let decoded = FlowSpecNlri {
+            scope: None,
             dst_prefix,
             src_prefix,
             protocol,
@@ -1002,6 +1021,41 @@ mod tests {
     // ==========================================================================
     // IPv4 Prefix Parsing Tests
     // ==========================================================================
+
+    #[tokio::test]
+    async fn vpn_is_refused_before_connecting_or_mutating_global_rules() {
+        use crate::domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity};
+        let speaker = GoBgpAnnouncer::new("http://127.0.0.1:1".into());
+        for family in [VpnFlowSpecFamily::Ipv4, VpnFlowSpecFamily::Ipv6] {
+            let rule = FlowSpecRule::new(
+                FlowSpecNlri {
+                    scope: Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap()),
+                    dst_prefix: if family == VpnFlowSpecFamily::Ipv4 {
+                        "192.0.2.1/32"
+                    } else {
+                        "2001:db8::1/128"
+                    }
+                    .into(),
+                    ..Default::default()
+                },
+                FlowSpecAction::discard(),
+            )
+            .with_route_targets(vec!["44407:777".into()]);
+            for error in [
+                speaker.announce(&rule).await.unwrap_err(),
+                speaker.withdraw(&rule).await.unwrap_err(),
+                speaker.matches_nlri(&rule.nlri, &rule.nlri).unwrap_err(),
+            ] {
+                assert!(matches!(
+                    error,
+                    PrefixdError::UnsupportedFlowSpecScope {
+                        backend: "gobgp",
+                        ..
+                    }
+                ));
+            }
+        }
+    }
 
     #[test]
     fn test_parse_prefix_v4_with_cidr() {

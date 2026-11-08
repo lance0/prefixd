@@ -3,6 +3,8 @@ mod gobgp;
 mod guarded;
 mod mock;
 mod proto;
+mod vpn_scope;
+pub use vpn_scope::check_vpn_startup;
 #[cfg(feature = "bgp-rustbgpd")]
 mod rustbgpd_proto;
 
@@ -30,6 +32,7 @@ pub async fn speaker_factory(
     config: &crate::config::BgpConfig,
 ) -> anyhow::Result<std::sync::Arc<dyn FlowSpecAnnouncer>> {
     use crate::config::BgpMode;
+    config.validate_vpn_scopes()?;
     tracing::info!(mode = ?config.mode, "selecting BGP speaker");
     Ok(match config.mode {
         BgpMode::Mock => std::sync::Arc::new(MockAnnouncer::new()),
