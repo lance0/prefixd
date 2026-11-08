@@ -41,7 +41,7 @@
     "tailwindcss-animate": "^1.0.7"
   },
   "devDependencies": {
-    "@oxlint/plugins": "1.88.0",
+    "@oxlint/plugins": "1.91.0",
     "@tailwindcss/postcss": "^4.3.5",
     "@testing-library/dom": "^10.4.2",
     "@testing-library/jest-dom": "^7.0.1",
