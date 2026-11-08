@@ -9,6 +9,15 @@ updates:
     commit-message:
       prefix: "deps(rust):"
 
+  # Fuzz harness has its own lockfile and graph.
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(fuzz):"
+
   # GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -25,3 +34,8 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps(frontend):"
+    groups:
+      tailwind:
+        patterns:
+          - "tailwindcss"
+          - "@tailwindcss/*"
