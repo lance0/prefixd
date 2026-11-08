@@ -75,8 +75,10 @@ pub(crate) async fn validate_source_only(
             .or_else(|_| prefix.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
             .map_err(|_| PrefixdError::Config("invalid configured safelist prefix".into()))?;
         if overlap(protected) {
-            return Err(PrefixdError::InvalidRequest(
-                "source-only prefix overlaps configured safelist".into(),
+            return Err(PrefixdError::GuardrailViolation(
+                crate::error::GuardrailError::Safelisted {
+                    ip: source.to_string(),
+                },
             ));
         }
     }

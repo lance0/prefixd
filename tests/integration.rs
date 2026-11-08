@@ -10879,6 +10879,17 @@ mod anonymous_auth {
             .unwrap()
     }
 
+    async fn viewer(repo: &MockRepository, username: &str) -> prefixd::domain::Operator {
+        let salt = b"anonymous-auth-test";
+        let hash = Argon2::default()
+            .hash_password_with_salt(PASSWORD.as_bytes(), salt)
+            .unwrap()
+            .to_string();
+        repo.create_operator(username, &hash, OperatorRole::Viewer, None)
+            .await
+            .unwrap()
+    }
+
     async fn request(
         app: &Router,
         method: &str,
@@ -11961,6 +11972,79 @@ mod anonymous_auth {
             .unwrap()
             .to_string();
         assert_eq!(same, ARGON2_0_5_FIXED_SALT);
+    }
+
+    #[tokio::test]
+    async fn viewer_cannot_ingest_events_or_create_whole_vrf_rules() {
+        let repo = Arc::new(MockRepository::new());
+        let viewer = viewer(&repo, "ingest-viewer").await;
+        let app = router(AuthMode::Credentials, repo, MemoryStore::default());
+        let cookie = login(&app, &viewer.username).await;
+        let event = serde_json::json!({
+            "timestamp": chrono::Utc::now(),
+            "source": "fastnetmon",
+            "victim_ip": "203.0.113.10",
+            "vector": "udp_flood",
+            "action": "ban"
+        });
+        assert_eq!(
+            request(&app, "POST", "/v1/events", Some(&cookie), Some(event))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let source_only = serde_json::json!({
+            "scope": "TRANSIT",
+            "src_prefix": "198.51.100.0/24",
+            "protocol": "udp",
+            "action": "discard",
+            "ttl_seconds": 60,
+            "reason": "whole VRF",
+            "confirm_destination_any": true
+        });
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/v1/vpn/source-rules",
+                Some(&cookie),
+                Some(source_only)
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn bearer_operator_cannot_create_whole_vrf_rule() {
+        let app = router(
+            AuthMode::Bearer,
+            Arc::new(MockRepository::new()),
+            MemoryStore::default(),
+        );
+        let body = serde_json::json!({
+            "scope": "TRANSIT",
+            "src_prefix": "198.51.100.0/24",
+            "protocol": "udp",
+            "action": "discard",
+            "ttl_seconds": 60,
+            "reason": "whole VRF",
+            "confirm_destination_any": true
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/vpn/source-rules")
+                    .header("authorization", "Bearer session-control-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
 

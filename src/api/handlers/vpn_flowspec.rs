@@ -98,8 +98,8 @@ pub async fn preview_vpn_mitigation(
 
 #[utoipa::path(post, path = "/v1/vpn/source-rules", tag = "mitigations", request_body = SourceOnlyVpnRequest,
     responses((status=201,description="Source-only VPN intent created",body=MitigationResponse),(status=202,description="Intent retained after an unconfirmed RPC"),
-    (status=400,description="Source-only scope, source, confirmation or action refused"),(status=401,description="Authentication required"),(status=403,description="Operator role required"),
-    (status=409,description="Conflicting intent"),(status=422,description="Prefix, safelist, TTL or quota refusal"),(status=503,description="Capability unavailable")))]
+    (status=400,description="Source-only scope, source prefix, TTL, confirmation or action refused"),(status=401,description="Authentication required"),(status=403,description="Administrator role required"),
+    (status=409,description="Conflicting intent"),(status=422,description="Safelist or quota refusal"),(status=503,description="Capability unavailable")))]
 pub async fn create_source_only_vpn(
     State(state): State<Arc<AppState>>,
     auth: AuthSession,
@@ -114,7 +114,7 @@ pub async fn create_source_only_vpn(
 #[utoipa::path(post, path = "/v1/vpn/source-rules/preview", tag = "mitigations", request_body = SourceOnlyVpnRequest,
     responses((status=200,description="Read-only source-only preview; destination is any in the named VRF",body=FlowSpecAdmissionPreview),
     (status=400,description="Invalid source-only input"),(status=401,description="Authentication required"),(status=403,description="Operator role required"),
-    (status=409,description="Conflicting intent"),(status=422,description="Source, TTL or quota refusal"),(status=503,description="Safety reads unavailable")))]
+    (status=409,description="Conflicting intent"),(status=422,description="Safelist or quota refusal"),(status=503,description="Safety reads unavailable")))]
 pub async fn preview_source_only_vpn(
     State(state): State<Arc<AppState>>,
     auth: AuthSession,

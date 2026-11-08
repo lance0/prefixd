@@ -50,6 +50,9 @@ pub enum PrefixdError {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     #[error("not found: {0}")]
     NotFound(String),
 
@@ -197,6 +200,7 @@ impl PrefixdError {
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MitigationNotFound(_) => StatusCode::NOT_FOUND,
             Self::ShuttingDown | Self::Standby => StatusCode::SERVICE_UNAVAILABLE,
             Self::DuplicateEvent { .. }

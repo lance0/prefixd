@@ -3438,10 +3438,12 @@ The wire match's optional `scope` holds identity only; RTs remain attributes.
 
 `POST /v1/vpn/source-rules/preview` and `/v1/vpn/source-rules` accept `scope`,
 `src_prefix`, `protocol`, `action`, optional `rate_bps`, explicit `ttl_seconds`
-and `reason`; creation also requires `confirm_destination_any: true`. Destination
+and `reason`; creation also requires the Administrator role and
+`confirm_destination_any: true`. Destination
 fields are refused. A preview acknowledges `destination: "any"` and `vpn_scope`.
 Source-only supports discard/police with the configured source safeguards,
-short TTL and quota; it never creates a global rule. See the
+short TTL and quota; it never creates a global rule. Preview is available to
+Operators; creation requires Administrator. See the
 [VPN procedure](../how-to/vpn-flowspec.md) for complete examples and boundaries.
 
 Authenticated `speaker.vpn_families` health entries report `family` and a fresh
