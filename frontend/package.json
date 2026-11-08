@@ -43,7 +43,7 @@
   "devDependencies": {
     "@oxlint/plugins": "1.88.0",
     "@testing-library/dom": "^10.4.2",
-    "@tailwindcss/postcss": "^4.3.3",
+    "@tailwindcss/postcss": "^4.3.4",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",
     "@types/node": "^26.6.5",
