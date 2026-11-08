@@ -239,9 +239,6 @@ async fn released_controller_lifecycle_uses_https_postgres_and_independent_guard
         time::Duration,
     };
 
-    if std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into()) != "0.81.0" {
-        return;
-    }
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let database = common::TestContext::new().await;
     let fixture = speaker_fixture::Speaker::start().await;
