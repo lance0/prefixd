@@ -1,10 +1,11 @@
 # Manual scrubber diversion
 
-Scrubber diversion is disabled by default. It uses rustbgpd v0.81.0's guarded
-FlowSpec methods to redirect selected traffic for one owned host to a configured,
-same-family IP target or configured scrubbing VRF route target. It does not
-configure the scrubber, VRFs or the clean return
-path. The first workflow is manual and requires an administrator; detector and
+Scrubber diversion is disabled by default. Global IP-target diversion uses
+guarded FlowSpec methods available in rustbgpd 0.81.0 or later. VPN diversion
+requires rustbgpd 0.82.0 or later, a named VPN scope and a successful family 13/14
+probe. It redirects selected traffic for one owned host to a configured,
+same-family IP target or scrubbing VRF route target. It does not configure the
+scrubber, VRFs or the clean return path. The first workflow is manual and requires an administrator; detector and
 playbook actions cannot request diversion.
 
 The controller fixtures qualify local intent, ownership and failure handling.
@@ -43,7 +44,9 @@ scrubber:
       reserved_targets: [192.0.2.1/32]
 ```
 
-For redirect-to-VRF, replace both IP targets with one action route target:
+For redirect-to-VRF, replace both IP targets with one action route target.
+This VPN-only action requires rustbgpd 0.82.0 and a successful family 13 or 14
+probe for the [configured VPN scope](vpn-flowspec.md#configure-scope):
 
 ```yaml
       scope: TRANSIT
