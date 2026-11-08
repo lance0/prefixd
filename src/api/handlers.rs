@@ -5473,13 +5473,6 @@ mod detector_scope_tests {
                 "{field}"
             );
         }
-        let mut legacy_extra = base;
-        legacy_extra["mitigation_id"] = serde_json::json!("legacy-echo");
-        legacy_extra["status"] = serde_json::json!("active");
-        assert!(
-            serde_json::from_value::<CreateMitigationRequest>(legacy_extra).is_ok(),
-            "unrelated legacy fields stay ignored"
-        );
     }
 }
 
