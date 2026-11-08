@@ -1138,11 +1138,8 @@ async fn handle_ban(
                 "VPN default scope cannot originate a global blackhole".into(),
             )));
         }
-        state
-            .announcer
-            .validate_scope(Some(&scope.identity))
-            .await
-            .map_err(AppError)?;
+        // Creation probes once before persistence; extensions and decisions that
+        // produce no intent must not hold the lifecycle lock for a speaker read.
         for intent in &mut decision.intents {
             intent.match_criteria.scope = Some(scope.clone());
         }
