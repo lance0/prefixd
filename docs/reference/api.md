@@ -3212,7 +3212,8 @@ Authorization: Bearer <token>
 
 Generates a markdown incident report for the selected mitigation's exact stored
 target, or for a bare host IP. Exactly one of `mitigation_id` or `ip` must be
-provided; `ip` does not accept CIDRs. For a CIDR mitigation, the report selects
+provided; `ip` does not accept CIDRs. Source-only VPN mitigations have no
+destination target and return `400`. For a CIDR mitigation, the report selects
 only rows with that exact canonical destination. It does not substitute the
 network address, include host events, or aggregate hosts and overlapping
 prefixes. Customer context follows the mitigation's saved owner; no service is
@@ -3233,7 +3234,7 @@ The response body is a markdown document suitable for pasting into Slack, email,
 | Status | Meaning |
 |--------|---------|
 | 200 | Report generated |
-| 400 | Missing or invalid parameters (must provide exactly one of mitigation_id or ip) |
+| 400 | Missing or invalid parameters (must provide exactly one of mitigation_id or ip), or the mitigation is source-only and has no destination target |
 | 401 | Authentication required |
 | 404 | Mitigation not found (when using mitigation_id) |
 | 500 | Report data could not be loaded or decoded |
