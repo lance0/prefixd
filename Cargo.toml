@@ -75,7 +75,6 @@ urlencoding = "2"
 
 # OpenAPI
 utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
-rand = "0.10.1"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"], optional = true }
