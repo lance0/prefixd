@@ -735,11 +735,7 @@ pub async fn ingest_event(
 ) -> impl IntoResponse {
     let input = input.0;
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    if let Err(_status) = require_auth(&state, &auth_session, auth_header) {
-        return Err(AppError(PrefixdError::Unauthorized(
-            "authentication required".into(),
-        )));
-    }
+    crate::api::auth::require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
 
     // Validate input
     validate_ip(&input.victim_ip).map_err(AppError)?;
@@ -2238,9 +2234,10 @@ pub async fn create_mitigation(
     // Check auth first
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
-    // A blackhole drops all traffic to the victim, so it needs Admin (ADR 027);
-    // bearer tokens map to Operator and get 403 before anything is read or saved.
-    let required = if req.action == "blackhole" && req.vpn_scope.is_none() {
+    // A blackhole drops traffic to one victim and a source-only rule drops every
+    // destination in a VRF. Both need Admin; bearer tokens map to Operator and
+    // get 403 before anything is read or saved.
+    let required = if req.action == "blackhole" || req.source_only {
         OperatorRole::Admin
     } else {
         OperatorRole::Operator
@@ -2849,11 +2846,7 @@ pub async fn ingest_events_batch(
     Json(req): Json<BatchEventRequest>,
 ) -> impl IntoResponse {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    if let Err(_status) = require_auth(&state, &auth_session, auth_header) {
-        return Err(AppError(PrefixdError::Unauthorized(
-            "authentication required".into(),
-        )));
-    }
+    crate::api::auth::require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
 
     if req.events.is_empty() || req.events.len() > MAX_BATCH_EVENTS {
         return Err(AppError(PrefixdError::InvalidRequest(format!(

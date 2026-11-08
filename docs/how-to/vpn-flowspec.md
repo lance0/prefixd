@@ -150,6 +150,7 @@ envelopes or missing scope acknowledgments; it does not fall back to global.
 ## Source-only rules
 
 Source-only is a distinct manual VPN operation with no destination component.
+Preview is available to Operators; creation requires the Administrator role.
 An explicit destination `/0` remains a different wire identity. Enabling
 `allow_source_only: true` accepts that the rule affects traffic to every
 destination in that VRF, including safelisted destinations.

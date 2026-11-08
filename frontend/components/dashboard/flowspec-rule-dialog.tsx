@@ -304,13 +304,15 @@ function previewProtocol(protocol: string): number | null {
 interface FlowSpecRuleDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
+  /** Source-only rules deny every destination in a VRF and require an administrator. */
+  canSourceOnly?: boolean
 }
 
 /**
  * Manual FlowSpec rule (POST /v1/mitigations), including the ADR 028 source-port, fragment
  * and packet-length matches. Errors appear once a field is edited or submission is attempted.
  */
-export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogProps) {
+export function FlowSpecRuleDialog({ open, onOpenChange, canSourceOnly = true }: FlowSpecRuleDialogProps) {
   const { formatTime } = useTimeFormat()
   const router = useRouter()
   const { data: settings } = useConfigSettings()
@@ -491,14 +493,15 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
             </Select>
             {selectedSnapshot ? <p className="break-words font-mono text-xs">{formatRoutingScope(selectedSnapshot)}</p> : null}
             {fieldError("routingScope", "fs-scope")}
-            {scopePolicy ? <div className="flex items-center gap-2">
+            {scopePolicy && canSourceOnly ? <div className="flex items-center gap-2">
               <Checkbox id="fs-source-only" checked={form.sourceOnly === true} disabled={!scopePolicy.allow_source_only} onCheckedChange={(checked) => {
                 invalidateAdmission()
                 setForm((prev) => ({ ...prev, action: checked === true && prev.action === "mark" ? "discard" : prev.action, sourceOnly: checked === true, confirmDestinationAny: false, victimIp: "", dstPorts: "", srcPorts: "", nonFirstFragments: false, lengthMin: "", lengthMax: "", ttl: String(scopePolicy.max_source_only_ttl_seconds) }))
               }} />
               <Label htmlFor="fs-source-only">Source-only rule (destination: any)</Label>
             </div> : null}
-            {scopePolicy && !scopePolicy.allow_source_only ? <p className="text-xs text-muted-foreground">Source-only rules are disabled for this scope.</p> : null}
+            {scopePolicy && !canSourceOnly ? <p className="text-xs text-muted-foreground">Source-only rules require an administrator.</p> : null}
+            {scopePolicy && canSourceOnly && !scopePolicy.allow_source_only ? <p className="text-xs text-muted-foreground">Source-only rules are disabled for this scope.</p> : null}
           </div> : null}
 
           {!form.sourceOnly ? <div className="space-y-1.5">

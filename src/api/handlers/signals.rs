@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::api::auth::{require_auth, require_role};
+use crate::api::auth::{require_auth, require_operator, require_role};
 use crate::auth::AuthSession;
 use crate::db::ListParams;
 use crate::domain::{AttackEventInput, AttackVector, validate_confidence};
@@ -394,11 +394,7 @@ async fn ingest_alertmanager_inner(
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<AlertmanagerWebhookResponse>), AppError> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    if let Err(_status) = require_auth(&state, &auth_session, auth_header) {
-        return Err(AppError(PrefixdError::Unauthorized(
-            "authentication required".into(),
-        )));
-    }
+    require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
 
     // Parse body as JSON — return 400 for malformed payloads
     let payload: AlertmanagerWebhookPayload = serde_json::from_slice(&body).map_err(|e| {
@@ -843,11 +839,7 @@ async fn ingest_fastnetmon_inner(
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    if let Err(_status) = require_auth(&state, &auth_session, auth_header) {
-        return Err(AppError(PrefixdError::Unauthorized(
-            "authentication required".into(),
-        )));
-    }
+    require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
 
     // Parse body as JSON — return 400 for malformed payloads
     let payload: FastNetMonPayload = serde_json::from_slice(&body).map_err(|e| {
@@ -1066,11 +1058,7 @@ async fn ingest_webhook_inner(
         }
         crate::correlation::WebhookAuth::Bearer => {
             let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-            if require_auth(&state, &auth_session, auth_header).is_err() {
-                return Err(AppError(PrefixdError::Unauthorized(
-                    "authentication required".into(),
-                )));
-            }
+            require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
         }
         crate::correlation::WebhookAuth::None => {
             // No-auth is caller's responsibility; logged once at startup.
@@ -1254,11 +1242,7 @@ pub async fn ingest_corroborator(
     Json(input): Json<CorroboratorInput>,
 ) -> impl IntoResponse {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    if let Err(_status) = require_auth(&state, &auth_session, auth_header) {
-        return Err(AppError(PrefixdError::Unauthorized(
-            "authentication required".into(),
-        )));
-    }
+    require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
     ingest_corroborator_inner(state, input).await
 }
 
@@ -1465,7 +1449,7 @@ pub async fn get_corroborator_activity(
     axum::extract::Query(query): axum::extract::Query<CorroboratorActivityQuery>,
 ) -> impl IntoResponse {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    if let Err(_status) = require_auth(&state, &auth_session, auth_header) {
+    if require_auth(&state, &auth_session, auth_header).is_err() {
         return Err(AppError(PrefixdError::Unauthorized(
             "authentication required".into(),
         )));

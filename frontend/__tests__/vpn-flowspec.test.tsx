@@ -121,6 +121,16 @@ describe("source-only operator form", { timeout: 10_000 }, () => {
     expect(controller.calls("POST", "/v1/mitigations")).toHaveLength(0)
   })
 
+  it("hides source-only creation from non-admin operators", async () => {
+    controller.route("GET", "/v1/config/settings", () => json({ settings: { bgp: { default_scope: "TRANSIT", vpn_scopes: { TRANSIT: policy } }, guardrails: { allow_src_prefix_match: true } }, loaded_at: "2026-11-08T12:00:00Z" }))
+    renderApp(<FlowSpecRuleDialog open onOpenChange={vi.fn()} canSourceOnly={false} />, { withoutAuth: true })
+    await settle()
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Routing scope" }), { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "TRANSIT (VPNv4)" }))
+    expect(screen.queryByRole("checkbox", { name: /Source-only rule/ })).not.toBeInTheDocument()
+    expect(screen.getByText("Source-only rules require an administrator.")).toBeInTheDocument()
+  })
+
   it("checks family, source floor and short TTL without inventing a destination", () => {
     const form: RuleForm = { routingScope: "TRANSIT", sourceOnly: true, victimIp: "", srcPrefix: "198.51.100.0/24", protocol: "udp", action: "discard", rateBps: "", dstPorts: "", srcPorts: "", nonFirstFragments: false, lengthMin: "", lengthMax: "", ttl: "30", reason: "pilot attack" }
     expect(validateRule(form, { maxPorts: 5, allowSrcPrefixMatch: true, vpnScope: policy })).toEqual({})

@@ -775,7 +775,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
       </AlertDialog>
 
       <MitigateNowDialog open={mitigateNowOpen} onOpenChange={setMitigateNowOpen} />
-      {permissions.canWithdraw && <FlowSpecRuleDialog open={ruleOpen} onOpenChange={setRuleOpen} />}
+      {permissions.canWithdraw && <FlowSpecRuleDialog open={ruleOpen} onOpenChange={setRuleOpen} canSourceOnly={permissions.isAdmin} />}
       {permissions.isAdmin && <BlackholeDialog open={blackholeOpen} onOpenChange={setBlackholeOpen} />}
     </div>
   )

@@ -3,8 +3,23 @@ use axum::http::StatusCode;
 use crate::AppState;
 use crate::config::AuthMode;
 use crate::domain::{Operator, OperatorRole};
+use crate::error::PrefixdError;
 
 use crate::auth::AuthSession;
+
+/// Ingest endpoints are mutations even when they carry detector metadata.
+/// Viewers may read, but may not create or withdraw mitigations.
+pub fn require_operator(
+    state: &AppState,
+    auth_session: &AuthSession,
+    auth_header: Option<&str>,
+) -> Result<(), PrefixdError> {
+    match require_role(state, auth_session, auth_header, OperatorRole::Operator) {
+        Ok(_) => Ok(()),
+        Err(StatusCode::FORBIDDEN) => Err(PrefixdError::Forbidden("operator role required".into())),
+        Err(_) => Err(PrefixdError::Unauthorized("authentication required".into())),
+    }
+}
 
 /// Check if request is authenticated via session cookie or bearer token (hybrid auth)
 /// Returns Ok(()) if authenticated, Err(StatusCode) if not

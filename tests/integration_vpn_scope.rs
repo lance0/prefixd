@@ -274,6 +274,52 @@ async fn source_only_extension_keeps_short_ceiling_and_rechecks_source_safelist(
 }
 
 #[tokio::test]
+async fn source_only_policy_refusals_use_documented_statuses() {
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(MockAnnouncer::new());
+    let mut configured = settings();
+    configured.guardrails.allow_src_prefix_match = true;
+    configured
+        .bgp
+        .vpn_scopes
+        .get_mut("V4")
+        .unwrap()
+        .allow_source_only = true;
+    configured.safelist.prefixes = vec!["198.51.100.0/25".into()];
+    let app = create_test_router(state(configured, repo, speaker));
+    post(
+        &app,
+        "/v1/vpn/source-rules",
+        json!({"scope":"V4","src_prefix":"198.51.100.0/24","protocol":"udp",
+            "action":"discard","ttl_seconds":30,"reason":"protected source",
+            "confirm_destination_any":true}),
+        StatusCode::UNPROCESSABLE_ENTITY,
+    )
+    .await;
+
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(MockAnnouncer::new());
+    let mut configured = settings();
+    configured.guardrails.allow_src_prefix_match = true;
+    configured
+        .bgp
+        .vpn_scopes
+        .get_mut("V4")
+        .unwrap()
+        .allow_source_only = true;
+    let app = create_test_router(state(configured, repo, speaker));
+    post(
+        &app,
+        "/v1/vpn/source-rules",
+        json!({"scope":"V4","src_prefix":"198.51.0.0/16","protocol":"udp",
+            "action":"discard","ttl_seconds":30,"reason":"too broad",
+            "confirm_destination_any":true}),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn automatic_family_map_can_select_global_for_one_family_explicitly() {
     let repo = Arc::new(MockRepository::new());
     let speaker = Arc::new(MockAnnouncer::new());
