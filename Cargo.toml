@@ -14,7 +14,7 @@ tokio = { version = "1", features = ["full", "sync"] }
 axum = { version = "0.8", features = ["macros", "ws"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 tower = { version = "0.5", features = ["util", "limit"] }
-tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "limit"] }
+tower-http = { version = "0.7", features = ["trace", "cors", "set-header", "limit"] }
 
 # Authentication
 axum-login = "0.18"
