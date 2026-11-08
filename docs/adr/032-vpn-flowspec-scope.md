@@ -1,4 +1,4 @@
-# ADR 032: Scoped IPv4 VPN FlowSpec Origination
+# ADR 032: Scoped VPN FlowSpec Origination
 
 ## Status
 
@@ -19,8 +19,8 @@ an RPC alone would leave cross-scope deduplication and withdrawal hazards.
 rustbgpd main provides scoped plain, leased and guarded injection. Its
 controller owns no VRF objects: the receiving PE imports the route targets.
 The pilot receiver is an ASR9901; router installation and traffic enforcement
-remain separate qualification work. This design covers IPv4 VPN origination.
-IPv6 VPN, receiving/reflection and VRF provisioning are outside this slice.
+remain separate qualification work. This design covers IPv4 and IPv6 VPN origination.
+Receiving/reflection and VRF provisioning are outside this slice.
 
 ## Decision
 
@@ -29,8 +29,9 @@ IPv6 VPN, receiving/reflection and VRF provisioning are outside this slice.
 Configure named VPN scopes under the existing speaker target. Each name
 resolves to a family enum, an RD and a nonempty list of scope RTs.
 Persist the family enum in scope snapshots and identity so adding family 14
-requires validation/configuration work without a storage migration. This slice
-accepts IPv4 VPN scope only; refuse IPv6 VPN configuration for now.
+requires no storage migration. Accept `ipv4` and `ipv6` scopes in this slice;
+use conventional IPv6 CIDRs with prefix offset zero. Nonzero offsets remain
+outside prefixd's match model and fail interoperability with GoBGP 4.11.0.
 For example, the proposed configuration is:
 
 ```yaml
@@ -46,7 +47,7 @@ bgp:
 
 Reserve `global` as the existing default. Manual creation and preview accept
 an optional scope name; omission retains global behavior. Unknown names,
-missing scope fields and IPv6 matches in an IPv4 scope fail before persistence
+missing scope fields and family-mismatched prefixes fail before persistence
 or speaker mutation. Preview and dry-run use the same validation. Raw RD/RT
 input belongs in operator configuration, not detector payloads.
 
@@ -59,7 +60,9 @@ new request types.
 
 Manual admission selects a scope; configured scrubber profiles select their
 scope. An operator-configured `default_scope` on the speaker target selects
-scope for automatic FlowSpec mitigation. Omission retains global automation.
+scope for automatic FlowSpec mitigation. Accept a single name or an explicit
+`{ipv4: TRANSIT, ipv6: TRANSIT6}` mapping; each selected scope must match the
+victim family, with no global fallback. Omission retains global automation.
 Detector payloads cannot select or override scope, and an unknown default is
 a configuration error. Automatic admission uses the same immutable snapshot
 and identity as manual admission; default changes affect new admissions only.
@@ -114,7 +117,7 @@ require draining VPN intent and pending withdrawals before controller downgrade.
 ### Backends and payload updates
 
 rustbgpd implements scoped plain, leased and guarded add/delete, local read-back,
-lease-key inventory and export dispositions. Use family 13 with an RD on every
+lease-key inventory and export dispositions. Use family 13 or 14 with an RD on every
 VPN key; use existing global families with no RD. Never retry VPN as global.
 GoBGP explicitly refuses VPN scope with a typed unsupported-scope error before
 an RPC. Mock behavior must exercise refusal, malformed inventory and isolation.
@@ -135,7 +138,7 @@ VRF action RTs remain distinct from scope RTs.
 ### Capabilities and release compatibility
 
 Keep the global daemon minimum at **0.81.0**. VPN is opt-in and requires the
-read-only `ListFlowSpecRoutes` probe with `afi_safi: 13` and
+read-only `ListFlowSpecRoutes` probe with `afi_safi: 13` or `14` for the selected family and
 `received_peer_address: "0.0.0.0"`, acknowledging `received_view: true`.
 `INVALID_ARGUMENT` means unsupported for that probe; transport and auth errors
 remain errors. Version strings alone cannot authorize a VPN mutation.
@@ -174,14 +177,14 @@ for the omitted destination.
 
 Apply safelist and infrastructure protection to the source prefix: refuse
 any overlap with the safelist or configured own/infrastructure ranges. Require
-a configurable minimum source prefix length, default IPv4 `/24`, an explicit
+a configurable minimum source prefix length, default IPv4 `/24` or IPv6 `/64`, an explicit
 TTL with a short maximum, and a separate source-only quota. Initial policy
 defaults are a 60-second maximum TTL and 10 active source-only rules per POP,
 with stricter existing limits still applying. Allow discard and rate-limit
 only; refuse source-only marking and redirects pending separate qualification.
 Keep global source-only refused and omitted destination distinct from explicit
-`/0`. Receiver validation of destination-less rules under RFC 8955 section 6
-and RFC 9117 varies by platform; pilot qualification must establish receiver
+`/0`. Receiver validation of destination-less rules under [RFC 8955 section 6](https://www.rfc-editor.org/rfc/rfc8955.html#section-6)
+and [RFC 9117](https://www.rfc-editor.org/rfc/rfc9117.html) varies by platform; pilot qualification must establish receiver
 acceptance. Controller encoding cannot establish it.
 
 ### Operator surfaces and qualification
@@ -203,7 +206,7 @@ Acceptance requires the following evidence; none is established by this ADR:
 | Unsupported speaker | Released 0.81.0 refusal across VPN paths with unchanged global inventory; separate transport/auth controls |
 | Older controller | New clients refuse absent VPN capability; scope-aware endpoints refuse on an older controller without changing global inventory |
 | Backend safety | GoBGP pre-RPC typed refusal; mock negative and malformed-inventory controls |
-| Wire behavior | Isolated prefixd to rustbgpd to GoBGP 4.11.0 peer; exact AFI 1/SAFI 134, RD/RT/actions and withdrawal; global-only peer control |
+| Wire behavior | Isolated prefixd to rustbgpd to GoBGP 4.11.0 peer; exact AFI 1 and 2/SAFI 134, RD/RT/actions and withdrawal; global-only peer control |
 | Actions and sources | All five actions; source+destination and source-only; admission negatives and round-trip evidence |
 | Regression proof | Remove each identity/scope fix and show its targeted test fails |
 | Release readiness | Tagged proto/checksum, immutable image pin, required gate and both released fixtures |
