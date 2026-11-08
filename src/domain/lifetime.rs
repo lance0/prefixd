@@ -223,7 +223,7 @@ pub async fn extend_flowspec_lifetime(
             &state.settings.timers,
         );
         if source_only { crate::guardrails::validate_source_only(state, &intent).await?; }
-        state.announcer.validate_scope(rule.nlri.scope.as_ref()).await?;
+        // Extension is database-only; the next mutation probes before dispatch.
         guardrails.validate_rule(&intent, safelisted)?;
         guardrails.validate_remaining_ttl(chrono::Duration::seconds(ttl_seconds.into()))?;
         // Unlike new admission, extension does not consume another quota/rate slot.
