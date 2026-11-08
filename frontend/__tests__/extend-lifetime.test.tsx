@@ -34,6 +34,29 @@ async function open() {
 }
 
 describe("operator lifetime extension", () => {
+  it("allows a source-only rule up to its scope ceiling", async () => {
+    signIn(controller, "credentials", operatorResponse("operator"))
+    controller.route("GET", "/v1/config/settings", () => json({ settings: {
+      pop: "test-pop", mode: "enforced",
+      guardrails: { min_ttl_seconds: 30, max_ttl_seconds: 1800 },
+      bgp: { vpn_scopes: { TRANSIT: {
+        family: "ipv4", rd: "44407:40", route_targets: ["44407:777"],
+        allow_source_only: true, min_source_prefix_length: 24,
+        max_source_only_ttl_seconds: 60, max_source_only_active: 10,
+      } } },
+    }, loaded_at: new Date(now).toISOString() }))
+    renderApp(<ExtendLifetimeDialog mitigation={{
+      ...mitigation,
+      customer_id: null,
+      victim_ip: "any",
+      dst_prefix: "",
+      src_prefix: "198.51.100.0/24",
+      vpn_scope: { name: "TRANSIT", identity: { family: "ipv4", rd: "44407:40" }, route_targets: ["44407:777"] },
+    }} now={now} onUpdated={vi.fn(async () => {})} />)
+    fireEvent.click(await screen.findByRole("button", { name: "Extend lifetime" }))
+    expect(await screen.findByLabelText("Remaining lifetime (seconds)")).toHaveAttribute("max", "60")
+  })
+
   it("previews exact target and expiry, requires a reason and confirms the bounded remaining lifetime", async () => {
     const response = deferred<Response>()
     controller.route("POST", "/v1/mitigations/rule-1/extend", () => response.promise)

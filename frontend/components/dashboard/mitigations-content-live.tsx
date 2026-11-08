@@ -132,10 +132,10 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
 
     try {
       const matching = await getAllMitigations(filters)
-      const headers = ["mitigation_id", "status", "victim_ip", "vector", "action_type", "customer_id", "created_at", "expires_at", "routing_scope", "dscp"]
+      const headers = ["mitigation_id", "status", "victim_ip", "dst_prefix", "src_prefix", "vector", "action_type", "customer_id", "created_at", "expires_at", "routing_scope", "dscp"]
 
       const rows = matching.map((m) => [
-        m.mitigation_id, m.status, m.victim_ip, m.vector, m.action_type,
+        m.mitigation_id, m.status, m.victim_ip, m.dst_prefix, m.src_prefix ?? "", m.vector, m.action_type,
         m.customer_id ?? "", m.created_at, m.expires_at, formatRoutingScope(m.vpn_scope), m.dscp?.toString() ?? "",
       ])
 

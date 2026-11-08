@@ -6,7 +6,7 @@ import { Clock3, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { useConfigSettings } from "@/hooks/use-api"
 import { usePermissions } from "@/hooks/use-permissions"
-import { apiErrorStatus, extendMitigation, type JsonValue, type Mitigation } from "@/lib/api"
+import { apiErrorStatus, extendMitigation, readVpnScopes, type JsonValue, type Mitigation } from "@/lib/api"
 import { useTimeFormat } from "@/components/time-zone-provider"
 import { FlowSpecPreview } from "./flowspec-preview"
 import { Button } from "@/components/ui/button"
@@ -43,10 +43,16 @@ export function ExtendLifetimeDialog({ mitigation, now, onUpdated }: {
     Number.isInteger(value) && Number(value) >= 0 ? Number(value) : NaN
 
   const minimum = Math.max(1, nonnegativeInteger(guardrails.min_ttl_seconds ?? timers.min_ttl_seconds))
-  const maximum = nonnegativeInteger(guardrails.max_ttl_seconds ?? timers.max_ttl_seconds)
+  const sourceOnly = mitigation.dst_prefix === ""
+  const scopePolicy = mitigation.vpn_scope ? readVpnScopes(settings)[mitigation.vpn_scope.name] : undefined
+
+  const maximum = sourceOnly
+    ? Math.min(nonnegativeInteger(guardrails.max_ttl_seconds ?? timers.max_ttl_seconds), scopePolicy?.max_source_only_ttl_seconds ?? 0)
+    : nonnegativeInteger(guardrails.max_ttl_seconds ?? timers.max_ttl_seconds)
 
   const eligible = permissions.isOperator && settings?.mode === "enforced" && settings?.pop === mitigation.pop
-    && mitigation.customer_id !== null && mitigation.origin_mode === "enforced" && (mitigation.action_type === "discard" || mitigation.action_type === "police")
+    && (mitigation.customer_id !== null || sourceOnly) && (!sourceOnly || scopePolicy !== undefined)
+    && mitigation.origin_mode === "enforced" && (mitigation.action_type === "discard" || mitigation.action_type === "police")
     && (mitigation.status === "active" || mitigation.status === "escalated")
     && !mitigation.withdrawn_at && Date.parse(mitigation.expires_at) > now
     && Number.isInteger(minimum) && minimum > 0 && Number.isInteger(maximum) && maximum >= minimum

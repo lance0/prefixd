@@ -485,7 +485,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange, canSourceOnly = true }:
               invalidateAdmission()
               setForm((prev) => ({ ...prev, routingScope: value, action: value === "global" && prev.action === "mark" ? "discard" : prev.action, sourceOnly: false, confirmDestinationAny: false }))
             }}>
-              <SelectTrigger id="fs-scope" className="h-9"><SelectValue /></SelectTrigger>
+              <SelectTrigger id="fs-scope" className="h-9" aria-invalid={Boolean(shown("routingScope"))} aria-describedby={describedBy("routingScope", "fs-scope")}><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="global">Global</SelectItem>
                 {Object.entries(scopes).map(([name, policy]) => <SelectItem key={name} value={name}>{name} (VPN{policy.family === "ipv4" ? "v4" : "v6"})</SelectItem>)}
@@ -566,7 +566,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange, canSourceOnly = true }:
             <div className="space-y-1.5">
               <Label htmlFor="fs-action">Action</Label>
               <Select value={form.action} onValueChange={(value) => { if (value === "discard" || value === "police" || value === "mark") update("action", value) }}>
-                <SelectTrigger id="fs-action" className="h-9">
+                <SelectTrigger id="fs-action" className="h-9" aria-invalid={Boolean(shown("action"))} aria-describedby={describedBy("action", "fs-action")}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>

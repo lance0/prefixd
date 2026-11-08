@@ -63,6 +63,17 @@ describe("active mitigation worklist", () => {
     expect(screen.queryByText(/installed|enforced/i)).not.toBeInTheDocument()
   })
 
+  it("identifies a source-only rule by source and destination any", () => {
+    render(<ActiveMitigationsMini mitigations={[{
+      ...mitigation,
+      victim_ip: "any",
+      dst_prefix: "",
+      src_prefix: "198.51.100.0/24",
+      vpn_scope: { name: "TRANSIT", identity: { family: "ipv4", rd: "44407:40" }, route_targets: ["44407:777"] },
+    }]} />)
+    expect(screen.getByRole("link", { name: "198.51.100.0/24 → any" })).toHaveAttribute("href", "/mitigations/rule-1")
+  })
+
   it("does not infer confidence or one source from a mitigation without correlation", () => {
     render(<ActiveMitigationsMini mitigations={[mitigation]} />)
     expect(screen.getByText(/Sources unavailable · Confidence: Unavailable/)).toBeInTheDocument()
