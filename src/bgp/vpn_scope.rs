@@ -79,6 +79,9 @@ fn check_named_snapshot(config: &BgpConfig, saved: &VpnScopeSnapshot) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{
+        FlowSpecAction, FlowSpecNlri, FlowSpecRule, VpnFlowSpecFamily, WithdrawalRequest,
+    };
 
     fn config() -> BgpConfig {
         crate::config::parse_yaml(
@@ -99,5 +102,67 @@ mod tests {
         assert!(check_named_snapshot(&config, &saved).is_err());
         config.vpn_scopes.clear();
         assert!(check_named_snapshot(&config, &saved).is_err());
+    }
+
+    #[test]
+    fn retained_scope_accepts_matching_rt_and_rejects_rt_only_change() {
+        let config = config();
+        let saved = config.resolve_scope("TRANSIT").unwrap().unwrap();
+        assert!(retained_scope(&config, &saved.identity, &saved.route_targets).is_ok());
+        assert!(retained_scope(&config, &saved.identity, &["44407:778".into()]).is_err());
+        let other = VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "44407:41").unwrap();
+        assert!(retained_scope(&config, &other, &saved.route_targets).is_err());
+    }
+
+    #[tokio::test]
+    async fn startup_validation_refuses_an_invalid_scope_before_speaker_reads() {
+        let mut config = config();
+        config.vpn_scopes.get_mut("TRANSIT").unwrap().rd = "0x0003000000000001".into();
+        let repo = crate::db::mock::MockRepository::new();
+        let speaker = crate::bgp::MockAnnouncer::new();
+        assert!(
+            check_vpn_startup(&config, "pop", &speaker, &repo)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_refuses_a_pending_flow_spec_after_rt_change() {
+        let config = config();
+        let repo = crate::db::mock::MockRepository::new();
+        let speaker = crate::bgp::MockAnnouncer::new();
+        let identity = config.resolve_scope("TRANSIT").unwrap().unwrap().identity;
+        let rule = FlowSpecRule::new(
+            FlowSpecNlri {
+                scope: Some(identity),
+                dst_prefix: "192.0.2.1/32".into(),
+                ..Default::default()
+            },
+            FlowSpecAction::discard(),
+        )
+        .with_route_targets(vec!["44407:778".into()]);
+        repo.insert_withdrawal_for_test(WithdrawalRequest {
+            operation_id: uuid::Uuid::new_v4(),
+            mitigation_id: uuid::Uuid::new_v4(),
+            pop: "pop".into(),
+            nlri_hash: rule.nlri_hash(),
+            rule_kind: "flowspec".into(),
+            rule_json: serde_json::to_string(&rule).unwrap(),
+            mitigation_updated_at: chrono::Utc::now(),
+            terminal_status: "withdrawn".into(),
+            speaker_delete_required: true,
+            actor_type: "operator".into(),
+            actor: "test".into(),
+            reason: "test".into(),
+            requested_at: chrono::Utc::now(),
+            completed_at: None,
+            target_id: None,
+        });
+        assert!(
+            check_vpn_startup(&config, "pop", &speaker, &repo)
+                .await
+                .is_err()
+        );
     }
 }

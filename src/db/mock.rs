@@ -86,6 +86,11 @@ impl MockRepository {
         )
     }
 
+    #[cfg(test)]
+    pub fn insert_withdrawal_for_test(&self, request: crate::domain::WithdrawalRequest) {
+        self.withdrawals.lock().unwrap().push(request);
+    }
+
     pub fn new() -> Self {
         Self {
             speaker_bindings: Mutex::new(MockSpeakerBindings::default()),
