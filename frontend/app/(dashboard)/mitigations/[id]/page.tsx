@@ -20,7 +20,7 @@ import { useTimeFormat } from "@/components/time-zone-provider"
 import { FlowSpecPreview, describeMatch, formatFlowSpecRule } from "@/components/dashboard/flowspec-preview"
 import { ExtendLifetimeDialog } from "@/components/dashboard/extend-lifetime-dialog"
 import { IncidentReportDialog } from "@/components/dashboard/incident-report-dialog"
-import { withdrawMitigation, getIncidentReport, isNotFound, type Mitigation } from "@/lib/api"
+import { formatRoutingScope, withdrawMitigation, getIncidentReport, isNotFound, type Mitigation } from "@/lib/api"
 import { copyText } from "@/lib/clipboard"
 import { toast } from "sonner"
 import {
@@ -223,7 +223,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
             <>
               <StatusBadge status={mitigation.status} />
               <OriginTag origin={mitigation.origin_mode} showUnknown />
-              <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} />
+              <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} dscp={mitigation.dscp} />
               <Tag>{mitigation.vector.replace(/_/g, " ")}</Tag>
               <span className="text-muted-foreground">POP <span className="font-mono text-foreground">{mitigation.pop}</span></span>
               <span className="text-muted-foreground tabular-nums">
@@ -237,10 +237,12 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
           }
           actions={
             <>
-              <Button variant="outline" size="sm" onClick={handleGenerateReport}>
-                <FileText className="size-4" aria-hidden="true" />
-                Report
-              </Button>
+              {mitigation.dst_prefix ? (
+                <Button variant="outline" size="sm" onClick={handleGenerateReport}>
+                  <FileText className="size-4" aria-hidden="true" />
+                  Report
+                </Button>
+              ) : null}
               <ExtendLifetimeDialog mitigation={mitigation} now={now} onUpdated={async () => { await mutate() }} />
               {permissions.canWithdraw && canWithdraw ? (
                 <Button
@@ -302,7 +304,8 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                   </p>
                 )}
                 <FieldList className="grid-cols-2 sm:grid-cols-4">
-                  <Field label="Destination prefix"><span className="font-mono">{mitigation.dst_prefix}</span></Field>
+                  <Field label="Routing scope"><span className="break-words font-mono">{formatRoutingScope(mitigation.vpn_scope)}</span></Field>
+                  <Field label="Destination prefix"><span className="font-mono">{mitigation.dst_prefix || "any"}</span></Field>
                   <Field label="Protocol">{protocolName(mitigation.protocol)}</Field>
                   <Field label="Destination ports"><span className="font-mono">{mitigation.dst_ports.length > 0 ? mitigation.dst_ports.join(", ") : "any"}</span></Field>
                   {mitigation.src_prefix ? (
@@ -320,7 +323,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                     </Field>
                   ) : null}
                   <Field label="Action applied">
-                    <span className="font-medium">{mitigation.action_type === "discard" ? "discard" : `rate-limit ${formatBps(mitigation.rate_bps)}`}</span>
+                    <span className="font-medium">{mitigation.action_type === "discard" ? "discard" : mitigation.action_type === "mark" ? `mark DSCP ${mitigation.dscp ?? "unavailable"}` : `rate-limit ${formatBps(mitigation.rate_bps)}`}</span>
                   </Field>
                 </FieldList>
               </CardContent>
@@ -337,7 +340,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                     {siblings.map((sibling) => (
                       <li key={sibling.mitigation_id} className="flex flex-wrap items-center gap-2 text-sm">
                         <StatusBadge status={sibling.status} />
-                        <ActionBadge actionType={sibling.action_type} rateBps={sibling.rate_bps} />
+                        <ActionBadge actionType={sibling.action_type} rateBps={sibling.rate_bps} dscp={sibling.dscp} />
                         <Link href={`/mitigations/${sibling.mitigation_id}`} className="min-w-0 break-words rounded-sm hover:underline">
                           {describeMatch(sibling)}
                         </Link>
@@ -566,7 +569,10 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
           <AlertDialogHeader>
             <AlertDialogTitle>Withdraw Mitigation</AlertDialogTitle>
             <AlertDialogDescription>
-              Request withdrawal for <span className="font-mono font-semibold">{mitigation?.victim_ip}</span>.
+              Request withdrawal for <span className="font-mono font-semibold">{mitigation?.dst_prefix || mitigation?.victim_ip}</span>
+              {mitigation?.vpn_scope ? <> in <span className="font-mono">{formatRoutingScope(mitigation.vpn_scope)}</span></> : null}
+              {mitigation?.src_prefix ? <> from source <span className="font-mono">{mitigation.src_prefix}</span></> : null}
+              {" "}({mitigation?.action_type}).
               Local completion is recorded in the audit log. Router convergence and traffic filtering are not verified here.
             </AlertDialogDescription>
           </AlertDialogHeader>

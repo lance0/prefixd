@@ -21,6 +21,7 @@ covers the daemon.
 | Run prefixd and rustbgpd on my machine | [Quickstart](tutorials/quickstart.md) |
 | Mitigate a target by hand and withdraw it | [Manual mitigation and withdrawal](cookbook/manual-mitigation.md) |
 | Manually divert a host through a configured scrubber | [Scrubber diversion](how-to/scrubber-diversion.md) |
+| Configure scoped IPv4/IPv6 mitigation, automatic defaults and source-only authorization | [VPN FlowSpec](how-to/vpn-flowspec.md) |
 | Keep an existing FlowSpec rule for longer | [Extend a mitigation](how-to/extending-mitigations.md) |
 | See what policy would do before it announces | [Dry-run rollout](cookbook/dry-run-rollout.md) |
 | Connect FastNetMon | [FastNetMon](how-to/detectors/fastnetmon.md) |

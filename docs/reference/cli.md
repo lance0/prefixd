@@ -471,8 +471,51 @@ intent. `diversions list`, `diversions get ID` and `diversions withdraw ID
 [--reason TEXT]` inspect and drain it; the reason is recorded in the audit log.
 These commands print JSON.
 
+For VPN diversion, the file must use a named-scope envelope:
+
+```json
+{
+  "scope": "TRANSIT",
+  "diversion": {
+    "profile": "scrubber-v4",
+    "scope": {"dst_prefix": "203.0.113.10/32", "protocol": 6, "dst_ports": [443]},
+    "ttl_seconds": 60,
+    "reason": "Confirmed attack"
+  }
+}
+```
+
+Use a profile configured for that scope and address family. The CLI sends VPN
+files to `/v1/vpn/diversions/preview` and `/v1/vpn/diversions`; creation repeats
+the preview and requires the same complete confirmation, including RD and RTs.
+A missing scope acknowledgment, a changed confirmation or an unavailable
+controller stops creation. It never retries through a global endpoint.
+Plain global request files retain their existing format and endpoint.
+
 Writes require an administrator. Supply an authenticated administrator session
 through `--session-cookie` or `PREFIXD_SESSION_COOKIE`; the value is a complete
 Cookie header and is hidden from help output. Sign in with
 [`POST /v1/auth/login`](api.md#login) and copy the session cookie it sets. Ordinary bearer tokens retain the
 Operator role. See [manual scrubber diversion](../how-to/scrubber-diversion.md).
+
+## Manual VPN FlowSpec
+
+`prefixdctl mitigations preview VICTIM` and `mitigations create VICTIM` accept
+`--scope`, `--protocol`, `--src-prefix`, `--dst-ports`, `--action discard|police`,
+`--rate-bps`, `--ttl-seconds` and `--reason`. TTL and reason are explicit.
+Scoped creation repeats a scope-aware preview and never falls back to global.
+
+For source-only, omit VICTIM and use `--source-only --scope NAME --src-prefix CIDR`.
+Creation also needs `--confirm-destination-any`; preview does not. Family/RD/RT
+appear in mitigation and local inventory output. See the
+[VPN procedure](../how-to/vpn-flowspec.md) for authorization and receiver limits.
+
+### VPN DSCP marking
+
+`mitigations preview` and `mitigations create` accept `--action mark --dscp N`
+for a named VPN destination scope. `N` is an integer from 0 through 63.
+`--rate-bps` is refused with marking, and `--dscp` is refused for other actions.
+A source-only or global marking request fails locally. Create requires the
+controller preview to acknowledge both action `mark` and the exact DSCP.
+Mitigation detail and speaker inventory show the saved DSCP. Marking cannot
+use lifetime extension in this slice; let it expire or withdraw by ID.

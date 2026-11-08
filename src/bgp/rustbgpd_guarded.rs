@@ -37,16 +37,31 @@ fn generation(value: Option<pb::LeaseGeneration>) -> Result<GuardedStamp> {
 fn encode_guarded(rule: &GuardedRule) -> Result<pb::AddFlowSpecRequest> {
     rule.validate()?;
     let (afi_safi, components) = encode_match(&rule.nlri)?;
+    let (route_targets, extended_communities) =
+        encode_scope_targets(rule.nlri.scope.as_ref(), &rule.route_targets)?;
+    let action = match (rule.target, &rule.redirect_route_target) {
+        (Some(target), None) => pb::flow_spec_action::Action::RedirectIp(pb::FlowSpecRedirectIp {
+            address: target.to_string(),
+            copy: false,
+        }),
+        (None, Some(target)) => pb::flow_spec_action::Action::Redirect(pb::FlowSpecRedirect {
+            route_target: target.clone(),
+        }),
+        _ => return Err(invalid("invalid guarded redirect target")),
+    };
     Ok(pb::AddFlowSpecRequest {
         afi_safi,
         components,
+        rd: rule
+            .nlri
+            .scope
+            .as_ref()
+            .map(|scope| scope.rd().to_owned())
+            .unwrap_or_default(),
+        route_targets,
+        extended_communities,
         actions: vec![pb::FlowSpecAction {
-            action: Some(pb::flow_spec_action::Action::RedirectIp(
-                pb::FlowSpecRedirectIp {
-                    address: rule.target.to_string(),
-                    copy: false,
-                },
-            )),
+            action: Some(action),
         }],
         ..Default::default()
     })
@@ -66,12 +81,39 @@ pub(super) fn foreign_guarded(route: &pb::FlowSpecRouteEntry) -> bool {
 
 /// Only the match of a foreign guarded rule: its action, target and other
 /// attributes belong to another owner. Its key still counts as occupied.
+fn scope_rt_bytes(route: &pb::FlowSpecRouteEntry) -> Result<Vec<u64>> {
+    let mut targets = route
+        .route_targets
+        .iter()
+        .map(|target| {
+            crate::domain::route_target_bytes(target).map_err(|error| invalid(&error.to_string()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    targets.sort_unstable();
+    Ok(targets)
+}
+
+fn raw_scope_targets(communities: &[u64]) -> Vec<u64> {
+    communities
+        .iter()
+        .copied()
+        .filter(|community| {
+            let bytes = community.to_be_bytes();
+            matches!(bytes[0], 0..=2) && bytes[1] == 2
+        })
+        .collect()
+}
+
 fn foreign_match(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecNlri> {
+    let mut extended_communities = vec![0x8006_u64 << 48];
+    extended_communities.extend(raw_scope_targets(&route.extended_communities));
     let route = pb::FlowSpecRouteEntry {
         components: route.components,
         peer_address: route.peer_address,
         afi_safi: route.afi_safi,
-        extended_communities: vec![0x8006_u64 << 48],
+        rd: route.rd,
+        route_targets: route.route_targets,
+        extended_communities,
         actions: vec![pb::FlowSpecAction {
             action: Some(pb::flow_spec_action::Action::TrafficRate(
                 pb::FlowSpecTrafficRate { rate: 0.0 },
@@ -175,39 +217,63 @@ pub(super) fn decode_guarded(
         .take()
         .ok_or_else(|| invalid("missing guarded lease time"))?;
     let [action] = route.actions.as_slice() else {
-        return Err(invalid("guarded rule requires one target-IP action"));
+        return Err(invalid("guarded rule requires one redirect action"));
     };
-    let Some(pb::flow_spec_action::Action::RedirectIp(target)) = &action.action else {
-        return Err(invalid("guarded rule requires a target-IP action"));
-    };
-    let address: std::net::IpAddr = target
-        .address
-        .parse()
-        .map_err(|_| invalid("invalid redirect target"))?;
-    if target.copy {
-        return Err(invalid("copy action is unsupported"));
-    }
-    let (extended, ipv6_extended) = match address {
-        std::net::IpAddr::V4(ip) => (
-            vec![u64::from_be_bytes([
-                1,
-                12,
-                ip.octets()[0],
-                ip.octets()[1],
-                ip.octets()[2],
-                ip.octets()[3],
-                0,
-                0,
-            ])],
-            vec![],
-        ),
-        std::net::IpAddr::V6(ip) => {
-            let mut raw = vec![0, 12];
-            raw.extend(ip.octets());
-            raw.extend([0, 0]);
-            (vec![], vec![raw])
+    let (target, redirect_route_target, mut extended, ipv6_extended) = match &action.action {
+        Some(pb::flow_spec_action::Action::RedirectIp(target)) => {
+            let address: std::net::IpAddr = target
+                .address
+                .parse()
+                .map_err(|_| invalid("invalid redirect target"))?;
+            if target.copy {
+                return Err(invalid("copy action is unsupported"));
+            }
+            let (extended, ipv6_extended) = match address {
+                std::net::IpAddr::V4(ip) => (
+                    vec![u64::from_be_bytes([
+                        1,
+                        12,
+                        ip.octets()[0],
+                        ip.octets()[1],
+                        ip.octets()[2],
+                        ip.octets()[3],
+                        0,
+                        0,
+                    ])],
+                    vec![],
+                ),
+                std::net::IpAddr::V6(ip) => {
+                    let mut raw = vec![0, 12];
+                    raw.extend(ip.octets());
+                    raw.extend([0, 0]);
+                    (vec![], vec![raw])
+                }
+            };
+            (Some(address), None, extended, ipv6_extended)
+        }
+        Some(pb::flow_spec_action::Action::Redirect(target)) => {
+            let canonical = crate::domain::canonical_route_target(&target.route_target)
+                .map_err(|error| invalid(&error.to_string()))?;
+            let mut bytes = crate::domain::route_target_bytes(&canonical)
+                .map_err(|error| invalid(&error.to_string()))?
+                .to_be_bytes();
+            bytes[0] |= 0x80;
+            bytes[1] = 8;
+            (
+                None,
+                Some(canonical),
+                vec![u64::from_be_bytes(bytes)],
+                vec![],
+            )
+        }
+        _ => {
+            return Err(invalid(
+                "guarded rule requires a target-IP or VRF redirect action",
+            ));
         }
     };
+    let scope_targets = scope_rt_bytes(&route)?;
+    extended.extend(&scope_targets);
     if route.extended_communities != extended || route.ipv6_extended_communities != ipv6_extended {
         return Err(invalid("inconsistent redirect action bytes"));
     }
@@ -217,6 +283,7 @@ pub(super) fn decode_guarded(
     route.admission_revision = None;
     route.ipv6_extended_communities.clear();
     route.extended_communities = vec![0x8006_u64 << 48];
+    route.extended_communities.extend(scope_targets);
     route.actions = vec![pb::FlowSpecAction {
         action: Some(pb::flow_spec_action::Action::TrafficRate(
             pb::FlowSpecTrafficRate { rate: 0.0 },
@@ -225,7 +292,9 @@ pub(super) fn decode_guarded(
     let decoded = decode(route, family)?;
     let rule = GuardedRule {
         nlri: decoded.nlri,
-        target: address,
+        route_targets: decoded.route_targets,
+        target,
+        redirect_route_target,
         owner,
         revision,
     };
@@ -241,14 +310,29 @@ impl RustBgpdAnnouncer {
     async fn guarded_call<T>(
         &self,
         operation: &'static str,
+        families: &[i32],
         call: impl Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
     ) -> Result<T> {
-        match tokio::time::timeout(Duration::from_secs(3), call).await {
-            Ok(Ok(response)) => Ok(response.into_inner()),
-            Ok(Err(status)) => Err(guarded_status_error(operation, &status)),
-            Err(_) => Err(invalid(&format!(
+        let deadline = tokio::time::Instant::now() + GUARDED_RPC_DEADLINE;
+        let deadline_error = || {
+            invalid(&format!(
                 "{operation} outcome unconfirmed after deadline; resolve by read-back"
-            ))),
+            ))
+        };
+        let attempt = async {
+            for family in families {
+                self.probe_vpn_family(*family).await?;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(deadline_error());
+            }
+            call.await
+                .map(tonic::Response::into_inner)
+                .map_err(|status| guarded_status_error(operation, &status))
+        };
+        match tokio::time::timeout_at(deadline, attempt).await {
+            Ok(result) => result,
+            Err(_) => Err(deadline_error()),
         }
     }
 
@@ -256,11 +340,12 @@ impl RustBgpdAnnouncer {
         let mut entries = vec![];
         let mut other_matches = vec![];
         let mut keys = std::collections::HashSet::new();
-        for family in [3, 4] {
+        for family in self.inventory_families() {
             let mut client = pb::rib_service_client::RibServiceClient::new(self.channel.clone());
             let response = self
                 .guarded_call(
                     "ListFlowSpecRoutes",
+                    &[],
                     client.list_flow_spec_routes(self.request(pb::ListFlowSpecRequest {
                         afi_safi: family,
                         received_peer_address: "0.0.0.0".into(),
@@ -318,11 +403,17 @@ impl GuardedFlowSpecSpeaker for RustBgpdAnnouncer {
         {
             return Err(invalid("invalid mutation window request"));
         }
+        let families: Vec<_> = self
+            .inventory_families()
+            .into_iter()
+            .filter(|family| *family >= 13)
+            .collect();
         let mut client =
             pb::injection_service_client::InjectionServiceClient::new(self.channel.clone());
         let response = self
             .guarded_call(
                 "IssueMutationWindow",
+                &families,
                 client.issue_mutation_window(self.request(pb::IssueMutationWindowRequest {
                     owner: owner.into(),
                     window_seconds: seconds,
@@ -357,6 +448,11 @@ impl GuardedFlowSpecSpeaker for RustBgpdAnnouncer {
         let response = self
             .guarded_call(
                 "AddGuardedFlowSpec",
+                rule.nlri
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.family.afi_safi())
+                    .as_slice(),
                 client.add_guarded_flow_spec(self.request(pb::AddGuardedFlowSpecRequest {
                     rule: Some(payload),
                     lease: Some(pb::InjectionLease {
@@ -386,11 +482,17 @@ impl GuardedFlowSpecSpeaker for RustBgpdAnnouncer {
         window: GuardedStamp,
         seconds: u32,
     ) -> Result<u32> {
+        let families: Vec<_> = self
+            .inventory_families()
+            .into_iter()
+            .filter(|family| *family >= 13)
+            .collect();
         let mut client =
             pb::injection_service_client::InjectionServiceClient::new(self.channel.clone());
         let response = self
             .guarded_call(
                 "RenewGuardedLease",
+                &families,
                 client.renew_guarded_lease(self.request(pb::RenewGuardedLeaseRequest {
                     owner: owner.into(),
                     generation: Some(current.into()),
@@ -415,9 +517,15 @@ impl GuardedFlowSpecSpeaker for RustBgpdAnnouncer {
         let response = self
             .guarded_call(
                 "DeleteGuardedFlowSpec",
+                rule.nlri
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.family.afi_safi())
+                    .as_slice(),
                 client.delete_guarded_flow_spec(self.request(pb::DeleteGuardedFlowSpecRequest {
                     afi_safi: payload.afi_safi,
                     components: payload.components,
+                    rd: payload.rd,
                     owner: rule.owner.clone(),
                     revision: rule.revision,
                 })),

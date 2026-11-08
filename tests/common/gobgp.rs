@@ -19,6 +19,10 @@ use tonic::transport::{Channel, Endpoint};
 const IMAGE_TAG: &str =
     "latest@sha256:42b8d0017237e388c55936efe1f23632365b24a31751f6e8815f93e12c4d18c2";
 
+/// Dedicated VPN comparator; keep the existing global 4.10.0 fixture unchanged.
+const VPN_IMAGE_TAG: &str =
+    "latest@sha256:cddb09fba72ee2d64d216aaff08a2bed74844fce292b3bfcf6859bd8df39f0f0";
+
 pub struct Speaker {
     pub container: ContainerAsync<GenericImage>,
     pub endpoint: String,
@@ -34,14 +38,19 @@ impl Speaker {
     }
 
     pub async fn with_router_id(router_id: &str) -> Self {
-        Self::start_configured(router_id, None).await
+        Self::start_configured(router_id, None, false).await
     }
 
     pub async fn on_network(network: &str) -> Self {
-        Self::start_configured("192.0.2.20", Some(network)).await
+        Self::start_configured("192.0.2.20", Some(network), false).await
     }
 
-    async fn start_configured(router_id: &str, network: Option<&str>) -> Self {
+    pub async fn on_vpn_network(network: &str, router_id: &str) -> Self {
+        Self::start_configured(router_id, Some(network), true).await
+    }
+
+    async fn start_configured(router_id: &str, network: Option<&str>, vpn: bool) -> Self {
+        let image_tag = if vpn { VPN_IMAGE_TAG } else { IMAGE_TAG };
         let sockets: Vec<_> = (0..2)
             .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
             .collect();
@@ -56,7 +65,7 @@ impl Speaker {
         };
         drop(sockets);
         let bridged = network.is_some();
-        let image = GenericImage::new("jauderho/gobgp", IMAGE_TAG);
+        let image = GenericImage::new("jauderho/gobgp", image_tag);
         let image = if bridged {
             image.with_exposed_port(50051.tcp())
         } else {
@@ -121,10 +130,19 @@ impl Speaker {
         assert_eq!(version.exit_code().await.unwrap(), Some(0));
         let version = String::from_utf8_lossy(&output);
         assert!(
-            version.contains("version 4.10.0"),
+            version.contains(if vpn {
+                "version 4.11.0"
+            } else {
+                "version 4.10.0"
+            }),
             "unexpected pinned binary: {version}"
         );
-        eprintln!("GoBGP fixture: image=jauderho/gobgp:{IMAGE_TAG}, {version}");
+        eprintln!("GoBGP fixture: image=jauderho/gobgp:{image_tag}, {version}");
+        if vpn {
+            eprintln!(
+                "GoBGP comparator: upstream tag v4.11.0 source=53ceb78fe284018ce83a92f3039198f0a86dc823; image builder revision=9b7a9ca4763af7cca784780cf63bfc8a87615fe0"
+            );
+        }
         fixture.configure().await;
         fixture
     }
@@ -196,6 +214,35 @@ impl Speaker {
     }
 
     pub async fn paths(&self, afi: i32, table: pb::TableType) -> Vec<pb::Path> {
+        self.paths_with_safi(afi, 133, table).await
+    }
+
+    pub async fn paths_with_safi(
+        &self,
+        afi: i32,
+        safi: i32,
+        table: pb::TableType,
+    ) -> Vec<pb::Path> {
+        self.paths_with_attributes(afi, safi, table, false).await
+    }
+
+    /// Keep typed NLRI while also asking the peer for complete serialized attributes.
+    pub async fn paths_with_binary_attributes(
+        &self,
+        afi: i32,
+        safi: i32,
+        table: pb::TableType,
+    ) -> Vec<pb::Path> {
+        self.paths_with_attributes(afi, safi, table, true).await
+    }
+
+    async fn paths_with_attributes(
+        &self,
+        afi: i32,
+        safi: i32,
+        table: pb::TableType,
+        binary: bool,
+    ) -> Vec<pb::Path> {
         tokio::time::timeout(Duration::from_secs(3), async {
             let mut stream = self
                 .client()
@@ -207,7 +254,8 @@ impl Speaker {
                     } else {
                         String::new()
                     },
-                    family: Some(pb::Family { afi, safi: 133 }),
+                    family: Some(pb::Family { afi, safi }),
+                    enable_attribute_binary: binary,
                     ..Default::default()
                 })
                 .await

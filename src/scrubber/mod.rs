@@ -130,13 +130,20 @@ impl Diversion {
         } else {
             crate::observability::ActorType::System
         };
+        let mut details = serde_json::json!({"profile":self.profile.id,"revision":self.profile.revision,"policy_binding":self.profile.policy_binding,"victim":self.victim(),"match":self.rule.nlri,"target":self.rule.target,"admission_revision":self.rule.revision,"generation":self.generation,"status":self.status,"admitted_by":self.actor,"withdrawal_requested_by":self.withdrawal_actor,"reason":self.withdrawal_reason.as_ref().unwrap_or(&self.reason)});
+        if let Some(target) = &self.rule.redirect_route_target {
+            if let Some(object) = details.as_object_mut() {
+                object.remove("target");
+            }
+            details["redirect_route_target"] = serde_json::json!(target);
+        }
         crate::observability::AuditEntry::new(
             actor_type,
             actor.or_else(|| Some("scrubber".into())),
             action,
             Some("scrubber_diversion"),
             Some(self.id.to_string()),
-            serde_json::json!({"profile":self.profile.id,"revision":self.profile.revision,"policy_binding":self.profile.policy_binding,"victim":self.victim(),"match":self.rule.nlri,"target":self.rule.target,"admission_revision":self.rule.revision,"generation":self.generation,"status":self.status,"admitted_by":self.actor,"withdrawal_requested_by":self.withdrawal_actor,"reason":self.withdrawal_reason.as_ref().unwrap_or(&self.reason)}),
+            details,
         )
     }
 }

@@ -1057,6 +1057,8 @@ fn test_settings() -> Settings {
             cors_origin: None,
         },
         bgp: BgpConfig {
+            vpn_scopes: Default::default(),
+            default_scope: "global".into(),
             rustbgpd: None,
             mode: BgpMode::Mock,
             gobgp_grpc: "127.0.0.1:50051".to_string(),
@@ -1080,6 +1082,7 @@ fn test_settings() -> Settings {
             allow_packet_length_match: false,
         },
         quotas: QuotasConfig {
+            source_only_limit: None,
             max_active_per_customer: 5,
             max_active_per_pop: 200,
             max_active_global: 500,

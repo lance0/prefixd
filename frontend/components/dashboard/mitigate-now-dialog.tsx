@@ -20,8 +20,10 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { ShieldAlert, RefreshCw } from "lucide-react"
-import { ingestEvent } from "@/lib/api"
+import { ingestEvent, readAutomaticScope } from "@/lib/api"
 import { toast } from "sonner"
+import { useConfigSettings } from "@/hooks/use-api"
+import { parseDestination } from "@/lib/destination"
 
 const VECTORS = [
   { value: "udp_flood", label: "UDP Flood" },
@@ -31,16 +33,10 @@ const VECTORS = [
   { value: "unknown", label: "Unknown" },
 ] as const
 
-function isValidIPv4(ip: string): boolean {
-  const parts = ip.split(".")
+function isValidAddress(ip: string): boolean {
+  const destination = parseDestination(ip)
 
-  if (parts.length !== 4) return false
-
-  return parts.every((p) => {
-    const n = Number(p)
-
-    return /^\d{1,3}$/.test(p) && n >= 0 && n <= 255
-  })
+  return destination !== null && !destination.isCidr
 }
 
 function parsePorts(input: string): number[] | null {
@@ -62,6 +58,8 @@ interface MitigateNowDialogProps {
 
 export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps) {
   const router = useRouter()
+  const { data: settings } = useConfigSettings()
+  const automaticScope = readAutomaticScope(settings?.settings)
   const [victimIp, setVictimIp] = useState("")
   const [vector, setVector] = useState("")
   const [bps, setBps] = useState("")
@@ -71,8 +69,10 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const destinationIp = victimIp.trim()
+
   const isValid =
-    isValidIPv4(victimIp) &&
+    isValidAddress(destinationIp) &&
     vector !== "" &&
     parsePorts(ports) !== null &&
     (!bps || !isNaN(Number(bps))) &&
@@ -98,7 +98,7 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
 
     try {
       const result = await ingestEvent({
-        victim_ip: victimIp,
+        victim_ip: destinationIp,
         vector,
         source: "dashboard",
         timestamp: new Date().toISOString(),
@@ -116,7 +116,7 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
           })
         } else {
           toast.success("Mitigation created", {
-            description: `${victimIp} — ${vector.replace(/_/g, " ")}`,
+            description: `${destinationIp} — ${vector.replace(/_/g, " ")}`,
           })
         }
 
@@ -156,6 +156,7 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
           </DialogTitle>
           <DialogDescription className="text-xs text-muted-foreground">
             Submit a manual attack event. The policy engine will evaluate playbooks and announce a FlowSpec rule if appropriate.
+            {automaticScope === null ? " Automatic routing scope is unavailable." : ` Automatic routing scope: ${automaticScope === "global" ? "Global" : automaticScope}. Detectors cannot override it.`}
           </DialogDescription>
         </DialogHeader>
 
@@ -171,8 +172,8 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
               onChange={(e) => setVictimIp(e.target.value)}
               className="font-mono h-9"
             />
-            {victimIp && !isValidIPv4(victimIp) && (
-              <p className="text-xs text-destructive">Invalid IPv4 address</p>
+            {victimIp && !isValidAddress(victimIp) && (
+              <p className="text-xs text-destructive">Invalid IPv4 or IPv6 address</p>
             )}
           </div>
 

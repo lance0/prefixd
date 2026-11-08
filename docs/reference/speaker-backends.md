@@ -275,11 +275,13 @@ Initial network connections and TLS handshakes have a ten-second budget;
 complete RPC attempts are bounded separately.
 
 `proto/rustbgpd.proto` is the unmodified `rustbgpd.proto` asset of the
-rustbgpd `v0.81.0` release, checked offline against the release's sha256 by
+rustbgpd `v0.82.0` release, checked offline against the release's sha256 by
 `just proto`. The controller message fields prefixd uses were checked against
 it. This is a protocol baseline, not proof that an arbitrary binary reporting
 that version has passed the deployment or router tests. The stubs follow the
-pinned release, and v0.81.0 is the minimum daemon. At startup prefixd reads
+pinned release, and v0.81.0 remains the minimum daemon. The v0.82.0
+fixture also runs the existing controller lifecycle; VPN runtime is not enabled
+by updating the schema pin. At startup prefixd reads
 the version that `GetHealth` reports and refuses a daemon older than v0.81.0,
 or one that reports no readable version, with "upgrade the speaker first".
 Peer identity fields are decoded. Both export RPCs set `include_configured`,
@@ -898,3 +900,25 @@ router's FlowSpec table is checked separately for each speaker against FRR by
 the [FlowSpec interop lab](../../lab/README.md#flowspec-interop-lab-maintained);
 that is also control-plane evidence only. ExaBGP and other
 write-only backends are not qualified by this readable suite.
+
+## Scoped VPN FlowSpec
+
+Opt-in VPNv4 and VPNv6 controller paths require rustbgpd 0.82.0 and positive
+read-only local-intent probes for families 13/14. Global rules retain the 0.81.0
+floor. GoBGP returns a typed unsupported-scope error before any VPN RPC. Scope
+identity and RT snapshots survive withdrawal/recovery; no refused VPN operation
+falls back globally. The current action slice covers discard, police and guarded
+target-IP and VRF redirect diversion. [The operator procedure](../how-to/vpn-flowspec.md) records
+source-only safeguards and the remaining marking qualification. Receiver action
+installation and forwarding remain separate qualification for both redirects.
+These controller paths do not establish router installation or enforcement.
+
+### VPN marking boundary
+
+rustbgpd VPN destination rules support one typed traffic-marking action with
+DSCP 0–63. Read-back must account for the matching raw `0x8009` extended
+community and all scope RTs exactly. Marking plus rate-limit or additional
+unmodelled attributes fails observation rather than becoming a partial rule.
+GoBGP refuses VPN scope before an RPC. Global and source-only marking remain
+refused. These are controller/encoding semantics; receiver packet marking
+needs a dated platform receipt.

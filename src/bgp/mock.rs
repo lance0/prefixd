@@ -28,6 +28,7 @@ pub struct MockAnnouncer {
     peers: Vec<PeerStatus>,
     /// Test seam: report no ADR 028 match support, like an adapter that has not opted in.
     no_match_support: bool,
+    no_vpn_support: bool,
     /// Test seam: export reads for these prefixes return this instead; `Err`
     /// fails the read.
     export_overrides: std::sync::Mutex<ExportOverrides>,
@@ -51,6 +52,7 @@ impl MockAnnouncer {
                 state: SessionState::Established,
             }],
             no_match_support: false,
+            no_vpn_support: false,
             export_overrides: Default::default(),
             flowspec_export_overrides: Default::default(),
             stall_exports: Default::default(),
@@ -64,6 +66,7 @@ impl MockAnnouncer {
             leases: Default::default(),
             peers,
             no_match_support: false,
+            no_vpn_support: false,
             export_overrides: Default::default(),
             flowspec_export_overrides: Default::default(),
             stall_exports: Default::default(),
@@ -76,6 +79,23 @@ impl MockAnnouncer {
             no_match_support: true,
             ..Self::new()
         }
+    }
+
+    /// Reports a scope-unaware speaker without changing global behavior.
+    pub fn without_vpn_support() -> Self {
+        Self {
+            no_vpn_support: true,
+            ..Self::new()
+        }
+    }
+
+    fn validate_flowspec_key(&self, nlri: &crate::domain::FlowSpecNlri) -> Result<()> {
+        self.register_scope(nlri.scope.as_ref())?;
+        if nlri.scope.is_some() {
+            nlri.validate()
+                .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Export reads for `prefix` return `exports`, or fail with the message.
@@ -181,7 +201,22 @@ impl FlowSpecAnnouncer for MockAnnouncer {
 
 #[async_trait]
 impl FlowSpecWriter for MockAnnouncer {
+    fn register_scope(&self, scope: Option<&crate::domain::VpnFlowSpecIdentity>) -> Result<()> {
+        if self.no_vpn_support {
+            super::announcer::require_global_scope("mock", scope)
+        } else {
+            Ok(())
+        }
+    }
+
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.validate_flowspec_key(&rule.nlri)?;
+        super::announcer::validate_add_scope(rule)?;
+        for action in &rule.actions {
+            action
+                .validate()
+                .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+        }
         let mut rules = self.rules.write().await;
         let hash = rule.nlri_hash();
         if !rule.owner.is_empty()
@@ -210,6 +245,13 @@ impl FlowSpecWriter for MockAnnouncer {
         rule: &FlowSpecRule,
         _lease_seconds: u32,
     ) -> Result<LeaseGeneration> {
+        self.validate_flowspec_key(&rule.nlri)?;
+        super::announcer::validate_add_scope(rule)?;
+        for action in &rule.actions {
+            action
+                .validate()
+                .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+        }
         let mut rules = self.rules.write().await;
         let hash = rule.nlri_hash();
         if rule.owner.is_empty()
@@ -231,6 +273,7 @@ impl FlowSpecWriter for MockAnnouncer {
         Ok(generation)
     }
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.validate_flowspec_key(&rule.nlri)?;
         let mut rules = self.rules.write().await;
         let hash = rule.nlri_hash();
         if rules
@@ -576,6 +619,10 @@ impl InjectionLeases for FaultyBlackholes {
 #[cfg(test)]
 #[async_trait]
 impl FlowSpecWriter for FaultyBlackholes {
+    fn register_scope(&self, scope: Option<&crate::domain::VpnFlowSpecIdentity>) -> Result<()> {
+        self.inner.register_scope(scope)
+    }
+
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
         self.flowspec_adds
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -687,6 +734,251 @@ impl BlackholeSpeaker for FaultyBlackholes {
 mod tests {
     use super::*;
     use crate::domain::{FlowSpecAction, FlowSpecNlri};
+
+    #[tokio::test]
+    async fn synthetic_historical_mark_cleanup_keeps_scope_owner_and_withdrawal_metadata() {
+        use crate::db::{MockRepository, RepositoryTrait};
+        use crate::domain::{
+            ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
+            MitigationStatus, VpnFlowSpecFamily, VpnFlowSpecIdentity, VpnScopeSnapshot,
+            execute_withdrawal, mitigation_rule, request_withdrawal,
+        };
+        for (family, destination, source) in [
+            (VpnFlowSpecFamily::Ipv4, "192.0.2.1/32", "198.51.100.0/24"),
+            (
+                VpnFlowSpecFamily::Ipv6,
+                "2001:db8::1/128",
+                "2001:db8:bad::/64",
+            ),
+        ] {
+            for source_only in [false, true] {
+                let repo = MockRepository::new();
+                let speaker = MockAnnouncer::new();
+                let global = FlowSpecRule::new(
+                    FlowSpecNlri {
+                        dst_prefix: destination.into(),
+                        src_prefix: Some(source.into()),
+                        protocol: Some(17),
+                        dst_ports: vec![53],
+                        ..Default::default()
+                    },
+                    FlowSpecAction::discard(),
+                );
+                speaker.announce(&global).await.unwrap();
+                let mut siblings = Vec::new();
+                for rd in ["44407:40", "44407:41"] {
+                    let mut sibling = global.clone();
+                    sibling.nlri.scope = Some(VpnFlowSpecIdentity::new(family, rd).unwrap());
+                    sibling.route_targets = vec!["44407:777".into()];
+                    if source_only {
+                        sibling.nlri.dst_prefix.clear();
+                    }
+                    speaker.announce(&sibling).await.unwrap();
+                    siblings.push(sibling);
+                }
+                let key = if source_only { &siblings[0] } else { &global };
+                let scope = key.nlri.scope.clone().map(|identity| {
+                    VpnScopeSnapshot::new("TRANSIT", identity, &key.route_targets).unwrap()
+                });
+                let params = ActionParams {
+                    dscp: Some(46),
+                    ..Default::default()
+                };
+                let mut historical = Mitigation::from_intent(
+                    MitigationIntent {
+                        event_id: uuid::Uuid::new_v4(),
+                        customer_id: Some("fixture".into()),
+                        service_id: None,
+                        pop: "fixture".into(),
+                        match_criteria: MatchCriteria {
+                            scope,
+                            dst_prefix: key.nlri.dst_prefix.clone(),
+                            src_prefix: key.nlri.src_prefix.clone(),
+                            protocol: key.nlri.protocol,
+                            dst_ports: key.nlri.dst_ports.clone(),
+                            ..Default::default()
+                        },
+                        action_type: ActionType::Mark,
+                        action_params: params,
+                        ttl_seconds: 60,
+                        reason: "synthetic historical mark fixture".into(),
+                    },
+                    destination.into(),
+                    AttackVector::Unknown,
+                );
+                historical.activate();
+                historical.origin_mode = Some(crate::config::OperationMode::Enforced);
+                let payload = mitigation_rule(&historical).unwrap();
+                assert!(
+                    speaker
+                        .announce(&payload)
+                        .await
+                        .unwrap_err()
+                        .to_string()
+                        .contains("requires a VPN destination")
+                );
+                let mut leased = payload.clone();
+                leased.owner = "historical-owner".into();
+                assert!(
+                    speaker
+                        .announce_leased(&leased, 60)
+                        .await
+                        .unwrap_err()
+                        .to_string()
+                        .contains("requires a VPN destination")
+                );
+                historical.action_params.dscp = Some(64);
+                historical.action_params.rate_bps = Some(8);
+                let payload = mitigation_rule(&historical).unwrap();
+                // Current admission cannot create this shape; seed it only as a cleanup invariant.
+                speaker
+                    .rules
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|held| held.nlri_hash() == key.nlri_hash())
+                    .unwrap()
+                    .actions = payload.actions.clone();
+                let mut wrong_owner = payload.clone();
+                wrong_owner.owner = "foreign-owner".into();
+                assert!(speaker.withdraw(&wrong_owner).await.is_err());
+                assert_eq!(speaker.list_active().await.unwrap().len(), 3);
+                repo.insert_mitigation(&historical).await.unwrap();
+                let request = request_withdrawal(
+                    &repo,
+                    &historical,
+                    false,
+                    "operator",
+                    "original-actor",
+                    "original-reason".into(),
+                    true,
+                    None,
+                )
+                .await
+                .unwrap();
+                let retried = request_withdrawal(
+                    &repo,
+                    &historical,
+                    false,
+                    "operator",
+                    "retry-actor",
+                    "retry-reason".into(),
+                    true,
+                    None,
+                )
+                .await
+                .unwrap();
+                assert_eq!(retried.operation_id, request.operation_id);
+                assert_eq!(retried.actor, "original-actor");
+                assert_eq!(retried.reason, "original-reason");
+                assert_eq!(retried.rule_json, request.rule_json);
+                let finished = execute_withdrawal(&repo, &speaker, false, &retried, None)
+                    .await
+                    .unwrap();
+                assert_eq!(finished.status, MitigationStatus::Withdrawn);
+                let held = speaker.list_active().await.unwrap();
+                assert_eq!(held.len(), 2);
+                assert!(held.iter().all(|held| held.nlri_hash() != key.nlri_hash()));
+                for sibling in std::iter::once(&global)
+                    .chain(&siblings)
+                    .filter(|rule| rule.nlri_hash() != key.nlri_hash())
+                {
+                    assert!(
+                        held.iter()
+                            .any(|held| held.nlri_hash() == sibling.nlri_hash())
+                    );
+                }
+                assert!(
+                    repo.pending_withdrawals(Some("fixture"))
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_mark_payload_refuses_add_but_keeps_exact_key_cleanup() {
+        let speaker = MockAnnouncer::new();
+        let global = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "192.0.2.1/32".into(),
+                ..Default::default()
+            },
+            FlowSpecAction::discard(),
+        );
+        speaker.announce(&global).await.unwrap();
+        let mut scoped = global.clone();
+        scoped.nlri.scope = Some(
+            crate::domain::VpnFlowSpecIdentity::new(
+                crate::domain::VpnFlowSpecFamily::Ipv4,
+                "44407:40",
+            )
+            .unwrap(),
+        );
+        scoped.route_targets = vec!["44407:777".into()];
+        scoped.actions = vec![FlowSpecAction::mark(46)];
+        speaker.announce(&scoped).await.unwrap();
+        scoped.actions[0].dscp = None;
+        assert!(speaker.announce(&scoped).await.is_err());
+        assert_eq!(speaker.list_active().await.unwrap().len(), 2);
+        speaker.withdraw(&scoped).await.unwrap();
+        let retained = speaker.list_active().await.unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].nlri_hash(), global.nlri_hash());
+    }
+
+    #[tokio::test]
+    async fn vpn_keys_and_attributes_are_isolated_and_unsupported_scope_cannot_mutate() {
+        use crate::domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity};
+        let speaker = MockAnnouncer::new();
+        let global = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "192.0.2.1/32".into(),
+                ..Default::default()
+            },
+            FlowSpecAction::discard(),
+        );
+        speaker.announce(&global).await.unwrap();
+        let mut scoped = Vec::new();
+        for rd in ["44407:40", "44407:41"] {
+            let mut rule = global.clone();
+            rule.nlri.scope = Some(VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, rd).unwrap());
+            rule.route_targets = vec!["44407:777".into()];
+            assert!(!speaker.matches_nlri(&global.nlri, &rule.nlri).unwrap());
+            speaker.announce(&rule).await.unwrap();
+            scoped.push(rule);
+        }
+        assert_eq!(speaker.list_active().await.unwrap().len(), 3);
+        let mut replacement = scoped[0].clone();
+        replacement.route_targets = vec!["44407:778".into()];
+        speaker.announce(&replacement).await.unwrap();
+        assert_eq!(speaker.list_active().await.unwrap().len(), 3);
+        speaker.withdraw(&replacement).await.unwrap();
+        let remaining = speaker.list_active().await.unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(
+            remaining
+                .iter()
+                .any(|rule| rule.nlri_hash() == global.nlri_hash())
+        );
+        assert!(
+            remaining
+                .iter()
+                .any(|rule| rule.nlri_hash() == scoped[1].nlri_hash())
+        );
+        let unsupported = MockAnnouncer::without_vpn_support();
+        assert!(matches!(
+            unsupported.announce(&scoped[0]).await,
+            Err(PrefixdError::UnsupportedFlowSpecScope { .. })
+        ));
+        assert!(unsupported.list_active().await.unwrap().is_empty());
+        let mut invalid = scoped[0].clone();
+        invalid.route_targets.clear();
+        assert!(speaker.announce(&invalid).await.is_err());
+        assert_eq!(speaker.list_active().await.unwrap().len(), 2);
+    }
 
     #[tokio::test]
     async fn test_mock_announce_withdraw() {

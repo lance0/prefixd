@@ -96,10 +96,16 @@ impl<'a> Observed<'a> {
             .map(|entry| &entry.rule.nlri)
             .chain(inventory.other_matches.iter())
         {
-            let prefix = nlri
-                .dst_prefix
-                .parse::<ipnet::IpNet>()
-                .map_err(|_| PrefixdError::Internal("invalid local speaker inventory".into()))?;
+            let prefix = if nlri.dst_prefix.is_empty() {
+                match nlri.ip_version() {
+                    IpVersion::V4 => "0.0.0.0/0",
+                    IpVersion::V6 => "::/0",
+                }
+            } else {
+                &nlri.dst_prefix
+            }
+            .parse::<ipnet::IpNet>()
+            .map_err(|_| PrefixdError::Internal("invalid local speaker inventory".into()))?;
             selectors.push((prefix, nlri.compute_hash()));
         }
         for (entry, (_, key)) in inventory.iter().zip(&selectors) {
@@ -270,7 +276,8 @@ impl ScrubberController {
                 )
             })?;
             if profile.snapshot() != row.profile
-                || profile.target(row.rule.target.is_ipv4())? != row.rule.target
+                || !Self::scope_agrees(state, profile, &row.rule)?
+                || !profile.matches_target(&row.rule)
                 || Self::owner(state, &profile.id)? != row.rule.owner
             {
                 return Err(PrefixdError::Config(
@@ -282,11 +289,28 @@ impl ScrubberController {
         Ok(())
     }
 
+    fn scope_agrees(
+        state: &AppState,
+        profile: &ScrubberProfile,
+        rule: &GuardedRule,
+    ) -> Result<bool> {
+        let scope = state.settings.bgp.resolve_scope(&profile.scope)?;
+        Ok(
+            scope.as_ref().map(|scope| &scope.identity) == rule.nlri.scope.as_ref()
+                && scope
+                    .as_ref()
+                    .map(|scope| scope.route_targets.as_slice())
+                    .unwrap_or_default()
+                    == rule.route_targets,
+        )
+    }
+
     pub fn new(settings: &crate::config::Settings) -> Result<Self> {
         settings.scrubber.validate()?;
         let mut runtime = Runtime::default();
         let mut tokens = HashMap::new();
         for profile in &settings.scrubber.profiles {
+            settings.bgp.resolve_scope(&profile.scope)?;
             crate::observability::metrics::SCRUBBER_READY
                 .with_label_values(&[&profile.id])
                 .set(0.0);
@@ -569,7 +593,20 @@ impl ScrubberController {
     ) -> Result<Diversion> {
         let profile = Self::profile(state, &req.profile)?;
         state.verified_speaker_binding()?;
+        let scope = state.settings.bgp.resolve_scope(&profile.scope)?;
+        if req.scope.scope.is_some()
+            && req.scope.scope.as_ref() != scope.as_ref().map(|scope| &scope.identity)
+        {
+            return Err(PrefixdError::InvalidRequest(
+                "diversion scope must match its configured profile".into(),
+            ));
+        }
+        state
+            .announcer
+            .validate_scope(scope.as_ref().map(|scope| &scope.identity))
+            .await?;
         let mut nlri = req.scope.clone();
+        nlri.scope = scope.as_ref().map(|scope| scope.identity.clone());
         let prefix: ipnet::IpNet = nlri
             .dst_prefix
             .parse()
@@ -607,7 +644,11 @@ impl ScrubberController {
                     "diversion requires unambiguous inventory ownership".into(),
                 )
             })?;
-        let criteria: MatchCriteria = serde_json::from_value(serde_json::to_value(&nlri)?)?;
+        let mut match_only = nlri.clone();
+        match_only.scope = None;
+        let mut criteria: MatchCriteria =
+            serde_json::from_value(serde_json::to_value(&match_only)?)?;
+        criteria.scope = scope.clone();
         let intent = MitigationIntent {
             event_id: Uuid::new_v4(),
             customer_id: Some(context.customer_id.clone()),
@@ -631,8 +672,10 @@ impl ScrubberController {
         )
         .await?;
         let rule = GuardedRule {
+            route_targets: scope.map(|scope| scope.route_targets).unwrap_or_default(),
             nlri,
             target: profile.target(prefix.addr().is_ipv4())?,
+            redirect_route_target: profile.redirect_route_target.clone(),
             owner: Self::owner(state, &profile.id)?,
             revision: 1,
         };
@@ -668,13 +711,20 @@ impl ScrubberController {
     }
 
     pub fn confirmation(row: &Diversion) -> Result<String> {
-        Ok(format!(
+        let mut confirmation = format!(
             "{} -> {} via {}@{}",
             serde_json::to_string(&row.rule.nlri)?,
-            row.rule.target,
+            row.rule.target_description()?,
             row.profile.id,
             row.profile.revision
-        ))
+        );
+        if !row.rule.route_targets.is_empty() {
+            confirmation.push_str(&format!(
+                " scope RTs {}",
+                serde_json::to_string(&row.rule.route_targets)?
+            ));
+        }
+        Ok(confirmation)
     }
 
     pub async fn create(
@@ -742,7 +792,7 @@ impl ScrubberController {
                     &mut row,
                     "admission could not be confirmed; explicit re-arm required",
                 );
-                tracing::warn!(code = %error.status_code(), "scrubber admission latched");
+                tracing::warn!(code = %error.status_code(), routing_scope = ?row.rule.nlri.scope, route_targets = ?row.rule.route_targets, "scrubber admission latched");
                 if let Err(error) = state.repo.save_diversion(&row, "scrubber_latched").await {
                     Self::latch_all(&mut runtime, "durable withdrawal unavailable");
                     return Err(error);
@@ -805,7 +855,7 @@ impl ScrubberController {
                 Self::ensure_epoch(state, &mut runtime)?;
                 let before = lifecycle(&row);
                 Self::failed(&mut runtime, &mut row, "withdrawal could not be confirmed");
-                tracing::warn!(code = %error.status_code(), "scrubber withdrawal remains pending");
+                tracing::warn!(code = %error.status_code(), routing_scope = ?row.rule.nlri.scope, route_targets = ?row.rule.route_targets, "scrubber withdrawal remains pending");
                 if before != lifecycle(&row)
                     && let Err(error) = state
                         .repo
@@ -880,7 +930,8 @@ impl ScrubberController {
             && row.expires_at > Utc::now()
             && Self::profile(state, &row.profile.id).is_ok_and(|p| {
                 p.snapshot() == row.profile
-                    && p.target(row.rule.target.is_ipv4()).ok() == Some(row.rule.target)
+                    && Self::scope_agrees(state, p, &row.rule).unwrap_or(false)
+                    && p.matches_target(&row.rule)
             })
             && Self::owner(state, &row.profile.id)? == row.rule.owner
             && !safelisted(safelist, prefix.addr())?
@@ -1012,18 +1063,13 @@ impl ScrubberController {
 
         // Adopt an owner only when its complete inventory matches this
         // controller's durable intent.
-        let mut known: HashMap<&str, std::collections::HashSet<(String, u64, std::net::IpAddr)>> =
-            HashMap::new();
+        let mut known: HashMap<&str, HashMap<String, &GuardedRule>> = HashMap::new();
         let mut disputed = std::collections::HashSet::new();
         for intent in durable {
             known
                 .entry(intent.rule.owner.as_str())
                 .or_default()
-                .insert((
-                    intent.rule.nlri.compute_hash(),
-                    intent.rule.revision,
-                    intent.rule.target,
-                ));
+                .insert(intent.rule.nlri.compute_hash(), &intent.rule);
             if intent.controller_incarnation != self.incarnation
                 || Some(intent.controller_epoch) != runtime.epoch
             {
@@ -1034,7 +1080,9 @@ impl ScrubberController {
             if known
                 .get(entry.rule.owner.as_str())
                 .is_some_and(|admissions| {
-                    !admissions.contains(&(key.clone(), entry.rule.revision, entry.rule.target))
+                    admissions
+                        .get(key)
+                        .is_none_or(|saved| !entry.rule.same_admission(saved))
                 })
             {
                 disputed.insert(entry.rule.owner.as_str());

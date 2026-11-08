@@ -2,5 +2,9 @@
   "0.81.0": {
     "image": "ghcr.io/lance0/rustbgpd:0.81.0@sha256:f8a6d62ced049e415d702e31c43cbd6dac62fa9bcfdd0f410938f3c6cc418a64",
     "source_commit": "eb1749d7018cd9691e4f4c9adef3b9adb830e9a8"
+  },
+  "0.82.0": {
+    "image": "ghcr.io/lance0/rustbgpd:0.82.0@sha256:807dcb90c8d0234d5c0c39bdde62f8a2ee24a9525bcd60ca4c95c2773e56f609",
+    "source_commit": "608dcaea0902272474bd2a25bcf30bff3dd3153b"
   }
 }

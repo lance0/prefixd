@@ -64,6 +64,12 @@ command palette still need complete pagination.
 
 ## Near-term work
 
+- Qualify VPN FlowSpec installation and traffic enforcement at the pilot routers
+  under [ADR 032](docs/adr/032-vpn-flowspec-scope.md). VPNv4/v6 controller lifecycle,
+  all five actions and software-peer receipt/withdrawal have a
+  [dated receipt](docs/reference/qualification/vpn-flowspec-actions-2026-11-08.md).
+  Router import isolation, installation and traffic effect remain unqualified.
+
 - Add stronger announcement acknowledgements and a complete desired/acknowledged
   ledger, including unleased and GoBGP paths. Opt-in rustbgpd injection owners
   and lease recovery do not complete that ledger or make shared targets

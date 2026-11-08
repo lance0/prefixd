@@ -92,6 +92,9 @@ pub enum PrefixdError {
     IpNotOwned(String),
 
     // BGP errors
+    #[error("{backend} does not support FlowSpec family {family}")]
+    UnsupportedFlowSpecScope { backend: &'static str, family: i32 },
+
     #[error("BGP announcement failed: {0}")]
     BgpAnnouncementFailed(String),
 
@@ -199,7 +202,9 @@ impl PrefixdError {
             Self::DuplicateEvent { .. }
             | Self::Conflict(_)
             | Self::InjectionOwnerMismatch { .. } => StatusCode::CONFLICT,
-            Self::GuardrailViolation(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::GuardrailViolation(_) | Self::UnsupportedFlowSpecScope { .. } => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             Self::IpNotOwned(_) | Self::InvalidIpAddress(_) | Self::InvalidPrefix(_) => {
                 StatusCode::BAD_REQUEST
             }

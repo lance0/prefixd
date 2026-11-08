@@ -65,6 +65,8 @@ impl std::str::FromStr for MitigationStatus {
 pub enum ActionType {
     Police,
     Discard,
+    /// Manual VPN destination rule, marking packets with an exact DSCP value.
+    Mark,
     /// Unicast host route, not a FlowSpec action (ADR 027).
     Blackhole,
 }
@@ -74,6 +76,7 @@ impl ActionType {
         match self {
             Self::Police => "police",
             Self::Discard => "discard",
+            Self::Mark => "mark",
             Self::Blackhole => "blackhole",
         }
     }
@@ -92,6 +95,7 @@ impl std::str::FromStr for ActionType {
         match s {
             "police" => Ok(Self::Police),
             "discard" => Ok(Self::Discard),
+            "mark" => Ok(Self::Mark),
             "blackhole" => Ok(Self::Blackhole),
             _ => Err(format!("unknown action: {}", s)),
         }
@@ -102,6 +106,8 @@ impl std::str::FromStr for ActionType {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MatchCriteria {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<super::VpnScopeSnapshot>,
     pub dst_prefix: String,
     /// Optional conventional source CIDR. Absent keeps legacy rule identities.
     #[serde(
@@ -221,7 +227,9 @@ impl MatchCriteria {
     /// a blackhole is domain-separated so it never shares a FlowSpec scope.
     pub fn scope_hash_for(&self, action_type: ActionType) -> String {
         match action_type {
-            ActionType::Police | ActionType::Discard => self.compute_scope_hash(),
+            ActionType::Police | ActionType::Discard | ActionType::Mark => {
+                self.compute_scope_hash()
+            }
             ActionType::Blackhole => blackhole_identity(&self.dst_prefix),
         }
     }
@@ -241,6 +249,8 @@ pub(crate) fn blackhole_identity(prefix: &str) -> String {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActionParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dscp: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_bps: Option<u64>,
     /// A blackhole's route, frozen at admission (ADR 027). Absent for FlowSpec,

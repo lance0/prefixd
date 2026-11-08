@@ -19,7 +19,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useConfigSettings } from "@/hooks/use-api"
 import { useTimeFormat } from "@/components/time-zone-provider"
-import { createMitigation, previewFlowSpecAdmission, type CreateFlowSpecRequest, type FlowSpecAdmissionPreview, type JsonValue } from "@/lib/api"
+import { createMitigation, createVpnFlowSpec, createSourceOnlyVpn, previewVpnFlowSpec, previewSourceOnlyVpn, readVpnScopes, formatRoutingScope, previewFlowSpecAdmission, type SourceOnlyVpnRequest, type VpnScopePolicy, type CreateFlowSpecRequest, type FlowSpecAdmissionPreview, type JsonValue } from "@/lib/api"
 import { parseDestination } from "@/lib/destination"
 import { formatFlowSpecRule } from "./flowspec-preview"
 import { StatusPill } from "./status-pill"
@@ -28,9 +28,13 @@ const PROTOCOLS = ["udp", "tcp", "icmp", "icmpv6", "any"] as const
 const DEFAULT_TTL_SECONDS = "300"
 
 export interface RuleForm {
+  routingScope?: string
+  sourceOnly?: boolean
+  confirmDestinationAny?: boolean
   victimIp: string
   protocol: string
-  action: "discard" | "police"
+  action: "discard" | "police" | "mark"
+  dscp?: string
   rateBps: string
   dstPorts: string
   srcPrefix: string
@@ -45,6 +49,7 @@ export interface RuleForm {
 /** The guardrails this form checks before the controller does; absent settings skip the opt-ins. */
 export interface RuleGuardrails {
   maxPorts: number
+  vpnScope?: VpnScopePolicy
   dstPrefixMinlen?: number
   dstPrefixMaxlen?: number
   dstPrefixMinlenV6?: number
@@ -100,10 +105,14 @@ function parseBound(input: string): number | null {
 export function validateRule(form: RuleForm, guardrails: RuleGuardrails): RuleErrors {
   const errors: RuleErrors = {}
   const destination = parseDestination(form.victimIp)
-  const v4 = destination !== null && !destination.ipv6
-  const v6 = destination?.ipv6 === true
+  const v4 = form.sourceOnly ? guardrails.vpnScope?.family === "ipv4" : destination !== null && !destination.ipv6
+  const v6 = form.sourceOnly ? guardrails.vpnScope?.family === "ipv6" : destination?.ipv6 === true
 
-  if (!destination) {
+  if (form.sourceOnly) {
+    if (!guardrails.vpnScope?.allow_source_only || !form.routingScope || form.routingScope === "global") errors.routingScope = "Source-only rules need an explicitly enabled VPN scope."
+
+    if (!form.srcPrefix.trim()) errors.srcPrefix = "Source-only rules require a source prefix."
+  } else if (!destination) {
     errors.victimIp = "Enter an IPv4 or IPv6 address, or a network in CIDR notation."
   } else if (!destination.networkAligned) {
     errors.victimIp = `Host bits are set. Use ${destination.prefix} if you intend to match that entire network.`
@@ -117,6 +126,10 @@ export function validateRule(form: RuleForm, guardrails: RuleGuardrails): RuleEr
     } else if (max !== undefined && destination.prefixLength > max) {
       errors.victimIp = `Destination is narrower than allowed (guardrails.${v6 ? "dst_prefix_maxlen_v6" : "dst_prefix_maxlen"}=${max}).`
     }
+  }
+
+  if (!form.sourceOnly && destination && guardrails.vpnScope && destination.ipv6 !== (guardrails.vpnScope.family === "ipv6")) {
+    errors.victimIp = "Destination must match the selected VPN scope address family."
   }
 
   const source = form.srcPrefix.trim()
@@ -139,6 +152,8 @@ export function validateRule(form: RuleForm, guardrails: RuleGuardrails): RuleEr
       errors.srcPrefix = "Enter an IPv4 or IPv6 network in CIDR notation."
     } else if ((v4 && !sourceV4) || (v6 && !sourceV6)) {
       errors.srcPrefix = "Source prefix must match the destination's address family."
+    } else if (form.sourceOnly && guardrails.vpnScope && Number(length) < guardrails.vpnScope.min_source_prefix_length) {
+      errors.srcPrefix = `Source prefix must be /${guardrails.vpnScope.min_source_prefix_length} or narrower in this scope.`
     } else if (guardrails.allowSrcPrefixMatch === false) {
       errors.srcPrefix = "Source prefix matching is off (guardrails.allow_src_prefix_match=false)."
     }
@@ -146,6 +161,12 @@ export function validateRule(form: RuleForm, guardrails: RuleGuardrails): RuleEr
 
   if ((form.protocol === "icmp" && v6) || (form.protocol === "icmpv6" && v4)) {
     errors.protocol = "Protocol does not match the destination's address family."
+  }
+
+  if (form.action === "mark") {
+    if (!form.routingScope || form.routingScope === "global" || form.sourceOnly) errors.action = "Marking requires a VPN destination rule."
+
+    if (!/^\d{1,2}$/.test(form.dscp ?? "") || Number(form.dscp) > 63) errors.dscp = "Enter an exact DSCP value from 0 to 63."
   }
 
   const rate = Number(form.rateBps)
@@ -203,6 +224,10 @@ export function validateRule(form: RuleForm, guardrails: RuleGuardrails): RuleEr
 
   if (!Number.isInteger(ttl) || ttl <= 0) errors.ttl = "TTL must be a positive whole number of seconds."
 
+  if (form.sourceOnly && guardrails.vpnScope && ttl > guardrails.vpnScope.max_source_only_ttl_seconds) {
+    errors.ttl = `Source-only TTL must not exceed ${guardrails.vpnScope.max_source_only_ttl_seconds} seconds.`
+  }
+
   if (!form.reason.trim()) errors.reason = "A reason is required for the audit log."
 
   return errors
@@ -222,6 +247,8 @@ export function toRequest(form: RuleForm): CreateFlowSpecRequest {
   const srcPorts = parsePorts(form.srcPorts) ?? []
 
   if (form.action === "police") request.rate_bps = Number(form.rateBps)
+
+  if (form.action === "mark") request.dscp = Number(form.dscp)
 
   if (dstPorts.length > 0) request.dst_ports = dstPorts
 
@@ -297,14 +324,37 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
   const [isChecking, setIsChecking] = useState(false)
   const admissionGeneration = useRef(0)
 
-  const errors = validateRule(form, readGuardrails(settings?.settings))
+  const scopes = readVpnScopes(settings?.settings)
+  const scopeName = form.routingScope ?? "global"
+  const scopePolicy = scopes[scopeName]
+  const errors = validateRule(form, { ...readGuardrails(settings?.settings), vpnScope: scopePolicy })
+
+  if (scopeName !== "global" && !scopePolicy) errors.routingScope = "This VPN scope is unavailable. Refresh settings before creating a rule."
   const isValid = Object.keys(errors).length === 0
   const destination = parseDestination(form.victimIp)
   const request = toRequest(form)
   const matchValid = !Object.keys(errors).some((field) => field !== "reason" && field !== "ttl")
 
-  const preview = destination?.networkAligned && matchValid ? formatFlowSpecRule({
-    dst_prefix: destination.prefix,
+  const selectedSnapshot = scopePolicy ? { name: scopeName, identity: { family: scopePolicy.family, rd: scopePolicy.rd }, route_targets: scopePolicy.route_targets } : undefined
+
+  const sourceRequest = (): SourceOnlyVpnRequest => {
+    if (form.action === "mark") throw new Error("Source-only marking is unavailable.")
+
+    const request: SourceOnlyVpnRequest = {
+      scope: scopeName, src_prefix: form.srcPrefix.trim(), protocol: form.protocol, action: form.action,
+      ttl_seconds: Number(form.ttl), reason: form.reason,
+    }
+
+    if (form.action === "police") request.rate_bps = Number(form.rateBps)
+
+    if (form.confirmDestinationAny) request.confirm_destination_any = true
+
+    return request
+  }
+
+  const preview = (form.sourceOnly || destination?.networkAligned) && matchValid ? formatFlowSpecRule({
+    vpn_scope: selectedSnapshot,
+    dst_prefix: form.sourceOnly ? "" : destination?.prefix ?? "",
     src_prefix: request.src_prefix ? parseDestination(request.src_prefix)?.prefix : undefined,
     protocol: previewProtocol(form.protocol),
     dst_ports: request.dst_ports ?? [],
@@ -313,6 +363,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
     packet_length: request.packet_length,
     action_type: form.action,
     rate_bps: form.action === "police" ? Number(form.rateBps) : null,
+    dscp: form.action === "mark" ? Number(form.dscp) : undefined,
   }) : null
 
   const shown = (field: keyof RuleForm) => (submitted || touched.has(field) ? errors[field] : undefined)
@@ -348,7 +399,9 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
     setAdmissionError(null)
 
     try {
-      const result = await previewFlowSpecAdmission(toRequest(form))
+      const result = form.sourceOnly ? await previewSourceOnlyVpn(sourceRequest())
+        : scopeName !== "global" ? await previewVpnFlowSpec(scopeName, toRequest(form))
+          : await previewFlowSpecAdmission(toRequest(form))
 
       if (generation === admissionGeneration.current) setAdmission(result)
     } catch (error) {
@@ -370,14 +423,16 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
     setError(null)
 
     try {
-      const mitigation = await createMitigation(toRequest(form))
+      const mitigation = form.sourceOnly ? await createSourceOnlyVpn(sourceRequest())
+        : scopeName !== "global" ? await createVpnFlowSpec(scopeName, toRequest(form))
+          : await createMitigation(toRequest(form))
 
       if (mitigation.announcement_outcome === "unconfirmed") {
         toast.warning("Rule intent saved; announcement unconfirmed", {
           description: "Intent is saved for reconciliation. Check speaker state and mitigation details.",
         })
       } else {
-        toast.success("Rule created", { description: form.victimIp })
+        toast.success("Rule created", { description: form.sourceOnly ? `Source ${form.srcPrefix} to any destination in ${scopeName}` : form.victimIp })
       }
 
       reset()
@@ -412,17 +467,41 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
       <DialogContent className="max-h-[90dvh] overflow-y-auto bg-card sm:max-w-lg">
         <form onSubmit={handleSubmit} noValidate className="grid gap-4">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-sm">
+            <DialogTitle className="flex items-center gap-2 text-balance text-sm">
               <ShieldPlus className="size-4 text-muted-foreground" aria-hidden="true" />
               Create FlowSpec rule
             </DialogTitle>
-            <DialogDescription className="text-xs">
-              Define the traffic to discard or police. The controller checks ownership, safelists
+            <DialogDescription className="text-pretty text-xs">
+              Define the traffic match and action. The controller checks ownership, safelists
               and deployment guardrails before saving intent.
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-1.5">
+          {Object.keys(scopes).length > 0 || scopeName !== "global" ? <div className="space-y-1.5">
+            <Label htmlFor="fs-scope">Routing scope</Label>
+            <Select value={scopeName} onValueChange={(value) => {
+              invalidateAdmission()
+              setForm((prev) => ({ ...prev, routingScope: value, action: value === "global" && prev.action === "mark" ? "discard" : prev.action, sourceOnly: false, confirmDestinationAny: false }))
+            }}>
+              <SelectTrigger id="fs-scope" className="h-9"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="global">Global</SelectItem>
+                {Object.entries(scopes).map(([name, policy]) => <SelectItem key={name} value={name}>{name} (VPN{policy.family === "ipv4" ? "v4" : "v6"})</SelectItem>)}
+              </SelectContent>
+            </Select>
+            {selectedSnapshot ? <p className="break-words font-mono text-xs">{formatRoutingScope(selectedSnapshot)}</p> : null}
+            {fieldError("routingScope", "fs-scope")}
+            {scopePolicy ? <div className="flex items-center gap-2">
+              <Checkbox id="fs-source-only" checked={form.sourceOnly === true} disabled={!scopePolicy.allow_source_only} onCheckedChange={(checked) => {
+                invalidateAdmission()
+                setForm((prev) => ({ ...prev, action: checked === true && prev.action === "mark" ? "discard" : prev.action, sourceOnly: checked === true, confirmDestinationAny: false, victimIp: "", dstPorts: "", srcPorts: "", nonFirstFragments: false, lengthMin: "", lengthMax: "", ttl: String(scopePolicy.max_source_only_ttl_seconds) }))
+              }} />
+              <Label htmlFor="fs-source-only">Source-only rule (destination: any)</Label>
+            </div> : null}
+            {scopePolicy && !scopePolicy.allow_source_only ? <p className="text-xs text-muted-foreground">Source-only rules are disabled for this scope.</p> : null}
+          </div> : null}
+
+          {!form.sourceOnly ? <div className="space-y-1.5">
             <Label htmlFor="fs-ip">Destination IP or CIDR</Label>
             <Input
               id="fs-ip"
@@ -439,10 +518,17 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
               Subnets require explicitly relaxed prefix bounds and one configured customer prefix covering the entire range.
             </p>
             {fieldError("victimIp", "fs-ip")}
-          </div>
+          </div> : <div className="space-y-2 rounded-md border border-warning/50 p-3 text-xs">
+            <p>Destination: any. This rule affects traffic from the selected source to every destination in this VRF, including safelisted destinations.</p>
+            <p>The controller protects safelisted and infrastructure source ranges. Receiver acceptance and enforcement require platform qualification.</p>
+            <div className="flex items-start gap-2">
+              <Checkbox id="fs-confirm-any" checked={form.confirmDestinationAny === true} onCheckedChange={(checked) => update("confirmDestinationAny", checked === true)} />
+              <Label htmlFor="fs-confirm-any">I confirm that this source-only rule may affect every destination in this VPN.</Label>
+            </div>
+          </div>}
 
           <div className="space-y-1.5">
-            <Label htmlFor="fs-src-prefix">Source prefix (optional)</Label>
+            <Label htmlFor="fs-src-prefix">Source prefix{form.sourceOnly ? " (required)" : " (optional)"}</Label>
             <Input
               id="fs-src-prefix"
               placeholder="e.g. 198.51.100.0/24"
@@ -455,7 +541,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
               autoComplete="off"
             />
             <p id="fs-src-prefix-help" className="text-xs text-muted-foreground">
-              Limits which sources match this destination. Requires source prefix matching to be enabled.
+              {form.sourceOnly ? `Requires /${scopePolicy?.min_source_prefix_length} or narrower; TTL ≤ ${scopePolicy?.max_source_only_ttl_seconds}s. ` : "Limits which sources match this destination. "}Requires source prefix matching to be enabled.
             </p>
             {fieldError("srcPrefix", "fs-src-prefix")}
           </div>
@@ -476,16 +562,21 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="fs-action">Action</Label>
-              <Select value={form.action} onValueChange={(value) => { if (value === "discard" || value === "police") update("action", value) }}>
+              <Select value={form.action} onValueChange={(value) => { if (value === "discard" || value === "police" || value === "mark") update("action", value) }}>
                 <SelectTrigger id="fs-action" className="h-9">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="discard">discard</SelectItem>
                   <SelectItem value="police">police</SelectItem>
+                  {scopePolicy && !form.sourceOnly && <SelectItem value="mark">mark DSCP</SelectItem>}
                 </SelectContent>
               </Select>
             </div>
+            {form.action === "mark" && <div className="space-y-1.5">
+              <Label htmlFor="fs-dscp">DSCP (0–63)</Label>
+              <Input id="fs-dscp" inputMode="numeric" value={form.dscp ?? ""} onChange={(event) => update("dscp", event.target.value)} aria-invalid={Boolean(shown("dscp"))} aria-describedby={describedBy("dscp", "fs-dscp")} className="h-9 font-mono tabular-nums" />
+            </div>}
             {form.action === "police" && (
               <div className="space-y-1.5">
                 <Label htmlFor="fs-rate">Rate (bps)</Label>
@@ -503,7 +594,10 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
           </div>
           {fieldError("protocol", "fs-protocol")}
           {fieldError("rateBps", "fs-rate")}
+          {fieldError("action", "fs-action")}
+          {fieldError("dscp", "fs-dscp")}
 
+          {!form.sourceOnly ? <>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="fs-dst">Destination ports</Label>
@@ -574,6 +668,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
             </div>
             {fieldError("lengthMin", "fs-length")}
           </fieldset>
+          </> : null}
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-[8rem_1fr]">
             <div className="space-y-1.5">
@@ -634,7 +729,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
                   {admission.reason && <p className="break-words">{admission.reason}</p>}
                   {admission.candidate && (
                     <>
-                      <p className="break-words font-mono">{formatFlowSpecRule({ ...admission.candidate.scope, action_type: admission.candidate.action.action_type, rate_bps: admission.candidate.action.rate_bps ?? null })}</p>
+                      <p className="break-words font-mono">{formatFlowSpecRule({ ...admission.candidate.scope, vpn_scope: admission.candidate.vpn_scope, action_type: admission.candidate.action.action_type, dscp: admission.candidate.action.dscp, rate_bps: admission.candidate.action.rate_bps ?? null })}</p>
                       {admission.candidate.action.action_type === "police" && <p className="font-mono">Police rate: {admission.candidate.action.rate_bps} bps</p>}
                       <p className="text-muted-foreground">
                         {admission.candidate.customer_id ? `Customer ${admission.candidate.customer_id}` : "No customer attribution"}
@@ -666,7 +761,7 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
             }} disabled={isSubmitting}>
               Cancel
             </Button>
-            <Button type="submit" size="sm" disabled={isSubmitting}>
+            <Button type="submit" size="sm" disabled={isSubmitting || (form.sourceOnly === true && form.confirmDestinationAny !== true)}>
               {isSubmitting ? (
                 <>
                   <RefreshCw className="size-3.5 animate-spin" aria-hidden="true" />

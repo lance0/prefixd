@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::domain::{FlowSpecNlri, FlowSpecRule, canonical_ports};
+use crate::domain::{FlowSpecNlri, FlowSpecRule, VpnFlowSpecIdentity, canonical_ports};
 use crate::error::Result;
 
 #[derive(Debug, Clone)]
@@ -44,22 +44,38 @@ impl std::fmt::Display for SessionState {
 /// Success acknowledges the backend's local mutation stage, not router enforcement.
 #[async_trait]
 pub trait FlowSpecWriter: Send + Sync {
+    /// Register required inventory scope before the first read, including persisted intent.
+    fn register_scope(&self, scope: Option<&VpnFlowSpecIdentity>) -> Result<()> {
+        require_global_scope("speaker", scope)
+    }
+
+    /// Read-only capability check; a successful old probe never authorizes a new mutation.
+    async fn validate_scope(&self, scope: Option<&VpnFlowSpecIdentity>) -> Result<()> {
+        self.register_scope(scope)
+    }
+
     /// Whether both matches address the same backend-local route for upsert and delete.
     /// Writers that normalize match terms must use the same normalization here.
     fn matches_nlri(&self, left: &FlowSpecNlri, right: &FlowSpecNlri) -> Result<bool> {
         for nlri in [left, right] {
-            if nlri.src_prefix.is_some() {
+            if nlri.src_prefix.is_some() || nlri.scope.is_some() {
                 nlri.validate().map_err(|error| {
                     crate::error::PrefixdError::BgpAnnouncementFailed(error.to_string())
                 })?;
             }
         }
         let prefix = |nlri: &FlowSpecNlri| {
-            nlri.dst_prefix.parse::<ipnet::IpNet>().map_err(|_| {
-                crate::error::PrefixdError::BgpAnnouncementFailed(
-                    "invalid destination prefix".into(),
-                )
-            })
+            if nlri.dst_prefix.is_empty() && nlri.scope.is_some() {
+                return Ok(None);
+            }
+            nlri.dst_prefix
+                .parse::<ipnet::IpNet>()
+                .map(Some)
+                .map_err(|_| {
+                    crate::error::PrefixdError::BgpAnnouncementFailed(
+                        "invalid destination prefix".into(),
+                    )
+                })
         };
         let source = |nlri: &FlowSpecNlri| {
             nlri.src_prefix
@@ -70,7 +86,8 @@ pub trait FlowSpecWriter: Send + Sync {
                     crate::error::PrefixdError::BgpAnnouncementFailed(error.to_string())
                 })
         };
-        Ok(prefix(left)? == prefix(right)?
+        Ok(left.scope == right.scope
+            && prefix(left)? == prefix(right)?
             && source(left)? == source(right)?
             && left.protocol == right.protocol
             && left.dst_ports == right.dst_ports
@@ -96,6 +113,54 @@ pub trait FlowSpecWriter: Send + Sync {
     }
     /// Idempotent delete; passes the rule's recorded owner where supported.
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()>;
+}
+
+pub(crate) fn require_global_scope(
+    backend: &'static str,
+    scope: Option<&VpnFlowSpecIdentity>,
+) -> Result<()> {
+    match scope {
+        Some(scope) => Err(crate::error::PrefixdError::UnsupportedFlowSpecScope {
+            backend,
+            family: scope.family.afi_safi(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Announcement policy must not prevent deletion of a historical routing key.
+pub(crate) fn validate_add_scope(rule: &FlowSpecRule) -> Result<()> {
+    use crate::domain::{ActionType, canonical_route_target};
+    for action in &rule.actions {
+        if action.action_type == ActionType::Mark
+            && (rule.nlri.scope.is_none() || rule.nlri.dst_prefix.is_empty())
+        {
+            return Err(crate::error::PrefixdError::InvalidRequest(
+                crate::domain::FlowSpecActionError::MarkRequiresVpnDestination.to_string(),
+            ));
+        }
+    }
+    match &rule.nlri.scope {
+        Some(_) => {
+            if rule.route_targets.is_empty() {
+                return Err(crate::error::PrefixdError::InvalidRequest(
+                    "VPN FlowSpec requires scope route targets".into(),
+                ));
+            }
+            for target in &rule.route_targets {
+                canonical_route_target(target).map_err(|error| {
+                    crate::error::PrefixdError::InvalidRequest(error.to_string())
+                })?;
+            }
+        }
+        None if !rule.route_targets.is_empty() => {
+            return Err(crate::error::PrefixdError::InvalidRequest(
+                "global FlowSpec cannot carry scope route targets".into(),
+            ));
+        }
+        None => {}
+    }
+    Ok(())
 }
 
 /// Complete local-rule observation; errors must never become an empty inventory.

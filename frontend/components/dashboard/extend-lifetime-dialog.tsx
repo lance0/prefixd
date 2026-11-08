@@ -46,7 +46,7 @@ export function ExtendLifetimeDialog({ mitigation, now, onUpdated }: {
   const maximum = nonnegativeInteger(guardrails.max_ttl_seconds ?? timers.max_ttl_seconds)
 
   const eligible = permissions.isOperator && settings?.mode === "enforced" && settings?.pop === mitigation.pop
-    && mitigation.customer_id !== null && mitigation.origin_mode === "enforced" && mitigation.action_type !== "blackhole"
+    && mitigation.customer_id !== null && mitigation.origin_mode === "enforced" && (mitigation.action_type === "discard" || mitigation.action_type === "police")
     && (mitigation.status === "active" || mitigation.status === "escalated")
     && !mitigation.withdrawn_at && Date.parse(mitigation.expires_at) > now
     && Number.isInteger(minimum) && minimum > 0 && Number.isInteger(maximum) && maximum >= minimum

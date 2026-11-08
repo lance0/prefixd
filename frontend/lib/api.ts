@@ -4,6 +4,73 @@ import { parseDestination } from "./destination"
 // This allows the dashboard to work on any host without hardcoded URLs
 const API_BASE = "/api/prefixd"
 
+export interface VpnScopeIdentity {
+  family: "ipv4" | "ipv6"
+  rd: string
+}
+
+export interface VpnScopeSnapshot {
+  name: string
+  identity: VpnScopeIdentity
+  route_targets: string[]
+}
+
+export interface VpnScopePolicies {
+  [name: string]: VpnScopePolicy
+}
+
+export interface VpnScopePolicy {
+  family: "ipv4" | "ipv6"
+  rd: string
+  route_targets: string[]
+  allow_source_only: boolean
+  min_source_prefix_length: number
+  max_source_only_ttl_seconds: number
+  max_source_only_active: number
+}
+
+export function formatRoutingScope(scope?: VpnScopeSnapshot | null): string {
+  return scope ? `${scope.name} · VPN${scope.identity.family === "ipv4" ? "v4" : "v6"} · RD ${scope.identity.rd} · RT ${scope.route_targets.join(", ")}` : "Global"
+}
+
+export function readAutomaticScope(settings: { [key: string]: JsonValue } | undefined): string | null {
+  if (!settings) return null
+
+  if (!isRecord(settings.bgp) || settings.bgp.default_scope === undefined) return "global"
+  const scope = settings.bgp.default_scope
+
+  if (isText(scope)) return scope
+
+  if (!isRecord(scope)) return null
+  const ipv4 = scope.ipv4 ?? "global"
+  const ipv6 = scope.ipv6 ?? "global"
+
+  if (!isText(ipv4) || !isText(ipv6)) return null
+
+  return `IPv4: ${ipv4} · IPv6: ${ipv6}`
+}
+
+/** Only complete, controller-owned scope policies become selectable. */
+export function readVpnScopes(settings: { [key: string]: JsonValue } | undefined): VpnScopePolicies {
+  const scopes = settings && isRecord(settings.bgp) && isRecord(settings.bgp.vpn_scopes) ? settings.bgp.vpn_scopes : {}
+  const policies: VpnScopePolicies = {}
+
+  for (const [name, value] of Object.entries(scopes)) {
+    if (!isRecord(value) || (value.family !== "ipv4" && value.family !== "ipv6") || !isText(value.rd) || !value.rd ||
+      !isNonemptyTextList(value.route_targets) ||
+      !isWholeNumber(value.min_source_prefix_length) || !isWholeNumber(value.max_source_only_ttl_seconds) || !isWholeNumber(value.max_source_only_active)) continue
+    policies[name] = {
+      family: value.family, rd: value.rd, route_targets: value.route_targets,
+      allow_source_only: value.allow_source_only === true,
+      min_source_prefix_length: value.min_source_prefix_length,
+      max_source_only_ttl_seconds: value.max_source_only_ttl_seconds,
+      max_source_only_active: value.max_source_only_active,
+    }
+  }
+
+  return policies
+}
+
 export interface ScrubberState {
   readiness?: "ready" | "not_ready" | "unknown"
   armed: boolean
@@ -15,7 +82,7 @@ export interface ScrubberState {
 export interface ScrubberProfiles {
   enabled: boolean
   profiles: Record<string, ScrubberState>
-  configuration: { id: string; revision: string; ipv4_target: string | null; ipv6_target: string | null }[]
+  configuration: { id: string; revision: string; scope?: string; ipv4_target: string | null; ipv6_target: string | null; redirect_route_target?: string }[]
 }
 
 export interface DiversionMatch {
@@ -24,6 +91,7 @@ export interface DiversionMatch {
   protocol: number | null
   dst_ports: number[]
   src_ports?: number[]
+  scope?: VpnScopeIdentity | null
 }
 
 export interface DiversionRequest {
@@ -36,8 +104,8 @@ export interface DiversionRequest {
 
 export interface ScrubberDiversion {
   id: string
-  profile: { id: string; revision: string }
-  rule: { nlri: DiversionMatch; target: string; owner: string; revision: number }
+  profile: { id: string; revision: string; scope?: string }
+  rule: { nlri: DiversionMatch; target?: string; redirect_route_target?: string; owner: string; revision: number; route_targets?: string[] }
   expires_at: string
   status: "pending" | "active" | "withdrawing" | "withdrawn" | "simulated"
   dry_run: boolean
@@ -55,8 +123,48 @@ export interface DiversionPreview {
 
 export const getScrubbers = () => fetchApi<ScrubberProfiles>("/v1/scrubbers")
 export const getDiversions = () => fetchApi<ScrubberDiversion[]>("/v1/diversions")
-export const previewDiversion = (request: DiversionRequest) => fetchApi<DiversionPreview>("/v1/diversions/preview", { method: "POST", body: JSON.stringify(request) })
-export const createDiversion = (request: DiversionRequest) => fetchApi<ScrubberDiversion>("/v1/diversions", { method: "POST", body: JSON.stringify(request) })
+
+function requireDiversionScope(preview: DiversionPreview, request: DiversionRequest, expectedScope: string): void {
+  const candidate = preview.candidate
+  const identity = candidate?.rule?.nlri?.scope
+  const acknowledged = identity && vpnIdentity({ ...identity })
+  const hasIpTarget = isText(candidate?.rule?.target) && Boolean(candidate.rule.target)
+  const hasVrfTarget = isText(candidate?.rule?.redirect_route_target) && Boolean(candidate.rule.redirect_route_target)
+
+  if (candidate?.profile?.id !== request.profile || candidate?.profile?.scope !== expectedScope ||
+    !acknowledged || hasIpTarget === hasVrfTarget || !isNonemptyTextList(candidate.rule.route_targets) ||
+    !isText(preview.confirmation) || !preview.confirmation) {
+    throw new Error("The controller did not acknowledge the requested VPN diversion scope. No global request was sent.")
+  }
+
+  const destination = parseDestination(candidate.rule.nlri.dst_prefix)
+  const requestedDestination = parseDestination(request.scope.dst_prefix)
+
+  if (!destination || !requestedDestination || destination.prefix !== requestedDestination.prefix ||
+    destination.ipv6 !== (acknowledged.family === "ipv6")) {
+    throw new Error("The VPN diversion response does not preserve the requested address family.")
+  }
+}
+
+export async function previewDiversion(request: DiversionRequest, expectedScope = "global"): Promise<DiversionPreview> {
+  if (expectedScope === "global") return fetchApi<DiversionPreview>("/v1/diversions/preview", { method: "POST", body: JSON.stringify(request) })
+  const result = await fetchApi<DiversionPreview>("/v1/vpn/diversions/preview", { method: "POST", body: JSON.stringify({ scope: expectedScope, diversion: request }) })
+  requireDiversionScope(result, request, expectedScope)
+
+  return result
+}
+
+export async function createDiversion(request: DiversionRequest, expectedScope = "global"): Promise<ScrubberDiversion> {
+  if (expectedScope === "global") return fetchApi<ScrubberDiversion>("/v1/diversions", { method: "POST", body: JSON.stringify(request) })
+  const preview = await previewDiversion(request, expectedScope)
+
+  if (preview.confirmation !== request.confirmation) {
+    throw new Error("The VPN diversion changed after confirmation. Preview and confirm it again before creating.")
+  }
+
+  return fetchApi<ScrubberDiversion>("/v1/vpn/diversions", { method: "POST", body: JSON.stringify({ scope: expectedScope, diversion: request }) })
+}
+
 export const armScrubber = (id: string, revision: string) => fetchApi<null>(`/v1/scrubbers/${encodeURIComponent(id)}/arm`, { method: "POST", body: JSON.stringify({ revision }) })
 export const withdrawDiversion = (id: string, reason?: string) => fetchApi<ScrubberDiversion>(`/v1/diversions/${encodeURIComponent(id)}/withdraw`, { method: "POST", body: JSON.stringify(reason?.trim() ? { reason: reason.trim() } : {}) })
 
@@ -158,9 +266,11 @@ export interface Mitigation {
   pop: string
   victim_ip: string
   vector: string
-  action_type: "police" | "discard" | "blackhole"
+  action_type: "police" | "discard" | "mark" | "blackhole"
   rate_bps: number | null
+  dscp?: number | null
   dst_prefix: string
+  vpn_scope?: VpnScopeSnapshot | null
   /** Source CIDR; null or absent means no source constraint. */
   src_prefix?: string | null
   protocol: number | null
@@ -399,8 +509,10 @@ export interface LocalFlowSpecRule {
     src_ports?: number[]
     fragment?: FragmentMatch | null
     packet_length?: PacketLengthRange | null
+    scope?: VpnScopeIdentity | null
   }
-  actions: { action_type: "police" | "discard"; rate_bps?: number }[]
+  route_targets?: string[]
+  actions: { action_type: "police" | "discard" | "mark"; rate_bps?: number; dscp?: number }[]
   /** Injection identity only; absent or empty does not establish controller ownership. */
   owner?: string
 }
@@ -521,8 +633,9 @@ export interface CreateFlowSpecRequest {
   src_prefix?: string
   /** udp, tcp, icmp, icmpv6 or any. Source ports, fragment and packet length need udp. */
   protocol: string
-  action: "discard" | "police"
+  action: "discard" | "police" | "mark"
   rate_bps?: number
+  dscp?: number
   ttl_seconds: number
   reason: string
   dst_ports?: number[]
@@ -538,6 +651,8 @@ export interface FlowSpecAdmissionPreview {
   speaker_state: "unobserved"
   candidate: {
     victim_ip: string
+    destination?: "any"
+    vpn_scope?: VpnScopeSnapshot
     customer_id: string | null
     service_id: string | null
     pop: string
@@ -549,8 +664,9 @@ export interface FlowSpecAdmissionPreview {
       src_ports?: number[]
       fragment?: FragmentMatch | null
       packet_length?: PacketLengthRange | null
+      scope?: VpnScopeIdentity | null
     }
-    action: { action_type: "discard" | "police"; rate_bps?: number | null }
+    action: { action_type: "discard" | "police" | "mark"; rate_bps?: number | null; dscp?: number | null }
     ttl_seconds: number
     expires_at_cap: string | null
   } | null
@@ -575,10 +691,32 @@ function isPortList(value: JsonValue | undefined): value is number[] {
   return Array.isArray(value) && value.every((port: JsonValue) => isWholeNumber(port) && port >= 0 && port <= 65535)
 }
 
+function isNonemptyTextList(value: JsonValue | undefined): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.every((entry) => isText(entry) && entry.length > 0)
+}
+
+function vpnIdentity(value: JsonValue | undefined): VpnScopeIdentity | undefined {
+  if (!isRecord(value) || Object.keys(value).some((key) => key !== "family" && key !== "rd") ||
+    (value.family !== "ipv4" && value.family !== "ipv6") || !isText(value.rd) || !value.rd) return undefined
+
+  return { family: value.family, rd: value.rd }
+}
+
+function vpnSnapshot(value: JsonValue | undefined): VpnScopeSnapshot | undefined {
+  if (!isRecord(value) || !isText(value.name) || !value.name || value.name === "global" ||
+    Object.keys(value).some((key) => !["name", "identity", "route_targets"].includes(key)) ||
+    !isNonemptyTextList(value.route_targets)) return undefined
+  const identity = vpnIdentity(value.identity)
+
+  return identity ? { name: value.name, identity, route_targets: value.route_targets } : undefined
+}
+
 function admissionCandidate(value: JsonValue | undefined): FlowSpecAdmissionPreview["candidate"] | undefined {
   if (value === null) return null
+  const snapshot = isRecord(value) ? vpnSnapshot(value.vpn_scope) : undefined
+  const sourceOnly = isRecord(value) && value.destination === "any" && snapshot !== undefined
 
-  if (!isRecord(value) || !isText(value.victim_ip) || !value.victim_ip ||
+  if (!isRecord(value) || !isText(value.victim_ip) || (!value.victim_ip && !sourceOnly) ||
     !(value.customer_id === null || isText(value.customer_id)) ||
     !(value.service_id === null || isText(value.service_id)) ||
     !isText(value.pop) || !value.pop ||
@@ -588,24 +726,36 @@ function admissionCandidate(value: JsonValue | undefined): FlowSpecAdmissionPrev
 
   const scope = value.scope
   const action = value.action
-  const scopeKeys = ["dst_prefix", "src_prefix", "protocol", "dst_ports", "src_ports", "fragment", "packet_length"]
+  const scopeKeys = ["dst_prefix", "src_prefix", "protocol", "dst_ports", "src_ports", "fragment", "packet_length", "scope"]
 
   // A future match component must not be silently dropped from an operator preview.
   if (Object.keys(scope).some((key) => !scopeKeys.includes(key)) ||
-    Object.keys(action).some((key) => key !== "action_type" && key !== "rate_bps") ||
-    !isText(scope.dst_prefix) || !scope.dst_prefix ||
+    Object.keys(action).some((key) => key !== "action_type" && key !== "rate_bps" && key !== "dscp") ||
+    !isText(scope.dst_prefix) || (!scope.dst_prefix && !sourceOnly) ||
     !(scope.src_prefix === undefined || scope.src_prefix === null || isText(scope.src_prefix)) ||
     !(scope.protocol === null || (isWholeNumber(scope.protocol) && scope.protocol >= 0 && scope.protocol <= 255)) ||
     !isPortList(scope.dst_ports) || !(scope.src_ports === undefined || isPortList(scope.src_ports)) ||
     !(scope.fragment === undefined || scope.fragment === null || scope.fragment === "non_first") ||
-    (action.action_type !== "discard" && action.action_type !== "police") ||
+    (action.action_type !== "discard" && action.action_type !== "police" && action.action_type !== "mark") ||
     !(action.rate_bps === undefined || action.rate_bps === null || (isWholeNumber(action.rate_bps) && action.rate_bps > 0))) return undefined
 
   const destination = parseDestination(scope.dst_prefix)
   const source = isText(scope.src_prefix) ? parseDestination(scope.src_prefix) : null
+  const identity = vpnIdentity(scope.scope)
 
-  if (!destination?.isCidr || !destination.networkAligned ||
-    (isText(scope.src_prefix) && (!source?.isCidr || !source.networkAligned || source.ipv6 !== destination.ipv6))) return undefined
+  if (action.action_type === "mark" ? !identity || sourceOnly || !isWholeNumber(action.dscp) || action.dscp < 0 || action.dscp > 63 || action.rate_bps != null : action.dscp != null) return undefined
+
+  if ((value.destination !== undefined && !sourceOnly) ||
+    (value.vpn_scope !== undefined && !snapshot) || (scope.scope !== undefined && scope.scope !== null && !identity) ||
+    (snapshot && (!identity || identity.family !== snapshot.identity.family || identity.rd !== snapshot.identity.rd)) ||
+    (identity && !snapshot)) return undefined
+  const ipv6 = identity ? identity.family === "ipv6" : destination?.ipv6
+
+  if (sourceOnly ? scope.dst_prefix !== "" || !source?.isCidr || !source.networkAligned
+    : !destination?.isCidr || !destination.networkAligned) return undefined
+
+  if ((destination && identity && destination.ipv6 !== ipv6) ||
+    (isText(scope.src_prefix) && (!source?.isCidr || !source.networkAligned || source.ipv6 !== ipv6))) return undefined
 
   let packetLength: PacketLengthRange | null | undefined
 
@@ -620,7 +770,7 @@ function admissionCandidate(value: JsonValue | undefined): FlowSpecAdmissionPrev
   if ((action.action_type === "police" && !(isWholeNumber(action.rate_bps) && action.rate_bps > 0)) ||
     (action.action_type === "discard" && action.rate_bps !== undefined && action.rate_bps !== null)) return undefined
 
-  return {
+  const candidate: NonNullable<FlowSpecAdmissionPreview["candidate"]> = {
     victim_ip: value.victim_ip, customer_id: value.customer_id, service_id: value.service_id, pop: value.pop,
     ttl_seconds: value.ttl_seconds, expires_at_cap: value.expires_at_cap,
     scope: {
@@ -629,6 +779,16 @@ function admissionCandidate(value: JsonValue | undefined): FlowSpecAdmissionPrev
     },
     action: { action_type: action.action_type, rate_bps: action.rate_bps },
   }
+
+  if (isWholeNumber(action.dscp)) candidate.action.dscp = action.dscp
+
+  if (snapshot) candidate.vpn_scope = snapshot
+
+  if (sourceOnly) candidate.destination = "any"
+
+  if (identity) candidate.scope.scope = identity
+
+  return candidate
 }
 
 /** A malformed, contradictory or newer unsupported result is never shown as passing. */
@@ -658,8 +818,10 @@ export function parseFlowSpecAdmissionPreview(value: JsonValue, status: number):
 }
 
 /** Read-only snapshot. Creation always repeats admission; a preview reserves nothing. */
-export async function previewFlowSpecAdmission(request: CreateFlowSpecRequest): Promise<FlowSpecAdmissionPreview> {
-  const response = await fetch(`${API_BASE}/v1/mitigations/preview`, {
+type FlowSpecAdmissionRequest = CreateFlowSpecRequest | { scope: string; rule: CreateFlowSpecRequest } | SourceOnlyVpnRequest
+
+async function previewAdmission(path: string, request: FlowSpecAdmissionRequest): Promise<FlowSpecAdmissionPreview> {
+  const response = await fetch(`${API_BASE}${path}`, {
     method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request),
   })
 
@@ -675,9 +837,58 @@ export async function previewFlowSpecAdmission(request: CreateFlowSpecRequest): 
   }
 
   if (result) return result
-  throw new Error(response.status === 404
+  throw new Error(path.startsWith("/v1/vpn/") && response.status === 404
+    ? "This controller does not provide VPN admission. Upgrade the controller; no global request was sent."
+    : response.status === 404
     ? "This controller does not provide admission checks. Upgrade the controller or create the rule with its usual guardrails."
     : `Admission check unavailable (HTTP ${response.status}). Retry the check; no preview result is available.`)
+}
+
+export function previewFlowSpecAdmission(request: CreateFlowSpecRequest): Promise<FlowSpecAdmissionPreview> {
+  return previewAdmission("/v1/mitigations/preview", request)
+}
+
+export interface SourceOnlyVpnRequest {
+  scope: string
+  src_prefix: string
+  protocol: string
+  action: "discard" | "police"
+  rate_bps?: number
+  ttl_seconds: number
+  reason: string
+  confirm_destination_any?: boolean
+}
+
+export function previewVpnFlowSpec(scope: string, rule: CreateFlowSpecRequest): Promise<FlowSpecAdmissionPreview> {
+  return previewAdmission("/v1/vpn/mitigations/preview", { scope, rule })
+}
+
+export function previewSourceOnlyVpn(request: SourceOnlyVpnRequest): Promise<FlowSpecAdmissionPreview> {
+  return previewAdmission("/v1/vpn/source-rules/preview", request)
+}
+
+function requireVpnAcknowledgement(preview: FlowSpecAdmissionPreview, scope: string, sourceOnly: boolean) {
+  if (preview.outcome !== "admissible") throw new Error(preview.reason ?? "VPN admission was not accepted.")
+
+  if (preview.candidate?.vpn_scope?.name !== scope || (sourceOnly && preview.candidate.destination !== "any")) {
+    throw new Error("The controller did not acknowledge the requested VPN scope. Upgrade or refresh the controller before creating this rule.")
+  }
+}
+
+export async function createVpnFlowSpec(scope: string, rule: CreateFlowSpecRequest): Promise<Mitigation> {
+  const preview = await previewVpnFlowSpec(scope, rule)
+  requireVpnAcknowledgement(preview, scope, false)
+
+  if (rule.action === "mark" && (preview.candidate?.action.action_type !== "mark" || preview.candidate.action.dscp !== rule.dscp)) throw new Error("The controller did not acknowledge the requested DSCP marking action.")
+
+  return fetchApi<Mitigation>("/v1/vpn/mitigations", { method: "POST", body: JSON.stringify({ scope, rule }) })
+}
+
+export async function createSourceOnlyVpn(request: SourceOnlyVpnRequest): Promise<Mitigation> {
+  if (request.confirm_destination_any !== true) throw new Error("Confirm that this rule affects every destination in the VPN.")
+  requireVpnAcknowledgement(await previewSourceOnlyVpn(request), request.scope, true)
+
+  return fetchApi<Mitigation>("/v1/vpn/source-rules", { method: "POST", body: JSON.stringify(request) })
 }
 
 /** Manual FlowSpec rule; the controller applies the same guardrails as playbooks. */

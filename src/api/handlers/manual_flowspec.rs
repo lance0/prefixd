@@ -29,7 +29,7 @@ use super::{
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FlowSpecAdmissionOutcome {
-    /// Controller-side checks passed at observation time; no reservation or RPC.
+    /// Admission checks passed at observation time; no reservation or mutation.
     Admissible,
     Refused,
     /// A required safety read could not be completed. This never means safe.
@@ -54,6 +54,11 @@ pub enum FlowSpecAdmissionCheck {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct FlowSpecAdmissionCandidate {
     pub victim_ip: String,
+    /// Source-only rules affect every destination in the selected VRF.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vpn_scope: Option<crate::domain::VpnScopeSnapshot>,
     pub customer_id: Option<String>,
     pub service_id: Option<String>,
     pub pop: String,
@@ -71,8 +76,8 @@ pub struct FlowSpecAdmissionPreview {
     pub checked_at: DateTime<Utc>,
     /// The controller's configured operation mode, not evidence of enforcement.
     pub mode: String,
-    /// Always unobserved: preview makes no RPC and cannot detect a speaker-side
-    /// owner conflict, availability, acceptance, export, or router installation.
+    /// Candidate state remains unobserved. VPN preview probes family capability,
+    /// but cannot establish candidate ownership, acceptance, export or enforcement.
     pub speaker_state: String,
     /// Present after input and inventory preparation, even if admission is refused.
     pub candidate: Option<FlowSpecAdmissionCandidate>,
@@ -108,11 +113,19 @@ impl PreparedManualFlowSpec {
         }
         FlowSpecAdmissionCandidate {
             victim_ip: self.target.clone(),
+            destination: self
+                .intent
+                .match_criteria
+                .dst_prefix
+                .is_empty()
+                .then(|| "any".into()),
+            vpn_scope: self.intent.match_criteria.scope.clone(),
             customer_id: self.intent.customer_id.clone(),
             service_id: self.intent.service_id.clone(),
             pop: self.intent.pop.clone(),
             scope,
             action: FlowSpecAction {
+                dscp: self.intent.action_params.dscp,
                 action_type: self.intent.action_type,
                 rate_bps: self.intent.action_params.rate_bps,
             },
@@ -132,14 +145,52 @@ pub(super) async fn prepare_manual_flowspec(
     state
         .verified_speaker_binding()
         .map_err(AdmissionFailure::at(Target))?;
+    let routing_scope = req
+        .vpn_scope
+        .as_deref()
+        .map(|name| {
+            state
+                .settings
+                .bgp
+                .resolve_scope(name)
+                .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))
+                .and_then(|scope| {
+                    scope.ok_or_else(|| {
+                        PrefixdError::InvalidRequest(
+                            "VPN admission requires a named VPN scope".into(),
+                        )
+                    })
+                })
+        })
+        .transpose()
+        .map_err(AdmissionFailure::at(Input))?;
+    if req.source_only && routing_scope.is_none() {
+        return Err(AdmissionFailure {
+            check: Input,
+            error: PrefixdError::InvalidRequest("source-only rules require VPN scope".into()),
+        });
+    }
     let parse = || -> crate::error::Result<_> {
-        let destination = if req.victim_ip.contains('/') {
+        let destination = if req.source_only {
+            let source = req.src_prefix.as_deref().ok_or_else(|| {
+                PrefixdError::InvalidRequest("source-only rules require src_prefix".into())
+            })?;
+            crate::domain::canonical_source_prefix(source)
+                .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?
+                .parse::<ipnet::IpNet>()
+                .map_err(|_| PrefixdError::InvalidRequest("invalid source prefix".into()))?
+        } else if req.victim_ip.contains('/') {
             crate::domain::parse_flowspec_destination(&req.victim_ip)
                 .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?
         } else {
             validate_ip(&req.victim_ip).map(ipnet::IpNet::from)?
         };
         validate_string_len(&req.reason, "reason", MAX_STRING_LEN)?;
+        if req.source_only && req.reason.trim().is_empty() {
+            return Err(PrefixdError::InvalidRequest(
+                "source-only rules require a reason".into(),
+            ));
+        }
         validate_string_len(operator_id, "operator_id", MAX_USERNAME_LEN)?;
         let address = destination.addr();
         let protocol = match req.protocol.as_deref() {
@@ -167,28 +218,32 @@ pub(super) async fn prepare_manual_flowspec(
         let action_type = match req.action.as_str() {
             "discard" => ActionType::Discard,
             "police" => ActionType::Police,
+            "mark" if routing_scope.is_some() && !req.source_only => ActionType::Mark,
             "blackhole" => return Err(PrefixdError::InvalidRequest(
                 "blackhole admission preview is unsupported; use the dedicated creation workflow"
                     .into(),
             )),
             _ => {
                 return Err(PrefixdError::InvalidRequest(format!(
-                    "invalid action '{}', expected: discard, police, blackhole",
+                    "invalid action '{}', expected: discard, police, scoped mark, blackhole",
                     req.action
                 )));
             }
         };
         FlowSpecAction {
+            dscp: req.dscp,
             action_type,
             rate_bps: req.rate_bps,
         }
-        .traffic_rate_bytes_per_second()
+        .validate()
         .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
         Ok((destination, protocol, action_type))
     };
     let (destination, protocol, action_type) = parse().map_err(AdmissionFailure::at(Input))?;
     let is_subnet = destination.prefix_len() != destination.max_prefix_len();
-    let target = if !req.victim_ip.contains('/') {
+    let target = if req.source_only {
+        "any".into()
+    } else if !req.victim_ip.contains('/') {
         req.victim_ip.clone()
     } else if is_subnet {
         destination.to_string()
@@ -196,7 +251,9 @@ pub(super) async fn prepare_manual_flowspec(
         destination.addr().to_string()
     };
     let inventory = state.inventory.read().await;
-    let context = if is_subnet {
+    let context = if req.source_only {
+        None
+    } else if is_subnet {
         // An invalid inventory is an error, never an unowned or admissible prefix.
         Some(
             inventory
@@ -232,7 +289,10 @@ pub(super) async fn prepare_manual_flowspec(
             service_id: None,
             pop: state.settings.pop.clone(),
             match_criteria: MatchCriteria {
-                dst_prefix: if req.victim_ip.contains('/') {
+                scope: routing_scope,
+                dst_prefix: if req.source_only {
+                    String::new()
+                } else if req.victim_ip.contains('/') {
                     destination.to_string()
                 } else {
                     format!("{}/{}", req.victim_ip, destination.prefix_len())
@@ -246,6 +306,7 @@ pub(super) async fn prepare_manual_flowspec(
             },
             action_type,
             action_params: ActionParams {
+                dscp: req.dscp,
                 rate_bps: req.rate_bps,
                 ..Default::default()
             },
@@ -296,8 +357,62 @@ async fn validate_manual_flowspec_on(
         state.settings.quotas.clone(),
         &state.settings.timers,
     );
+    if intent.match_criteria.dst_prefix.is_empty() {
+        crate::guardrails::validate_source_only(state, intent)
+            .await
+            .map_err(AdmissionFailure::at(Safety))?;
+        let policy = crate::guardrails::source_only_policy(state, &intent.match_criteria)
+            .map_err(AdmissionFailure::at(Safety))?;
+        let scope = intent
+            .match_criteria
+            .scope
+            .as_ref()
+            .ok_or_else(|| AdmissionFailure {
+                check: Safety,
+                error: PrefixdError::InvalidRequest("source-only rules require VPN scope".into()),
+            })?;
+        let count = repo
+            .active_mitigations_for_pop(&intent.pop)
+            .await
+            .map_err(AdmissionFailure::at(Safety))?
+            .into_iter()
+            .filter(|row| {
+                row.is_active()
+                    && row.match_criteria.dst_prefix.is_empty()
+                    && row
+                        .match_criteria
+                        .scope
+                        .as_ref()
+                        .is_some_and(|other| other.identity == scope.identity)
+            })
+            .count();
+        if count >= policy.max_source_only_active as usize {
+            return Err(AdmissionFailure {
+                check: Safety,
+                error: PrefixdError::GuardrailViolation(
+                    crate::error::GuardrailError::QuotaExceeded {
+                        quota_type: "source_only".into(),
+                        current: u32::try_from(count).unwrap_or(u32::MAX),
+                        max: policy.max_source_only_active,
+                    },
+                ),
+            });
+        }
+    }
+    let safelist_match = if intent.match_criteria.dst_prefix.is_empty() {
+        intent
+            .match_criteria
+            .src_prefix
+            .as_deref()
+            .ok_or_else(|| AdmissionFailure {
+                check: Safety,
+                error: PrefixdError::InvalidRequest("source-only rules require src_prefix".into()),
+            })?
+    } else {
+        &intent.match_criteria.dst_prefix
+    };
     let is_safelisted = repo
-        .is_safelisted(&intent.match_criteria.dst_prefix)
+        .is_safelisted(safelist_match)
         .await
         .map_err(AdmissionFailure::at(Safelist))?;
     guardrails
@@ -320,7 +435,12 @@ async fn validate_manual_flowspec_on(
         state.settings.guardrails.max_lifetime_seconds,
     )
     .map_err(AdmissionFailure::at(Lifetime))?;
-    super::flowspec_rule_for_admission(state, &mut mitigation)
+    let rule = super::flowspec_rule_for_admission(state, &mut mitigation)
+        .map_err(AdmissionFailure::at(Capability))?;
+    state
+        .announcer
+        .validate_scope(rule.nlri.scope.as_ref())
+        .await
         .map_err(AdmissionFailure::at(Capability))?;
     Ok(mitigation)
 }
@@ -464,6 +584,18 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl FlowSpecWriter for NoRpcSpeaker {
+        fn register_scope(
+            &self,
+            _scope: Option<&crate::domain::VpnFlowSpecIdentity>,
+        ) -> crate::error::Result<()> {
+            Ok(())
+        }
+        async fn validate_scope(
+            &self,
+            _scope: Option<&crate::domain::VpnFlowSpecIdentity>,
+        ) -> crate::error::Result<()> {
+            Ok(())
+        }
         async fn announce(&self, _rule: &FlowSpecRule) -> crate::error::Result<()> {
             self.rpc()
         }
@@ -1292,6 +1424,222 @@ mod tests {
         assert_eq!(events[0]["fields"]["pop"], fixture.state.settings.pop);
         assert_eq!(events[0]["fields"]["reason"], "NewMitigationRateExceeded");
         assert!(events[0]["fields"]["error"].is_string());
+        fixture.assert_no_mutations().await;
+    }
+    fn vpn_settings() -> Settings {
+        let mut settings = Fixture::settings();
+        settings.guardrails.min_ttl_seconds = Some(1);
+        settings.bgp.vpn_scopes = serde_json::from_value(json!({
+            "TRANSIT": {"family":"ipv4", "rd":"44407:40", "route_targets":["44407:777"], "allow_source_only":true},
+            "TRANSIT6": {"family":"ipv6", "rd":"44407:60", "route_targets":["44407:777"], "allow_source_only":true}
+        })).unwrap();
+        settings
+    }
+
+    fn source_only_request(scope: &str, source: &str) -> Value {
+        json!({"scope":scope,"src_prefix":source,"protocol":"any","action":"discard",
+            "ttl_seconds":60,"reason":"Block the confirmed attack source", "confirm_destination_any":true})
+    }
+
+    #[tokio::test]
+    async fn vpn_source_only_previews_and_creates_both_families_without_destination_authorization()
+    {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        for (scope, source, family) in [
+            ("TRANSIT", "198.51.100.7/24", "ipv4"),
+            ("TRANSIT6", "2001:db9::7/64", "ipv6"),
+        ] {
+            let fixture = Fixture::new(vpn_settings(), FlowSpecMatchSupport::ALL);
+            // A protected destination does not prohibit explicit whole-VRF authorization.
+            fixture.seed_safelist("operator").await;
+            let body = source_only_request(scope, source);
+            let (status, preview) = fixture.post("/v1/vpn/source-rules/preview", &body).await;
+            assert_eq!(status, StatusCode::OK, "{preview}");
+            assert_eq!(preview["candidate"]["destination"], "any");
+            assert_eq!(preview["candidate"]["scope"]["dst_prefix"], "");
+            assert_eq!(preview["candidate"]["scope"]["scope"]["family"], family);
+            assert_eq!(
+                preview["candidate"]["vpn_scope"]["route_targets"],
+                json!(["44407:777"])
+            );
+            fixture.assert_no_mutations().await;
+            let (status, created) = fixture.post("/v1/vpn/source-rules", &body).await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            let rows = fixture
+                .repo
+                .active_mitigations_for_pop(&fixture.state.settings.pop)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].match_criteria.dst_prefix, "");
+            assert_eq!(rows[0].match_criteria.scope.as_ref().unwrap().name, scope);
+        }
+    }
+
+    #[tokio::test]
+    async fn vpn_source_only_refuses_unsafe_scope_source_ttl_actions_and_confirmation() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        for case in [
+            "scope",
+            "optin",
+            "source-optin",
+            "own",
+            "infrastructure",
+            "safelist",
+            "configured-safelist",
+            "prefix",
+            "ttl-zero",
+            "ttl-long",
+            "family",
+            "marking",
+            "redirect",
+            "confirmation",
+        ] {
+            let mut settings = vpn_settings();
+            let mut body = source_only_request("TRANSIT", "198.51.100.0/24");
+            match case {
+                "scope" => body["scope"] = json!("global"),
+                "optin" => {
+                    settings
+                        .bgp
+                        .vpn_scopes
+                        .get_mut("TRANSIT")
+                        .unwrap()
+                        .allow_source_only = false
+                }
+                "source-optin" => settings.guardrails.allow_src_prefix_match = false,
+                "own" => body["src_prefix"] = json!("203.0.113.0/24"),
+                "infrastructure" => {
+                    settings
+                        .bgp
+                        .vpn_scopes
+                        .get_mut("TRANSIT")
+                        .unwrap()
+                        .infrastructure_prefixes = vec!["198.51.100.128/25".into()]
+                }
+                "prefix" => body["src_prefix"] = json!("198.51.100.0/23"),
+                "ttl-zero" => body["ttl_seconds"] = json!(0),
+                "ttl-long" => body["ttl_seconds"] = json!(61),
+                "family" => body["src_prefix"] = json!("2001:db9::/64"),
+                "marking" => body["action"] = json!("marking"),
+                "redirect" => body["action"] = json!("redirect"),
+                "confirmation" => body["confirm_destination_any"] = json!(false),
+                "configured-safelist" => {
+                    settings.safelist.prefixes = vec!["198.51.100.128/25".into()]
+                }
+                "safelist" => {}
+                _ => unreachable!(),
+            }
+            let fixture = Fixture::new(settings, FlowSpecMatchSupport::ALL);
+            if case == "safelist" {
+                fixture
+                    .repo
+                    .insert_safelist("198.51.100.128/25", "operator", None)
+                    .await
+                    .unwrap();
+                fixture.seeded_safelist.fetch_add(1, SeqCst);
+            }
+            let (status, result) = fixture.post("/v1/vpn/source-rules", &body).await;
+            assert!(status.is_client_error(), "{case}: {status} {result}");
+            fixture.assert_no_mutations().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn vpn_source_only_quota_is_separate_and_scope_qualified() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let mut settings = vpn_settings();
+        settings
+            .bgp
+            .vpn_scopes
+            .get_mut("TRANSIT")
+            .unwrap()
+            .max_source_only_active = 1;
+        let mut other = settings.bgp.vpn_scopes["TRANSIT"].clone();
+        other.rd = "44407:41".into();
+        settings.bgp.vpn_scopes.insert("OTHER".into(), other);
+        let fixture = Fixture::new(settings, FlowSpecMatchSupport::ALL);
+        let (status, first) = fixture
+            .post(
+                "/v1/vpn/source-rules",
+                &source_only_request("TRANSIT", "198.51.100.0/24"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{first}");
+        let (status, second) = fixture
+            .post(
+                "/v1/vpn/source-rules",
+                &source_only_request("TRANSIT", "198.51.101.0/24"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{second}");
+        let (status, other) = fixture
+            .post(
+                "/v1/vpn/source-rules",
+                &source_only_request("OTHER", "198.51.100.0/24"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{other}");
+        assert_eq!(
+            fixture
+                .repo
+                .active_mitigations_for_pop(&fixture.state.settings.pop)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn vpn_wrappers_refuse_unknown_fields_and_global_source_only() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let fixture = Fixture::new(vpn_settings(), FlowSpecMatchSupport::ALL);
+        let mut nested = json!({"scope":"TRANSIT", "rule":request("203.0.113.1")});
+        nested["rule"]["scope"] = json!("OTHER");
+        let (status, _) = fixture.post("/v1/vpn/mitigations", &nested).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let mut source = source_only_request("TRANSIT", "198.51.100.0/24");
+        source["victim_ip"] = json!("203.0.113.1");
+        let (status, _) = fixture.post("/v1/vpn/source-rules", &source).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = fixture
+            .post(
+                "/v1/mitigations",
+                &source_only_request("global", "198.51.100.0/24"),
+            )
+            .await;
+        assert!(status.is_client_error());
+        fixture.assert_no_mutations().await;
+    }
+    #[tokio::test]
+    async fn vpn_routes_require_authentication_before_scope_or_policy_reads() {
+        let mut settings = vpn_settings();
+        settings.http.auth.mode = AuthMode::Credentials;
+        let fixture = Fixture::new(settings, FlowSpecMatchSupport::ALL);
+        for path in ["/v1/vpn/source-rules", "/v1/vpn/source-rules/preview"] {
+            let (status, _) = fixture
+                .post(path, &source_only_request("TRANSIT", "198.51.100.0/24"))
+                .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        for path in ["/v1/vpn/mitigations", "/v1/vpn/mitigations/preview"] {
+            let (status, _) = fixture
+                .post(
+                    path,
+                    &json!({"scope":"TRANSIT","rule":request("203.0.113.1")}),
+                )
+                .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
         fixture.assert_no_mutations().await;
     }
 }

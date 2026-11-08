@@ -309,7 +309,7 @@ impl RepositoryTrait for Repository {
             sqlx::query("SET LOCAL lock_timeout='5s'").execute(&mut *tx).await?;
             sqlx::query("SET LOCAL statement_timeout='5s'").execute(&mut *tx).await?;
             sqlx::query("SELECT pg_advisory_xact_lock(1886545528, 1903522164)").execute(&mut *tx).await?;
-            let conflict: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mitigations m WHERE m.pop=$1 AND $2::inet <<= (m.match_json::jsonb->>'dst_prefix')::inet AND (m.status IN ('pending','active','escalated') OR EXISTS(SELECT 1 FROM withdrawal_requests w WHERE w.mitigation_id=m.mitigation_id AND w.completed_at IS NULL))) OR EXISTS(SELECT 1 FROM scrubber_diversions WHERE pop=$1 AND victim=$2::inet AND status IN ('pending','active','withdrawing'))")
+            let conflict: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mitigations m WHERE m.pop=$1 AND $2::inet <<= (CASE WHEN m.match_json::jsonb->>'dst_prefix' = '' AND m.match_json::jsonb->'scope'->'identity'->>'family' = 'ipv4' AND m.match_json::jsonb->>'src_prefix' IS NOT NULL AND family((m.match_json::jsonb->>'src_prefix')::inet) = 4 THEN '0.0.0.0/0' WHEN m.match_json::jsonb->>'dst_prefix' = '' AND m.match_json::jsonb->'scope'->'identity'->>'family' = 'ipv6' AND m.match_json::jsonb->>'src_prefix' IS NOT NULL AND family((m.match_json::jsonb->>'src_prefix')::inet) = 6 THEN '::/0' ELSE m.match_json::jsonb->>'dst_prefix' END)::inet AND (m.status IN ('pending','active','escalated') OR EXISTS(SELECT 1 FROM withdrawal_requests w WHERE w.mitigation_id=m.mitigation_id AND w.completed_at IS NULL))) OR EXISTS(SELECT 1 FROM scrubber_diversions WHERE pop=$1 AND victim=$2::inet AND status IN ('pending','active','withdrawing'))")
                 .bind(&intent.pop).bind(intent.victim()).fetch_one(&mut *tx).await?;
             if conflict { return Err(PrefixdError::Conflict("victim has live or pending mitigation intent".into())); }
             let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scrubber_diversions WHERE pop=$1 AND status IN ('pending','active','withdrawing')").bind(&intent.pop).fetch_one(&mut *tx).await?;
@@ -747,8 +747,18 @@ impl RepositoryTrait for Repository {
             sqlx::query("SELECT pg_advisory_xact_lock(1886545528, 1903522164)")
                 .execute(&mut *tx).await?;
             if m.action_type != ActionType::Blackhole {
+                let destination = if m.match_criteria.dst_prefix.is_empty() {
+                    let scope = m.match_criteria.scope.as_ref().ok_or_else(|| PrefixdError::InvalidRequest("source-only admission requires VPN scope".into()))?;
+                    let max = quotas.source_only_limit.ok_or_else(|| PrefixdError::InvalidRequest("source-only admission requires its scope quota".into()))?;
+                    crate::domain::FlowSpecNlri::from(&m.match_criteria).validate().map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+                    let identity = serde_json::to_string(&scope.identity)?;
+                    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE pop=$1 AND status IN ('pending','active','escalated') AND match_json::jsonb->>'dst_prefix' = '' AND match_json::jsonb->'scope'->'identity' = $2::jsonb")
+                        .bind(&m.pop).bind(identity).fetch_one(&mut *tx).await?;
+                    check_active_quota("source_only", u32::try_from(count).unwrap_or(u32::MAX), max)?;
+                    match scope.identity.family { crate::domain::VpnFlowSpecFamily::Ipv4 => "0.0.0.0/0", crate::domain::VpnFlowSpecFamily::Ipv6 => "::/0" }
+                } else { &m.match_criteria.dst_prefix };
                 let conflict: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM scrubber_diversions WHERE pop=$1 AND victim <<= $2::inet AND status IN ('pending','active','withdrawing'))")
-                    .bind(&m.pop).bind(&m.match_criteria.dst_prefix).fetch_one(&mut *tx).await?;
+                    .bind(&m.pop).bind(destination).fetch_one(&mut *tx).await?;
                 if conflict { return Err(PrefixdError::Conflict("victim has live or pending scrubber diversion".into())); }
                 if let Some(customer_id) = &m.customer_id {
                     let count: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND customer_id = $1 AND status IN ('pending', 'active', 'escalated')) + (SELECT COUNT(*) FROM scrubber_diversions WHERE customer_id = $1 AND status IN ('pending','active','withdrawing'))")
@@ -847,9 +857,12 @@ impl RepositoryTrait for Repository {
             let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
                 .fetch_one(&mut *tx).await?;
             request.validate_current(&current, now)?;
+            let protection_prefix = if current.match_criteria.dst_prefix.is_empty() {
+                current.match_criteria.src_prefix.as_deref().ok_or_else(|| PrefixdError::InvalidRequest("source-only rule has no source prefix".into()))?
+            } else { &current.match_criteria.dst_prefix }.to_owned();
             let (withdrawing, safelisted): (bool, bool) = sqlx::query_as(
                 "SELECT EXISTS (SELECT 1 FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL), EXISTS (SELECT 1 FROM safelist WHERE $2::inet && prefix::inet)",
-            ).bind(current.mitigation_id).bind(&current.match_criteria.dst_prefix)
+            ).bind(current.mitigation_id).bind(&protection_prefix)
                 .fetch_one(&mut *tx).await?;
             if withdrawing {
                 return Err(PrefixdError::Conflict(
@@ -858,7 +871,7 @@ impl RepositoryTrait for Repository {
             }
             // Same 422 refusal as preparation for a safelist that landed meanwhile.
             if safelisted {
-                return Err(crate::domain::extension_safelisted(&current.match_criteria.dst_prefix));
+                return Err(crate::domain::extension_safelisted(&protection_prefix));
             }
             request.ensure_fence(fence)?;
             // Decide from the exact sample used for the write. A backward wall-
@@ -879,7 +892,7 @@ impl RepositoryTrait for Repository {
                 RETURNING m.*"#,
             ).bind(current.mitigation_id).bind(current.updated_at).bind(current.expires_at)
                 .bind(f64::from(request.ttl_seconds)).bind(&current.pop)
-                .bind(&current.match_criteria.dst_prefix)
+                .bind(&protection_prefix)
                 .fetch_optional(&mut *tx).await?;
             let extended = row.is_some();
             let updated = if let Some(row) = row {
@@ -898,14 +911,14 @@ impl RepositoryTrait for Repository {
             let (eligible, safelisted): (bool, bool) = sqlx::query_as(
                 "SELECT $1::timestamptz > clock_timestamp() AND NOT EXISTS (SELECT 1 FROM withdrawal_requests WHERE mitigation_id = $2 AND completed_at IS NULL), EXISTS (SELECT 1 FROM safelist WHERE $3::inet && prefix::inet)",
             ).bind(request.expected.expires_at).bind(updated.mitigation_id)
-                .bind(&updated.match_criteria.dst_prefix).fetch_one(&mut *tx).await?;
+                .bind(&protection_prefix).fetch_one(&mut *tx).await?;
             if !eligible {
                 return Err(PrefixdError::Conflict(
                     "mitigation expired or began withdrawal during lifetime update".into(),
                 ));
             }
             if safelisted {
-                return Err(crate::domain::extension_safelisted(&updated.match_criteria.dst_prefix));
+                return Err(crate::domain::extension_safelisted(&protection_prefix));
             }
             request.ensure_fence(fence)?;
             let outcome = LifetimeExtensionOutcome {

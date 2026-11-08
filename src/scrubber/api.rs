@@ -24,6 +24,47 @@ pub struct CreateDiversion {
     pub reason: String,
     pub confirmation: Option<String>,
 }
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VpnDiversionRequest {
+    pub scope: String,
+    pub diversion: CreateDiversion,
+}
+
+impl VpnDiversionRequest {
+    fn into_diversion(mut self, state: &AppState) -> Result<CreateDiversion> {
+        let scope = state
+            .settings
+            .bgp
+            .resolve_scope(&self.scope)
+            .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?
+            .ok_or_else(|| {
+                PrefixdError::InvalidRequest("VPN diversion requires a named VPN scope".into())
+            })?;
+        let profile = state
+            .settings
+            .scrubber
+            .profiles
+            .iter()
+            .find(|profile| profile.id == self.diversion.profile)
+            .ok_or_else(|| PrefixdError::NotFound("unknown scrubber profile".into()))?;
+        if profile.scope != self.scope
+            || self
+                .diversion
+                .scope
+                .scope
+                .as_ref()
+                .is_some_and(|identity| identity != &scope.identity)
+        {
+            return Err(PrefixdError::InvalidRequest(
+                "VPN diversion scope must match its configured profile".into(),
+            ));
+        }
+        self.diversion.scope.scope = Some(scope.identity);
+        Ok(self.diversion)
+    }
+}
+
 #[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArmProfile {
@@ -45,12 +86,15 @@ pub struct ScrubberProfiles {
 }
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct ConfiguredProfile {
+    pub scope: String,
     pub id: String,
     pub revision: String,
     #[schema(value_type = Option<String>, example = "192.0.2.99")]
     pub ipv4_target: Option<std::net::IpAddr>,
     #[schema(value_type = Option<String>, example = "2001:db8::99")]
     pub ipv6_target: Option<std::net::IpAddr>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_route_target: Option<String>,
 }
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct DiversionPreview {
@@ -129,10 +173,12 @@ pub async fn profiles(
             .profiles
             .iter()
             .map(|profile| ConfiguredProfile {
+                scope: profile.scope.clone(),
                 id: profile.id.clone(),
                 revision: profile.revision.clone(),
                 ipv4_target: profile.ipv4_target,
                 ipv6_target: profile.ipv6_target,
+                redirect_route_target: profile.redirect_route_target.clone(),
             })
             .collect(),
     };
@@ -213,6 +259,54 @@ pub async fn create(
     .await;
     Ok(response(result, StatusCode::ACCEPTED))
 }
+#[utoipa::path(post,path="/v1/vpn/diversions/preview",tag="scrubbers",request_body=VpnDiversionRequest,responses(
+    (status=200,body=DiversionPreview,description="Named VPN profile and exact scoped rule acknowledged; no speaker mutation"),
+    (status=400,body=ErrorResponse,description="Global, unknown or mismatched VPN scope"),
+    (status=401,description="Authentication required"),
+    (status=403,description="Administrator role required"),
+    (status=404,body=ErrorResponse,description="Unknown scrubber profile"),
+    (status=409,body=ErrorResponse,description="Scrubber diversion disabled"),
+    (status=422,description="Malformed scoped request or guardrail refusal"),
+    (status=503,body=ErrorResponse,description="Capability or controller unavailable"),
+))]
+pub async fn preview_vpn(
+    State(state): State<Arc<AppState>>,
+    session: AuthSession,
+    headers: HeaderMap,
+    Json(req): Json<VpnDiversionRequest>,
+) -> std::result::Result<Response, StatusCode> {
+    admin(&state, &session, &headers)?;
+    let req = match req.into_diversion(&state) {
+        Ok(req) => req,
+        Err(error) => return Ok(response::<()>(Err(error), StatusCode::BAD_REQUEST)),
+    };
+    preview(State(state), session, headers, Json(req)).await
+}
+
+#[utoipa::path(post,path="/v1/vpn/diversions",tag="scrubbers",request_body=VpnDiversionRequest,responses(
+    (status=202,body=Diversion,description="Immutable scoped guarded intent; remote installation remains unqualified"),
+    (status=400,body=ErrorResponse,description="Global, unknown or mismatched VPN scope, or confirmation mismatch"),
+    (status=401,description="Authentication required"),
+    (status=403,description="Administrator role required"),
+    (status=404,body=ErrorResponse,description="Unknown scrubber profile"),
+    (status=409,body=ErrorResponse,description="Readiness, scope ownership or live intent conflict"),
+    (status=422,description="Malformed scoped request or guardrail refusal"),
+    (status=503,body=ErrorResponse,description="Capability or controller unavailable"),
+))]
+pub async fn create_vpn(
+    State(state): State<Arc<AppState>>,
+    session: AuthSession,
+    headers: HeaderMap,
+    Json(req): Json<VpnDiversionRequest>,
+) -> std::result::Result<Response, StatusCode> {
+    admin(&state, &session, &headers)?;
+    let req = match req.into_diversion(&state) {
+        Ok(req) => req,
+        Err(error) => return Ok(response::<()>(Err(error), StatusCode::BAD_REQUEST)),
+    };
+    create(State(state), session, headers, Json(req)).await
+}
+
 #[utoipa::path(get,path="/v1/diversions",tag="scrubbers",responses(
     (status=200,body=Vec<Diversion>,description="All outstanding local intents, including pending withdrawals"),
     (status=401,description="Authentication required"),

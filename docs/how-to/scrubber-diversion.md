@@ -1,9 +1,11 @@
 # Manual scrubber diversion
 
-Scrubber diversion is disabled by default. It uses rustbgpd v0.81.0's guarded
-FlowSpec methods to redirect selected traffic for one owned host to a configured,
-same-family IP target. It does not configure the scrubber or its clean return
-path. The first workflow is manual and requires an administrator; detector and
+Scrubber diversion is disabled by default. Global IP-target diversion uses
+guarded FlowSpec methods available in rustbgpd 0.81.0 or later. VPN diversion
+requires rustbgpd 0.82.0 or later, a named VPN scope and a successful family 13/14
+probe. It redirects selected traffic for one owned host to a configured,
+same-family IP target or scrubbing VRF route target. It does not configure the
+scrubber, VRFs or the clean return path. The first workflow is manual and requires an administrator; detector and
 playbook actions cannot request diversion.
 
 The controller fixtures qualify local intent, ownership and failure handling.
@@ -42,7 +44,38 @@ scrubber:
       reserved_targets: [192.0.2.1/32]
 ```
 
-An omitted target family is unsupported. Targets must be unicast literals;
+For redirect-to-VRF, replace both IP targets with one action route target.
+This VPN-only action requires rustbgpd 0.82.0 and a successful family 13 or 14
+probe for the [configured VPN scope](vpn-flowspec.md#configure-scope):
+
+```yaml
+      scope: TRANSIT
+      redirect_route_target: "44407:888"
+      # Omit ipv4_target and ipv6_target.
+```
+
+The configured VPN scope's RD and scope RT (for example `44407:777`) identify
+where the receiver imports the mitigation rule. `redirect_route_target` selects
+the scrubbing VRF used by the redirect action. These are different attributes:
+scope RTs use subtype `0x02`; redirect-to-VRF uses RFC 8955/RFC 7674 types
+`0x80`, `0x81` or `0x82` with subtype `0x08`. AS2, IPv4-administrator and AS4
+forms are supported, including `0.ASN:value` to preserve a small-ASN AS4 form.
+The controller requires a named VPN scope for this action and rejects a profile
+mixing IP targets and a VRF action target. Global IP-target diversion keeps its
+existing behavior.
+No API payload can supply an arbitrary action target.
+
+The same guarded admission, readiness, revision and withdrawal rules apply to
+both action types. For a VRF target, the monitor's `target_reachable` and canary
+checks must establish the configured scrubbing-VRF import, forwarding and clean
+return path. A ping, BGP session or local RPC acceptance cannot establish those
+properties. Qualify the receiver's redirect action and loop avoidance per
+platform and software release. The dashboard, preview confirmation, saved rule
+and audit identify this action as `VRF RT ...` separately from scope RTs.
+Changing the action target requires draining the held admission, then creating
+a new revision; retries and pending withdrawals retain the original target.
+
+For IP-target profiles, an omitted target family is unsupported. Targets must be unicast literals;
 unspecified, loopback, link-local, multicast, mapped IPv6, IPv4 `0/8` and `240/4`
 and configured reserved targets are refused. The target cannot equal the victim.
 Private targets are allowed when explicitly configured. Router identities must
