@@ -218,6 +218,20 @@ async fn source_only_extension_keeps_short_ceiling_and_rechecks_source_safelist(
     )
     .await;
     let id = admitted["mitigation_id"].as_str().unwrap();
+    let report = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/reports/incident?mitigation_id={id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        report.status(),
+        StatusCode::BAD_REQUEST,
+        "source-only rules have no destination incident target"
+    );
     let extended = post(
         &app,
         &format!("/v1/mitigations/{id}/extend"),
