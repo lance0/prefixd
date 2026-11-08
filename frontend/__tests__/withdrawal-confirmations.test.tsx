@@ -48,6 +48,18 @@ const targets: Mitigation[] = [10, 11].map((suffix) => ({
   acknowledged_by: null,
 }))
 
+const sourceOnly: Mitigation = {
+  ...targets[0],
+  victim_ip: "any",
+  dst_prefix: "",
+  src_prefix: "198.51.100.0/24",
+  vpn_scope: {
+    name: "TRANSIT",
+    identity: { family: "ipv4", rd: "44407:40" },
+    route_targets: ["44407:777"],
+  },
+}
+
 const detailPath = `/v1/mitigations/${targets[0].mitigation_id}`
 
 /** Serves the mitigations an operator sees: the list and the first target's detail. */
@@ -268,6 +280,19 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     await act(async () => refresh.resolve())
     await waitFor(() => expect(trigger).not.toBeInTheDocument())
     await waitFor(() => expect(stableTarget).toHaveFocus())
+  })
+})
+
+describe("source-only withdrawal confirmation", { timeout: 10_000 }, () => {
+  it("names the VPN scope and source, and hides the destination-only report action", async () => {
+    serveMitigations([sourceOnly], sourceOnly)
+    await renderView("detail")
+    const { dialog } = await openSingle("detail")
+
+    expect(within(dialog).getByText("TRANSIT · VPNv4 · RD 44407:40 · RT 44407:777")).toBeVisible()
+    expect(within(dialog).getByText("198.51.100.0/24")).toBeVisible()
+    expect(dialog).toHaveTextContent("(discard).")
+    expect(screen.queryByRole("button", { name: "Report" })).not.toBeInTheDocument()
   })
 })
 

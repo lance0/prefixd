@@ -237,10 +237,12 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
           }
           actions={
             <>
-              <Button variant="outline" size="sm" onClick={handleGenerateReport}>
-                <FileText className="size-4" aria-hidden="true" />
-                Report
-              </Button>
+              {mitigation.dst_prefix ? (
+                <Button variant="outline" size="sm" onClick={handleGenerateReport}>
+                  <FileText className="size-4" aria-hidden="true" />
+                  Report
+                </Button>
+              ) : null}
               <ExtendLifetimeDialog mitigation={mitigation} now={now} onUpdated={async () => { await mutate() }} />
               {permissions.canWithdraw && canWithdraw ? (
                 <Button
@@ -567,7 +569,10 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
           <AlertDialogHeader>
             <AlertDialogTitle>Withdraw Mitigation</AlertDialogTitle>
             <AlertDialogDescription>
-              Request withdrawal for <span className="font-mono font-semibold">{mitigation?.victim_ip}</span>.
+              Request withdrawal for <span className="font-mono font-semibold">{mitigation?.dst_prefix || mitigation?.victim_ip}</span>
+              {mitigation?.vpn_scope ? <> in <span className="font-mono">{formatRoutingScope(mitigation.vpn_scope)}</span></> : null}
+              {mitigation?.src_prefix ? <> from source <span className="font-mono">{mitigation.src_prefix}</span></> : null}
+              {" "}({mitigation?.action_type}).
               Local completion is recorded in the audit log. Router convergence and traffic filtering are not verified here.
             </AlertDialogDescription>
           </AlertDialogHeader>
