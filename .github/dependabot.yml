@@ -17,8 +17,8 @@ updates:
     commit-message:
       prefix: "deps(actions):"
 
-  # npm (frontend)
-  - package-ecosystem: "npm"
+  # Bun (frontend); this repository commits bun.lock, not an npm lockfile.
+  - package-ecosystem: "bun"
     directory: "/frontend"
     schedule:
       interval: "weekly"
