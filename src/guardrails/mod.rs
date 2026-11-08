@@ -1,3 +1,6 @@
+mod source_only;
+pub(crate) use source_only::{source_only_policy, validate_source_only};
+
 mod blackhole;
 
 pub use blackhole::{
@@ -87,9 +90,13 @@ impl Guardrails {
 
         // Check safelist
         if is_safelisted {
-            let ip = &intent.match_criteria.dst_prefix;
+            let ip = if intent.match_criteria.dst_prefix.is_empty() {
+                intent.match_criteria.src_prefix.as_deref().unwrap_or("")
+            } else {
+                &intent.match_criteria.dst_prefix
+            };
             return Err(PrefixdError::GuardrailViolation(
-                GuardrailError::Safelisted { ip: ip.clone() },
+                GuardrailError::Safelisted { ip: ip.into() },
             ));
         }
 
@@ -97,7 +104,9 @@ impl Guardrails {
         self.validate_ttl(intent.ttl_seconds)?;
 
         // Check prefix length
-        self.validate_prefix_length(&intent.match_criteria)?;
+        if !intent.match_criteria.dst_prefix.is_empty() {
+            self.validate_prefix_length(&intent.match_criteria)?;
+        }
 
         // Check port count
         self.validate_port_count(&intent.match_criteria)?;
@@ -593,6 +602,7 @@ mod tests {
                 allow_packet_length_match: false,
             },
             QuotasConfig {
+                source_only_limit: None,
                 max_active_per_customer: 5,
                 max_active_per_pop: 200,
                 max_active_global: 500,
@@ -656,6 +666,7 @@ mod tests {
                 allow_packet_length_match: true,
             },
             QuotasConfig {
+                source_only_limit: None,
                 max_active_per_customer: 100,
                 max_active_per_pop: 1000,
                 max_active_global: 5000,

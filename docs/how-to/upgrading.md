@@ -1816,3 +1816,13 @@ If you have **custom scripts or integrations** that page through results with `o
 - **prefixdctl default endpoint** changed from `http://127.0.0.1:8080` to `http://127.0.0.1` (nginx)
 - **Timeseries bucketing fix** -- sub-hour buckets now align correctly
 - No config file changes required
+
+## VPN FlowSpec and downgrade
+
+Drain all VPN mitigations, diversions and pending withdrawals against their
+original target before starting a controller that cannot preserve scope. Scope
+name/RD/RT edits with outstanding intent fail startup; changing the default only
+changes new admissions. A speaker downgrade or failed capability probe retains
+VPN intent/error state and refuses mutations/replay without global fallback.
+Global-only deployments retain the rustbgpd 0.81.0 minimum. See
+[VPN FlowSpec](vpn-flowspec.md) for the 0.82.0 capability boundary.

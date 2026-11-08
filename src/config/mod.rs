@@ -1,10 +1,12 @@
 mod inventory;
 mod playbooks;
 mod settings;
+mod vpn_scope;
 
 pub use inventory::*;
 pub use playbooks::*;
 pub use settings::*;
+pub use vpn_scope::*;
 
 use anyhow::Result;
 use std::path::Path;

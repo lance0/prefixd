@@ -419,6 +419,10 @@ pub async fn generate_incident_report(
                 Ok(None) => return StatusCode::NOT_FOUND.into_response(),
                 Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             };
+            // Source-only VPN rules have no destination target to report on.
+            if mitigation.match_criteria.dst_prefix.is_empty() {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
             (
                 mitigation.victim_ip,
                 Some((mitigation.customer_id, mitigation.service_id)),

@@ -167,6 +167,21 @@ enum OperatorCommands {
 
 #[derive(Subcommand)]
 enum MitigationCommands {
+    /// Preview a manual FlowSpec mitigation without changing routing state
+    Preview {
+        #[command(flatten)]
+        rule: ManualMitigationArgs,
+    },
+
+    /// Create a manual FlowSpec mitigation after an admission preview
+    Create {
+        #[command(flatten)]
+        rule: ManualMitigationArgs,
+        /// Accept that a source-only rule affects every destination in the VRF
+        #[arg(long, requires = "source_only")]
+        confirm_destination_any: bool,
+    },
+
     /// List mitigations, newest first, in every status unless --status is given
     List {
         /// Filter by status (pending, active, expired, withdrawn, rejected)
@@ -215,6 +230,77 @@ enum MitigationCommands {
         #[arg(short, long, env = "USER")]
         operator: String,
     },
+}
+
+#[derive(clap::Args)]
+struct ManualMitigationArgs {
+    /// Destination address or exact CIDR; omitted only with --source-only
+    #[arg(required_unless_present = "source_only")]
+    victim_ip: Option<String>,
+    /// Configured routing scope; omitted or global uses global FlowSpec
+    #[arg(long)]
+    scope: Option<String>,
+    /// Match a source CIDR and every destination in the selected VPN
+    #[arg(long, requires_all = ["scope", "src_prefix"], conflicts_with_all = ["victim_ip", "dst_ports"])]
+    source_only: bool,
+    #[arg(long)]
+    src_prefix: Option<String>,
+    #[arg(long, default_value = "any", value_parser = ["any", "udp", "tcp", "icmp", "icmpv6"])]
+    protocol: String,
+    #[arg(long, value_delimiter = ',')]
+    dst_ports: Vec<u16>,
+    #[arg(long, default_value = "discard", value_parser = ["discard", "police"])]
+    action: String,
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    rate_bps: Option<u64>,
+    /// Explicit requested lifetime, subject to current controller policy
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    ttl_seconds: u32,
+    #[arg(short, long, value_parser = parse_extension_reason)]
+    reason: String,
+}
+
+impl ManualMitigationArgs {
+    fn vpn_scope(&self) -> Option<&str> {
+        self.scope.as_deref().filter(|name| *name != "global")
+    }
+
+    fn request(&self, confirmed: bool) -> Result<(&'static str, serde_json::Value), String> {
+        if (self.action == "police") != self.rate_bps.is_some() {
+            return Err("--rate-bps is required for police and must be omitted for discard".into());
+        }
+        if self.source_only {
+            let scope = self
+                .vpn_scope()
+                .ok_or("source-only rules require a VPN scope")?;
+            let source = self
+                .src_prefix
+                .as_deref()
+                .ok_or("--src-prefix is required")?;
+            return Ok((
+                "/v1/vpn/source-rules",
+                serde_json::json!({
+                    "scope": scope, "src_prefix": source, "protocol": self.protocol,
+                    "action": self.action, "rate_bps": self.rate_bps,
+                    "ttl_seconds": self.ttl_seconds, "reason": self.reason,
+                    "confirm_destination_any": confirmed,
+                }),
+            ));
+        }
+        let victim = self.victim_ip.as_deref().ok_or("destination is required")?;
+        let rule = serde_json::json!({
+            "victim_ip": victim, "protocol": self.protocol, "src_prefix": self.src_prefix,
+            "dst_ports": self.dst_ports, "action": self.action, "rate_bps": self.rate_bps,
+            "ttl_seconds": self.ttl_seconds, "reason": self.reason,
+        });
+        Ok(match self.vpn_scope() {
+            Some(scope) => (
+                "/v1/vpn/mitigations",
+                serde_json::json!({"scope": scope, "rule": rule}),
+            ),
+            None => ("/v1/mitigations", rule),
+        })
+    }
 }
 
 #[derive(Subcommand)]
@@ -305,6 +391,8 @@ struct MitigationResponse {
     status: String,
     customer_id: Option<String>,
     victim_ip: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dst_prefix: Option<String>,
     vector: String,
     action_type: String,
     rate_bps: Option<u64>,
@@ -324,6 +412,8 @@ struct MitigationResponse {
     created_at: String,
     expires_at: String,
     scope_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vpn_scope: Option<prefixd::domain::VpnScopeSnapshot>,
     /// Present only for a blackhole, which drops all traffic to the victim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     blackhole: Option<BlackholeRoute>,
@@ -336,12 +426,20 @@ struct PacketLength {
 }
 
 impl MitigationResponse {
+    fn destination_label(&self) -> &str {
+        if self.vpn_scope.is_some() && self.dst_prefix.as_deref() == Some("") {
+            "any"
+        } else {
+            &self.victim_ip
+        }
+    }
+
     /// One-line match, for example `udp src 123,389` or `udp non-first fragments`.
     fn match_summary(&self) -> String {
         if self.blackhole.is_some() || self.action_type == "blackhole" {
             return "all traffic".into();
         }
-        match_summary(
+        let summary = match_summary(
             self.protocol,
             self.src_prefix.as_deref(),
             &self.dst_ports,
@@ -350,7 +448,32 @@ impl MitigationResponse {
             self.packet_length
                 .as_ref()
                 .map(|length| (length.min, length.max)),
-        )
+        );
+        match &self.vpn_scope {
+            Some(scope) => format!(
+                "{summary}; {}",
+                vpn_scope_summary(Some(&scope.identity), &scope.route_targets)
+            ),
+            None => summary,
+        }
+    }
+}
+
+fn vpn_scope_summary(
+    identity: Option<&prefixd::domain::VpnFlowSpecIdentity>,
+    route_targets: &[String],
+) -> String {
+    match identity {
+        None => "global".into(),
+        Some(identity) => format!(
+            "VPN {} RD {} RT {}",
+            match identity.family {
+                prefixd::domain::VpnFlowSpecFamily::Ipv4 => "IPv4",
+                prefixd::domain::VpnFlowSpecFamily::Ipv6 => "IPv6",
+            },
+            identity.rd(),
+            route_targets.join(","),
+        ),
     }
 }
 
@@ -617,6 +740,120 @@ async fn cmd_scrubbers(client: &Client, command: ScrubberCommands) -> Result<(),
     Ok(())
 }
 
+fn read_diversion_request(path: &std::path::Path) -> Result<serde_json::Value, String> {
+    let bytes = std::fs::read(path).map_err(|_| "cannot read diversion request file")?;
+    if bytes.len() > 16_384 {
+        return Err("diversion request file is too large".into());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "invalid diversion request JSON".into())
+}
+
+fn vpn_diversion_request(
+    body: &serde_json::Value,
+) -> Result<Option<prefixd::scrubber::api::VpnDiversionRequest>, String> {
+    if body.get("diversion").is_some() || body["scope"].is_string() {
+        let request: prefixd::scrubber::api::VpnDiversionRequest =
+            serde_json::from_value(body.clone()).map_err(|_| "invalid VPN diversion envelope")?;
+        if request.scope == "global"
+            || request.scope.is_empty()
+            || request.scope.len() > 64
+            || !request
+                .scope
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+        {
+            return Err("VPN diversion requires a configured VPN scope name".into());
+        }
+        return Ok(Some(request));
+    }
+    let request: prefixd::scrubber::api::CreateDiversion =
+        serde_json::from_value(body.clone()).map_err(|_| "invalid diversion request")?;
+    if request.scope.scope.is_some() {
+        return Err("VPN diversion requires a named scope envelope".into());
+    }
+    Ok(None)
+}
+
+fn require_vpn_diversion_preview<'a>(
+    request: &prefixd::scrubber::api::VpnDiversionRequest,
+    preview: &'a serde_json::Value,
+) -> Result<&'a str, String> {
+    let candidate: prefixd::scrubber::Diversion =
+        serde_json::from_value(preview["candidate"].clone())
+            .map_err(|_| "controller did not acknowledge the VPN diversion; no rule was created")?;
+    candidate
+        .rule
+        .validate()
+        .map_err(|error| error.to_string())?;
+    let identity = candidate
+        .rule
+        .nlri
+        .scope
+        .as_ref()
+        .ok_or("controller did not acknowledge the VPN identity; no rule was created")?;
+    prefixd::domain::VpnScopeSnapshot::new(
+        &request.scope,
+        identity.clone(),
+        &candidate.rule.route_targets,
+    )
+    .map_err(|_| "controller did not acknowledge valid VPN route targets; no rule was created")?;
+    if candidate.profile.scope != request.scope
+        || candidate.profile.id != request.diversion.profile
+        || request
+            .diversion
+            .scope
+            .scope
+            .as_ref()
+            .is_some_and(|requested| requested != identity)
+    {
+        return Err(
+            "controller acknowledged a different VPN profile or scope; no rule was created".into(),
+        );
+    }
+    let mut expected = request.diversion.scope.clone();
+    expected.scope = Some(identity.clone());
+    if expected.compute_hash() != candidate.rule.nlri.compute_hash() {
+        return Err("controller acknowledged a different VPN match; no rule was created".into());
+    }
+    let confirmation = preview["confirmation"]
+        .as_str()
+        .ok_or("controller did not provide a full diversion confirmation")?;
+    let expected = prefixd::scrubber::ScrubberController::confirmation(&candidate)
+        .map_err(|error| error.to_string())?;
+    if confirmation != expected {
+        return Err("controller confirmation does not match its VPN diversion".into());
+    }
+    Ok(confirmation)
+}
+
+async fn submit_diversion(
+    client: &Client,
+    mut body: serde_json::Value,
+    confirmation: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    if let Some(request) = vpn_diversion_request(&body)? {
+        let preview: serde_json::Value = client.post("/v1/vpn/diversions/preview", &body).await?;
+        let acknowledged = require_vpn_diversion_preview(&request, &preview)?;
+        return match confirmation {
+            None => Ok(preview),
+            Some(confirmation) => {
+                if confirmation != acknowledged {
+                    return Err("diversion confirmation changed; preview and confirm the complete VPN rule again".into());
+                }
+                body["diversion"]["confirmation"] = confirmation.into();
+                client.post("/v1/vpn/diversions", &body).await
+            }
+        };
+    }
+    match confirmation {
+        None => client.post("/v1/diversions/preview", &body).await,
+        Some(confirmation) => {
+            body["confirmation"] = confirmation.into();
+            client.post("/v1/diversions", &body).await
+        }
+    }
+}
+
 async fn cmd_diversions(client: &Client, command: DiversionCommands) -> Result<(), String> {
     let value: serde_json::Value = match command {
         DiversionCommands::List => client.get("/v1/diversions").await?,
@@ -631,29 +868,10 @@ async fn cmd_diversions(client: &Client, command: DiversionCommands) -> Result<(
                 .await?
         }
         DiversionCommands::Preview { file } => {
-            let bytes = std::fs::read(file).map_err(|_| "cannot read diversion request file")?;
-            if bytes.len() > 16_384 {
-                return Err("diversion request file is too large".into());
-            }
-            let body: serde_json::Value =
-                serde_json::from_slice(&bytes).map_err(|_| "invalid diversion request JSON")?;
-            client.post("/v1/diversions/preview", &body).await?
+            submit_diversion(client, read_diversion_request(&file)?, None).await?
         }
         DiversionCommands::Create { file, confirmation } => {
-            let bytes = std::fs::read(file).map_err(|_| "cannot read diversion request file")?;
-            if bytes.len() > 16_384 {
-                return Err("diversion request file is too large".into());
-            }
-            let mut body: serde_json::Value =
-                serde_json::from_slice(&bytes).map_err(|_| "invalid diversion request JSON")?;
-            let object = body
-                .as_object_mut()
-                .ok_or("diversion request must be a JSON object")?;
-            object.insert(
-                "confirmation".into(),
-                serde_json::Value::String(confirmation),
-            );
-            client.post("/v1/diversions", &body).await?
+            submit_diversion(client, read_diversion_request(&file)?, Some(&confirmation)).await?
         }
     };
     println!(
@@ -749,12 +967,97 @@ async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String>
     Ok(())
 }
 
+fn require_manual_preview(
+    rule: &ManualMitigationArgs,
+    preview: &serde_json::Value,
+) -> Result<(), String> {
+    if preview["outcome"] != "admissible" {
+        return Err(format!(
+            "admission preview refused: {}",
+            preview["reason"].as_str().unwrap_or("unavailable")
+        ));
+    }
+    if let Some(name) = rule.vpn_scope() {
+        let scope: prefixd::domain::VpnScopeSnapshot =
+            serde_json::from_value(preview["candidate"]["vpn_scope"].clone())
+                .map_err(|_| "controller did not acknowledge the VPN scope; no rule was created")?;
+        if scope.name != name {
+            return Err(
+                "controller acknowledged a different VPN scope; no rule was created".into(),
+            );
+        }
+        let address = if rule.source_only {
+            rule.src_prefix.as_deref()
+        } else {
+            rule.victim_ip.as_deref()
+        }
+        .and_then(|prefix| prefix.split('/').next())
+        .ok_or("request has no address family")?
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| "request address is invalid")?;
+        if address.is_ipv4() != (scope.identity.family == prefixd::domain::VpnFlowSpecFamily::Ipv4)
+        {
+            return Err(
+                "controller acknowledged a different VPN family; no rule was created".into(),
+            );
+        }
+        if rule.source_only && preview["candidate"]["destination"] != "any" {
+            return Err(
+                "controller did not acknowledge destination:any; no rule was created".into(),
+            );
+        }
+    }
+    if let Some(source) = &rule.src_prefix {
+        let requested =
+            prefixd::domain::canonical_source_prefix(source).map_err(|e| e.to_string())?;
+        if preview["candidate"]["scope"]["src_prefix"] != requested {
+            return Err(
+                "controller did not acknowledge the source prefix; no rule was created".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_manual_mitigation(
+    client: &Client,
+    rule: ManualMitigationArgs,
+    create: bool,
+    confirmed: bool,
+) -> Result<(), String> {
+    if create && rule.source_only && !confirmed {
+        return Err("source-only creation requires --confirm-destination-any".into());
+    }
+    let (path, body) = rule.request(confirmed)?;
+    let preview: serde_json::Value = client.post(&format!("{path}/preview"), &body).await?;
+    let value = if create {
+        require_manual_preview(&rule, &preview)?;
+        client.post(path, &body).await?
+    } else {
+        preview
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
 async fn cmd_mitigations(
     client: &Client,
     cmd: MitigationCommands,
     format: OutputFormat,
 ) -> Result<(), String> {
     match cmd {
+        MitigationCommands::Preview { rule } => {
+            cmd_manual_mitigation(client, rule, false, false).await?;
+        }
+        MitigationCommands::Create {
+            rule,
+            confirm_destination_any,
+        } => {
+            cmd_manual_mitigation(client, rule, true, confirm_destination_any).await?;
+        }
         MitigationCommands::List {
             status,
             customer,
@@ -795,7 +1098,7 @@ async fn cmd_mitigations(
                             "{:<36}  {:<10}  {:<15}  {:<10}  {:<9}  {:<19}  {}",
                             m.mitigation_id,
                             m.status,
-                            m.victim_ip,
+                            m.destination_label(),
                             m.vector,
                             m.action_type,
                             expires,
@@ -820,10 +1123,19 @@ async fn cmd_mitigations(
                 OutputFormat::Table => {
                     println!("Mitigation ID:  {}", m.mitigation_id);
                     println!("Status:         {}", m.status);
-                    println!("Victim IP:      {}", m.victim_ip);
+                    println!("Victim IP:      {}", m.destination_label());
                     println!("Vector:         {}", m.vector);
                     println!("Action:         {}", m.action_type);
                     println!("Match:          {}", m.match_summary());
+                    println!(
+                        "Scope:          {}",
+                        vpn_scope_summary(
+                            m.vpn_scope.as_ref().map(|scope| &scope.identity),
+                            m.vpn_scope
+                                .as_ref()
+                                .map_or(&[], |scope| scope.route_targets.as_slice())
+                        )
+                    );
                     if let Some(rate) = m.rate_bps {
                         println!("Rate (bps):     {}", rate);
                     }
@@ -1010,8 +1322,8 @@ async fn cmd_speaker_routes(client: &Client, format: OutputFormat) -> Result<(),
                 return Ok(());
             }
             println!(
-                "{:<25}  {:<45}  {:<20}  OWNER",
-                "DESTINATION", "MATCH", "ACTION"
+                "{:<25}  {:<45}  {:<20}  {:<40}  OWNER",
+                "DESTINATION", "MATCH", "ACTION", "SCOPE"
             );
             for rule in inventory.routes {
                 let nlri = &rule.nlri;
@@ -1035,10 +1347,15 @@ async fn cmd_speaker_routes(client: &Client, format: OutputFormat) -> Result<(),
                     .collect::<Vec<_>>()
                     .join(", ");
                 println!(
-                    "{:<25}  {:<45}  {:<20}  {}",
-                    nlri.dst_prefix,
+                    "{:<25}  {:<45}  {:<20}  {:<40}  {}",
+                    if nlri.dst_prefix.is_empty() {
+                        "any"
+                    } else {
+                        &nlri.dst_prefix
+                    },
                     summary,
                     actions,
+                    vpn_scope_summary(nlri.scope.as_ref(), &rule.route_targets),
                     if rule.owner.is_empty() {
                         "-"
                     } else {
@@ -1355,6 +1672,432 @@ async fn cmd_migrations(format: OutputFormat) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn diversion_cli_fixture(family: &str) -> (serde_json::Value, serde_json::Value) {
+        let (prefix, target) = if family == "ipv4" {
+            ("203.0.113.10/32", "192.0.2.99")
+        } else {
+            ("2001:db8:1::10/128", "2001:db8::99")
+        };
+        let request = serde_json::json!({"scope":"TRANSIT","diversion":{
+            "profile":"a","scope":{"dst_prefix":prefix,"protocol":6,"dst_ports":[443]},
+            "ttl_seconds":60,"reason":"confirmed attack"
+        }});
+        let candidate: prefixd::scrubber::Diversion = serde_json::from_value(serde_json::json!({
+            "id":"7f72a903-63d1-4a4a-a5db-0517e0a7df1d",
+            "controller_incarnation":"7f72a903-63d1-4a4a-a5db-0517e0a7df1e",
+            "controller_epoch":1,"pop":"p","customer_id":"c",
+            "profile":{"id":"a","revision":"r1","scope":"TRANSIT","router_peers":[],
+                "policy_binding":"vpn","qualification_receipt":"pilot","destinations":[prefix]},
+            "rule":{"nlri":{"dst_prefix":prefix,"protocol":6,"dst_ports":[443],
+                "scope":{"family":family,"rd":"44407:40"}},
+                "target":target,"route_targets":["44407:777"],"owner":"prefixd.scrub.cli","revision":7},
+            "created_at":"2026-11-08T00:00:00Z","expires_at":"2026-11-08T00:01:00Z",
+            "actor":"operator","reason":"confirmed attack","dry_run":true,"status":"pending",
+            "withdrawal_reason":null,"windows":[],"generation":null,"last_error":null
+        })).unwrap();
+        let confirmation = prefixd::scrubber::ScrubberController::confirmation(&candidate).unwrap();
+        (
+            request,
+            serde_json::json!({"candidate":candidate,"confirmation":confirmation}),
+        )
+    }
+
+    #[test]
+    fn diversion_envelopes_and_scope_acknowledgements_fail_closed() {
+        for family in ["ipv4", "ipv6"] {
+            let (body, preview) = diversion_cli_fixture(family);
+            let request = vpn_diversion_request(&body).unwrap().unwrap();
+            assert_eq!(
+                require_vpn_diversion_preview(&request, &preview).unwrap(),
+                preview["confirmation"].as_str().unwrap()
+            );
+            assert!(vpn_diversion_request(&body["diversion"]).unwrap().is_none());
+            for pointer in [
+                "/candidate/rule/nlri/scope",
+                "/candidate/rule/route_targets",
+                "/candidate/profile/scope",
+                "/confirmation",
+            ] {
+                let mut missing = preview.clone();
+                *missing.pointer_mut(pointer).unwrap() = serde_json::Value::Null;
+                assert!(
+                    require_vpn_diversion_preview(&request, &missing).is_err(),
+                    "{pointer}"
+                );
+            }
+            for (pointer, value) in [
+                (
+                    "/candidate/rule/nlri/scope/rd",
+                    serde_json::json!("44407:41"),
+                ),
+                (
+                    "/candidate/rule/nlri/scope/family",
+                    serde_json::json!(if family == "ipv4" { "ipv6" } else { "ipv4" }),
+                ),
+                (
+                    "/candidate/rule/route_targets",
+                    serde_json::json!(["44407:778"]),
+                ),
+                ("/candidate/profile/scope", serde_json::json!("OTHER")),
+                ("/candidate/rule/nlri/protocol", serde_json::json!(17)),
+            ] {
+                let mut changed = preview.clone();
+                *changed.pointer_mut(pointer).unwrap() = value;
+                assert!(
+                    require_vpn_diversion_preview(&request, &changed).is_err(),
+                    "{pointer}"
+                );
+            }
+            for malformed in [
+                serde_json::json!({"scope":"global","diversion":body["diversion"]}),
+                serde_json::json!({"scope":"bad scope","diversion":body["diversion"]}),
+                serde_json::json!({"diversion":body["diversion"]}),
+                serde_json::json!({"scope":"TRANSIT"}),
+                serde_json::json!({"scope":"TRANSIT","diversion":body["diversion"],"confirmation":"wrong level"}),
+                serde_json::json!({"profile":"a","scope":preview["candidate"]["rule"]["nlri"],"ttl_seconds":60,"reason":"test"}),
+            ] {
+                assert!(vpn_diversion_request(&malformed).is_err(), "{malformed}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn diversion_cli_uses_scoped_preview_and_nested_confirmation_without_changing_global_files()
+     {
+        use std::sync::{Arc, Mutex};
+        for family in ["ipv4", "ipv6", "global"] {
+            let (mut body, preview) =
+                diversion_cli_fixture(if family == "global" { "ipv4" } else { family });
+            if family == "global" {
+                body = body["diversion"].clone();
+            }
+            let confirmation = preview["confirmation"].as_str().unwrap().to_string();
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let requests = received.clone();
+            let app = axum::Router::new().fallback(
+                move |uri: axum::http::Uri, axum::Json(body): axum::Json<serde_json::Value>| {
+                    let requests = requests.clone();
+                    let preview = preview.clone();
+                    async move {
+                        requests
+                            .lock()
+                            .unwrap()
+                            .push((uri.path().to_string(), body));
+                        axum::Json(if uri.path().ends_with("/preview") {
+                            preview
+                        } else {
+                            serde_json::json!({"created":true})
+                        })
+                    }
+                },
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = Client::new(format!("http://{}", listener.local_addr().unwrap()), None);
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let result = submit_diversion(&client, body, Some(&confirmation)).await;
+            server.abort();
+            let _ = server.await;
+            assert_eq!(result.unwrap()["created"], true);
+            let requests = received.lock().unwrap();
+            if family == "global" {
+                assert_eq!(requests.len(), 1);
+                assert_eq!(requests[0].0, "/v1/diversions");
+                assert_eq!(requests[0].1["confirmation"], confirmation);
+            } else {
+                assert_eq!(
+                    requests
+                        .iter()
+                        .map(|(path, _)| path.as_str())
+                        .collect::<Vec<_>>(),
+                    ["/v1/vpn/diversions/preview", "/v1/vpn/diversions"]
+                );
+                assert_eq!(requests[1].1["diversion"]["confirmation"], confirmation);
+                assert!(requests[1].1.get("confirmation").is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn diversion_cli_refuses_missing_acknowledgements_changed_confirmation_and_http_errors() {
+        use std::sync::{Arc, Mutex};
+        for failure in ["missing_ack", "changed_confirmation", "http_error"] {
+            let (body, mut preview) = diversion_cli_fixture("ipv4");
+            let mut confirmation = preview["confirmation"].as_str().unwrap().to_string();
+            if failure == "missing_ack" {
+                preview["candidate"] = serde_json::json!({});
+            }
+            if failure == "changed_confirmation" {
+                confirmation.push_str(" stale");
+            }
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let requests = received.clone();
+            let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+                let requests = requests.clone();
+                let preview = preview.clone();
+                async move {
+                    requests.lock().unwrap().push(uri.path().to_string());
+                    let status = if failure == "http_error" {
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        axum::http::StatusCode::OK
+                    };
+                    (status, axum::Json(preview))
+                }
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = Client::new(format!("http://{}", listener.local_addr().unwrap()), None);
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let result = submit_diversion(&client, body, Some(&confirmation)).await;
+            server.abort();
+            let _ = server.await;
+            assert!(result.is_err(), "{failure}");
+            assert_eq!(*received.lock().unwrap(), ["/v1/vpn/diversions/preview"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn diversion_cli_transport_failure_never_retries_through_global() {
+        use tokio::io::AsyncReadExt;
+        let (body, preview) = diversion_cli_fixture("ipv6");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::new(format!("http://{}", listener.local_addr().unwrap()), None);
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            let read = stream.read(&mut bytes).await.unwrap();
+            String::from_utf8_lossy(&bytes[..read]).to_string()
+        });
+        let result = submit_diversion(&client, body, preview["confirmation"].as_str()).await;
+        let request = server.await.unwrap();
+        assert!(result.unwrap_err().contains("request failed"));
+        assert!(request.starts_with("POST /v1/vpn/diversions/preview "));
+    }
+
+    fn manual_args(extra: &[&str]) -> ManualMitigationArgs {
+        let cli = Cli::try_parse_from(
+            ["prefixdctl", "mitigations", "preview"]
+                .into_iter()
+                .chain(extra.iter().copied()),
+        )
+        .unwrap();
+        match cli.command {
+            Commands::Mitigations(MitigationCommands::Preview { rule }) => rule,
+            _ => unreachable!(),
+        }
+    }
+
+    fn vpn_preview(family: &str) -> serde_json::Value {
+        serde_json::json!({
+            "outcome": "admissible",
+            "candidate": {
+                "vpn_scope": {"name": "TRANSIT", "identity": {"family": family, "rd": "44407:40"}, "route_targets": ["44407:777"]},
+                "destination": "any",
+                "scope": {"src_prefix": if family == "ipv4" {"198.51.100.0/24"} else {"2001:db8:2::/64"}},
+            }
+        })
+    }
+
+    #[test]
+    fn manual_cli_scoped_request_shapes_and_source_only_constraints() {
+        let normal = manual_args(&["192.0.2.1", "--ttl-seconds", "60", "--reason", "test"]);
+        let (path, body) = normal.request(false).unwrap();
+        assert_eq!(path, "/v1/mitigations");
+        assert_eq!(body["victim_ip"], "192.0.2.1");
+        assert!(body.get("scope").is_none());
+        let scoped = manual_args(&[
+            "192.0.2.1",
+            "--scope",
+            "TRANSIT",
+            "--ttl-seconds",
+            "60",
+            "--reason",
+            "test",
+        ]);
+        let (path, body) = scoped.request(false).unwrap();
+        assert_eq!(path, "/v1/vpn/mitigations");
+        assert_eq!(body["scope"], "TRANSIT");
+        assert_eq!(body["rule"]["victim_ip"], "192.0.2.1");
+        for source in ["198.51.100.0/24", "2001:db8:2::/64"] {
+            let rule = manual_args(&[
+                "--source-only",
+                "--scope",
+                "TRANSIT",
+                "--src-prefix",
+                source,
+                "--ttl-seconds",
+                "30",
+                "--reason",
+                "test",
+            ]);
+            let (path, body) = rule.request(true).unwrap();
+            assert_eq!(path, "/v1/vpn/source-rules");
+            assert_eq!(body["src_prefix"], source);
+            assert_eq!(body["confirm_destination_any"], true);
+            assert!(body.get("victim_ip").is_none());
+            assert!(body.get("dst_prefix").is_none());
+        }
+        for invalid in [
+            vec![
+                "--source-only",
+                "--scope",
+                "TRANSIT",
+                "--ttl-seconds",
+                "30",
+                "--reason",
+                "test",
+            ],
+            vec![
+                "--source-only",
+                "--src-prefix",
+                "198.51.100.0/24",
+                "--ttl-seconds",
+                "30",
+                "--reason",
+                "test",
+            ],
+            vec![
+                "--source-only",
+                "--scope",
+                "TRANSIT",
+                "--src-prefix",
+                "198.51.100.0/24",
+                "--reason",
+                "test",
+            ],
+            vec![
+                "192.0.2.1",
+                "--source-only",
+                "--scope",
+                "TRANSIT",
+                "--src-prefix",
+                "198.51.100.0/24",
+                "--ttl-seconds",
+                "30",
+                "--reason",
+                "test",
+            ],
+            vec![
+                "--source-only",
+                "--scope",
+                "TRANSIT",
+                "--src-prefix",
+                "198.51.100.0/24",
+                "--action",
+                "marking",
+                "--ttl-seconds",
+                "30",
+                "--reason",
+                "test",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(
+                    ["prefixdctl", "mitigations", "preview"]
+                        .into_iter()
+                        .chain(invalid)
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_preview_must_acknowledge_scope_family_source_and_any_destination() {
+        let rule = manual_args(&[
+            "--source-only",
+            "--scope",
+            "TRANSIT",
+            "--src-prefix",
+            "198.51.100.1/24",
+            "--ttl-seconds",
+            "30",
+            "--reason",
+            "test",
+        ]);
+        let valid = vpn_preview("ipv4");
+        assert!(require_manual_preview(&rule, &valid).is_ok());
+        for pointer in [
+            "/candidate/vpn_scope",
+            "/candidate/vpn_scope/identity/rd",
+            "/candidate/vpn_scope/route_targets",
+            "/candidate/destination",
+            "/candidate/scope/src_prefix",
+        ] {
+            let mut bad = valid.clone();
+            *bad.pointer_mut(pointer).unwrap() = serde_json::Value::Null;
+            assert!(require_manual_preview(&rule, &bad).is_err(), "{pointer}");
+        }
+        let mut wrong_name = valid.clone();
+        wrong_name["candidate"]["vpn_scope"]["name"] = "OTHER".into();
+        assert!(require_manual_preview(&rule, &wrong_name).is_err());
+        assert!(require_manual_preview(&rule, &vpn_preview("ipv6")).is_err());
+        let ipv6 = manual_args(&[
+            "--source-only",
+            "--scope",
+            "TRANSIT",
+            "--src-prefix",
+            "2001:db8:2::/64",
+            "--ttl-seconds",
+            "30",
+            "--reason",
+            "test",
+        ]);
+        assert!(require_manual_preview(&ipv6, &vpn_preview("ipv6")).is_ok());
+    }
+
+    #[test]
+    fn vpn_output_keeps_scope_and_destination_any_distinct() {
+        for family in ["ipv4", "ipv6"] {
+            let snapshot: prefixd::domain::VpnScopeSnapshot =
+                serde_json::from_value(vpn_preview(family)["candidate"]["vpn_scope"].clone())
+                    .unwrap();
+            let summary = vpn_scope_summary(Some(&snapshot.identity), &snapshot.route_targets);
+            assert!(summary.contains(if family == "ipv4" { "IPv4" } else { "IPv6" }));
+            assert!(summary.contains("RD 44407:40 RT 44407:777"));
+            let mitigation: MitigationResponse = serde_json::from_value(serde_json::json!({
+                "mitigation_id": "m", "status": "active", "customer_id": null,
+                "victim_ip": "", "dst_prefix": "", "vector": "manual",
+                "action_type": "discard", "rate_bps": null, "created_at": "",
+                "expires_at": "", "scope_hash": "s", "vpn_scope": snapshot,
+            }))
+            .unwrap();
+            assert_eq!(mitigation.destination_label(), "any");
+            assert!(mitigation.match_summary().contains(&summary));
+        }
+        assert_eq!(vpn_scope_summary(None, &[]), "global");
+    }
+
+    #[tokio::test]
+    async fn old_controller_acknowledgement_never_causes_unscoped_retry_or_creation() {
+        use std::sync::{Arc, Mutex};
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let received = paths.clone();
+        let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+            let received = received.clone();
+            async move {
+                received.lock().unwrap().push(uri.path().to_string());
+                axum::Json(serde_json::json!({"outcome":"admissible", "candidate":{}}))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::new(format!("http://{}", listener.local_addr().unwrap()), None);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let rule = manual_args(&[
+            "192.0.2.1",
+            "--scope",
+            "TRANSIT",
+            "--ttl-seconds",
+            "60",
+            "--reason",
+            "test",
+        ]);
+        let result = cmd_manual_mitigation(&client, rule, true, false).await;
+        server.abort();
+        let _ = server.await;
+        assert!(result.unwrap_err().contains("did not acknowledge"));
+        assert_eq!(*paths.lock().unwrap(), ["/v1/vpn/mitigations/preview"]);
+    }
 
     #[test]
     fn extension_requires_positive_ttl_and_a_bounded_reason() {

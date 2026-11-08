@@ -46,6 +46,25 @@ fn wire_action(rule: &FlowSpecRule) -> crate::error::Result<u32> {
         .map_err(|error| crate::error::PrefixdError::BgpAnnouncementFailed(error.to_string()))
 }
 
+fn wire_route_targets(rule: &FlowSpecRule) -> crate::error::Result<Vec<u64>> {
+    let invalid = |message: &str| crate::error::PrefixdError::BgpAnnouncementFailed(message.into());
+    if rule.nlri.scope.is_none() && !rule.route_targets.is_empty() {
+        return Err(invalid("global FlowSpec rule has VPN route targets"));
+    }
+    if rule.nlri.scope.is_some() && rule.route_targets.is_empty() {
+        return Err(invalid("VPN FlowSpec rule has no route targets"));
+    }
+    let mut targets = rule
+        .route_targets
+        .iter()
+        .map(|target| {
+            crate::domain::route_target_bytes(target).map_err(|error| invalid(&error.to_string()))
+        })
+        .collect::<crate::error::Result<Vec<_>>>()?;
+    targets.sort_unstable();
+    Ok(targets)
+}
+
 /// Keys blocked by pending deletions of either kind; unreadable intent fails the caller.
 fn pending_ownership_keys(
     requests: &[crate::domain::WithdrawalRequest],
@@ -628,7 +647,18 @@ impl ReconciliationLoop {
             // A scoped loop always reports its POP, including zero; an
             // unscoped loop reports each mitigation POP it saw.
             let mut by_pop: HashMap<&str, f64> = pop.map(|pop| (pop, 0.0)).into_iter().collect();
+            let mut flowspec_families = [0.0; 4];
             for m in &active {
+                if m.action_type != ActionType::Blackhole {
+                    let nlri = crate::domain::FlowSpecNlri::from(&m.match_criteria);
+                    let family = match (nlri.scope.is_some(), nlri.ip_version()) {
+                        (false, crate::domain::IpVersion::V4) => 0,
+                        (false, crate::domain::IpVersion::V6) => 1,
+                        (true, crate::domain::IpVersion::V4) => 2,
+                        (true, crate::domain::IpVersion::V6) => 3,
+                    };
+                    flowspec_families[family] += 1.0;
+                }
                 *counts
                     .entry((m.action_type.to_string(), m.pop.clone()))
                     .or_default() += 1.0;
@@ -639,6 +669,21 @@ impl ReconciliationLoop {
                 crate::observability::metrics::RECONCILIATION_ACTIVE_COUNT
                     .with_label_values(&[pop])
                     .set(*count);
+            }
+            // Desired active intent, including simulations; this is not installed-state evidence.
+            crate::observability::metrics::FLOWSPEC_ACTIVE_BY_FAMILY.reset();
+            for (family, count) in [
+                "ipv4_flowspec",
+                "ipv6_flowspec",
+                "l3vpn_ipv4_flowspec",
+                "l3vpn_ipv6_flowspec",
+            ]
+            .into_iter()
+            .zip(flowspec_families)
+            {
+                crate::observability::metrics::FLOWSPEC_ACTIVE_BY_FAMILY
+                    .with_label_values(&[family])
+                    .set(count);
             }
             crate::observability::metrics::MITIGATIONS_ACTIVE.reset();
             for ((action_type, pop), count) in &counts {
@@ -678,15 +723,16 @@ impl ReconciliationLoop {
         // Complete validation precedes every repair, including unknown local rows.
         for rule in &announced {
             let action = wire_action(rule)?;
+            let targets = wire_route_targets(rule)?;
             anyhow::ensure!(
                 announced_actions
-                    .insert(rule.nlri_hash(), (rule, action))
+                    .insert(rule.nlri_hash(), (rule, action, targets))
                     .is_none(),
                 "speaker inventory has multiple local rules for one NLRI"
             );
         }
 
-        // Upsert only uniquely owned missing or differing-action intent.
+        // Upsert only uniquely owned missing or differing-attribute intent.
         let mut repair_error = None;
         let mut forced_failure = false;
         for candidate in &active {
@@ -721,9 +767,19 @@ impl ReconciliationLoop {
                     continue;
                 }
             };
+            let targets = match wire_route_targets(&candidate_rule) {
+                Ok(targets) => targets,
+                Err(error) => {
+                    repair_error = Some(error);
+                    continue;
+                }
+            };
+            let source_only = candidate_rule.nlri.dst_prefix.is_empty();
             // A full leased re-add treats every leased rule as missing.
             let forced = readd && !candidate_rule.owner.is_empty();
-            if let Some((observed, observed_action)) = announced_actions.get(&nlri_hash) {
+            if let Some((observed, observed_action, observed_targets)) =
+                announced_actions.get(&nlri_hash)
+            {
                 match self
                     .announcer
                     .matches_nlri(&candidate_rule.nlri, &observed.nlri)
@@ -755,7 +811,12 @@ impl ReconciliationLoop {
                     });
                     continue;
                 }
-                if !forced && observed_action == &action && destination_prefix.is_none() {
+                if !forced
+                    && observed_action == &action
+                    && observed_targets == &targets
+                    && destination_prefix.is_none()
+                    && !source_only
+                {
                     continue;
                 }
             }
@@ -821,6 +882,107 @@ impl ReconciliationLoop {
             self.verified_speaker_binding()?;
             if mitigation.expires_at <= chrono::Utc::now() {
                 continue;
+            }
+            if source_only {
+                let Some(state) = &self.state else {
+                    repair_error = Some(crate::error::PrefixdError::Conflict(
+                        "source-only repair requires current scope and source protection policy"
+                            .into(),
+                    ));
+                    continue;
+                };
+                let Some(source) = rule.nlri.src_prefix.as_deref() else {
+                    repair_error = Some(crate::error::PrefixdError::InvalidRequest(
+                        "source-only repair requires a source prefix".into(),
+                    ));
+                    continue;
+                };
+                let safelisted = match self.repo.is_safelisted(source).await {
+                    Ok(safelisted) => safelisted,
+                    Err(error) => {
+                        repair_error = Some(error);
+                        continue;
+                    }
+                };
+                let remaining = mitigation.expires_at - chrono::Utc::now();
+                let minimum = state
+                    .settings
+                    .guardrails
+                    .min_ttl_seconds
+                    .unwrap_or(state.settings.timers.min_ttl_seconds);
+                // Admission's minimum TTL does not shorten an already-running rule.
+                let ttl_seconds = u32::try_from((remaining.num_milliseconds() + 999) / 1000)
+                    .unwrap_or(u32::MAX)
+                    .max(minimum);
+                let intent = crate::domain::MitigationIntent {
+                    event_id: mitigation.last_event_id,
+                    customer_id: mitigation.customer_id.clone(),
+                    service_id: mitigation.service_id.clone(),
+                    pop: mitigation.pop.clone(),
+                    match_criteria: mitigation.match_criteria.clone(),
+                    action_type: mitigation.action_type,
+                    action_params: mitigation.action_params.clone(),
+                    ttl_seconds,
+                    reason: mitigation.reason.clone(),
+                };
+                let validation = if safelisted {
+                    Err(crate::error::PrefixdError::InvalidRequest(
+                        "source prefix is safelisted".into(),
+                    ))
+                } else {
+                    match crate::guardrails::validate_source_only(state, &intent).await {
+                        Ok(()) => crate::guardrails::Guardrails::with_timers(
+                            state.settings.guardrails.clone(),
+                            state.settings.quotas.clone(),
+                            &state.settings.timers,
+                        )
+                        .validate_rule(&intent, false),
+                        Err(error) => Err(error),
+                    }
+                };
+                if let Err(error) = validation {
+                    if !matches!(
+                        error,
+                        crate::error::PrefixdError::InvalidRequest(_)
+                            | crate::error::PrefixdError::GuardrailViolation(_)
+                    ) {
+                        repair_error = Some(error);
+                        continue;
+                    }
+                    if self.dry_run {
+                        continue;
+                    }
+                    let binding = self.verified_speaker_binding()?;
+                    let withdrawal = match request_withdrawal(
+                        self.repo.as_ref(),
+                        &mitigation,
+                        false,
+                        "system",
+                        "source-safety-recheck",
+                        format!("source-only rule no longer passes source protection: {error}"),
+                        true,
+                        binding,
+                    )
+                    .await
+                    {
+                        Ok(request) => {
+                            execute_withdrawal(
+                                self.repo.as_ref(),
+                                self.announcer.as_ref(),
+                                false,
+                                &request,
+                                binding,
+                            )
+                            .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    match withdrawal {
+                        Ok(withdrawn) => self.notify_withdrawn(&withdrawn).await,
+                        Err(error) => repair_error = Some(error),
+                    }
+                    continue;
+                }
             }
             // Hosts keep their existing admission policy. Non-host rules need
             // fresh whole-prefix ownership and overlap safety, even when the
@@ -906,8 +1068,18 @@ impl ReconciliationLoop {
                     continue;
                 }
             }
+            let targets = match wire_route_targets(&rule) {
+                Ok(targets) => targets,
+                Err(error) => {
+                    repair_error = Some(error);
+                    continue;
+                }
+            };
             if forced
-                || announced_actions.get(&nlri_hash).map(|(_, action)| action) != Some(&action)
+                || announced_actions
+                    .get(&nlri_hash)
+                    .map(|(_, action, targets)| (action, targets))
+                    != Some((&action, &targets))
             {
                 let reason = if forced {
                     "lease re-add"
@@ -981,6 +1153,8 @@ impl ReconciliationLoop {
                 tracing::warn!(
                     nlri_hash = %rule.nlri_hash(),
                     dst_prefix = %rule.nlri.dst_prefix,
+                    routing_scope = ?rule.nlri.scope,
+                    route_targets = ?rule.route_targets,
                     "unknown route in BGP RIB"
                 );
             }
@@ -1671,6 +1845,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl FlowSpecWriter for FailingWithdrawal {
+        fn register_scope(&self, scope: Option<&crate::domain::VpnFlowSpecIdentity>) -> Result<()> {
+            self.inner.register_scope(scope)
+        }
         async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
             self.announcements.fetch_add(1, SeqCst);
             if self.mode.load(SeqCst) == 3 && rule.nlri.dst_prefix == "192.0.2.1/32" {
@@ -2567,6 +2744,310 @@ mod tests {
         }
     }
 
+    fn scoped_mitigation(
+        prefix: &str,
+        family: crate::domain::VpnFlowSpecFamily,
+        name: &str,
+        rd: &str,
+    ) -> Mitigation {
+        let mut mitigation = action_mitigation(prefix, FlowSpecAction::discard());
+        mitigation.match_criteria.scope = Some(
+            crate::domain::VpnScopeSnapshot::new(
+                name,
+                crate::domain::VpnFlowSpecIdentity::new(family, rd).unwrap(),
+                &["44407:777".into()],
+            )
+            .unwrap(),
+        );
+        mitigation.scope_hash = mitigation.match_criteria.compute_scope_hash();
+        mitigation
+    }
+
+    #[tokio::test]
+    async fn route_target_drift_repairs_only_the_saved_rd_and_preserves_global() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for (prefix, family) in [
+            ("192.0.2.1/32", crate::domain::VpnFlowSpecFamily::Ipv4),
+            ("2001:db8::1/128", crate::domain::VpnFlowSpecFamily::Ipv6),
+        ] {
+            let repo = Arc::new(MockRepository::new());
+            let speaker = action_speaker(0);
+            let global = action_mitigation(prefix, FlowSpecAction::discard());
+            let a = scoped_mitigation(prefix, family, "A", "44407:40");
+            let b = scoped_mitigation(prefix, family, "B", "44407:41");
+            for mitigation in [&global, &a, &b] {
+                repo.insert_mitigation(mitigation).await.unwrap();
+                let mut rule = crate::domain::mitigation_rule(mitigation).unwrap();
+                if mitigation.mitigation_id == a.mitigation_id {
+                    rule.route_targets = vec!["44407:888".into()];
+                }
+                speaker.inner.announce(&rule).await.unwrap();
+            }
+            let reconciler = ReconciliationLoop::new(repo, speaker.clone(), 30, false);
+            reconciler.sync_announcements().await.unwrap();
+            assert_eq!(speaker.announcements.load(SeqCst), 1);
+            let inventory = speaker.inner.list_active().await.unwrap();
+            assert_eq!(inventory.len(), 3);
+            for mitigation in [&global, &a, &b] {
+                let expected = crate::domain::mitigation_rule(mitigation).unwrap();
+                let observed = inventory
+                    .iter()
+                    .find(|rule| rule.nlri_hash() == expected.nlri_hash())
+                    .unwrap();
+                assert_eq!(observed.route_targets, expected.route_targets);
+            }
+            let label = match family {
+                crate::domain::VpnFlowSpecFamily::Ipv4 => "l3vpn_ipv4_flowspec",
+                crate::domain::VpnFlowSpecFamily::Ipv6 => "l3vpn_ipv6_flowspec",
+            };
+            assert_eq!(
+                crate::observability::metrics::FLOWSPEC_ACTIVE_BY_FAMILY
+                    .with_label_values(&[label])
+                    .get(),
+                2.0
+            );
+            reconciler.sync_announcements().await.unwrap();
+            assert_eq!(speaker.announcements.load(SeqCst), 1);
+        }
+    }
+
+    fn source_only_state(
+        repo: Arc<MockRepository>,
+        speaker: Arc<dyn FlowSpecAnnouncer>,
+        family: crate::domain::VpnFlowSpecFamily,
+    ) -> Arc<AppState> {
+        let mut state = action_state(repo, speaker);
+        let settings = &mut Arc::get_mut(&mut state).unwrap().settings;
+        settings.guardrails.allow_src_prefix_match = true;
+        for (name, rd) in [("A", "44407:40"), ("B", "44407:41")] {
+            settings.bgp.vpn_scopes.insert(name.into(), serde_json::from_value(serde_json::json!({
+                "family": family, "rd": rd, "route_targets": ["44407:777"], "allow_source_only": true,
+            })).unwrap());
+        }
+        state
+    }
+
+    fn source_only_mitigation(state: &AppState, name: &str, source: &str) -> Mitigation {
+        let mut mitigation = action_mitigation("192.0.2.1/32", FlowSpecAction::discard());
+        mitigation.match_criteria.dst_prefix.clear();
+        mitigation.match_criteria.src_prefix = Some(source.into());
+        mitigation.match_criteria.scope = state.settings.bgp.resolve_scope(name).unwrap();
+        mitigation.scope_hash = mitigation.match_criteria.compute_scope_hash();
+        mitigation.expires_at = chrono::Utc::now() + chrono::Duration::seconds(50);
+        mitigation
+    }
+
+    #[tokio::test]
+    async fn source_only_repair_rechecks_source_protection_after_observation() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for (family, source, control_source) in [
+            (
+                crate::domain::VpnFlowSpecFamily::Ipv4,
+                "198.51.100.0/24",
+                "203.0.113.0/24",
+            ),
+            (
+                crate::domain::VpnFlowSpecFamily::Ipv6,
+                "2001:db8:1::/64",
+                "2001:db8:2::/64",
+            ),
+        ] {
+            for present in [false, true] {
+                for change in ["safelist", "own", "lookup_failure"] {
+                    let repo = Arc::new(MockRepository::new());
+                    let inner = action_speaker(0);
+                    let speaker = Arc::new(PausedActionInventory {
+                        inner: inner.clone(),
+                        observed: Default::default(),
+                        release: Default::default(),
+                    });
+                    let state = source_only_state(repo.clone(), speaker.clone(), family);
+                    let affected = source_only_mitigation(&state, "A", source);
+                    let control = source_only_mitigation(&state, "B", control_source);
+                    for mitigation in [&affected, &control] {
+                        repo.insert_mitigation(mitigation).await.unwrap();
+                    }
+                    if present {
+                        inner
+                            .inner
+                            .announce(&crate::domain::mitigation_rule(&affected).unwrap())
+                            .await
+                            .unwrap();
+                    }
+                    inner
+                        .inner
+                        .announce(&crate::domain::mitigation_rule(&control).unwrap())
+                        .await
+                        .unwrap();
+                    let reconciler =
+                        ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+                            .with_app_state(state.clone());
+                    let mut pass = Box::pin(reconciler.sync_announcements());
+                    assert!(futures_util::poll!(&mut pass).is_pending());
+                    speaker.observed.notified().await;
+                    let guard = state.mitigation_lock.lock().await;
+                    match change {
+                        "safelist" => repo.insert_safelist(source, "test", None).await.unwrap(),
+                        "own" => {
+                            *state.inventory.write().await =
+                                crate::config::Inventory::new(vec![crate::config::Customer {
+                                    customer_id: "own".into(),
+                                    name: "Own space".into(),
+                                    prefixes: vec![source.into()],
+                                    policy_profile: crate::config::PolicyProfile::Normal,
+                                    services: vec![],
+                                }]);
+                        }
+                        _ => repo.fail_safelist.store(true, SeqCst),
+                    }
+                    speaker.release.notify_one();
+                    drop(guard);
+                    let result = pass.await;
+                    if change == "lookup_failure" {
+                        assert!(result.is_err());
+                        assert_eq!(status(&repo, &affected).await, MitigationStatus::Active);
+                    } else {
+                        result.unwrap();
+                        assert_eq!(status(&repo, &affected).await, MitigationStatus::Withdrawn);
+                    }
+                    assert_eq!(inner.announcements.load(SeqCst), 0);
+                    assert_eq!(status(&repo, &control).await, MitigationStatus::Active);
+                    let inventory = inner.inner.list_active().await.unwrap();
+                    assert!(inventory.iter().any(|rule| {
+                        rule.nlri_hash()
+                            == crate::domain::mitigation_rule(&control)
+                                .unwrap()
+                                .nlri_hash()
+                    }));
+                    if change != "lookup_failure" {
+                        assert!(inventory.iter().all(|rule| {
+                            rule.nlri_hash()
+                                != crate::domain::mitigation_rule(&affected)
+                                    .unwrap()
+                                    .nlri_hash()
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn source_only_safety_withdrawal_retries_the_original_scoped_intent() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for failure in [11, 12] {
+            let repo = Arc::new(MockRepository::new());
+            let speaker = action_speaker(failure);
+            let state = source_only_state(
+                repo.clone(),
+                speaker.clone(),
+                crate::domain::VpnFlowSpecFamily::Ipv4,
+            );
+            let affected = source_only_mitigation(&state, "A", "198.51.100.0/24");
+            repo.insert_mitigation(&affected).await.unwrap();
+            let rule = crate::domain::mitigation_rule(&affected).unwrap();
+            speaker.inner.announce(&rule).await.unwrap();
+            repo.insert_safelist("198.51.100.10", "test", None)
+                .await
+                .unwrap();
+            let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+                .with_app_state(state);
+            assert!(reconciler.sync_announcements().await.is_err());
+            let pending = repo.pending_withdrawals(None).await.unwrap();
+            let [request] = pending.as_slice() else {
+                panic!("one pending source withdrawal")
+            };
+            assert_eq!(request.actor, "source-safety-recheck");
+            assert_eq!(
+                serde_json::to_value(request.flowspec_rule().unwrap()).unwrap(),
+                serde_json::to_value(&rule).unwrap()
+            );
+            repo.remove_safelist("198.51.100.10").await.unwrap();
+            reconciler.sync_announcements().await.unwrap();
+            assert_eq!(speaker.announcements.load(SeqCst), 0);
+            assert!(reconciler.expire_mitigations().await.is_err());
+            let retained = repo.pending_withdrawals(None).await.unwrap();
+            assert_eq!(retained[0].operation_id, request.operation_id);
+            assert_eq!(retained[0].rule_json, request.rule_json);
+            speaker.mode.store(0, SeqCst);
+            reconciler.expire_mitigations().await.unwrap();
+            assert_eq!(status(&repo, &affected).await, MitigationStatus::Withdrawn);
+            assert!(speaker.inner.list_active().await.unwrap().is_empty());
+            assert_eq!(speaker.announcements.load(SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn source_only_safety_recheck_in_dry_run_sends_no_mutation() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = action_speaker(0);
+        let state = source_only_state(
+            repo.clone(),
+            speaker.clone(),
+            crate::domain::VpnFlowSpecFamily::Ipv4,
+        );
+        let affected = source_only_mitigation(&state, "A", "198.51.100.0/24");
+        repo.insert_mitigation(&affected).await.unwrap();
+        speaker
+            .inner
+            .announce(&crate::domain::mitigation_rule(&affected).unwrap())
+            .await
+            .unwrap();
+        repo.insert_safelist("198.51.100.10", "test", None)
+            .await
+            .unwrap();
+        ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, true)
+            .with_app_state(state)
+            .sync_announcements()
+            .await
+            .unwrap();
+        assert_eq!(status(&repo, &affected).await, MitigationStatus::Active);
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+        assert_eq!(speaker.announcements.load(SeqCst), 0);
+        assert_eq!(speaker.inner.list_active().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn source_only_recovery_requires_policy_and_expiry_keeps_other_rd() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = action_speaker(0);
+        let state = source_only_state(
+            repo.clone(),
+            speaker.clone(),
+            crate::domain::VpnFlowSpecFamily::Ipv4,
+        );
+        let affected = source_only_mitigation(&state, "A", "198.51.100.0/24");
+        let control = source_only_mitigation(&state, "B", "198.51.100.0/24");
+        for mitigation in [&affected, &control] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        let standalone = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+        assert!(
+            standalone
+                .sync_announcements()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("requires current scope")
+        );
+        assert_eq!(speaker.announcements.load(SeqCst), 0);
+        let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+            .with_app_state(state.clone());
+        reconciler.sync_announcements().await.unwrap();
+        assert_eq!(speaker.announcements.load(SeqCst), 2);
+        let mut expired = affected.clone();
+        expired.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        repo.update_mitigation(&expired).await.unwrap();
+        reconciler.expire_mitigations().await.unwrap();
+        assert_eq!(status(&repo, &expired).await, MitigationStatus::Expired);
+        assert_eq!(status(&repo, &control).await, MitigationStatus::Active);
+        let inventory = speaker.inner.list_active().await.unwrap();
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].nlri.scope.as_ref().unwrap().rd(), "44407:41");
+    }
+
     #[tokio::test]
     async fn action_drift_repairs_both_families_once_and_preserves_unknown_rules() {
         let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
@@ -3055,12 +3536,18 @@ mod tests {
         fn backend(&self) -> &'static str {
             "mock"
         }
+        fn match_support(&self) -> crate::bgp::FlowSpecMatchSupport {
+            self.inner.match_support()
+        }
         fn reader(&self) -> Option<&dyn FlowSpecReader> {
             Some(self)
         }
     }
     #[async_trait::async_trait]
     impl FlowSpecWriter for PausedActionInventory {
+        fn register_scope(&self, scope: Option<&crate::domain::VpnFlowSpecIdentity>) -> Result<()> {
+            self.inner.register_scope(scope)
+        }
         async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
             self.inner.announce(rule).await
         }

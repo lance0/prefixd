@@ -159,6 +159,14 @@ async fn main() -> anyhow::Result<()> {
             controller_fence.clone(),
         ));
 
+    prefixd::bgp::check_vpn_startup(
+        &config.settings.bgp,
+        &config.settings.pop,
+        announcer.as_ref(),
+        repo.as_ref(),
+    )
+    .await?;
+
     // Init safelist from config
     for prefix in &config.settings.safelist.prefixes {
         repo.insert_safelist(prefix, "config", Some("from prefixd.yaml"))

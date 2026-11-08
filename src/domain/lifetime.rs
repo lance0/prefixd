@@ -153,8 +153,16 @@ pub async fn extend_flowspec_lifetime(
                 "mitigation no longer uniquely owns this FlowSpec match".into(),
             ));
         }
-        let destination = super::parse_flowspec_destination(&expected.match_criteria.dst_prefix)
+        let source_only = expected.match_criteria.dst_prefix.is_empty();
+        let protected_prefix = if source_only {
+            expected.match_criteria.src_prefix.as_deref().ok_or_else(||
+                PrefixdError::InvalidRequest("source-only rule has no source".into()))?
+        } else {
+            &expected.match_criteria.dst_prefix
+        };
+        let destination = super::parse_flowspec_destination(protected_prefix)
             .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+        if !source_only {
         let inventory = state.inventory.read().await;
         let context = if destination.prefix_len() == destination.max_prefix_len() {
             inventory.lookup_ip(&expected.victim_ip)
@@ -174,6 +182,7 @@ pub async fn extend_flowspec_lifetime(
             ));
         }
         drop(inventory);
+        }
         let configured_safelisted =
             state
                 .settings
@@ -213,16 +222,26 @@ pub async fn extend_flowspec_lifetime(
             state.settings.quotas.clone(),
             &state.settings.timers,
         );
+        if source_only { crate::guardrails::validate_source_only(state, &intent).await?; }
+        state.announcer.validate_scope(rule.nlri.scope.as_ref()).await?;
         guardrails.validate_rule(&intent, safelisted)?;
         guardrails.validate_remaining_ttl(chrono::Duration::seconds(ttl_seconds.into()))?;
         // Unlike new admission, extension does not consume another quota/rate slot.
         state.announcer.match_support().require(&rule.nlri)?;
         validate_live(&expected, &state.settings.pop, Utc::now())?;
         state.verified_speaker_binding()?;
+        let max_lifetime_seconds = if source_only {
+                let scope = expected.match_criteria.scope.as_ref().ok_or_else(||
+                    PrefixdError::InvalidRequest("source-only requires VPN scope".into()))?;
+                let policy = state.settings.bgp.vpn_scopes.get(&scope.name).ok_or_else(||
+                    PrefixdError::Config("source-only scope is no longer configured".into()))?;
+                Some(state.settings.guardrails.max_lifetime_seconds
+                    .map_or(policy.max_source_only_ttl_seconds, |limit| limit.min(policy.max_source_only_ttl_seconds)))
+            } else { state.settings.guardrails.max_lifetime_seconds };
         let request = LifetimeExtension {
             expected,
             ttl_seconds,
-            max_lifetime_seconds: state.settings.guardrails.max_lifetime_seconds,
+            max_lifetime_seconds,
             actor,
             reason,
             target_id: binding.map(super::VerifiedSpeakerBinding::target_id),

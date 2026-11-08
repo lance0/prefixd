@@ -1,6 +1,9 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
+
+use super::{DefaultFlowSpecScope, VpnScopeConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -155,9 +158,14 @@ pub struct BgpConfig {
     pub local_asn: u32,
     pub router_id: String,
     pub neighbors: Vec<BgpNeighbor>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub vpn_scopes: BTreeMap<String, VpnScopeConfig>,
+    #[serde(skip_serializing_if = "DefaultFlowSpecScope::is_global")]
+    pub default_scope: DefaultFlowSpecScope,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BgpConfigInput {
     #[serde(default, rename = "backend", alias = "mode")]
     mode: Option<BgpMode>,
@@ -169,10 +177,14 @@ struct BgpConfigInput {
     router_id: String,
     #[serde(default)]
     neighbors: Vec<BgpNeighbor>,
+    #[serde(default)]
+    vpn_scopes: BTreeMap<String, VpnScopeConfig>,
+    #[serde(default)]
+    default_scope: DefaultFlowSpecScope,
 }
 
 impl TryFrom<BgpConfigInput> for BgpConfig {
-    type Error = &'static str;
+    type Error = String;
 
     /// An unset backend never moves a configured speaker. v0.19.1 defaulted to
     /// GoBGP and required `gobgp_grpc`, so that endpoint needs an explicit backend.
@@ -181,19 +193,25 @@ impl TryFrom<BgpConfigInput> for BgpConfig {
             (Some(mode), _) => mode,
             (None, false) => {
                 return Err(
-                    "bgp.backend is required when bgp.gobgp_grpc is set; add bgp.backend: gobgp to keep the GoBGP speaker",
+                    "bgp.backend is required when bgp.gobgp_grpc is set; add bgp.backend: gobgp to keep the GoBGP speaker".into(),
                 );
             }
             (None, true) => BgpMode::Rustbgpd,
         };
-        Ok(Self {
+        let config = Self {
             mode,
             gobgp_grpc: input.gobgp_grpc,
             rustbgpd: input.rustbgpd,
             local_asn: input.local_asn,
             router_id: input.router_id,
             neighbors: input.neighbors,
-        })
+            vpn_scopes: input.vpn_scopes,
+            default_scope: input.default_scope,
+        };
+        config
+            .validate_vpn_scopes()
+            .map_err(|error| error.to_string())?;
+        Ok(config)
     }
 }
 
@@ -353,6 +371,10 @@ pub(crate) fn default_max_ports() -> usize {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotasConfig {
+    /// Admission-only source quota copied from a resolved VPN scope.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub source_only_limit: Option<u32>,
     #[serde(default = "default_max_per_customer")]
     pub max_active_per_customer: u32,
     #[serde(default = "default_max_per_pop")]
@@ -755,6 +777,7 @@ impl Settings {
         let content = std::fs::read_to_string(path)?;
         reject_removed_keys(&content)?;
         let settings: Settings = crate::config::parse_yaml(&content)?;
+        settings.bgp.validate_vpn_scopes()?;
         settings.http.validate_auth_transport()?;
         settings.blackhole.validate()?;
         settings.amplification.validate()?;

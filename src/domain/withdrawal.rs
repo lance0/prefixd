@@ -33,7 +33,13 @@ impl MitigationRoute {
                         rate_bps: params.rate_bps,
                     },
                 )
-                .with_owner(params.injection_owner.clone()),
+                .with_owner(params.injection_owner.clone())
+                .with_route_targets(
+                    criteria
+                        .scope
+                        .as_ref()
+                        .map_or_else(Vec::new, |scope| scope.route_targets.clone()),
+                ),
             ),
             ActionType::Blackhole => Self::Blackhole {
                 prefix: criteria.dst_prefix.clone(),
@@ -578,6 +584,50 @@ mod tests {
         );
         mitigation.activate();
         mitigation
+    }
+
+    #[test]
+    fn vpn_withdrawal_freezes_scope_and_rt_snapshot() {
+        let mut mitigation = mitigation("192.0.2.1/32");
+        mitigation.match_criteria.scope = Some(
+            super::super::VpnScopeSnapshot::new(
+                "TRANSIT",
+                super::super::VpnFlowSpecIdentity::new(
+                    super::super::VpnFlowSpecFamily::Ipv4,
+                    "44407:40",
+                )
+                .unwrap(),
+                &["44407:777".into()],
+            )
+            .unwrap(),
+        );
+        mitigation.scope_hash = mitigation.match_criteria.compute_scope_hash();
+        let request =
+            WithdrawalRequest::new(&mitigation, false, "operator", "test", "test".into(), true)
+                .unwrap();
+        let before = request.flowspec_rule().unwrap();
+        assert_eq!(before.nlri.scope.as_ref().unwrap().rd(), "44407:40");
+        assert_eq!(before.route_targets, ["44407:777"]);
+        assert_eq!(request.ownership_key().unwrap(), before.nlri_hash());
+        mitigation.match_criteria.scope.as_mut().unwrap().identity =
+            super::super::VpnFlowSpecIdentity::new(
+                super::super::VpnFlowSpecFamily::Ipv4,
+                "44407:41",
+            )
+            .unwrap();
+        mitigation
+            .match_criteria
+            .scope
+            .as_mut()
+            .unwrap()
+            .route_targets = vec!["44407:888".into()];
+        let after = MitigationRoute::of(&mitigation).into_flowspec().unwrap();
+        assert_ne!(before.nlri_hash(), after.nlri_hash());
+        let restored = request.flowspec_rule().unwrap();
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
     }
 
     #[tokio::test]

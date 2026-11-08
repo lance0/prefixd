@@ -62,10 +62,12 @@ pub use health::{
 };
 
 mod manual_flowspec;
+mod vpn_flowspec;
 pub use manual_flowspec::{
     __path_preview_manual_flowspec, FlowSpecAdmissionCandidate, FlowSpecAdmissionCheck,
     FlowSpecAdmissionOutcome, FlowSpecAdmissionPreview, preview_manual_flowspec,
 };
+pub use vpn_flowspec::*;
 
 mod speaker;
 pub use speaker::{
@@ -286,7 +288,10 @@ pub struct MitigationResponse {
     pub action_type: String,
     /// Rate limit in bps (for police action)
     pub rate_bps: Option<u64>,
-    /// Destination prefix (CIDR)
+    /// Resolved VPN scope snapshot; absent for global rules.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vpn_scope: Option<crate::domain::VpnScopeSnapshot>,
+    /// Destination prefix (CIDR), empty for a source-only VPN rule.
     pub dst_prefix: String,
     /// Source network (same-family CIDR), or null when not matched
     pub src_prefix: Option<String>,
@@ -385,6 +390,7 @@ impl From<&Mitigation> for MitigationResponse {
             vector: m.vector.to_string(),
             action_type: m.action_type.to_string(),
             rate_bps: m.action_params.rate_bps,
+            vpn_scope: m.match_criteria.scope.clone(),
             dst_prefix: m.match_criteria.dst_prefix.clone(),
             src_prefix: m.match_criteria.src_prefix.clone(),
             protocol: m.match_criteria.protocol,
@@ -531,8 +537,65 @@ fn validate_ip(ip: &str) -> Result<IpAddr, PrefixdError> {
         .map_err(|_| PrefixdError::InvalidRequest(format!("invalid IP address: '{}'", ip)))
 }
 
+/// Detector metadata cannot select a routing scope; other legacy metadata remains accepted.
+pub struct DetectorEventRequest(AttackEventInput);
+
+impl<'de> serde::Deserialize<'de> for DetectorEventRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(object) = value.as_object()
+            && [
+                "scope",
+                "vpn_scope",
+                "vrf",
+                "rd",
+                "route_targets",
+                "afi_safi",
+                "default_scope",
+            ]
+            .iter()
+            .any(|field| object.contains_key(*field))
+        {
+            return Err(serde::de::Error::custom(
+                "detectors cannot select routing scope",
+            ));
+        }
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+fn reject_internal_vpn_field<'de, D: serde::Deserializer<'de>, T>(_: D) -> Result<T, D::Error> {
+    Err(serde::de::Error::custom(
+        "VPN selectors require the scope-aware endpoint",
+    ))
+}
+
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateMitigationRequest {
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "reject_internal_vpn_field"
+    )]
+    #[schema(ignore)]
+    vpn_scope: Option<String>,
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "reject_internal_vpn_field"
+    )]
+    #[schema(ignore)]
+    source_only: bool,
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "reject_internal_vpn_field"
+    )]
+    #[schema(ignore)]
+    source_only_confirmed: bool,
     #[serde(default)]
     #[allow(
         dead_code,
@@ -616,8 +679,9 @@ pub async fn ingest_event(
     State(state): State<Arc<AppState>>,
     auth_session: AuthSession,
     headers: HeaderMap,
-    Json(input): Json<AttackEventInput>,
+    Json(input): Json<DetectorEventRequest>,
 ) -> impl IntoResponse {
+    let input = input.0;
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     if let Err(_status) = require_auth(&state, &auth_session, auth_header) {
         return Err(AppError(PrefixdError::Unauthorized(
@@ -692,16 +756,20 @@ async fn persist_new_mitigation(
     actor: &CreationActor,
 ) -> crate::error::Result<Option<AnnouncementOutcome>> {
     let rule = flowspec_rule_for_admission(state, mitigation)?;
+    state
+        .announcer
+        .validate_scope(rule.nlri.scope.as_ref())
+        .await?;
+    let mut quotas = state.settings.quotas.clone();
+    if mitigation.match_criteria.dst_prefix.is_empty() {
+        let policy = crate::guardrails::source_only_policy(state, &mitigation.match_criteria)?;
+        quotas.source_only_limit = Some(policy.max_source_only_active);
+    }
     mitigation.activate();
     mitigation.origin_mode = Some(state.settings.mode);
     state
         .repo
-        .admit_mitigation(
-            mitigation,
-            &state.settings.quotas,
-            &state.settings.blackhole,
-            actor,
-        )
+        .admit_mitigation(mitigation, &quotas, &state.settings.blackhole, actor)
         .await
         .inspect_err(|error| {
             let reason = match error {
@@ -1018,7 +1086,7 @@ async fn handle_ban(
         state.settings.amplification.library_ports(),
         state.settings.guardrails.max_ports,
     );
-    let decision = match policy.evaluate(&event, context.as_ref()) {
+    let mut decision = match policy.evaluate(&event, context.as_ref()) {
         Err(
             error @ PrefixdError::GuardrailViolation(
                 GuardrailError::NoAllowedPorts | GuardrailError::InvalidAction(_),
@@ -1043,6 +1111,35 @@ async fn handle_ban(
         }
         result => result,
     };
+    if let Some(scope) = state
+        .settings
+        .bgp
+        .resolve_default_scope_for(if event.victim_ip.contains(':') {
+            crate::domain::IpVersion::V6
+        } else {
+            crate::domain::IpVersion::V4
+        })
+        .map_err(AppError)?
+        && let Ok(decision) = &mut decision
+    {
+        if decision
+            .intents
+            .iter()
+            .any(|intent| intent.action_type == ActionType::Blackhole)
+        {
+            return Err(AppError(PrefixdError::InvalidRequest(
+                "VPN default scope cannot originate a global blackhole".into(),
+            )));
+        }
+        state
+            .announcer
+            .validate_scope(Some(&scope.identity))
+            .await
+            .map_err(AppError)?;
+        for intent in &mut decision.intents {
+            intent.match_criteria.scope = Some(scope.clone());
+        }
+    }
     // Only allowlisted detectors reach a blackhole, whether it creates or extends (ADR 027).
     if let Ok(decision) = &decision
         && decision
@@ -2088,13 +2185,28 @@ pub async fn create_mitigation(
     use crate::domain::OperatorRole;
     // A blackhole drops all traffic to the victim, so it needs Admin (ADR 027);
     // bearer tokens map to Operator and get 403 before anything is read or saved.
-    let required = if req.action == "blackhole" {
+    let required = if req.action == "blackhole" && req.vpn_scope.is_none() {
         OperatorRole::Admin
     } else {
         OperatorRole::Operator
     };
     let operator = require_role(&state, &auth_session, auth_header, required)?;
     let operator_id = operator.username.clone();
+    if req.vpn_scope.is_some()
+        && (req.action == "blackhole"
+            || req.source_only && !matches!(req.action.as_str(), "discard" | "police"))
+    {
+        return Ok(AppError(PrefixdError::InvalidRequest(
+            "VPN FlowSpec admission supports discard and police only".into(),
+        ))
+        .into_response());
+    }
+    if req.source_only && !req.source_only_confirmed {
+        return Ok(AppError(PrefixdError::InvalidRequest(
+            "source-only creation requires confirm_destination_any: true".into(),
+        ))
+        .into_response());
+    }
     if req.action == "blackhole" {
         return Ok(create_blackhole(&state, operator_id, req).await);
     }
@@ -2633,7 +2745,8 @@ const MAX_BATCH_EVENTS: usize = 100;
 
 #[derive(Deserialize, ToSchema)]
 pub struct BatchEventRequest {
-    events: Vec<AttackEventInput>,
+    #[schema(value_type = Vec<AttackEventInput>)]
+    events: Vec<DetectorEventRequest>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -2698,6 +2811,7 @@ pub async fn ingest_events_batch(
     let mut rejected = 0u32;
 
     for (index, input) in req.events.into_iter().enumerate() {
+        let input = input.0;
         // Validate input
         let validation_err = validate_ip(&input.victim_ip)
             .and_then(|_| validate_string_len(&input.source, "source", MAX_STRING_LEN))
@@ -5256,5 +5370,60 @@ playbooks:
         ban(&f, event("max", "udp_amplification", Some(&too_many[..64])))
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod detector_scope_tests {
+    use super::*;
+
+    #[test]
+    fn detector_scope_selectors_are_refused_before_ingestion() {
+        let base = serde_json::json!({"timestamp":"2026-11-08T00:00:00Z", "source":"fixture",
+            "victim_ip":"203.0.113.1", "vector":"udp_flood", "legacy_metadata":true});
+        assert!(serde_json::from_value::<DetectorEventRequest>(base.clone()).is_ok());
+        for field in [
+            "scope",
+            "vpn_scope",
+            "vrf",
+            "rd",
+            "route_targets",
+            "afi_safi",
+            "default_scope",
+        ] {
+            let mut selected = base.clone();
+            selected[field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<DetectorEventRequest>(selected).is_err(),
+                "{field}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod global_manual_scope_tests {
+    use super::*;
+
+    #[test]
+    fn global_manual_requests_refuse_scope_and_internal_selector_fields() {
+        let base = serde_json::json!({"reason":"scope control", "victim_ip":"203.0.113.1",
+            "protocol":"udp", "action":"discard", "ttl_seconds":30});
+        assert!(serde_json::from_value::<CreateMitigationRequest>(base.clone()).is_ok());
+        for field in [
+            "scope",
+            "vpn_scope",
+            "source_only",
+            "source_only_confirmed",
+            "rd",
+            "route_targets",
+        ] {
+            let mut scoped = base.clone();
+            scoped[field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<CreateMitigationRequest>(scoped).is_err(),
+                "{field}"
+            );
+        }
     }
 }

@@ -44,6 +44,19 @@ fn session_routes() -> Router<Arc<AppState>> {
 /// State-changing requests return 503 while the controller is in standby.
 fn api_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
+        .route("/v1/vpn/mitigations", post(handlers::create_vpn_mitigation))
+        .route(
+            "/v1/vpn/mitigations/preview",
+            post(handlers::preview_vpn_mitigation),
+        )
+        .route(
+            "/v1/vpn/source-rules",
+            post(handlers::create_source_only_vpn),
+        )
+        .route(
+            "/v1/vpn/source-rules/preview",
+            post(handlers::preview_source_only_vpn),
+        )
         .route("/v1/speaker/routes", get(handlers::list_speaker_routes))
         .route("/v1/scrubbers", get(crate::scrubber::api::profiles))
         .route(
@@ -57,6 +70,11 @@ fn api_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/v1/diversions/preview",
             post(crate::scrubber::api::preview),
+        )
+        .route("/v1/vpn/diversions", post(crate::scrubber::api::create_vpn))
+        .route(
+            "/v1/vpn/diversions/preview",
+            post(crate::scrubber::api::preview_vpn),
         )
         .route("/v1/diversions/{id}", get(crate::scrubber::api::get))
         .route(

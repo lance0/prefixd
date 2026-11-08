@@ -7,11 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in VPNv4 and VPNv6 FlowSpec scopes on rustbgpd 0.82.0, with immutable
+  RD/RT identity through admission, withdrawal and recovery. Manual and automatic
+  family defaults preserve global behavior when omitted; GoBGP refuses VPN.
+- Manual source-only VPN discard/police with explicit whole-VRF authorization,
+  source protection, short TTL and scoped quotas. CLI/dashboard previews show
+  destination any and require confirmation. Guarded target-IP diversion can use
+  a configured VPN scope. Marking and redirect-to-VRF remain pending.
+
 ### Changed
 
 - Vendor the rustbgpd v0.82.0 controller schema and test the existing global
   lifecycle against its pinned image as well as v0.81.0. The global daemon
-  minimum remains v0.81.0; VPN mitigation runtime is still in development.
+  minimum remains v0.81.0; VPN support requires a successful family probe.
 
 ## [0.24.0] - 2026-11-02
 

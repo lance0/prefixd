@@ -29,7 +29,7 @@ import {
 } from "@/components/ui/tooltip"
 import { useConfigInventory, useMitigations, usePops } from "@/hooks/use-api"
 import { usePermissions } from "@/hooks/use-permissions"
-import { getAllMitigations, withdrawMitigation, bulkWithdrawMitigations, type BulkWithdrawResult, type Mitigation } from "@/lib/api"
+import { getAllMitigations, formatRoutingScope, withdrawMitigation, bulkWithdrawMitigations, type BulkWithdrawResult, type Mitigation } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { downloadCsv } from "@/lib/csv"
 import { MitigateNowDialog } from "@/components/dashboard/mitigate-now-dialog"
@@ -132,11 +132,11 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
 
     try {
       const matching = await getAllMitigations(filters)
-      const headers = ["mitigation_id", "status", "victim_ip", "vector", "action_type", "customer_id", "created_at", "expires_at"]
+      const headers = ["mitigation_id", "status", "victim_ip", "vector", "action_type", "customer_id", "created_at", "expires_at", "routing_scope"]
 
       const rows = matching.map((m) => [
         m.mitigation_id, m.status, m.victim_ip, m.vector, m.action_type,
-        m.customer_id ?? "", m.created_at, m.expires_at,
+        m.customer_id ?? "", m.created_at, m.expires_at, formatRoutingScope(m.vpn_scope),
       ])
 
       downloadCsv(`mitigations-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
@@ -537,6 +537,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                         >
                           {mitigation.victim_ip}
                         </Link>
+                        <span className="mt-0.5 block break-words font-mono text-xs text-muted-foreground">{formatRoutingScope(mitigation.vpn_scope)}</span>
                         <span className="mt-0.5 block text-xs text-muted-foreground md:hidden">
                           {vector} · {match} · created {formatRelative(mitigation.created_at, now)}
                         </span>
@@ -671,7 +672,10 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
           <AlertDialogHeader>
             <AlertDialogTitle>Withdraw Mitigation</AlertDialogTitle>
             <AlertDialogDescription>
-              Request withdrawal for <span className="font-mono font-semibold">{withdrawTarget?.victim_ip}</span>.
+              Request withdrawal for <span className="font-mono font-semibold">{withdrawTarget?.dst_prefix || withdrawTarget?.victim_ip}</span>
+              {withdrawTarget?.vpn_scope ? <> in <span className="font-mono">{formatRoutingScope(withdrawTarget.vpn_scope)}</span></> : null}
+              {withdrawTarget?.src_prefix ? <> from source <span className="font-mono">{withdrawTarget.src_prefix}</span></> : null}
+              {" "}({withdrawTarget?.action_type}).
               Local completion is recorded in the audit log. Router convergence and traffic filtering are not verified here.
             </AlertDialogDescription>
           </AlertDialogHeader>

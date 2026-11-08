@@ -1852,3 +1852,169 @@ async fn manual_destination_cidrs_survive_restart_then_withdraw_and_expire_exact
     harness.repair().await;
     harness.finish().await;
 }
+
+#[tokio::test]
+#[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
+async fn live_vpn_release_matrix_never_mutates_identical_global_keys() {
+    use prefixd::{
+        bgp::{ExportObserver, rustbgpd_pb as pb},
+        domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity},
+        error::PrefixdError,
+    };
+
+    async fn assert_global_controls(
+        fixture: &fixture::Speaker,
+        baseline: &[(i32, pb::ListFlowSpecResponse)],
+        last_remaining: &mut u32,
+    ) {
+        for (family, expected) in baseline {
+            let mut actual = fixture.received_flow_spec(*family, "0.0.0.0").await;
+            for row in &mut actual.received_routes {
+                let route = row.route.as_mut().unwrap();
+                if let Some(remaining) = route.lease_remaining_ms.take() {
+                    assert!(
+                        remaining > 0 && remaining <= *last_remaining,
+                        "VPN operations must not renew the global control's lease"
+                    );
+                    *last_remaining = remaining;
+                }
+            }
+            assert_eq!(&actual, expected, "global family {family} changed");
+        }
+    }
+
+    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
+    assert!(
+        matches!(version.as_str(), "0.81.0" | "0.82.0"),
+        "unqualified release {version}"
+    );
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    assert_eq!(
+        speaker.daemon_health().await.unwrap().version.as_deref(),
+        Some(version.as_str())
+    );
+    let global4 = rule();
+    let mut global6 = global4.clone().with_owner("prefixd.test.global-control");
+    global6.nlri.dst_prefix = "2001:db8::231/128".into();
+    speaker.announce(&global4).await.unwrap();
+    let control_generation = speaker.announce_leased(&global6, 60).await.unwrap();
+    let mut baseline = vec![
+        (3, fixture.received_flow_spec(3, "0.0.0.0").await),
+        (4, fixture.received_flow_spec(4, "0.0.0.0").await),
+    ];
+    let mut last_remaining = 0;
+    for (family, response) in &mut baseline {
+        assert!(response.received_view && !response.advertised_view);
+        assert_eq!(response.received_routes.len(), 1);
+        let route = response.received_routes[0].route.as_mut().unwrap();
+        assert!(route.rd.is_empty() && route.route_targets.is_empty());
+        if *family == 4 {
+            assert_eq!(route.injection_owner, global6.owner);
+            let generation = route.lease_generation.as_ref().unwrap();
+            assert_eq!(generation.incarnation, control_generation.incarnation);
+            assert_eq!(generation.sequence, control_generation.sequence);
+            last_remaining = route.lease_remaining_ms.take().unwrap();
+        }
+    }
+    for (family, global) in [
+        (VpnFlowSpecFamily::Ipv4, &global4),
+        (VpnFlowSpecFamily::Ipv6, &global6),
+    ] {
+        let mut scoped = global.clone().with_owner("");
+        scoped.nlri.scope = Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap());
+        scoped.route_targets = vec!["44407:777".into()];
+        let leased = scoped.clone().with_owner("prefixd.test.vpn-matrix");
+        if version == "0.81.0" {
+            for operation in 0..4 {
+                let error = match operation {
+                    0 => speaker.announce(&scoped).await.unwrap_err(),
+                    1 => speaker.announce_leased(&leased, 60).await.unwrap_err(),
+                    2 => speaker.withdraw(&scoped).await.unwrap_err(),
+                    _ => speaker.flowspec_exports(&scoped.nlri).await.unwrap_err(),
+                };
+                assert!(
+                    matches!(error, PrefixdError::UnsupportedFlowSpecScope { backend: "rustbgpd", family: observed } if observed == family.afi_safi()),
+                    "{error}"
+                );
+                assert_global_controls(&fixture, &baseline, &mut last_remaining).await;
+            }
+            assert!(
+                speaker.list_active().await.is_err(),
+                "unsupported registered VPN inventory must fail, not return partial global rows"
+            );
+        } else {
+            speaker
+                .validate_scope(scoped.nlri.scope.as_ref())
+                .await
+                .unwrap();
+            speaker.announce(&scoped).await.unwrap();
+            let rows = speaker.list_active().await.unwrap();
+            assert!(
+                rows.iter()
+                    .any(|row| speaker.matches_nlri(&row.nlri, &scoped.nlri).unwrap()
+                        && row.owner.is_empty()
+                        && row.route_targets == scoped.route_targets)
+            );
+            let exports = speaker.flowspec_exports(&scoped.nlri).await.unwrap();
+            assert!(exports.is_some());
+            assert_global_controls(&fixture, &baseline, &mut last_remaining).await;
+            speaker.withdraw(&scoped).await.unwrap();
+            let after = speaker.list_active().await.unwrap();
+            assert!(
+                !after
+                    .iter()
+                    .any(|row| speaker.matches_nlri(&row.nlri, &scoped.nlri).unwrap())
+            );
+            let generation = speaker.announce_leased(&leased, 60).await.unwrap();
+            let rows = fixture
+                .received_flow_spec(family.afi_safi(), "0.0.0.0")
+                .await;
+            let row = rows
+                .received_routes
+                .iter()
+                .find_map(|row| {
+                    row.route
+                        .as_ref()
+                        .filter(|row| row.injection_owner == leased.owner)
+                })
+                .unwrap();
+            let control = baseline[usize::from(family == VpnFlowSpecFamily::Ipv6)]
+                .1
+                .received_routes[0]
+                .route
+                .as_ref()
+                .unwrap();
+            assert_eq!(row.components, control.components);
+            assert_eq!(row.actions, control.actions);
+            assert_eq!(row.rd, "44407:40");
+            assert_eq!(row.route_targets, leased.route_targets);
+            let observed = row.lease_generation.as_ref().unwrap();
+            assert_eq!(
+                (observed.incarnation, observed.sequence),
+                (generation.incarnation, generation.sequence)
+            );
+            let exports = speaker.flowspec_exports(&leased.nlri).await.unwrap();
+            assert!(exports.is_some());
+            assert_global_controls(&fixture, &baseline, &mut last_remaining).await;
+            speaker.withdraw(&leased).await.unwrap();
+            let after = speaker.list_active().await.unwrap();
+            assert!(
+                !after
+                    .iter()
+                    .any(|row| speaker.matches_nlri(&row.nlri, &leased.nlri).unwrap())
+            );
+        }
+        assert_global_controls(&fixture, &baseline, &mut last_remaining).await;
+        println!(
+            "rustbgpd {version} VPN family {}: global controls preserved",
+            family.afi_safi()
+        );
+    }
+    // A fresh adapter has no unsupported VPN registration from the rollback proof.
+    let cleanup = fixture.connect().await;
+    cleanup.withdraw(&global4).await.unwrap();
+    cleanup.withdraw(&global6).await.unwrap();
+    assert!(cleanup.list_active().await.unwrap().is_empty());
+    fixture.container.rm().await.unwrap();
+}

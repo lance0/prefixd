@@ -14,6 +14,8 @@ pub enum IpVersion {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlowSpecNlri {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<super::VpnFlowSpecIdentity>,
     pub dst_prefix: String,
     /// Conventional source CIDR (RFC 8955/8956 type 2), with IPv6 offset 0.
     #[serde(
@@ -53,6 +55,8 @@ pub enum FlowSpecMatchError {
     InvalidPacketLength { min: u16, max: u16, floor: u16 },
     #[error("destination must be a canonical IPv4 or IPv6 network CIDR")]
     InvalidDestinationPrefix,
+    #[error("VPN scope and match prefixes must use the same address family")]
+    ScopeFamilyMismatch,
     #[error("source prefix must be an IPv4 or IPv6 CIDR")]
     InvalidSourcePrefix,
     #[error("source and destination prefixes must use the same address family")]
@@ -68,8 +72,14 @@ pub fn canonical_source_prefix(prefix: &str) -> Result<String, FlowSpecMatchErro
 }
 
 impl FlowSpecNlri {
-    /// Detect IP version from the destination prefix
+    /// VPN scope fixes the family even when the destination component is absent.
     pub fn ip_version(&self) -> IpVersion {
+        if let Some(scope) = &self.scope {
+            return match scope.family {
+                super::VpnFlowSpecFamily::Ipv4 => IpVersion::V4,
+                super::VpnFlowSpecFamily::Ipv6 => IpVersion::V6,
+            };
+        }
         if self.dst_prefix.contains(':') {
             IpVersion::V6
         } else {
@@ -84,21 +94,39 @@ impl FlowSpecNlri {
 
     /// The ADR 028 rule invariants. Rules without new components are not checked here.
     pub fn validate(&self) -> Result<(), FlowSpecMatchError> {
-        if !self.is_extended() && self.src_prefix.is_none() {
+        if self.scope.is_none() && !self.is_extended() && self.src_prefix.is_none() {
             return Ok(());
         }
-        let prefix: ipnet::IpNet = self
-            .dst_prefix
-            .parse()
-            .map_err(|_| FlowSpecMatchError::InvalidDestinationPrefix)?;
-        if prefix.addr() != prefix.network() {
-            return Err(FlowSpecMatchError::InvalidDestinationPrefix);
-        }
+        let destination = if self.dst_prefix.is_empty() {
+            if self.scope.is_none() || self.src_prefix.is_none() {
+                return Err(FlowSpecMatchError::InvalidDestinationPrefix);
+            }
+            None
+        } else {
+            let prefix: ipnet::IpNet = self
+                .dst_prefix
+                .parse()
+                .map_err(|_| FlowSpecMatchError::InvalidDestinationPrefix)?;
+            if prefix.addr() != prefix.network() {
+                return Err(FlowSpecMatchError::InvalidDestinationPrefix);
+            }
+            if self.scope.is_some()
+                && prefix.addr().is_ipv4() != (self.ip_version() == IpVersion::V4)
+            {
+                return Err(FlowSpecMatchError::ScopeFamilyMismatch);
+            }
+            Some(prefix)
+        };
         if let Some(source) = &self.src_prefix {
             let source: ipnet::IpNet = source
                 .parse()
                 .map_err(|_| FlowSpecMatchError::InvalidSourcePrefix)?;
-            if source.addr().is_ipv4() != prefix.addr().is_ipv4() {
+            let ipv4 = destination
+                .as_ref()
+                .map_or(self.ip_version() == IpVersion::V4, |prefix| {
+                    prefix.addr().is_ipv4()
+                });
+            if source.addr().is_ipv4() != ipv4 {
                 return Err(FlowSpecMatchError::SourcePrefixFamilyMismatch);
             }
         }
@@ -117,7 +145,11 @@ impl FlowSpecNlri {
                 return Err(FlowSpecMatchError::PacketLengthWithoutSourcePorts);
             }
             // Smallest IP plus UDP header: a lower bound at or below it matches all UDP.
-            let floor = if prefix.addr().is_ipv4() { 28 } else { 48 };
+            let floor = if self.ip_version() == IpVersion::V4 {
+                28
+            } else {
+                48
+            };
             if min <= floor || min > max {
                 return Err(FlowSpecMatchError::InvalidPacketLength { min, max, floor });
             }
@@ -125,19 +157,26 @@ impl FlowSpecNlri {
         Ok(())
     }
 
-    /// Shared scope, NLRI and ownership identity. Source-prefix rules use v3;
-    /// ADR 028 rules without source keep v2 byte for byte. `None` preserves the
-    /// original legacy hashes. Tags separate both namespaces from legacy input.
+    /// Scoped VPN keys include exact RD bytes. Global source-prefix rules keep
+    /// v3 and ADR 028 rules keep v2 byte for byte; `None` preserves legacy hashes.
     pub(crate) fn extended_identity(&self) -> Option<String> {
-        if !self.is_extended() && self.src_prefix.is_none() {
+        if self.scope.is_none() && !self.is_extended() && self.src_prefix.is_none() {
             return None;
         }
         let mut hasher = Sha256::new();
-        hasher.update(if self.src_prefix.is_some() {
-            b"prefixd:flowspec-match:v3\0"
+        if let Some(scope) = &self.scope {
+            hasher.update(b"prefixd:flowspec-match:vpn:v1\0");
+            hasher.update(scope.family.afi_safi().to_be_bytes());
+            hasher.update(scope.rd_bytes());
+            // Omitted destination is a different wire key from an explicit /0.
+            hasher.update([u8::from(!self.dst_prefix.is_empty())]);
         } else {
-            b"prefixd:flowspec-match:v2\0"
-        });
+            hasher.update(if self.src_prefix.is_some() {
+                b"prefixd:flowspec-match:v3\0"
+            } else {
+                b"prefixd:flowspec-match:v2\0"
+            });
+        }
         match self.dst_prefix.parse::<ipnet::IpNet>() {
             Ok(prefix) => hasher.update(prefix.to_string().as_bytes()),
             Err(_) => hasher.update(self.dst_prefix.as_bytes()),
@@ -198,6 +237,7 @@ impl FlowSpecNlri {
 impl From<&MatchCriteria> for FlowSpecNlri {
     fn from(criteria: &MatchCriteria) -> Self {
         Self {
+            scope: criteria.scope.as_ref().map(|scope| scope.identity.clone()),
             dst_prefix: criteria.dst_prefix.clone(),
             src_prefix: criteria
                 .src_prefix
@@ -275,6 +315,8 @@ impl FlowSpecAction {
 pub struct FlowSpecRule {
     pub nlri: FlowSpecNlri,
     pub actions: Vec<FlowSpecAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route_targets: Vec<String>,
     /// Injection owner the rule was added under (ADR 027); `""` for an unleased
     /// rule. Absent from unleased rule JSON, so persisted rules are unchanged.
     /// Not part of the rule's identity.
@@ -287,6 +329,7 @@ impl FlowSpecRule {
         Self {
             nlri,
             actions: vec![action],
+            route_targets: Vec::new(),
             owner: String::new(),
         }
     }
@@ -294,6 +337,11 @@ impl FlowSpecRule {
     /// The same rule held under an injection owner.
     pub fn with_owner(mut self, owner: impl Into<String>) -> Self {
         self.owner = owner.into();
+        self
+    }
+
+    pub fn with_route_targets(mut self, route_targets: Vec<String>) -> Self {
+        self.route_targets = route_targets;
         self
     }
 
@@ -331,6 +379,151 @@ impl std::fmt::Display for AnnouncementStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn vpn_scope(rd: &str) -> super::super::VpnScopeSnapshot {
+        super::super::VpnScopeSnapshot::new(
+            "TRANSIT",
+            super::super::VpnFlowSpecIdentity::new(super::super::VpnFlowSpecFamily::Ipv4, rd)
+                .unwrap(),
+            &["44407:777".into()],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn vpn_identity_golden_keys_separate_global_and_rds_without_rt_or_name() {
+        let global = MatchCriteria {
+            dst_prefix: "192.0.2.1/32".into(),
+            protocol: Some(17),
+            dst_ports: vec![53],
+            ..Default::default()
+        };
+        assert_eq!(
+            global.compute_scope_hash(),
+            "e4fab6e38e1f8dbcd5af569b47f6e00f"
+        );
+        assert_eq!(
+            FlowSpecNlri::from(&global).compute_hash(),
+            global.compute_scope_hash()
+        );
+        let json = serde_json::to_value(&global).unwrap();
+        assert!(json.get("scope").is_none());
+        let decoded: MatchCriteria = serde_json::from_value(json).unwrap();
+        assert!(decoded.scope.is_none());
+        for (rd, expected) in [
+            ("44407:40", "17ac3694a05ab63f96b63d1043f2fa4b"),
+            ("44407:41", "628c89a4b18f3bd1c27599cd3445f732"),
+        ] {
+            let mut criteria = global.clone();
+            criteria.scope = Some(vpn_scope(rd));
+            assert_eq!(criteria.compute_scope_hash(), expected);
+            assert_eq!(FlowSpecNlri::from(&criteria).compute_hash(), expected);
+            let saved: MatchCriteria =
+                serde_json::from_value(serde_json::to_value(&criteria).unwrap()).unwrap();
+            assert_eq!(saved.compute_scope_hash(), expected);
+            let scope = criteria.scope.as_mut().unwrap();
+            scope.name = "renamed".into();
+            scope.route_targets = vec!["44407:888".into()];
+            assert_eq!(criteria.compute_scope_hash(), expected);
+        }
+    }
+
+    #[test]
+    fn source_only_requires_vpn_scope_and_is_distinct_from_explicit_default() {
+        let source_only = FlowSpecNlri {
+            scope: Some(vpn_scope("44407:40").identity),
+            src_prefix: Some("198.51.100.0/24".into()),
+            ..Default::default()
+        };
+        source_only.validate().unwrap();
+        assert_eq!(source_only.ip_version(), IpVersion::V4);
+        let mut explicit_default = source_only.clone();
+        explicit_default.dst_prefix = "0.0.0.0/0".into();
+        explicit_default.validate().unwrap();
+        assert_ne!(source_only.compute_hash(), explicit_default.compute_hash());
+        let mut global = source_only.clone();
+        global.scope = None;
+        assert!(global.validate().is_err());
+        let mut absent = source_only.clone();
+        absent.src_prefix = None;
+        assert!(absent.validate().is_err());
+        let mut mismatched = explicit_default.clone();
+        mismatched.scope.as_mut().unwrap().family = super::super::VpnFlowSpecFamily::Ipv6;
+        assert_eq!(
+            mismatched.validate(),
+            Err(FlowSpecMatchError::ScopeFamilyMismatch)
+        );
+        let mut vpn6 = source_only.clone();
+        vpn6.scope.as_mut().unwrap().family = super::super::VpnFlowSpecFamily::Ipv6;
+        vpn6.src_prefix = Some("2001:db8:1::/48".into());
+        vpn6.validate().unwrap();
+        assert_eq!(vpn6.ip_version(), IpVersion::V6);
+        let mut vpn6_default = vpn6.clone();
+        vpn6_default.dst_prefix = "::/0".into();
+        vpn6_default.validate().unwrap();
+        assert_ne!(vpn6.compute_hash(), vpn6_default.compute_hash());
+        let mut vpn6_mismatch = vpn6;
+        vpn6_mismatch.src_prefix = Some("198.51.100.0/24".into());
+        assert_eq!(
+            vpn6_mismatch.validate(),
+            Err(FlowSpecMatchError::SourcePrefixFamilyMismatch)
+        );
+        let mut invalid_udp = source_only.clone();
+        invalid_udp.src_ports = vec![53];
+        assert_eq!(invalid_udp.validate(), Err(FlowSpecMatchError::RequiresUdp));
+        invalid_udp.protocol = Some(17);
+        invalid_udp.fragment = Some(FragmentMatch::NonFirst);
+        assert_eq!(
+            invalid_udp.validate(),
+            Err(FlowSpecMatchError::SourcePortsWithFragment)
+        );
+    }
+
+    #[test]
+    fn vpn_hash_includes_each_component_and_exact_rd_type() {
+        let base = FlowSpecNlri {
+            scope: Some(vpn_scope("65000:100").identity),
+            dst_prefix: "192.0.2.0/24".into(),
+            src_prefix: Some("198.51.100.0/24".into()),
+            protocol: Some(17),
+            ..Default::default()
+        };
+        let mut variants = Vec::new();
+        let mut changed = base.clone();
+        changed.dst_prefix = "192.0.3.0/24".into();
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.src_prefix = None;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.protocol = Some(6);
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.dst_ports = vec![53];
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.src_ports = vec![53];
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.fragment = Some(FragmentMatch::NonFirst);
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.src_ports = vec![53];
+        changed.packet_length = Some(PacketLengthRange { min: 100, max: 200 });
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.scope = Some(vpn_scope("0x00020000fde80064").identity);
+        variants.push(changed);
+        let mut hashes = std::collections::HashSet::new();
+        assert!(hashes.insert(base.compute_hash()));
+        for changed in variants {
+            changed.validate().unwrap();
+            assert!(hashes.insert(changed.compute_hash()));
+        }
+        let mut canonical = base.clone();
+        canonical.src_prefix = Some("198.51.100.42/24".into());
+        assert_eq!(base.compute_hash(), canonical.compute_hash());
+    }
 
     /// Unleased rules serialize exactly as before the owner existed; the owner
     /// never changes a rule's identity.

@@ -15,6 +15,7 @@ fn profile() -> ScrubberProfile {
     ScrubberProfile {
         id: "fixture".into(),
         revision: "v1".into(),
+        scope: "global".into(),
         ipv4_target: Some("192.0.2.99".parse().unwrap()),
         ipv6_target: None,
         destinations: vec!["203.0.113.0/24".parse().unwrap()],
@@ -38,6 +39,7 @@ fn diversion(pop: &str, host: u8) -> Diversion {
         customer_id: "cust_integration".into(),
         profile: profile().snapshot(),
         rule: GuardedRule {
+            route_targets: vec![],
             nlri: FlowSpecNlri {
                 dst_prefix: format!("203.0.113.{host}/32"),
                 protocol: Some(6),
@@ -501,4 +503,87 @@ async fn released_controller_lifecycle_uses_https_postgres_and_independent_guard
         .unwrap()
         .unwrap();
     fixture.container.rm().await.unwrap();
+}
+
+async fn exercise_source_only_diversion_exclusion(
+    repo: std::sync::Arc<dyn prefixd::db::RepositoryTrait>,
+    pop: &str,
+) {
+    let settings = common::test_settings();
+    let target = SpeakerTarget::from_config(&settings.bgp).unwrap();
+    repo.register_speaker_target(pop, &target, false)
+        .await
+        .unwrap();
+    let mut source = ordinary(pop, "203.0.113.0/24");
+    source.match_criteria.dst_prefix = String::new();
+    source.match_criteria.src_prefix = Some("2001:db9::/64".into());
+    source.match_criteria.scope = Some(
+        VpnScopeSnapshot::new(
+            "TRANSIT6",
+            VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv6, "44407:60").unwrap(),
+            &["44407:777".into()],
+        )
+        .unwrap(),
+    );
+    source.scope_hash = source.match_criteria.compute_scope_hash();
+    source.victim_ip = "any".into();
+    source.activate();
+    repo.insert_mitigation(&source).await.unwrap();
+    // A VPNv6 source-only rule must not block or break IPv4 diversion admission.
+    let allowed = diversion(pop, 40);
+    let allowed = repo
+        .admit_diversion(&allowed, &profile(), &settings.quotas)
+        .await
+        .unwrap();
+    // Retire the unrelated positive control before exercising the conflicting row.
+    let mut retired = allowed;
+    retired.status = DiversionStatus::Withdrawing;
+    retired.withdrawal_reason = Some("source-only exclusion control".into());
+    retired.withdrawal_actor = Some("fixture-admin".into());
+    repo.save_diversion(&retired, "scrubber_withdraw")
+        .await
+        .unwrap();
+    retired.status = DiversionStatus::Withdrawn;
+    repo.save_diversion(&retired, "scrubber_withdrawn")
+        .await
+        .unwrap();
+    let mut v4_source = source;
+    v4_source.mitigation_id = Uuid::new_v4();
+    v4_source.match_criteria.src_prefix = Some("198.51.100.0/24".into());
+    v4_source.match_criteria.scope = Some(
+        VpnScopeSnapshot::new(
+            "TRANSIT",
+            VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "44407:40").unwrap(),
+            &["44407:777".into()],
+        )
+        .unwrap(),
+    );
+    v4_source.scope_hash = v4_source.match_criteria.compute_scope_hash();
+    repo.insert_mitigation(&v4_source).await.unwrap();
+    let blocked = diversion(pop, 41);
+    let error = repo
+        .admit_diversion(&blocked, &profile(), &settings.quotas)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.status_code(),
+        axum::http::StatusCode::CONFLICT,
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn postgres_source_only_diversion_exclusion_is_family_correct() {
+    let context = common::TestContext::new().await;
+    exercise_source_only_diversion_exclusion(context.repo.clone(), &context.state.settings.pop)
+        .await;
+}
+
+#[tokio::test]
+async fn mock_source_only_diversion_exclusion_is_family_correct() {
+    exercise_source_only_diversion_exclusion(
+        std::sync::Arc::new(prefixd::db::MockRepository::new()),
+        "source-only-exclusion",
+    )
+    .await;
 }

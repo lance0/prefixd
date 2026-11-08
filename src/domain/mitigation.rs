@@ -102,6 +102,8 @@ impl std::str::FromStr for ActionType {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MatchCriteria {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<super::VpnScopeSnapshot>,
     pub dst_prefix: String,
     /// Optional conventional source CIDR. Absent keeps legacy rule identities.
     #[serde(
