@@ -211,7 +211,7 @@ pub async fn arm(
     ))
 }
 #[utoipa::path(post,path="/v1/diversions/preview",tag="scrubbers",request_body=CreateDiversion,responses(
-    (status=200,body=DiversionPreview,description="Controller checks only; no persistence or speaker RPC"),
+    (status=200,body=DiversionPreview,description="Controller checks only; no persistence. A VPN scope performs one read-only family capability probe"),
     (status=400,body=ErrorResponse,description="Invalid host, match, lifetime or reason, or no unambiguous inventory owner"),
     (status=401,description="Authentication required"),
     (status=403,description="Administrator role required"),

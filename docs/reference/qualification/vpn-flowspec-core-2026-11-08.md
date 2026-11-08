@@ -37,10 +37,13 @@ both Rust feature suites, PostgreSQL tests, all three MSRV configurations,
 release build, frontend lint/typecheck/684 tests/production build and dependency
 audits under the existing policy. Library totals were 617 without default
 features and 682 with all features. The final CLI suite has 12 passing tests.
-The gate then failed cargo-deny for unmaintained transitive dependencies
-RUSTSEC-2026-0440 and RUSTSEC-2026-0441, independently reproduced on unchanged
-main with the same lockfile. No dependency policy exception was added.
-Speaker fixtures run separately because the gate stops at that failure.
+At this revision the gate then failed cargo-deny for unmaintained transitive
+dependencies RUSTSEC-2026-0440 and RUSTSEC-2026-0441, independently reproduced
+on unchanged main with the same lockfile. No exception was added in this stack.
+A later dependency PR cleared 0441 by updating hyper and added the documented
+dev-only 0440 ignore for the testcontainers `astral-tokio-tar` graph; current
+main is advisory-clean apart from that warning. Speaker fixtures run separately
+because the gate stopped at that failure.
 
 ## Acceptance evidence
 

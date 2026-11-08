@@ -118,8 +118,9 @@ missing binary data, wrong actions and wrong RTs. IPv6 prefix offsets are zero.
 
 Local runtime gates passed both Rust feature suites, PostgreSQL, strict lint,
 MSRV, release build and frontend checks; the updated stack has 697 frontend tests.
-Cargo-deny fails on RUSTSEC-2026-0440/0441 on unchanged main and this stack; no new
-exception was added. Qualification PR checks and review state must be read on
+At this revision cargo-deny failed on RUSTSEC-2026-0440/0441 on unchanged main
+and this stack; no exception was added here. Current main clears 0441 and
+documents the dev-only 0440 ignore. Qualification PR checks and review state must be read on
 its actual head; this receipt does not assert hosted CI or review approval.
 
 The ASR9901 pilot still needs platform/release/action-specific acceptance,

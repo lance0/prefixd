@@ -726,6 +726,27 @@ prefixdctl migrations
 
 ## Version-Specific Notes
 
+### v0.24.0 → next release
+
+Scoped VPN FlowSpec, source-only whole-VRF rules, manual DSCP marking and
+guarded redirect-to-VRF are new and remain disabled unless `bgp.vpn_scopes`
+and `bgp.default_scope` are configured. `default_scope` defaults to `global`;
+an existing 0.24.0 configuration loads unchanged. No migration is required;
+migration 019 remains the latest.
+
+The global daemon minimum stays rustbgpd v0.81.0. VPN and redirect-to-VRF
+require rustbgpd v0.82.0 and a successful family 13/14 capability probe; GoBGP
+refuses scoped admission before any RPC. Global rules, hashes and pending
+withdrawals keep their existing wire identity.
+
+Before downgrading prefixd or rustbgpd, drain all VPN mitigations, diversions
+and pending withdrawals against their original target. Scope name/RD/RT edits
+with outstanding intent fail startup; changing the default only changes new
+admissions. A speaker downgrade or failed capability probe retains VPN intent
+and error state and refuses mutations/replay without global fallback. An older
+controller does not understand scoped intent, so do not rely on it to withdraw
+or expire it. See [VPN FlowSpec](vpn-flowspec.md) for the capability boundary.
+
 ### v0.23.1 → 0.24.0
 
 This upgrade needs rustbgpd v0.81.0, upgraded before prefixd. Migration 019
@@ -1816,13 +1837,3 @@ If you have **custom scripts or integrations** that page through results with `o
 - **prefixdctl default endpoint** changed from `http://127.0.0.1:8080` to `http://127.0.0.1` (nginx)
 - **Timeseries bucketing fix** -- sub-hour buckets now align correctly
 - No config file changes required
-
-## VPN FlowSpec and downgrade
-
-Drain all VPN mitigations, diversions and pending withdrawals against their
-original target before starting a controller that cannot preserve scope. Scope
-name/RD/RT edits with outstanding intent fail startup; changing the default only
-changes new admissions. A speaker downgrade or failed capability probe retains
-VPN intent/error state and refuses mutations/replay without global fallback.
-Global-only deployments retain the rustbgpd 0.81.0 minimum. See
-[VPN FlowSpec](vpn-flowspec.md) for the 0.82.0 capability boundary.
