@@ -43,6 +43,13 @@ missing scope fields and IPv6 matches in an IPv4 scope fail before persistence
 or speaker mutation. Preview and dry-run use the same validation. Raw RD/RT
 input belongs in operator configuration, not detector payloads.
 
+Use scope-aware endpoints for VPN admission/preview and guarded creation so
+older controllers reject the route instead of ignoring a new JSON selector
+and injecting globally. CLI/dashboard clients require controller VPN capability
+before submission; they never retry through a global endpoint or drop scope.
+Keep existing global endpoints compatible. Reject unknown scope fields in the
+new request types.
+
 The first slice selects VPN scope through manual admission and configured
 scrubber profiles. Automatic detector/playbook mitigation remains global;
 refuse explicit VPN selectors on those paths until scoped event and inventory
@@ -147,7 +154,9 @@ VPN operation: its destination is the whole VRF. Require explicit whole-VRF
 authorization in scope configuration, a source prefix, source-match opt-in and
 preview/confirmation showing `destination: any`. Evaluate destination ownership
 and safelist protection over the whole destination domain; refuse admission if
-that authorization or protection cannot be established. A host used for audit
+that authorization or protection cannot be established. Any destination safelist
+overlap causes refusal. Omitted destination and an explicit `/0` remain distinct
+wire identities. A host used for audit
 context cannot substitute for the omitted destination component. Keep global
 source-only refused. This policy needs agreement before implementation; if it
 cannot support the pilot safely, record the gap rather than emit a wider rule.
@@ -169,6 +178,7 @@ Acceptance requires the following evidence; none is established by this ADR:
 | Global/RD A/RD B isolation | Add/list/delete, TTL and lease expiry, retry and restart tests with identical components |
 | RT and RD updates | Plain/leased replacement; guarded delete/new revision; lossless single-representation replay |
 | Unsupported speaker | Released 0.81.0 refusal across VPN paths with unchanged global inventory; separate transport/auth controls |
+| Older controller | New clients refuse absent VPN capability; scope-aware endpoints refuse on an older controller without changing global inventory |
 | Backend safety | GoBGP pre-RPC typed refusal; mock negative and malformed-inventory controls |
 | Wire behavior | Isolated prefixd to rustbgpd to GoBGP 4.11.0 peer; exact AFI 1/SAFI 134, RD/RT/actions and withdrawal; global-only peer control |
 | Actions and sources | All five actions; source+destination and source-only; admission negatives and round-trip evidence |
