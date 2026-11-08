@@ -275,11 +275,13 @@ Initial network connections and TLS handshakes have a ten-second budget;
 complete RPC attempts are bounded separately.
 
 `proto/rustbgpd.proto` is the unmodified `rustbgpd.proto` asset of the
-rustbgpd `v0.81.0` release, checked offline against the release's sha256 by
+rustbgpd `v0.82.0` release, checked offline against the release's sha256 by
 `just proto`. The controller message fields prefixd uses were checked against
 it. This is a protocol baseline, not proof that an arbitrary binary reporting
 that version has passed the deployment or router tests. The stubs follow the
-pinned release, and v0.81.0 is the minimum daemon. At startup prefixd reads
+pinned release, and v0.81.0 remains the minimum daemon. The v0.82.0
+fixture also runs the existing controller lifecycle; VPN runtime is not enabled
+by updating the schema pin. At startup prefixd reads
 the version that `GetHealth` reports and refuses a daemon older than v0.81.0,
 or one that reports no readable version, with "upgrade the speaker first".
 Peer identity fields are decoded. Both export RPCs set `include_configured`,

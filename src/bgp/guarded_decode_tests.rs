@@ -148,3 +148,18 @@ fn guarded_refusals_name_their_cause_and_other_failures_stay_unconfirmed() {
         );
     }
 }
+
+#[test]
+fn foreign_match_never_normalizes_scoped_fields_into_global_occupancy() {
+    let baseline = route();
+    assert_eq!(
+        foreign_match(baseline.clone(), 3).unwrap().dst_prefix,
+        "192.0.2.1/32"
+    );
+    let mut rd = baseline.clone();
+    rd.rd = "44407:40".into();
+    assert!(foreign_match(rd, 3).is_err());
+    let mut targets = baseline;
+    targets.route_targets = vec!["44407:777".into()];
+    assert!(foreign_match(targets, 3).is_err());
+}

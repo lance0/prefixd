@@ -64,6 +64,10 @@ command palette still need complete pagination.
 
 ## Near-term work
 
+- Implement scoped IPv4 VPN FlowSpec under [ADR 032](docs/adr/032-vpn-flowspec-scope.md).
+  The v0.82.0 schema and fixture pin are a dependency, not VPN lifecycle or
+  router qualification.
+
 - Add stronger announcement acknowledgements and a complete desired/acknowledged
   ledger, including unleased and GoBGP paths. Opt-in rustbgpd injection owners
   and lease recovery do not complete that ledger or make shared targets

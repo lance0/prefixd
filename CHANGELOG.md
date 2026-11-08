@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Vendor the rustbgpd v0.82.0 controller schema and test the existing global
+  lifecycle against its pinned image as well as v0.81.0. The global daemon
+  minimum remains v0.81.0; VPN mitigation runtime is still in development.
+
 ## [0.24.0] - 2026-11-02
 
 prefixd 0.24.0 adds manual scrubber diversion through rustbgpd's guarded

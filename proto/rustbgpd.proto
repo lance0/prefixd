@@ -35,6 +35,8 @@ enum AddressFamily {
   ADDRESS_FAMILY_IPV4_LABELED_UNICAST = 10;
   ADDRESS_FAMILY_IPV6_LABELED_UNICAST = 11;
   ADDRESS_FAMILY_IPV4_RT_CONSTRAIN = 12;
+  ADDRESS_FAMILY_L3VPN_IPV4_FLOWSPEC = 13;
+  ADDRESS_FAMILY_L3VPN_IPV6_FLOWSPEC = 14;
 }
 
 enum SessionState {
@@ -2080,8 +2082,8 @@ message TestPolicyRequest {
   // fail the dry run with compiled=false and rendered diagnostics.
   string rpol_source = 1;
   // Which policy in the file to evaluate. Bare name for zero-parameter
-  // policies; call-form with u32 arguments for parameterized ones,
-  // e.g. "customer-in(200)".
+  // policies; call-form for parameterized ones, with integer, community,
+  // address or set-name arguments, e.g. "customer-in(200, cust-65001)".
   string policy = 2;
   // "import" evaluates over the retained post-policy Adj-RIB-In
   // (optionally one peer's): routes admitted by import policy when they
@@ -2861,8 +2863,14 @@ message ExplainModifications {
   repeated uint64 extended_communities_remove = 7;
   repeated string large_communities_add = 8;
   repeated string large_communities_remove = 9;
-  optional uint32 as_path_prepend_asn = 10;
-  optional uint32 as_path_prepend_count = 11;
+  // Replaced by `as_path_prepend`: a single ASN and count cannot represent
+  // an ordered sequence such as `666.5 666.5 2.5 2.5 2.5`.
+  reserved 10, 11;
+  reserved "as_path_prepend_asn", "as_path_prepend_count";
+  // The ASNs the policy places in front of the AS_PATH, leftmost first,
+  // with computed operands resolved; at most 255. Empty when the policy
+  // prepends nothing.
+  repeated uint32 as_path_prepend = 12;
 }
 
 // One candidate path in an RFC 9107 ORR advertised-route explanation.
@@ -2954,10 +2962,13 @@ message ExplainBestPathRequest {
   // Loc-RIB best and `candidates` lists every non-best route the RIB
   // knows for the prefix. The winner is never repeated in candidates.
   // A peer scope also tags Add-Path advertisement: every candidate
-  // that the named peer would receive — passes the peer's
-  // export policy + sendable-family check + split-horizon / RR
-  // suppression and falls within the peer's effective
-  // `add_path_send_max` — gets a non-zero
+  // that passes the peer's RFC 5291 §6 refresh gate, sendable-family
+  // check, Address-Prefix ORF filter, split-horizon / RR
+  // suppression, RFC 1997 `NO_ADVERTISE` / `NO_EXPORT`,
+  // route-server control, LLGR export restriction, conditional
+  // advertisement and export policy, falls within the peer's
+  // effective `add_path_send_max`, and is not withheld at commit by
+  // RFC 9234 OTC egress or the outbound prefix limit, gets a non-zero
   // `advertised_path_id`: the outbound Add-Path path ID the peer
   // has or would get. A path keeps its ID while it is sent, so IDs
   // follow no rank order and need not be contiguous; the selected
@@ -3005,17 +3016,20 @@ message BestPathCandidate {
   // knob and maximum_paths bound.
   string multipath = 6;
   // Set on responses scoped to a peer with Add-Path send mode
-  // (`add_path_send_max > 0`). Non-zero = this candidate would be
-  // advertised at this rank. Zero = filtered (export policy
-  // reject, family mismatch, split-horizon, iBGP / RFC 4456
-  // route-reflector suppression, or beyond `send_max`). Always
-  // zero in single-best send mode (`add_path_send_max == 0`) —
-  // single-best advertises only the selected best (`best_route`)
-  // at `path_id = 0`, and never falls back to the next-best
-  // candidate when the winner is suppressed, so this field cannot
-  // represent that selection. In single-best mode operators infer
-  // winner-advertisement from `best_route` plus their knowledge
-  // of the peer's policy state.
+  // (`add_path_send_max > 0`). Non-zero = the outbound Add-Path
+  // path ID this candidate has or would get (a stable key, not a
+  // rank). Zero = filtered (RFC 5291 §6 refresh gate, family
+  // mismatch, Address-Prefix ORF filter, split-horizon, iBGP /
+  // RFC 4456 route-reflector suppression, RFC 1997, route-server
+  // control, LLGR export restriction, conditional advertisement,
+  // export policy reject), beyond `send_max`, or withheld at commit
+  // (RFC 9234 OTC egress, outbound prefix limit). Always zero
+  // without Add-Path send (`add_path_send_max == 0`): such a peer
+  // gets one path at `path_id = 0`. An ordinary single-best peer
+  // gets the selected best (`best_route`) or nothing; a
+  // per-client-best route-server client gets the first candidate
+  // its export gates permit, which can be a non-best candidate.
+  // Use ExplainAdvertisedRoute for what such a peer is sent.
   uint32 advertised_path_id = 4;
 }
 
@@ -4238,6 +4252,8 @@ message ListFlowSpecExportDispositionsRequest {
   uint32 page_size = 3;
   string page_token = 4;
   bool include_configured = 5;
+  // Required for VPN FlowSpec (IPv4 or IPv6); empty for global FlowSpec.
+  string rd = 6;
 }
 
 // The export dispositions of one requested key on one page.
@@ -4366,12 +4382,17 @@ message FlowSpecRouteEntry {
   // The admission revision of a rule added with AddGuardedFlowSpec, set
   // with injection_owner.
   optional uint64 admission_revision = 12;
+  // Lossless Route Distinguisher for VPN FlowSpec; empty for global rules.
+  string rd = 13;
+  // VPN scope RTs, also present raw in extended_communities. Re-inject one
+  // representation only. Small-ASN four-octet RTs use the asdot+ form.
+  repeated string route_targets = 14;
 }
 
 message AddFlowSpecRequest {
-  // Address family: IPV4_FLOWSPEC or IPV6_FLOWSPEC.
+  // IPV4_FLOWSPEC, IPV6_FLOWSPEC, L3VPN_IPV4_FLOWSPEC or L3VPN_IPV6_FLOWSPEC.
   AddressFamily afi_safi = 1;
-  // Match components, the rule's identity together with afi_safi. They must
+  // Match components, the rule's identity together with afi_safi and rd. They must
   // be non-empty and in strictly ascending RFC 8955 type order, with no type
   // repeated; the daemon does not reorder them. Out-of-order or duplicate
   // types, and a rule encoding to more than 4095 NLRI bytes, return
@@ -4387,6 +4408,14 @@ message AddFlowSpecRequest {
   // A typed redirect_ip must not also be supplied as a raw target-IP action
   // in either community list. Other raw communities retain their bytes.
   repeated bytes ipv6_extended_communities = 6;
+  // Required for VPN FlowSpec (IPv4 or IPv6); empty for global FlowSpec. Types 0, 1
+  // and 2 are accepted. Identity is (afi_safi, rd, components). VPN rules
+  // use their AFI component grammar; the eight-byte RD counts toward the 4095 limit.
+  string rd = 7;
+  // VPN-only scope RTs in the FlowSpecRedirect.route_target grammar. At
+  // least one supported transitive RT is required, typed here or raw in
+  // extended_communities. Repeated typed RTs or typed/raw duplicates fail.
+  repeated string route_targets = 8;
 }
 
 message AddFlowSpecResponse {
@@ -4421,6 +4450,8 @@ message DeleteFlowSpecRequest {
   string owner = 4;
   // Same as DeletePathRequest.override_owner.
   bool override_owner = 5;
+  // Required for VPN FlowSpec (IPv4 or IPv6); empty for global FlowSpec.
+  string rd = 6;
 }
 
 // An owner's lease (ADR-0141).
@@ -4522,6 +4553,8 @@ message LeasedPathKey {
 message LeasedFlowSpecKey {
   AddressFamily afi_safi = 1;
   repeated FlowSpecComponent components = 2;
+  // Required when echoing a VPN key into DeleteFlowSpec.
+  string rd = 3;
 }
 
 message LeasedKey {
@@ -4591,6 +4624,8 @@ message DeleteGuardedFlowSpecRequest {
   string owner = 3;
   // Required, nonzero: the revision the rule was added with.
   uint64 revision = 4;
+  // Required for VPN FlowSpec (IPv4 or IPv6); empty for global FlowSpec.
+  string rd = 5;
 }
 
 message DeleteGuardedFlowSpecResponse {
@@ -4658,6 +4693,8 @@ enum FlowSpecDeleteOutcome {
 }
 
 message ListFlowSpecRequest {
+  // UNSPECIFIED selects global IPv4/IPv6 FlowSpec (SAFI 133) only, in every
+  // view. VPN rows require explicit L3VPN_IPV4_FLOWSPEC or L3VPN_IPV6_FLOWSPEC.
   AddressFamily afi_safi = 1;
   // When both peer selectors are empty, select the Loc-RIB. An IP address here
   // selects retained received candidates from that peer, including

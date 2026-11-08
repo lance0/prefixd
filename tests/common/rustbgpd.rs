@@ -375,7 +375,16 @@ prefixd-test = "operator"
                 Mount::bind_mount(files.path().to_str().unwrap(), "/fixture")
                     .with_access_mode(AccessMode::ReadWrite),
             )
-            .with_cmd(["rustbgpd", "/fixture/config.toml"]);
+            .with_cmd(if observation_neighbors {
+                // The root-only discovery daemon must own its private fixture credential.
+                vec![
+                    "sh",
+                    "-c",
+                    "chown 0:0 /fixture/token && exec rustbgpd /fixture/config.toml",
+                ]
+            } else {
+                vec!["rustbgpd", "/fixture/config.toml"]
+            });
         let container = image
             .start()
             .await

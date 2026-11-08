@@ -520,6 +520,8 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
         || !route.communities.is_empty()
         || !route.as_path.is_empty()
         || !route.ipv6_extended_communities.is_empty()
+        || !route.rd.is_empty()
+        || !route.route_targets.is_empty()
         || route.admission_revision.is_some()
         || route.injection_owner.starts_with("guarded:")
     {
@@ -1389,6 +1391,7 @@ impl ExportObserver for RustBgpdAnnouncer {
                             page_size: ROUTE_PAGE_SIZE,
                             page_token,
                             include_configured: true,
+                            rd: String::new(),
                         },
                     ))
                     .await
@@ -1614,7 +1617,7 @@ mod tests {
             );
             let original = route(&rule);
             assert!(decode(original.clone(), original.afi_safi).is_ok());
-            for case in 0..5 {
+            for case in 0..7 {
                 let mut bad = original.clone();
                 match case {
                     0 => bad.ipv6_extended_communities = vec![vec![0; 20]],
@@ -1636,6 +1639,8 @@ mod tests {
                             },
                         ));
                     }
+                    5 => bad.rd = "44407:40".into(),
+                    6 => bad.route_targets = vec!["44407:777".into()],
                     _ => unreachable!(),
                 }
                 assert!(decode(bad, original.afi_safi).is_err(), "case {case}");
