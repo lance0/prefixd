@@ -1,7 +1,7 @@
 # VPN FlowSpec actions and recovery — 2026-11-08
 
 This receipt extends the [core receipt](vpn-flowspec-core-2026-11-08.md).
-The runtime source is `ba5a34f6ac253c3aac49e6c5747d2b4e99e2af4c`.
+The runtime source is `7a917ae4f0c12c385fc71e344f79b1c3eb7d3ef9`.
 It establishes controller behavior and received software-peer routes, not
 router installation, VRF import isolation or traffic enforcement.
 
@@ -39,7 +39,14 @@ does not derive expected action bytes from prefixd's encoder.
 | PostgreSQL/controller recovery | PASS | PASS | Six HTTP-created rows, original controller/router/client references dropped, speaker restarted, fresh repository/controller, changed B defaults, startup probes and production reconciliation restore exact saved global/A/B payloads. Saved-A withdrawal preserves B/global and the stored target/rule/actor/reason. This is controller-state reconstruction, not process-kill/soak qualification. |
 | Older speaker | PASS refusal | PASS refusal | 0.81.0 rejects required families/startup while PostgreSQL/global speaker controls remain unchanged; no global retry |
 
-The tightened-budget five-action run passed in 42.39 seconds.
+The five-action run with periodic readiness passed in 50.17 seconds. Its owned
+scrubber worker uses the production five-second cadence and four-second pass
+budget, with missed ticks skipped. A nine-second pause exceeds the HTTPS
+monitor's eight-second report lifetime; authenticated refreshes keep all four
+profiles ready and armed and all four original guarded intents active. The
+worker stays alive throughout peer polling and pending-window drain, then
+aborts and joins before HTTPS monitor and peer teardown.
+
 Each guarded withdrawal reads a held lease above 11 seconds inside one 10-second
 budget covering that read, the HTTP withdrawal and peer absence. Lease expiry
 therefore cannot satisfy the withdrawal proof. The test waits for pending-window
@@ -49,9 +56,9 @@ manual withdrawal preserves healthy profile arming; failures still latch.
 The HTTPS fixture verifies authentication and readiness gates; its asserted
 canary/readiness values do not prove a real scrubbing path.
 
-The three-key replacement/expiry/restart run passed in 21.02 seconds on 0.82.0;
+The three-key replacement/expiry/restart run passed in 21.04 seconds on 0.82.0;
 the 0.81.0 refusal branch passed separately. Both released versions also passed
-the PostgreSQL recovery test. The writer API returns no replacement outcome enum,
+the PostgreSQL recovery test (2.16 seconds on 0.82.0 and 1.96 seconds on 0.81.0). The writer API returns no replacement outcome enum,
 so those assertions establish state replacement rather than exposing `REPLACED`.
 
 ## Controls and reproduction
@@ -74,9 +81,21 @@ arming. The corrected test asserts both healthy arming and pending-window state,
 without increasing deadlines or relaxing lease preconditions. Evidence review
 then tightened the budget to include the held-rule read and HTTP request as well
 as peer removal; the earlier 43.06-second run remains diagnostic for that timing
-claim. The initial database recovery
-assertion similarly omitted the API's existing actor prefix; the corrected check
-requires the full reason and actor fields. Failed receipts were retained.
+claim. Review also found that manual lifecycle ticks left the earlier
+42.39-second run unable to establish readiness continuity across a slow peer
+read. The periodic worker and nine-second survival control resolve that fixture
+gap; the earlier run remains diagnostic for readiness continuity. Report TTLs,
+pass budgets, withdrawal deadlines and held-lease preconditions are unchanged.
+The initial database recovery assertion similarly omitted the API's existing
+actor prefix; the corrected check requires the full reason and actor fields. Failed receipts were retained.
+
+Runtime review also bounded VPN capability probes by the existing guarded RPC
+deadline and normalized dashboard destination whitespace before submission.
+Separate focused tests cover stalled probes and padded IPv4/IPv6 input. The live
+action receipt uses responsive local speakers and valid HTTP payloads; it does
+not measure stalled-probe latency or frontend behavior. Historical invalid-action
+cleanup also has separate key-only withdrawal coverage; the five-action fixture
+uses valid admitted action payloads.
 
 Use Docker and the repository's pinned toolchains:
 
@@ -93,7 +112,7 @@ The binary oracle's unit controls reject malformed attributes, duplicate types,
 missing binary data, wrong actions and wrong RTs. IPv6 prefix offsets are zero.
 
 Local runtime gates passed both Rust feature suites, PostgreSQL, strict lint,
-MSRV, release build and frontend checks; the marking stack has 693 frontend tests.
+MSRV, release build and frontend checks; the updated stack has 697 frontend tests.
 Cargo-deny fails on RUSTSEC-2026-0440/0441 on unchanged main and this stack; no new
 exception was added. Qualification PR checks and review state must be read on
 its actual head; this receipt does not assert hosted CI or review approval.

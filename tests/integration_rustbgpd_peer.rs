@@ -1090,6 +1090,20 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
     .await;
     let cookie = cookie.unwrap();
     state.scrubber.tick(&state).await.unwrap();
+    let scrubber_task = tokio::spawn({
+        let state = state.clone();
+        async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                tokio::time::timeout(Duration::from_secs(4), state.scrubber.tick(&state))
+                    .await
+                    .expect("fixture scrubber pass stays within the production pass budget")
+                    .expect("fixture scrubber lifecycle pass succeeds");
+            }
+        }
+    });
     for (id, _, _, _, _) in profiles {
         let (before, _) = request(
             &app,
@@ -1171,7 +1185,6 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
             .into_iter()
             .enumerate()
         {
-            state.scrubber.tick(&state).await.unwrap();
             let nlri = FlowSpecNlri {
                 scope: Some(VpnFlowSpecIdentity::new(family, rd).unwrap()),
                 dst_prefix: format!(
@@ -1289,6 +1302,47 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
     }
     assert_eq!(speaker.list_active().await.unwrap().len(), 7);
     assert_eq!(speaker.guarded_inventory().await.unwrap().len(), 4);
+    // Exceed the monitor's eight-second TTL while peer observation does no lifecycle work.
+    let reads_before_pause = accepted_monitor_reads.load(SeqCst);
+    tokio::time::sleep(Duration::from_secs(9)).await;
+    assert!(
+        !scrubber_task.is_finished(),
+        "periodic scrubber worker must remain live"
+    );
+    assert!(accepted_monitor_reads.load(SeqCst) >= reads_before_pause + profiles.len());
+    let healthy = state.scrubber.profiles().await;
+    for (id, _, _, _, _) in profiles {
+        let profile = &healthy[id];
+        assert!(
+            profile.armed && profile.ready,
+            "{id} must remain armed and ready after nine seconds"
+        );
+        assert_eq!(profile.readiness, prefixd::scrubber::ReadinessState::Ready);
+        assert!(
+            profile.latch_reason.is_none(),
+            "{id}: {:?}",
+            profile.latch_reason
+        );
+    }
+    let active = database
+        .repo
+        .list_diversions(&state.settings.pop)
+        .await
+        .unwrap();
+    assert_eq!(active.len(), 4);
+    for (id, _, frozen, _) in &diversions {
+        let saved = active.iter().find(|row| row.id.to_string() == *id).unwrap();
+        assert_eq!(saved.status, prefixd::scrubber::DiversionStatus::Active);
+        assert_eq!(serde_json::to_value(&saved.rule).unwrap(), *frozen);
+    }
+    assert_eq!(
+        speaker.guarded_inventory().await.unwrap().len(),
+        4,
+        "periodic readiness renewal must retain all four original guarded rules"
+    );
+    eprintln!(
+        "nine-second readiness survival control PASS: eight-second reports refreshed, all four profiles armed/ready and original guarded intents active"
+    );
     // Independent local RPC evidence includes every raw action and scope RT.
     let mut local_count = 0;
     for family in [3, 4, 13, 14] {
@@ -1403,7 +1457,6 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
         Duration::from_secs(u64::from(prefixd::scrubber::WINDOW_SECONDS) + 10),
         async {
             loop {
-                state.scrubber.tick(&state).await.unwrap();
                 let rows = database
                     .repo
                     .list_diversions(&state.settings.pop)
@@ -1468,6 +1521,11 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
     assert!(speaker.list_active().await.unwrap().is_empty());
     eprintln!(
         "all-five VPN action receipt: both families, authenticated HTTP and HTTPS readiness, frozen guarded payloads, exact local/peer bytes, independent withdrawals and global-only peer control PASS; traffic enforcement unqualified"
+    );
+    scrubber_task.abort();
+    assert!(
+        scrubber_task.await.unwrap_err().is_cancelled(),
+        "owned scrubber worker must be aborted and awaited before monitor teardown"
     );
     handle.graceful_shutdown(Some(Duration::from_secs(2)));
     monitor_task.await.unwrap().unwrap();
