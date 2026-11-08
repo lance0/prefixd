@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Record [VPNv4/v6 five-action software-peer and recovery qualification](docs/reference/qualification/vpn-flowspec-actions-2026-11-08.md), including exact receiver attributes and independent withdrawal. Router installation and traffic enforcement remain separate qualification.
+
 - Vendor the rustbgpd v0.82.0 controller schema and test the existing global
   lifecycle against its pinned image as well as v0.81.0. The global daemon
   minimum remains v0.81.0; VPN support requires a successful family probe.

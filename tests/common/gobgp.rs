@@ -223,6 +223,26 @@ impl Speaker {
         safi: i32,
         table: pb::TableType,
     ) -> Vec<pb::Path> {
+        self.paths_with_attributes(afi, safi, table, false).await
+    }
+
+    /// Keep typed NLRI while also asking the peer for complete serialized attributes.
+    pub async fn paths_with_binary_attributes(
+        &self,
+        afi: i32,
+        safi: i32,
+        table: pb::TableType,
+    ) -> Vec<pb::Path> {
+        self.paths_with_attributes(afi, safi, table, true).await
+    }
+
+    async fn paths_with_attributes(
+        &self,
+        afi: i32,
+        safi: i32,
+        table: pb::TableType,
+        binary: bool,
+    ) -> Vec<pb::Path> {
         tokio::time::timeout(Duration::from_secs(3), async {
             let mut stream = self
                 .client()
@@ -235,6 +255,7 @@ impl Speaker {
                         String::new()
                     },
                     family: Some(pb::Family { afi, safi }),
+                    enable_attribute_binary: binary,
                     ..Default::default()
                 })
                 .await

@@ -221,3 +221,5 @@ installation, wrong-RT isolation or traffic enforcement is claimed. Record
 separate platform/release/action receipts for the ASR9901 pilot and later
 platforms. See [ADR 032](../adr/032-vpn-flowspec-scope.md) and the
 [backend evidence boundaries](../reference/speaker-backends.md).
+
+The [dated controller and software-peer receipt](../reference/qualification/vpn-flowspec-actions-2026-11-08.md) covers all five actions and recovery for both families; it retains the router qualification boundary.

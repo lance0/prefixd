@@ -2022,6 +2022,226 @@ async fn live_vpn_release_matrix_never_mutates_identical_global_keys() {
 
 #[tokio::test]
 #[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
+async fn live_vpn_three_key_replacement_expiry_and_restart_preserve_scope() {
+    use prefixd::{
+        bgp::{RustBgpdAnnouncer, rustbgpd_pb as pb},
+        domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity},
+        error::PrefixdError,
+    };
+    use std::time::Duration;
+
+    fn same_key(left: &FlowSpecRule, right: &FlowSpecRule) -> bool {
+        let mut left_ports = left.nlri.dst_ports.clone();
+        let mut right_ports = right.nlri.dst_ports.clone();
+        left_ports.sort_unstable();
+        right_ports.sort_unstable();
+        left.nlri.scope == right.nlri.scope
+            && left.nlri.dst_prefix.parse::<ipnet::IpNet>().unwrap()
+                == right.nlri.dst_prefix.parse::<ipnet::IpNet>().unwrap()
+            && left.nlri.src_prefix == right.nlri.src_prefix
+            && left.nlri.protocol == right.nlri.protocol
+            && left_ports == right_ports
+            && left.nlri.src_ports == right.nlri.src_ports
+            && left.nlri.fragment == right.nlri.fragment
+            && left.nlri.packet_length == right.nlri.packet_length
+    }
+
+    fn exact(actual: &[FlowSpecRule], expected: &[FlowSpecRule]) -> bool {
+        actual.len() == expected.len()
+            && expected.iter().all(|wanted| {
+                let matching: Vec<_> = actual.iter().filter(|row| same_key(row, wanted)).collect();
+                matching.len() == 1
+                    && matching[0].owner == wanted.owner
+                    && matching[0].route_targets == wanted.route_targets
+                    && serde_json::to_value(&matching[0].actions).unwrap()
+                        == serde_json::to_value(&wanted.actions).unwrap()
+            })
+    }
+
+    async fn expect_inventory(
+        speaker: &RustBgpdAnnouncer,
+        expected: &[FlowSpecRule],
+    ) -> Vec<FlowSpecRule> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let actual = speaker.list_active().await.unwrap();
+                if exact(&actual, expected) {
+                    return actual;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("exact scoped local inventory within five seconds")
+    }
+
+    async fn raw_lease_generation(
+        fixture: &fixture::Speaker,
+        rule: &FlowSpecRule,
+    ) -> pb::LeaseGeneration {
+        let scope = rule.nlri.scope.as_ref().unwrap();
+        let response = fixture
+            .received_flow_spec(scope.family.afi_safi(), "0.0.0.0")
+            .await;
+        assert!(response.received_view && !response.advertised_view);
+        let matching: Vec<_> = response
+            .received_routes
+            .iter()
+            .filter_map(|row| row.route.as_ref())
+            .filter(|row| row.rd == scope.rd() && row.injection_owner == rule.owner)
+            .collect();
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].route_targets, rule.route_targets);
+        matching[0].lease_generation.unwrap()
+    }
+
+    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
+    assert!(matches!(version.as_str(), "0.81.0" | "0.82.0"));
+    let fixture = fixture::Speaker::start().await;
+    for (family, prefix, global_family) in [
+        (VpnFlowSpecFamily::Ipv4, "192.0.2.232/32", 3),
+        (VpnFlowSpecFamily::Ipv6, "2001:db8::232/128", 4),
+    ] {
+        let speaker = fixture.connect().await;
+        let mut global = rule();
+        global.nlri.dst_prefix = prefix.into();
+        let scoped = |rd: &str| {
+            let mut scoped = global.clone();
+            scoped.nlri.scope = Some(VpnFlowSpecIdentity::new(family, rd).unwrap());
+            scoped.route_targets = vec!["44407:777".into()];
+            scoped
+        };
+        let mut a = scoped("44407:40");
+        let b = scoped("44407:41");
+        speaker.announce(&global).await.unwrap();
+        if version == "0.81.0" {
+            let before = fixture.received_flow_spec(global_family, "0.0.0.0").await;
+            for refused in [&a, &b] {
+                let error = speaker.announce(refused).await.unwrap_err();
+                assert!(
+                    matches!(error, PrefixdError::UnsupportedFlowSpecScope { backend: "rustbgpd", family: observed } if observed == family.afi_safi()),
+                    "{error}"
+                );
+                assert_eq!(
+                    fixture.received_flow_spec(global_family, "0.0.0.0").await,
+                    before
+                );
+            }
+            let cleanup = fixture.connect().await;
+            cleanup.withdraw(&global).await.unwrap();
+            assert!(cleanup.list_active().await.unwrap().is_empty());
+            println!(
+                "rustbgpd {version} family {}: three-key lifecycle unsupported; both RD adds refused and global control unchanged",
+                family.afi_safi()
+            );
+            continue;
+        }
+        for scoped in [&a, &b] {
+            speaker.announce(scoped).await.unwrap();
+        }
+        let actual = expect_inventory(&speaker, &[global.clone(), a.clone(), b.clone()]).await;
+        let mut wrong_rd = a.clone();
+        wrong_rd.nlri.scope = Some(VpnFlowSpecIdentity::new(family, "44407:99").unwrap());
+        assert!(
+            !exact(&actual, &[global.clone(), wrong_rd.clone(), b.clone()]),
+            "wrong-RD oracle must reject the same components in another scope"
+        );
+        speaker.withdraw(&wrong_rd).await.unwrap();
+        expect_inventory(&speaker, &[global.clone(), a.clone(), b.clone()]).await;
+
+        a.route_targets = vec!["44407:778".into()];
+        speaker.announce(&a).await.unwrap();
+        expect_inventory(&speaker, &[global.clone(), a.clone(), b.clone()]).await;
+        speaker.withdraw(&a).await.unwrap();
+        expect_inventory(&speaker, &[global.clone(), b.clone()]).await;
+        speaker.announce(&a).await.unwrap();
+        expect_inventory(&speaker, &[global.clone(), a.clone(), b.clone()]).await;
+        // Converting a plain key to leased ownership requires retiring the plain key.
+        speaker.withdraw(&a).await.unwrap();
+        speaker.withdraw(&b).await.unwrap();
+        expect_inventory(&speaker, std::slice::from_ref(&global)).await;
+
+        let mut leased_a = a
+            .clone()
+            .with_owner(format!("prefixd.test.vpn-a-{}", family.afi_safi()));
+        let leased_b = b
+            .clone()
+            .with_owner(format!("prefixd.test.vpn-b-{}", family.afi_safi()));
+        let first_generation = speaker
+            .announce_leased(&leased_a, TEST_LEASE_SECONDS)
+            .await
+            .unwrap();
+        speaker.announce_leased(&leased_b, 60).await.unwrap();
+        leased_a.route_targets = vec!["44407:779".into()];
+        let replacement_generation = speaker
+            .announce_leased(&leased_a, TEST_LEASE_SECONDS)
+            .await
+            .unwrap();
+        assert_eq!(first_generation, replacement_generation);
+        expect_inventory(
+            &speaker,
+            &[global.clone(), leased_a.clone(), leased_b.clone()],
+        )
+        .await;
+        let observed = raw_lease_generation(&fixture, &leased_a).await;
+        assert_eq!(
+            (observed.incarnation, observed.sequence),
+            (first_generation.incarnation, first_generation.sequence)
+        );
+        tokio::time::timeout(
+            Duration::from_secs(u64::from(TEST_LEASE_SECONDS) + 3),
+            async {
+                loop {
+                    let actual = speaker.list_active().await.unwrap();
+                    if exact(&actual, &[global.clone(), leased_b.clone()]) {
+                        break;
+                    }
+                    assert!(actual.iter().any(|row| same_key(row, &global)));
+                    assert!(actual.iter().any(|row| same_key(row, &leased_b)));
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            },
+        )
+        .await
+        .expect("only RD A expires within its fixed lease deadline");
+        expect_inventory(&speaker, &[global.clone(), leased_b.clone()]).await;
+
+        // Replay uses the saved keys and RT payloads, not current configuration names.
+        let snapshots = [global.clone(), leased_a.clone(), leased_b.clone()];
+        fixture.container.stop_with_timeout(Some(0)).await.unwrap();
+        fixture.container.start().await.unwrap();
+        fixture.ready().await;
+        let restarted = fixture.connect().await;
+        for saved in &snapshots {
+            restarted.register_scope(saved.nlri.scope.as_ref()).unwrap();
+        }
+        expect_inventory(&restarted, &[]).await;
+        restarted.announce(&snapshots[0]).await.unwrap();
+        let replay_generation = restarted.announce_leased(&snapshots[1], 60).await.unwrap();
+        restarted.announce_leased(&snapshots[2], 60).await.unwrap();
+        assert_ne!(replay_generation.incarnation, first_generation.incarnation);
+        expect_inventory(&restarted, &snapshots).await;
+        let observed = raw_lease_generation(&fixture, &snapshots[1]).await;
+        assert_eq!(
+            (observed.incarnation, observed.sequence),
+            (replay_generation.incarnation, replay_generation.sequence)
+        );
+        restarted.withdraw(&snapshots[2]).await.unwrap();
+        expect_inventory(&restarted, &[snapshots[0].clone(), snapshots[1].clone()]).await;
+        restarted.withdraw(&snapshots[1]).await.unwrap();
+        expect_inventory(&restarted, std::slice::from_ref(&snapshots[0])).await;
+        restarted.withdraw(&snapshots[0]).await.unwrap();
+        expect_inventory(&restarted, &[]).await;
+        println!(
+            "rustbgpd {version} family {}: global/RD-A/RD-B isolated through RT replacement, targeted deletion, owner lease expiry and exact snapshot restart replay; replacement proven by state (adapter returns no outcome enum)",
+            family.afi_safi()
+        );
+    }
+    fixture.container.rm().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
 async fn live_marking_release_matrix_preserves_dscp_in_both_vpn_families() {
     use prefixd::{
         domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity},
