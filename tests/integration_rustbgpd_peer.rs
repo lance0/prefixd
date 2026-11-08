@@ -779,3 +779,755 @@ async fn released_vpn_http_rules_reach_only_negotiated_peers_with_exact_scope() 
     }
     pair.remove().await;
 }
+
+/// All five actions cross the HTTP/controller/guarded boundary before the peer
+/// oracle reads serialized attributes. This qualifies neither VRF installation
+/// nor the action's effect on traffic.
+#[tokio::test]
+#[ignore = "requires isolated pinned speakers and PostgreSQL; use rustbgpd 0.82.0"]
+async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_bytes() {
+    use argon2::PasswordHasher;
+    use axum::{
+        Router,
+        body::Body,
+        http::{HeaderMap, Request, StatusCode},
+        response::IntoResponse,
+        routing::get,
+    };
+    use peer_receipt::{BinaryWireRule, wait_go_binary_received};
+    use prefixd::{
+        AppState,
+        api::create_test_router,
+        bgp::{FlowSpecReader, GuardedFlowSpecSpeaker, PeerObserver},
+        config::{AuthMode, BgpMode, Customer, Inventory, OperationMode, Playbooks, PolicyProfile},
+        domain::{OperatorRole, SpeakerTarget, VpnFlowSpecFamily, VpnFlowSpecIdentity},
+        fence::{ControllerFence, FencedAnnouncer},
+        scrubber::ScrubberController,
+    };
+    use serde_json::{Value, json};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering::SeqCst},
+        },
+        time::Duration,
+    };
+    use tower::ServiceExt;
+
+    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
+    if version == "0.81.0" {
+        let fixture = rustbgpd::Speaker::start().await;
+        let speaker = fixture.connect().await;
+        let global = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "203.0.113.20/32".into(),
+                ..Default::default()
+            },
+            FlowSpecAction::discard(),
+        );
+        speaker.announce(&global).await.unwrap();
+        let before = fixture.received_flow_spec(3, "0.0.0.0").await;
+        assert_eq!(before.received_routes.len(), 1);
+        for family in [VpnFlowSpecFamily::Ipv4, VpnFlowSpecFamily::Ipv6] {
+            let scope = VpnFlowSpecIdentity::new(family, "44407:40").unwrap();
+            assert!(matches!(speaker.validate_scope(Some(&scope)).await,
+                Err(prefixd::error::PrefixdError::UnsupportedFlowSpecScope { family: refused, .. })
+                if refused == family.afi_safi()));
+            assert_eq!(fixture.received_flow_spec(3, "0.0.0.0").await, before);
+        }
+        speaker.withdraw(&global).await.unwrap();
+        assert!(
+            fixture
+                .received_flow_spec(3, "0.0.0.0")
+                .await
+                .received_routes
+                .is_empty()
+        );
+        fixture.container.rm().await.unwrap();
+        eprintln!(
+            "rustbgpd 0.81.0 negative control PASS: both VPN families refused with typed capability errors; seeded global rule unchanged"
+        );
+        return;
+    }
+    assert_eq!(
+        version, "0.82.0",
+        "all-five positive receipt requires released 0.82.0"
+    );
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let database = common::TestContext::new().await;
+    let pair = peer_receipt::Pair::start_vpn().await;
+    let speaker = Arc::new(pair.rust.connect().await);
+    let global_peer = pair.global_only.as_ref().unwrap();
+    for peer in [&pair.go, global_peer] {
+        contract::wait_peer_state(&peer.connect().await, &peer.peer_address, true)
+            .await
+            .unwrap();
+    }
+    let expected_peers = [
+        pair.rust.peer_address.clone(),
+        global_peer
+            .container
+            .get_bridge_ip_address()
+            .await
+            .unwrap()
+            .to_string(),
+    ];
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let peers = speaker.session_status().await.unwrap();
+            if peers.len() == 2
+                && expected_peers.iter().all(|address| {
+                    peers
+                        .iter()
+                        .any(|peer| &peer.address == address && peer.state.is_established())
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("both isolated peers Established");
+
+    let accepted_monitor_reads = Arc::new(AtomicUsize::new(0));
+    let count = accepted_monitor_reads.clone();
+    let expected_token = std::env::var("PREFIXD_RUSTBGPD_TEST_TOKEN").unwrap();
+    let monitor = Router::new().route(
+        "/{profile}",
+        get(
+            move |axum::extract::Path(profile): axum::extract::Path<String>, headers: HeaderMap| {
+                let token = expected_token.clone();
+                let count = count.clone();
+                async move {
+                    let authorization = format!("Bearer {token}");
+                    if headers
+                        .get("authorization")
+                        .and_then(|header| header.to_str().ok())
+                        != Some(authorization.as_str())
+                    {
+                        return StatusCode::UNAUTHORIZED.into_response();
+                    }
+                    count.fetch_add(1, SeqCst);
+                    axum::Json(json!({
+                        "profile": profile,
+                        "revision": "v1",
+                        "policy_binding": "action-fixture",
+                        "observed_at": chrono::Utc::now(),
+                        "valid_until": chrono::Utc::now() + chrono::Duration::seconds(8),
+                        "process_ready": true,
+                        "filters_ready": true,
+                        "target_reachable": true,
+                        "capacity_available": true,
+                        "canary_passed": true,
+                        "export_isolated": true,
+                    }))
+                    .into_response()
+                }
+            },
+        ),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
+        include_bytes!("../src/bgp/testdata/transport-server-cert.pem").to_vec(),
+        include_bytes!("../src/bgp/testdata/transport-server-key.pem").to_vec(),
+    )
+    .await
+    .unwrap();
+    let handle = axum_server::Handle::new();
+    let monitor_task = tokio::spawn(
+        axum_server::from_tcp_rustls(listener, tls)
+            .unwrap()
+            .handle(handle.clone())
+            .serve(monitor.into_make_service()),
+    );
+    let monitor_client = reqwest::Client::builder()
+        .https_only(true)
+        .add_root_certificate(
+            reqwest::Certificate::from_pem(include_bytes!("../src/bgp/testdata/transport-ca.pem"))
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    assert_eq!(
+        monitor_client
+            .get(format!("https://{address}/ip4"))
+            .bearer_auth("wrong-token")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let mut settings = database.state.settings.clone();
+    settings.mode = OperationMode::Enforced;
+    settings.http.auth.mode = AuthMode::Credentials;
+    settings.bgp.mode = BgpMode::Rustbgpd;
+    settings.bgp.rustbgpd = Some(pair.rust.config.clone());
+    settings.guardrails.allow_src_prefix_match = true;
+    settings.bgp.vpn_scopes = serde_json::from_value(json!({
+        "TRANSIT":{"family":"ipv4","rd":"44407:40","route_targets":["44407:777"]},
+        "TRANSIT6":{"family":"ipv6","rd":"44407:41","route_targets":["44407:778"]}
+    }))
+    .unwrap();
+    let profiles = [
+        ("ip4", "TRANSIT", Some("192.0.2.99"), None, None),
+        ("ip6", "TRANSIT6", None, Some("2001:db8:ffff::66"), None),
+        ("rt4", "TRANSIT", None, None, Some("44407:888")),
+        ("rt6", "TRANSIT6", None, None, Some("44407:888")),
+    ];
+    let profile_json:Vec<_>=profiles.into_iter().map(|(id,scope,ipv4,ipv6,rt)|json!({
+        "id":id,"revision":"v1","scope":scope,"ipv4_target":ipv4,"ipv6_target":ipv6,
+        "redirect_route_target":rt,"destinations":["203.0.113.0/24","2001:db8:100::/48"],
+        "router_peers":[pair.rust.peer_address],"policy_binding":"action-fixture",
+        "qualification_receipt":"owned HTTP/speaker/peer fixture; traffic enforcement unqualified",
+        "readiness_url":format!("https://{address}/{id}"),"readiness_token_env":"PREFIXD_RUSTBGPD_TEST_TOKEN",
+        "max_ttl_seconds":300,"max_active":10,"max_new_per_minute":20,"reserved_targets":[]
+    })).collect();
+    settings.scrubber=serde_json::from_value(json!({"enabled":true,"profiles":profile_json,
+        "readiness_ca_cert":std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bgp/testdata/transport-ca.pem")})).unwrap();
+    let binding = database
+        .repo
+        .register_speaker_target(
+            &settings.pop,
+            &SpeakerTarget::from_config(&settings.bgp).unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+    let fence = Arc::new(ControllerFence::new(true));
+    let announcer = Arc::new(FencedAnnouncer::new(speaker.clone(), fence.clone()));
+    let inventory = Inventory::new(vec![Customer {
+        customer_id: "action-pilot".into(),
+        name: "Action pilot".into(),
+        prefixes: vec!["203.0.113.0/24".into(), "2001:db8:100::/48".into()],
+        policy_profile: PolicyProfile::Normal,
+        services: vec![],
+    }]);
+    let state = AppState::with_pool(
+        settings,
+        inventory,
+        Playbooks { playbooks: vec![] },
+        database.repo.clone(),
+        announcer,
+        ".".into(),
+        Some(database.pool.clone()),
+    )
+    .unwrap()
+    .with_speaker_binding(binding)
+    .unwrap()
+    .with_fence(fence)
+    .unwrap();
+    ScrubberController::check_startup(&state).await.unwrap();
+    let hash = argon2::Argon2::default()
+        .hash_password_with_salt(b"vpn-action-fixture-password", b"vpn-action-fixture")
+        .unwrap()
+        .to_string();
+    database
+        .repo
+        .create_operator("action-admin", &hash, OperatorRole::Admin, None)
+        .await
+        .unwrap();
+    let app = create_test_router(state.clone());
+    async fn request(
+        app: &Router,
+        method: &str,
+        path: &str,
+        body: Value,
+        cookie: Option<&str>,
+        status: StatusCode,
+    ) -> (Value, Option<String>) {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json");
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let actual = response.status();
+        let cookie = response.headers().get("set-cookie").map(|header| {
+            header
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned()
+        });
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| json!({"raw":String::from_utf8_lossy(&bytes)}));
+        assert_eq!(actual, status, "{method} {path}: {value}");
+        (value, cookie)
+    }
+    request(
+        &app,
+        "POST",
+        "/v1/scrubbers/ip4/arm",
+        json!({"revision":"v1"}),
+        None,
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    let (_, cookie) = request(
+        &app,
+        "POST",
+        "/v1/auth/login",
+        json!({"username":"action-admin","password":"vpn-action-fixture-password"}),
+        None,
+        StatusCode::OK,
+    )
+    .await;
+    let cookie = cookie.unwrap();
+    state.scrubber.tick(&state).await.unwrap();
+    let scrubber_task = tokio::spawn({
+        let state = state.clone();
+        async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                tokio::time::timeout(Duration::from_secs(4), state.scrubber.tick(&state))
+                    .await
+                    .expect("fixture scrubber pass stays within the production pass budget")
+                    .expect("fixture scrubber lifecycle pass succeeds");
+            }
+        }
+    });
+    for (id, _, _, _, _) in profiles {
+        let (before, _) = request(
+            &app,
+            "GET",
+            "/v1/scrubbers",
+            Value::Null,
+            Some(&cookie),
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(before["profiles"][id]["armed"], false);
+        request(
+            &app,
+            "POST",
+            &format!("/v1/scrubbers/{id}/arm"),
+            json!({"revision":"v1"}),
+            Some(&cookie),
+            StatusCode::OK,
+        )
+        .await;
+    }
+    assert!(accepted_monitor_reads.load(SeqCst) >= profiles.len());
+
+    let mut expected = vec![];
+    let mut ordinary = vec![];
+    let mut diversions = vec![];
+    let global_match = FlowSpecNlri {
+        dst_prefix: "203.0.113.20/32".into(),
+        src_prefix: Some("198.51.100.0/24".into()),
+        protocol: Some(6),
+        dst_ports: vec![443],
+        ..Default::default()
+    };
+    let (global,_)=request(&app,"POST","/v1/mitigations",json!({"victim_ip":"203.0.113.20","src_prefix":"198.51.100.0/24",
+        "protocol":"tcp","dst_ports":[443],"action":"discard","ttl_seconds":180,"reason":"global action control"}),Some(&cookie),StatusCode::CREATED).await;
+    let global_id = global["mitigation_id"].as_str().unwrap().to_owned();
+    expected.push(BinaryWireRule {
+        nlri: global_match,
+        extended_communities: vec![0x8006_0000_0000_0000],
+        ipv6_extended_communities: vec![],
+    });
+    for (scope, family, rd, rt, raw_rt, destinations, source, ip_profile, rt_profile) in [
+        (
+            "TRANSIT",
+            VpnFlowSpecFamily::Ipv4,
+            "44407:40",
+            "44407:777",
+            0x0002_ad77_0000_0309u64,
+            [
+                "203.0.113.20",
+                "203.0.113.21",
+                "203.0.113.22",
+                "203.0.113.23",
+                "203.0.113.24",
+            ],
+            "198.51.100.0/24",
+            "ip4",
+            "rt4",
+        ),
+        (
+            "TRANSIT6",
+            VpnFlowSpecFamily::Ipv6,
+            "44407:41",
+            "44407:778",
+            0x0002_ad77_0000_030au64,
+            [
+                "2001:db8:100::20",
+                "2001:db8:100::21",
+                "2001:db8:100::22",
+                "2001:db8:100::23",
+                "2001:db8:100::24",
+            ],
+            "2001:db9::/64",
+            "ip6",
+            "rt6",
+        ),
+    ] {
+        for (index, action) in ["discard", "police", "mark", "redirect_ip", "redirect_vrf"]
+            .into_iter()
+            .enumerate()
+        {
+            let nlri = FlowSpecNlri {
+                scope: Some(VpnFlowSpecIdentity::new(family, rd).unwrap()),
+                dst_prefix: format!(
+                    "{}/{}",
+                    destinations[index],
+                    if family == VpnFlowSpecFamily::Ipv4 {
+                        32
+                    } else {
+                        128
+                    }
+                ),
+                src_prefix: Some(source.into()),
+                protocol: Some(6),
+                dst_ports: vec![443],
+                ..Default::default()
+            };
+            let mut communities = vec![raw_rt];
+            let mut ipv6_communities = vec![];
+            if index < 3 {
+                let (created,_)=request(&app,"POST","/v1/vpn/mitigations",json!({"scope":scope,"rule":{
+                    "victim_ip":destinations[index],"src_prefix":source,"protocol":"tcp","dst_ports":[443],"action":action,
+                    "rate_bps":if index==1 {Some(8_000_000u64)} else {None},"dscp":if index==2 {Some(46u8)} else {None},
+                    "ttl_seconds":180,"reason":"all-action VPN HTTP wire receipt"}}),Some(&cookie),StatusCode::CREATED).await;
+                assert_eq!(created["vpn_scope"]["identity"]["rd"], rd);
+                assert_eq!(created["vpn_scope"]["route_targets"], json!([rt]));
+                if index == 2 {
+                    assert_eq!(created["dscp"], 46);
+                }
+                ordinary.push((
+                    created["mitigation_id"].as_str().unwrap().to_owned(),
+                    nlri.clone(),
+                ));
+                communities.push(match index {
+                    0 => 0x8006_0000_0000_0000,
+                    1 => 0x8006_0000_0000_0000 | u64::from(1_000_000f32.to_bits()),
+                    _ => 0x8009_0000_0000_002e,
+                });
+            } else {
+                let profile = if index == 3 { ip_profile } else { rt_profile };
+                let mut body = json!({"scope":scope,"diversion":{"profile":profile,"scope":{
+                    "dst_prefix":nlri.dst_prefix,"src_prefix":source,"protocol":6,"dst_ports":[443]},
+                    "ttl_seconds":180,"reason":"guarded all-action HTTP wire receipt","confirmation":null}});
+                let before = speaker.guarded_inventory().await.unwrap().len();
+                let (preview, _) = request(
+                    &app,
+                    "POST",
+                    "/v1/vpn/diversions/preview",
+                    body.clone(),
+                    Some(&cookie),
+                    StatusCode::OK,
+                )
+                .await;
+                assert_eq!(
+                    speaker.guarded_inventory().await.unwrap().len(),
+                    before,
+                    "preview cannot mutate guarded inventory"
+                );
+                body["diversion"]["confirmation"] = preview["confirmation"].clone();
+                let (created, _) = request(
+                    &app,
+                    "POST",
+                    "/v1/vpn/diversions",
+                    body,
+                    Some(&cookie),
+                    StatusCode::ACCEPTED,
+                )
+                .await;
+                assert_eq!(created["status"], "active", "{created}");
+                assert_eq!(created["profile"]["scope"], scope);
+                assert_eq!(created["rule"]["nlri"]["scope"]["rd"], rd);
+                assert_eq!(created["rule"]["route_targets"], json!([rt]));
+                assert!(
+                    created["windows"]
+                        .as_array()
+                        .is_some_and(|windows| !windows.is_empty())
+                );
+                let id = created["id"].as_str().unwrap().to_owned();
+                let (saved, _) = request(
+                    &app,
+                    "GET",
+                    &format!("/v1/diversions/{id}"),
+                    Value::Null,
+                    Some(&cookie),
+                    StatusCode::OK,
+                )
+                .await;
+                assert_eq!(
+                    saved["rule"], created["rule"],
+                    "persisted admission payload is frozen"
+                );
+                if index == 4 {
+                    assert_eq!(saved["rule"]["redirect_route_target"], "44407:888");
+                    communities.push(0x8008_ad77_0000_0378);
+                } else if family == VpnFlowSpecFamily::Ipv4 {
+                    communities.push(0x010c_c000_0263_0000);
+                } else {
+                    let mut redirect = [0; 20];
+                    redirect[1] = 0x0c;
+                    redirect[2..18].copy_from_slice(
+                        &"2001:db8:ffff::66"
+                            .parse::<std::net::Ipv6Addr>()
+                            .unwrap()
+                            .octets(),
+                    );
+                    ipv6_communities.push(redirect);
+                }
+                diversions.push((id, nlri.clone(), saved["rule"].clone(), profile.to_owned()));
+            }
+            expected.push(BinaryWireRule {
+                nlri,
+                extended_communities: communities,
+                ipv6_extended_communities: ipv6_communities,
+            });
+        }
+    }
+    assert_eq!(speaker.list_active().await.unwrap().len(), 7);
+    assert_eq!(speaker.guarded_inventory().await.unwrap().len(), 4);
+    // Exceed the monitor's eight-second TTL while peer observation does no lifecycle work.
+    let reads_before_pause = accepted_monitor_reads.load(SeqCst);
+    tokio::time::sleep(Duration::from_secs(9)).await;
+    assert!(
+        !scrubber_task.is_finished(),
+        "periodic scrubber worker must remain live"
+    );
+    assert!(accepted_monitor_reads.load(SeqCst) >= reads_before_pause + profiles.len());
+    let healthy = state.scrubber.profiles().await;
+    for (id, _, _, _, _) in profiles {
+        let profile = &healthy[id];
+        assert!(
+            profile.armed && profile.ready,
+            "{id} must remain armed and ready after nine seconds"
+        );
+        assert_eq!(profile.readiness, prefixd::scrubber::ReadinessState::Ready);
+        assert!(
+            profile.latch_reason.is_none(),
+            "{id}: {:?}",
+            profile.latch_reason
+        );
+    }
+    let active = database
+        .repo
+        .list_diversions(&state.settings.pop)
+        .await
+        .unwrap();
+    assert_eq!(active.len(), 4);
+    for (id, _, frozen, _) in &diversions {
+        let saved = active.iter().find(|row| row.id.to_string() == *id).unwrap();
+        assert_eq!(saved.status, prefixd::scrubber::DiversionStatus::Active);
+        assert_eq!(serde_json::to_value(&saved.rule).unwrap(), *frozen);
+    }
+    assert_eq!(
+        speaker.guarded_inventory().await.unwrap().len(),
+        4,
+        "periodic readiness renewal must retain all four original guarded rules"
+    );
+    eprintln!(
+        "nine-second readiness survival control PASS: eight-second reports refreshed, all four profiles armed/ready and original guarded intents active"
+    );
+    // Independent local RPC evidence includes every raw action and scope RT.
+    let mut local_count = 0;
+    for family in [3, 4, 13, 14] {
+        let view = pair.rust.received_flow_spec(family, "0.0.0.0").await;
+        for row in view.received_routes {
+            let route = row.route.unwrap();
+            local_count += 1;
+            let wanted: Vec<_> = expected
+                .iter()
+                .filter(|wanted| {
+                    let rd = wanted.nlri.scope.as_ref().map_or("", |scope| scope.rd());
+                    let afi = wanted
+                        .nlri
+                        .scope
+                        .as_ref()
+                        .map_or(3, |scope| scope.family.afi_safi());
+                    afi == family
+                        && rd == route.rd
+                        && route.components.iter().any(|component| {
+                            component.r#type == 1 && component.prefix == wanted.nlri.dst_prefix
+                        })
+                })
+                .collect();
+            assert_eq!(wanted.len(), 1, "unmatched local scoped payload {route:?}");
+            let wanted = wanted[0];
+            assert_eq!(
+                route
+                    .components
+                    .iter()
+                    .map(|component| component.r#type)
+                    .collect::<Vec<_>>(),
+                [1, 2, 3, 5]
+            );
+            assert_eq!(
+                route.components[1].prefix,
+                wanted.nlri.src_prefix.as_deref().unwrap()
+            );
+            assert_eq!(route.components[2].value.trim_start_matches('='), "6");
+            assert_eq!(route.components[3].value.trim_start_matches('='), "443");
+            let mut raw = route.extended_communities;
+            raw.sort_unstable();
+            let mut wanted_raw = wanted.extended_communities.clone();
+            wanted_raw.sort_unstable();
+            assert_eq!(raw, wanted_raw);
+            assert_eq!(
+                route.ipv6_extended_communities,
+                wanted
+                    .ipv6_extended_communities
+                    .iter()
+                    .map(|value| value.to_vec())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    assert_eq!(local_count, expected.len());
+    wait_go_binary_received(&pair.go, &expected).await;
+    wait_go_binary_received(pair.global_only.as_ref().unwrap(), &expected[..1]).await;
+
+    for (id, nlri, frozen, profile) in &diversions {
+        tokio::time::timeout(Duration::from_secs(10), async {
+        state.scrubber.tick(&state).await.unwrap();
+        let held = speaker.guarded_inventory().await.unwrap();
+        assert!(
+            held.iter().any(
+                |entry| entry.rule.nlri.compute_hash() == nlri.compute_hash()
+                    && entry.remaining_ms > 11_000
+            ),
+            "withdrawal receipt must begin with a held rule whose lease outlives the 10-second peer deadline"
+        );
+        let (withdrawing, _) = request(
+            &app,
+            "POST",
+            &format!("/v1/diversions/{id}/withdraw"),
+            json!({"reason":"independent guarded action withdrawal"}),
+            Some(&cookie),
+            StatusCode::ACCEPTED,
+        )
+        .await;
+        assert_eq!(withdrawing["status"], "withdrawing");
+        assert_eq!(
+            withdrawing["rule"], *frozen,
+            "withdrawal preserves its original action and scope"
+        );
+        let index = expected
+            .iter()
+            .position(|wanted| {
+                serde_json::to_value(&wanted.nlri).unwrap() == serde_json::to_value(nlri).unwrap()
+            })
+            .unwrap();
+        expected.remove(index);
+        wait_go_binary_received(&pair.go, &expected).await;
+        wait_go_binary_received(pair.global_only.as_ref().unwrap(), &expected[..1]).await;
+        let (profiles, _) = request(
+            &app,
+            "GET",
+            "/v1/scrubbers",
+            Value::Null,
+            Some(&cookie),
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(
+            profiles["profiles"][profile.as_str()]["armed"],
+            true,
+            "successful manual withdrawal preserves healthy profile arming"
+        );
+        })
+        .await
+        .expect("held-rule read, withdrawal and peer absence share one 10-second budget");
+    }
+    tokio::time::timeout(
+        Duration::from_secs(u64::from(prefixd::scrubber::WINDOW_SECONDS) + 10),
+        async {
+            loop {
+                let rows = database
+                    .repo
+                    .list_diversions(&state.settings.pop)
+                    .await
+                    .unwrap();
+                if rows
+                    .iter()
+                    .all(|row| row.status == prefixd::scrubber::DiversionStatus::Withdrawn)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        },
+    )
+    .await
+    .expect("guarded withdrawal windows drained with exact local absence");
+    assert!(speaker.guarded_inventory().await.unwrap().is_empty());
+    for (id, _, frozen, _) in &diversions {
+        let (closed, _) = request(
+            &app,
+            "GET",
+            &format!("/v1/diversions/{id}"),
+            Value::Null,
+            Some(&cookie),
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(closed["status"], "withdrawn");
+        assert_eq!(closed["rule"], *frozen);
+    }
+    for (id, nlri) in ordinary {
+        request(
+            &app,
+            "POST",
+            &format!("/v1/mitigations/{id}/withdraw"),
+            json!({"reason":"independent ordinary action withdrawal"}),
+            Some(&cookie),
+            StatusCode::OK,
+        )
+        .await;
+        let index = expected
+            .iter()
+            .position(|wanted| {
+                serde_json::to_value(&wanted.nlri).unwrap() == serde_json::to_value(&nlri).unwrap()
+            })
+            .unwrap();
+        expected.remove(index);
+        wait_go_binary_received(&pair.go, &expected).await;
+    }
+    request(
+        &app,
+        "POST",
+        &format!("/v1/mitigations/{global_id}/withdraw"),
+        json!({"reason":"last global control withdrawal"}),
+        Some(&cookie),
+        StatusCode::OK,
+    )
+    .await;
+    wait_go_binary_received(&pair.go, &[]).await;
+    wait_go_binary_received(pair.global_only.as_ref().unwrap(), &[]).await;
+    assert!(speaker.list_active().await.unwrap().is_empty());
+    eprintln!(
+        "all-five VPN action receipt: both families, authenticated HTTP and HTTPS readiness, frozen guarded payloads, exact local/peer bytes, independent withdrawals and global-only peer control PASS; traffic enforcement unqualified"
+    );
+    scrubber_task.abort();
+    assert!(
+        scrubber_task.await.unwrap_err().is_cancelled(),
+        "owned scrubber worker must be aborted and awaited before monitor teardown"
+    );
+    handle.graceful_shutdown(Some(Duration::from_secs(2)));
+    monitor_task.await.unwrap().unwrap();
+    pair.remove().await;
+}

@@ -48,7 +48,7 @@ fn go_rd(rd: &go::RouteDistinguisher) -> String {
     }
 }
 
-fn go_received_scoped(path: &go::Path, afi: i32, safi: i32, peer: &str) -> FlowSpecRule {
+fn go_received_match(path: &go::Path, afi: i32, safi: i32, peer: &str) -> FlowSpecNlri {
     assert_eq!(path.family, Some(go::Family { afi, safi }));
     assert_eq!(path.neighbor_ip, peer);
     let (rules, scope) = match &path.nlri.as_ref().expect("received NLRI").nlri {
@@ -129,6 +129,11 @@ fn go_received_scoped(path: &go::Path, afi: i32, safi: i32, peer: &str) -> FlowS
     assert!(
         !result.dst_prefix.is_empty() || (result.scope.is_some() && result.src_prefix.is_some())
     );
+    result
+}
+
+fn go_received_scoped(path: &go::Path, afi: i32, safi: i32, peer: &str) -> FlowSpecRule {
+    let result = go_received_match(path, afi, safi, peer);
     let mut actions = vec![];
     let mut targets = vec![];
     for attribute in &path.pattrs {
@@ -326,6 +331,144 @@ pub(crate) async fn wait_go_scoped_received(fixture: &gobgp::Speaker, expected: 
         eprintln!("raw peer receipt AFI={afi} SAFI={safi}: {paths:?}");
     }
     result.expect("exact global/VPN peer receipt with RD, RT, action and no global leakage");
+}
+
+/// Exact expected action and scope bytes, independent of prefixd's action model.
+pub(crate) struct BinaryWireRule {
+    pub nlri: FlowSpecNlri,
+    pub extended_communities: Vec<u64>,
+    pub ipv6_extended_communities: Vec<[u8; 20]>,
+}
+
+/// GoBGP 4.11 ListPath serializes each attribute including its BGP header.
+/// Attribute 16 contains eight-octet communities; RFC 5701 attribute 25 uses twenty.
+fn binary_communities(attributes: &[Vec<u8>]) -> Result<(Vec<u64>, Vec<[u8; 20]>), &'static str> {
+    if attributes.is_empty() {
+        return Err("peer omitted binary path attributes");
+    }
+    let mut seen = [false; 256];
+    let mut ordinary = vec![];
+    let mut ipv6 = vec![];
+    for attribute in attributes {
+        if attribute.len() < 3 {
+            return Err("truncated path attribute header");
+        }
+        let flags = attribute[0];
+        let kind = attribute[1];
+        if flags & 0x0f != 0 {
+            return Err("reserved path attribute flag bits");
+        }
+        if std::mem::replace(&mut seen[usize::from(kind)], true) {
+            return Err("duplicate path attribute type");
+        }
+        let (header, length) = if flags & 0x10 == 0 {
+            (3, usize::from(attribute[2]))
+        } else {
+            if attribute.len() < 4 {
+                return Err("truncated extended path attribute length");
+            }
+            (
+                4,
+                usize::from(u16::from_be_bytes([attribute[2], attribute[3]])),
+            )
+        };
+        if attribute.len() != header + length {
+            return Err("path attribute length mismatch");
+        }
+        let value = &attribute[header..];
+        match kind {
+            16 => {
+                if flags & 0xc0 != 0xc0 || value.is_empty() || value.len() % 8 != 0 {
+                    return Err("invalid extended communities attribute");
+                }
+                for bytes in value.as_chunks::<8>().0 {
+                    ordinary.push(u64::from_be_bytes(*bytes));
+                }
+            }
+            25 => {
+                if flags & 0xc0 != 0xc0 || value.is_empty() || value.len() % 20 != 0 {
+                    return Err("invalid IPv6 extended communities attribute");
+                }
+                for bytes in value.as_chunks::<20>().0 {
+                    ipv6.push(*bytes);
+                }
+            }
+            _ => {}
+        }
+    }
+    ordinary.sort_unstable();
+    ipv6.sort_unstable();
+    Ok((ordinary, ipv6))
+}
+
+pub(crate) fn exact_binary_inventory(
+    actual: &[(i32, i32, go::Path)],
+    expected: &[BinaryWireRule],
+    peer: &str,
+) -> Result<(), &'static str> {
+    if actual.len() != expected.len() {
+        return Err("peer route cardinality mismatch");
+    }
+    let mut matched = vec![false; expected.len()];
+    for (afi, safi, path) in actual {
+        let nlri = go_received_match(path, *afi, *safi, peer);
+        let wanted: Vec<_> = expected
+            .iter()
+            .enumerate()
+            .filter(|(_, wanted)| {
+                serde_json::to_value(&nlri).unwrap() == serde_json::to_value(&wanted.nlri).unwrap()
+            })
+            .collect();
+        if wanted.len() != 1 {
+            return Err("peer NLRI, family or RD mismatch");
+        }
+        let (index, wanted) = wanted[0];
+        if std::mem::replace(&mut matched[index], true) {
+            return Err("duplicate peer NLRI");
+        }
+        let (ordinary, ipv6) = binary_communities(&path.pattrs_binary)?;
+        let mut expected_ordinary = wanted.extended_communities.clone();
+        let mut expected_ipv6 = wanted.ipv6_extended_communities.clone();
+        expected_ordinary.sort_unstable();
+        expected_ipv6.sort_unstable();
+        if ordinary != expected_ordinary || ipv6 != expected_ipv6 {
+            return Err("peer action or scope RT bytes mismatch");
+        }
+    }
+    Ok(())
+}
+
+/// Every AFI/SAFI is read even when no rule is expected there, exposing global leaks.
+pub(crate) async fn wait_go_binary_received(fixture: &gobgp::Speaker, expected: &[BinaryWireRule]) {
+    let mut actual = vec![];
+    let mut failure = None;
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            actual.clear();
+            for afi in [1, 2] {
+                for safi in [133, 134] {
+                    actual.extend(
+                        fixture
+                            .paths_with_binary_attributes(afi, safi, go::TableType::AdjIn)
+                            .await
+                            .into_iter()
+                            .map(|path| (afi, safi, path)),
+                    );
+                }
+            }
+            match exact_binary_inventory(&actual, expected, &fixture.peer_address) {
+                Ok(()) => break,
+                Err(error) => failure = Some(error),
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    eprintln!("raw peer binary action receipt: {actual:?}");
+    assert!(
+        result.is_ok(),
+        "exact binary peer action/scope receipt timed out: {failure:?}"
+    );
 }
 
 pub(crate) async fn wait_rust_views(
@@ -642,6 +785,152 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    fn binary_attribute(kind: u8, bytes: &[u8], extended: bool) -> Vec<u8> {
+        let mut attribute = vec![if extended { 0xd0 } else { 0xc0 }, kind];
+        if extended {
+            attribute.extend(u16::try_from(bytes.len()).unwrap().to_be_bytes());
+        } else {
+            attribute.push(u8::try_from(bytes.len()).unwrap());
+        }
+        attribute.extend(bytes);
+        attribute
+    }
+
+    #[test]
+    fn binary_action_oracle_covers_five_actions_both_families_without_typed_actions() {
+        let scope_rt = 0x0002_ad77_0000_0309u64;
+        let discard = 0x8006_0000_0000_0000u64;
+        let police = discard | u64::from(1_000_000f32.to_bits());
+        let marking = 0x8009_0000_0000_002eu64;
+        let redirect_vrf = 0x8008_ad77_0000_0378u64;
+        let redirect_ipv4 = 0x010c_c000_0263_0000u64;
+        let mut redirect_ipv6 = [0; 20];
+        redirect_ipv6[1] = 0x0c;
+        redirect_ipv6[2..18].copy_from_slice(
+            &"2001:db8:ffff::66"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets(),
+        );
+        for afi in [1, 2] {
+            let mut path = vpn_path();
+            path.family.as_mut().unwrap().afi = afi;
+            // Old typed protobuf action variants cannot establish these receipts.
+            path.pattrs.clear();
+            if afi == 2 {
+                let Some(go::nlri::Nlri::VpnFlowSpec(nlri)) = &mut path.nlri.as_mut().unwrap().nlri
+                else {
+                    panic!("test VPN NLRI")
+                };
+                let Some(go::flow_spec_rule::Rule::IpPrefix(prefix)) = &mut nlri.rules[0].rule
+                else {
+                    panic!("test destination")
+                };
+                prefix.prefix = "2001:db8::1".into();
+                prefix.prefix_len = 128;
+            }
+            for action in [discard, police, marking, redirect_vrf, redirect_ipv4] {
+                let mut ordinary = vec![scope_rt];
+                let mut ipv6 = vec![];
+                if action == redirect_ipv4 && afi == 2 {
+                    ipv6.push(redirect_ipv6);
+                } else {
+                    ordinary.push(action);
+                }
+                let payload: Vec<_> = ordinary
+                    .iter()
+                    .flat_map(|value| value.to_be_bytes())
+                    .collect();
+                path.pattrs_binary = vec![binary_attribute(16, &payload, false)];
+                if !ipv6.is_empty() {
+                    path.pattrs_binary
+                        .push(binary_attribute(25, &ipv6[0], true));
+                }
+                let expected = BinaryWireRule {
+                    nlri: go_received_match(&path, afi, 134, "192.0.2.1"),
+                    extended_communities: ordinary,
+                    ipv6_extended_communities: ipv6,
+                };
+                let original = (afi, 134, path.clone());
+                assert!(
+                    exact_binary_inventory(
+                        std::slice::from_ref(&original),
+                        std::slice::from_ref(&expected),
+                        "192.0.2.1"
+                    )
+                    .is_ok()
+                );
+                let mut wrong_action = original.clone();
+                let attribute = wrong_action.2.pattrs_binary.last_mut().unwrap();
+                *attribute.last_mut().unwrap() ^= 1;
+                assert!(
+                    exact_binary_inventory(
+                        &[wrong_action],
+                        std::slice::from_ref(&expected),
+                        "192.0.2.1"
+                    )
+                    .is_err()
+                );
+                let mut wrong_rt = original.clone();
+                wrong_rt.2.pattrs_binary[0][10] ^= 1;
+                assert!(
+                    exact_binary_inventory(
+                        &[wrong_rt],
+                        std::slice::from_ref(&expected),
+                        "192.0.2.1"
+                    )
+                    .is_err()
+                );
+                let mut missing_binary = original;
+                missing_binary.2.pattrs_binary.clear();
+                assert!(
+                    exact_binary_inventory(
+                        &[missing_binary],
+                        std::slice::from_ref(&expected),
+                        "192.0.2.1"
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn binary_community_parser_checks_headers_lengths_widths_and_duplicates() {
+        let value = 0x0002_ad77_0000_0309u64.to_be_bytes();
+        let ordinary = binary_attribute(16, &value, false);
+        let ipv6 = binary_attribute(25, &[0x55; 20], false);
+        assert_eq!(
+            binary_communities(&[ordinary.clone(), ipv6]).unwrap(),
+            (vec![u64::from_be_bytes(value)], vec![[0x55; 20]])
+        );
+        let long: Vec<_> = (0..32).flat_map(|_| value).collect();
+        let extended = binary_attribute(16, &long, true);
+        assert_eq!(
+            binary_communities(&[extended]).unwrap().0,
+            vec![u64::from_be_bytes(value); 32]
+        );
+        for malformed in [
+            vec![],
+            vec![0xc0, 16],
+            vec![0xd0, 16, 0],
+            vec![0xc0, 16, 8, 0],
+            binary_attribute(16, &[0; 7], false),
+            binary_attribute(25, &[0; 19], false),
+            vec![0xc0, 16, 0],
+        ] {
+            assert!(binary_communities(&[malformed]).is_err());
+        }
+        let mut reserved = ordinary.clone();
+        reserved[0] |= 1;
+        assert!(binary_communities(&[reserved]).is_err());
+        let mut non_transitive = ordinary.clone();
+        non_transitive[0] = 0x80;
+        assert!(binary_communities(&[non_transitive]).is_err());
+        assert!(binary_communities(&[ordinary.clone(), ordinary]).is_err());
+        assert!(binary_communities(&[]).is_err());
     }
 
     #[test]
