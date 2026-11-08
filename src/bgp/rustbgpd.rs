@@ -33,6 +33,9 @@ enum ScopedRpcError {
     Mutation(tonic::Status),
 }
 
+/// Capability reads cannot outlive a guarded operation's complete RPC budget.
+const GUARDED_RPC_DEADLINE: Duration = Duration::from_secs(3);
+
 /// The oldest daemon prefixd runs against: 0.79.0 adds the injection lease
 /// (rustbgpd ADR-0141); 0.80.0 scopes link-local export rows by interface and
 /// aborts export walks whose pages disagree; 0.81.0 adds the guarded FlowSpec
@@ -262,27 +265,36 @@ impl RustBgpdAnnouncer {
         };
         self.vpn_families
             .fetch_or(bit, std::sync::atomic::Ordering::Relaxed);
-        let response = self
-            .call("ListFlowSpecRoutes", || async {
+        let response = tokio::time::timeout(
+            GUARDED_RPC_DEADLINE,
+            self.call("ListFlowSpecRoutes", || async {
+                let mut request = self.request(pb::ListFlowSpecRequest {
+                    afi_safi: family,
+                    received_peer_address: "0.0.0.0".into(),
+                    advertised_peer_address: String::new(),
+                });
+                request.set_timeout(GUARDED_RPC_DEADLINE);
                 pb::rib_service_client::RibServiceClient::new(self.channel.clone())
-                    .list_flow_spec_routes(self.request(pb::ListFlowSpecRequest {
-                        afi_safi: family,
-                        received_peer_address: "0.0.0.0".into(),
-                        advertised_peer_address: String::new(),
-                    }))
+                    .list_flow_spec_routes(request)
                     .await
-            })
-            .await
-            .map_err(|status| {
-                if status.code() == Code::InvalidArgument {
-                    PrefixdError::UnsupportedFlowSpecScope {
-                        backend: "rustbgpd",
-                        family,
-                    }
-                } else {
-                    failed("ListFlowSpecRoutes", &status)
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(tonic::Status::deadline_exceeded(
+                "capability probe deadline elapsed",
+            ))
+        })
+        .map_err(|status| {
+            if status.code() == Code::InvalidArgument {
+                PrefixdError::UnsupportedFlowSpecScope {
+                    backend: "rustbgpd",
+                    family,
                 }
-            })?;
+            } else {
+                failed("ListFlowSpecRoutes", &status)
+            }
+        })?;
         acknowledge_local_intent(&response)
     }
 

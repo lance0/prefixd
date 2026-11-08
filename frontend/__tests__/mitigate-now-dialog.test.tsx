@@ -26,6 +26,27 @@ function toastOf(text: string) {
 
 // Real Radix form interactions on throttled runners; see CONTRIBUTING.md.
 describe("manual mitigation creation outcome", { timeout: 10_000 }, () => {
+  it.each([
+    [" 203.0.113.10 ", "203.0.113.10", "global"],
+    [" 2001:db8::10 ", "2001:db8::10", "global"],
+    [" 203.0.113.10 ", "203.0.113.10", { ipv4: "TRANSIT", ipv6: "TRANSIT6" }],
+    [" 2001:db8::10 ", "2001:db8::10", { ipv4: "TRANSIT", ipv6: "TRANSIT6" }],
+  ] as const)("submits validated destination %s as %s for default %j", async (input, expected, defaultScope) => {
+    controller.route("GET", "/v1/config/settings", () => json({ settings: { bgp: { default_scope: defaultScope } }, loaded_at: "2026-11-08T12:00:00Z" }))
+    controller.route("POST", "/v1/events", () => json({ event_id: "event", mitigation_id: "saved-intent", status: "accepted" }))
+    const { router } = renderApp(<MitigateNowDialog open onOpenChange={vi.fn()} />, { withoutAuth: true })
+    fireEvent.change(screen.getByLabelText(/Destination IP/), { target: { value: input } })
+    fireEvent.keyDown(screen.getByRole("combobox", { name: /Attack Vector/ }), { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "UDP Flood" }))
+    expect(screen.getByRole("button", { name: "Submit" })).toBeEnabled()
+    fireEvent.click(screen.getByRole("button", { name: "Submit" }))
+    await waitFor(() => expect(router.push).toHaveBeenCalledWith("/mitigations/saved-intent"))
+    const body = JSON.parse(controller.calls("POST", "/v1/events")[0].body ?? "")
+
+    expect(body).toMatchObject({ victim_ip: expected, vector: "udp_flood", action: "ban" })
+    expect(body).not.toHaveProperty("scope")
+  })
+
   it.each([undefined, "unconfirmed"] as const)("opens saved intent and reports request outcome %s", async outcome => {
     controller.route("POST", "/v1/events", () => json({ event_id: "event", mitigation_id: "saved-intent", status: "accepted", announcement_outcome: outcome }))
     const close = vi.fn()

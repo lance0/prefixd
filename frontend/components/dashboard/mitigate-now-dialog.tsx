@@ -69,8 +69,10 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const destinationIp = victimIp.trim()
+
   const isValid =
-    isValidAddress(victimIp) &&
+    isValidAddress(destinationIp) &&
     vector !== "" &&
     parsePorts(ports) !== null &&
     (!bps || !isNaN(Number(bps))) &&
@@ -96,7 +98,7 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
 
     try {
       const result = await ingestEvent({
-        victim_ip: victimIp,
+        victim_ip: destinationIp,
         vector,
         source: "dashboard",
         timestamp: new Date().toISOString(),
@@ -114,7 +116,7 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
           })
         } else {
           toast.success("Mitigation created", {
-            description: `${victimIp} — ${vector.replace(/_/g, " ")}`,
+            description: `${destinationIp} — ${vector.replace(/_/g, " ")}`,
           })
         }
 

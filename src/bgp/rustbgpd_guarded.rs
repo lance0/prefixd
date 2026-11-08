@@ -282,14 +282,29 @@ impl RustBgpdAnnouncer {
     async fn guarded_call<T>(
         &self,
         operation: &'static str,
+        families: &[i32],
         call: impl Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
     ) -> Result<T> {
-        match tokio::time::timeout(Duration::from_secs(3), call).await {
-            Ok(Ok(response)) => Ok(response.into_inner()),
-            Ok(Err(status)) => Err(guarded_status_error(operation, &status)),
-            Err(_) => Err(invalid(&format!(
+        let deadline = tokio::time::Instant::now() + GUARDED_RPC_DEADLINE;
+        let deadline_error = || {
+            invalid(&format!(
                 "{operation} outcome unconfirmed after deadline; resolve by read-back"
-            ))),
+            ))
+        };
+        let attempt = async {
+            for family in families {
+                self.probe_vpn_family(*family).await?;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(deadline_error());
+            }
+            call.await
+                .map(tonic::Response::into_inner)
+                .map_err(|status| guarded_status_error(operation, &status))
+        };
+        match tokio::time::timeout_at(deadline, attempt).await {
+            Ok(result) => result,
+            Err(_) => Err(deadline_error()),
         }
     }
 
@@ -302,6 +317,7 @@ impl RustBgpdAnnouncer {
             let response = self
                 .guarded_call(
                     "ListFlowSpecRoutes",
+                    &[],
                     client.list_flow_spec_routes(self.request(pb::ListFlowSpecRequest {
                         afi_safi: family,
                         received_peer_address: "0.0.0.0".into(),
@@ -359,18 +375,17 @@ impl GuardedFlowSpecSpeaker for RustBgpdAnnouncer {
         {
             return Err(invalid("invalid mutation window request"));
         }
-        for family in self
+        let families: Vec<_> = self
             .inventory_families()
             .into_iter()
             .filter(|family| *family >= 13)
-        {
-            self.probe_vpn_family(family).await?;
-        }
+            .collect();
         let mut client =
             pb::injection_service_client::InjectionServiceClient::new(self.channel.clone());
         let response = self
             .guarded_call(
                 "IssueMutationWindow",
+                &families,
                 client.issue_mutation_window(self.request(pb::IssueMutationWindowRequest {
                     owner: owner.into(),
                     window_seconds: seconds,
@@ -400,12 +415,16 @@ impl GuardedFlowSpecSpeaker for RustBgpdAnnouncer {
         seconds: u32,
     ) -> Result<GuardedStamp> {
         let payload = encode_guarded(rule)?;
-        self.validate_scope(rule.nlri.scope.as_ref()).await?;
         let mut client =
             pb::injection_service_client::InjectionServiceClient::new(self.channel.clone());
         let response = self
             .guarded_call(
                 "AddGuardedFlowSpec",
+                rule.nlri
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.family.afi_safi())
+                    .as_slice(),
                 client.add_guarded_flow_spec(self.request(pb::AddGuardedFlowSpecRequest {
                     rule: Some(payload),
                     lease: Some(pb::InjectionLease {
@@ -435,18 +454,17 @@ impl GuardedFlowSpecSpeaker for RustBgpdAnnouncer {
         window: GuardedStamp,
         seconds: u32,
     ) -> Result<u32> {
-        for family in self
+        let families: Vec<_> = self
             .inventory_families()
             .into_iter()
             .filter(|family| *family >= 13)
-        {
-            self.probe_vpn_family(family).await?;
-        }
+            .collect();
         let mut client =
             pb::injection_service_client::InjectionServiceClient::new(self.channel.clone());
         let response = self
             .guarded_call(
                 "RenewGuardedLease",
+                &families,
                 client.renew_guarded_lease(self.request(pb::RenewGuardedLeaseRequest {
                     owner: owner.into(),
                     generation: Some(current.into()),
@@ -466,12 +484,16 @@ impl GuardedFlowSpecSpeaker for RustBgpdAnnouncer {
 
     async fn delete_guarded(&self, rule: &GuardedRule) -> Result<()> {
         let payload = encode_guarded(rule)?;
-        self.validate_scope(rule.nlri.scope.as_ref()).await?;
         let mut client =
             pb::injection_service_client::InjectionServiceClient::new(self.channel.clone());
         let response = self
             .guarded_call(
                 "DeleteGuardedFlowSpec",
+                rule.nlri
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.family.afi_safi())
+                    .as_slice(),
                 client.delete_guarded_flow_spec(self.request(pb::DeleteGuardedFlowSpecRequest {
                     afi_safi: payload.afi_safi,
                     components: payload.components,
