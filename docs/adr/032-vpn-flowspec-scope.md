@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed 2026-11-08. Design only; VPN scope is not implemented.
+Accepted 2026-11-08 with the revisions below. Runtime implementation and
+qualification are in progress; acceptance does not establish VPN support.
 Extends [ADR 025](025-pluggable-speaker-backends.md),
 [ADR 030](030-scrubber-diversion.md) and
 [ADR 031](031-source-prefix-matches.md).
@@ -26,13 +27,19 @@ IPv6 VPN, receiving/reflection and VRF provisioning are outside this slice.
 ### Selection and admission
 
 Configure named VPN scopes under the existing speaker target. Each name
-resolves to an IPv4 VPN family, an RD and a nonempty list of scope RTs.
+resolves to a family enum, an RD and a nonempty list of scope RTs.
+Persist the family enum in scope snapshots and identity so adding family 14
+requires validation/configuration work without a storage migration. This slice
+accepts IPv4 VPN scope only; refuse IPv6 VPN configuration for now.
 For example, the proposed configuration is:
 
 ```yaml
 bgp:
+  default_scope: TRANSIT
   vpn_scopes:
     TRANSIT:
+      family: ipv4
+      allow_source_only: false
       rd: "44407:40"
       route_targets: ["44407:777"]
 ```
@@ -50,10 +57,15 @@ before submission; they never retry through a global endpoint or drop scope.
 Keep existing global endpoints compatible. Reject unknown scope fields in the
 new request types.
 
-The first slice selects VPN scope through manual admission and configured
-scrubber profiles. Automatic detector/playbook mitigation remains global;
-refuse explicit VPN selectors on those paths until scoped event and inventory
-attribution exists. Do not infer a VRF from an IP address. Existing inventory
+Manual admission selects a scope; configured scrubber profiles select their
+scope. An operator-configured `default_scope` on the speaker target selects
+scope for automatic FlowSpec mitigation. Omission retains global automation.
+Detector payloads cannot select or override scope, and an unknown default is
+a configuration error. Automatic admission uses the same immutable snapshot
+and identity as manual admission; default changes affect new admissions only.
+Include default scope in this slice through the shared automatic admission
+path before ownership/deduplication. BGP settings, including this default,
+require restart under the current configuration model. Do not infer a VRF from an IP address. Existing inventory
 ownership rules still authorize destination matches; this slice does not add
 independent customer ownership of overlapping address space in different VRFs.
 
@@ -77,9 +89,13 @@ Global NLRIs carry no RD or typed scope RTs.
 Preserve existing global hashes and serialized defaults. Introduce a domain-
 separated VPN hash over the complete identity and use it for mitigation dedupe,
 NLRI hashes, ownership, lease keys, reconciliation and export-evidence caches.
-Existing `(scope_hash, pop)` mitigation uniqueness can remain. Add a migration
-for guarded diversion uniqueness, currently `(pop, victim)`, and update its
-queries and overlap checks to include routing scope. Legacy rows and pending
+Existing `(scope_hash, pop)` mitigation uniqueness can remain. Retain the
+guarded `(pop, victim)` live index and cross-scope exclusion for conflicting
+discard/diversion intent, including pending operations: different RDs can
+carry the same RT and enter the same receiver VRF. Separate domains require
+verified receiver import bindings; neither RD inequality nor distinct RTs
+establish disjointness. Add scope to snapshot identity without weakening the
+existing victim exclusion. Legacy rows and pending
 snapshots remain global; migration replay must preserve operations and audit
 history without inventing remote acknowledgement.
 
@@ -130,12 +146,12 @@ without replacing the channel. Fail closed when support cannot be established.
 Refuse configured VPN on unsupported backends at startup and expose actual
 capability/error state in authenticated health.
 
-The expected first release is **v0.82.0**. At design time it is untagged and
-upstream API documentation still labels the release floor UNASSIGNED. Develop
-against an exact main commit using a test-only local image/binary override;
-do not fabricate a release manifest entry. After publication, vendor the tagged
-proto and checksum, add the immutable release image pin and test both 0.81.0
-refusal and 0.82.0 VPN behavior. Leave the global minimum unchanged.
+The VPN contract ships in **v0.82.0**, commit
+`608dcaea0902272474bd2a25bcf30bff3dd3153b`. Vendor its release proto and checksum
+and add the immutable image pin immediately:
+`ghcr.io/lance0/rustbgpd:0.82.0@sha256:807dcb90c8d0234d5c0c39bdde62f8a2ee24a9525bcd60ca4c95c2773e56f609`.
+Test both 0.81.0 refusal and 0.82.0 VPN behavior. Leave the global minimum
+unchanged; daemon version alone remains insufficient evidence of capability.
 
 ### Actions and source-only rules
 
@@ -150,16 +166,23 @@ a redirect target. Scope support must not bypass those controls.
 
 Source-plus-destination keeps the existing opt-in and destination ownership,
 prefix, port, safelist, TTL and quota checks. Source-only is a distinct manual
-VPN operation: its destination is the whole VRF. Require explicit whole-VRF
-authorization in scope configuration, a source prefix, source-match opt-in and
-preview/confirmation showing `destination: any`. Evaluate destination ownership
-and safelist protection over the whole destination domain; refuse admission if
-that authorization or protection cannot be established. Any destination safelist
-overlap causes refusal. Omitted destination and an explicit `/0` remain distinct
-wire identities. A host used for audit
-context cannot substitute for the omitted destination component. Keep global
-source-only refused. This policy needs agreement before implementation; if it
-cannot support the pilot safely, record the gap rather than emit a wider rule.
+VPN operation. The scope's `allow_source_only: true` is the operator's explicit
+authorization to affect traffic to every destination in that VRF, including
+safelisted destinations. Require source-match opt-in and preview/confirmation
+showing `destination: any`; a host used for audit context cannot substitute
+for the omitted destination.
+
+Apply safelist and infrastructure protection to the source prefix: refuse
+any overlap with the safelist or configured own/infrastructure ranges. Require
+a configurable minimum source prefix length, default IPv4 `/24`, an explicit
+TTL with a short maximum, and a separate source-only quota. Initial policy
+defaults are a 60-second maximum TTL and 10 active source-only rules per POP,
+with stricter existing limits still applying. Allow discard and rate-limit
+only; refuse source-only marking and redirects pending separate qualification.
+Keep global source-only refused and omitted destination distinct from explicit
+`/0`. Receiver validation of destination-less rules under RFC 8955 section 6
+and RFC 9117 varies by platform; pilot qualification must establish receiver
+acceptance. Controller encoding cannot establish it.
 
 ### Operator surfaces and qualification
 
@@ -195,17 +218,18 @@ ships. This design adds no runtime release note or roadmap completion claim.
 
 Existing global users retain their daemon floor and rule identities. VPN work
 reaches admission, persistence, guarded diversion and operator views as well as
-the adapter. GoBGP VPN and automatic VPN attribution remain explicit omissions.
-Source-only admission may refuse configurations that cannot protect all
-VRF destinations. Router support claims require a separate platform, release
+the adapter. GoBGP VPN remains refused. Automatic scope comes from operator
+configuration; detectors cannot choose it. Source-only opt-in authorizes all
+VRF destinations while protecting safelisted and infrastructure sources.
+Router support claims require a separate platform, release
 and action receipt; this work does not qualify IOS XR installation or traffic.
 
 ## Contract references
 
-The design uses rustbgpd main at `af456f7b3588e46132f328ef19293c43544bebde`:
+The design uses rustbgpd v0.82.0 at `608dcaea0902272474bd2a25bcf30bff3dd3153b`:
 
-- [VPN controller API](https://github.com/lance0/rustbgpd/blob/af456f7b3588e46132f328ef19293c43544bebde/docs/reference/api.md#vpn-flowspec-controller-api)
-- [ADR 0146](https://github.com/lance0/rustbgpd/blob/af456f7b3588e46132f328ef19293c43544bebde/docs/adr/0146-vpn-flowspec.md)
-- [RPC schema](https://github.com/lance0/rustbgpd/blob/af456f7b3588e46132f328ef19293c43544bebde/proto/rustbgpd.proto)
-- [Controller example](https://github.com/lance0/rustbgpd/blob/af456f7b3588e46132f328ef19293c43544bebde/examples/vpn-flowspec-controller/config.toml)
-- [Wire qualification and limits](https://github.com/lance0/rustbgpd/blob/af456f7b3588e46132f328ef19293c43544bebde/docs/artifacts/interop/vpn-flowspec-qualification-20261106/README.md)
+- [VPN controller API](https://github.com/lance0/rustbgpd/blob/608dcaea0902272474bd2a25bcf30bff3dd3153b/docs/reference/api.md#vpn-flowspec-controller-api)
+- [ADR 0146](https://github.com/lance0/rustbgpd/blob/608dcaea0902272474bd2a25bcf30bff3dd3153b/docs/adr/0146-vpn-flowspec.md)
+- [RPC schema](https://github.com/lance0/rustbgpd/blob/608dcaea0902272474bd2a25bcf30bff3dd3153b/proto/rustbgpd.proto)
+- [Controller example](https://github.com/lance0/rustbgpd/blob/608dcaea0902272474bd2a25bcf30bff3dd3153b/examples/vpn-flowspec-controller/config.toml)
+- [Wire qualification and limits](https://github.com/lance0/rustbgpd/blob/608dcaea0902272474bd2a25bcf30bff3dd3153b/docs/artifacts/interop/vpn-flowspec-qualification-20261106/README.md)
