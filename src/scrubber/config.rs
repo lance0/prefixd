@@ -23,6 +23,12 @@ pub struct ScrubberProfile {
     pub scope: String,
     pub ipv4_target: Option<IpAddr>,
     pub ipv6_target: Option<IpAddr>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "canonical_redirect"
+    )]
+    pub redirect_route_target: Option<String>,
     pub destinations: Vec<ipnet::IpNet>,
     pub router_peers: Vec<String>,
     pub policy_binding: String,
@@ -47,6 +53,18 @@ pub struct ProfileSnapshot {
     pub policy_binding: String,
     pub qualification_receipt: String,
     pub destinations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_route_target: Option<String>,
+}
+
+fn canonical_redirect<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)?
+        .as_deref()
+        .map(crate::domain::canonical_route_target)
+        .transpose()
+        .map_err(serde::de::Error::custom)
 }
 
 fn global_scope() -> String {
@@ -58,15 +76,26 @@ fn is_global_scope(scope: &str) -> bool {
 }
 
 impl ScrubberProfile {
-    pub fn target(&self, ipv4: bool) -> Result<IpAddr> {
+    pub fn target(&self, ipv4: bool) -> Result<Option<IpAddr>> {
+        if self.redirect_route_target.is_some() {
+            return Ok(None);
+        }
         (if ipv4 {
             self.ipv4_target
         } else {
             self.ipv6_target
         })
+        .map(Some)
         .ok_or_else(|| {
             PrefixdError::InvalidRequest("profile does not support this target family".into())
         })
+    }
+    pub fn matches_target(&self, rule: &crate::bgp::GuardedRule) -> bool {
+        self.redirect_route_target == rule.redirect_route_target
+            && self
+                .target(rule.nlri.ip_version() == crate::domain::IpVersion::V4)
+                .ok()
+                == Some(rule.target)
     }
     pub fn snapshot(&self) -> ProfileSnapshot {
         ProfileSnapshot {
@@ -77,6 +106,7 @@ impl ScrubberProfile {
             policy_binding: self.policy_binding.clone(),
             qualification_receipt: self.qualification_receipt.clone(),
             destinations: self.destinations.iter().map(ToString::to_string).collect(),
+            redirect_route_target: self.redirect_route_target.clone(),
         }
     }
 }
@@ -113,7 +143,15 @@ impl ScrubberConfig {
                 || profile.destinations.is_empty()
                 || profile.router_peers.is_empty()
                 || profile.router_peers.len() > 64
-                || profile.ipv4_target.is_none() && profile.ipv6_target.is_none()
+                || if let Some(target) = &profile.redirect_route_target {
+                    profile.scope == "global"
+                        || profile.ipv4_target.is_some()
+                        || profile.ipv6_target.is_some()
+                        || !crate::domain::canonical_route_target(target)
+                            .is_ok_and(|canonical| canonical == *target)
+                } else {
+                    profile.ipv4_target.is_none() && profile.ipv6_target.is_none()
+                }
                 || profile.ipv4_target.is_some_and(|v| !v.is_ipv4())
                 || profile.ipv6_target.is_some_and(|v| !v.is_ipv6())
                 || profile

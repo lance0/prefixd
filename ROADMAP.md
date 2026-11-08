@@ -65,8 +65,8 @@ command palette still need complete pagination.
 ## Near-term work
 
 - Complete scoped VPN FlowSpec under [ADR 032](docs/adr/032-vpn-flowspec-scope.md).
-  VPNv4/v6 scoped discard, police and guarded target-IP lifecycle are implemented;
-  marking, redirect-to-VRF and the complete five-action wire matrix remain.
+  VPNv4/v6 scoped discard, police and guarded IP/VRF redirect lifecycle are implemented;
+  marking and the complete five-action wire matrix remain.
   Router installation and traffic enforcement require separate pilot receipts.
 
 - Add stronger announcement acknowledgements and a complete desired/acknowledged

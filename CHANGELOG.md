@@ -15,7 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Manual source-only VPN discard/police with explicit whole-VRF authorization,
   source protection, short TTL and scoped quotas. CLI/dashboard previews show
   destination any and require confirmation. Guarded target-IP diversion can use
-  a configured VPN scope. Marking and redirect-to-VRF remain pending.
+  a configured VPN scope. Marking remains pending.
+- Profile-configured guarded redirect-to-VRF for VPNv4 and VPNv6. The controller
+  preserves the action route target separately from scope RTs, retains existing
+  readiness/re-arm checks and freezes the action through withdrawal retries.
+  Receiver installation and forwarding require separate qualification.
 
 ### Changed
 

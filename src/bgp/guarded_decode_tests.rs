@@ -35,7 +35,7 @@ fn guarded_readback_requires_exact_supported_action_and_lease_fields() {
     let decoded = decode_guarded(valid.clone(), 3).unwrap();
     assert_eq!(decoded.rule.owner, "profile.a");
     assert_eq!(decoded.rule.revision, 7);
-    assert_eq!(decoded.rule.target.to_string(), "192.0.2.99");
+    assert_eq!(decoded.rule.target.unwrap().to_string(), "192.0.2.99");
     for case in 0..13 {
         let mut bad = valid.clone();
         match case {
@@ -562,5 +562,62 @@ mod deadlines {
         }
         server.abort();
         let _ = server.await;
+    }
+}
+
+#[test]
+fn vrf_redirect_actions_preserve_all_rt_forms_separately_from_scope_targets() {
+    use crate::domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity};
+    for (family, kind, prefix) in [
+        (13, VpnFlowSpecFamily::Ipv4, "192.0.2.1/32"),
+        (14, VpnFlowSpecFamily::Ipv6, "2001:db8::1/128"),
+    ] {
+        for (input, canonical, expected_action) in [
+            ("44407:888", "44407:888", 0x8008_ad77_0000_0378u64),
+            ("192.0.2.1:888", "192.0.2.1:888", 0x8108_c000_0201_0378),
+            ("65536:888", "1.0:888", 0x8208_0001_0000_0378),
+            ("0.44407:888", "0.44407:888", 0x8208_0000_ad77_0378),
+        ] {
+            let mut scoped = route();
+            scoped.afi_safi = family;
+            scoped.rd = "44407:40".into();
+            scoped.components[0].prefix = prefix.into();
+            scoped.route_targets = vec!["44407:777".into()];
+            let scope_target = crate::domain::route_target_bytes("44407:777").unwrap();
+            scoped.extended_communities = vec![expected_action, scope_target];
+            scoped.actions[0].action = Some(pb::flow_spec_action::Action::Redirect(
+                pb::FlowSpecRedirect {
+                    route_target: input.into(),
+                },
+            ));
+            let held = decode_guarded(scoped.clone(), family).unwrap().rule;
+            assert_eq!(held.target, None);
+            assert_eq!(held.redirect_route_target.as_deref(), Some(canonical));
+            assert_eq!(held.route_targets, ["44407:777"]);
+            assert_eq!(
+                held.nlri.scope,
+                Some(VpnFlowSpecIdentity::new(kind, "44407:40").unwrap())
+            );
+            let replay = encode_guarded(&held).unwrap();
+            let Some(pb::flow_spec_action::Action::Redirect(target)) =
+                replay.actions[0].action.as_ref()
+            else {
+                panic!("expected VRF redirect")
+            };
+            assert_eq!(target.route_target, canonical);
+            assert_eq!(replay.route_targets, ["44407:777"]);
+            assert!(
+                replay.extended_communities.is_empty(),
+                "typed action and scope RT have no raw twins"
+            );
+            let mut changed = held.clone();
+            changed.redirect_route_target = Some("44407:889".into());
+            assert!(!held.same_admission(&changed));
+            scoped.extended_communities[0] = scope_target;
+            assert!(
+                decode_guarded(scoped, family).is_err(),
+                "scope RT cannot stand in for redirect action RT"
+            );
+        }
     }
 }

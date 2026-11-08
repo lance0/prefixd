@@ -908,6 +908,7 @@ read-only local-intent probes for families 13/14. Global rules retain the 0.81.0
 floor. GoBGP returns a typed unsupported-scope error before any VPN RPC. Scope
 identity and RT snapshots survive withdrawal/recovery; no refused VPN operation
 falls back globally. The current action slice covers discard, police and guarded
-target-IP diversion. [The operator procedure](../how-to/vpn-flowspec.md) records
-source-only safeguards and the remaining marking/redirect-to-VRF qualification.
+target-IP and VRF redirect diversion. [The operator procedure](../how-to/vpn-flowspec.md) records
+source-only safeguards and the remaining marking qualification. Receiver action
+installation and forwarding remain separate qualification for both redirects.
 These controller paths do not establish router installation or enforcement.

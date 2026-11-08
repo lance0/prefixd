@@ -82,7 +82,7 @@ export interface ScrubberState {
 export interface ScrubberProfiles {
   enabled: boolean
   profiles: Record<string, ScrubberState>
-  configuration: { id: string; revision: string; scope?: string; ipv4_target: string | null; ipv6_target: string | null }[]
+  configuration: { id: string; revision: string; scope?: string; ipv4_target: string | null; ipv6_target: string | null; redirect_route_target?: string }[]
 }
 
 export interface DiversionMatch {
@@ -105,7 +105,7 @@ export interface DiversionRequest {
 export interface ScrubberDiversion {
   id: string
   profile: { id: string; revision: string; scope?: string }
-  rule: { nlri: DiversionMatch; target: string; owner: string; revision: number; route_targets?: string[] }
+  rule: { nlri: DiversionMatch; target?: string; redirect_route_target?: string; owner: string; revision: number; route_targets?: string[] }
   expires_at: string
   status: "pending" | "active" | "withdrawing" | "withdrawn" | "simulated"
   dry_run: boolean
@@ -128,9 +128,11 @@ function requireDiversionScope(preview: DiversionPreview, request: DiversionRequ
   const candidate = preview.candidate
   const identity = candidate?.rule?.nlri?.scope
   const acknowledged = identity && vpnIdentity({ ...identity })
+  const hasIpTarget = isText(candidate?.rule?.target) && Boolean(candidate.rule.target)
+  const hasVrfTarget = isText(candidate?.rule?.redirect_route_target) && Boolean(candidate.rule.redirect_route_target)
 
   if (candidate?.profile?.id !== request.profile || candidate?.profile?.scope !== expectedScope ||
-    !acknowledged || !isNonemptyTextList(candidate.rule.route_targets) ||
+    !acknowledged || hasIpTarget === hasVrfTarget || !isNonemptyTextList(candidate.rule.route_targets) ||
     !isText(preview.confirmation) || !preview.confirmation) {
     throw new Error("The controller did not acknowledge the requested VPN diversion scope. No global request was sent.")
   }

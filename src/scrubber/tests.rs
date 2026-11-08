@@ -205,6 +205,7 @@ fn profile(id: &str) -> ScrubberProfile {
         scope: "global".into(),
         ipv4_target: Some("192.0.2.99".parse().unwrap()),
         ipv6_target: None,
+        redirect_route_target: None,
         destinations: vec!["203.0.113.0/24".parse().unwrap()],
         router_peers: vec!["192.0.2.2".into()],
         policy_binding: "fixture-policy-v1".into(),
@@ -630,7 +631,8 @@ async fn untracked_local_victim_overlaps_refuse_diversion_without_touching_forei
             let rule = GuardedRule {
                 route_targets: vec![],
                 nlri: foreign.clone(),
-                target: "192.0.2.98".parse().unwrap(),
+                target: Some("192.0.2.98".parse().unwrap()),
+                redirect_route_target: None,
                 owner: "another-tool".into(),
                 revision: 999,
             };
@@ -1632,4 +1634,103 @@ async fn vpn_diversion_routes_acknowledge_both_families_and_keep_confirmation() 
         );
         assert_eq!(fake.writes.load(SeqCst), 0);
     }
+}
+
+#[test]
+fn vrf_profiles_canonicalize_action_rt_and_refuse_mixed_targets() {
+    let legacy = profile("a");
+    let legacy_json = serde_json::to_value(&legacy).unwrap();
+    assert!(legacy_json.get("redirect_route_target").is_none());
+    let mut input = legacy_json;
+    input["ipv4_target"] = serde_json::Value::Null;
+    input["ipv6_target"] = serde_json::Value::Null;
+    input["redirect_route_target"] = "65536:888".into();
+    let configured: ScrubberProfile = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(configured.redirect_route_target.as_deref(), Some("1.0:888"));
+    let mut config = ScrubberConfig {
+        enabled: true,
+        profiles: vec![configured],
+        readiness_ca_cert: None,
+    };
+    assert!(
+        config.validate().is_err(),
+        "global VRF redirect profile is refused before any RPC"
+    );
+    config.profiles[0].scope = "TRANSIT".into();
+    config.validate().unwrap();
+    assert_eq!(
+        config.profiles[0]
+            .snapshot()
+            .redirect_route_target
+            .as_deref(),
+        Some("1.0:888")
+    );
+    config.profiles[0].ipv4_target = legacy.ipv4_target;
+    assert!(config.validate().is_err());
+    input["redirect_route_target"] = "not-a-route-target".into();
+    assert!(serde_json::from_value::<ScrubberProfile>(input).is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn vrf_diversion_keeps_action_target_in_confirmation_audit_and_readiness_drain() {
+    let (mut state, repo, fake) = fixture(OperationMode::Enforced).await;
+    let configured = Arc::get_mut(&mut state).unwrap();
+    configured.settings.bgp.vpn_scopes.insert(
+        "TRANSIT".into(),
+        crate::config::parse_yaml("family: ipv4\nrd: '44407:40'\nroute_targets: ['44407:777']")
+            .unwrap(),
+    );
+    let profile = &mut configured.settings.scrubber.profiles[0];
+    profile.scope = "TRANSIT".into();
+    profile.ipv4_target = None;
+    profile.redirect_route_target = Some("44407:888".into());
+    ready(&state).await;
+    let req = confirmed(&state, "a", 20).await;
+    assert!(
+        req.confirmation
+            .as_deref()
+            .unwrap()
+            .contains("VRF RT 44407:888")
+    );
+    let mut row = state
+        .scrubber
+        .create(&state, &req, "original-admin")
+        .await
+        .unwrap();
+    assert_eq!(row.status, DiversionStatus::Active);
+    assert_eq!(row.rule.target, None);
+    assert_eq!(row.rule.redirect_route_target.as_deref(), Some("44407:888"));
+    assert_eq!(row.rule.route_targets, ["44407:777"]);
+    let audit = serde_json::to_value(row.audit("scrubber_admit")).unwrap();
+    assert!(audit.to_string().contains("redirect_route_target"));
+    assert!(audit.to_string().contains("44407:888"));
+    let mut changed = row.clone();
+    changed.rule.redirect_route_target = Some("44407:889".into());
+    assert!(
+        repo.save_diversion(&changed, "invalid_action_retarget")
+            .await
+            .is_err()
+    );
+    let mut runtime = state.scrubber.runtime.lock().await;
+    runtime
+        .profiles
+        .get_mut("a")
+        .unwrap()
+        .latch("configured VRF clean-path canary failed");
+    state
+        .scrubber
+        .drive(&state, &mut runtime, &mut row)
+        .await
+        .unwrap();
+    assert_eq!(row.status, DiversionStatus::Withdrawing);
+    assert_eq!(row.rule.redirect_route_target.as_deref(), Some("44407:888"));
+    tokio::time::advance(Duration::from_secs(WINDOW_SECONDS.into())).await;
+    state
+        .scrubber
+        .drive(&state, &mut runtime, &mut row)
+        .await
+        .unwrap();
+    assert_eq!(row.status, DiversionStatus::Withdrawn);
+    assert!(fake.rows.lock().unwrap().is_empty());
+    assert!(!runtime.profiles["a"].armed);
 }

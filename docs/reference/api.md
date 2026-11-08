@@ -3396,7 +3396,12 @@ playbook requests cannot choose a scrubber target.
 
 Creation takes `profile`, `scope` (a complete host FlowSpec match), bounded
 `ttl_seconds`, `reason` and the exact `confirmation` returned by preview.
-Arbitrary targets, owners and health URLs are rejected. A live/pending diversion
+Arbitrary targets, owners and health URLs are rejected. Profiles configure either
+IP targets or one `redirect_route_target`. Saved `rule.target` remains the IP
+string for existing IP-target rules; VRF redirects omit it and return
+`rule.redirect_route_target` instead. The action RT is distinct from
+`rule.route_targets`, the VPN import scope attributes. Preview confirmation and
+audit retain the selected action target. A live/pending diversion
 excludes every other mitigation affecting its victim. Dry-run creates a
 simulation without any speaker mutation. `active` establishes exact local
 read-back; per-peer export and router forwarding remain distinct evidence.

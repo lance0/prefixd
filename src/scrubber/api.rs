@@ -93,6 +93,8 @@ pub struct ConfiguredProfile {
     pub ipv4_target: Option<std::net::IpAddr>,
     #[schema(value_type = Option<String>, example = "2001:db8::99")]
     pub ipv6_target: Option<std::net::IpAddr>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_route_target: Option<String>,
 }
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct DiversionPreview {
@@ -176,6 +178,7 @@ pub async fn profiles(
                 revision: profile.revision.clone(),
                 ipv4_target: profile.ipv4_target,
                 ipv6_target: profile.ipv6_target,
+                redirect_route_target: profile.redirect_route_target.clone(),
             })
             .collect(),
     };

@@ -14,7 +14,8 @@ fn rule(prefix: &str, target: &str, owner: &str, revision: u64) -> GuardedRule {
             dst_ports: vec![443],
             ..Default::default()
         },
-        target: target.parse().unwrap(),
+        target: Some(target.parse().unwrap()),
+        redirect_route_target: None,
         owner: owner.into(),
         revision,
     }
@@ -75,7 +76,7 @@ async fn guarded_contract_preserves_targets_revisions_and_independent_owners() {
     wrong.owner = b.owner.clone();
     assert!(speaker.delete_guarded(&wrong).await.is_err());
     let mut wrong = a.clone();
-    wrong.target = "192.0.2.98".parse().unwrap();
+    wrong.target = Some("192.0.2.98".parse().unwrap());
     assert!(speaker.add_guarded(&wrong, wa.stamp, 30).await.is_err());
     assert_eq!(speaker.guarded_inventory().await.unwrap().len(), 3);
     speaker.delete_guarded(&a).await.unwrap();
@@ -407,5 +408,103 @@ async fn guarded_vpn_scope_keeps_rd_targets_and_held_revision() {
         speaker.delete_guarded(&replaced).await.unwrap();
         speaker.delete_guarded(&global).await.unwrap();
         assert!(speaker.guarded_inventory().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
+async fn guarded_vpn_vrf_redirects_keep_action_and_scope_targets_separate() {
+    use prefixd::domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity};
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    let supported = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").as_deref() == Ok("0.82.0");
+    let window = speaker
+        .issue_window("prefixd.scrub.vrffixture", 30)
+        .await
+        .unwrap();
+    for (family, global_family, prefix) in [
+        (VpnFlowSpecFamily::Ipv4, 3, "192.0.2.22/32"),
+        (VpnFlowSpecFamily::Ipv6, 4, "2001:db8::22/128"),
+    ] {
+        for (index, (target, expected_action)) in [
+            ("44407:888", 0x8008_ad77_0000_0378u64),
+            ("192.0.2.1:888", 0x8108_c000_0201_0378),
+            ("0.44407:888", 0x8208_0000_ad77_0378),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut scoped = rule(prefix, "192.0.2.99", "prefixd.scrub.vrffixture", 1);
+            scoped.revision = (index as u64) * 2 + 1;
+            scoped.target = None;
+            scoped.redirect_route_target = Some(target.into());
+            scoped.nlri.scope = Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap());
+            scoped.route_targets = vec!["44407:777".into()];
+            if !supported {
+                assert!(
+                    speaker
+                        .add_guarded(&scoped, window.stamp, 30)
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    fixture
+                        .received_flow_spec(global_family, "0.0.0.0")
+                        .await
+                        .received_routes
+                        .is_empty()
+                );
+                continue;
+            }
+            speaker
+                .add_guarded(&scoped, window.stamp, 30)
+                .await
+                .unwrap();
+            let raw = fixture
+                .received_flow_spec(family.afi_safi(), "0.0.0.0")
+                .await;
+            let held = raw.received_routes[0].route.as_ref().unwrap();
+            assert_eq!(held.route_targets, ["44407:777"]);
+            assert_eq!(
+                held.extended_communities,
+                [
+                    expected_action,
+                    prefixd::domain::route_target_bytes("44407:777").unwrap()
+                ]
+            );
+            assert!(
+                speaker
+                    .guarded_inventory()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry.rule.same_admission(&scoped))
+            );
+            let mut replacement = scoped.clone();
+            replacement.redirect_route_target = Some("44407:889".into());
+            assert!(
+                speaker
+                    .add_guarded(&replacement, window.stamp, 30)
+                    .await
+                    .is_err()
+            );
+            speaker.delete_guarded(&scoped).await.unwrap();
+            replacement.revision = scoped.revision + 1;
+            speaker
+                .add_guarded(&replacement, window.stamp, 30)
+                .await
+                .unwrap();
+            assert!(speaker.delete_guarded(&scoped).await.is_err());
+            assert!(
+                speaker
+                    .guarded_inventory()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry.rule.same_admission(&replacement))
+            );
+            speaker.delete_guarded(&replacement).await.unwrap();
+            assert!(speaker.guarded_inventory().await.unwrap().is_empty());
+        }
     }
 }

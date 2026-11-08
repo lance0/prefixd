@@ -277,7 +277,7 @@ impl ScrubberController {
             })?;
             if profile.snapshot() != row.profile
                 || !Self::scope_agrees(state, profile, &row.rule)?
-                || profile.target(row.rule.target.is_ipv4())? != row.rule.target
+                || !profile.matches_target(&row.rule)
                 || Self::owner(state, &profile.id)? != row.rule.owner
             {
                 return Err(PrefixdError::Config(
@@ -675,6 +675,7 @@ impl ScrubberController {
             route_targets: scope.map(|scope| scope.route_targets).unwrap_or_default(),
             nlri,
             target: profile.target(prefix.addr().is_ipv4())?,
+            redirect_route_target: profile.redirect_route_target.clone(),
             owner: Self::owner(state, &profile.id)?,
             revision: 1,
         };
@@ -713,7 +714,7 @@ impl ScrubberController {
         let mut confirmation = format!(
             "{} -> {} via {}@{}",
             serde_json::to_string(&row.rule.nlri)?,
-            row.rule.target,
+            row.rule.target_description()?,
             row.profile.id,
             row.profile.revision
         );
@@ -930,7 +931,7 @@ impl ScrubberController {
             && Self::profile(state, &row.profile.id).is_ok_and(|p| {
                 p.snapshot() == row.profile
                     && Self::scope_agrees(state, p, &row.rule).unwrap_or(false)
-                    && p.target(row.rule.target.is_ipv4()).ok() == Some(row.rule.target)
+                    && p.matches_target(&row.rule)
             })
             && Self::owner(state, &row.profile.id)? == row.rule.owner
             && !safelisted(safelist, prefix.addr())?

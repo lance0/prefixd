@@ -19,8 +19,11 @@ pub struct GuardedRule {
     pub nlri: FlowSpecNlri,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub route_targets: Vec<String>,
-    #[schema(value_type = String, example = "192.0.2.99")]
-    pub target: IpAddr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, example = "192.0.2.99")]
+    pub target: Option<IpAddr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_route_target: Option<String>,
     /// The profile owner without the speaker's `guarded:` namespace prefix.
     pub owner: String,
     /// Immutable per admission, independent of the shared owner generation.
@@ -54,9 +57,6 @@ impl GuardedRule {
             PrefixdError::InvalidRequest("diversion requires a canonical host prefix".into())
         })?;
         if prefix.prefix_len() != prefix.max_prefix_len()
-            || prefix.addr().is_ipv4() != self.target.is_ipv4()
-            || !validate_redirect_target(self.target)
-            || prefix.addr() == self.target
             || self.revision == 0
             || self.owner.is_empty()
             || self.owner.len() > 64
@@ -68,6 +68,21 @@ impl GuardedRule {
             return Err(PrefixdError::InvalidRequest(
                 "invalid host diversion, target, owner or admission revision".into(),
             ));
+        }
+        match (self.target, &self.redirect_route_target) {
+            (Some(target), None)
+                if prefix.addr().is_ipv4() == target.is_ipv4()
+                    && validate_redirect_target(target)
+                    && prefix.addr() != target => {}
+            (None, Some(target))
+                if self.nlri.scope.is_some()
+                    && crate::domain::canonical_route_target(target)
+                        .is_ok_and(|canonical| canonical == *target) => {}
+            _ => {
+                return Err(PrefixdError::InvalidRequest(
+                    "diversion requires exactly one valid IP or VRF route-target action".into(),
+                ));
+            }
         }
         match &self.nlri.scope {
             Some(_) => {
@@ -93,10 +108,21 @@ impl GuardedRule {
             .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))
     }
 
+    pub fn target_description(&self) -> Result<String> {
+        match (self.target, &self.redirect_route_target) {
+            (Some(target), None) => Ok(target.to_string()),
+            (None, Some(target)) => Ok(format!("VRF RT {target}")),
+            _ => Err(PrefixdError::InvalidRequest(
+                "invalid diversion action target".into(),
+            )),
+        }
+    }
+
     pub fn same_admission(&self, other: &Self) -> bool {
         self.owner == other.owner
             && self.revision == other.revision
             && self.target == other.target
+            && self.redirect_route_target == other.redirect_route_target
             && self.route_targets == other.route_targets
             && self.nlri.compute_hash() == other.nlri.compute_hash()
     }
@@ -189,5 +215,44 @@ mod tests {
         for value in ["192.0.2.99", "10.1.1.1", "2001:db8::99", "fd00::99"] {
             assert!(validate_redirect_target(value.parse().unwrap()), "{value}");
         }
+    }
+
+    #[test]
+    fn legacy_target_json_is_unchanged_and_redirect_targets_are_exclusive() {
+        let legacy = serde_json::json!({
+            "nlri": {"dst_prefix":"192.0.2.1/32","protocol":6,"dst_ports":[443]},
+            "target":"192.0.2.99", "owner":"prefixd.scrub.fixture", "revision":7,
+        });
+        let rule: GuardedRule = serde_json::from_value(legacy.clone()).unwrap();
+        rule.validate().unwrap();
+        assert_eq!(serde_json::to_value(&rule).unwrap(), legacy);
+        let mut vrf = rule.clone();
+        vrf.target = None;
+        vrf.redirect_route_target = Some("44407:888".into());
+        assert!(vrf.validate().is_err(), "global VRF redirects stay refused");
+        vrf.nlri.scope = Some(
+            crate::domain::VpnFlowSpecIdentity::new(
+                crate::domain::VpnFlowSpecFamily::Ipv4,
+                "44407:40",
+            )
+            .unwrap(),
+        );
+        vrf.route_targets = vec!["44407:777".into()];
+        vrf.validate().unwrap();
+        assert_eq!(vrf.target_description().unwrap(), "VRF RT 44407:888");
+        assert!(!vrf.same_admission(&rule));
+        let encoded = serde_json::to_value(&vrf).unwrap();
+        assert!(encoded.get("target").is_none());
+        assert_eq!(encoded["redirect_route_target"], "44407:888");
+        let restored: GuardedRule = serde_json::from_value(encoded).unwrap();
+        assert!(vrf.same_admission(&restored));
+        vrf.target = rule.target;
+        assert!(
+            vrf.validate().is_err(),
+            "IP and VRF targets cannot be combined"
+        );
+        vrf.target = None;
+        vrf.redirect_route_target = None;
+        assert!(vrf.validate().is_err(), "a target is required");
     }
 }
