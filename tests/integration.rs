@@ -3350,6 +3350,56 @@ async fn test_batch_event_ingestion_partial_success() {
 }
 
 #[tokio::test]
+async fn test_batch_event_ingestion_rejects_one_scope_selector_item_only() {
+    let app = setup_app().await;
+    let body = serde_json::json!({
+        "events": [
+            {
+                "timestamp": "2026-01-16T14:00:00Z",
+                "source": "fastnetmon",
+                "victim_ip": "203.0.113.200",
+                "vector": "udp_flood",
+                "rd": "44407:40"
+            },
+            {
+                "timestamp": "2026-01-16T14:00:01Z",
+                "source": "fastnetmon",
+                "victim_ip": "203.0.113.201",
+                "vector": "udp_flood"
+            }
+        ]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events/batch")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["accepted"], 1, "{json}");
+    assert_eq!(json["rejected"], 1, "{json}");
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results[0]["status"], "rejected");
+    assert!(
+        results[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("routing scope")
+    );
+    assert_ne!(results[1]["status"], "rejected");
+}
+
+#[tokio::test]
 async fn test_batch_event_ingestion_empty_batch() {
     let app = setup_app().await;
 

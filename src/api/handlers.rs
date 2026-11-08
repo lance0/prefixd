@@ -576,7 +576,10 @@ fn reject_internal_vpn_field<'de, D: serde::Deserializer<'de>, T>(_: D) -> Resul
 }
 
 #[derive(Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
+#[allow(
+    dead_code,
+    reason = "Selector stubs reject during deserialization and are never read"
+)]
 pub struct CreateMitigationRequest {
     #[serde(
         default,
@@ -585,6 +588,48 @@ pub struct CreateMitigationRequest {
     )]
     #[schema(ignore)]
     vpn_scope: Option<String>,
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "reject_internal_vpn_field"
+    )]
+    #[schema(ignore)]
+    scope: Option<String>,
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "reject_internal_vpn_field"
+    )]
+    #[schema(ignore)]
+    vrf: Option<String>,
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "reject_internal_vpn_field"
+    )]
+    #[schema(ignore)]
+    rd: Option<String>,
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "reject_internal_vpn_field"
+    )]
+    #[schema(ignore)]
+    route_targets: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "reject_internal_vpn_field"
+    )]
+    #[schema(ignore)]
+    afi_safi: Option<String>,
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "reject_internal_vpn_field"
+    )]
+    #[schema(ignore)]
+    default_scope: Option<String>,
     #[serde(
         default,
         skip_serializing,
@@ -2760,7 +2805,8 @@ const MAX_BATCH_EVENTS: usize = 100;
 #[derive(Deserialize, ToSchema)]
 pub struct BatchEventRequest {
     #[schema(value_type = Vec<AttackEventInput>)]
-    events: Vec<DetectorEventRequest>,
+    /// Deserialized per item so one invalid event does not discard the batch.
+    events: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -2824,8 +2870,23 @@ pub async fn ingest_events_batch(
     let mut accepted = 0u32;
     let mut rejected = 0u32;
 
-    for (index, input) in req.events.into_iter().enumerate() {
-        let input = input.0;
+    for (index, value) in req.events.into_iter().enumerate() {
+        let input = match serde_json::from_value::<DetectorEventRequest>(value) {
+            Ok(input) => input.0,
+            Err(error) => {
+                rejected += 1;
+                results.push(BatchEventResult {
+                    announcement_outcome: None,
+                    index,
+                    event_id: Uuid::nil(),
+                    status: "rejected".to_string(),
+                    mitigation_id: None,
+                    mitigation_ids: Vec::new(),
+                    error: Some(error.to_string()),
+                });
+                continue;
+            }
+        };
         // Validate input
         let validation_err = validate_ip(&input.victim_ip)
             .and_then(|_| validate_string_len(&input.source, "source", MAX_STRING_LEN))
@@ -5412,6 +5473,13 @@ mod detector_scope_tests {
                 "{field}"
             );
         }
+        let mut legacy_extra = base;
+        legacy_extra["mitigation_id"] = serde_json::json!("legacy-echo");
+        legacy_extra["status"] = serde_json::json!("active");
+        assert!(
+            serde_json::from_value::<CreateMitigationRequest>(legacy_extra).is_ok(),
+            "unrelated legacy fields stay ignored"
+        );
     }
 }
 
@@ -5429,8 +5497,11 @@ mod global_manual_scope_tests {
             "vpn_scope",
             "source_only",
             "source_only_confirmed",
+            "vrf",
             "rd",
             "route_targets",
+            "afi_safi",
+            "default_scope",
         ] {
             let mut scoped = base.clone();
             scoped[field] = serde_json::Value::Null;
@@ -5439,5 +5510,12 @@ mod global_manual_scope_tests {
                 "{field}"
             );
         }
+        let mut legacy_extra = base;
+        legacy_extra["mitigation_id"] = serde_json::json!("legacy-echo");
+        legacy_extra["status"] = serde_json::json!("active");
+        assert!(
+            serde_json::from_value::<CreateMitigationRequest>(legacy_extra).is_ok(),
+            "unrelated legacy fields stay ignored"
+        );
     }
 }

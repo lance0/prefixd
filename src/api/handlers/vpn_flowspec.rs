@@ -46,6 +46,12 @@ impl SourceOnlyVpnRequest {
     fn into_request(self) -> CreateMitigationRequest {
         CreateMitigationRequest {
             vpn_scope: Some(self.scope),
+            scope: None,
+            vrf: None,
+            rd: None,
+            route_targets: None,
+            afi_safi: None,
+            default_scope: None,
             source_only: true,
             source_only_confirmed: self.confirm_destination_any,
             operator_id: String::new(),
