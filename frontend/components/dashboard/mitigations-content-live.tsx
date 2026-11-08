@@ -132,11 +132,11 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
 
     try {
       const matching = await getAllMitigations(filters)
-      const headers = ["mitigation_id", "status", "victim_ip", "vector", "action_type", "customer_id", "created_at", "expires_at", "routing_scope"]
+      const headers = ["mitigation_id", "status", "victim_ip", "vector", "action_type", "customer_id", "created_at", "expires_at", "routing_scope", "dscp"]
 
       const rows = matching.map((m) => [
         m.mitigation_id, m.status, m.victim_ip, m.vector, m.action_type,
-        m.customer_id ?? "", m.created_at, m.expires_at, formatRoutingScope(m.vpn_scope),
+        m.customer_id ?? "", m.created_at, m.expires_at, formatRoutingScope(m.vpn_scope), m.dscp?.toString() ?? "",
       ])
 
       downloadCsv(`mitigations-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
@@ -549,7 +549,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                         </span>
                       </TableCell>
                       <TableCell className="order-3 p-0 md:px-3 md:py-2">
-                        <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} />
+                        <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} dscp={mitigation.dscp} />
                       </TableCell>
                       <TableCell className="hidden text-muted-foreground md:table-cell">{vector}</TableCell>
                       <TableCell className="hidden max-w-56 whitespace-normal break-words text-muted-foreground md:table-cell">{match}</TableCell>

@@ -67,6 +67,7 @@ pub enum PlaybookAction {
 impl PlaybookAction {
     fn flowspec(self, rate_bps: Option<u64>) -> FlowSpecAction {
         FlowSpecAction {
+            dscp: None,
             action_type: match self {
                 Self::Police => ActionType::Police,
                 Self::Discard => ActionType::Discard,

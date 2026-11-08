@@ -75,7 +75,7 @@ export function LocalFlowSpecInventory() {
                     <TableCell className="tabular-nums">
                       {rule.actions.length === 0 ? "No actions reported" : rule.actions.map((action, actionIndex) => (
                         <div key={actionIndex}>
-                          {action.action_type}{action.action_type === "police" ? ` ${action.rate_bps === undefined ? "rate unavailable" : `${action.rate_bps.toLocaleString("en-US")} bps`}` : ""}
+                          {action.action_type}{action.action_type === "mark" ? ` DSCP ${action.dscp ?? "unavailable"}` : action.action_type === "police" ? ` ${action.rate_bps === undefined ? "rate unavailable" : `${action.rate_bps.toLocaleString("en-US")} bps`}` : ""}
                         </div>
                       ))}
                     </TableCell>

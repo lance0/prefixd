@@ -273,6 +273,7 @@ pub async fn run_action_contract(speaker: &dyn FlowSpecAnnouncer) -> Result<()> 
         vec![],
         vec![FlowSpecAction::discard(), FlowSpecAction::police(8)],
         vec![FlowSpecAction {
+            dscp: None,
             action_type: ActionType::Police,
             rate_bps: None,
         }],
@@ -280,6 +281,7 @@ pub async fn run_action_contract(speaker: &dyn FlowSpecAnnouncer) -> Result<()> 
         vec![FlowSpecAction::police(16_777_217)],
         vec![FlowSpecAction::police(u64::MAX)],
         vec![FlowSpecAction {
+            dscp: None,
             action_type: ActionType::Discard,
             rate_bps: Some(8),
         }],

@@ -284,10 +284,12 @@ pub struct MitigationResponse {
     pub victim_ip: String,
     /// Attack vector type
     pub vector: String,
-    /// Action type (discard, police, blackhole)
+    /// Action type (discard, police, mark for VPN destination rules, blackhole)
     pub action_type: String,
     /// Rate limit in bps (for police action)
     pub rate_bps: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dscp: Option<u8>,
     /// Resolved VPN scope snapshot; absent for global rules.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vpn_scope: Option<crate::domain::VpnScopeSnapshot>,
@@ -390,6 +392,7 @@ impl From<&Mitigation> for MitigationResponse {
             vector: m.vector.to_string(),
             action_type: m.action_type.to_string(),
             rate_bps: m.action_params.rate_bps,
+            dscp: m.action_params.dscp,
             vpn_scope: m.match_criteria.scope.clone(),
             dst_prefix: m.match_criteria.dst_prefix.clone(),
             src_prefix: m.match_criteria.src_prefix.clone(),
@@ -610,7 +613,7 @@ pub struct CreateMitigationRequest {
     victim_ip: String,
     /// IP protocol: udp, tcp, icmp (IPv4 protocol 1), icmpv6 (IPv6 protocol 58), or any.
     /// An empty string also selects any protocol. ICMP selectors must match the victim's address family.
-    /// Required for discard and police; omit for blackhole.
+    /// Required for discard, police and mark; omit for blackhole.
     #[schema(example = "icmpv6")]
     #[serde(default)]
     protocol: Option<String>,
@@ -635,7 +638,7 @@ pub struct CreateMitigationRequest {
     /// `guardrails.allow_packet_length_match`. Discard and police only.
     #[serde(default)]
     packet_length: Option<PacketLengthRange>,
-    /// discard, police, or blackhole. A blackhole drops all traffic to the victim
+    /// discard, police, mark (VPN destination only), or blackhole. A blackhole drops all traffic to the victim
     /// and requires the Admin role, a nonempty reason and `confirm_victim_ip`.
     action: String,
     /// Blackhole only: must exactly equal `victim_ip`, or the request returns 400.
@@ -645,6 +648,10 @@ pub struct CreateMitigationRequest {
     /// Must be omitted or null for discard.
     #[serde(default)]
     rate_bps: Option<u64>,
+    /// Exact packet DSCP, required only for manual VPN destination action `mark`.
+    #[serde(default)]
+    #[schema(minimum = 0, maximum = 63)]
+    dscp: Option<u8>,
     ttl_seconds: u32,
     /// Optional ceiling for this creation's expiry; later detector extensions are separate.
     #[serde(default)]
@@ -1765,12 +1772,18 @@ async fn rule_owner(
                 crate::domain::RETIRE_DRY_RUN_FLAG
             )));
         }
+        if owner.action_type == ActionType::Mark {
+            return Err(PrefixdError::Conflict(
+                "manual marking intent cannot be extended by a detector".into(),
+            ));
+        }
         if owner.action_type != ActionType::Blackhole {
             (FlowSpecAction {
+                dscp: owner.action_params.dscp,
                 action_type: owner.action_type,
                 rate_bps: owner.action_params.rate_bps,
             })
-            .traffic_rate_bytes_per_second()
+            .validate()
             .map_err(|error| {
                 PrefixdError::GuardrailViolation(GuardrailError::InvalidAction(error))
             })?;
@@ -2197,7 +2210,7 @@ pub async fn create_mitigation(
             || req.source_only && !matches!(req.action.as_str(), "discard" | "police"))
     {
         return Ok(AppError(PrefixdError::InvalidRequest(
-            "VPN FlowSpec admission supports discard and police only".into(),
+            "VPN FlowSpec refuses blackholes; source-only supports discard and police only".into(),
         ))
         .into_response());
     }
@@ -2338,10 +2351,11 @@ async fn create_blackhole(
         || req.fragment.is_some()
         || req.packet_length.is_some()
         || req.rate_bps.is_some()
+        || req.dscp.is_some()
         || req.expires_at_cap.is_some()
     {
         Some(
-            "a blackhole takes no protocol, dst_ports, src_prefix, src_ports, fragment, packet_length, rate_bps or expires_at_cap",
+            "a blackhole takes no protocol, dst_ports, src_prefix, src_ports, fragment, packet_length, rate_bps, dscp or expires_at_cap",
         )
     } else {
         None

@@ -509,3 +509,13 @@ For source-only, omit VICTIM and use `--source-only --scope NAME --src-prefix CI
 Creation also needs `--confirm-destination-any`; preview does not. Family/RD/RT
 appear in mitigation and local inventory output. See the
 [VPN procedure](../how-to/vpn-flowspec.md) for authorization and receiver limits.
+
+### VPN DSCP marking
+
+`mitigations preview` and `mitigations create` accept `--action mark --dscp N`
+for a named VPN destination scope. `N` is an integer from 0 through 63.
+`--rate-bps` is refused with marking, and `--dscp` is refused for other actions.
+A source-only or global marking request fails locally. Create requires the
+controller preview to acknowledge both action `mark` and the exact DSCP.
+Mitigation detail and speaker inventory show the saved DSCP. Marking cannot
+use lifetime extension in this slice; let it expire or withdraw by ID.

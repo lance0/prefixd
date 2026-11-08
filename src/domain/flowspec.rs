@@ -254,6 +254,9 @@ impl From<&MatchCriteria> for FlowSpecNlri {
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct FlowSpecAction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 0, maximum = 63)]
+    pub dscp: Option<u8>,
     pub action_type: ActionType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_bps: Option<u64>,
@@ -261,6 +264,18 @@ pub struct FlowSpecAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FlowSpecActionError {
+    #[error("action 'mark' requires dscp")]
+    MissingDscp,
+    #[error("DSCP {0} must be between 0 and 63")]
+    InvalidDscp(u8),
+    #[error("only action 'mark' accepts dscp")]
+    UnexpectedDscp,
+    #[error("action 'mark' must not include rate_bps")]
+    UnexpectedMarkRate,
+    #[error("action 'mark' requires a VPN destination match")]
+    MarkRequiresVpnDestination,
+    #[error("action 'mark' is not a traffic-rate action")]
+    NotTrafficRate,
     #[error("action 'police' requires rate_bps")]
     MissingPoliceRate,
     #[error("action 'police' requires rate_bps > 0")]
@@ -278,12 +293,16 @@ pub enum FlowSpecActionError {
 impl FlowSpecAction {
     /// Encode the supported traffic-rate action without changing its bit rate.
     pub fn traffic_rate_bytes_per_second(&self) -> Result<f32, FlowSpecActionError> {
+        if self.dscp.is_some() && self.action_type != ActionType::Mark {
+            return Err(FlowSpecActionError::UnexpectedDscp);
+        }
         match (self.action_type, self.rate_bps) {
             (ActionType::Discard, None) => Ok(0.0),
             (ActionType::Discard, Some(_)) => Err(FlowSpecActionError::UnexpectedDiscardRate),
             (ActionType::Police, None) => Err(FlowSpecActionError::MissingPoliceRate),
             (ActionType::Police, Some(0)) => Err(FlowSpecActionError::ZeroPoliceRate),
             (ActionType::Blackhole, _) => Err(FlowSpecActionError::NotFlowSpec),
+            (ActionType::Mark, _) => Err(FlowSpecActionError::NotTrafficRate),
             (ActionType::Police, Some(bps)) => {
                 // Fractional bytes are valid; integer division would turn 1–7 bps into discard.
                 let rate = (bps as f64 / 8.0) as f32;
@@ -296,9 +315,44 @@ impl FlowSpecAction {
         }
     }
 
+    pub fn validate(&self) -> Result<(), FlowSpecActionError> {
+        if self.action_type == ActionType::Mark {
+            if self.rate_bps.is_some() {
+                return Err(FlowSpecActionError::UnexpectedMarkRate);
+            }
+            match self.dscp {
+                Some(0..=63) => Ok(()),
+                Some(dscp) => Err(FlowSpecActionError::InvalidDscp(dscp)),
+                None => Err(FlowSpecActionError::MissingDscp),
+            }
+        } else {
+            self.traffic_rate_bytes_per_second().map(|_| ())
+        }
+    }
+
+    /// The exact action community used for payload comparison and read-back accounting.
+    pub fn extended_community(&self) -> Result<u64, FlowSpecActionError> {
+        self.validate()?;
+        match self.dscp {
+            Some(dscp) => Ok((0x8009_u64 << 48) | u64::from(dscp)),
+            None => self
+                .traffic_rate_bytes_per_second()
+                .map(|rate| (0x8006_u64 << 48) | u64::from(rate.to_bits())),
+        }
+    }
+
+    pub fn mark(dscp: u8) -> Self {
+        Self {
+            action_type: ActionType::Mark,
+            dscp: Some(dscp),
+            rate_bps: None,
+        }
+    }
+
     pub fn police(rate_bps: u64) -> Self {
         Self {
             action_type: ActionType::Police,
+            dscp: None,
             rate_bps: Some(rate_bps),
         }
     }
@@ -306,6 +360,7 @@ impl FlowSpecAction {
     pub fn discard() -> Self {
         Self {
             action_type: ActionType::Discard,
+            dscp: None,
             rate_bps: None,
         }
     }
@@ -578,6 +633,7 @@ mod tests {
         for (action, error) in [
             (
                 FlowSpecAction {
+                    dscp: None,
                     action_type: ActionType::Police,
                     rate_bps: None,
                 },
@@ -597,6 +653,7 @@ mod tests {
             ),
             (
                 FlowSpecAction {
+                    dscp: None,
                     action_type: ActionType::Discard,
                     rate_bps: Some(0),
                 },
@@ -604,6 +661,7 @@ mod tests {
             ),
             (
                 FlowSpecAction {
+                    dscp: None,
                     action_type: ActionType::Discard,
                     rate_bps: Some(8),
                 },
@@ -611,6 +669,7 @@ mod tests {
             ),
             (
                 FlowSpecAction {
+                    dscp: None,
                     action_type: ActionType::Blackhole,
                     rate_bps: None,
                 },

@@ -21,7 +21,7 @@ import { getIncidentReport } from "@/lib/api"
 
 type TimelineEntry =
   | { type: "event"; timestamp: string; data: { event_id: string; source: string; vector: string; bps: number | null; pps: number | null; confidence: number | null } }
-  | { type: "mitigation"; timestamp: string; data: { mitigation_id: string; status: Mitigation["status"]; action_type: string; rate_bps: number | null; vector: string; created_at: string; withdrawn_at: string | null; expires_at: string } }
+  | { type: "mitigation"; timestamp: string; data: { mitigation_id: string; status: Mitigation["status"]; action_type: string; rate_bps: number | null; dscp?: number | null; vector: string; created_at: string; withdrawn_at: string | null; expires_at: string } }
 
 export default function IpHistoryPage() {
   const { formatTime } = useTimeFormat()
@@ -88,6 +88,7 @@ export default function IpHistoryPage() {
           status: m.status,
           action_type: m.action_type,
           rate_bps: m.rate_bps,
+          dscp: m.dscp,
           vector: m.vector,
           created_at: m.created_at,
           withdrawn_at: m.withdrawn_at,
@@ -194,7 +195,7 @@ export default function IpHistoryPage() {
                               Mitigation
                             </Link>
                             <StatusBadge status={entry.data.status} />
-                            <ActionBadge actionType={entry.data.action_type} rateBps={entry.data.rate_bps} />
+                            <ActionBadge actionType={entry.data.action_type} rateBps={entry.data.rate_bps} dscp={entry.data.dscp} />
                           </>
                         )}
                       </div>

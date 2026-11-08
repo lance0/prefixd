@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { fireEvent, screen, waitFor } from "@testing-library/react"
-import { FlowSpecRuleDialog, validateRule, type RuleForm } from "@/components/dashboard/flowspec-rule-dialog"
+import { fireEvent, screen, waitFor, within } from "@testing-library/react"
+import { FlowSpecRuleDialog, validateRule, toRequest, type RuleForm } from "@/components/dashboard/flowspec-rule-dialog"
 import { createSourceOnlyVpn, createVpnFlowSpec, parseFlowSpecAdmissionPreview, readAutomaticScope, type JsonValue, type VpnScopeSnapshot } from "@/lib/api"
 import { formatFlowSpecRule } from "@/components/dashboard/flowspec-preview"
 import { json, renderApp, settle, useFakeController } from "./support/fake-controller"
@@ -128,5 +128,61 @@ describe("source-only operator form", { timeout: 10_000 }, () => {
     const ipv6 = { ...policy, family: "ipv6" as const, min_source_prefix_length: 64 }
     expect(validateRule({ ...form, srcPrefix: "2001:db8:bad::/64" }, { maxPorts: 5, allowSrcPrefixMatch: true, vpnScope: ipv6 })).toEqual({})
     expect(validateRule(form, { maxPorts: 5, vpnScope: ipv6 })).toHaveProperty("srcPrefix")
+  })
+})
+
+
+describe("VPN marking", () => {
+  function markedPreview(dscp: number): JsonValue {
+    const value = preview()
+
+    if (!(value instanceof Object) || Array.isArray(value)) throw new Error("fixture")
+    const candidate = value.candidate
+
+    if (!(candidate instanceof Object) || Array.isArray(candidate)) throw new Error("fixture")
+
+    return { ...value, candidate: { ...candidate, action: { action_type: "mark", dscp } } }
+  }
+
+  it.each([0, 63])("preserves exact DSCP %i in validation, request and preview", dscp => {
+    const form: RuleForm = { routingScope: "TRANSIT", victimIp: "203.0.113.10", srcPrefix: "", protocol: "udp", action: "mark", dscp: String(dscp), rateBps: "", dstPorts: "", srcPorts: "", nonFirstFragments: false, lengthMin: "", lengthMax: "", ttl: "30", reason: "pilot mark" }
+    expect(validateRule(form, { maxPorts: 5, vpnScope: policy })).toEqual({})
+    expect(toRequest(form)).toMatchObject({ action: "mark", dscp })
+    expect(toRequest(form)).not.toHaveProperty("rate_bps")
+    expect(parseFlowSpecAdmissionPreview(markedPreview(dscp), 200)?.candidate?.action).toMatchObject({ action_type: "mark", dscp })
+    expect(formatFlowSpecRule({ dst_prefix: "203.0.113.10/32", protocol: 17, dst_ports: [], action_type: "mark", dscp, rate_bps: null, vpn_scope: scope })).toContain(`then mark DSCP ${dscp}`)
+    expect(validateRule({ ...form, routingScope: "global" }, { maxPorts: 5 })).toHaveProperty("action")
+    expect(validateRule({ ...form, sourceOnly: true }, { maxPorts: 5, vpnScope: policy })).toHaveProperty("action")
+    expect(validateRule({ ...form, dscp: "64" }, { maxPorts: 5, vpnScope: policy })).toHaveProperty("dscp")
+  })
+
+  it("renders the exact acknowledged DSCP in controller admission", { timeout: 10_000 }, async () => {
+    controller.route("GET", "/v1/config/settings", () => json({ settings: { bgp: { vpn_scopes: { TRANSIT: policy } }, guardrails: { allow_src_prefix_match: true } }, loaded_at: "2026-11-08T12:00:00Z" }))
+    controller.route("POST", "/v1/vpn/mitigations/preview", () => json(markedPreview(0)))
+    renderApp(<FlowSpecRuleDialog open onOpenChange={vi.fn()} />, { withoutAuth: true })
+    await settle()
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Routing scope" }), { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "TRANSIT (VPNv4)" }))
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Action" }), { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "mark DSCP" }))
+    fireEvent.change(screen.getByLabelText("Destination IP or CIDR"), { target: { value: "203.0.113.10" } })
+    fireEvent.change(screen.getByLabelText("DSCP (0–63)"), { target: { value: "0" } })
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "pilot mark" } })
+    fireEvent.click(screen.getByRole("button", { name: "Check admission" }))
+    const region = screen.getByRole("region", { name: "Controller admission" })
+    await waitFor(() => expect(within(region).getByText(/then mark DSCP 0/)).toBeInTheDocument())
+    expect(within(region).queryByText(/mark DSCP unavailable/)).not.toBeInTheDocument()
+  })
+
+  it("refuses a malformed or mismatched marking acknowledgement without sending creation", async () => {
+    expect(parseFlowSpecAdmissionPreview(markedPreview(64), 200)).toBeNull()
+    controller.route("POST", "/v1/vpn/mitigations/preview", () => json(markedPreview(1)))
+    await expect(createVpnFlowSpec("TRANSIT", { ...rule, action: "mark", dscp: 0 })).rejects.toThrow("did not acknowledge")
+    expect(controller.calls("POST", "/v1/vpn/mitigations")).toHaveLength(0)
+    expect(controller.calls("POST", "/v1/mitigations")).toHaveLength(0)
+    controller.route("POST", "/v1/vpn/mitigations/preview", () => json(markedPreview(0)))
+    controller.route("POST", "/v1/vpn/mitigations", () => json({ mitigation_id: "mark" }))
+    await createVpnFlowSpec("TRANSIT", { ...rule, action: "mark", dscp: 0 })
+    expect(JSON.parse(controller.calls("POST", "/v1/vpn/mitigations")[0].body ?? "").rule).toMatchObject({ action: "mark", dscp: 0 })
   })
 })

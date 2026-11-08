@@ -34,15 +34,14 @@ impl ExportTarget {
 /// Audit reason for a local blackhole route withdrawn because its row is already terminal.
 pub const ORPHANED_AFTER_DOWNTIME: &str = "orphaned after controller downtime";
 
-fn wire_action(rule: &FlowSpecRule) -> crate::error::Result<u32> {
+fn wire_action(rule: &FlowSpecRule) -> crate::error::Result<u64> {
     let [action] = rule.actions.as_slice() else {
         return Err(crate::error::PrefixdError::BgpAnnouncementFailed(
-            "exactly one traffic rate action is required".into(),
+            "exactly one FlowSpec action is required".into(),
         ));
     };
     action
-        .traffic_rate_bytes_per_second()
-        .map(f32::to_bits)
+        .extended_community()
         .map_err(|error| crate::error::PrefixdError::BgpAnnouncementFailed(error.to_string()))
 }
 
@@ -3796,6 +3795,7 @@ mod tests {
         let coerced = FlowSpecRule::new(
             crate::domain::FlowSpecNlri::from(&live.match_criteria),
             FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Blackhole,
                 rate_bps: None,
             },

@@ -15,6 +15,7 @@ struct Fake {
     refusal: Arc<Mutex<Option<Status>>>,
     attempts: Arc<AtomicUsize>,
     deletes: Arc<AtomicUsize>,
+    delete_requests: Arc<Mutex<Vec<pb::DeleteFlowSpecRequest>>>,
     health_calls: Arc<AtomicUsize>,
     families: Arc<Mutex<Vec<i32>>>,
     /// Injection owner per leased rule, by match components.
@@ -314,17 +315,16 @@ impl pb::injection_service_server::InjectionService for Fake {
         let request = request.into_inner();
         assert!(request.allow_missing);
         assert!(!request.override_owner, "prefixd never overrides the owner");
+        self.delete_requests.lock().unwrap().push(request.clone());
         self.delete_owners
             .lock()
             .unwrap()
             .push(request.owner.clone());
-        if self
-            .rules
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|old| old.components == request.components)
-            && self.owner_of(&request.components) != request.owner
+        if self.rules.lock().unwrap().iter().any(|old| {
+            old.afi_safi == request.afi_safi
+                && old.rd == request.rd
+                && old.components == request.components
+        }) && self.owner_of(&request.components) != request.owner
         {
             return Err(Status::failed_precondition("key is held by another owner"));
         }
@@ -335,8 +335,11 @@ impl pb::injection_service_server::InjectionService for Fake {
         }
         let mut rules = self.rules.lock().unwrap();
         let before = rules.len();
-        rules
-            .retain(|old| old.afi_safi != request.afi_safi || old.components != request.components);
+        rules.retain(|old| {
+            old.afi_safi != request.afi_safi
+                || old.rd != request.rd
+                || old.components != request.components
+        });
         Ok(Response::new(pb::DeleteFlowSpecResponse {
             outcome: if rules.len() == before { 2 } else { 1 },
         }))
@@ -508,6 +511,7 @@ async fn authenticated_controller_rpc_contract() {
             vec![],
             vec![FlowSpecAction::discard(), FlowSpecAction::police(8)],
             vec![FlowSpecAction {
+                dscp: None,
                 action_type: crate::domain::ActionType::Police,
                 rate_bps: None,
             }],
@@ -515,6 +519,7 @@ async fn authenticated_controller_rpc_contract() {
             vec![FlowSpecAction::police(16_777_217)],
             vec![FlowSpecAction::police(u64::MAX)],
             vec![FlowSpecAction {
+                dscp: None,
                 action_type: crate::domain::ActionType::Discard,
                 rate_bps: Some(8),
             }],
@@ -2710,4 +2715,110 @@ async fn malformed_guarded_rules_of_ours_still_fail_both_reads() {
         assert!(speaker.guarded_inventory().await.is_err(), "{bad:?}");
     }
     server.abort();
+}
+
+#[tokio::test]
+async fn historical_mark_scope_policy_never_blocks_exact_key_delete_rpc() {
+    use crate::domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity};
+    for (family, destination, source) in [
+        (VpnFlowSpecFamily::Ipv4, "192.0.2.21/32", "198.51.100.0/24"),
+        (
+            VpnFlowSpecFamily::Ipv6,
+            "2001:db8::21/128",
+            "2001:db8:bad::/64",
+        ),
+    ] {
+        for source_only in [false, true] {
+            let (speaker, fake, server) = flowspec_speaker().await;
+            let global = FlowSpecRule::new(
+                FlowSpecNlri {
+                    dst_prefix: destination.into(),
+                    src_prefix: Some(source.into()),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                    ..Default::default()
+                },
+                FlowSpecAction::discard(),
+            )
+            .with_owner("historical-owner");
+            let mut siblings = Vec::new();
+            for rd in ["44407:40", "44407:41"] {
+                let mut sibling = global.clone();
+                sibling.nlri.scope = Some(VpnFlowSpecIdentity::new(family, rd).unwrap());
+                sibling.route_targets = vec!["44407:777".into()];
+                if source_only {
+                    sibling.nlri.dst_prefix.clear();
+                }
+                siblings.push(sibling);
+            }
+            // Synthetic preexisting keys: unsupported historical actions are not admitted today.
+            for held in std::iter::once(&global).chain(&siblings) {
+                let encoded = encode(held).unwrap();
+                fake.owners
+                    .lock()
+                    .unwrap()
+                    .push((encoded.components.clone(), held.owner.clone()));
+                fake.rules.lock().unwrap().push(encoded);
+            }
+            let key = if source_only { &siblings[0] } else { &global };
+            let expected = encode(key).unwrap();
+            let mut historical = key.clone();
+            historical.actions = vec![FlowSpecAction::mark(46)];
+            let mut unleased = historical.clone();
+            unleased.owner.clear();
+            assert!(
+                speaker
+                    .announce(&unleased)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("requires a VPN destination")
+            );
+            assert!(
+                speaker
+                    .announce_leased(&historical, 60)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("requires a VPN destination")
+            );
+            assert_eq!(fake.attempts.load(SeqCst), 0);
+            assert!(fake.leased.lock().unwrap().is_empty());
+            historical.actions[0].dscp = None;
+            historical.actions[0].rate_bps = Some(8);
+            speaker.withdraw(&historical).await.unwrap();
+            assert_eq!(fake.deletes.load(SeqCst), 1);
+            let request = fake.delete_requests.lock().unwrap().pop().unwrap();
+            assert_eq!(request.afi_safi, expected.afi_safi);
+            assert_eq!(request.rd, expected.rd);
+            assert_eq!(request.components, expected.components);
+            assert_eq!(request.owner, "historical-owner");
+            assert!(request.allow_missing);
+            assert!(!request.override_owner);
+            let remaining = fake.rules.lock().unwrap();
+            assert_eq!(remaining.len(), 2);
+            assert!(
+                remaining
+                    .iter()
+                    .all(|held| held.afi_safi != request.afi_safi
+                        || held.rd != request.rd
+                        || held.components != request.components)
+            );
+            for sibling in std::iter::once(&global)
+                .chain(&siblings)
+                .filter(|held| held.nlri_hash() != key.nlri_hash())
+            {
+                let expected = encode(sibling).unwrap();
+                assert!(
+                    remaining
+                        .iter()
+                        .any(|held| held.afi_safi == expected.afi_safi
+                            && held.rd == expected.rd
+                            && held.components == expected.components)
+                );
+            }
+            drop(remaining);
+            server.abort();
+        }
+    }
 }

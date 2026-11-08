@@ -82,11 +82,22 @@ impl Guardrails {
     /// exposure. Quota and new-admission accounting belong to creation alone.
     pub fn validate_rule(&self, intent: &MitigationIntent, is_safelisted: bool) -> Result<()> {
         (FlowSpecAction {
+            dscp: intent.action_params.dscp,
             action_type: intent.action_type,
             rate_bps: intent.action_params.rate_bps,
         })
-        .traffic_rate_bytes_per_second()
+        .validate()
         .map_err(|error| PrefixdError::GuardrailViolation(GuardrailError::InvalidAction(error)))?;
+        if intent.action_type == crate::domain::ActionType::Mark
+            && (intent.match_criteria.scope.is_none()
+                || intent.match_criteria.dst_prefix.is_empty())
+        {
+            return Err(PrefixdError::GuardrailViolation(
+                GuardrailError::InvalidAction(
+                    crate::domain::FlowSpecActionError::MarkRequiresVpnDestination,
+                ),
+            ));
+        }
 
         // Check safelist
         if is_safelisted {

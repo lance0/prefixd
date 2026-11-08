@@ -136,7 +136,7 @@ impl GoBgpAnnouncer {
     /// Build a FlowSpec Path for GoBGP v4 API (uses typed oneof fields, not Any)
     fn build_flowspec_path(&self, rule: &FlowSpecRule) -> Result<Path> {
         self.register_scope(rule.nlri.scope.as_ref())?;
-        super::announcer::validate_rule_scope(rule)?;
+        super::announcer::validate_add_scope(rule)?;
         let is_v6 = rule.nlri.ip_version() == IpVersion::V6;
         let afi = if is_v6 { AFI_IP6 } else { AFI_IP };
 
@@ -480,7 +480,7 @@ impl FlowSpecWriter for GoBgpAnnouncer {
 
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
         self.register_scope(rule.nlri.scope.as_ref())?;
-        super::announcer::validate_rule_scope(rule)?;
+        super::announcer::validate_add_scope(rule)?;
         // GoBGP has no injection lease; a leased rule never becomes an unleased one.
         if !rule.owner.is_empty() {
             return Err(PrefixdError::Config(
@@ -522,7 +522,6 @@ impl FlowSpecWriter for GoBgpAnnouncer {
     }
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
         self.register_scope(rule.nlri.scope.as_ref())?;
-        super::announcer::validate_rule_scope(rule)?;
         let path = self.build_flowspec_withdraw_path(&rule.nlri)?;
         let is_v6 = rule.nlri.ip_version() == IpVersion::V6;
         let afi = if is_v6 { AFI_IP6 } else { AFI_IP };
@@ -1221,6 +1220,7 @@ mod tests {
         let announcer = make_announcer();
 
         let actions = vec![FlowSpecAction {
+            dscp: None,
             action_type: ActionType::Discard,
             rate_bps: None,
         }];
@@ -1238,6 +1238,7 @@ mod tests {
         let announcer = make_announcer();
 
         let actions = vec![FlowSpecAction {
+            dscp: None,
             action_type: ActionType::Police,
             rate_bps: Some(1_000_000_000), // 1 Gbps
         }];
@@ -1284,6 +1285,7 @@ mod tests {
                 vec![],
                 vec![FlowSpecAction::discard(), FlowSpecAction::police(8)],
                 vec![FlowSpecAction {
+                    dscp: None,
                     action_type: ActionType::Police,
                     rate_bps: None,
                 }],
@@ -1291,6 +1293,7 @@ mod tests {
                 vec![FlowSpecAction::police(16_777_217)],
                 vec![FlowSpecAction::police(u64::MAX)],
                 vec![FlowSpecAction {
+                    dscp: None,
                     action_type: ActionType::Discard,
                     rate_bps: Some(8),
                 }],
@@ -1317,6 +1320,7 @@ mod tests {
                 ..Default::default()
             },
             FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Discard,
                 rate_bps: None,
             },
@@ -1346,6 +1350,7 @@ mod tests {
                 ..Default::default()
             },
             FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Police,
                 rate_bps: Some(500_000_000),
             },
@@ -1390,6 +1395,7 @@ mod tests {
                 ..Default::default()
             },
             FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Discard,
                 rate_bps: None,
             },
@@ -1426,6 +1432,7 @@ mod tests {
                 ..Default::default()
             },
             FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Police,
                 rate_bps: Some(100_000_000), // 100 Mbps
             },
@@ -1456,6 +1463,7 @@ mod tests {
                 ..Default::default()
             },
             FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Police,
                 rate_bps: Some(500_000_000),
             },
@@ -1483,6 +1491,7 @@ mod tests {
                 ..Default::default()
             },
             FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Discard,
                 rate_bps: None,
             },
@@ -1599,10 +1608,12 @@ mod proptests {
     fn flowspec_action() -> impl Strategy<Value = FlowSpecAction> {
         prop_oneof![
             Just(FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Discard,
                 rate_bps: None,
             }),
             (1u64..=0xff_ffff, 0u32..=40).prop_map(|(significand, shift)| FlowSpecAction {
+                dscp: None,
                 action_type: ActionType::Police,
                 rate_bps: Some(significand << shift),
             }),

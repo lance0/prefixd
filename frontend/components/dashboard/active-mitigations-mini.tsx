@@ -85,7 +85,7 @@ export function ActiveMitigationsMini({ mitigations, limit = 8, loading, error, 
                     <Link href={`/mitigations/${m.mitigation_id}`} className="break-all rounded-sm font-mono font-medium hover:underline">{m.dst_prefix}</Link>
                     <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">{m.pop} · {m.status}<OriginTag origin={m.origin_mode} /></div>
                   </td>
-                  <td className="px-4 align-top xl:py-4"><span className="mb-1 block text-xs text-muted-foreground xl:hidden">Action</span><ActionBadge actionType={m.action_type} rateBps={m.rate_bps} /></td>
+                  <td className="px-4 align-top xl:py-4"><span className="mb-1 block text-xs text-muted-foreground xl:hidden">Action</span><ActionBadge actionType={m.action_type} rateBps={m.rate_bps} dscp={m.dscp} /></td>
                   <td className="col-span-2 row-start-2 px-4 align-top xl:w-1/3 xl:py-4">
                     <div className="font-medium">{m.vector === "unknown" ? "Unclassified signal" : m.vector.replace(/_/g, " ")}</div>
                     <p className="mt-1 line-clamp-2 text-muted-foreground text-pretty">{m.reason.trim() || "Reason unavailable"}</p>

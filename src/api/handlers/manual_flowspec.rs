@@ -125,6 +125,7 @@ impl PreparedManualFlowSpec {
             pop: self.intent.pop.clone(),
             scope,
             action: FlowSpecAction {
+                dscp: self.intent.action_params.dscp,
                 action_type: self.intent.action_type,
                 rate_bps: self.intent.action_params.rate_bps,
             },
@@ -217,22 +218,24 @@ pub(super) async fn prepare_manual_flowspec(
         let action_type = match req.action.as_str() {
             "discard" => ActionType::Discard,
             "police" => ActionType::Police,
+            "mark" if routing_scope.is_some() && !req.source_only => ActionType::Mark,
             "blackhole" => return Err(PrefixdError::InvalidRequest(
                 "blackhole admission preview is unsupported; use the dedicated creation workflow"
                     .into(),
             )),
             _ => {
                 return Err(PrefixdError::InvalidRequest(format!(
-                    "invalid action '{}', expected: discard, police, blackhole",
+                    "invalid action '{}', expected: discard, police, scoped mark, blackhole",
                     req.action
                 )));
             }
         };
         FlowSpecAction {
+            dscp: req.dscp,
             action_type,
             rate_bps: req.rate_bps,
         }
-        .traffic_rate_bytes_per_second()
+        .validate()
         .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
         Ok((destination, protocol, action_type))
     };
@@ -303,6 +306,7 @@ pub(super) async fn prepare_manual_flowspec(
             },
             action_type,
             action_params: ActionParams {
+                dscp: req.dscp,
                 rate_bps: req.rate_bps,
                 ..Default::default()
             },
