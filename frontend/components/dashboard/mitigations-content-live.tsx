@@ -672,7 +672,10 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
           <AlertDialogHeader>
             <AlertDialogTitle>Withdraw Mitigation</AlertDialogTitle>
             <AlertDialogDescription>
-              Request withdrawal for <span className="font-mono font-semibold">{withdrawTarget?.victim_ip}</span>.
+              Request withdrawal for <span className="font-mono font-semibold">{withdrawTarget?.dst_prefix || withdrawTarget?.victim_ip}</span>
+              {withdrawTarget?.vpn_scope ? <> in <span className="font-mono">{formatRoutingScope(withdrawTarget.vpn_scope)}</span></> : null}
+              {withdrawTarget?.src_prefix ? <> from source <span className="font-mono">{withdrawTarget.src_prefix}</span></> : null}
+              {" "}({withdrawTarget?.action_type}).
               Local completion is recorded in the audit log. Router convergence and traffic filtering are not verified here.
             </AlertDialogDescription>
           </AlertDialogHeader>
