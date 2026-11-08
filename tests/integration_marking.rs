@@ -189,6 +189,76 @@ async fn scoped_marking_persists_repairs_and_withdraws_exact_dscp_in_both_famili
 }
 
 #[tokio::test]
+async fn detector_ban_cannot_extend_manual_marking_in_either_family() {
+    for (scope, victim, dscp) in [("V4", "203.0.113.10", 0), ("V6", "2001:db8:100::10", 63)] {
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(MockAnnouncer::new());
+        let mut configured = settings();
+        configured.bgp.default_scope =
+            serde_json::from_value(json!({"ipv4":"V4","ipv6":"V6"})).unwrap();
+        let mut inventory = common::test_inventory();
+        inventory.customers[0]
+            .prefixes
+            .push("2001:db8:100::/48".into());
+        let state = AppState::new(
+            configured,
+            inventory,
+            common::test_playbooks(),
+            repo.clone(),
+            speaker.clone(),
+            ".".into(),
+        )
+        .unwrap();
+        let app = prefixd::api::create_test_router(state.clone());
+        let mut manual = request(scope, victim, dscp);
+        // The UDP playbook would extend this expiry to 120 seconds without the refusal.
+        manual["rule"]["ttl_seconds"] = json!(60);
+        let (status, created) = post(&app, "/v1/vpn/mitigations", manual).await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let id = created["mitigation_id"].as_str().unwrap().parse().unwrap();
+        let before = repo.get_mitigation(id).await.unwrap().unwrap();
+        assert_eq!(before.action_type, ActionType::Mark);
+        assert_eq!(before.action_params.dscp, Some(dscp));
+        assert_eq!(before.match_criteria.scope.as_ref().unwrap().name, scope);
+        let speaker_before = serde_json::to_value(speaker.list_active().await.unwrap()).unwrap();
+        let (status, refusal) = post(
+            &app,
+            "/v1/events",
+            json!({
+                "timestamp":chrono::Utc::now().to_rfc3339(),
+                "source":"fastnetmon", "victim_ip":victim,
+                "vector":"udp_flood", "confidence":0.99, "action":"ban"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{scope}: {refusal}");
+        assert!(
+            refusal["error"]
+                .as_str()
+                .unwrap()
+                .contains("manual marking intent cannot be extended by a detector"),
+            "{refusal}"
+        );
+        let after = repo.get_mitigation(id).await.unwrap().unwrap();
+        assert_eq!(after.expires_at, before.expires_at);
+        assert_eq!(after.action_params.dscp, Some(dscp));
+        assert_eq!(
+            serde_json::to_value(&after).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+        let active = repo
+            .active_mitigations_for_pop(&state.settings.pop)
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1, "detector must not add another mitigation");
+        assert_eq!(
+            serde_json::to_value(speaker.list_active().await.unwrap()).unwrap(),
+            speaker_before
+        );
+    }
+}
+
+#[tokio::test]
 async fn marking_refuses_wrong_parameters_global_and_source_only_before_persistence() {
     let repo = Arc::new(MockRepository::new());
     let speaker = Arc::new(MockAnnouncer::new());
