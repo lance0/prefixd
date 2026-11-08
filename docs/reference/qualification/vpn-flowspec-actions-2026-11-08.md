@@ -56,10 +56,15 @@ manual withdrawal preserves healthy profile arming; failures still latch.
 The HTTPS fixture verifies authentication and readiness gates; its asserted
 canary/readiness values do not prove a real scrubbing path.
 
-The three-key replacement/expiry/restart run passed in 21.04 seconds on 0.82.0;
+The three-key replacement/expiry/restart run passed in 21.21 seconds on 0.82.0;
 the 0.81.0 refusal branch passed separately. Both released versions also passed
 the PostgreSQL recovery test (2.16 seconds on 0.82.0 and 1.96 seconds on 0.81.0). The writer API returns no replacement outcome enum,
 so those assertions establish state replacement rather than exposing `REPLACED`.
+The expiry wait requires RD A to disappear from the daemon's raw received view,
+while RD B retains its exact payload and owner generation with a positive lease
+and the raw unleased global control remains unchanged. Normalized inventory
+alone hides zero-remaining leases; the earlier 21.04-second run is diagnostic
+for daemon removal. The fixed lease and expiry deadline are unchanged.
 
 ## Controls and reproduction
 

@@ -2188,22 +2188,84 @@ async fn live_vpn_three_key_replacement_expiry_and_restart_preserve_scope() {
             (observed.incarnation, observed.sequence),
             (first_generation.incarnation, first_generation.sequence)
         );
+        let global_before_expiry = fixture.received_flow_spec(global_family, "0.0.0.0").await;
+        assert!(global_before_expiry.received_view && !global_before_expiry.advertised_view);
+        assert_eq!(global_before_expiry.received_routes.len(), 1);
+        let raw_before_expiry = fixture
+            .received_flow_spec(family.afi_safi(), "0.0.0.0")
+            .await;
+        assert!(raw_before_expiry.received_view && !raw_before_expiry.advertised_view);
+        assert_eq!(raw_before_expiry.received_routes.len(), 2);
+        let mut expected_b = raw_before_expiry
+            .received_routes
+            .iter()
+            .find_map(|row| row.route.as_ref().filter(|route| route.rd == "44407:41"))
+            .unwrap()
+            .clone();
+        assert!(
+            expected_b
+                .lease_remaining_ms
+                .take()
+                .is_some_and(|remaining| remaining > 0)
+        );
         tokio::time::timeout(
             Duration::from_secs(u64::from(TEST_LEASE_SECONDS) + 3),
             async {
                 loop {
+                    let raw = fixture
+                        .received_flow_spec(family.afi_safi(), "0.0.0.0")
+                        .await;
+                    assert!(raw.received_view && !raw.advertised_view);
+                    let routes: Vec<_> = raw
+                        .received_routes
+                        .iter()
+                        .map(|row| row.route.as_ref().expect("complete raw retained route"))
+                        .collect();
+                    let b_rows: Vec<_> = routes
+                        .iter()
+                        .filter(|route| route.rd == "44407:41")
+                        .collect();
+                    assert_eq!(
+                        b_rows.len(),
+                        1,
+                        "RD B remains in the daemon's raw retained view"
+                    );
+                    let mut actual_b = (**b_rows[0]).clone();
+                    assert!(
+                        actual_b
+                            .lease_remaining_ms
+                            .take()
+                            .is_some_and(|remaining| remaining > 0)
+                    );
+                    assert_eq!(
+                        actual_b, expected_b,
+                        "RD B retains its exact scoped payload and owner generation"
+                    );
+                    assert_eq!(
+                        fixture.received_flow_spec(global_family, "0.0.0.0").await,
+                        global_before_expiry,
+                        "unleased global control remains unchanged"
+                    );
                     let actual = speaker.list_active().await.unwrap();
-                    if exact(&actual, &[global.clone(), leased_b.clone()]) {
-                        break;
-                    }
                     assert!(actual.iter().any(|row| same_key(row, &global)));
                     assert!(actual.iter().any(|row| same_key(row, &leased_b)));
+                    // The adapter hides zero-remaining leases; require actual daemon removal too.
+                    if routes.iter().all(|route| route.rd != "44407:40")
+                        && exact(&actual, &[global.clone(), leased_b.clone()])
+                    {
+                        assert_eq!(routes.len(), 1, "only RD B remains in raw VPN inventory");
+                        break;
+                    }
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             },
         )
         .await
-        .expect("only RD A expires within its fixed lease deadline");
+        .expect("raw daemon view removes only RD A within its fixed lease deadline");
+        println!(
+            "rustbgpd {version} family {}: raw retained view confirms expired RD A removed, exact live RD B and unleased global controls preserved",
+            family.afi_safi()
+        );
         expect_inventory(&speaker, &[global.clone(), leased_b.clone()]).await;
 
         // Replay uses the saved keys and RT payloads, not current configuration names.
