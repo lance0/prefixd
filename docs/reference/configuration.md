@@ -1001,8 +1001,9 @@ removed in 0.20.0 are no longer accepted``. Delete them:
 | `observability.metrics_listen` | Metrics are served on `http.listen` |
 | `shutdown.preserve_announcements` | Shutdown always leaves speaker rules in place |
 
-Other unknown keys keep their existing handling: `observability`, `shutdown`
-and `blackhole` reject them, and other sections ignore them.
+Other unknown keys keep their existing handling: `bgp`, `observability`,
+`shutdown`, `blackhole`, `amplification` and `scrubber` reject them; the other
+sections ignore them.
 
 ---
 
@@ -1355,14 +1356,13 @@ Note: `prefixd.yaml` changes require restart.
 
 ## Validation
 
-prefixd validates configuration on startup:
+prefixd validates configuration while loading it at startup. There is no
+validate-only flag; a malformed or invalid file stops startup before the
+controller connects to PostgreSQL or the speaker:
 
 ```bash
-# Check configuration
-prefixd --config ./configs --check
-
-# Verbose validation
-RUST_LOG=debug prefixd --config ./configs --check
+RUST_LOG=debug docker compose --profile rustbgpd up -d --no-build
+docker compose logs prefixd-rustbgpd
 ```
 
 Configuration API edits count UTF-8 bytes: playbook names allow up to 128 bytes;

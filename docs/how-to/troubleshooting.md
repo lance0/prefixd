@@ -55,15 +55,18 @@ curl --fail-with-body --silent --show-error -X POST http://localhost/v1/events \
 
 | Response | Cause | Fix |
 |----------|-------|-----|
-| 403 Forbidden | IP is safelisted | `prefixdctl safelist list` |
-| 422 Unprocessable | Guardrail rejection | Check error message |
-| 201 but no mitigation | IP not in inventory | Add to `inventory.yaml` |
+| 403 Forbidden | Missing or invalid credentials, or a role that cannot ingest | Check `PREFIXD_API_TOKEN` and the auth mode |
+| 422 Unprocessable | Guardrail rejection, including safelist, quota or unsupported VPN scope | Check the error message; `prefixdctl safelist list` |
+| 202 `accepted_no_mitigation` | IP not in the effective inventory | Read `/etc/prefixd/inventory.yaml` in the controller |
+| 202 `accepted` without `mitigation_id` | Correlation threshold or source count not met | Check effective `correlation.yaml`, confidence and source count |
+| 202 `accepted_no_playbook` | No enabled playbook matches the vector | Check `/etc/prefixd/playbooks.yaml` |
 | 429 Too Many Requests | Rate limited | Wait or increase limits |
 
 **Debug inventory lookup:**
 ```bash
-# Check if IP is in inventory
-grep -r "203.0.113" configs/inventory.yaml
+# Check the effective inventory inside the controller. Compose stores it in
+# the prefixd-config volume; editing configs/inventory.yaml does not change it.
+docker compose exec -T prefixd-rustbgpd cat /etc/prefixd/inventory.yaml | grep 203.0.113
 
 # Check safelist
 prefixdctl safelist list
@@ -77,7 +80,7 @@ prefixdctl safelist list
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `prefix too broad` | Not a /32 | Detector must send specific IPs |
+| `destination prefix /N violates length constraint (min=/X, max=/Y)` | Manual CIDR outside guardrail bounds | Use a host /32 or /128, or widen `guardrails.dst_prefix_minlen`/`dst_prefix_maxlen` |
 | `TTL too short/long` | Outside bounds | Check `guardrails.min_ttl_seconds` |
 | `quota exceeded` | Too many mitigations | Increase quota or wait for expiry |
 | `new mitigation rate exceeded` | `quotas.max_new_per_minute` mitigations already created at this POP in the last 60 seconds | Wait for the window to pass or raise the limit |

@@ -343,8 +343,9 @@ safely. This does not change route injection or withdrawal. See the
 ## Released controller qualification
 
 The scoped controller promotion is released: v0.81.0 is the minimum controller
-contract version and the Compose and default fixture pin. CI runs the
-lifecycle, TTL and restart suite against the v0.81.0 image reference in
+contract version and the default local fixture version; Compose pins v0.82.0
+for the VPN paths. CI runs the lifecycle, TTL and restart suite against both
+released image references in
 [releases.json](../../tests/fixtures/rustbgpd/releases.json), and checks that
 startup refuses the released v0.80.1 image. Image OCI source
 revisions match the dereferenced release-tag commits. This qualifies the local
@@ -353,7 +354,9 @@ controller boundary on Linux amd64, independently of router interoperability.
 Run the same isolated suite locally with Docker available:
 
 ```bash
-scripts/test-rustbgpd.sh # 0.81.0, plus the v0.80.1 refusal
+PREFIXD_RUSTBGPD_TEST_VERSION=0.81.0 scripts/test-rustbgpd.sh
+PREFIXD_RUSTBGPD_TEST_VERSION=0.82.0 scripts/test-rustbgpd.sh
+# plus the v0.80.1 refusal
 ```
 
 Fixtures bind ephemeral loopback ports, create an owner-only bearer token, and
@@ -907,11 +910,12 @@ Opt-in VPNv4 and VPNv6 controller paths require rustbgpd 0.82.0 and positive
 read-only local-intent probes for families 13/14. Global rules retain the 0.81.0
 floor. GoBGP returns a typed unsupported-scope error before any VPN RPC. Scope
 identity and RT snapshots survive withdrawal/recovery; no refused VPN operation
-falls back globally. The current action slice covers discard, police and guarded
-target-IP and VRF redirect diversion. [The operator procedure](../how-to/vpn-flowspec.md) records
-source-only safeguards and the remaining marking qualification. Receiver action
-installation and forwarding remain separate qualification for both redirects.
-These controller paths do not establish router installation or enforcement.
+falls back globally. The current action slice covers discard, police, manual
+destination DSCP marking, and guarded target-IP and VRF redirect diversion;
+source-only rules support discard and police only. [The operator procedure](../how-to/vpn-flowspec.md) records
+source-only safeguards. Receiver action installation, forwarding and packet
+marking remain separate qualification for every action. These controller paths
+do not establish router installation or enforcement.
 
 ### VPN marking boundary
 

@@ -1,4 +1,4 @@
-# FlowSpec-only adaptation of rustbgpd v0.81.0 examples/flowspec-controller/config.toml.
+# FlowSpec-only adaptation of rustbgpd v0.82.0 examples/flowspec-controller/config.toml.
 # Replace documentation peer addresses with your edge routers before deployment.
 config_epoch = 2
 
@@ -37,6 +37,9 @@ export_chain = ["distribute-mitigation"]
 address = "192.0.2.1"
 remote_asn = 65001
 description = "edge-router-example"
+# VPN FlowSpec needs the l3vpn families here and on the receiver (rustbgpd
+# 0.82.0+). Leave them out for a global-only peer:
+# families = ["ipv4_flowspec", "ipv6_flowspec", "l3vpn_ipv4_flowspec", "l3vpn_ipv6_flowspec"]
 families = ["ipv4_flowspec", "ipv6_flowspec"]
 hold_time = 30
 # Off because this placeholder is not a real router. Enable Graceful Restart

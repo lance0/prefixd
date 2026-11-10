@@ -1,10 +1,12 @@
 # Originate VPN FlowSpec
 
 VPN FlowSpec selects an RD and scope route targets for a mitigation. The receiving
-PE imports those RTs into its VRF; prefixd and rustbgpd do not create VRFs. This
-path requires rustbgpd 0.82.0 and a successful read-only probe of family 13
-(IPv4) or 14 (IPv6). Global FlowSpec keeps the 0.81.0 minimum. GoBGP refuses
-VPN requests before an RPC.
+PE imports those RTs into its VRF; prefixd and rustbgpd do not create VRFs.
+Each configured scope requires rustbgpd 0.82.0 and a successful read-only
+probe of its family: 13 for `ipv4` and 14 for `ipv6`. Configuring both
+`TRANSIT` and `TRANSIT6` requires both probes, and startup refuses to run when
+a configured or retained scope's family is unsupported. Global FlowSpec keeps
+the 0.81.0 minimum. GoBGP refuses VPN requests before an RPC.
 
 The Compose stack ships rustbgpd 0.82.0, and the rustbgpd neighbor must also
 list `l3vpn_ipv4_flowspec` and/or `l3vpn_ipv6_flowspec`; the shipped

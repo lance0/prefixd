@@ -39,14 +39,21 @@ sources:
       - customer_id    # Or any group for this customer
 ```
 
-Apply the change:
+Apply the change through the dashboard's **Config → Correlation** editor, or
+send the complete configuration as JSON (the API does not accept YAML):
 
 ```bash
-curl -X PUT https://prefixd.example.com/v1/config/correlation \
-     -H 'Authorization: Bearer $PREFIXD_API_TOKEN' \
-     -H 'Content-Type: application/json' \
-     -d '@configs/correlation.yaml'
+python3 -c 'import json,sys,yaml; json.dump(yaml.safe_load(sys.stdin), sys.stdout)' \
+  < configs/correlation.yaml \
+| curl -X PUT https://prefixd.example.com/v1/config/correlation \
+    -H 'Authorization: Bearer $PREFIXD_API_TOKEN' \
+    -H 'Content-Type: application/json' \
+    --data-binary @-
 ```
+
+The PUT replaces the entire file, so start from the live configuration
+(`GET /v1/config/correlation`) rather than a checkout copy. In Compose that
+copy is not the live `/etc/prefixd/correlation.yaml` in `prefixd-config`.
 
 The validator rejects:
 

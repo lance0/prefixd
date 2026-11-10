@@ -135,7 +135,13 @@ prefix, port, TTL, quota and safelist checks still apply.
   "mitigation_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d",
   "mitigation_ids": ["7f72a903-63d1-4a4a-a5db-0517e0a7df1d"],
   "rules": [
-    { "outcome": "created", "mitigation_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d" }
+    {
+      "outcome": "created",
+      "scope_hash": "…",
+      "scope": { "dst_prefix": "203.0.113.10/32" },
+      "action_type": "police",
+      "mitigation_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d"
+    }
   ],
   "status": "accepted"
 }
@@ -143,7 +149,8 @@ prefix, port, TTL, quota and safelist checks still apply.
 
 `mitigation_ids` lists every mitigation the request created, extended or
 withdrew, in admission priority order; it is `[]` when there are none.
-`mitigation_id` is its first entry, kept for existing callers. `rules` reports
+`mitigation_id` is its first entry, or `null` when the list is empty (unowned
+victim, unmet correlation, or no playbook). `rules` reports
 each rule a ban evaluated, in admission priority order, with `outcome` `created`,
 `extended` or `rejected` (with a `reason`); it is omitted when no rule was
 evaluated, for example on the unban path or with no playbook.
@@ -249,7 +256,13 @@ atomic detector ingestion.
 
 Common status values:
 
-- Ban path: `"accepted"`, `"extended"`, `"accepted_no_playbook"`, `"accepted_no_mitigation"`
+- Ban path: `"accepted"`, `"extended"`, `"accepted_no_playbook"`, `"accepted_no_mitigation"`.
+  `"accepted"` alone does not mean a mitigation exists: with correlation
+  enabled, an unmet threshold or source count returns `"accepted"` with
+  `"mitigation_id": null` and `"mitigation_ids": []`.
+  `"accepted_no_mitigation"` means the victim is outside the effective
+  inventory; `"accepted_no_playbook"` means policy produced no action. Check
+  `mitigation_id`, not `status` alone.
 - Unban path: `"withdrawn"`, `"ignored_no_event_id"`, `"not_found"`, `"no_active_mitigation"`
 
 When the matching playbook's step is `action: blackhole`
@@ -265,10 +278,10 @@ add reports `"announcement_outcome": "unconfirmed"` as above.
 
 | Status | Reason |
 |--------|--------|
-| 400 | Invalid request body |
+| 400 | Invalid request body, or a VPN default scope refuses a blackhole |
 | 401 | Authentication required |
 | 409 | Duplicate event, or in enforced mode the rule is owned by a dry-run mitigation (when every rule is refused before admission, the event is not stored); for a blackhole, a pending withdrawal or an untracked local route at the prefix; for a FlowSpec rule, another injection owner, or none, holding its match at the speaker |
-| 422 | Missing required field, including `protocol` for `"discard"` or `"police"`; guardrail rejection (safelist, quotas, new mitigation rate, prefix length, blackhole source allowlist and victim checks, etc.) |
+| 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length, blackhole source allowlist, VPN scope capability and victim checks, etc.) |
 | 429 | Rate limited |
 
 ### Batch Ingest Events
@@ -299,7 +312,12 @@ Content-Type: application/json
 }
 ```
 
-Accepts up to 100 events in a single request. Each event is processed sequentially through the full pipeline (validation, guardrails, policy engine, FlowSpec announce). Partial success: if some events fail, the rest are still processed.
+Accepts up to 100 events in a single request. Each event is processed
+sequentially through validation, deduplication, policy evaluation, event
+storage, correlation and guardrails, then admission and announcement. Partial
+success: if some events fail, the rest are still processed. Each result's
+`status` is the event response status: `accepted`, `extended`,
+`accepted_no_mitigation`, `accepted_no_playbook` or `rejected`.
 
 **Response (all accepted — 202):**
 
@@ -308,8 +326,8 @@ Accepts up to 100 events in a single request. Each event is processed sequential
   "accepted": 2,
   "rejected": 0,
   "results": [
-    { "index": 0, "event_id": "550e8400-...", "status": "mitigation_created", "mitigation_id": "660e8400-..." },
-    { "index": 1, "event_id": "770e8400-...", "status": "mitigation_created", "mitigation_id": "880e8400-..." }
+    { "index": 0, "event_id": "550e8400-...", "status": "accepted", "mitigation_id": "660e8400-..." },
+    { "index": 1, "event_id": "770e8400-...", "status": "accepted", "mitigation_id": "880e8400-..." }
   ]
 }
 ```
@@ -321,7 +339,7 @@ Accepts up to 100 events in a single request. Each event is processed sequential
   "accepted": 1,
   "rejected": 1,
   "results": [
-    { "index": 0, "event_id": "550e8400-...", "status": "mitigation_created", "mitigation_id": "660e8400-..." },
+    { "index": 0, "event_id": "550e8400-...", "status": "accepted", "mitigation_id": "660e8400-..." },
     { "index": 1, "event_id": "00000000-...", "status": "rejected", "error": "invalid IP address" }
   ]
 }
@@ -1288,7 +1306,7 @@ includes duplicates.
 
 ## Signal Groups
 
-Signal groups are created by the correlation engine when `correlation.enabled` is true. They group related attack events by (victim_ip, vector) within a configurable time window, enabling multi-source corroboration.
+Signal groups are created by the correlation engine when `correlation.enabled` is true, for bans whose victim is in inventory. An unowned event returns before the correlation step and creates no group. Groups collect related attack events by (victim_ip, vector) within a configurable time window, enabling multi-source corroboration.
 
 ### List Signal Groups
 
@@ -1488,11 +1506,13 @@ it the same way. Resolved alerts ignore the annotation.
 
 | Status | Description |
 |--------|-------------|
-| `accepted` | Event created, mitigation may or may not be created |
+| `accepted` | Event created; check `mitigation_id` to see whether policy admitted one |
 | `extended` | Existing mitigation TTL extended |
+| `accepted_no_mitigation` | Victim outside the effective inventory; no mitigation |
+| `accepted_no_playbook` | Policy produced no action |
 | `duplicate` | Fingerprint already seen (dedup) |
-| `withdrawn` | Resolved alert triggered mitigation withdrawal |
-| `withdrawn_noop` | Resolved alert with no matching active mitigation |
+| `withdrawn` | Unban request accepted; it may have withdrawn mitigations, or the fingerprint was unknown or already withdrawn |
+| `withdrawn_noop` | Unban failed before withdrawal (see `error`); nothing is known to be withdrawn |
 | `error` | Processing failed for this alert (see `error` field) |
 
 **Error Responses:**
@@ -1707,7 +1727,7 @@ X-Signature-SHA256: <hex-encoded HMAC-SHA256 of request body>
   "processed": 2,
   "failed": 0,
   "results": [
-    { "index": 0, "status": "mitigated", "event_id": "…", "mitigation_id": "…" },
+    { "index": 0, "status": "accepted", "event_id": "…", "mitigation_id": "…" },
     { "index": 1, "status": "duplicate" }
   ]
 }

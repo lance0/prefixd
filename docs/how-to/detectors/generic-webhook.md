@@ -30,10 +30,11 @@ The secret must be present at prefixd startup; it is read from the environment, 
 
 ### 2. Add the adapter to the correlation config
 
-prefixd accepts correlation config in two layouts (either is fine; the standalone file takes precedence when both exist):
-
-- **Standalone `configs/correlation.yaml`** (recommended) — top-level keys directly, no wrapping `correlation:` section.
-- **Embedded in `configs/prefixd.yaml`** — nested under a `correlation:` key alongside other daemon settings.
+Put correlation configuration in the controller's `correlation.yaml` with
+top-level keys. Do not wrap it in `correlation:`. The inline section in
+`prefixd.yaml` is only a fallback for installations without a standalone file;
+Compose always seeds `correlation.yaml` into `prefixd-config`, so an inline
+adapter is never read there.
 
 **Standalone `configs/correlation.yaml`:**
 
@@ -77,25 +78,21 @@ webhook_adapters:
     source_id_prefix: "radware-"
 ```
 
-**Embedded in `configs/prefixd.yaml`** (same fields, one level deeper):
-
-```yaml
-correlation:
-  enabled: true
-  sources:
-    radware:
-      weight: 1.2
-      type: detector
-  webhook_adapters:
-    - name: radware
-      # … same adapter fields as above
-```
-
-Reload the config (no restart required):
+In Compose the live file is `/etc/prefixd/correlation.yaml` in the
+`prefixd-config` volume; editing `configs/correlation.yaml` in the checkout has
+no effect. Apply the change with **Config → Correlation** in the dashboard, or
+send the complete configuration as JSON:
 
 ```bash
-curl -X POST -H "Authorization: Bearer $PREFIXD_API_TOKEN" http://prefixd.example.com/v1/config/reload
+curl -X PUT http://prefixd.example.com/v1/config/correlation \
+  -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data-binary @correlation.json
 ```
+
+No restart is required, and the request replaces the whole file rather than
+merging with it. If you edit the file in the volume directly,
+`POST /v1/config/reload` re-reads it.
 
 ### 3. Configure Radware to POST
 

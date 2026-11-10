@@ -1,6 +1,9 @@
 # Upgrade Guide
 
-Upgrading a v0.23.1 deployment? Follow [v0.23.1 → 0.24.0](#v0231--0240).
+Upgrading a v0.24.0 deployment? Follow
+[v0.24.0 → next release](#v0240--next-release). Upgrading a v0.23.1
+deployment? Follow [v0.23.1 → 0.24.0](#v0231--0240), then
+[v0.24.0 → next release](#v0240--next-release).
 From v0.23.0, follow [v0.23.0 → 0.23.1](#v0230--0231) first; from v0.22.1,
 [v0.22.1 → 0.23.0](#v0221--0230) before that; from v0.22.0,
 [v0.22.0 → 0.22.1](#v0220--0221) before that; from v0.21.0,
@@ -36,14 +39,16 @@ the protection; drain affected rules or accept that policy change explicitly.
 
 prefixd requires rustbgpd v0.81.0 or later. The v0.24.0 Compose file pinned
 v0.81.0; the current file pins v0.82.0. Upgrade rustbgpd to at least v0.81.0
-first: the new controller refuses to start against v0.80.x (see
-[rustbgpd minimum version](#rustbgpd-minimum-version)).
+first (v0.82.0 when you configure any VPN scope): the new controller refuses
+to start against v0.80.x and refuses configured VPN scopes unless their family
+probe succeeds (see [rustbgpd minimum version](#rustbgpd-minimum-version)).
 This change requires no prefixd database migration. Keep the same POP,
 endpoint, credentials and mode, and follow the
-[speaker release notes](https://github.com/lance0/rustbgpd/releases/tag/v0.81.0)
-before recreating the speaker. Reconciliation must restore its process-local
-injections after the restart; verify exact rules, lease state and receiving
-routers afterward.
+[v0.81.0](https://github.com/lance0/rustbgpd/releases/tag/v0.81.0) and
+[v0.82.0](https://github.com/lance0/rustbgpd/releases/tag/v0.82.0) speaker
+release notes before recreating the speaker. Reconciliation must restore its
+process-local injections after the restart; verify exact rules, lease state and
+receiving routers afterward.
 
 v0.81.0 allows local FlowSpec and RTBH injections to compete during Graceful
 Restart selection deferral, while received candidates and End-of-RIB can remain
@@ -253,8 +258,10 @@ A production write-only backend remains gated on a durable announcement ledger.
 ## rustbgpd minimum version
 
 prefixd requires rustbgpd 0.81.0 or later. At startup it reads the version
-that rustbgpd's `GetHealth` reports and exits before reading or writing any
-intent if the daemon is older or reports no readable version:
+that rustbgpd's `GetHealth` reports and exits if the daemon is older or reports
+no readable version. Migrations, speaker-target registration and legacy origin
+tagging have already run; the check still precedes any speaker intent read or
+write:
 
 ```text
 rustbgpd 0.80.1 is older than the minimum 0.81.0; upgrade the speaker first
@@ -481,12 +488,14 @@ the `udp_amplification` vector, so pages that include them fail closed there.
 
 ## Scrubber diversion and downgrade
 
-Manual [scrubber diversion](scrubber-diversion.md) is disabled by default and
-requires rustbgpd v0.81.0, prefixd's minimum speaker. An older daemon refuses
-the guarded RPCs; prefixd never retries them through ordinary leased or
-unleased methods. Migration 019 adds the `scrubber_diversions` table and its
-admission-revision sequence. It creates no rows and changes no existing
-mitigation; with scrubbers disabled, the upgrade needs no further action.
+Manual [scrubber diversion](scrubber-diversion.md) is disabled by default.
+Global IP-target diversion requires rustbgpd v0.81.0, prefixd's minimum
+speaker; VPN-scoped diversion, including redirect-to-VRF, requires v0.82.0 and
+a successful family probe. An older daemon refuses the guarded RPCs; prefixd
+never retries them through ordinary leased or unleased methods. Migration 019
+adds the `scrubber_diversions` table and its admission-revision sequence. It
+creates no rows and changes no existing mitigation; with scrubbers disabled,
+the upgrade needs no further action.
 
 To enable diversion, configure profiles, their readiness credentials and any
 monitor CA as the [how-to](scrubber-diversion.md) describes, then restart.
@@ -504,8 +513,9 @@ GROUP BY pop, profile_id, status;
 
 Before disabling scrubbers, changing the operation mode, removing or changing a
 profile, changing the POP or speaker target, downgrading rustbgpd below v0.81.0
-or downgrading prefixd to a release without this feature, withdraw every
-enforced diversion with the current controller. Wait until the query returns no
+(or below v0.82.0 while VPN-scoped diversion intent exists), or downgrading
+prefixd to a release without this feature, withdraw every enforced diversion
+with the current controller. Wait until the query returns no
 rows, then verify router removal separately. This controller refuses to start
 while outstanding intent conflicts with its configuration. An older controller
 ignores the table: it neither renews nor withdraws diversions and does not
@@ -730,16 +740,18 @@ prefixdctl migrations
 ### v0.24.0 → next release
 
 Scoped VPN FlowSpec, source-only whole-VRF rules, manual DSCP marking and
-guarded redirect-to-VRF are new and remain disabled unless `bgp.vpn_scopes`
-and `bgp.default_scope` are configured. `default_scope` defaults to `global`;
-an existing 0.24.0 configuration loads unchanged. No migration is required;
-migration 019 remains the latest.
+guarded redirect-to-VRF are new. Manual scoped admission and scoped scrubber
+profiles require only a configured `bgp.vpn_scopes` entry; `bgp.default_scope`
+additionally opts automatic mitigation into a named scope and defaults to
+`global`, so an existing 0.24.0 configuration loads unchanged. No migration is
+required; migration 019 remains the latest.
 
-The global daemon minimum stays rustbgpd v0.81.0. VPN and redirect-to-VRF
-require rustbgpd v0.82.0 and a successful family 13/14 capability probe; GoBGP
-refuses scoped admission before any RPC. Global rules, hashes and pending
-withdrawals keep their existing wire identity. Compose now pins rustbgpd
-0.82.0 (override with `PREFIXD_RUSTBGPD_IMAGE`), and the shipped `prefixd.yaml`
+The global daemon minimum stays rustbgpd v0.81.0. Every VPN-scoped rule,
+including manual marking and either diversion action, requires rustbgpd v0.82.0
+and a successful probe for its family; GoBGP refuses scoped admission before
+any RPC. Global rules, hashes and pending withdrawals keep their existing wire
+identity. Compose now pins rustbgpd 0.82.0 (override with
+`PREFIXD_RUSTBGPD_IMAGE`), and the shipped `prefixd.yaml`
 no longer duplicates the `correlation` section: `correlation.yaml` is the only
 source. Existing `prefixd-config` volumes keep their copies, so merge the new
 `ack_flood` playbook and any correlation changes into `/etc/prefixd/` before
@@ -749,9 +761,10 @@ without `mitigation_id`; reinstall it on the FastNetMon host.
 Before downgrading prefixd or rustbgpd, drain all VPN mitigations, diversions
 and pending withdrawals against their original target. Scope name/RD/RT edits
 with outstanding intent fail startup; changing the default only changes new
-admissions. A speaker downgrade or failed capability probe retains VPN intent
-and error state and refuses mutations/replay without global fallback. An older
-controller does not understand scoped intent, so do not rely on it to withdraw
+admissions. A speaker downgrade or failed family probe fails startup while VPN
+scopes or retained VPN intent exist; PostgreSQL retains that intent, and
+prefixd never falls back to global. An older controller does not understand
+scoped intent, so do not rely on it to withdraw
 or expire it. See [VPN FlowSpec](vpn-flowspec.md) for the capability boundary.
 
 ### v0.23.1 → 0.24.0
