@@ -12,7 +12,13 @@
 
 set -euo pipefail
 
-# Configuration - override via environment or /etc/default/prefixd
+# Configuration - environment, or /etc/default/prefixd when present.
+PREFIXD_DEFAULTS_FILE="${PREFIXD_DEFAULTS_FILE:-/etc/default/prefixd}"
+if [[ -r "$PREFIXD_DEFAULTS_FILE" ]]; then
+    # shellcheck source=/dev/null
+    . "$PREFIXD_DEFAULTS_FILE"
+fi
+
 PREFIXD_API="${PREFIXD_API:-http://localhost:8080}"
 PREFIXD_TOKEN="${PREFIXD_TOKEN:-}"
 PREFIXD_OPERATOR="${PREFIXD_OPERATOR:-fastnetmon}"

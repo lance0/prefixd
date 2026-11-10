@@ -451,7 +451,7 @@ struct BanRun {
 /// Run a `ban` against a curl stub that answers each attempt from `outcomes`.
 /// Each entry is `refused`, an HTTP status (`503`), or `status|body` so a test
 /// can return a prefixd event response. PATH is isolated to the stub directory.
-fn ban_run(outcomes: &[&str], with_jq: bool) -> BanRun {
+fn ban_run(outcomes: &[&str], with_jq: bool, envs: &[(&str, &str)]) -> BanRun {
     let dir = tempfile::tempdir().expect("tempdir");
     let bin_dir = dir.path().join("bin");
     fs::create_dir(&bin_dir).expect("mkdir bin");
@@ -487,6 +487,7 @@ printf '%s\n%s' "$body" "$code"
         .env("PREFIXD_OPERATOR", "test_operator")
         .env("PREFIXD_LOG", &log_path)
         .env("BAN_POST_DELAY_SECONDS", "0")
+        .envs(envs.iter().copied())
         .stdin(Stdio::null())
         .status()
         .expect("run script");
@@ -506,7 +507,7 @@ printf '%s\n%s' "$body" "$code"
 }
 
 fn ban_attempts(outcomes: &[&str]) -> (bool, Vec<String>) {
-    let run = ban_run(outcomes, true);
+    let run = ban_run(outcomes, true, &[]);
     (run.ok, run.event_ids)
 }
 
@@ -548,7 +549,7 @@ fn ban_logs_no_mitigation_for_a_202_without_an_id() {
             })
             .to_string();
             let outcome = format!("202|{body}");
-            let run = ban_run(&[outcome.as_str()], with_jq);
+            let run = ban_run(&[outcome.as_str()], with_jq, &[]);
             assert!(run.ok, "jq={with_jq} {status}: {}", run.log);
             assert!(
                 run.log.contains("NO_MITIGATION"),
@@ -576,7 +577,7 @@ fn ban_logs_success_only_when_a_mitigation_was_created_or_extended() {
             })
             .to_string();
             let outcome = format!("202|{body}");
-            let run = ban_run(&[outcome.as_str()], with_jq);
+            let run = ban_run(&[outcome.as_str()], with_jq, &[]);
             assert!(run.ok, "jq={with_jq} {status}: {}", run.log);
             assert!(
                 run.log.contains("SUCCESS"),
@@ -590,4 +591,28 @@ fn ban_logs_success_only_when_a_mitigation_was_created_or_extended() {
             );
         }
     }
+}
+
+#[test]
+fn ban_reads_the_defaults_file_when_present() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let defaults = dir.path().join("prefixd-defaults");
+    fs::write(&defaults, "PREFIXD_OPERATOR=from_file\n").expect("write defaults");
+    let body = serde_json::json!({
+        "status": "accepted",
+        "mitigation_id": "6f5e6f5e-0000-4000-8000-000000000001",
+        "mitigation_ids": ["6f5e6f5e-0000-4000-8000-000000000001"],
+    })
+    .to_string();
+    let outcome = format!("202|{body}");
+    let run = ban_run(
+        &[outcome.as_str()],
+        true,
+        &[
+            ("PREFIXD_DEFAULTS_FILE", defaults.to_str().expect("path")),
+            ("PREFIXD_OPERATOR", ""),
+        ],
+    );
+    assert!(run.ok, "{}", run.log);
+    assert!(run.log.contains("SUCCESS"), "{}", run.log);
 }
