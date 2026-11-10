@@ -34,9 +34,10 @@ the protection; drain affected rules or accept that policy change explicitly.
 
 ## rustbgpd v0.81
 
-prefixd now requires rustbgpd v0.81.0, and Compose pins the immutable v0.81.0
-image. Upgrade rustbgpd to v0.81.0 first: the new controller refuses to start
-against v0.80.x (see [rustbgpd minimum version](#rustbgpd-minimum-version)).
+prefixd requires rustbgpd v0.81.0 or later. The v0.24.0 Compose file pinned
+v0.81.0; the current file pins v0.82.0. Upgrade rustbgpd to at least v0.81.0
+first: the new controller refuses to start against v0.80.x (see
+[rustbgpd minimum version](#rustbgpd-minimum-version)).
 This change requires no prefixd database migration. Keep the same POP,
 endpoint, credentials and mode, and follow the
 [speaker release notes](https://github.com/lance0/rustbgpd/releases/tag/v0.81.0)
