@@ -181,11 +181,13 @@ response without `mitigation_id` logs `NO_MITIGATION (status=...)` instead of
 | 422 | error | guardrail or VPN scope refused; the event may still be recorded | error text: safelist, quota, `l3vpn` capability |
 | 409 | error | duplicate event, or speaker binding/owner conflict | event ID, controller fence |
 
-`SUCCESS` on a 2xx only means the event was accepted; it does not prove a
-mitigation exists or that a router installed it. `NO_MITIGATION` is a warning,
-not a retry: the script still exits 0 because retrying cannot change these
-gates. Peers being down does not suppress mitigation rows: prefixd records the
-intent and reports the announcement as `unconfirmed`.
+`SUCCESS` means prefixd committed mitigation intent (created or extended) and
+returned its ID; it does not prove the speaker exported the rule or a router
+installed it. Check `announcement_outcome` and the speaker export state.
+`NO_MITIGATION` is a warning, not a retry: the script still exits 0 because
+retrying cannot change these gates. Peers being down does not suppress
+mitigation rows: prefixd records the intent and reports the announcement as
+`unconfirmed`.
 
 The shipped safelist covers `10.0.0.0/8` and `192.168.0.0/16`; an owned victim
 inside either range is refused with 422. Use a TEST-NET or real owned prefix
