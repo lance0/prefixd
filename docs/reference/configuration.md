@@ -469,44 +469,46 @@ The multi-signal correlation engine groups related attack events from multiple d
 
 When `enabled` is false (the default), the correlation engine is bypassed and events follow the direct path to policy evaluation — identical to pre-correlation behavior.
 
-```yaml
-correlation:
-  # Enable the correlation engine
-  enabled: true
-  
-  # Time window (seconds) for grouping signals by (victim_ip, vector).
-  # Events arriving within this window are added to the same signal group.
-  window_seconds: 300
-  
-  # Global minimum number of distinct sources required before a signal group
-  # can trigger a mitigation. Set to 1 for backward-compatible single-source behavior.
-  min_sources: 1
-  
-  # Global minimum derived confidence threshold (0.0-1.0).
-  # A signal group must reach this threshold (in addition to min_sources) before triggering.
-  confidence_threshold: 0.5
+The example is the standalone `correlation.yaml` shape. To use the inline
+fallback instead, nest it under a `correlation:` key in `prefixd.yaml`.
 
-  # Exponential half-life applied to per-event confidence contributions when
-  # computing derived_confidence. 0 disables decay (default). When set, an
-  # event's effective weight is multiplied by 0.5^(age_seconds / H), so
-  # older corroborating evidence smoothly loses influence. See ADR 022.
-  # Must satisfy 0 <= H <= 10 * window_seconds.
-  confidence_decay_half_life_seconds: 0
-  
-  # Default weight for sources not listed below
-  default_weight: 1.0
-  
-  # Per-source configuration: weight and type for known detection sources.
-  sources:
-    fastnetmon:
-      weight: 1.0
-      type: detector
-    alertmanager:
-      weight: 0.8
-      type: telemetry
-    dashboard:
-      weight: 1.0
-      type: manual
+```yaml
+# Enable the correlation engine
+enabled: true
+
+# Time window (seconds) for grouping signals by (victim_ip, vector).
+# Events arriving within this window are added to the same signal group.
+window_seconds: 300
+
+# Global minimum number of distinct sources required before a signal group
+# can trigger a mitigation. Set to 1 for backward-compatible single-source behavior.
+min_sources: 1
+
+# Global minimum derived confidence threshold (0.0-1.0).
+# A signal group must reach this threshold (in addition to min_sources) before triggering.
+confidence_threshold: 0.5
+
+# Exponential half-life applied to per-event confidence contributions when
+# computing derived_confidence. 0 disables decay (default). When set, an
+# event's effective weight is multiplied by 0.5^(age_seconds / H), so
+# older corroborating evidence smoothly loses influence. See ADR 022.
+# Must satisfy 0 <= H <= 10 * window_seconds.
+confidence_decay_half_life_seconds: 0
+
+# Default weight for sources not listed below
+default_weight: 1.0
+
+# Per-source configuration: weight and type for known detection sources.
+sources:
+  fastnetmon:
+    weight: 1.0
+    type: detector
+  alertmanager:
+    weight: 0.8
+    type: telemetry
+  dashboard:
+    weight: 1.0
+    type: manual
 ```
 
 | Field | Type | Default | Description |
