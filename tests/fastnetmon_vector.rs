@@ -647,3 +647,64 @@ fn ban_requires_curl() {
     let log = fs::read_to_string(&log_path).expect("script log");
     assert!(log.contains("ERROR: curl is required"), "{log}");
 }
+
+#[test]
+fn unban_retries_a_transport_failure_before_withdrawing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir(&bin_dir).expect("mkdir bin");
+    let calls = dir.path().join("calls");
+    let withdraw_calls = dir.path().join("withdraw-calls");
+    let stub = format!(
+        r#"#!/bin/bash
+mode=lookup
+for arg in "$@"; do
+    case "$arg" in
+        *"/withdraw"*) mode=withdraw ;;
+        *"/v1/mitigations"*) mode=lookup ;;
+    esac
+done
+if [[ "$mode" == "withdraw" ]]; then
+    n=$(wc -l < '{withdraw_calls}' 2>/dev/null || printf 0)
+    printf 'withdraw\n' >> '{withdraw_calls}'
+    if [[ "$n" -eq 0 ]]; then
+        exit 7
+    fi
+    printf '{{"status":"withdrawn"}}\n200'
+    exit 0
+fi
+n=$(wc -l < '{calls}' 2>/dev/null || printf 0)
+printf '%s\n' "$mode" >> '{calls}'
+if [[ "$n" -eq 0 ]]; then
+    exit 7
+fi
+printf '{{"mitigations":[{{"mitigation_id":"6f5e6f5e-0000-4000-8000-000000000001"}}]}}\n200'
+"#,
+        calls = calls.display(),
+        withdraw_calls = withdraw_calls.display()
+    );
+    let curl_path = bin_dir.join("curl");
+    fs::write(&curl_path, stub).expect("write curl stub");
+    fs::set_permissions(&curl_path, fs::Permissions::from_mode(0o755)).expect("chmod curl stub");
+    link_commands(&bin_dir, true);
+    let log_path = dir.path().join("script.log");
+    let status = Command::new("bash")
+        .arg(SCRIPT)
+        .args(["198.51.100.7", "incoming", "0", "unban"])
+        .env("PATH", &bin_dir)
+        .env("PREFIXD_API", "http://127.0.0.1:1")
+        .env("PREFIXD_OPERATOR", "test_operator")
+        .env("PREFIXD_LOG", &log_path)
+        .env("PREFIXD_DEFAULTS_FILE", dir.path().join("no-defaults"))
+        .env("UNBAN_QUERY_RETRIES", "3")
+        .env("UNBAN_QUERY_DELAY_SECONDS", "0")
+        .env("WITHDRAW_DELAY_SECONDS", "0")
+        .stdin(Stdio::null())
+        .status()
+        .expect("run script");
+    assert!(status.success(), "{}", fs::read_to_string(&log_path).unwrap_or_default());
+    let log = fs::read_to_string(&log_path).expect("script log");
+    assert!(log.contains("Unban lookup transport failure"), "{log}");
+    assert!(log.contains("Withdrawal for"), "{log}");
+    assert!(log.contains("SUCCESS: Withdrew mitigation"), "{log}");
+}
