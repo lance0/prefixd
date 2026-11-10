@@ -6,6 +6,13 @@ path requires rustbgpd 0.82.0 and a successful read-only probe of family 13
 (IPv4) or 14 (IPv6). Global FlowSpec keeps the 0.81.0 minimum. GoBGP refuses
 VPN requests before an RPC.
 
+The Compose stack ships rustbgpd 0.82.0, and the rustbgpd neighbor must also
+list `l3vpn_ipv4_flowspec` and/or `l3vpn_ipv6_flowspec`; the shipped
+`configs/rustbgpd.toml` only enables the global families. A v0.24.0 controller
+has no VPN code and silently ignores `bgp.vpn_scopes`, so verify the controller
+image digest and that the running settings expose the scope before debugging
+the router.
+
 The current implementation covers discard, police, manual destination DSCP
 marking and guarded target-IP or VRF route-target scrubber diversion.
 [The scrubber procedure](scrubber-diversion.md) distinguishes scope RTs from
@@ -43,8 +50,10 @@ bgp:
       allow_source_only: false
 ```
 
-A string `default_scope: TRANSIT` selects one named family. A family mismatch
-refuses admission; it never falls back to global. The two-family mapping above
+The two entries are logical family selectors, not two VRFs; they may use the
+same RD and route target and feed one real VRF. A string
+`default_scope: TRANSIT` selects one named family. A family mismatch refuses
+admission; it never falls back to global. The two-family mapping above
 selects each family explicitly. Omitting the default retains global automatic
 mitigation. Detectors cannot supply routing scope, RD or RT selectors; keep
 unrelated detector metadata in `raw_details`.

@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SQLite is an optional, never-compiled sqlx driver (postgres only), and
   `sqlx-sqlite` 0.8.6 requires `^0.30.1` while 0.9.0 still caps below the
   patched 0.39.0. Remove the exception when sqlx accepts 0.39.
+- Log `NO_MITIGATION` with the response status instead of `SUCCESS` when the
+  FastNetMon notify script receives a 2xx event response without a
+  `mitigation_id`, so an unowned victim, unmet correlation or missing playbook
+  is visible in the script log.
+- Ship an `ack_flood` playbook, so every vector the FastNetMon notify script
+  can emit has a port-independent default instead of returning
+  `accepted_no_playbook`.
 
 ### Added
 
@@ -45,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Vendor the rustbgpd v0.82.0 controller schema and test the existing global
   lifecycle against its pinned image as well as v0.81.0. The global daemon
   minimum remains v0.81.0; VPN support requires a successful family probe.
+
+- Pin Compose to rustbgpd 0.82.0 and expose `PREFIXD_RUSTBGPD_IMAGE` so VPN
+  deployments are not silently recreated on 0.81.0.
+- Remove the duplicate `correlation` block from the shipped `prefixd.yaml` and
+  `prefixd-gobgp.yaml`; `correlation.yaml` is the only source, because it
+  already replaced that block whenever it existed. Existing `prefixd-config`
+  volumes keep their copies: merge the new `ack_flood` playbook into
+  `/etc/prefixd/playbooks.yaml` before relying on it.
 
 ## [0.24.0] - 2026-11-02
 

@@ -41,6 +41,10 @@ not pass through prefixd's admission checks or create prefixd mitigation and
 audit records. Choose this path when FastNetMon should own RTBH; use the notify
 path when prefixd should apply its policy and own the route lifecycle.
 
+Detector playbooks can select police (rate-limit), discard or a guarded host
+blackhole. DSCP marking, redirect-to-IP/VRF and optional source-prefix matching
+are manual/VPN-scrubber operations, not playbook actions.
+
 ### Keep one writer per speaker target
 
 prefixd requires exclusive administration of its physical speaker target.
@@ -162,6 +166,36 @@ Older copies of the script omit confidence. With correlation enabled, missing
 confidence counts as zero: the API can accept and record the event without
 creating a mitigation. Copy the updated script to the FastNetMon host when
 upgrading; updating only the prefixd container does not replace it.
+
+The script distinguishes a recorded event from an admitted mitigation: a 2xx
+response without `mitigation_id` logs `NO_MITIGATION (status=...)` instead of
+`SUCCESS`. Read the response body:
+
+| HTTP | `status` | Meaning | Next check |
+|------|----------|---------|------------|
+| 202 | `accepted` with `mitigation_id` | mitigation created | `announcement_outcome` and speaker export state |
+| 202 | `extended` with `mitigation_id` | existing mitigation extended | — |
+| 202 | `accepted` without `mitigation_id` | correlation threshold or source count not met | effective `correlation.yaml`, confidence, group window |
+| 202 | `accepted_no_mitigation` | victim not in the effective inventory | `/etc/prefixd/inventory.yaml` in the controller |
+| 202 | `accepted_no_playbook` | no playbook matched the vector | effective `playbooks.yaml` |
+| 422 | error | guardrail or VPN scope refused; the event may still be recorded | error text: safelist, quota, `l3vpn` capability |
+| 409 | error | duplicate event, or speaker binding/owner conflict | event ID, controller fence |
+
+`SUCCESS` on a 2xx only means the event was accepted; it does not prove a
+mitigation exists or that a router installed it. `NO_MITIGATION` is a warning,
+not a retry: the script still exits 0 because retrying cannot change these
+gates. Peers being down does not suppress mitigation rows: prefixd records the
+intent and reports the announcement as `unconfirmed`.
+
+The shipped safelist covers `10.0.0.0/8` and `192.168.0.0/16`; an owned victim
+inside either range is refused with 422. Use a TEST-NET or real owned prefix
+for lab tests.
+
+Compose keeps `inventory.yaml`, `playbooks.yaml` and `correlation.yaml` in the
+`prefixd-config` volume. Editing the copies under `configs/` in the checkout
+does not change the running controller; read `/etc/prefixd/` inside the
+controller (or use the dashboard editors). See the
+[quickstart configuration notes](../../tutorials/quickstart.md#configuration-and-persistence).
 
 ### Unban Flow
 
@@ -381,12 +415,15 @@ tail -f /var/log/prefixd-fastnetmon.log
 1. **503 Service Unavailable**: `PREFIXD_API` reaches a standby controller; route
    it to the controller whose `GET /v1/ready` returns `200`
 2. **401 Unauthorized**: Check `PREFIXD_TOKEN` matches prefixd config
-3. **422 Unprocessable**: Victim IP not in prefixd inventory, or a blackhole
-   playbook matched and `source` is not in `blackhole.detector_sources`
-4. **No mitigation created**: Check the full response in the script log. A `202`
-   with no `mitigation_id` can mean correlation is not met; check the signal
-   group's confidence and source count, and update older scripts that omit
-   confidence. Also check that the victim is owned and playbooks match the vector.
+3. **422 Unprocessable**: A guardrail refused the mitigation, for example a
+   safelisted victim, a quota, an unsupported VPN scope, or a blackhole
+   playbook whose `source` is not in `blackhole.detector_sources`. An unowned
+   victim is not a 422: it returns `202 accepted_no_mitigation`.
+4. **No mitigation created**: Read the `NO_MITIGATION` or `SUCCESS` line in the
+   script log and map its `status` with the table under [Ban Flow](#ban-flow).
+   A `202` with no `mitigation_id` can mean correlation is not met, the victim
+   is unowned, or no playbook matched; update older scripts that omit
+   confidence.
 5. **400 on withdraw**: Ensure script sends `operator_id` (set `PREFIXD_OPERATOR`, default: `fastnetmon`)
 
 ### Debug mode

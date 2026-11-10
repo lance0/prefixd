@@ -737,7 +737,13 @@ migration 019 remains the latest.
 The global daemon minimum stays rustbgpd v0.81.0. VPN and redirect-to-VRF
 require rustbgpd v0.82.0 and a successful family 13/14 capability probe; GoBGP
 refuses scoped admission before any RPC. Global rules, hashes and pending
-withdrawals keep their existing wire identity.
+withdrawals keep their existing wire identity. Compose now pins rustbgpd
+0.82.0 (override with `PREFIXD_RUSTBGPD_IMAGE`), and the shipped `prefixd.yaml`
+no longer duplicates the `correlation` section: `correlation.yaml` is the only
+source. Existing `prefixd-config` volumes keep their copies, so merge the new
+`ack_flood` playbook and any correlation changes into `/etc/prefixd/` before
+relying on them. The FastNetMon script now logs `NO_MITIGATION` for a 2xx
+without `mitigation_id`; reinstall it on the FastNetMon host.
 
 Before downgrading prefixd or rustbgpd, drain all VPN mitigations, diversions
 and pending withdrawals against their original target. Scope name/RD/RT edits

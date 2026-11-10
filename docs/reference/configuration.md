@@ -591,7 +591,9 @@ playbooks:
         ttl_seconds: 120
 ```
 
-When a playbook has no `correlation` override, the global defaults from `prefixd.yaml` are used.
+When a playbook has no `correlation` override, the effective global defaults
+from `correlation.yaml` are used (or the inline `prefixd.yaml` section when
+that file is absent).
 
 | Override Field | Type | Description |
 |----------------|------|-------------|
