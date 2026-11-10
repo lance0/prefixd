@@ -1433,6 +1433,20 @@ observability:
     }
 
     #[test]
+    fn shipped_controller_configs_do_not_duplicate_correlation() {
+        // AppConfig::load replaces the inline block with correlation.yaml.
+        // Keeping a second copy here silently misled operators who edited it.
+        for shipped in [
+            include_str!("../../configs/prefixd.yaml"),
+            include_str!("../../configs/prefixd-gobgp.yaml"),
+        ] {
+            let settings: Settings = crate::config::parse_yaml(shipped).unwrap();
+            assert!(!settings.correlation.enabled);
+            assert!(settings.correlation.sources.is_empty());
+        }
+    }
+
+    #[test]
     fn test_settings_without_correlation_defaults_to_disabled() {
         let settings: Settings = crate::config::parse_yaml(MINIMAL_SETTINGS_YAML).unwrap();
         assert!(!settings.correlation.enabled);
