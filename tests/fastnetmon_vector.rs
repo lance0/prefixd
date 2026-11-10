@@ -28,26 +28,13 @@ fn ban_payload(details: &str, envs: &[(&str, &str)]) -> serde_json::Value {
     ban_payload_with_jq(details, envs, true)
 }
 
-fn ban_payload_with_jq(details: &str, envs: &[(&str, &str)], with_jq: bool) -> serde_json::Value {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let bin_dir = dir.path().join("bin");
-    fs::create_dir(&bin_dir).expect("mkdir bin");
-    let args_log = dir.path().join("curl-args");
-
-    // Emits a body plus the trailing status line `curl -w "%{http_code}"` prints,
-    // so the script sees a successful ingest.
-    let stub = format!(
-        "#!/bin/bash\nprintf '%s\\0' \"$@\" >> '{}'\ncat > /dev/null\nprintf '{{\"status\":\"accepted\"}}\\n201'\nexit 0\n",
-        args_log.display()
-    );
-    let curl_path = bin_dir.join("curl");
-    fs::write(&curl_path, stub).expect("write curl stub");
-    fs::set_permissions(&curl_path, fs::Permissions::from_mode(0o755)).expect("chmod curl stub");
-
-    // Isolate PATH so the fallback really runs without jq. A failing jq stub
-    // would still be found by command -v and select the wrong branch.
+/// Link every command the ban path (and its curl stub) needs into `bin_dir`,
+/// optionally including jq. A restricted PATH makes the no-jq fallback real:
+/// a failing jq stub would still be found by `command -v`.
+fn link_commands(bin_dir: &std::path::Path, with_jq: bool) {
     let mut commands = vec![
-        "bash", "cat", "date", "tr", "grep", "awk", "sort", "head", "tail", "sed",
+        "bash", "cat", "cut", "date", "tr", "grep", "awk", "sort", "head", "tail", "sed", "sleep",
+        "wc",
     ];
     if with_jq {
         commands.push("jq");
@@ -75,6 +62,25 @@ fn ban_payload_with_jq(details: &str, envs: &[(&str, &str)], with_jq: bool) -> s
             std::os::unix::fs::symlink(target.trim(), bin_dir.join(command)).expect("link command");
         }
     }
+}
+
+fn ban_payload_with_jq(details: &str, envs: &[(&str, &str)], with_jq: bool) -> serde_json::Value {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir(&bin_dir).expect("mkdir bin");
+    let args_log = dir.path().join("curl-args");
+
+    // Emits a body plus the trailing status line `curl -w "%{http_code}"` prints,
+    // so the script sees a successful ingest.
+    let stub = format!(
+        "#!/bin/bash\nprintf '%s\\0' \"$@\" >> '{}'\ncat > /dev/null\nprintf '{{\"status\":\"accepted\"}}\\n201'\nexit 0\n",
+        args_log.display()
+    );
+    let curl_path = bin_dir.join("curl");
+    fs::write(&curl_path, stub).expect("write curl stub");
+    fs::set_permissions(&curl_path, fs::Permissions::from_mode(0o755)).expect("chmod curl stub");
+
+    link_commands(&bin_dir, with_jq);
 
     let mut child = Command::new("bash")
         .arg(SCRIPT)
@@ -436,10 +442,16 @@ fn reported_ports_are_capped_at_64() {
     assert_eq!(ports[..2], [1000, 1001], "ties rank by port");
 }
 
-/// Run a `ban` against a curl stub that answers each attempt from `outcomes`
-/// (`refused` = connection error, otherwise an HTTP status). Returns whether the
-/// script succeeded and the event IDs it posted, one per attempt.
-fn ban_attempts(outcomes: &[&str]) -> (bool, Vec<String>) {
+struct BanRun {
+    ok: bool,
+    event_ids: Vec<String>,
+    log: String,
+}
+
+/// Run a `ban` against a curl stub that answers each attempt from `outcomes`.
+/// Each entry is `refused`, an HTTP status (`503`), or `status|body` so a test
+/// can return a prefixd event response. PATH is isolated to the stub directory.
+fn ban_run(outcomes: &[&str], with_jq: bool) -> BanRun {
     let dir = tempfile::tempdir().expect("tempdir");
     let bin_dir = dir.path().join("bin");
     fs::create_dir(&bin_dir).expect("mkdir bin");
@@ -454,7 +466,10 @@ done
 n=$(wc -l < '{calls}')
 outcome=$(sed -n "${{n}}p" '{outcomes}')
 if [[ "$outcome" == refused ]]; then printf '\n000'; exit 7; fi
-printf '{{"status":"x"}}\n%s' "$outcome"
+code=${{outcome%%|*}}
+body=${{outcome#*|}}
+if [[ "$body" == "$outcome" ]]; then body='{{"status":"x"}}'; fi
+printf '%s\n%s' "$body" "$code"
 "#,
         calls = calls.display(),
         outcomes = outcomes_file.display()
@@ -462,18 +477,15 @@ printf '{{"status":"x"}}\n%s' "$outcome"
     let curl_path = bin_dir.join("curl");
     fs::write(&curl_path, stub).expect("write curl stub");
     fs::set_permissions(&curl_path, fs::Permissions::from_mode(0o755)).expect("chmod curl stub");
-    let path = format!(
-        "{}:{}",
-        bin_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    link_commands(&bin_dir, with_jq);
+    let log_path = dir.path().join("script.log");
     let status = Command::new("bash")
         .arg(SCRIPT)
         .args(["198.51.100.7", "incoming", "250000", "ban"])
-        .env("PATH", path)
+        .env("PATH", &bin_dir)
         .env("PREFIXD_API", "http://127.0.0.1:1")
         .env("PREFIXD_OPERATOR", "test_operator")
-        .env("PREFIXD_LOG", dir.path().join("script.log"))
+        .env("PREFIXD_LOG", &log_path)
         .env("BAN_POST_DELAY_SECONDS", "0")
         .stdin(Stdio::null())
         .status()
@@ -486,7 +498,16 @@ printf '{{"status":"x"}}\n%s' "$outcome"
             json["event_id"].as_str().expect("event_id").to_string()
         })
         .collect();
-    (status.success(), event_ids)
+    BanRun {
+        ok: status.success(),
+        event_ids,
+        log: fs::read_to_string(log_path).unwrap_or_default(),
+    }
+}
+
+fn ban_attempts(outcomes: &[&str]) -> (bool, Vec<String>) {
+    let run = ban_run(outcomes, true);
+    (run.ok, run.event_ids)
 }
 
 #[test]
@@ -513,5 +534,60 @@ fn ban_does_not_retry_client_errors() {
         let (ok, ids) = ban_attempts(&[status, "202"]);
         assert!(!ok, "{status}");
         assert_eq!(ids.len(), 1, "{status} was retried");
+    }
+}
+
+#[test]
+fn ban_logs_no_mitigation_for_a_202_without_an_id() {
+    for with_jq in [true, false] {
+        for status in ["accepted", "accepted_no_mitigation", "accepted_no_playbook"] {
+            let body = serde_json::json!({
+                "status": status,
+                "mitigation_id": serde_json::Value::Null,
+                "mitigation_ids": [],
+            })
+            .to_string();
+            let outcome = format!("202|{body}");
+            let run = ban_run(&[outcome.as_str()], with_jq);
+            assert!(run.ok, "jq={with_jq} {status}: {}", run.log);
+            assert!(
+                run.log.contains("NO_MITIGATION"),
+                "jq={with_jq} {status}: {}",
+                run.log
+            );
+            assert!(
+                run.log.contains(&format!("status={status}")),
+                "jq={with_jq} {status}: {}",
+                run.log
+            );
+        }
+    }
+}
+
+#[test]
+fn ban_logs_success_only_when_a_mitigation_was_created_or_extended() {
+    let id = "6f5e6f5e-0000-4000-8000-000000000001";
+    for with_jq in [true, false] {
+        for status in ["accepted", "extended"] {
+            let body = serde_json::json!({
+                "status": status,
+                "mitigation_id": id,
+                "mitigation_ids": [id],
+            })
+            .to_string();
+            let outcome = format!("202|{body}");
+            let run = ban_run(&[outcome.as_str()], with_jq);
+            assert!(run.ok, "jq={with_jq} {status}: {}", run.log);
+            assert!(
+                run.log.contains("SUCCESS"),
+                "jq={with_jq} {status}: {}",
+                run.log
+            );
+            assert!(
+                !run.log.contains("NO_MITIGATION"),
+                "jq={with_jq} {status}: {}",
+                run.log
+            );
+        }
     }
 }
