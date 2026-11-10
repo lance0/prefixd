@@ -109,6 +109,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment.
 - Fail the FastNetMon notify script with an explicit `curl is required` error
   instead of an opaque shell error when the host lacks curl.
+- Log and retry FastNetMon unban delivery when curl fails instead of exiting
+  silently under `set -e`, and remove GNU-only `head -n -1`/`date -Iseconds`
+  from the notify script.
 
 ## [0.24.0] - 2026-11-02
 

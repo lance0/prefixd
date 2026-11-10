@@ -25,6 +25,8 @@ PREFIXD_OPERATOR="${PREFIXD_OPERATOR:-fastnetmon}"
 LOG_FILE="${PREFIXD_LOG:-/var/log/prefixd-fastnetmon.log}"
 UNBAN_QUERY_RETRIES="${UNBAN_QUERY_RETRIES:-5}"
 UNBAN_QUERY_DELAY_SECONDS="${UNBAN_QUERY_DELAY_SECONDS:-1}"
+WITHDRAW_ATTEMPTS="${WITHDRAW_ATTEMPTS:-3}"
+WITHDRAW_DELAY_SECONDS="${WITHDRAW_DELAY_SECONDS:-1}"
 BAN_POST_ATTEMPTS="${BAN_POST_ATTEMPTS:-3}"
 BAN_POST_DELAY_SECONDS="${BAN_POST_DELAY_SECONDS:-1}"
 
@@ -35,7 +37,7 @@ PPS="${3:-0}"
 ACTION="${4:-ban}"
 
 log() {
-    echo "$(date -Iseconds) $*" >> "$LOG_FILE"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%S%z) $*" >> "$LOG_FILE"
 }
 
 if ! command -v curl &> /dev/null; then
@@ -82,10 +84,17 @@ if [[ "$API_ACTION" == "unban" ]]; then
             --data-urlencode "status=pending,active,escalated" \
             --data-urlencode "victim_ip=$IP" \
             --data-urlencode "limit=1000" \
-            "${AUTH_ARGS[@]}" 2>&1)
+            "${AUTH_ARGS[@]}" 2>&1) || RESPONSE=$(printf '\n000')
 
         HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-        BODY=$(echo "$RESPONSE" | head -n -1)
+        BODY=$(printf '%s' "$RESPONSE" | sed '$d')
+
+        if [[ ( "$HTTP_CODE" == "000" || "$HTTP_CODE" == "503" ) && "$ATTEMPT" -lt "$UNBAN_QUERY_RETRIES" ]]; then
+            log "Unban lookup transport failure ($HTTP_CODE, attempt $ATTEMPT/$UNBAN_QUERY_RETRIES), retrying in ${UNBAN_QUERY_DELAY_SECONDS}s"
+            sleep "$UNBAN_QUERY_DELAY_SECONDS"
+            ATTEMPT=$((ATTEMPT + 1))
+            continue
+        fi
 
         if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
             log "ERROR querying mitigations ($HTTP_CODE): $BODY"
@@ -129,21 +138,31 @@ if [[ "$API_ACTION" == "unban" ]]; then
             W_PAYLOAD="{\"operator_id\":\"$OP_ESCAPED\",\"reason\":\"$REASON_ESCAPED\"}"
         fi
 
-        W_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-            "$PREFIXD_API/v1/mitigations/$MID/withdraw" \
-            -H "Content-Type: application/json" \
-            "${AUTH_ARGS[@]}" \
-            -d "$W_PAYLOAD" 2>&1)
+        W_ATTEMPT=1
+        while true; do
+            W_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+                "$PREFIXD_API/v1/mitigations/$MID/withdraw" \
+                -H "Content-Type: application/json" \
+                "${AUTH_ARGS[@]}" \
+                -d "$W_PAYLOAD" 2>&1) || W_RESPONSE=$(printf '\n000')
 
-        W_HTTP=$(echo "$W_RESPONSE" | tail -n1)
-        W_BODY=$(echo "$W_RESPONSE" | head -n -1)
+            W_HTTP=$(echo "$W_RESPONSE" | tail -n1)
+            W_BODY=$(printf '%s' "$W_RESPONSE" | sed '$d')
 
-        if [[ "$W_HTTP" =~ ^2 ]]; then
-            log "SUCCESS: Withdrew mitigation $MID for $IP ($W_HTTP)"
-        else
+            if [[ "$W_HTTP" =~ ^2 ]]; then
+                log "SUCCESS: Withdrew mitigation $MID for $IP ($W_HTTP)"
+                break
+            fi
+            if [[ ( "$W_HTTP" == "000" || "$W_HTTP" == "503" ) && "$W_ATTEMPT" -lt "$WITHDRAW_ATTEMPTS" ]]; then
+                log "Withdrawal for $MID not delivered ($W_HTTP, attempt $W_ATTEMPT/$WITHDRAW_ATTEMPTS), retrying in ${WITHDRAW_DELAY_SECONDS}s"
+                sleep "$WITHDRAW_DELAY_SECONDS"
+                W_ATTEMPT=$((W_ATTEMPT + 1))
+                continue
+            fi
             log "ERROR withdrawing $MID ($W_HTTP): $W_BODY"
             WITHDRAW_FAILED=1
-        fi
+            break
+        done
     done
 
     [[ "$WITHDRAW_FAILED" -eq 1 ]] && exit 1
@@ -310,7 +329,7 @@ while true; do
         -d "$PAYLOAD" 2>&1) || CURL_STATUS=$?
 
     HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-    BODY=$(echo "$RESPONSE" | head -n -1)
+    BODY=$(printf '%s' "$RESPONSE" | sed '$d')
 
     if [[ "$CURL_STATUS" -eq 0 && "$HTTP_CODE" =~ ^2 ]]; then
         # A 2xx only proves the event was accepted. prefixd records events
