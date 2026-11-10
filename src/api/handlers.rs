@@ -4795,6 +4795,17 @@ playbooks:
     }
 
     #[tokio::test]
+    async fn unowned_victim_is_accepted_without_a_mitigation() {
+        let f = fixture(OperationMode::DryRun, |_, _| {});
+        let mut input = event("unowned", "udp_flood", None);
+        input.victim_ip = "198.51.100.7".into();
+        let response = ban(&f, input).await.unwrap();
+        assert_eq!(response.status, "accepted_no_mitigation");
+        assert_eq!(response.mitigation_id, None);
+        assert!(rows(&f).await.is_empty());
+    }
+
+    #[tokio::test]
     async fn library_intersection_per_rule_admission_refresh_and_changed_set() {
         // Enforced admissions move process-global announcement series.
         let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
