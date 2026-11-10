@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing installations must copy the updated script to the FastNetMon host.
 - Refresh the separate fuzz lockfile after the controller's tower-http 0.7
   upgrade so locked fuzz builds and release preparation use a consistent graph.
+- Ignore `RUSTSEC-2026-0459` (`libsqlite3-sys`) in both full-lock audits.
+  SQLite is an optional, never-compiled sqlx driver (postgres only), and
+  `sqlx-sqlite` 0.8.6 requires `^0.30.1` while 0.9.0 still caps below the
+  patched 0.39.0. Remove the exception when sqlx accepts 0.39.
 
 ### Added
 

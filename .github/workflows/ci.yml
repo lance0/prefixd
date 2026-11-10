@@ -364,12 +364,18 @@ jobs:
       - name: Audit Rust dependencies
         uses: actions-rust-lang/audit@v1
         with:
-          # Only advisories with no fixed release upstream. Everything else is
-          # resolved by bumping the dependency in Cargo.lock -- or by dropping
-          # our own use of it (rustls-pemfile was replaced by rustls-pki-types).
-          # RUSTSEC-2023-0071: rsa crate - in Cargo.lock as an optional dependency
-          #   of sqlx's mysql driver, which is never compiled (postgres only).
-          ignore: RUSTSEC-2023-0071
+          # Only advisories that a compatible lockfile update cannot clear.
+          # Everything else is resolved by bumping the dependency in Cargo.lock
+          # -- or by dropping our own use of it (rustls-pemfile was replaced by
+          # rustls-pki-types).
+          # RUSTSEC-2023-0071: rsa crate - no patched release; in Cargo.lock as
+          #   an optional dependency of sqlx's mysql driver, which is never
+          #   compiled (postgres only).
+          # RUSTSEC-2026-0459: libsqlite3-sys - fixed in 0.39.0, but
+          #   sqlx-sqlite 0.8.6 requires ^0.30.1 and 0.9.0 still caps <0.38.0,
+          #   so the patch is unreachable; the sqlite driver is optional and
+          #   never compiled (postgres only).
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2026-0459
           denyWarnings: false
           createIssues: false
 
@@ -377,8 +383,9 @@ jobs:
         uses: actions-rust-lang/audit@v1
         with:
           file: fuzz/Cargo.lock
-          # Same optional, uncompiled SQLx MySQL dependency as the root lockfile.
-          ignore: RUSTSEC-2023-0071
+          # Same optional, uncompiled SQLx MySQL and SQLite dependencies as the
+          # root lockfile.
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2026-0459
           denyWarnings: false
           createIssues: false
 
