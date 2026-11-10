@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Send explicit ban confidence (`0.9`) from the FastNetMon Community notify
   script, with or without jq, so bans meet the shipped correlation threshold.
   Existing installations must copy the updated script to the FastNetMon host.
+- Refresh the separate fuzz lockfile after the controller's tower-http 0.7
+  upgrade so locked fuzz builds and release preparation use a consistent graph.
 
 ### Added
 
