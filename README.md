@@ -24,12 +24,13 @@ to announce a FlowSpec rule with a mandatory TTL. No detector speaks BGP.
 > [Why rustbgpd](#pairs-with-rustbgpd)
 
 **Status:** pre-1.0, and the API can change before 1.0. The latest release,
-[v0.24.0](https://github.com/lance0/prefixd/releases/tag/v0.24.0), adds guarded
-manual scrubber diversion, disabled by default, plus per-peer FlowSpec export
-evidence and server-side search and paging of mitigation and event history. It
-needs rustbgpd v0.81.0 or later, upgraded first, and applies migration 019 on
-startup; follow the
-[upgrade guide](docs/how-to/upgrading.md#v0231--0240).
+[v0.25.0](https://github.com/lance0/prefixd/releases/tag/v0.25.0), adds opt-in
+VPNv4/VPNv6 FlowSpec scopes, manual DSCP marking, source-only whole-VRF rules
+and guarded redirect-to-VRF. It stays global-only until `bgp.vpn_scopes` is
+configured, needs rustbgpd v0.81.0 or later (v0.82.0 for VPN; Compose pins
+v0.82.0), applies no new migration, and keeps migration 019 as the latest;
+follow the
+[upgrade guide](docs/how-to/upgrading.md#v0240--0250).
 
 ## Choose your path
 
@@ -146,8 +147,8 @@ The other limits in the shipped configuration reject requests the same way:
 |-----------|-----------------|-------------------|
 | Safelist | `10.0.0.0/8`, `192.168.0.0/16`, plus API entries | `IP 10.0.0.5/32 is safelisted` |
 | TTL | Required, 30 to 1800 seconds | `TTL 7200s out of bounds (min=30, max=1800)` |
-| Ports | At most 8 destination ports | `too many ports: 9 (max=8)` |
-| Active quotas | 5 per customer, 200 per POP, 500 global | `quota exceeded: customer (5/5)` |
+| Ports | At most 5 destination ports | `too many ports: 9 (max=5)` |
+| Active quotas | 20 per customer, 200 per POP, 500 global | `quota exceeded: customer (20/20)` |
 | New mitigation rate | 30 per POP in any 60 seconds; TTL extensions don't count | `new mitigation rate exceeded: 30 created at this POP in the last 60s (max_new_per_minute=30)` |
 | Destination | IPv4 `/32` and IPv6 `/128` by default | Manual subnets require [explicit prefix bounds and whole-prefix ownership](docs/reference/api.md#destination-cidrs) |
 

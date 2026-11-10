@@ -574,6 +574,10 @@ derived_confidence = sum(event_confidence_i × source_weight_i) / sum(source_wei
 
 Events with null or missing confidence are treated as 0.0.
 
+`corroboration_met` is sticky: once a group meets `min_sources` and the
+effective `confidence_threshold`, later decay below the threshold does not
+revoke authorization for that group's lifetime.
+
 #### Per-Playbook Correlation Overrides
 
 Playbooks can override global `min_sources` and `confidence_threshold` for specific attack vectors. Add a `correlation` section to any playbook in `playbooks.yaml`:

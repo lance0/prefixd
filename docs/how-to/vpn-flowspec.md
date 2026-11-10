@@ -33,8 +33,7 @@ bgp:
   local_asn: 44407
   router_id: 192.0.2.1
   rustbgpd:
-    endpoint: http://127.0.0.1:50051
-    bearer_token_env: PREFIXD_RUSTBGPD_TOKEN
+    endpoint: "unix:///run/rustbgpd/grpc.sock"
     leased_flowspec: true
   default_scope:
     ipv4: TRANSIT
@@ -51,6 +50,11 @@ bgp:
       route_targets: ["44407:777"]
       allow_source_only: false
 ```
+
+The shipped Compose stack uses the owner-only Unix socket above. For a remote
+speaker, replace it with a verified `https://` endpoint and configure
+`bearer_token_env` or client certificates as described in
+[speaker backends](../reference/speaker-backends.md#rustbgpd-configuration).
 
 The two entries are logical family selectors, not two VRFs; they may use the
 same RD and route target and feed one real VRF. A string

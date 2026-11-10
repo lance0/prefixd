@@ -1,9 +1,9 @@
 # Upgrade Guide
 
 Upgrading a v0.24.0 deployment? Follow
-[v0.24.0 → next release](#v0240--next-release). Upgrading a v0.23.1
+[v0.24.0 → 0.25.0](#v0240--0250). Upgrading a v0.23.1
 deployment? Follow [v0.23.1 → 0.24.0](#v0231--0240), then
-[v0.24.0 → next release](#v0240--next-release).
+[v0.24.0 → 0.25.0](#v0240--0250).
 From v0.23.0, follow [v0.23.0 → 0.23.1](#v0230--0231) first; from v0.22.1,
 [v0.22.1 → 0.23.0](#v0221--0230) before that; from v0.22.0,
 [v0.22.0 → 0.22.1](#v0220--0221) before that; from v0.21.0,
@@ -403,7 +403,7 @@ status or local speaker read-back does not establish router cleanup.
 
 ## Source-prefix matches and downgrade
 
-The next release adds optional `src_prefix` to manual FlowSpec matches. No
+prefixd 0.23.0 adds optional `src_prefix` to manual FlowSpec matches. No
 migration is required. The flag `guardrails.allow_src_prefix_match` was reserved
 before this change; it now admits source CIDRs when true. Leave it false until
 the receiving routers are qualified. Existing source-free rules retain their
@@ -737,35 +737,148 @@ prefixdctl migrations
 
 ## Version-Specific Notes
 
-### v0.24.0 → next release
+### v0.24.0 → 0.25.0
 
-Scoped VPN FlowSpec, source-only whole-VRF rules, manual DSCP marking and
-guarded redirect-to-VRF are new. Manual scoped admission and scoped scrubber
-profiles require only a configured `bgp.vpn_scopes` entry; `bgp.default_scope`
-additionally opts automatic mitigation into a named scope and defaults to
-`global`, so an existing 0.24.0 configuration loads unchanged. No migration is
-required; migration 019 remains the latest.
+0.25.0 adds opt-in VPNv4/VPNv6 FlowSpec scopes, manual DSCP marking,
+source-only whole-VRF rules and guarded redirect-to-VRF. It applies no migration:
+migration 019 remains the latest. Global behavior is unchanged and a valid
+0.24.0 `prefixd.yaml` loads as it is, except that unknown keys under `bgp` now
+fail startup instead of being ignored. The global speaker floor stays rustbgpd
+v0.81.0; Compose pins v0.82.0 for the VPN paths.
 
-The global daemon minimum stays rustbgpd v0.81.0. Every VPN-scoped rule,
-including manual marking and either diversion action, requires rustbgpd v0.82.0
-and a successful probe for its family; GoBGP refuses scoped admission before
-any RPC. Global rules, hashes and pending withdrawals keep their existing wire
-identity. Compose now pins rustbgpd 0.82.0 (override with
-`PREFIXD_RUSTBGPD_IMAGE`), and the shipped `prefixd.yaml`
-no longer duplicates the `correlation` section: `correlation.yaml` is the only
-source. Existing `prefixd-config` volumes keep their copies, so merge the new
-`ack_flood` playbook and any correlation changes into `/etc/prefixd/` before
-relying on them. The FastNetMon script now logs `NO_MITIGATION` for a 2xx
-without `mitigation_id`; reinstall it on the FastNetMon host.
+#### Before you start
 
-Before downgrading prefixd or rustbgpd, drain all VPN mitigations, diversions
-and pending withdrawals against their original target. Scope name/RD/RT edits
-with outstanding intent fail startup; changing the default only changes new
-admissions. A speaker downgrade or failed family probe fails startup while VPN
-scopes or retained VPN intent exist; PostgreSQL retains that intent, and
-prefixd never falls back to global. An older controller does not understand
-scoped intent, so do not rely on it to withdraw
-or expire it. See [VPN FlowSpec](vpn-flowspec.md) for the capability boundary.
+- Back up PostgreSQL and keep the 0.24.0 images, `prefixd.yaml`,
+  `correlation.yaml`, `playbooks.yaml` and the old FastNetMon script.
+- `configs/prefixd.yaml` is a read-only bind mount, so the checkout's new file
+  takes effect immediately. `correlation.yaml` is unchanged in this release and
+  lives in the `prefixd-config` volume; do not replace a customized file.
+  - If you relied on an inline `correlation` block and have no
+    `correlation.yaml`, create one before upgrading: with neither source,
+    correlation is disabled.
+  - The initializer seeds a missing `correlation.yaml` on the next Compose
+    start, which then overrides an inline block.
+- Do not replace `playbooks.yaml`. After the upgrade, merge only the new
+  `ack_flood_police` entry into `/etc/prefixd/playbooks.yaml` and reload or
+  restart; existing volume files are preserved.
+- A v0.24.0 controller accepts and silently ignores `bgp.vpn_scopes` and
+  `bgp.default_scope`. After upgrading, confirm the running settings expose the
+  scopes you configured. VPN also needs rustbgpd v0.82.0 and
+  `l3vpn_ipv4_flowspec`/`l3vpn_ipv6_flowspec` on the speaker neighbor and the
+  receiver.
+- Reinstall `scripts/prefixd-fastnetmon.sh` on every FastNetMon host. It now
+  sends `confidence: 0.9`, sources `/etc/default/prefixd`, requires `curl`, and
+  logs `NO_MITIGATION` for a 2xx without a `mitigation_id`.
+
+#### Compose
+
+Run these in the deployment's checkout:
+
+```bash
+# 1. Back up the database
+docker compose exec -T postgres pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+
+# 2. Update the checkout; it pins rustbgpd 0.82.0
+git fetch --tags && git checkout v0.25.0
+
+# 3. Upgrade and recreate the speaker first
+docker compose --profile rustbgpd pull rustbgpd
+docker compose --profile rustbgpd up -d --no-deps --force-recreate rustbgpd
+```
+
+The new speaker process starts with an empty local RIB. Wait one
+`timers.reconciliation_interval_seconds` pass and verify the active rules are
+back before replacing the controller. For a controller-only change, use the
+`--no-deps` command below; otherwise "RIB unchanged" means after one successful
+repair pass.
+
+```bash
+# 4. Pin and pull the 0.25.0 controller and dashboard
+export PREFIXD_IMAGE=ghcr.io/lance0/prefixd:0.25.0
+export PREFIXD_DASHBOARD_IMAGE=ghcr.io/lance0/prefixd-dashboard:0.25.0
+docker compose --profile rustbgpd pull prefixd-rustbgpd dashboard
+
+# 5. Replace the controller and dashboard; rustbgpd keeps its routes
+docker compose --profile rustbgpd up -d --no-deps --no-build prefixd-rustbgpd dashboard
+
+# 6. Install the new notify script on the FastNetMon host, then merge
+#    ack_flood_police into /etc/prefixd/playbooks.yaml and reload or restart.
+```
+
+Keep both variables set for later Compose commands, or put them in `.env`.
+For GoBGP, skip step 3 and use profile `gobgp` and service `prefixd-gobgp`.
+
+#### Bare metal
+
+Upgrade rustbgpd to 0.82.0 when any VPN scope is configured (0.81.0 remains the
+global floor), and wait for one reconciliation pass of the running 0.24.0
+controller. Then:
+
+```bash
+pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+git fetch --tags && git checkout v0.25.0
+cargo build --release --locked
+sudo systemctl stop prefixd
+sudo cp target/release/prefixd target/release/prefixdctl /usr/local/bin/
+sudo systemctl start prefixd
+```
+
+Ensure `/etc/prefixd/correlation.yaml` exists if the deployment relies on
+correlation, merge `ack_flood_police` into `playbooks.yaml`, and install the new
+FastNetMon script.
+
+#### Check the 0.25.0 upgrade
+
+- `prefixdctl migrations` lists rows 1 through 19 unchanged; no migration 020 is
+  applied.
+- Authenticated `GET /v1/health/detail` is healthy, the first reconciliation
+  succeeds without repairs, and the same mitigation IDs stay active or
+  withdrawn. Global FlowSpec rules and hashes keep their existing wire identity.
+- `GET /v1/config/settings` reports `default_scope: "global"` and
+  `vpn_scopes: {}` unless you configured scopes; then it reports them.
+- `GET /v1/config/correlation` matches the intended configuration. With no
+  `correlation.yaml` and no inline block, correlation is disabled.
+- `GET /v1/config/playbooks` contains `ack_flood_police`; a detector
+  `ack_flood` event creates a police rule.
+- One FastNetMon ban logs `SUCCESS (..., status=accepted)` with a
+  `mitigation_id`; the event has `confidence: 0.9`. An unban withdraws it.
+
+#### Downgrading to 0.24.0
+
+Keep rustbgpd at 0.82.0. A v0.24.0 controller cannot decode scoped or `mark`
+rows: its `MatchCriteria`/`FlowSpecNlri` reject unknown fields and it has no
+`mark` action. Active or pending scoped intent therefore fails startup or
+reconciliation, and completed scoped/mark rows still break history and detail
+reads. Drain while 0.25.0 is running:
+
+```sql
+-- Active scoped or mark mitigations (must be empty)
+SELECT mitigation_id, pop, victim_ip, action_type, status
+FROM mitigations
+WHERE status IN ('pending','active','escalated')
+  AND (match_json LIKE '%"scope"%' OR action_type = 'mark');
+
+-- Pending withdrawals of scoped or mark rules (must be empty)
+SELECT pop, count(*) AS pending
+FROM withdrawal_requests
+WHERE completed_at IS NULL
+  AND (rule_json LIKE '%"scope"%' OR rule_json LIKE '%"mark"%')
+GROUP BY pop;
+
+-- Outstanding scoped diversions (must be empty; simplest is all diversions)
+SELECT pop, profile_id, status, count(*) AS outstanding
+FROM scrubber_diversions
+WHERE status IN ('pending','active','withdrawing')
+  AND snapshot_json LIKE '%"scope"%'
+GROUP BY pop, profile_id, status;
+```
+
+Verify the speaker has no scoped or mark local intent, then roll back the
+binaries/images and restore the 0.24.0 configuration. Do not rewrite history:
+test the 0.24.0 binary against a restored backup before switching in place, as
+the source-prefix rollback section already requires. If you also downgrade the
+speaker to 0.81.0, remove all scopes and drain retained scoped intent first;
+0.25.0 refuses startup while either exists.
 
 ### v0.23.1 → 0.24.0
 

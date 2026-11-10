@@ -129,6 +129,12 @@ WITHDRAW_DELAY_SECONDS="1"
 The script sources `/etc/default/prefixd` when it exists; variables set there
 override the process environment.
 
+The script authenticates with a bearer token only. Set `http.auth.mode: bearer`
+with `bearer_token_env: PREFIXD_API_TOKEN` (or use `mtls`/`none`) before pointing
+FastNetMon at it. `credentials` mode rejects `Authorization: Bearer`, so the
+script cannot log in; the shipped Compose configuration uses `credentials`.
+
+
 FastNetMon runs the script once per ban and never repeats it. The script
 therefore retries the same event, with the same `event_id`, when prefixd cannot
 be reached or answers `503` (a standby or draining controller). It stops after
@@ -438,7 +444,7 @@ tail -f /var/log/prefixd-fastnetmon.log
 1. **Connection refused**: Verify `PREFIXD_API` is reachable
 1. **503 Service Unavailable**: `PREFIXD_API` reaches a standby controller; route
    it to the controller whose `GET /v1/ready` returns `200`
-2. **401 Unauthorized**: Check `PREFIXD_TOKEN` matches prefixd config
+2. **401 Unauthorized**: Bearer mode is not enabled, or `PREFIXD_TOKEN` does not match the controller token
 3. **422 Unprocessable**: A guardrail refused the mitigation, for example a
    safelisted victim, a quota, an unsupported VPN scope, or a blackhole
    playbook whose `source` is not in `blackhole.detector_sources`. An unowned
