@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Send explicit ban confidence (`0.9`) from the FastNetMon Community notify
+  script, with or without jq, so bans meet the shipped correlation threshold.
+  Existing installations must copy the updated script to the FastNetMon host.
+
 ### Added
 
 - Manual VPN destination rules can mark DSCP 0–63 through rustbgpd, with exact

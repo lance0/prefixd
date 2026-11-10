@@ -3869,7 +3869,7 @@ mod tests {
                 .blackhole
                 .detector_sources = vec!["fastnetmon".into()];
             *state.playbooks.write().await = blackhole_playbooks(600);
-            // FastNetMon sends no confidence, so it acts alone.
+            // Isolate blackhole admission and lifecycle behavior from correlation.
             state.correlation_config.write().await.enabled = false;
             state
         }
@@ -3884,6 +3884,7 @@ mod tests {
                 "vector": "udp_flood",
                 "action": "ban",
                 "pps": 250000,
+                "confidence": 0.9,
                 "raw_details": {"raw": "incoming udp traffic: 900 mbps", "direction": "incoming", "original_action": "ban"},
             })
         }

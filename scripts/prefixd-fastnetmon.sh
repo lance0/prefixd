@@ -227,7 +227,9 @@ if [[ "$VECTOR" == "udp_flood" ]]; then
     fi
 fi
 
-# Build JSON payload
+# Build JSON payload. A Community ban carries the same 0.9 confidence as the
+# native FastNetMon JSON adapter's default ban mapping. /v1/events does not
+# apply that mapping itself; omitted confidence counts as zero in correlation.
 TIMESTAMP=$(date -u +%FT%TZ)
 
 if command -v jq &> /dev/null; then
@@ -250,6 +252,7 @@ if command -v jq &> /dev/null; then
             vector: $vector,
             action: $action,
             pps: $pps,
+            confidence: 0.9,
             raw_details: {
                 raw: $raw,
                 direction: $direction,
@@ -271,6 +274,7 @@ else
     $SRC_PORTS_FIELD
     "action": "$API_ACTION",
     "pps": ${PPS:-0},
+    "confidence": 0.9,
     "raw_details": {
         "raw": "$RAW_ESCAPED",
         "direction": "$DIRECTION"
