@@ -59,6 +59,8 @@ Follow a procedure for a specific task.
 |------|-------|
 | [Deployment](how-to/deployment.md) | Configure authentication, peers, TLS, databases and deployment. |
 | [Scrubber diversion](how-to/scrubber-diversion.md) | Configure disabled-by-default profiles, readiness, re-arm and guarded withdrawal. |
+| [VPN FlowSpec](how-to/vpn-flowspec.md) | Configure scopes, automatic defaults and guarded VPN diversion. |
+| [Extending mitigations](how-to/extending-mitigations.md) | Keep an existing FlowSpec rule for longer. |
 | [Upgrading and rollback](how-to/upgrading.md) | Back up state and apply version-specific upgrade procedures. |
 | [Troubleshooting](how-to/troubleshooting.md) | Diagnose API, mitigation and BGP problems. |
 | [Grafana and monitoring](how-to/grafana.md) | Set up dashboards and investigate operational metrics. |

@@ -7,17 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Upgrade notes
 
-- Send explicit ban confidence (`0.9`) from the FastNetMon Community notify
-  script, with or without jq, so bans meet the shipped correlation threshold.
-  Existing installations must copy the updated script to the FastNetMon host.
-- Refresh the separate fuzz lockfile after the controller's tower-http 0.7
-  upgrade so locked fuzz builds and release preparation use a consistent graph.
-- Ignore `RUSTSEC-2026-0459` (`libsqlite3-sys`) in both full-lock audits.
-  SQLite is an optional, never-compiled sqlx driver (postgres only), and
-  `sqlx-sqlite` 0.8.6 requires `^0.30.1` while 0.9.0 still caps below the
-  patched 0.39.0. Remove the exception when sqlx accepts 0.39.
+- Upgrade a v0.24.0 deployment with
+  [v0.24.0 → next release](docs/how-to/upgrading.md#v0240--next-release). No
+  database migration is required; migration 019 remains the latest.
+- Copy the updated `scripts/prefixd-fastnetmon.sh` to every FastNetMon host. It
+  sends explicit `0.9` confidence and logs `NO_MITIGATION` when a 2xx response
+  has no `mitigation_id`.
+- The shipped `prefixd.yaml` and `prefixd-gobgp.yaml` no longer contain a
+  `correlation` section; `correlation.yaml` is the only source. If you relied on
+  the inline section and have no `correlation.yaml`, create one before
+  upgrading: with neither, correlation is disabled.
+- Existing `prefixd-config` volumes keep their inventory, playbook and
+  correlation files. Merge the new `ack_flood` playbook into
+  `/etc/prefixd/playbooks.yaml`; checkout edits do not reach the volume.
+- Compose pins rustbgpd 0.82.0 and exposes `PREFIXD_RUSTBGPD_IMAGE`. VPN
+  FlowSpec also needs `l3vpn_ipv4_flowspec`/`l3vpn_ipv6_flowspec` on the
+  rustbgpd neighbor and the receiver. A v0.24.0 controller has no VPN code and
+  silently ignores `bgp.vpn_scopes`.
+
+### Known limitations
+
+- VPN FlowSpec qualifies controller intent and speaker export only. Router
+  installation, VRF import and forwarding remain separate platform
+  qualification, including for redirect actions.
+- GoBGP refuses VPN requests; only the rustbgpd 0.82.0 controller paths are
+  qualified for scoped admission.
 
 ### Added
 
@@ -45,6 +61,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Vendor the rustbgpd v0.82.0 controller schema and test the existing global
   lifecycle against its pinned image as well as v0.81.0. The global daemon
   minimum remains v0.81.0; VPN support requires a successful family probe.
+
+- Pin Compose to rustbgpd 0.82.0 and expose `PREFIXD_RUSTBGPD_IMAGE` so VPN
+  deployments are not silently recreated on 0.81.0.
+- Remove the duplicate `correlation` block from the shipped `prefixd.yaml` and
+  `prefixd-gobgp.yaml`; `correlation.yaml` is the only source, because it
+  already replaced that block whenever it existed. Existing `prefixd-config`
+  volumes keep their copies: merge the new `ack_flood` playbook into
+  `/etc/prefixd/playbooks.yaml` before relying on it.
+
+### Fixed
+
+- Send explicit ban confidence (`0.9`) from the FastNetMon Community notify
+  script, with or without jq, so bans meet the shipped correlation threshold.
+  Existing installations must copy the updated script to the FastNetMon host.
+- Refresh the separate fuzz lockfile after the controller's tower-http 0.7
+  upgrade so locked fuzz builds and release preparation use a consistent graph.
+- Ignore `RUSTSEC-2026-0459` (`libsqlite3-sys`) in both full-lock audits.
+  SQLite is an optional, never-compiled sqlx driver (postgres only), and
+  `sqlx-sqlite` 0.8.6 requires `^0.30.1` while 0.9.0 still caps below the
+  patched 0.39.0. Remove the exception when sqlx accepts 0.39.
+- Log `NO_MITIGATION` with the response status instead of `SUCCESS` when the
+  FastNetMon notify script receives a 2xx event response without a
+  `mitigation_id`, so an unowned victim, unmet correlation or missing playbook
+  is visible in the script log.
+- Ship an `ack_flood` playbook, so every vector the FastNetMon notify script
+  can emit has a port-independent default instead of returning
+  `accepted_no_playbook`.
+- Keep signal-group corroboration sticky after it is first met, matching ADR 022
+  and the API docs, even when decay later drops derived confidence below the
+  threshold.
+- Source `/etc/default/prefixd` from the FastNetMon notify script, as its
+  documentation already described, instead of silently using only the process
+  environment.
+- Fail the FastNetMon notify script with an explicit `curl is required` error
+  instead of an opaque shell error when the host lacks curl.
 
 ## [0.24.0] - 2026-11-02
 
@@ -2808,7 +2859,6 @@ Startup now refuses the configuration keys removed in 0.20.0, and requires
 [0.21.0]: https://github.com/lance0/prefixd/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/lance0/prefixd/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/lance0/prefixd/compare/v0.19.0...v0.19.1
-[0.19.0]: https://github.com/lance0/prefixd/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/lance0/prefixd/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/lance0/prefixd/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/lance0/prefixd/compare/v0.17.0...v0.17.1

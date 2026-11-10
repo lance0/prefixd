@@ -1421,12 +1421,14 @@ async fn handle_ban(
             .collect();
         let source_count = CorrelationEngine::count_distinct_sources(&source_names);
 
+        // ADR 022: once corroboration is met, it stays met for the group.
+        // Decay can lower derived_confidence below the threshold later.
         let corroboration_met = CorrelationEngine::check_corroboration(
             source_count,
             derived_confidence,
             &correlation_config,
             playbook_override,
-        );
+        ) || group.corroboration_met;
 
         // Update group in DB
         let mut updated_group = group.clone();
@@ -4792,6 +4794,17 @@ playbooks:
 
     async fn get(f: &Fixture, id: Uuid) -> Mitigation {
         f.repo.get_mitigation(id).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn unowned_victim_is_accepted_without_a_mitigation() {
+        let f = fixture(OperationMode::DryRun, |_, _| {});
+        let mut input = event("unowned", "udp_flood", None);
+        input.victim_ip = "198.51.100.7".into();
+        let response = ban(&f, input).await.unwrap();
+        assert_eq!(response.status, "accepted_no_mitigation");
+        assert_eq!(response.mitigation_id, None);
+        assert!(rows(&f).await.is_empty());
     }
 
     #[tokio::test]

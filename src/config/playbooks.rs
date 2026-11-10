@@ -484,6 +484,27 @@ mod tests {
     }
 
     #[test]
+    fn shipped_playbooks_cover_every_fastnetmon_vector_without_destination_ports() {
+        let playbooks: Playbooks =
+            crate::config::parse_yaml(include_str!("../../configs/playbooks.yaml")).unwrap();
+        assert!(playbooks.validate().is_empty());
+        // The notify script sends no top_dst_ports, so a vector without a
+        // port-independent playbook would silently stop at accepted_no_playbook.
+        for vector in [
+            AttackVector::UdpFlood,
+            AttackVector::SynFlood,
+            AttackVector::AckFlood,
+            AttackVector::IcmpFlood,
+            AttackVector::Unknown,
+        ] {
+            assert!(
+                playbooks.find_playbook(vector, false).is_some(),
+                "no shipped playbook for {vector}"
+            );
+        }
+    }
+
+    #[test]
     fn test_validate_empty_playbooks() {
         let pb = Playbooks { playbooks: vec![] };
         let errors = pb.validate();

@@ -62,13 +62,16 @@ curl -sS -b cookies.txt -X POST http://localhost/v1/events \
 
 A `202` with `"status": "accepted"` and a `mitigation_id` means policy created
 a mitigation. The shipped `udp_flood_police_first` playbook selects its first
-step: police at 5 Mbps for 120 seconds. Other statuses, such as
-`accepted_no_mitigation`, mean policy or correlation chose not to act; see
+step: police at 5 Mbps for 120 seconds. `accepted` without a `mitigation_id`
+means correlation chose not to act; `accepted_no_mitigation` means the address
+is not in inventory; `accepted_no_playbook` means no playbook matched. See
 [ingest attack event](../reference/api.md#ingest-attack-event).
 
 Guardrails still apply. An event for an address that no inventory customer owns
-returns `202` with `accepted_no_mitigation` before guardrails run; the shipped
-safelist covers no shipped inventory address, so events there take this path.
+returns `202` with `accepted_no_mitigation` before per-rule guardrails run
+(policy and the blackhole source allowlist can still refuse it with `422`
+first); the shipped safelist covers no shipped inventory address, so events
+there take this path.
 An owned address that is safelisted returns `422` exactly as it does in
 enforced mode.
 

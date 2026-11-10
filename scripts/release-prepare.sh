@@ -66,7 +66,7 @@ EOF
     }
 
     refuse "is empty" "$next"
-    sed -i 's/^## \[Unreleased\]$/&\n\nA summary.\n\n### Fixed\n\n- A fix./' CHANGELOG.md
+    python3 -c 'from pathlib import Path; p=Path("CHANGELOG.md"); s=p.read_text(); old="## [Unreleased]"; assert s.count(old) == 1; p.write_text(s.replace(old, old + "\n\nA summary.\n\n### Fixed\n\n- A fix.", 1))'
     commit unreleased
     refuse "not greater" "$cur"
     refuse "not greater" "0.0.1"
@@ -163,7 +163,19 @@ open("CHANGELOG.md", "w", encoding="utf-8").write(text)
 EOF
 
 # [package] comes first in Cargo.toml; the tomllib read below confirms the edit.
-sed -i "0,/^version = \"$cur\"\$/s//version = \"$new\"/" Cargo.toml
+python3 - "$cur" "$new" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+cur, new = sys.argv[1], sys.argv[2]
+path = Path("Cargo.toml")
+text = path.read_text()
+pattern = rf'(?m)^version = "{re.escape(cur)}"$'
+if len(re.findall(pattern, text)) != 1:
+    sys.exit("error: Cargo.toml does not contain exactly one [package] version line")
+path.write_text(re.sub(pattern, f'version = "{new}"', text, count=1))
+PY
 [ "$(package_version)" = "$new" ] || fail "could not set the Cargo.toml [package] version to $new"
 
 cargo update --workspace --quiet

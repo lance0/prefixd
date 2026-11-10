@@ -3929,6 +3929,31 @@ async fn test_correlation_min_sources_2_two_sources_creates_mitigation() {
     );
 }
 
+/// ADR 022: corroboration stays met after it is first met, even when a later
+/// event drops the group's derived confidence below the threshold.
+#[tokio::test]
+async fn test_corroboration_met_is_sticky_after_a_guardrail_refusal() {
+    let (app, repo) = setup_app_correlation_with_repo(1, 0.5).await;
+    repo.insert_safelist("203.0.113.10", "admin", Some("core router"))
+        .await
+        .unwrap();
+
+    // Corroboration is met, but the safelist rejects the mitigation. The
+    // group stays open with corroboration_met set.
+    let first = make_event_json("detector_a", "203.0.113.10", 0.9);
+    let (status, _) = post_event(&app, &first).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    repo.remove_safelist("203.0.113.10").await.unwrap();
+
+    // (0.9 + 0.0) / 2 = 0.45, below the 0.5 threshold. Sticky corroboration
+    // must still admit the second event.
+    let second = make_event_json("detector_a", "203.0.113.10", 0.0);
+    let (status, json) = post_event(&app, &second).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(json["status"], "accepted", "{json}");
+    assert!(json["mitigation_id"].is_string(), "{json}");
+}
+
 /// VAL-ENGINE-020: Events bypass correlation when disabled
 #[tokio::test]
 async fn test_correlation_disabled_bypasses_entirely() {

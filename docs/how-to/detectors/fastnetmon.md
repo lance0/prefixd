@@ -41,6 +41,10 @@ not pass through prefixd's admission checks or create prefixd mitigation and
 audit records. Choose this path when FastNetMon should own RTBH; use the notify
 path when prefixd should apply its policy and own the route lifecycle.
 
+Detector playbooks can select police (rate-limit), discard or a guarded host
+blackhole. DSCP marking, redirect-to-IP/VRF and optional source-prefix matching
+are manual/VPN-scrubber operations, not playbook actions.
+
 ### Keep one writer per speaker target
 
 prefixd requires exclusive administration of its physical speaker target.
@@ -86,7 +90,8 @@ rustbgpd `v0.80.1`; it does not qualify a shared-target deployment:
 
 ## Installation
 
-1. Copy the notify script to the FastNetMon host:
+1. Copy the notify script to the FastNetMon host. The host needs `bash` and
+   `curl`; `jq` is optional (the script falls back to `grep`/`cut`):
 
 ```bash
 sudo cp scripts/prefixd-fastnetmon.sh /usr/local/bin/
@@ -102,7 +107,7 @@ PREFIXD_API="http://prefixd-host:8080"
 # Bearer token for authentication (if auth.mode=bearer)
 PREFIXD_TOKEN="your-api-token"
 
-# Operator ID written to withdrawal audit trail (optional)
+# Operator request field (optional; audit actor comes from authentication)
 PREFIXD_OPERATOR="fastnetmon"
 
 # Log file location (optional)
@@ -117,12 +122,17 @@ BAN_POST_ATTEMPTS="3"
 BAN_POST_DELAY_SECONDS="1"
 ```
 
+The script sources `/etc/default/prefixd` when it exists; variables set there
+override the process environment.
+
 FastNetMon runs the script once per ban and never repeats it. The script
 therefore retries the same event, with the same `event_id`, when prefixd cannot
 be reached or answers `503` (a standby or draining controller). It stops after
-`BAN_POST_ATTEMPTS` attempts in total. It never retries a `4xx`: a `409` means
-that event ID already arrived. A `409` after a retried connection error usually
-means the first attempt reached prefixd. Point `PREFIXD_API` at the active
+`BAN_POST_ATTEMPTS` attempts in total. It never retries a `4xx`. A `409` means
+the event ID already arrived, or the rule conflicts with speaker or injection
+ownership; read the error text. A `503` can be returned after the event row was
+stored, so a retry can then get `409` with no mitigation: check
+`GET /v1/mitigations`, not just the event. Point `PREFIXD_API` at the active
 controller, or at a load balancer that routes by `GET /v1/ready`; see
 [controller fence and rolling deploys](../upgrading.md#controller-fence-and-rolling-deploys).
 
@@ -149,7 +159,9 @@ sudo systemctl restart fastnetmon
 3. Script generates a unique UUID `event_id` for each ban occurrence
 4. Sends `POST /v1/events` with `action: "ban"` and numeric `confidence: 0.9`, retrying a connection error or
    `503` up to `BAN_POST_ATTEMPTS` times with the same `event_id`
-5. prefixd evaluates playbook, creates mitigation, announces FlowSpec
+5. prefixd stores the event, applies ownership, correlation and playbook gates,
+   then admits a mitigation and attempts the announcement; any gate can stop the
+   ban without a mitigation
 
 The script assigns `0.9` to a ban, matching the native JSON adapter's default
 ban confidence. This lets a single ban meet the shipped correlation settings
@@ -162,6 +174,40 @@ Older copies of the script omit confidence. With correlation enabled, missing
 confidence counts as zero: the API can accept and record the event without
 creating a mitigation. Copy the updated script to the FastNetMon host when
 upgrading; updating only the prefixd container does not replace it.
+
+The script distinguishes a recorded event from an admitted mitigation: a 2xx
+response without `mitigation_id` logs `NO_MITIGATION (<code>, status=...)`
+instead of `SUCCESS (<code>, status=...)`. Read the response body:
+
+| HTTP | Body | Meaning | Next check |
+|------|------|---------|------------|
+| 202 | `accepted` with `mitigation_id` | mitigation created | `announcement_outcome` and speaker export state |
+| 202 | `extended` with `mitigation_id` | existing mitigation extended | — |
+| 202 | `accepted` without `mitigation_id` | correlation threshold or source count not met | effective `correlation.yaml`, confidence, group window |
+| 202 | `accepted_no_mitigation` | victim not in the effective inventory | `/etc/prefixd/inventory.yaml` in the controller |
+| 202 | `accepted_no_playbook` | policy produced no rule: no playbook matched, or its initial step has no action | effective `playbooks.yaml` |
+| 400 | `error` | invalid event, or a VPN default scope refused a blackhole | error text; `default_scope`/`vpn_scopes` |
+| 422 | `error` | guardrail or VPN scope refused; the event may still be recorded | error text: safelist, quota, `l3vpn` capability |
+| 429 | `error` | event rate limit | `http.rate_limit`; wait |
+| 409 | `error` | duplicate event, speaker binding or owner conflict | event ID; a `503`-then-`409` retry may have stored an event without a mitigation |
+
+`SUCCESS` means prefixd committed mitigation intent (created or extended) and
+returned its ID; it does not prove the speaker exported the rule or a router
+installed it. Check `announcement_outcome` and the speaker export state.
+`NO_MITIGATION` is a warning, not a retry: the script still exits 0 because
+retrying cannot change these gates. Peers being down does not suppress
+mitigation rows: prefixd records the intent and reports the announcement as
+`unconfirmed`.
+
+The shipped safelist covers `10.0.0.0/8` and `192.168.0.0/16`; an owned victim
+inside either range is refused with 422. Use a real owned prefix for lab tests;
+a TEST-NET address is unowned unless you add it to the effective inventory.
+
+Compose keeps `inventory.yaml`, `playbooks.yaml` and `correlation.yaml` in the
+`prefixd-config` volume. Editing the copies under `configs/` in the checkout
+does not change the running controller; read `/etc/prefixd/` inside the
+controller (or use the dashboard editors). See the
+[quickstart configuration notes](../../tutorials/quickstart.md#configuration-and-persistence).
 
 ### Unban Flow
 
@@ -198,9 +244,10 @@ blackhole:
 Blackholes need the rustbgpd backend and a nonempty safelist; see the
 [blackhole configuration](../../reference/configuration.md#blackhole). In
 `playbooks.yaml`, one playbook per vector the script sends (`udp_flood`,
-`syn_flood`, `ack_flood`, `icmp_flood` and `unknown`). The first playbook that
-matches a vector wins, so put blackhole playbooks before FlowSpec ones for the
-same vector, or replace them:
+`udp_amplification`, `syn_flood`, `ack_flood`, `icmp_flood` and `unknown`).
+`udp_amplification` without its own playbook falls back to the `udp_flood`
+playbook. The first playbook that matches a vector wins, so put blackhole
+playbooks before FlowSpec ones for the same vector, or replace them:
 
 ```yaml
 playbooks:
@@ -310,7 +357,10 @@ Rules that keep the mapping honest:
 
 - Lines reporting a **zero metric** (`outgoing udp traffic: 0 mbps` or `incoming tcp syn pps: 0 packets per second`) are ignored — FastNetMon lists every protocol it tracks, and idle counters must not select a vector.
 - TCP flag tokens are matched before `udp` for mixed floods.
-- Protocol tokens are bounded by non-alphanumeric characters, including underscores: `tcp_ack` matches ACK, while `packets` and `Attack_type: udp_flood` do not.
+- Protocol tokens are bounded by non-alphanumeric characters, including
+  underscores: `tcp_ack` matches ACK, while `Attack_type` does not match `ack`.
+  A value such as `Attack_type: udp_flood` still contains a separate `udp`
+  token and selects `udp_flood`.
 
 ### UDP amplification
 
@@ -357,14 +407,18 @@ only library ports. See the
 Test the script manually:
 
 ```bash
-# Simulate ban
-echo "Attack details: UDP flood" | /usr/local/bin/prefixd-fastnetmon.sh 192.0.2.1 incoming 1000000 ban
+# Load the same settings the notify script uses.
+. /etc/default/prefixd 2>/dev/null || true
 
-# Check prefixd
-curl http://prefixd:8080/v1/mitigations?status=active
+# Simulate ban for an address the effective inventory owns.
+echo "Attack details: UDP flood" | /usr/local/bin/prefixd-fastnetmon.sh 203.0.113.10 incoming 1000000 ban
+
+# Check prefixd (same host and token the script uses).
+curl -H "Authorization: Bearer ${PREFIXD_TOKEN}" \
+  "${PREFIXD_API}/v1/mitigations?status=active&victim_ip=203.0.113.10"
 
 # Simulate unban
-echo "" | /usr/local/bin/prefixd-fastnetmon.sh 192.0.2.1 incoming 0 unban
+echo "" | /usr/local/bin/prefixd-fastnetmon.sh 203.0.113.10 incoming 0 unban
 ```
 
 ## Troubleshooting
@@ -381,13 +435,17 @@ tail -f /var/log/prefixd-fastnetmon.log
 1. **503 Service Unavailable**: `PREFIXD_API` reaches a standby controller; route
    it to the controller whose `GET /v1/ready` returns `200`
 2. **401 Unauthorized**: Check `PREFIXD_TOKEN` matches prefixd config
-3. **422 Unprocessable**: Victim IP not in prefixd inventory, or a blackhole
-   playbook matched and `source` is not in `blackhole.detector_sources`
-4. **No mitigation created**: Check the full response in the script log. A `202`
-   with no `mitigation_id` can mean correlation is not met; check the signal
-   group's confidence and source count, and update older scripts that omit
-   confidence. Also check that the victim is owned and playbooks match the vector.
-5. **400 on withdraw**: Ensure script sends `operator_id` (set `PREFIXD_OPERATOR`, default: `fastnetmon`)
+3. **422 Unprocessable**: A guardrail refused the mitigation, for example a
+   safelisted victim, a quota, an unsupported VPN scope, or a blackhole
+   playbook whose `source` is not in `blackhole.detector_sources`. An unowned
+   victim is not a 422: it returns `202 accepted_no_mitigation`.
+4. **No mitigation created**: Read the `NO_MITIGATION` or `SUCCESS` line in the
+   script log and map its `status` with the table under [Ban Flow](#ban-flow).
+   A `202` with no `mitigation_id` can mean correlation is not met, the victim
+   is unowned, or no playbook matched; update older scripts that omit
+   confidence.
+5. **400 on withdraw**: Check the error text. The request needs a non-empty
+   `reason`; the audit actor comes from authentication, not `PREFIXD_OPERATOR`.
 
 ### Debug mode
 

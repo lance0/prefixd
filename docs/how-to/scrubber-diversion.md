@@ -240,4 +240,5 @@ absence, and verify router removal separately. Keep the durable snapshots and
 withdrawal records. An older controller does not understand their exclusion
 obligations. See [ADR 030](../adr/030-scrubber-diversion.md), the
 [speaker contract](../project/scrubber-diversion-contract.md) and rustbgpd's
-[released guarded contract](https://github.com/lance0/rustbgpd/blob/v0.81.0/docs/adr/0144-guarded-flowspec-mutations.md).
+[released guarded contract](https://github.com/lance0/rustbgpd/blob/v0.82.0/docs/adr/0144-guarded-flowspec-mutations.md)
+and [VPN FlowSpec design](https://github.com/lance0/rustbgpd/blob/v0.82.0/docs/adr/0146-vpn-flowspec.md).

@@ -2,8 +2,10 @@
 
 ## Status
 
-Accepted 2026-11-08 with the revisions below. Runtime implementation and
-qualification are in progress; acceptance does not establish VPN support.
+Accepted 2026-11-08 with the revisions below. Controller implementation and
+released software-peer qualification are complete; router installation, VRF
+import isolation and traffic enforcement remain in progress. Acceptance does
+not establish VPN support.
 Extends [ADR 025](025-pluggable-speaker-backends.md),
 [ADR 030](030-scrubber-diversion.md) and
 [ADR 031](031-source-prefix-matches.md).

@@ -12,7 +12,13 @@
 
 set -euo pipefail
 
-# Configuration - override via environment or /etc/default/prefixd
+# Configuration - environment, or /etc/default/prefixd when present.
+PREFIXD_DEFAULTS_FILE="${PREFIXD_DEFAULTS_FILE:-/etc/default/prefixd}"
+if [[ -r "$PREFIXD_DEFAULTS_FILE" ]]; then
+    # shellcheck source=/dev/null
+    . "$PREFIXD_DEFAULTS_FILE"
+fi
+
 PREFIXD_API="${PREFIXD_API:-http://localhost:8080}"
 PREFIXD_TOKEN="${PREFIXD_TOKEN:-}"
 PREFIXD_OPERATOR="${PREFIXD_OPERATOR:-fastnetmon}"
@@ -31,6 +37,11 @@ ACTION="${4:-ban}"
 log() {
     echo "$(date -Iseconds) $*" >> "$LOG_FILE"
 }
+
+if ! command -v curl &> /dev/null; then
+    log "ERROR: curl is required"
+    exit 1
+fi
 
 # Validate required args
 if [[ -z "$IP" ]]; then
@@ -302,7 +313,23 @@ while true; do
     BODY=$(echo "$RESPONSE" | head -n -1)
 
     if [[ "$CURL_STATUS" -eq 0 && "$HTTP_CODE" =~ ^2 ]]; then
-        log "SUCCESS ($HTTP_CODE): $BODY"
+        # A 2xx only proves the event was accepted. prefixd records events
+        # before ownership, correlation and playbook gates, and those gates
+        # answer 202 without a mitigation. Surface that instead of SUCCESS.
+        STATUS=""
+        MITIGATION_ID=""
+        if command -v jq &> /dev/null; then
+            STATUS=$(printf '%s' "$BODY" | jq -r '.status // empty' 2>/dev/null || true)
+            MITIGATION_ID=$(printf '%s' "$BODY" | jq -r '.mitigation_id // empty' 2>/dev/null || true)
+        else
+            STATUS=$(printf '%s' "$BODY" | grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n 1 | cut -d'"' -f4 || true)
+            MITIGATION_ID=$(printf '%s' "$BODY" | grep -oE '"mitigation_id"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n 1 | cut -d'"' -f4 || true)
+        fi
+        if [[ -z "$MITIGATION_ID" ]]; then
+            log "NO_MITIGATION ($HTTP_CODE, status=${STATUS:-unknown}): $BODY"
+            exit 0
+        fi
+        log "SUCCESS ($HTTP_CODE, status=${STATUS:-unknown}): $BODY"
         exit 0
     fi
     if [[ ( "$CURL_STATUS" -ne 0 || "$HTTP_CODE" == "503" ) && "$ATTEMPT" -lt "$BAN_POST_ATTEMPTS" ]]; then

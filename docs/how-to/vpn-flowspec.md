@@ -1,10 +1,19 @@
 # Originate VPN FlowSpec
 
 VPN FlowSpec selects an RD and scope route targets for a mitigation. The receiving
-PE imports those RTs into its VRF; prefixd and rustbgpd do not create VRFs. This
-path requires rustbgpd 0.82.0 and a successful read-only probe of family 13
-(IPv4) or 14 (IPv6). Global FlowSpec keeps the 0.81.0 minimum. GoBGP refuses
-VPN requests before an RPC.
+PE imports those RTs into its VRF; prefixd and rustbgpd do not create VRFs.
+Each configured scope requires rustbgpd 0.82.0 and a successful read-only
+probe of its family: 13 for `ipv4` and 14 for `ipv6`. Configuring both
+`TRANSIT` and `TRANSIT6` requires both probes, and startup refuses to run when
+a configured or retained scope's family is unsupported. Global FlowSpec keeps
+the 0.81.0 minimum. GoBGP refuses VPN requests before an RPC.
+
+The Compose stack ships rustbgpd 0.82.0, and the rustbgpd neighbor must also
+list `l3vpn_ipv4_flowspec` and/or `l3vpn_ipv6_flowspec`; the shipped
+`configs/rustbgpd.toml` only enables the global families. A v0.24.0 controller
+has no VPN code and silently ignores `bgp.vpn_scopes`, so verify the controller
+image digest and that the running settings expose the scope before debugging
+the router.
 
 The current implementation covers discard, police, manual destination DSCP
 marking and guarded target-IP or VRF route-target scrubber diversion.
@@ -43,8 +52,10 @@ bgp:
       allow_source_only: false
 ```
 
-A string `default_scope: TRANSIT` selects one named family. A family mismatch
-refuses admission; it never falls back to global. The two-family mapping above
+The two entries are logical family selectors, not two VRFs; they may use the
+same RD and route target and feed one real VRF. A string
+`default_scope: TRANSIT` selects one named family. A family mismatch refuses
+admission; it never falls back to global. The two-family mapping above
 selects each family explicitly. Omitting the default retains global automatic
 mitigation. Detectors cannot supply routing scope, RD or RT selectors; keep
 unrelated detector metadata in `raw_details`.

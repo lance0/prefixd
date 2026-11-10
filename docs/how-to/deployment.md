@@ -82,7 +82,9 @@ revision.
 
 Compose uses the prebuilt `main` tags by default. `PREFIXD_IMAGE` overrides both
 the controller and its initializer; `PREFIXD_DASHBOARD_IMAGE` overrides the
-frontend. Supply already-published matching references when pinning a deployment.
+frontend. `PREFIXD_RUSTBGPD_IMAGE` overrides the pinned speaker image; leave it
+unset to use the tested rustbgpd 0.82.0 digest. Supply already-published matching
+references when pinning a deployment.
 No new release tag or immutable controller digest is implied by this guide.
 The quickstart uses `--pull always --no-build`; the explicit
 [local build option](../tutorials/quickstart.md#build-from-source) uses local tags
