@@ -213,7 +213,7 @@ Install `cargo-deny` and run
 for the backend dependency gate. `deny.toml` checks development/build dependencies,
 licenses and sources, rejects wildcard requirements, and keeps duplicate versions
 visible as warnings. Reassess the exact certificate-data license exceptions on
-version changes. The separate full-lock Rust advisory audit retains the RSA exception for SQLx's
+version changes. The separate full-lock Rust advisory audit retains the `rsa` (RUSTSEC-2023-0071) and `libsqlite3-sys` (RUSTSEC-2026-0459) exceptions for SQLx's
 optional, uncompiled MySQL dependency. Cargo-deny's selected graph does not
 currently include it; passing cargo-deny is not an exception-free full-lock audit.
 The Rust advisory checks cover both `Cargo.lock` and `fuzz/Cargo.lock`; they

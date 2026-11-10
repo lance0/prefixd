@@ -4,8 +4,7 @@ bgp:
   local_asn: 44407
   router_id: 192.0.2.1
   rustbgpd:
-    endpoint: http://127.0.0.1:50051
-    bearer_token_env: PREFIXD_RUSTBGPD_TOKEN
+    endpoint: "unix:///run/rustbgpd/grpc.sock"
     leased_flowspec: true
   default_scope:
     ipv4: TRANSIT

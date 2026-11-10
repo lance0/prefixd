@@ -10,15 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Upgrade notes
 
 - Upgrade a v0.24.0 deployment with
-  [v0.24.0 → next release](docs/how-to/upgrading.md#v0240--next-release). No
-  database migration is required; migration 019 remains the latest.
+  [v0.24.0 → 0.25.0](https://github.com/lance0/prefixd/blob/v0.25.0/docs/how-to/upgrading.md#v0240--0250).
+  No database migration is required; migration 019 remains the latest.
 - Copy the updated `scripts/prefixd-fastnetmon.sh` to every FastNetMon host. It
   sends explicit `0.9` confidence and logs `NO_MITIGATION` when a 2xx response
-  has no `mitigation_id`.
+  has no `mitigation_id`. A ban that an older script recorded without confidence
+  can now meet the shipped correlation threshold and create a mitigation. It
+  also sources `/etc/default/prefixd` and requires `curl`.
 - The shipped `prefixd.yaml` and `prefixd-gobgp.yaml` no longer contain a
-  `correlation` section; `correlation.yaml` is the only source. If you relied on
-  the inline section and have no `correlation.yaml`, create one before
-  upgrading: with neither, correlation is disabled.
+  `correlation` section; `correlation.yaml` is the only source for those Compose
+  configurations. An inline section still applies when no `correlation.yaml`
+  exists. If you relied on the inline section with no standalone file, create
+  one before switching to the new shipped main config: with neither,
+  correlation is disabled.
 - Existing `prefixd-config` volumes keep their inventory, playbook and
   correlation files. Merge the new `ack_flood` playbook into
   `/etc/prefixd/playbooks.yaml`; checkout edits do not reach the volume.
@@ -29,11 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limitations
 
-- VPN FlowSpec qualifies controller intent and speaker export only. Router
-  installation, VRF import and forwarding remain separate platform
-  qualification, including for redirect actions.
+- VPN FlowSpec qualifies controller intent, speaker export and, in fixtures, a
+  software peer's received routes. Router installation, VRF import and
+  forwarding remain separate platform qualification, including for redirect
+  actions.
+- The FastNetMon Community notify script authenticates with a bearer token
+  only; `credentials` auth mode rejects it.
 - GoBGP refuses VPN requests; only the rustbgpd 0.82.0 controller paths are
   qualified for scoped admission.
+- The 0.24.0 known limitations otherwise still apply, including
+  controller-dependent TTL expiry and the administrator-only Scrubbers page.
 
 ### Added
 
@@ -56,19 +65,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Record [VPNv4/v6 five-action software-peer and recovery qualification](docs/reference/qualification/vpn-flowspec-actions-2026-11-08.md), including exact receiver attributes and independent withdrawal. Router installation and traffic enforcement remain separate qualification.
+- Record [VPNv4/v6 five-action software-peer and recovery qualification](https://github.com/lance0/prefixd/blob/v0.25.0/docs/reference/qualification/vpn-flowspec-actions-2026-11-08.md), including exact receiver attributes and independent withdrawal. Router installation and traffic enforcement remain separate qualification.
 
 - Vendor the rustbgpd v0.82.0 controller schema and test the existing global
   lifecycle against its pinned image as well as v0.81.0. The global daemon
   minimum remains v0.81.0; VPN support requires a successful family probe.
+- Unknown keys under `bgp` now fail configuration loading instead of being
+  ignored. Check a 0.24.0 `prefixd.yaml` for misspelled BGP keys before
+  upgrading.
 
 - Pin Compose to rustbgpd 0.82.0 and expose `PREFIXD_RUSTBGPD_IMAGE` so VPN
   deployments are not silently recreated on 0.81.0.
 - Remove the duplicate `correlation` block from the shipped `prefixd.yaml` and
-  `prefixd-gobgp.yaml`; `correlation.yaml` is the only source, because it
-  already replaced that block whenever it existed. Existing `prefixd-config`
-  volumes keep their copies: merge the new `ack_flood` playbook into
-  `/etc/prefixd/playbooks.yaml` before relying on it.
+  `prefixd-gobgp.yaml`; `correlation.yaml` is the only source for those Compose
+  configurations, because it already replaced that block whenever it existed.
+  The inline fallback still applies when no standalone file exists. Existing
+  `prefixd-config` volumes keep their copies: merge the new `ack_flood`
+  playbook into `/etc/prefixd/playbooks.yaml` before relying on it.
 
 ### Fixed
 

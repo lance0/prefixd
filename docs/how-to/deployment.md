@@ -292,14 +292,16 @@ Resolved alerts (status=`resolved`) automatically withdraw the corresponding mit
 
 Point FastNetMon's webhook notify URL at prefixd:
 
-```bash
-# FastNetMon Advanced
+```ini
+# FastNetMon Advanced; keep notify_script_args on one physical line.
 notify_script_path = /usr/bin/curl
-notify_script_args = -X POST -H "Content-Type: application/json" \
-  -d @- http://prefixd.internal/v1/signals/fastnetmon
+notify_script_args = -X POST -H "Content-Type: application/json" -H "Authorization: Bearer <token>" -d @- http://prefixd.internal/v1/signals/fastnetmon
 ```
 
-Or use the notify script from `scripts/prefixd-fastnetmon.sh` which provides additional features (retry, logging, unban support).
+The webhook and the Community notify script authenticate with a bearer
+token, so the controller must run `http.auth.mode: bearer` (or `mtls`/`none`);
+`credentials` mode rejects `Authorization: Bearer`. The Community script
+provides additional retry, logging and unban behavior.
 
 The adapter classifies the attack vector from the traffic breakdown (UDP/SYN/ICMP/TCP) and maps `action` to confidence:
 
