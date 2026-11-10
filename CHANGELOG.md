@@ -94,6 +94,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Source `/etc/default/prefixd` from the FastNetMon notify script, as its
   documentation already described, instead of silently using only the process
   environment.
+- Fail the FastNetMon notify script with an explicit `curl is required` error
+  instead of an opaque shell error when the host lacks curl.
 
 ## [0.24.0] - 2026-11-02
 

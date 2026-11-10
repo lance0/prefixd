@@ -38,6 +38,11 @@ log() {
     echo "$(date -Iseconds) $*" >> "$LOG_FILE"
 }
 
+if ! command -v curl &> /dev/null; then
+    log "ERROR: curl is required"
+    exit 1
+fi
+
 # Validate required args
 if [[ -z "$IP" ]]; then
     log "ERROR: No victim IP provided"

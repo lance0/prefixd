@@ -90,7 +90,8 @@ rustbgpd `v0.80.1`; it does not qualify a shared-target deployment:
 
 ## Installation
 
-1. Copy the notify script to the FastNetMon host:
+1. Copy the notify script to the FastNetMon host. The host needs `bash` and
+   `curl`; `jq` is optional (the script falls back to `grep`/`cut`):
 
 ```bash
 sudo cp scripts/prefixd-fastnetmon.sh /usr/local/bin/
