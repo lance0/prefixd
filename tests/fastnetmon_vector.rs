@@ -57,7 +57,10 @@ fn ban_payload_with_jq(details: &str, envs: &[(&str, &str)], with_jq: bool) -> s
             .args(["-c", "command -v \"$1\"", "--", command])
             .output()
             .expect("locate command");
-        assert!(output.status.success(), "missing test prerequisite: {command}");
+        assert!(
+            output.status.success(),
+            "missing test prerequisite: {command}"
+        );
         let target = String::from_utf8(output.stdout).expect("command path");
         std::os::unix::fs::symlink(target.trim(), bin_dir.join(command)).expect("link command");
     }
@@ -141,7 +144,8 @@ async fn ban_confidence_creates_a_mitigation_with_shipped_correlation() {
             settings.mode = OperationMode::DryRun;
             settings.bgp.mode = BgpMode::Mock;
             settings.http.auth.mode = AuthMode::None;
-            settings.correlation = CorrelationConfig::load(configs.join("correlation.yaml")).unwrap();
+            settings.correlation =
+                CorrelationConfig::load(configs.join("correlation.yaml")).unwrap();
             assert!(settings.correlation.enabled);
             assert_eq!(settings.correlation.min_sources, 1);
             assert_eq!(settings.correlation.confidence_threshold, 0.5);
