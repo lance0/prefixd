@@ -89,6 +89,7 @@ fn ban_payload_with_jq(details: &str, envs: &[(&str, &str)], with_jq: bool) -> s
         .env("PREFIXD_API", "http://127.0.0.1:1")
         .env("PREFIXD_OPERATOR", "test_operator")
         .env("PREFIXD_LOG", dir.path().join("script.log"))
+        .env("PREFIXD_DEFAULTS_FILE", dir.path().join("no-defaults"))
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -487,6 +488,7 @@ printf '%s\n%s' "$body" "$code"
         .env("PREFIXD_OPERATOR", "test_operator")
         .env("PREFIXD_LOG", &log_path)
         .env("BAN_POST_DELAY_SECONDS", "0")
+        .env("PREFIXD_DEFAULTS_FILE", dir.path().join("no-defaults"))
         .envs(envs.iter().copied())
         .stdin(Stdio::null())
         .status()
@@ -615,4 +617,33 @@ fn ban_reads_the_defaults_file_when_present() {
     );
     assert!(run.ok, "{}", run.log);
     assert!(run.log.contains("SUCCESS"), "{}", run.log);
+}
+
+#[test]
+fn ban_requires_curl() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir(&bin_dir).expect("mkdir bin");
+    for command in ["bash", "date"] {
+        let output = Command::new("bash")
+            .args(["-c", "command -v \"$1\"", "--", command])
+            .output()
+            .expect("locate command");
+        assert!(output.status.success(), "missing {command}");
+        let target = String::from_utf8(output.stdout).expect("command path");
+        std::os::unix::fs::symlink(target.trim(), bin_dir.join(command)).expect("link command");
+    }
+    let log_path = dir.path().join("script.log");
+    let status = Command::new("bash")
+        .arg(SCRIPT)
+        .args(["198.51.100.7", "incoming", "250000", "ban"])
+        .env("PATH", &bin_dir)
+        .env("PREFIXD_LOG", &log_path)
+        .env("PREFIXD_DEFAULTS_FILE", dir.path().join("no-defaults"))
+        .stdin(Stdio::null())
+        .status()
+        .expect("run script");
+    assert!(!status.success(), "a host without curl must fail");
+    let log = fs::read_to_string(&log_path).expect("script log");
+    assert!(log.contains("ERROR: curl is required"), "{log}");
 }

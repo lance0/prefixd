@@ -35,7 +35,7 @@ PPS="${3:-0}"
 ACTION="${4:-ban}"
 
 log() {
-    echo "$(date -Iseconds) $*" >> "$LOG_FILE"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%S%z) $*" >> "$LOG_FILE"
 }
 
 if ! command -v curl &> /dev/null; then
@@ -82,10 +82,10 @@ if [[ "$API_ACTION" == "unban" ]]; then
             --data-urlencode "status=pending,active,escalated" \
             --data-urlencode "victim_ip=$IP" \
             --data-urlencode "limit=1000" \
-            "${AUTH_ARGS[@]}" 2>&1)
+            "${AUTH_ARGS[@]}" 2>&1) || RESPONSE=$(printf '\n000')
 
         HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-        BODY=$(echo "$RESPONSE" | head -n -1)
+        BODY=$(printf '%s' "$RESPONSE" | sed '$d')
 
         if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
             log "ERROR querying mitigations ($HTTP_CODE): $BODY"
@@ -133,10 +133,10 @@ if [[ "$API_ACTION" == "unban" ]]; then
             "$PREFIXD_API/v1/mitigations/$MID/withdraw" \
             -H "Content-Type: application/json" \
             "${AUTH_ARGS[@]}" \
-            -d "$W_PAYLOAD" 2>&1)
+            -d "$W_PAYLOAD" 2>&1) || W_RESPONSE=$(printf '\n000')
 
         W_HTTP=$(echo "$W_RESPONSE" | tail -n1)
-        W_BODY=$(echo "$W_RESPONSE" | head -n -1)
+        W_BODY=$(printf '%s' "$W_RESPONSE" | sed '$d')
 
         if [[ "$W_HTTP" =~ ^2 ]]; then
             log "SUCCESS: Withdrew mitigation $MID for $IP ($W_HTTP)"
@@ -310,7 +310,7 @@ while true; do
         -d "$PAYLOAD" 2>&1) || CURL_STATUS=$?
 
     HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-    BODY=$(echo "$RESPONSE" | head -n -1)
+    BODY=$(printf '%s' "$RESPONSE" | sed '$d')
 
     if [[ "$CURL_STATUS" -eq 0 && "$HTTP_CODE" =~ ^2 ]]; then
         # A 2xx only proves the event was accepted. prefixd records events
