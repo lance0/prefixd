@@ -702,7 +702,11 @@ printf '{{"mitigations":[{{"mitigation_id":"6f5e6f5e-0000-4000-8000-000000000001
         .stdin(Stdio::null())
         .status()
         .expect("run script");
-    assert!(status.success(), "{}", fs::read_to_string(&log_path).unwrap_or_default());
+    assert!(
+        status.success(),
+        "{}",
+        fs::read_to_string(&log_path).unwrap_or_default()
+    );
     let log = fs::read_to_string(&log_path).expect("script log");
     assert!(log.contains("Unban lookup transport failure"), "{log}");
     assert!(log.contains("Withdrawal for"), "{log}");
