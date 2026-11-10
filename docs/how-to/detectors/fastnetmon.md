@@ -120,6 +120,10 @@ UNBAN_QUERY_DELAY_SECONDS="1"
 # Ban delivery attempts on a connection error or 503 (optional)
 BAN_POST_ATTEMPTS="3"
 BAN_POST_DELAY_SECONDS="1"
+
+# Withdrawal delivery attempts on a connection error or 503 (optional)
+WITHDRAW_ATTEMPTS="3"
+WITHDRAW_DELAY_SECONDS="1"
 ```
 
 The script sources `/etc/default/prefixd` when it exists; variables set there
