@@ -1,4 +1,4 @@
-//! Regression tests for scripts/prefixd-fastnetmon.sh: attack-vector inference and ban retry.
+//! Regression tests for scripts/prefixd-fastnetmon.sh: vectors, confidence and ban retry.
 //!
 //! The script maps FastNetMon's stdin details to a prefixd vector. Idle protocol
 //! lines ("outgoing udp traffic: 0 mbps") must not select a vector: they were
@@ -25,6 +25,10 @@ fn detected_vector(details: &str) -> String {
 /// Run a `ban` invocation with `details` on stdin and extra environment,
 /// returning the JSON payload handed to curl.
 fn ban_payload(details: &str, envs: &[(&str, &str)]) -> serde_json::Value {
+    ban_payload_with_jq(details, envs, true)
+}
+
+fn ban_payload_with_jq(details: &str, envs: &[(&str, &str)], with_jq: bool) -> serde_json::Value {
     let dir = tempfile::tempdir().expect("tempdir");
     let bin_dir = dir.path().join("bin");
     fs::create_dir(&bin_dir).expect("mkdir bin");
@@ -40,16 +44,42 @@ fn ban_payload(details: &str, envs: &[(&str, &str)]) -> serde_json::Value {
     fs::write(&curl_path, stub).expect("write curl stub");
     fs::set_permissions(&curl_path, fs::Permissions::from_mode(0o755)).expect("chmod curl stub");
 
-    let path = format!(
-        "{}:{}",
-        bin_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    // Isolate PATH so the fallback really runs without jq. A failing jq stub
+    // would still be found by command -v and select the wrong branch.
+    let mut commands = vec![
+        "bash", "cat", "date", "tr", "grep", "awk", "sort", "head", "tail", "sed",
+    ];
+    if with_jq {
+        commands.push("jq");
+    }
+    for command in commands {
+        let output = Command::new("bash")
+            .args(["-c", "command -v \"$1\"", "--", command])
+            .output()
+            .expect("locate command");
+        assert!(
+            output.status.success(),
+            "missing test prerequisite: {command}"
+        );
+        let target = String::from_utf8(output.stdout).expect("command path");
+        std::os::unix::fs::symlink(target.trim(), bin_dir.join(command)).expect("link command");
+    }
+    // Preserve the script's UUID fallbacks on hosts without Linux /proc.
+    for command in ["uuidgen", "python3"] {
+        let output = Command::new("bash")
+            .args(["-c", "command -v \"$1\"", "--", command])
+            .output()
+            .expect("locate optional command");
+        if output.status.success() {
+            let target = String::from_utf8(output.stdout).expect("command path");
+            std::os::unix::fs::symlink(target.trim(), bin_dir.join(command)).expect("link command");
+        }
+    }
 
     let mut child = Command::new("bash")
         .arg(SCRIPT)
         .args(["198.51.100.7", "incoming", "250000", "ban"])
-        .env("PATH", path)
+        .env("PATH", &bin_dir)
         .env("PREFIXD_API", "http://127.0.0.1:1")
         .env("PREFIXD_OPERATOR", "test_operator")
         .env("PREFIXD_LOG", dir.path().join("script.log"))
@@ -80,6 +110,85 @@ fn ban_payload(details: &str, envs: &[(&str, &str)]) -> serde_json::Value {
         .find(|arg| arg.contains("\"vector\""))
         .expect("payload with vector not passed to curl");
     serde_json::from_str(payload).expect("payload is valid JSON")
+}
+
+#[tokio::test]
+async fn ban_confidence_creates_a_mitigation_with_shipped_correlation() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use prefixd::AppState;
+    use prefixd::bgp::MockAnnouncer;
+    use prefixd::config::{
+        AuthMode, BgpMode, Customer, Inventory, OperationMode, Playbooks, PolicyProfile, Settings,
+    };
+    use prefixd::correlation::CorrelationConfig;
+    use prefixd::db::{MockRepository, RepositoryTrait};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    let configs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("configs");
+    for with_jq in [true, false] {
+        let payload = ban_payload_with_jq("Attack protocol: udp", &[], with_jq);
+        assert_eq!(payload["confidence"], serde_json::json!(0.9));
+        assert_eq!(payload["source"], "fastnetmon");
+        assert_eq!(payload["action"], "ban");
+
+        for with_confidence in [true, false] {
+            let mut event = payload.clone();
+            if !with_confidence {
+                // Preserve the generic API contract: missing confidence is
+                // not implicitly trusted just because source is fastnetmon.
+                event.as_object_mut().unwrap().remove("confidence");
+            }
+            let mut settings = Settings::load(configs.join("prefixd.yaml")).unwrap();
+            settings.mode = OperationMode::DryRun;
+            settings.bgp.mode = BgpMode::Mock;
+            settings.http.auth.mode = AuthMode::None;
+            settings.correlation =
+                CorrelationConfig::load(configs.join("correlation.yaml")).unwrap();
+            assert!(settings.correlation.enabled);
+            assert_eq!(settings.correlation.min_sources, 1);
+            assert_eq!(settings.correlation.confidence_threshold, 0.5);
+            let inventory = Inventory::new(vec![Customer {
+                customer_id: "test".into(),
+                name: "Test customer".into(),
+                prefixes: vec!["198.51.100.0/24".into()],
+                policy_profile: PolicyProfile::Normal,
+                services: vec![],
+            }]);
+            let repo = Arc::new(MockRepository::new());
+            let state = AppState::new(
+                settings,
+                inventory,
+                Playbooks::load(configs.join("playbooks.yaml")).unwrap(),
+                repo.clone(),
+                Arc::new(MockAnnouncer::new()),
+                ".".into(),
+            )
+            .unwrap();
+            let response = prefixd::api::create_test_router(state)
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/events")
+                        .header("content-type", "application/json")
+                        .body(Body::from(event.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["mitigation_id"].is_string(), with_confidence, "{body}");
+            assert_eq!(
+                repo.count_active_global().await.unwrap(),
+                u32::from(with_confidence)
+            );
+        }
+    }
 }
 
 #[test]

@@ -147,9 +147,21 @@ sudo systemctl restart fastnetmon
 1. FastNetMon detects attack on victim IP
 2. Calls script with args: `$1=IP $2=direction $3=pps $4=ban` and writes the attack details to its stdin
 3. Script generates a unique UUID `event_id` for each ban occurrence
-4. Sends `POST /v1/events` with `action: "ban"`, retrying a connection error or
+4. Sends `POST /v1/events` with `action: "ban"` and numeric `confidence: 0.9`, retrying a connection error or
    `503` up to `BAN_POST_ATTEMPTS` times with the same `event_id`
 5. prefixd evaluates playbook, creates mitigation, announces FlowSpec
+
+The script assigns `0.9` to a ban, matching the native JSON adapter's default
+ban confidence. This lets a single ban meet the shipped correlation settings
+(`min_sources: 1`, `confidence_threshold: 0.5`). Inventory ownership, playbooks
+and guardrails still apply; a stricter correlation policy may require more
+signals. The `sources.fastnetmon.confidence_mapping` setting applies to
+`POST /v1/signals/fastnetmon`, not this script's `POST /v1/events` payload.
+
+Older copies of the script omit confidence. With correlation enabled, missing
+confidence counts as zero: the API can accept and record the event without
+creating a mitigation. Copy the updated script to the FastNetMon host when
+upgrading; updating only the prefixd container does not replace it.
 
 ### Unban Flow
 
@@ -371,7 +383,10 @@ tail -f /var/log/prefixd-fastnetmon.log
 2. **401 Unauthorized**: Check `PREFIXD_TOKEN` matches prefixd config
 3. **422 Unprocessable**: Victim IP not in prefixd inventory, or a blackhole
    playbook matched and `source` is not in `blackhole.detector_sources`
-4. **No mitigation created**: Check playbooks match the vector
+4. **No mitigation created**: Check the full response in the script log. A `202`
+   with no `mitigation_id` can mean correlation is not met; check the signal
+   group's confidence and source count, and update older scripts that omit
+   confidence. Also check that the victim is owned and playbooks match the vector.
 5. **400 on withdraw**: Ensure script sends `operator_id` (set `PREFIXD_OPERATOR`, default: `fastnetmon`)
 
 ### Debug mode
