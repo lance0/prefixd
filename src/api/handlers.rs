@@ -1421,12 +1421,14 @@ async fn handle_ban(
             .collect();
         let source_count = CorrelationEngine::count_distinct_sources(&source_names);
 
+        // ADR 022: once corroboration is met, it stays met for the group.
+        // Decay can lower derived_confidence below the threshold later.
         let corroboration_met = CorrelationEngine::check_corroboration(
             source_count,
             derived_confidence,
             &correlation_config,
             playbook_override,
-        );
+        ) || group.corroboration_met;
 
         // Update group in DB
         let mut updated_group = group.clone();
