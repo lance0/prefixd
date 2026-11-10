@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-10
+
 ### Upgrade notes
 
 - Upgrade a v0.24.0 deployment with
@@ -2866,7 +2868,8 @@ Startup now refuses the configuration keys removed in 0.20.0, and requires
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/lance0/prefixd/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/lance0/prefixd/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/lance0/prefixd/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/lance0/prefixd/compare/v0.22.1...v0.23.0
