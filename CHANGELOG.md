@@ -55,11 +55,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for example `{"set": ["syn"], "not_set": ["ack"]}`. It requires protocol TCP
   and `guardrails.allow_tcp_flags_match`, has one canonical form and rule
   identity, and is encoded and read back exactly by rustbgpd 0.81.0 and 0.82.0
-  and GoBGP. A speaker rule with type 9 in any other form is not treated as a
-  prefixd rule. API, OpenAPI, WebSocket messages, `prefixdctl` (`--tcp-flags-set`,
-  `--tcp-flags-not-set` and match summaries), dashboard displays, the
-  `flowspec_match.tcp_flags` capability and the `flowspec_tcp_flags` capability
-  metric expose it. Scrubber diversions refuse request-supplied TCP flags.
+  and GoBGP. A local speaker rule with type 9 in any other form fails the
+  inventory read rather than being treated as a prefixd rule. API, OpenAPI,
+  WebSocket messages, `prefixdctl` (`--tcp-flags-set`, `--tcp-flags-not-set`
+  and match summaries), dashboard displays, the `flowspec_match.tcp_flags`
+  capability and the `flowspec_tcp_flags` capability metric expose it. A
+  refusal without the flag counts as
+  `prefixd_guardrail_rejections_total{reason="TcpFlagsMatchNotAllowed"}`.
+  Scrubber diversions refuse request-supplied TCP flags. Router support varies;
+  qualify receivers before enabling the flag.
+
+### Changed
+
+- The rustbgpd guarded inventory read no longer fails on a local FlowSpec rule
+  without a destination component that another guarded owner holds or that has
+  no owner. Such a rule previously latched every scrubber profile; it now
+  occupies its key, refuses diversion for every victim of its family, or of
+  both families when it has no prefix component, and is never deleted. The
+  ordinary reconciler's local read still fails on an unowned rule it cannot
+  decode.
 
 ### Security
 

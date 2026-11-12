@@ -117,8 +117,10 @@ fn raw_scope_targets(communities: &[u64]) -> Vec<u64> {
 /// The match of a global local rule without a destination component that is
 /// not prefixd's own return leg (ADR 030 R5). prefixd never injects that
 /// shape except as a scrubber return leg, so only the key matters: it occupies
-/// the key and affects every victim of its family. Its other attributes belong
-/// to another owner and never fail the read.
+/// the key and affects every victim of its family. Its path attributes and
+/// actions belong to another owner and are not checked, but its match
+/// components are still decoded strictly: an unsupported component fails the
+/// whole read, which is fail-closed.
 fn destination_less(route: &pb::FlowSpecRouteEntry, family: i32) -> Result<Option<FlowSpecNlri>> {
     if !matches!(family, 3 | 4)
         || route

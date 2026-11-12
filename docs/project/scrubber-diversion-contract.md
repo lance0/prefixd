@@ -2,7 +2,9 @@
 
 **Status:** The speaker prerequisite is released in rustbgpd v0.81.0. prefixd's
 manual controller is implemented behind disabled-by-default profiles; exact
-router/scrubber forwarding qualification remains open. See the
+router/scrubber forwarding qualification remains open. The optional return
+leg's speaker and controller cases pass on v0.81.0 and v0.82.0; see the
+[qualification coverage](#qualification-coverage). See the
 [manual workflow](../how-to/scrubber-diversion.md) and the
 [released guarded contract](https://github.com/lance0/rustbgpd/blob/v0.81.0/docs/adr/0144-guarded-flowspec-mutations.md).
 

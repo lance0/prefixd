@@ -490,6 +490,11 @@ removing or changing `return_leg` requires a new profile `revision`. Startup
 refuses the change while the profile has outstanding diversion, as for any
 other change to the frozen snapshot.
 
+*Correction, 2026-11-12.* A new profile `revision` for a `return_leg` change
+is operator procedure, so readiness reports and admissions name the new
+qualification. The controller does not compare revisions across restarts; it
+enforces only the startup refusal while the profile has outstanding diversion.
+
 ### R2. Rule shape
 
 The controller derives the return leg from a validated inbound leg. A request
@@ -611,9 +616,10 @@ rule. A foreign rule at a leg's key keeps withdrawal pending and visible. The
 controller never finalizes the withdrawal by deleting that rule.
 
 **Quotas.** Quotas budget rules on routers. A pair therefore counts as two
-against `max_active` and the customer, POP and global caps. Creation rate
-counts one admission. The speaker's per-owner key cap also counts two keys
-for each pair.
+against `max_active` and the customer, POP and global caps, and a profile with
+a return leg needs `max_active` of at least 2. Creation rate counts one
+admission. The speaker's per-owner key cap also counts two keys for each
+pair.
 
 **Dry-run.** Dry-run simulates both legs and sends nothing, as in section 4.
 
@@ -803,10 +809,14 @@ backend, router and scrubber:
 
 - **Speaker gate.** rustbgpd v0.81.0, prefixd's minimum, accepts, reads back,
   fences and exports the return shape exactly as v0.82.0 does, so both pass
-  the speaker gate and the minimum is unchanged. The only older daemon,
-  v0.80.1, has no guarded methods; prefixd's startup version check already
-  refuses it, so the refusal clause is met by that check rather than by a
+  the speaker gate and the minimum is unchanged. Older daemons, such as
+  v0.80.1, have no guarded methods; prefixd's startup version check already
+  refuses them, so the refusal clause is met by that check rather than by a
   shape-specific test.
+- **Export community.** Configuration validation requires a canonical
+  `ASN:VALUE` outside `0:x` and `65535:x`, unique across profiles and
+  different from every `blackhole.communities` entry. Ordinary FlowSpec and
+  VPN scopes attach no standard community.
 - **Controller gate.** Renewal extends the profile owner's whole lease. When
   one leg disappears while another healthy diversion of the same profile
   renews in the same pass, the surviving leg is extended once, by at most one

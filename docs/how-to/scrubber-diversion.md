@@ -183,8 +183,10 @@ ordinary FlowSpec reconciler's local inventory read still fails on an unowned
 local rule it cannot decode, including one without a destination, as it did
 before return legs.
 
-Adding, removing or changing `return_leg` requires a new profile `revision`.
-Startup refuses the change while the profile has outstanding diversion.
+Startup refuses adding, removing or changing `return_leg` while the profile
+has outstanding diversion. Give the profile a new `revision` with the change so
+readiness reports and admissions name the new qualification; prefixd does not
+compare revisions across restarts.
 
 Set the readiness credential in the controller's environment, install any
 private monitor CA, then enable the profile configuration and restart. Each
@@ -254,9 +256,9 @@ budget. Each pass reads the guarded inventory once, issues at most one mutation
 window and one renewal per profile, and reads the result back once, so speaker
 work grows with profiles rather than diversions. It reuses a window only while
 at least twelve seconds remain, longer than the gap between two renewals.
-Per-peer export reads stop three seconds into the pass and rotate across
-passes; a slow or failed read marks that diversion's export evidence as
-historical without latching. A pass writes and audits a diversion only when its
+Per-peer export reads stop three seconds into the pass, each read is capped
+at two seconds, and reads rotate across passes; a slow or failed read marks
+that diversion's export evidence as historical without latching. A pass writes and audits a diversion only when its
 status, generation or export evidence changes. A failed, stale, malformed or
 mismatched report, storage failure, lost controller fence, failed renewal, lost
 ownership or incomplete pass latches affected profiles unarmed. New

@@ -17,7 +17,10 @@ now 5. Extends
 [ADR 025](025-pluggable-speaker-backends.md). It follows the identity
 conventions of [ADR 027](027-blackhole-mitigations.md). The 2026-10-23
 amendment to [ADR 004](004-destination-prefix-32-only.md) permits guarded
-manual destination CIDRs; automatic rules still match one victim host.
+manual destination CIDRs; automatic rules still match one victim host. The
+2026-11-12 amendment in [section 1](#1-components) admits explicit manual TCP
+flags matches behind `allow_tcp_flags_match`; detectors and playbooks still do
+not select them.
 
 ## Date
 

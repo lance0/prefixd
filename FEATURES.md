@@ -197,8 +197,8 @@ CIDR with explicit prefix-bound opt-in, optional protocol and discrete
 destination-port equalities, with source-port, fragment and packet-length
 components for amplification. Manual rules may also select a same-family source
 CIDR behind `guardrails.allow_src_prefix_match`, and a TCP flags match such as
-SYN without ACK on TCP rules behind `guardrails.allow_tcp_flags_match`. Policy rates use bits/sec;
-adapters convert wire units. Automatic ICMP maps to protocol 1 for IPv4 and 58
+SYN without ACK on TCP rules behind `guardrails.allow_tcp_flags_match`. Policy
+rates use bits/sec; adapters convert wire units. Automatic ICMP maps to protocol 1 for IPv4 and 58
 for IPv6; manual requests use `icmp` or `icmpv6` for the matching family.
 
 Saved intent, successful speaker acceptance and local read-back do not prove
@@ -286,6 +286,60 @@ FastNetMon Community ban, into a blackhole for the victim
   `PrefixdBlackholeNotExported` remains blackhole-only and fires when a
   blackhole reaches no peer, for example through an export-policy denial. Committed export is not router enforcement. See
   [export evidence](docs/reference/speaker-backends.md#export-evidence).
+
+---
+
+## Scrubber Diversion
+
+An Admin can divert one owned host's traffic to a configured scrubber with a
+guarded FlowSpec redirect ([ADR 030](docs/adr/030-scrubber-diversion.md)). It
+is disabled by default and needs rustbgpd v0.81.0 or later (v0.82.0 for
+redirect-to-VRF):
+
+- **Configured profiles only.** A request names a profile, never a target. Each
+  profile freezes its targets, router peers, policy binding and revision into
+  every admission, and uses its own speaker lease owner.
+- **Fresh readiness and explicit re-arm.** An authenticated monitor must attest
+  readiness every few seconds; any failure latches the profile and drains its
+  diversions until an Admin re-arms it.
+- **Symmetric return leg.** A global IP-target profile can add a `return_leg`.
+  For TCP, the controller derives a destination-less rule for the victim's
+  responses, tagged with an export community, and admits, renews and withdraws
+  both legs together.
+- **Forwarding is not qualified.** prefixd confirms local speaker intent and
+  per-peer export. Router installation, forwarding and the clean return path
+  remain the operator's qualification.
+
+See the [operator workflow](docs/how-to/scrubber-diversion.md).
+
+---
+
+## VPN FlowSpec
+
+Opt-in VPNv4 and VPNv6 FlowSpec scopes
+([ADR 032](docs/adr/032-vpn-flowspec-scope.md)) select an RD and scope route
+targets for a mitigation. Global FlowSpec stays the default until
+`bgp.vpn_scopes` is configured:
+
+- **rustbgpd 0.82.0 or later only.** Each configured scope needs a successful
+  read-only probe of its family (13 or 14). GoBGP refuses VPN requests before
+  any RPC, and no refused VPN operation falls back to global FlowSpec.
+- **Frozen scope identity.** Admission snapshots the scope name, family, exact
+  RD and RTs, which withdrawal, retries and recovery keep. An optional
+  per-family `default_scope` applies to automatic mitigations; detectors cannot
+  supply RD or RT selectors.
+- **Actions.** Discard, police and manual destination DSCP marking (0–63).
+  Source-only discard and police need `allow_source_only` on the scope, an
+  Admin to create them and an explicit destination-any confirmation.
+- **Scrubber diversion.** A scrubber profile can name a scope for guarded
+  target-IP diversion, or use a configured `redirect_route_target` for
+  redirect-to-VRF, kept separate from the scope RTs.
+- **Evidence boundary.** prefixd confirms local intent, speaker acceptance and
+  software-peer receipt. VRF import, router installation, packet marking and
+  forwarding remain platform qualification.
+
+See [VPN FlowSpec](docs/how-to/vpn-flowspec.md) and the
+[speaker reference](docs/reference/speaker-backends.md#scoped-vpn-flowspec).
 
 ---
 
