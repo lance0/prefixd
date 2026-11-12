@@ -7,14 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-11-12
+
+prefixd 0.26.0 adds an RFC 8955 TCP flags match to manual FlowSpec rules and an
+optional symmetric return leg for scrubber diversion, which pairs the inbound
+diversion with a source-matched rule for the victim's return traffic. Both are
+off until configured: TCP flags need `guardrails.allow_tcp_flags_match`, and the
+return leg needs a scrubber profile with `return_leg`. The release also updates
+rustix for RUSTSEC-2026-0486, which only test code reaches. It applies no
+migration, keeps rustbgpd v0.81.0 as the minimum, and loads a 0.25.0
+configuration as it is.
+
 ### Upgrade notes
 
+- Upgrade a v0.25.0 deployment with
+  [v0.25.0 → 0.26.0](https://github.com/lance0/prefixd/blob/v0.26.0/docs/how-to/upgrading.md#v0250--0260).
+  No database migration is required; migration 019 remains the latest.
 - `guardrails.allow_tcp_flags_match` is no longer reserved. It now admits the
   new TCP flags match and no longer logs a startup warning. Leave it `false`
   until the receiving routers are qualified for TCP flags matches.
 - Rows with `tcp_flags` fail to load on an older controller. Withdraw them
   before a downgrade; see the
-  [downgrade procedure](docs/how-to/upgrading.md#tcp-flags-matches-and-downgrade).
+  [downgrade procedure](https://github.com/lance0/prefixd/blob/v0.26.0/docs/how-to/upgrading.md#tcp-flags-matches-and-downgrade).
 - Scrubber profiles accept an optional `return_leg`. No migration is required,
   and rows and profiles without one keep their JSON and wire bytes. 0.25.0 and
   earlier refuse a configuration with `return_leg`, and refuse to start while
@@ -22,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including inbound-only UDP rows, which also stops ordinary TTL expiry.
   Withdraw every such diversion and remove `return_leg` before a downgrade;
   recovery is to roll forward and drain. See the
-  [downgrade procedure](docs/how-to/upgrading.md#downgrading-with-scrubber-return-legs).
+  [downgrade procedure](https://github.com/lance0/prefixd/blob/v0.26.0/docs/how-to/upgrading.md#downgrading-with-scrubber-return-legs).
 - A profile with `return_leg` needs `max_active` of at least 2, and each
   `export_community` must be unique across profiles and differ from every
   blackhole community.
@@ -30,10 +44,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `max_active` and the customer, POP and global caps, including for ordinary
   mitigation admission. Rows without a return leg still count once.
 
+### Known limitations
+
+- prefixd qualifies the return leg's control plane only: the exact speaker
+  rule, its read-back and its community-scoped export to the return peers.
+  Qualifying that the return routers forward the victim's traffic to the
+  scrubber, and that the scrubber handles both directions, is the operator's
+  responsibility.
+- Router support for TCP flags matches varies. prefixd qualifies speaker
+  encoding and read-back, not router installation or forwarding.
+- The 0.25.0 known limitations otherwise still apply.
+
+### Security
+
+- **rustix** — Updated 1.1.4 → 1.1.6 in both lockfiles, which fixes the
+  extended-attribute functions marking unwritten bytes as initialized for a
+  zero-length buffer (RUSTSEC-2026-0486). prefixd uses only `rustix::process`;
+  the affected `rustix::fs` functions are reached through the test-only
+  `testcontainers` archive path. No advisory exception is added.
+
 ### Added
 
 - Global IP-target scrubber profiles can add a symmetric `return_leg`
-  ([ADR 030 amendment](docs/adr/030-scrubber-diversion.md#amendment-symmetric-return-leg)).
+  ([ADR 030 amendment](https://github.com/lance0/prefixd/blob/v0.26.0/docs/adr/030-scrubber-diversion.md#amendment-symmetric-return-leg)).
   For a TCP diversion, the controller derives a destination-less rule with the
   victim as source, the mirrored ports as source ports, an optional SYN+ACK
   selector and a required `export_community`, under the same target, owner,
@@ -75,13 +108,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ordinary reconciler's local read still fails on an unowned rule it cannot
   decode.
 
-### Security
+### Documentation
 
-- **rustix** — Updated 1.1.4 → 1.1.6 in both lockfiles, which fixes the
-  extended-attribute functions marking unwritten bytes as initialized for a
-  zero-length buffer (RUSTSEC-2026-0486). prefixd uses only `rustix::process`;
-  the affected `rustix::fs` functions are reached through the test-only
-  `testcontainers` archive path. No advisory exception is added.
+- The API reference lists the source and amplification matches that VPN mark
+  rules already accept, and FEATURES describes VPN FlowSpec.
+- ADR 030 records that a new profile `revision` for a `return_leg` change is an
+  operator procedure, not a check the controller enforces.
 
 ## [0.25.0] - 2026-11-10
 
@@ -2944,7 +2976,8 @@ Startup now refuses the configuration keys removed in 0.20.0, and requires
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/lance0/prefixd/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/lance0/prefixd/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/lance0/prefixd/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/lance0/prefixd/compare/v0.23.0...v0.23.1
