@@ -1,9 +1,9 @@
 # Upgrade Guide
 
-Upgrading a v0.24.0 deployment? Follow
-[v0.24.0 → 0.25.0](#v0240--0250). Upgrading a v0.23.1
-deployment? Follow [v0.23.1 → 0.24.0](#v0231--0240), then
-[v0.24.0 → 0.25.0](#v0240--0250).
+Upgrading a v0.25.0 deployment? Follow
+[v0.25.0 → 0.26.0](#v0250--0260). From v0.24.0, follow
+[v0.24.0 → 0.25.0](#v0240--0250) first; from v0.23.1,
+[v0.23.1 → 0.24.0](#v0231--0240) before that.
 From v0.23.0, follow [v0.23.0 → 0.23.1](#v0230--0231) first; from v0.22.1,
 [v0.22.1 → 0.23.0](#v0221--0230) before that; from v0.22.0,
 [v0.22.0 → 0.22.1](#v0220--0221) before that; from v0.21.0,
@@ -811,6 +811,93 @@ prefixdctl migrations
 ---
 
 ## Version-Specific Notes
+
+### v0.25.0 → 0.26.0
+
+0.26.0 adds an opt-in TCP flags match for manual FlowSpec rules and an optional
+symmetric `return_leg` for scrubber profiles. It applies no migration:
+migration 019 remains the latest. A valid 0.25.0 `prefixd.yaml` loads as it
+is, the rustbgpd minimum stays v0.81.0, and Compose still pins v0.82.0, so the
+speaker is not restarted. Rows, rules and profiles that use neither feature
+keep their stored JSON, wire bytes and rule identities.
+
+#### Before you start
+
+- Back up PostgreSQL and keep the 0.25.0 images or binaries and configuration.
+- Check `guardrails.allow_tcp_flags_match`. 0.25.0 parsed it and ignored it;
+  0.26.0 admits TCP flags matches when it is `true`. Keep it `false` until
+  the receiving routers are qualified; see
+  [TCP flags matches and downgrade](#tcp-flags-matches-and-downgrade).
+- Add `return_leg` to a scrubber profile only in a separate restart after the
+  upgrade, with a new profile `revision`. Such a profile needs `max_active` of
+  at least 2, and each pair counts as two rules against its profile and the
+  customer, POP and global caps. See
+  [scrubber diversion](scrubber-diversion.md).
+
+#### Compose
+
+Run these in the deployment's checkout. rustbgpd stays on its current image:
+
+```bash
+# 1. Back up the database
+docker compose exec -T postgres pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+
+# 2. Update the checkout; rustbgpd stays pinned at 0.82.0
+git fetch --tags && git checkout v0.26.0
+
+# 3. Pin and pull the 0.26.0 controller and dashboard
+export PREFIXD_IMAGE=ghcr.io/lance0/prefixd:0.26.0
+export PREFIXD_DASHBOARD_IMAGE=ghcr.io/lance0/prefixd-dashboard:0.26.0
+docker compose --profile rustbgpd pull prefixd-rustbgpd dashboard
+
+# 4. Replace the controller and dashboard; rustbgpd keeps its routes
+docker compose --profile rustbgpd up -d --no-deps --no-build prefixd-rustbgpd dashboard
+```
+
+Keep both variables set for later Compose commands, or put them in `.env`.
+For GoBGP, use profile `gobgp` and service `prefixd-gobgp`.
+
+#### Bare metal
+
+```bash
+pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+git fetch --tags && git checkout v0.26.0
+cargo build --release --locked
+sudo systemctl stop prefixd
+sudo cp target/release/prefixd target/release/prefixdctl /usr/local/bin/
+sudo systemctl start prefixd
+```
+
+#### Check the 0.26.0 upgrade
+
+- `prefixdctl migrations` lists rows 1 through 19 unchanged; no migration 020 is
+  applied.
+- Authenticated `GET /v1/health/detail` is healthy and reports version 0.26.0,
+  the first reconciliation succeeds without repairs, and the same mitigation
+  IDs stay active or withdrawn. The speaker's local FlowSpec rules are
+  unchanged.
+- With scrubbers disabled, `GET /v1/scrubbers` still reports
+  `"enabled": false`. With scrubbers enabled, profiles start unarmed as after
+  every restart; re-arm each one after fresh readiness.
+
+#### Downgrading to 0.25.0
+
+0.25.0 cannot load TCP flags rows or diversions that involve a return leg.
+Drain both with 0.26.0 running, then follow [rollback](#rollback):
+
+- Withdraw every live TCP flags rule and drain its withdrawals; see
+  [TCP flags matches and downgrade](#tcp-flags-matches-and-downgrade).
+- Withdraw every outstanding diversion on a profile with `return_leg`,
+  including inbound-only UDP rows, then remove `return_leg`. A 0.25.0
+  controller refuses to start while any such row is outstanding, which also
+  stops ordinary TTL expiry; the only recovery is to roll forward and drain.
+  See [downgrading with scrubber return legs](#downgrading-with-scrubber-return-legs).
+
+An older `prefixdctl` cannot parse `speaker list-routes` once any route has
+TCP flags, and its `mitigations list` and `get` show such rules without their
+flags. Use a 0.26.0 `prefixdctl` until no TCP flags rule remains. Older
+`prefixdctl` diversion and scrubber commands print the controller's JSON as
+received, so they show return-leg fields without interpreting them.
 
 ### v0.24.0 → 0.25.0
 

@@ -24,13 +24,12 @@ to announce a FlowSpec rule with a mandatory TTL. No detector speaks BGP.
 > [Why rustbgpd](#pairs-with-rustbgpd)
 
 **Status:** pre-1.0, and the API can change before 1.0. The latest release,
-[v0.25.0](https://github.com/lance0/prefixd/releases/tag/v0.25.0), adds opt-in
-VPNv4/VPNv6 FlowSpec scopes, manual DSCP marking, source-only whole-VRF rules
-and guarded redirect-to-VRF. It stays global-only until `bgp.vpn_scopes` is
-configured, needs rustbgpd v0.81.0 or later (v0.82.0 for VPN; Compose pins
-v0.82.0), applies no new migration, and keeps migration 019 as the latest;
-follow the
-[upgrade guide](docs/how-to/upgrading.md#v0240--0250).
+[v0.26.0](https://github.com/lance0/prefixd/releases/tag/v0.26.0), adds an
+opt-in TCP flags match for manual FlowSpec rules and an optional symmetric
+return leg for scrubber diversion. Both stay off until configured. It needs
+rustbgpd v0.81.0 or later (v0.82.0 for VPN; Compose pins v0.82.0), applies no
+new migration, and keeps migration 019 as the latest; follow the
+[upgrade guide](docs/how-to/upgrading.md#v0250--0260).
 
 ## Choose your path
 
