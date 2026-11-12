@@ -472,12 +472,59 @@ async fn break_glass_removal_of_either_leg_withdraws_the_pair() {
         assert_eq!(
             fake.renewals.load(SeqCst),
             renewals,
-            "a partial pair never renews the surviving leg"
+            "a partial pair that is its owner's only row sends no renewal"
         );
         assert!(!state.scrubber.profiles().await["a"].armed);
         renew_pass(&state, &mut rows).await;
         assert!(fake.rows.lock().unwrap().is_empty(), "both legs drain");
         assert_eq!(fake.added.lock().unwrap().len(), 2, "no repair");
+    }
+}
+
+/// The owner lease is shared, so a healthy sibling's renewal in the failing
+/// pass can extend the surviving leg once. The next pass still drains it.
+#[tokio::test(start_paused = true)]
+async fn break_glass_survivor_beside_a_healthy_sibling_drains_in_the_next_pass() {
+    for return_removed in [false, true] {
+        let (state, _repo, fake) = pair_fixture().await;
+        let mut rows = vec![];
+        for host in [20, 21] {
+            rows.push(
+                state
+                    .scrubber
+                    .create(&state, &confirmed(&state, "a", host).await, "admin")
+                    .await
+                    .unwrap(),
+            );
+        }
+        let (inbound, ret) = keys(&rows[0]);
+        let (removed, survivor) = if return_removed {
+            (ret, inbound)
+        } else {
+            (inbound, ret)
+        };
+        fake.rows.lock().unwrap().remove(&removed);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        ready(&state).await;
+        let renewals = fake.renewals.load(SeqCst);
+        renew_pass(&state, &mut rows).await;
+        assert_eq!(rows[0].status, DiversionStatus::Withdrawing);
+        assert_eq!(
+            fake.renewals.load(SeqCst),
+            renewals + 1,
+            "the sibling's owner renewal also extends the survivor once"
+        );
+        assert!(fake.rows.lock().unwrap().contains_key(&survivor));
+        renew_pass(&state, &mut rows).await;
+        assert!(
+            !fake.rows.lock().unwrap().contains_key(&survivor),
+            "the next pass deletes the survivor"
+        );
+        assert_eq!(
+            fake.renewals.load(SeqCst),
+            renewals + 1,
+            "no further renewal"
+        );
     }
 }
 
@@ -780,6 +827,24 @@ fn return_legs_need_a_global_ip_profile_peers_and_a_canonical_community() {
     let mut shared = config.clone();
     shared.profiles[0].return_leg.as_mut().unwrap().router_peers = vec!["192.0.2.2".into()];
     shared.validate().unwrap();
+    assert!(invalid(&|p| p.max_active = 1), "a pair needs two rules");
+    // Each profile's return legs need their own community.
+    let mut second = profile("b");
+    second.return_leg = Some(return_leg());
+    let mut two = config.clone();
+    two.profiles.push(second.clone());
+    assert!(two.validate().is_err());
+    second.return_leg.as_mut().unwrap().export_community = "64496:101".into();
+    two.profiles[1] = second;
+    two.validate().unwrap();
+    // It must also differ from every configured blackhole community.
+    let mut blackhole = crate::config::BlackholeConfig {
+        communities: vec!["64496:100".into()],
+        ..Default::default()
+    };
+    assert!(config.validate_with(&blackhole).is_err());
+    blackhole.communities = vec!["64496:666".into()];
+    config.validate_with(&blackhole).unwrap();
     // Only `syn_ack` is a configurable selector.
     let yaml = "router_peers: [192.0.2.3]\npolicy_binding: v1\nexport_community: '64496:100'\n";
     let parsed: ReturnLeg =
@@ -862,4 +927,138 @@ fn readiness_requires_the_return_leg_object_exactly_for_pair_profiles() {
             .unwrap()
             .ready
     );
+}
+
+#[tokio::test]
+async fn an_inbound_leg_with_a_community_is_refused_before_victim_lookup() {
+    let (state, _repo, _fake) = pair_fixture().await;
+    let row = state
+        .scrubber
+        .prepare(&state, &request("a", 20), "admin")
+        .await
+        .unwrap();
+    row.validate().unwrap();
+    // A tampered inbound leg shaped like a return leg would otherwise pass
+    // rule validation and reach `victim()` with an empty destination.
+    let mut tampered = row.clone();
+    tampered.rule = row.return_rule.clone().unwrap();
+    assert!(tampered.rule.validate().is_ok());
+    assert!(tampered.validate().is_err());
+    let mut tampered = row;
+    tampered.rule.export_community = Some("64496:100".into());
+    assert!(tampered.validate().is_err());
+}
+
+#[tokio::test]
+async fn guardrail_quota_reads_weight_a_pair_as_two_rules() {
+    let (state, repo, _fake) = pair_fixture().await;
+    for (profile, host) in [("a", 20), ("b", 21)] {
+        state
+            .scrubber
+            .create(&state, &confirmed(&state, profile, host).await, "admin")
+            .await
+            .unwrap();
+    }
+    let pop = &state.settings.pop;
+    assert_eq!(repo.count_active_flowspec_by_pop(pop).await.unwrap(), 3);
+    assert_eq!(repo.count_active_flowspec_global().await.unwrap(), 3);
+    assert_eq!(
+        repo.count_active_flowspec_by_customer("cust_example")
+            .await
+            .unwrap(),
+        3
+    );
+    let intent = MitigationIntent {
+        event_id: Uuid::new_v4(),
+        customer_id: Some("cust_example".into()),
+        service_id: None,
+        pop: pop.clone(),
+        match_criteria: MatchCriteria {
+            dst_prefix: "198.51.100.1/32".into(),
+            protocol: Some(6),
+            ..Default::default()
+        },
+        action_type: ActionType::Discard,
+        action_params: ActionParams::default(),
+        ttl_seconds: 60,
+        reason: "ordinary fixture".into(),
+    };
+    let guardrails = |max_active_per_pop| {
+        let mut quotas = state.settings.quotas.clone();
+        quotas.max_active_per_pop = max_active_per_pop;
+        crate::guardrails::Guardrails::with_timers(
+            state.settings.guardrails.clone(),
+            quotas,
+            &state.settings.timers,
+        )
+    };
+    let error = guardrails(3)
+        .validate(&intent, repo.as_ref(), false)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("pop"), "{error}");
+    // Negative control: counting rows (two) would have admitted it.
+    guardrails(4)
+        .validate(&intent, repo.as_ref(), false)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn foreign_destination_less_rules_affect_every_victim_of_both_families() {
+    let (state, _repo, fake) = pair_fixture().await;
+    let row = state
+        .scrubber
+        .prepare(&state, &request("b", 20), "admin")
+        .await
+        .unwrap();
+    let keys = [row.rule.nlri.compute_hash()];
+    let mut v6 = row.clone();
+    v6.rule.nlri.dst_prefix = "2001:db8::20/128".into();
+    v6.rule.target = Some("2001:db8::99".parse().unwrap());
+    // As the rustbgpd reader represents them: a source-bearing return shape
+    // under another owner, and a match with no prefix component at all.
+    let sourced = FlowSpecNlri {
+        dst_prefix: String::new(),
+        src_prefix: Some("198.51.100.1/32".into()),
+        protocol: Some(6),
+        src_ports: vec![443],
+        tcp_flags: Some(crate::bgp::syn_ack()),
+        ..Default::default()
+    };
+    let bare = FlowSpecNlri {
+        dst_prefix: String::new(),
+        protocol: Some(17),
+        ..Default::default()
+    };
+    for (other, victims) in [(sourced, vec![&row]), (bare, vec![&row, &v6])] {
+        let inventory = GuardedInventory {
+            entries: vec![],
+            other_matches: vec![other.clone()],
+        };
+        let index = Observed::new(&inventory, &[]).unwrap();
+        for victim in victims {
+            assert!(
+                index.foreign_victim_overlap(victim, &keys).unwrap(),
+                "{other:?} overlaps {}",
+                victim.rule.nlri.dst_prefix
+            );
+        }
+        assert!(index.has_key(&other.compute_hash()));
+    }
+    // End to end: a foreign destination-less rule refuses admission and is
+    // never deleted.
+    fake.other_matches.lock().unwrap().push(FlowSpecNlri {
+        dst_prefix: String::new(),
+        protocol: Some(17),
+        ..Default::default()
+    });
+    let refused = state
+        .scrubber
+        .create(&state, &confirmed(&state, "b", 20).await, "admin")
+        .await
+        .unwrap();
+    assert_eq!(refused.status, DiversionStatus::Withdrawing);
+    assert_eq!(fake.writes.load(SeqCst), 0);
+    assert_eq!(fake.other_matches.lock().unwrap().len(), 1);
 }

@@ -191,6 +191,26 @@ impl ScrubberProfile {
 }
 
 impl ScrubberConfig {
+    /// [`Self::validate`], and no return-leg community equals a configured
+    /// blackhole community, which the speaker's export policy also matches.
+    pub fn validate_with(&self, blackhole: &crate::config::BlackholeConfig) -> Result<()> {
+        self.validate()?;
+        let blackhole = blackhole.parsed_communities()?;
+        if self
+            .profiles
+            .iter()
+            .filter_map(|profile| profile.return_leg.as_ref())
+            .filter_map(|leg| crate::bgp::export_community_value(&leg.export_community))
+            .any(|community| blackhole.contains(&community))
+        {
+            return Err(PrefixdError::Config(
+                "a scrubber return-leg export community must differ from every blackhole community"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.enabled && self.profiles.is_empty() {
             return Err(PrefixdError::Config(
@@ -203,6 +223,7 @@ impl ScrubberConfig {
             ));
         }
         let mut names = std::collections::HashSet::new();
+        let mut communities = std::collections::HashSet::new();
         for profile in &self.profiles {
             let url = reqwest::Url::parse(&profile.readiness_url)
                 .map_err(|_| PrefixdError::Config("invalid scrubber readiness URL".into()))?;
@@ -268,12 +289,20 @@ impl ScrubberConfig {
                     || leg.policy_binding.is_empty()
                     || leg.policy_binding.len() > 256
                     || crate::bgp::export_community_value(&leg.export_community).is_none()
+                    // A pair holds two rules, so a smaller cap admits no TCP pair.
+                    || profile.max_active < 2
                 {
                     return Err(PrefixdError::Config(
-                        "invalid scrubber return leg: it needs a global IP-target profile, 1 to 64 router peers, a policy binding and a canonical ASN:VALUE export community outside 0:x and 65535:x".into(),
+                        "invalid scrubber return leg: it needs a global IP-target profile with max_active of at least 2, 1 to 64 router peers, a policy binding and a canonical ASN:VALUE export community outside 0:x and 65535:x".into(),
                     ));
                 }
                 validate_peers(&leg.router_peers)?;
+                // Export policy tells each profile's return legs apart by community.
+                if !communities.insert(&leg.export_community) {
+                    return Err(PrefixdError::Config(
+                        "scrubber return legs need distinct export communities".into(),
+                    ));
+                }
             }
         }
         Ok(())

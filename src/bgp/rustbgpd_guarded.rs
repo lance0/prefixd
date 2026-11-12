@@ -114,7 +114,28 @@ fn raw_scope_targets(communities: &[u64]) -> Vec<u64> {
         .collect()
 }
 
+/// The match of a global local rule without a destination component that is
+/// not prefixd's own return leg (ADR 030 R5). prefixd never injects that
+/// shape except as a scrubber return leg, so only the key matters: it occupies
+/// the key and affects every victim of its family. Its other attributes belong
+/// to another owner and never fail the read.
+fn destination_less(route: &pb::FlowSpecRouteEntry, family: i32) -> Result<Option<FlowSpecNlri>> {
+    if !matches!(family, 3 | 4)
+        || route
+            .components
+            .iter()
+            .any(|component| component.r#type == 1)
+        || !route.rd.is_empty()
+    {
+        return Ok(None);
+    }
+    decode_components(&route.components, family, None).map(Some)
+}
+
 fn foreign_match(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecNlri> {
+    if let Some(nlri) = destination_less(&route, family)? {
+        return Ok(nlri);
+    }
     let mut extended_communities = vec![0x8006_u64 << 48];
     extended_communities.extend(raw_scope_targets(&route.extended_communities));
     let route = pb::FlowSpecRouteEntry {
@@ -410,7 +431,7 @@ impl RustBgpdAnnouncer {
                 let route = row.route.ok_or_else(|| invalid("missing local route"))?;
                 if foreign_guarded(&route) {
                     let nlri = foreign_match(route, family)?;
-                    if !keys.insert(nlri.compute_hash()) {
+                    if !keys.insert((family, nlri.compute_hash())) {
                         return Err(invalid("repeated local key"));
                     }
                     other_matches.push(nlri);
@@ -418,16 +439,19 @@ impl RustBgpdAnnouncer {
                     || route.admission_revision.is_some()
                 {
                     let observation = decode_guarded(route, family)?;
-                    if !keys.insert(observation.rule.nlri.compute_hash()) {
+                    if !keys.insert((family, observation.rule.nlri.compute_hash())) {
                         return Err(invalid("repeated guarded key"));
                     }
                     entries.push(observation);
                 } else {
-                    let ordinary = decode(route, family)?;
-                    if !keys.insert(ordinary.nlri.compute_hash()) {
+                    let nlri = match destination_less(&route, family)? {
+                        Some(nlri) => nlri,
+                        None => decode(route, family)?.nlri,
+                    };
+                    if !keys.insert((family, nlri.compute_hash())) {
                         return Err(invalid("repeated local key"));
                     }
-                    other_matches.push(ordinary.nlri);
+                    other_matches.push(nlri);
                 }
             }
         }

@@ -77,6 +77,20 @@ type MockGroupEventLink = (
 );
 
 impl MockRepository {
+    /// Outstanding diversion rules, a return-leg pair counting two, as the
+    /// repository's quota SQL counts them.
+    fn diversion_rules(&self, keep: impl Fn(&crate::scrubber::Diversion) -> bool) -> u32 {
+        let rules: usize = self
+            .diversions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| row.status.outstanding() && keep(row))
+            .map(|row| row.legs().count())
+            .sum();
+        u32::try_from(rules).unwrap_or(u32::MAX)
+    }
+
     #[cfg(test)]
     pub fn lifecycle_read_counts(&self) -> (usize, usize) {
         use std::sync::atomic::Ordering::Relaxed;
@@ -1241,7 +1255,8 @@ impl RepositoryTrait for MockRepository {
                             | MitigationStatus::Escalated
                     )
             })
-            .count() as u32)
+            .count() as u32
+            + self.diversion_rules(|row| row.customer_id == customer_id))
     }
 
     async fn count_active_flowspec_by_pop(&self, pop: &str) -> Result<u32> {
@@ -1268,7 +1283,8 @@ impl RepositoryTrait for MockRepository {
                             | MitigationStatus::Escalated
                     )
             })
-            .count() as u32)
+            .count() as u32
+            + self.diversion_rules(|row| row.pop == pop))
     }
 
     async fn count_active_flowspec_global(&self) -> Result<u32> {
@@ -1294,7 +1310,8 @@ impl RepositoryTrait for MockRepository {
                             | MitigationStatus::Escalated
                     )
             })
-            .count() as u32)
+            .count() as u32
+            + self.diversion_rules(|_| true))
     }
 
     async fn find_expired_mitigations(&self) -> Result<Vec<Mitigation>> {

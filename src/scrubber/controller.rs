@@ -137,6 +137,11 @@ impl<'a> Observed<'a> {
             if let Some(entry) = entry {
                 guarded.insert(key.clone(), entry);
             }
+            // A global match with no prefix component names no family, so it
+            // affects every victim of both.
+            if nlri.dst_prefix.is_empty() && nlri.scope.is_none() && source.is_none() {
+                selectors.push(("::/0".parse().map_err(|_| invalid())?, key.clone()));
+            }
             selectors.push((prefix, key));
         }
         Ok(Self {
@@ -365,7 +370,7 @@ impl ScrubberController {
     }
 
     pub fn new(settings: &crate::config::Settings) -> Result<Self> {
-        settings.scrubber.validate()?;
+        settings.scrubber.validate_with(&settings.blackhole)?;
         let mut runtime = Runtime::default();
         let mut tokens = HashMap::new();
         for profile in &settings.scrubber.profiles {

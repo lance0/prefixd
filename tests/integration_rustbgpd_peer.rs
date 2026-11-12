@@ -1716,6 +1716,26 @@ async fn released_return_leg_reaches_only_its_peers_with_exact_bytes() {
         speaker.delete_guarded(&replacement).await.unwrap();
         speaker.delete_guarded(&inbound).await.unwrap();
         assert!(speaker.guarded_inventory().await.unwrap().is_empty());
+        // Another tool's destination-less rule occupies its key without
+        // failing the guarded read or becoming prefixd intent.
+        let mut foreign = ret.clone();
+        foreign.owner = "other.tool".into();
+        let foreign_window = speaker.issue_window(&foreign.owner, 30).await.unwrap();
+        speaker
+            .add_guarded(&foreign, foreign_window.stamp, 30)
+            .await
+            .unwrap();
+        let inventory = speaker.guarded_inventory().await.unwrap();
+        assert!(inventory.is_empty());
+        assert!(inventory.has_key(&ret.nlri));
+        speaker.delete_guarded(&foreign).await.unwrap();
+        assert!(
+            !speaker
+                .guarded_inventory()
+                .await
+                .unwrap()
+                .has_key(&ret.nlri)
+        );
         tokio::time::timeout(Duration::from_secs(15), async {
             while !router_b
                 .paths(afi, prefixd::bgp::apipb::TableType::AdjIn)

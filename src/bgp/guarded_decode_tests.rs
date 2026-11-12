@@ -262,6 +262,8 @@ mod deadlines {
         guarded_mutations: Arc<AtomicUsize>,
         completed_mutations: Arc<AtomicUsize>,
         global_present: Arc<AtomicBool>,
+        /// Local intent rows returned by family.
+        routes: Arc<std::sync::Mutex<Vec<(i32, pb::FlowSpecRouteEntry)>>>,
     }
 
     impl Service {
@@ -296,6 +298,18 @@ mod deadlines {
             }
             Ok(tonic::Response::new(pb::ListFlowSpecResponse {
                 received_view: true,
+                received_routes: self
+                    .routes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(held, _)| *held == family)
+                    .map(|(_, route)| pb::ReceivedFlowSpecRouteEntry {
+                        route: Some(route.clone()),
+                        validation: 1,
+                        ..Default::default()
+                    })
+                    .collect(),
                 ..Default::default()
             }))
         }
@@ -418,6 +432,82 @@ mod deadlines {
             4 => speaker.delete_guarded(rule).await,
             _ => unreachable!(),
         }
+    }
+
+    /// ADR 030 R5: a destination-less rule that is not prefixd's return leg,
+    /// guarded under another owner or unowned, occupies its key without
+    /// failing the read; prefixd's own return leg is still decoded strictly.
+    #[tokio::test]
+    async fn foreign_destination_less_rules_occupy_their_keys_without_failing_the_read() {
+        let (speaker, service, server) = fixture().await;
+        let mut foreign = return_route();
+        foreign.injection_owner = "guarded:other.tool".into();
+        foreign.components[0].prefix = "192.0.2.2/32".into();
+        foreign.communities = vec![1, 2];
+        let unowned = pb::FlowSpecRouteEntry {
+            components: vec![pb::FlowSpecComponent {
+                r#type: 3,
+                value: "==17".into(),
+                ..Default::default()
+            }],
+            actions: vec![pb::FlowSpecAction {
+                action: Some(pb::flow_spec_action::Action::TrafficRate(
+                    pb::FlowSpecTrafficRate { rate: 0.0 },
+                )),
+            }],
+            peer_address: "0.0.0.0".into(),
+            afi_safi: 4,
+            extended_communities: vec![0x8006_u64 << 48],
+            communities: vec![(64496 << 16) | 7],
+            ..Default::default()
+        };
+        // Negative control: the strict ordinary decoder refuses both shapes,
+        // which made the whole guarded read fail before this change.
+        let mut ordinary_foreign = foreign.clone();
+        ordinary_foreign.injection_owner.clear();
+        assert!(decode(ordinary_foreign, 3).is_err());
+        assert!(decode(unowned.clone(), 4).is_err());
+        *service.routes.lock().unwrap() = vec![(3, return_route()), (3, foreign), (4, unowned)];
+        let inventory = speaker.guarded_inventory().await.unwrap();
+        assert_eq!(
+            inventory.len(),
+            1,
+            "only prefixd's own return leg is an entry"
+        );
+        assert_eq!(
+            inventory[0].rule.export_community.as_deref(),
+            Some("64496:100")
+        );
+        let foreign_key = FlowSpecNlri {
+            dst_prefix: String::new(),
+            src_prefix: Some("192.0.2.2/32".into()),
+            protocol: Some(6),
+            src_ports: vec![443],
+            tcp_flags: Some(crate::bgp::syn_ack()),
+            ..Default::default()
+        };
+        let unowned_key = FlowSpecNlri {
+            dst_prefix: String::new(),
+            protocol: Some(17),
+            ..Default::default()
+        };
+        assert_eq!(inventory.other_matches.len(), 2);
+        for key in [&foreign_key, &unowned_key] {
+            assert!(inventory.has_key(key), "{key:?}");
+            assert!(
+                inventory
+                    .other_matches
+                    .iter()
+                    .any(|other| other.dst_prefix.is_empty() && other.scope.is_none()),
+                "kept destination-less, never normalized to a host"
+            );
+        }
+        // A malformed row under prefixd's own owner still fails the read.
+        let mut ours = return_route();
+        ours.communities = vec![1, 2];
+        *service.routes.lock().unwrap() = vec![(3, ours)];
+        assert!(speaker.guarded_inventory().await.is_err());
+        server.abort();
     }
 
     #[tokio::test]

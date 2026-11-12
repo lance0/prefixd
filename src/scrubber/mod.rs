@@ -124,6 +124,13 @@ impl Diversion {
     /// Both legs are valid and the return leg is exactly the one the frozen
     /// profile derives from the inbound leg.
     pub fn validate(&self) -> crate::error::Result<()> {
+        // The inbound leg is a host-destination rule; only a return leg
+        // carries a community and omits the destination.
+        if self.rule.export_community.is_some() {
+            return Err(crate::error::PrefixdError::Internal(
+                "inconsistent scrubber inbound leg".into(),
+            ));
+        }
         self.rule.validate()?;
         match (
             derive_return(&self.rule, self.profile.return_leg.as_ref())?,
