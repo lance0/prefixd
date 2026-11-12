@@ -89,9 +89,9 @@ MTU and loop avoidance externally. The receipt field records an operator's
 qualification reference; prefixd does not independently certify its contents.
 
 Diversion covers one direction only. A stateful scrubber that must also see
-the victim's TCP responses needs a symmetric return leg. That leg is a
-[proposed amendment to ADR 030](../adr/030-scrubber-diversion.md#amendment-symmetric-return-leg)
-and is not implemented. Profiles do not accept a `return_leg` setting.
+the victim's TCP responses needs a symmetric return leg. That leg is
+[designed in ADR 030](../adr/030-scrubber-diversion.md#amendment-symmetric-return-leg)
+but not implemented. Profiles do not accept a `return_leg` setting yet.
 
 Set the readiness credential in the controller's environment, install any
 private monitor CA, then enable the profile configuration and restart. Each

@@ -14,9 +14,9 @@ Extends [ADR 025](025-pluggable-speaker-backends.md) and
 [ADR 027](027-blackhole-mitigations.md); complements
 [ADR 029](029-upstream-blackholing.md).
 
-The [symmetric return-leg amendment](#amendment-symmetric-return-leg) is
-Proposed 2026-11-12 and not implemented. Until it is accepted and qualified,
-the decision below diverts one direction only.
+The [symmetric return-leg amendment](#amendment-symmetric-return-leg) was
+accepted on 2026-11-12 and is not implemented yet. Until it is implemented and
+qualified, diversion covers one direction only.
 
 ## Context and research
 
@@ -396,9 +396,16 @@ failure-time or production-scrubbing guarantee.
 
 ## Amendment: symmetric return leg
 
-**Status:** Proposed 2026-11-12. Nothing in this section is implemented. It
-extends the accepted decision above and changes none of it for profiles
-without a return leg.
+**Status:** Accepted 2026-11-12. Nothing in this section is implemented yet.
+It extends the decision above and changes none of it for profiles without a
+return leg. Four choices are settled:
+
+- The return leg is tagged with a required `export_community`, and the speaker
+  contract does not change.
+- A return leg may overlap other hosts' destination rules, provided the
+  forwarding receipt includes a router-precedence control.
+- A pair counts as two rules against quotas.
+- A profile with a return leg refuses a request that omits the protocol.
 
 ### Context
 
@@ -414,9 +421,10 @@ victim's SYN-ACK. An operator then needs two rules for the same victim:
 
 UDP and other protocols need only the inbound leg. This amendment adds the
 second rule as an optional **return leg**. Both legs belong to one diversion
-and use the lifecycle in sections 3 and 4. The TCP-flags component (RFC 8955
-type 9) is added to `FlowSpecNlri` separately. This design assumes that
-component exists and uses its canonical representation.
+and use the lifecycle in sections 3 and 4. The optional flags selector uses
+the canonical TCP-flags match from the FlowSpec match model. That match is
+defined separately, and this amendment does not fix its field name or
+encoding.
 
 The amendment stays in this ADR because the return leg adds no separate
 mechanism. It reuses this ADR's profile, readiness, owner, window, latch and
@@ -463,8 +471,8 @@ A global IP-target profile can carry an optional `return_leg`:
   differ from any community the profile's scope or ordinary FlowSpec
   attaches.
 - **TCP flags.** `tcp_flags` is optional. When set, it accepts only
-  `syn_ack`, which means SYN and ACK both set (an RFC 8955 bitmask match with
-  the match bit). When omitted, the return leg matches all of the victim's TCP
+  `syn_ack`: a SYN+ACK selector expressed with the canonical TCP-flags match
+  from the FlowSpec match model. When omitted, the return leg matches all of the victim's TCP
   traffic from the mirrored ports. This is gateway-style symmetry and puts more
   load on the scrubber. No request, detector or playbook supplies or widens
   this selector, so it does not depend on whether request-supplied TCP-flags
@@ -724,10 +732,15 @@ Losing either leg's readiness drains both legs.
   and community. Metric labels do not change. `prefixd_scrubber_intents`
   keeps counting rows. OpenAPI, the API reference, the configuration reference
   and release notes change with the implementation.
-- **Speaker.** Guarded add and read-back must carry a destination-less global
-  rule with source ports, the type 9 component and a standard community, and
-  read back the exact bytes. If the pinned rustbgpd release cannot, the
-  minimum release is raised rather than gated by version. GoBGP stays
+- **Speaker.** The speaker contract does not change. In rustbgpd v0.82.0,
+  `AddGuardedFlowSpecRequest.rule` is an `AddFlowSpecRequest`, which carries
+  standard `communities`. The request requires only non-empty components in
+  ascending order, so a rule without a destination is valid. FlowSpec export
+  policy evaluates standard communities, and a rule without a destination has
+  no prefix in the policy context. This is established from the contract, not
+  from a live test, so the speaker gate in R9 must prove exact add, read-back
+  and export in a live fixture. If that fixture fails on the pinned release,
+  the minimum release is raised rather than gated by version. GoBGP stays
   unsupported for diversion.
 - **Downgrade and rollback.** `Diversion`, `ProfileSnapshot` and the profile
   configuration all deny unknown fields. An older controller therefore
@@ -762,7 +775,7 @@ backend, router and scrubber:
 
 | Gate | Acceptance |
 | --- | --- |
-| Speaker | Guarded add, read-back, revision-fenced delete and peer receipt of the return shape, with exact component and community bytes, for each target family. An older daemon refuses the shape without changing state. |
+| Speaker | A live released-daemon fixture proves guarded add, read-back, revision-fenced delete and peer receipt of the return shape, with exact component and community bytes, for each target family. It also proves that export policy matching the community sends the return leg only to its peers. An older daemon refuses the shape without changing state. |
 | Controller | The fake speaker and the released-daemon tests cover these cases: both legs confirmed before `active`; refusal and unknown outcome of each add, in each order; ambiguous delete of each leg; restart with each single leg outstanding; a foreign rule at the return key; export outside each leg's peer set; one leg removed by the break-glass override; quotas counted per leg; victim-as-source conflicts in both admission paths; the return-leg overlap index; and a negative control showing that today's inventory index treats the return leg as overlapping every victim. |
 | Forwarding | The section 5 receipt for both routers: router B's acceptance of the destination-less rule; installed rules and counters on each router; dirty and clean captures in both directions; handshake completion through a stateful scrubber; a loop negative control that re-enters clean return output inside router B's ingress scope; precedence against an overlapping destination-keyed discard for another host; a UDP diversion that creates no return leg; and removal timing for each leg on withdrawal, TTL expiry, readiness loss and controller stop. |
 
