@@ -140,7 +140,7 @@ covers the use case, and routers limit range terms, see section 7).
 Matching SYN alone drops legitimate connection attempts, and router support is
 partial (section 7). TCP reflection, such as SYN-ACK floods, needs its own
 decision with evidence. `allow_tcp_flags_match` stays reserved. Amended
-2026-11-12: manual discard and police TCP rules may carry an explicit TCP flags
+2026-11-12: manual discard, police and VPN mark TCP rules may carry an explicit TCP flags
 match behind `allow_tcp_flags_match`, which is no longer reserved. Detectors and
 playbooks still do not select TCP flags. See
 [TCP flags matches](../reference/api.md#tcp-flags-matches).

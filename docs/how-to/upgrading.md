@@ -512,6 +512,12 @@ WHERE completed_at IS NULL
 GROUP BY pop;
 ```
 
+Older `prefixdctl` binaries are also affected while any rule carries TCP
+flags. `prefixdctl speaker routes` fails to parse the inventory once any route
+has `tcp_flags`, and `prefixdctl mitigations list` and `get` show such rules
+without their flags, so they look wider than they are. Use a current
+`prefixdctl` until no TCP flags rules remain.
+
 Verify the speaker's local FlowSpec intent holds no rule with a TCP flags
 component, then follow [rollback](#rollback). Do not delete rows to bypass
 cleanup. Completed rows can also fail history reads on the older binary; retain

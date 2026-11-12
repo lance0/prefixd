@@ -469,6 +469,11 @@ async fn live_rustbgpd_amplification_components_inject_read_and_delete() {
             observed,
             [
                 vec![protocol.clone()],
+                vec![
+                    protocol.clone(),
+                    (9, "!0x0001/match & !0x0004/match".into())
+                ],
+                vec![protocol.clone(), (9, "!0x0010/match".into())],
                 vec![protocol.clone(), (9, "0x0002/match & !0x0010/match".into())],
                 vec![protocol, (9, "0x0012/match".into())],
             ]

@@ -936,7 +936,9 @@ connection-opening SYNs.
   `InvalidMatch`.
 
 TCP flags combine with `src_prefix` and `dst_ports`, and are available on
-manual discard and police rules only. Both bundled speakers encode them and
+manual discard, police and VPN `mark` rules, like the other match components.
+Blackholes and scrubber diversions refuse them; a diversion's return leg never
+takes flags from the request. Both bundled speakers encode them and
 report `flowspec_match.tcp_flags`; a speaker that cannot encode the component
 returns `400`. Each `set` list is one bitmask term with the match bit, and each
 `not_set` flag is its own negated term, ANDed. A speaker rule with type 9 in any

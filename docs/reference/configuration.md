@@ -324,11 +324,13 @@ select source prefixes: source addresses may be spoofed, so operators must
 choose the scope from their own evidence. See [source matches](api.md#source-prefix-matches)
 and the [downgrade procedure](../how-to/upgrading.md#source-prefix-matches-and-downgrade).
 
-`allow_tcp_flags_match` enables an optional `tcp_flags` match on manual discard
-and police TCP rules. It defaults to `false`; a request carrying TCP flags then
+`allow_tcp_flags_match` enables an optional `tcp_flags` match on manual discard,
+police and VPN mark TCP rules. It defaults to `false`; a request carrying TCP flags then
 returns `422` with `reason="TcpFlagsMatchNotAllowed"` before persistence or
-speaker RPC, including in dry run. Disabling the flag prevents new admissions;
-withdraw existing rules explicitly. This flag previously had no effect. The
+speaker RPC, including in dry run. Disabling the flag prevents new admissions and
+refuses lifetime extension of existing TCP flags rules with the same `422`.
+It does not remove them: reconciliation keeps re-announcing each one until it
+expires or is withdrawn, so withdraw them explicitly. This flag previously had no effect. The
 match requires protocol 6 and at least one flag, and no flag may be both set and
 not set. Detectors and playbooks do not select TCP flags. See
 [TCP flags matches](api.md#tcp-flags-matches) and the

@@ -370,8 +370,9 @@ pub fn amplification_rules() -> Vec<FlowSpecRule> {
     rules
 }
 
-/// TCP flags rules in both families: SYN+ACK from one source and SYN without
-/// ACK, each beside the all-TCP rule for the same victim.
+/// TCP flags rules in both families: SYN+ACK from one source, SYN without ACK,
+/// ACK clear only, and FIN and RST both clear, beside the all-TCP rule for the
+/// same victim.
 #[allow(
     dead_code,
     reason = "Peered targets do not repeat local match-encoding qualification."
@@ -406,6 +407,26 @@ pub fn tcp_flags_rules() -> Vec<FlowSpecRule> {
                     tcp_flags: Some(TcpFlagsMatch {
                         set: [TcpFlag::Syn].into(),
                         not_set: [TcpFlag::Ack].into(),
+                    }),
+                    ..tcp.clone()
+                },
+                FlowSpecAction::discard(),
+            ),
+            FlowSpecRule::new(
+                FlowSpecNlri {
+                    tcp_flags: Some(TcpFlagsMatch {
+                        set: Default::default(),
+                        not_set: [TcpFlag::Ack].into(),
+                    }),
+                    ..tcp.clone()
+                },
+                FlowSpecAction::police(8_000_000),
+            ),
+            FlowSpecRule::new(
+                FlowSpecNlri {
+                    tcp_flags: Some(TcpFlagsMatch {
+                        set: Default::default(),
+                        not_set: [TcpFlag::Fin, TcpFlag::Rst].into(),
                     }),
                     ..tcp
                 },

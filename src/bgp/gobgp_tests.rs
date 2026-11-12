@@ -1189,6 +1189,14 @@ async fn tcp_flags_encode_and_read_back_exactly() {
         set: [TcpFlag::Syn].into(),
         not_set: [TcpFlag::Ack].into(),
     };
+    let not_ack = TcpFlagsMatch {
+        set: Default::default(),
+        not_set: [TcpFlag::Ack].into(),
+    };
+    let not_fin_rst = TcpFlagsMatch {
+        set: Default::default(),
+        not_set: [TcpFlag::Fin, TcpFlag::Rst].into(),
+    };
     for (prefix, source) in [
         ("192.0.2.1/32", "203.0.113.1/32"),
         ("2001:db8::1/128", "2001:db8:1::/48"),
@@ -1199,6 +1207,8 @@ async fn tcp_flags_encode_and_read_back_exactly() {
         for (flags, expected) in [
             (&syn_ack, vec![(0x01, 0x12)]),
             (&syn_not_ack, vec![(0x01, 0x02), (0x43, 0x10)]),
+            (&not_ack, vec![(0x03, 0x10)]),
+            (&not_fin_rst, vec![(0x03, 0x01), (0x43, 0x04)]),
         ] {
             for src_prefix in [None, Some(source.to_owned())] {
                 let mut flagged = tcp.clone();

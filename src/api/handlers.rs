@@ -689,7 +689,7 @@ pub struct CreateMitigationRequest {
     packet_length: Option<PacketLengthRange>,
     /// TCP flags (RFC 8955 type 9): every `set` flag is set and every `not_set`
     /// flag is clear. Needs protocol `tcp`, at least one flag, no flag in both
-    /// lists, and `guardrails.allow_tcp_flags_match`. Discard and police only.
+    /// lists, and `guardrails.allow_tcp_flags_match`. Discard, police and VPN mark.
     #[schema(example = json!({"set": ["syn", "ack"]}))]
     #[serde(default)]
     tcp_flags: Option<TcpFlagsMatch>,

@@ -188,7 +188,9 @@ async fn amplification_components_inject_read_and_delete() {
             [
                 vec![protocol.clone()],
                 vec![protocol.clone(), (9, vec![(0x01, 0x02), (0xc3, 0x10)])],
-                vec![protocol, (9, vec![(0x81, 0x12)])],
+                vec![protocol.clone(), (9, vec![(0x03, 0x01), (0xc3, 0x04)])],
+                vec![protocol.clone(), (9, vec![(0x81, 0x12)])],
+                vec![protocol, (9, vec![(0x83, 0x10)])],
             ]
         );
     }

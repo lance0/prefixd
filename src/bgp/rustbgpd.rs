@@ -2504,6 +2504,14 @@ mod tests {
             set: [TcpFlag::Syn].into(),
             not_set: [TcpFlag::Ack].into(),
         };
+        let not_ack = TcpFlagsMatch {
+            set: Default::default(),
+            not_set: [TcpFlag::Ack].into(),
+        };
+        let not_fin_rst = TcpFlagsMatch {
+            set: Default::default(),
+            not_set: [TcpFlag::Fin, TcpFlag::Rst].into(),
+        };
         for (prefix, source) in [
             ("192.0.2.1/32", "203.0.113.1/32"),
             ("2001:db8::1/128", "2001:db8:1::/48"),
@@ -2513,7 +2521,12 @@ mod tests {
                 protocol: Some(6),
                 ..Default::default()
             };
-            for (flags, value) in [(&syn_ack, "0x12"), (&syn_not_ack, "0x02 & !0x10")] {
+            for (flags, value) in [
+                (&syn_ack, "0x12"),
+                (&syn_not_ack, "0x02 & !0x10"),
+                (&not_ack, "!0x10"),
+                (&not_fin_rst, "!0x01 & !0x04"),
+            ] {
                 for src_prefix in [None, Some(source.to_owned())] {
                     let nlri = FlowSpecNlri {
                         src_prefix,

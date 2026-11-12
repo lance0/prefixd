@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Manual discard and police rules accept an RFC 8955 type 9 `tcp_flags` match,
+- Manual discard, police and VPN mark rules accept an RFC 8955 type 9 `tcp_flags` match,
   for example `{"set": ["syn"], "not_set": ["ack"]}`. It requires protocol TCP
   and `guardrails.allow_tcp_flags_match`, has one canonical form and rule
   identity, and is encoded and read back exactly by rustbgpd 0.81.0 and 0.82.0
@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prefixd rule. API, OpenAPI, WebSocket messages, `prefixdctl` (`--tcp-flags-set`,
   `--tcp-flags-not-set` and match summaries), dashboard displays, the
   `flowspec_match.tcp_flags` capability and the `flowspec_tcp_flags` capability
-  metric expose it.
+  metric expose it. Scrubber diversions refuse request-supplied TCP flags.
 
 ## [0.25.0] - 2026-11-10
 
