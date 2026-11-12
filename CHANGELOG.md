@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **rustix** — Updated 1.1.4 → 1.1.6 in both lockfiles, which fixes the
+  extended-attribute functions marking unwritten bytes as initialized for a
+  zero-length buffer (RUSTSEC-2026-0486). prefixd uses only `rustix::process`;
+  the affected `rustix::fs` functions are reached through the test-only
+  `testcontainers` archive path. No advisory exception is added.
+
 ## [0.25.0] - 2026-11-10
 
 ### Upgrade notes
