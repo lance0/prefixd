@@ -347,6 +347,49 @@ async fn dry_run_sends_no_window_add_renew_or_delete() {
 }
 
 #[tokio::test]
+async fn diversion_scope_refuses_tcp_flags_without_speaker_calls() {
+    for mode in [OperationMode::DryRun, OperationMode::Enforced] {
+        let (mut state, repo, fake) = fixture(mode).await;
+        // Even with the manual opt-in on, a diversion never takes request flags.
+        Arc::get_mut(&mut state)
+            .unwrap()
+            .settings
+            .guardrails
+            .allow_tcp_flags_match = true;
+        ready(&state).await;
+        let mut request = request("a", 20);
+        request.scope.tcp_flags = Some(crate::domain::TcpFlagsMatch {
+            set: [crate::domain::TcpFlag::Syn, crate::domain::TcpFlag::Ack].into(),
+            not_set: Default::default(),
+        });
+        let error = state
+            .scrubber
+            .prepare(&state, &request, "admin")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, PrefixdError::InvalidRequest(message) if message == "diversion scope does not accept TCP flags"),
+            "{error}"
+        );
+        assert!(
+            state
+                .scrubber
+                .create(&state, &request, "admin")
+                .await
+                .is_err()
+        );
+        assert_eq!(fake.writes.load(SeqCst), 0);
+        assert_eq!(fake.reads.load(SeqCst), 0);
+        assert!(
+            repo.list_diversions(&state.settings.pop)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
 async fn startup_is_unarmed_and_confirmation_is_exact() {
     let (state, repo, fake) = fixture(OperationMode::Enforced).await;
     let mut request = confirmed(&state, "a", 20).await;

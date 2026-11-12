@@ -486,6 +486,43 @@ rules use the `unknown` vector, which older releases decode, so step 2 selects
 rules by match rather than by vector. Older releases refuse to decode rows with
 the `udp_amplification` vector, so pages that include them fail closed there.
 
+## TCP flags matches and downgrade
+
+Releases after 0.25.0 add an optional `tcp_flags` match to manual FlowSpec
+rules. No migration is required. `guardrails.allow_tcp_flags_match` was
+reserved before this change; it now admits TCP flags matches when true. Leave
+it false until the receiving routers are qualified. Rules without TCP flags
+retain their stored JSON and rule identities.
+
+0.25.0 and earlier refuse the `tcp_flags` key, so they cannot load such rows or
+their pending withdrawals. Before downgrading, pause manual creation, withdraw
+every live TCP flags rule with the current release, and drain the withdrawals on
+the original speaker target. Both queries must return no rows:
+
+```sql
+SELECT mitigation_id, pop, victim_ip
+FROM mitigations
+WHERE status IN ('pending', 'active', 'escalated')
+  AND match_json::jsonb ? 'tcp_flags';
+
+SELECT pop, count(*) AS pending
+FROM withdrawal_requests
+WHERE completed_at IS NULL
+  AND rule_json::jsonb -> 'nlri' ? 'tcp_flags'
+GROUP BY pop;
+```
+
+Older `prefixdctl` binaries are also affected while any rule carries TCP
+flags. `prefixdctl speaker routes` fails to parse the inventory once any route
+has `tcp_flags`, and `prefixdctl mitigations list` and `get` show such rules
+without their flags, so they look wider than they are. Use a current
+`prefixdctl` until no TCP flags rules remain.
+
+Verify the speaker's local FlowSpec intent holds no rule with a TCP flags
+component, then follow [rollback](#rollback). Do not delete rows to bypass
+cleanup. Completed rows can also fail history reads on the older binary; retain
+a backup and verify the rollback binary against a restored copy first.
+
 ## Scrubber diversion and downgrade
 
 Manual [scrubber diversion](scrubber-diversion.md) is disabled by default.

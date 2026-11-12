@@ -303,6 +303,7 @@ pub(super) async fn prepare_manual_flowspec(
                 src_ports: crate::domain::canonical_ports(&req.src_ports),
                 fragment: req.fragment,
                 packet_length: req.packet_length,
+                tcp_flags: req.tcp_flags,
             },
             action_type,
             action_params: ActionParams {
@@ -657,6 +658,7 @@ mod tests {
             settings.guardrails.allow_src_prefix_match = true;
             settings.guardrails.allow_fragment_match = true;
             settings.guardrails.allow_packet_length_match = true;
+            settings.guardrails.allow_tcp_flags_match = true;
             settings.quotas.max_active_per_customer = 20;
             settings.quotas.max_active_per_pop = 50;
             settings.quotas.max_active_global = 100;
@@ -869,6 +871,7 @@ mod tests {
             request("2001:db8:1234::/48"),
             request("2001:0DB8::10"),
             request("203.0.112.0/22"),
+            request("2001:db8:1234::/48"),
         ]
         .into_iter()
         .enumerate()
@@ -899,6 +902,11 @@ mod tests {
                     body["fragment"] = json!("non_first");
                     body["dst_ports"] = json!([]);
                 }
+                5 => {
+                    body["protocol"] = json!("tcp");
+                    body["src_prefix"] = json!("2001:db8:ffff::9/64");
+                    body["tcp_flags"] = json!({"set": ["ack", "syn"]});
+                }
                 _ => unreachable!(),
             }
             let fixture = Fixture::new(Fixture::settings(), FlowSpecMatchSupport::ALL);
@@ -918,6 +926,7 @@ mod tests {
                 "src_ports",
                 "fragment",
                 "packet_length",
+                "tcp_flags",
             ] {
                 // Empty optional components serialize differently in the two existing models.
                 if preview["candidate"]["scope"].get(key).is_some() {
@@ -948,6 +957,65 @@ mod tests {
                 preview["candidate"]["action"]["rate_bps"],
                 created["rate_bps"]
             );
+            if *index == 5 {
+                assert_eq!(created["tcp_flags"], json!({"set": ["syn", "ack"]}));
+            }
+            assert_eq!(fixture.speaker.calls.load(SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_flags_refusals_never_mutate() {
+        for (protocol, flags, allow, expected) in [
+            (
+                "udp",
+                json!({"set": ["syn"]}),
+                true,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "any",
+                json!({"set": ["syn"]}),
+                true,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("tcp", json!({}), true, StatusCode::UNPROCESSABLE_ENTITY),
+            (
+                "tcp",
+                json!({"set": ["syn"], "not_set": ["syn"]}),
+                true,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "tcp",
+                json!({"set": ["syn"]}),
+                false,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "tcp",
+                json!({"set": ["synack"]}),
+                true,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "tcp",
+                json!({"set": ["syn"], "any": ["ack"]}),
+                true,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ] {
+            let mut settings = Fixture::settings();
+            settings.guardrails.allow_tcp_flags_match = allow;
+            let fixture = Fixture::new(settings, FlowSpecMatchSupport::ALL);
+            let mut body = request("203.0.113.10");
+            body["protocol"] = json!(protocol);
+            body["tcp_flags"] = flags;
+            for path in ["/v1/mitigations/preview", "/v1/mitigations"] {
+                let (status, response) = fixture.post(path, &body).await;
+                assert_eq!(status, expected, "{path} {body}: {response}");
+            }
+            fixture.assert_no_mutations().await;
             assert_eq!(fixture.speaker.calls.load(SeqCst), 0);
         }
     }

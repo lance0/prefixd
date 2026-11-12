@@ -255,6 +255,14 @@ export interface PacketLengthRange {
   max: number
 }
 
+export type TcpFlag = "fin" | "syn" | "rst" | "psh" | "ack" | "urg" | "ece" | "cwr"
+
+/** TCP flags (RFC 8955 type 9): every `set` flag is set and every `not_set` flag is clear. */
+export interface TcpFlagsMatch {
+  set?: TcpFlag[]
+  not_set?: TcpFlag[]
+}
+
 export interface Mitigation {
   /** This creation request had no successful speaker reply; not persisted status. */
   announcement_outcome?: AnnouncementOutcome
@@ -281,6 +289,8 @@ export interface Mitigation {
   fragment?: FragmentMatch | null
   /** Inclusive total IP packet length. */
   packet_length?: PacketLengthRange | null
+  /** TCP flags; absent from controllers that predate them. */
+  tcp_flags?: TcpFlagsMatch | null
   created_at: string
   updated_at: string
   expires_at: string
@@ -382,6 +392,7 @@ export interface HealthResponse {
         source_ports?: boolean
         fragment?: boolean
         packet_length?: boolean
+        tcp_flags?: boolean
       }
     }
     /** Present when the speaker reports blackhole export. */
@@ -509,6 +520,7 @@ export interface LocalFlowSpecRule {
     src_ports?: number[]
     fragment?: FragmentMatch | null
     packet_length?: PacketLengthRange | null
+    tcp_flags?: TcpFlagsMatch | null
     scope?: VpnScopeIdentity | null
   }
   route_targets?: string[]

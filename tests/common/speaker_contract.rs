@@ -169,8 +169,9 @@ pub fn exact_inventory(actual: &[FlowSpecRule], expected: &[FlowSpecRule]) -> Re
             prefixd::domain::canonical_ports(&found.nlri.src_ports)
                 == prefixd::domain::canonical_ports(&wanted.nlri.src_ports)
                 && found.nlri.fragment == wanted.nlri.fragment
-                && found.nlri.packet_length == wanted.nlri.packet_length,
-            "source port, fragment or packet length mismatch for {}",
+                && found.nlri.packet_length == wanted.nlri.packet_length
+                && found.nlri.tcp_flags == wanted.nlri.tcp_flags,
+            "source port, fragment, packet length or TCP flags mismatch for {}",
             wanted.nlri.dst_prefix
         );
         ensure!(
@@ -369,8 +370,75 @@ pub fn amplification_rules() -> Vec<FlowSpecRule> {
     rules
 }
 
-/// Injects, reads back as matching and deletes each ADR 028 rule. A speaker that
-/// dropped a component would collapse two rules into one route and fail here.
+/// TCP flags rules in both families: SYN+ACK from one source, SYN without ACK,
+/// ACK clear only, and FIN and RST both clear, beside the all-TCP rule for the
+/// same victim.
+#[allow(
+    dead_code,
+    reason = "Peered targets do not repeat local match-encoding qualification."
+)]
+pub fn tcp_flags_rules() -> Vec<FlowSpecRule> {
+    use prefixd::domain::{TcpFlag, TcpFlagsMatch};
+    let mut rules = vec![];
+    for (prefix, source) in [
+        ("192.0.2.248/32", "203.0.113.1/32"),
+        ("2001:db8::248/128", "2001:db8:1::/48"),
+    ] {
+        let tcp = FlowSpecNlri {
+            dst_prefix: prefix.into(),
+            protocol: Some(6),
+            ..Default::default()
+        };
+        rules.extend([
+            FlowSpecRule::new(tcp.clone(), FlowSpecAction::police(80_000_000)),
+            FlowSpecRule::new(
+                FlowSpecNlri {
+                    src_prefix: Some(source.into()),
+                    tcp_flags: Some(TcpFlagsMatch {
+                        set: [TcpFlag::Syn, TcpFlag::Ack].into(),
+                        not_set: Default::default(),
+                    }),
+                    ..tcp.clone()
+                },
+                FlowSpecAction::discard(),
+            ),
+            FlowSpecRule::new(
+                FlowSpecNlri {
+                    tcp_flags: Some(TcpFlagsMatch {
+                        set: [TcpFlag::Syn].into(),
+                        not_set: [TcpFlag::Ack].into(),
+                    }),
+                    ..tcp.clone()
+                },
+                FlowSpecAction::discard(),
+            ),
+            FlowSpecRule::new(
+                FlowSpecNlri {
+                    tcp_flags: Some(TcpFlagsMatch {
+                        set: Default::default(),
+                        not_set: [TcpFlag::Ack].into(),
+                    }),
+                    ..tcp.clone()
+                },
+                FlowSpecAction::police(8_000_000),
+            ),
+            FlowSpecRule::new(
+                FlowSpecNlri {
+                    tcp_flags: Some(TcpFlagsMatch {
+                        set: Default::default(),
+                        not_set: [TcpFlag::Fin, TcpFlag::Rst].into(),
+                    }),
+                    ..tcp
+                },
+                FlowSpecAction::discard(),
+            ),
+        ]);
+    }
+    rules
+}
+
+/// Injects, reads back as matching and deletes each ADR 028 and TCP flags rule. A
+/// speaker that dropped a component would collapse two rules into one route and fail here.
 #[allow(
     dead_code,
     reason = "Peered targets do not repeat local match-encoding qualification."
@@ -383,7 +451,8 @@ pub async fn run_amplification_contract(speaker: &dyn FlowSpecAnnouncer) -> Resu
     wait_inventory(speaker, &[])
         .await
         .context("isolated initial inventory")?;
-    let mut expected = amplification_rules();
+    let rules = [amplification_rules(), tcp_flags_rules()].concat();
+    let mut expected = rules.clone();
     for rule in &expected {
         speaker.announce(rule).await.context("announce")?;
         speaker.announce(rule).await.context("duplicate announce")?;
@@ -392,7 +461,7 @@ pub async fn run_amplification_contract(speaker: &dyn FlowSpecAnnouncer) -> Resu
         .await
         .context("extended rules read back as matching")?;
     // Delete one rule at a time; its siblings on the same victim must survive.
-    for rule in amplification_rules().iter().rev() {
+    for rule in rules.iter().rev() {
         speaker.withdraw(rule).await.context("withdraw")?;
         expected.retain(|other| other.nlri_hash() != rule.nlri_hash());
         wait_inventory(speaker, &expected)

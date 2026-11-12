@@ -17,7 +17,7 @@ import { ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatBps, formatTimeRemaining } from "@/lib/format"
 import { useTimeFormat } from "@/components/time-zone-provider"
-import { FlowSpecPreview, describeMatch, formatFlowSpecRule } from "@/components/dashboard/flowspec-preview"
+import { FlowSpecPreview, describeMatch, formatFlowSpecRule, tcpFlagsLabel } from "@/components/dashboard/flowspec-preview"
 import { ExtendLifetimeDialog } from "@/components/dashboard/extend-lifetime-dialog"
 import { IncidentReportDialog } from "@/components/dashboard/incident-report-dialog"
 import { formatRoutingScope, withdrawMitigation, getIncidentReport, isNotFound, type Mitigation } from "@/lib/api"
@@ -313,6 +313,9 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                   ) : null}
                   {mitigation.src_ports?.length ? (
                     <Field label="Source ports"><span className="font-mono">{mitigation.src_ports.join(", ")}</span></Field>
+                  ) : null}
+                  {mitigation.tcp_flags ? (
+                    <Field label="TCP flags"><span className="font-mono">{tcpFlagsLabel(mitigation.tcp_flags)}</span></Field>
                   ) : null}
                   {mitigation.fragment === "non_first" ? (
                     <Field label="Fragments">non-first fragments only</Field>

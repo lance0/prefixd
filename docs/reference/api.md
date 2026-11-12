@@ -526,6 +526,7 @@ and no partial CSV. CSV timestamps remain UTC.
       "src_ports": [],
       "fragment": null,
       "packet_length": null,
+      "tcp_flags": null,
       "created_at": "2026-01-18T10:30:00Z",
       "updated_at": "2026-01-18T10:30:00Z",
       "expires_at": "2026-01-18T10:32:00Z",
@@ -560,6 +561,10 @@ inclusive total IP length range such as `{"min": 1000, "max": 65535}`, otherwise
 `null`. The three fields are present in every mitigation response and WebSocket
 message; controllers before this release omit them, which means none of the
 components.
+
+`tcp_flags` is the [TCP flags match](#tcp-flags-matches), for example
+`{"set": ["syn"], "not_set": ["ack"]}`, otherwise `null`. Older controllers
+omit it, which means no TCP flags component.
 
 `origin_mode` records the operation mode that admitted the mitigation:
 `dry-run` for a simulation that prefixd never announced, or `enforced`. It is
@@ -732,6 +737,7 @@ instead submits an attack event through `POST /v1/events`, which applies playboo
 | `src_ports` | array | no | UDP source ports (default `[]`, which means not matched). Discard and police only; see [amplification matches](#amplification-matches) |
 | `fragment` | string | no | `"non_first"` matches non-first IP fragments. Discard and police only |
 | `packet_length` | object | no | `{"min": N, "max": M}`, an inclusive total IP packet length. Discard and police only |
+| `tcp_flags` | object | no | `{"set": [...], "not_set": [...]}`; needs `"protocol": "tcp"` and `guardrails.allow_tcp_flags_match`. See [TCP flags matches](#tcp-flags-matches) |
 | `action` | string | yes | `"discard"`, `"police"` or `"blackhole"` (Admin only, see [manual blackhole](#manual-blackhole)) |
 | `confirm_victim_ip` | string | conditional | Required for `"blackhole"`: must exactly equal `victim_ip` |
 | `rate_bps` | integer | conditional | Positive, exactly representable traffic rate for `"police"`; omit or use `null` for `"discard"` |
@@ -908,6 +914,37 @@ returns `201` with `"src_ports": [123, 389]`, `"fragment": null` and
 `"packet_length": null`. A blackhole takes none of these fields; sending one
 returns `400`.
 
+#### TCP flags matches
+
+`tcp_flags` matches the TCP flags byte
+([RFC 8955 type 9](https://www.rfc-editor.org/rfc/rfc8955.html#section-4.2.2.9)).
+It is one conjunction: every flag in `set` is set and every flag in `not_set`
+is clear. Other flags are not constrained. Flag names are `fin`, `syn`, `rst`,
+`psh`, `ack`, `urg`, `ece` and `cwr`. For example, `{"set": ["syn", "ack"]}`
+matches SYN-ACK segments, and `{"set": ["syn"], "not_set": ["ack"]}` matches
+connection-opening SYNs.
+
+- The rule needs `"protocol": "tcp"`; any other protocol, including `"any"`,
+  is refused.
+- At least one flag is required, and no flag may appear in both lists. Unknown
+  flag names and unknown keys are refused.
+- Lists are stored in bit order without duplicates, so equivalent spellings are
+  one rule identity.
+- `guardrails.allow_tcp_flags_match: true` is required. Otherwise creation
+  returns `422` with `reason` `TcpFlagsMatchNotAllowed` before saving intent or
+  calling the speaker, in either operation mode. Invariant failures use
+  `InvalidMatch`.
+
+TCP flags combine with `src_prefix` and `dst_ports`, and are available on
+manual discard, police and VPN `mark` rules, like the other match components.
+Blackholes and scrubber diversions refuse them; a diversion's return leg never
+takes flags from the request. Both bundled speakers encode them and
+report `flowspec_match.tcp_flags`; a speaker that cannot encode the component
+returns `400`. Each `set` list is one bitmask term with the match bit, and each
+`not_set` flag is its own negated term, ANDed. A speaker rule with type 9 in any
+other form is not a prefixd rule and is never treated as one. Speaker
+acceptance does not prove router installation; qualify your platform first.
+
 **Response (201 Created):**
 
 Returns the full mitigation object (same shape as [Get Mitigation](#get-mitigation)).
@@ -960,8 +997,8 @@ than FlowSpec:
   character for character, and `reason` must be nonempty. Otherwise the request
   returns `400` without saving a row or audit entry.
 - **Host route only.** Omit `protocol` (or send `"any"` or `""`),
-  `dst_ports`, `src_prefix`, `src_ports`, `fragment`, `packet_length`, `rate_bps` and
-  `expires_at_cap`; any of them returns `400`. The
+  `dst_ports`, `src_prefix`, `src_ports`, `fragment`, `packet_length`, `tcp_flags`,
+  `rate_bps` and `expires_at_cap`; any of them returns `400`. The
   route is the victim's `/32` or `/128`.
 - **Guardrails.** `blackhole.enabled` must be true, the victim must be owned in
   inventory and pass the [blackhole victim checks](configuration.md#blackhole),
@@ -2351,7 +2388,8 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
         "source_prefix": true,
         "source_ports": true,
         "fragment": true,
-        "packet_length": true
+        "packet_length": true,
+        "tcp_flags": true
       }
     },
     "detector_unleased": false,
@@ -3130,8 +3168,8 @@ Every metrics scrape refreshes capabilities from local adapter state without a
 speaker RPC. Capability values match health detail's `speaker.capabilities`:
 `rule_reader`, `peer_observer`, `daemon_health`, `blackhole`, `blackhole_lease`,
 `blackhole_export`, `flowspec_export`, `flowspec_source_prefix`, `flowspec_source_ports`,
-`flowspec_fragment` and `flowspec_packet_length` (the last four correspond to
-`flowspec_match` fields). Lease capability is `0` until a successful runtime
+`flowspec_fragment`, `flowspec_packet_length` and `flowspec_tcp_flags` (the last five
+correspond to `flowspec_match` fields). Lease capability is `0` until a successful runtime
 probe confirms it, and returns to `0` if a lease RPC reports unsupported after
 a speaker rollback. Zero alone cannot distinguish unprobed from unsupported.
 Capability is availability, not current health, a live lease, export or router

@@ -591,6 +591,12 @@ impl ScrubberController {
         req: &super::api::CreateDiversion,
         actor: &str,
     ) -> Result<Diversion> {
+        // The return leg takes TCP flags from its profile, never from the request.
+        if req.scope.tcp_flags.is_some() {
+            return Err(PrefixdError::InvalidRequest(
+                "diversion scope does not accept TCP flags".into(),
+            ));
+        }
         let profile = Self::profile(state, &req.profile)?;
         state.verified_speaker_binding()?;
         let scope = state.settings.bgp.resolve_scope(&profile.scope)?;

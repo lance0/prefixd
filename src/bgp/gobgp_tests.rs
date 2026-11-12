@@ -1162,13 +1162,125 @@ async fn amplification_components_encode_per_adr_and_read_back_strictly() {
                 component(p, 5).items.insert(0, extra);
                 component(p, 5).items[0].op = 0x01;
             },
-            |p| component(p, 5).r#type = 9,
+            |p| component(p, 5).r#type = 13,
             |p| component(p, 3).r#type = 4,
             |p| components(p).swap(4, 5),
         ];
         assert!(speaker.parse_flowspec_path(&base).is_ok());
         for (index, mutate) in mutations.iter().enumerate() {
             let mut p = base.clone();
+            mutate(&mut p);
+            assert!(speaker.parse_flowspec_path(&p).is_err(), "mutation {index}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn tcp_flags_encode_and_read_back_exactly() {
+    use crate::domain::{TcpFlag, TcpFlagsMatch};
+    let fake = Fake::default();
+    let adds = fake.adds.clone();
+    let (speaker, _server) = serve(fake).await;
+    let syn_ack = TcpFlagsMatch {
+        set: [TcpFlag::Syn, TcpFlag::Ack].into(),
+        not_set: Default::default(),
+    };
+    let syn_not_ack = TcpFlagsMatch {
+        set: [TcpFlag::Syn].into(),
+        not_set: [TcpFlag::Ack].into(),
+    };
+    let not_ack = TcpFlagsMatch {
+        set: Default::default(),
+        not_set: [TcpFlag::Ack].into(),
+    };
+    let not_fin_rst = TcpFlagsMatch {
+        set: Default::default(),
+        not_set: [TcpFlag::Fin, TcpFlag::Rst].into(),
+    };
+    for (prefix, source) in [
+        ("192.0.2.1/32", "203.0.113.1/32"),
+        ("2001:db8::1/128", "2001:db8:1::/48"),
+    ] {
+        let mut tcp = rule(prefix);
+        tcp.nlri.protocol = Some(6);
+        tcp.nlri.dst_ports.clear();
+        for (flags, expected) in [
+            (&syn_ack, vec![(0x01, 0x12)]),
+            (&syn_not_ack, vec![(0x01, 0x02), (0x43, 0x10)]),
+            (&not_ack, vec![(0x03, 0x10)]),
+            (&not_fin_rst, vec![(0x03, 0x01), (0x43, 0x04)]),
+        ] {
+            for src_prefix in [None, Some(source.to_owned())] {
+                let mut flagged = tcp.clone();
+                flagged.nlri.src_prefix = src_prefix;
+                flagged.nlri.tcp_flags = Some(flags.clone());
+                speaker.announce(&flagged).await.unwrap();
+                let add = adds.lock().unwrap().pop().unwrap().path.unwrap();
+                assert_eq!(items(&add).last().unwrap(), &(9, expected.clone()));
+                let mut observed = add;
+                gobgp_read_back(&mut observed);
+                let decoded = speaker.parse_flowspec_path(&observed).unwrap();
+                assert_eq!(decoded.nlri.tcp_flags.as_ref(), Some(flags));
+                assert_eq!(decoded.nlri_hash(), flagged.nlri_hash());
+                assert!(speaker.matches_nlri(&flagged.nlri, &decoded.nlri).unwrap());
+                assert!(!speaker.matches_nlri(&tcp.nlri, &decoded.nlri).unwrap());
+            }
+        }
+        // A foreign rule carrying type 9 never decodes as the same rule without it.
+        let mut foreign = speaker.build_flowspec_path(&tcp).unwrap();
+        components(&mut foreign).push(ProtoFlowSpecRule {
+            rule: Some(flow_spec_rule::Rule::Component(FlowSpecComponent {
+                r#type: 9,
+                items: vec![FlowSpecComponentItem {
+                    op: 0x01,
+                    value: 0x12,
+                }],
+            })),
+        });
+        gobgp_read_back(&mut foreign);
+        let decoded = speaker.parse_flowspec_path(&foreign).unwrap();
+        assert_ne!(decoded.nlri_hash(), tcp.nlri_hash());
+        assert!(!speaker.matches_nlri(&tcp.nlri, &decoded.nlri).unwrap());
+        // Any other bitmask form is not prefixd's and fails the read.
+        let mutations: &[fn(&mut Path)] = &[
+            // Any-match (no match bit), a multi-bit NOT, zero and out-of-range values.
+            |p| component(p, 2).items[0].op = 0x80,
+            |p| component(p, 2).items[0].op = 0x83,
+            |p| component(p, 2).items[0].value = 0,
+            |p| component(p, 2).items[0].value = 0x100,
+            |p| component(p, 2).items.clear(),
+            // An ORed or misordered second term, and a contradiction.
+            |p| {
+                component(p, 2).items[0].op = 0x01;
+                component(p, 2).items.push(FlowSpecComponentItem {
+                    op: 0x83,
+                    value: 0x10,
+                });
+            },
+            |p| {
+                component(p, 2).items[0].op = 0x03;
+                component(p, 2).items[0].value = 0x10;
+                component(p, 2).items.push(FlowSpecComponentItem {
+                    op: 0xc1,
+                    value: 0x02,
+                });
+            },
+            |p| {
+                component(p, 2).items[0].op = 0x01;
+                component(p, 2).items.push(FlowSpecComponentItem {
+                    op: 0xc3,
+                    value: 0x02,
+                });
+            },
+            // TCP flags on UDP or with no protocol.
+            |p| component(p, 1).items[0].value = 17,
+            |p| {
+                components(p).remove(1);
+            },
+        ];
+        assert!(speaker.parse_flowspec_path(&foreign).is_ok());
+        for (index, mutate) in mutations.iter().enumerate() {
+            let mut p = foreign.clone();
             mutate(&mut p);
             assert!(speaker.parse_flowspec_path(&p).is_err(), "mutation {index}");
         }

@@ -221,7 +221,7 @@ impl Guardrails {
         Ok(())
     }
 
-    /// ADR 028 rule invariants, then the fragment and packet-length opt-ins.
+    /// Match invariants, then the source-prefix, fragment, packet-length and TCP flags opt-ins.
     /// Mode-independent, so dry run refuses exactly as enforced mode does.
     fn validate_match(&self, criteria: &MatchCriteria) -> Result<()> {
         let refuse = |error| Err(PrefixdError::GuardrailViolation(error));
@@ -236,6 +236,9 @@ impl Guardrails {
         }
         if criteria.packet_length.is_some() && !self.config.allow_packet_length_match {
             return refuse(GuardrailError::PacketLengthMatchNotAllowed);
+        }
+        if criteria.tcp_flags.is_some() && !self.config.allow_tcp_flags_match {
+            return refuse(GuardrailError::TcpFlagsMatchNotAllowed);
         }
         Ok(())
     }
@@ -454,6 +457,36 @@ mod tests {
         ));
         config.allow_packet_length_match = true;
         check(&config, criteria).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_flags_match_needs_opt_in_and_tcp() {
+        let (mut config, _) = test_config();
+        for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
+            let criteria: MatchCriteria = serde_json::from_value(serde_json::json!({
+                "dst_prefix": prefix, "protocol": 6, "dst_ports": [],
+                "tcp_flags": {"set": ["syn"], "not_set": ["ack"]}
+            }))
+            .unwrap();
+            config.allow_tcp_flags_match = false;
+            assert!(matches!(
+                refused(check(&config, criteria.clone()).await),
+                GuardrailError::TcpFlagsMatchNotAllowed
+            ));
+            config.allow_tcp_flags_match = true;
+            check(&config, criteria.clone()).await.unwrap();
+            // The opt-in never admits flags on another protocol.
+            let udp = MatchCriteria {
+                protocol: Some(17),
+                ..criteria
+            };
+            assert!(matches!(
+                refused(check(&config, udp).await),
+                GuardrailError::InvalidMatch {
+                    reason: crate::domain::FlowSpecMatchError::TcpFlagsRequireTcp
+                }
+            ));
+        }
     }
 
     #[tokio::test]

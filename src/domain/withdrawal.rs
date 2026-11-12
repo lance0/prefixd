@@ -1258,7 +1258,7 @@ mod tests {
         }
         // An unknown key would widen the rule if ignored.
         for json in [
-            r#"{"dst_prefix":"192.0.2.10/32","protocol":17,"dst_ports":[],"tcp_flags":2}"#,
+            r#"{"dst_prefix":"192.0.2.10/32","protocol":17,"dst_ports":[],"icmp_type":8}"#,
             r#"{"dst_prefix":"192.0.2.10/32","protocol":17,"dst_ports":[],"src_ports":[123],"packet_length":{"min":468,"max":65535,"step":1}}"#,
             r#"{"dst_prefix":"192.0.2.10/32","protocol":17,"dst_ports":[],"fragment":"first"}"#,
         ] {

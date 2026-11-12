@@ -54,9 +54,12 @@ The controller uses it for the
 and [amplification](../adr/028-amplification-matches.md) components the adapter
 encodes: a same-family source CIDR (type 2), UDP
 source ports (type 6), a non-first
-fragment (type 12, bit `0x02` with the match bit) and one packet-length range
-(type 10). The default is none. rustbgpd, GoBGP and the mock report all four
-in both families. Before any speaker RPC, and before persistence in dry-run
+fragment (type 12, bit `0x02` with the match bit), one packet-length range
+(type 10) and TCP flags (type 9). The default is none. rustbgpd, GoBGP and the
+mock report all five in both families. TCP flags encode as ANDed bitmask terms
+with the match bit: one term for the `set` flags, then one negated single-bit
+term per `not_set` flag in bit order. rustbgpd renders them, for example, as
+`0x0002/match & !0x0010/match`. Before any speaker RPC, and before persistence in dry-run
 and enforced modes, the controller refuses a rule with a component the
 selected speaker does not encode. It never drops the component, because that
 would widen the rule. Both adapters emit components in ascending type order and
@@ -70,7 +73,7 @@ their UDP invariants.
 Health detail adds `speaker.backend` and availability booleans under
 `speaker.capabilities`: `rule_reader`, `peer_observer`, `daemon_health`,
 `blackhole`, `blackhole_lease`, `blackhole_export`, `flowspec_export` and the `flowspec_match`
-object (`source_prefix`, `source_ports`, `fragment`, `packet_length`). The export
+object (`source_prefix`, `source_ports`, `fragment`, `packet_length`, `tcp_flags`). The export
 booleans are true when the adapter reads per-peer [export evidence](#export-evidence)
 for that kind, which only rustbgpd does. `blackhole_lease` is true only
 after the rustbgpd adapter's `ListInjectionLeases` probe succeeded, which

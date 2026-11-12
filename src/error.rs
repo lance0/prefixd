@@ -163,6 +163,9 @@ pub enum GuardrailError {
     #[error("packet length matching not allowed (guardrails.allow_packet_length_match=false)")]
     PacketLengthMatchNotAllowed,
 
+    #[error("TCP flags matching not allowed (guardrails.allow_tcp_flags_match=false)")]
+    TcpFlagsMatchNotAllowed,
+
     #[error("quota exceeded: {quota_type} ({current}/{max})")]
     QuotaExceeded {
         quota_type: String,

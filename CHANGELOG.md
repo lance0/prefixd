@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- `guardrails.allow_tcp_flags_match` is no longer reserved. It now admits the
+  new TCP flags match and no longer logs a startup warning. Leave it `false`
+  until the receiving routers are qualified for TCP flags matches.
+- Rows with `tcp_flags` fail to load on an older controller. Withdraw them
+  before a downgrade; see the
+  [downgrade procedure](docs/how-to/upgrading.md#tcp-flags-matches-and-downgrade).
+
+### Added
+
+- Manual discard, police and VPN mark rules accept an RFC 8955 type 9 `tcp_flags` match,
+  for example `{"set": ["syn"], "not_set": ["ack"]}`. It requires protocol TCP
+  and `guardrails.allow_tcp_flags_match`, has one canonical form and rule
+  identity, and is encoded and read back exactly by rustbgpd 0.81.0 and 0.82.0
+  and GoBGP. A speaker rule with type 9 in any other form is not treated as a
+  prefixd rule. API, OpenAPI, WebSocket messages, `prefixdctl` (`--tcp-flags-set`,
+  `--tcp-flags-not-set` and match summaries), dashboard displays, the
+  `flowspec_match.tcp_flags` capability and the `flowspec_tcp_flags` capability
+  metric expose it. Scrubber diversions refuse request-supplied TCP flags.
+
 ### Security
 
 - **rustix** — Updated 1.1.4 → 1.1.6 in both lockfiles, which fixes the

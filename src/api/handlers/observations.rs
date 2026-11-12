@@ -831,6 +831,9 @@ fn report_match(criteria: &crate::domain::MatchCriteria) -> String {
             ));
         }
     }
+    if let Some(flags) = &criteria.tcp_flags {
+        parts.push(format!("TCP flags {flags}"));
+    }
     if criteria.fragment.is_some() {
         parts.push("non-first fragments".into());
     }

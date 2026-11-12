@@ -196,7 +196,8 @@ Rules match a destination host by default, or a guarded manual destination
 CIDR with explicit prefix-bound opt-in, optional protocol and discrete
 destination-port equalities, with source-port, fragment and packet-length
 components for amplification. Manual rules may also select a same-family source
-CIDR behind `guardrails.allow_src_prefix_match`. Policy rates use bits/sec;
+CIDR behind `guardrails.allow_src_prefix_match`, and a TCP flags match such as
+SYN without ACK on TCP rules behind `guardrails.allow_tcp_flags_match`. Policy rates use bits/sec;
 adapters convert wire units. Automatic ICMP maps to protocol 1 for IPv4 and 58
 for IPv6; manual requests use `icmp` or `icmpv6` for the matching family.
 

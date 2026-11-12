@@ -114,6 +114,31 @@ describe("amplification match display", () => {
     expect(screen.queryByText("Fragments")).not.toBeInTheDocument()
   })
 
+  it("shows TCP flags on the detail page, in the summary and in the rule", async () => {
+    const synRule = rule("00000000-0000-4000-8000-000000000009", {
+      vector: "syn_flood", protocol: 6, dst_ports: [443], src_ports: undefined,
+      tcp_flags: { not_set: ["ack"], set: ["syn"] },
+    })
+
+    signIn(controller, "credentials", operatorResponse("operator"))
+    controller.route("GET", `/v1/mitigations/${synRule.mitigation_id}`, () => json(synRule))
+    await act(async () => {
+      renderApp(
+        <Suspense fallback={<p>Loading...</p>}>
+          <MitigationDetailPage params={Promise.resolve({ id: synRule.mitigation_id })} />
+        </Suspense>,
+        { url: `/mitigations/${synRule.mitigation_id}` },
+      )
+    })
+    await screen.findByText("FlowSpec rule")
+    expect(screen.getByText("TCP flags").nextSibling).toHaveTextContent("SYN !ACK")
+    expect(screen.getByText("Matches").parentElement).toHaveTextContent("Matches TCP dst 443 flags SYN !ACK")
+    expect(screen.getByText(/destination-port 443 tcp-flags SYN !ACK then discard/)).toBeInTheDocument()
+    expect(describeMatch({ protocol: 6, dst_ports: [], tcp_flags: { set: ["ack", "syn"] }, src_prefix: "203.0.113.1/32", action_type: "discard" }))
+      .toBe("TCP from 203.0.113.1/32 flags SYN+ACK")
+    expect(describeMatch({ protocol: 6, dst_ports: [], action_type: "discard" })).toBe("all TCP")
+  })
+
   it("shows the event's top source ports, and nothing when the detector sent none", () => {
     const event: Event = {
       event_id: "event-amp", external_event_id: null, source: "fastnetmon", event_timestamp: createdAt,

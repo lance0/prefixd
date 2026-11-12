@@ -178,6 +178,7 @@ pub fn update_speaker_metrics(speaker: &dyn crate::bgp::FlowSpecAnnouncer) {
             "flowspec_packet_length",
             capabilities.flowspec_match.packet_length,
         ),
+        ("flowspec_tcp_flags", capabilities.flowspec_match.tcp_flags),
     ] {
         SPEAKER_CAPABILITY
             .with_label_values(&[backend, capability])
@@ -716,6 +717,7 @@ mod tests {
             ("flowspec_source_ports", 1.0),
             ("flowspec_fragment", 1.0),
             ("flowspec_packet_length", 1.0),
+            ("flowspec_tcp_flags", 1.0),
         ] {
             assert_eq!(
                 SPEAKER_CAPABILITY
