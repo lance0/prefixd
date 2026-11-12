@@ -313,7 +313,7 @@ source-port list over `max_ports`, or a component the selected speaker cannot
 encode fails startup, reload and playbook edits, in both modes.
 
 `allow_src_prefix_match` enables an optional same-family `src_prefix` CIDR on
-manual discard and police rules. It defaults to `false`; a request carrying a
+manual discard, police and VPN mark rules. It defaults to `false`; a request carrying a
 source prefix then returns `422` before persistence or speaker RPC, including
 in dry run. Disabling the flag prevents new admissions; withdraw existing rules
 explicitly. This flag previously had no effect. Source prefixes do not require

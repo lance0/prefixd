@@ -490,6 +490,11 @@ removing or changing `return_leg` requires a new profile `revision`. Startup
 refuses the change while the profile has outstanding diversion, as for any
 other change to the frozen snapshot.
 
+*Correction, 2026-11-12.* A new profile `revision` for a `return_leg` change
+is operator procedure, so readiness reports and admissions name the new
+qualification. The controller does not compare revisions across restarts; it
+enforces only the startup refusal while the profile has outstanding diversion.
+
 ### R2. Rule shape
 
 The controller derives the return leg from a validated inbound leg. A request

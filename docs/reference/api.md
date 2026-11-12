@@ -733,10 +733,10 @@ instead submits an attack event through `POST /v1/events`, which applies playboo
 | `victim_ip` | string | yes | Bare IPv4/IPv6 address or aligned destination CIDR for discard/police; default bounds allow only `/32` and `/128`. Blackholes require a bare host IP |
 | `protocol` | string | conditional | Required for `"discard"` and `"police"`: `"udp"`, `"tcp"`, `"icmp"` (IPv4 protocol 1), `"icmpv6"` (IPv6 protocol 58), or `"any"`; `""` also selects any protocol. Omit for `"blackhole"` |
 | `dst_ports` | array | no | Destination ports (default `[]`) |
-| `src_prefix` | string | no | Same-family source CIDR; requires `guardrails.allow_src_prefix_match`. Host bits are cleared. Discard and police only; see [source-prefix matches](#source-prefix-matches) |
-| `src_ports` | array | no | UDP source ports (default `[]`, which means not matched). Discard and police only; see [amplification matches](#amplification-matches) |
-| `fragment` | string | no | `"non_first"` matches non-first IP fragments. Discard and police only |
-| `packet_length` | object | no | `{"min": N, "max": M}`, an inclusive total IP packet length. Discard and police only |
+| `src_prefix` | string | no | Same-family source CIDR; requires `guardrails.allow_src_prefix_match`. Host bits are cleared. Discard, police and VPN `mark`; refused for `blackhole`; see [source-prefix matches](#source-prefix-matches) |
+| `src_ports` | array | no | UDP source ports (default `[]`, which means not matched). Discard, police and VPN `mark`; refused for `blackhole`; see [amplification matches](#amplification-matches) |
+| `fragment` | string | no | `"non_first"` matches non-first IP fragments. Discard, police and VPN `mark`; refused for `blackhole` |
+| `packet_length` | object | no | `{"min": N, "max": M}`, an inclusive total IP packet length. Discard, police and VPN `mark`; refused for `blackhole` |
 | `tcp_flags` | object | no | `{"set": [...], "not_set": [...]}`; needs `"protocol": "tcp"` and `guardrails.allow_tcp_flags_match`. See [TCP flags matches](#tcp-flags-matches) |
 | `action` | string | yes | `"discard"`, `"police"` or `"blackhole"` (Admin only, see [manual blackhole](#manual-blackhole)) |
 | `confirm_victim_ip` | string | conditional | Required for `"blackhole"`: must exactly equal `victim_ip` |
@@ -842,7 +842,7 @@ without the same safety checks.
 
 #### Source-prefix matches
 
-Manual discard and police rules may include `src_prefix`, for example
+Manual discard, police and VPN `mark` rules may include `src_prefix`, for example
 `"198.51.100.99/24"` for an IPv4 victim, or `"2001:db8:1::/64"` for IPv6.
 The response echoes the canonical network (`"198.51.100.0/24"` in the first
 example), and mitigation list/detail responses expose `src_prefix: null` when
@@ -857,7 +857,8 @@ returns `422` before saving intent or calling the speaker, in either operation
 mode. Source prefixes alone support every existing protocol selector. Adding
 source ports, fragments or packet length keeps their UDP requirements below.
 Blackholes refuse `src_prefix`. This manual match does not select a scrubber or
-change the action to redirect; the supported actions remain discard and police.
+change the action to redirect; the supported actions remain discard, police
+and VPN `mark`.
 
 The encodings follow [RFC 8955 section 4.2.2.2](https://www.rfc-editor.org/rfc/rfc8955.html#section-4.2.2.2)
 and [RFC 8956 section 3.2](https://www.rfc-editor.org/rfc/rfc8956.html#section-3.2),

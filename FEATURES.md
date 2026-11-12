@@ -314,6 +314,35 @@ See the [operator workflow](docs/how-to/scrubber-diversion.md).
 
 ---
 
+## VPN FlowSpec
+
+Opt-in VPNv4 and VPNv6 FlowSpec scopes
+([ADR 032](docs/adr/032-vpn-flowspec-scope.md)) select an RD and scope route
+targets for a mitigation. Global FlowSpec stays the default until
+`bgp.vpn_scopes` is configured:
+
+- **rustbgpd 0.82.0 or later only.** Each configured scope needs a successful
+  read-only probe of its family (13 or 14). GoBGP refuses VPN requests before
+  any RPC, and no refused VPN operation falls back to global FlowSpec.
+- **Frozen scope identity.** Admission snapshots the scope name, family, exact
+  RD and RTs, which withdrawal, retries and recovery keep. An optional
+  per-family `default_scope` applies to automatic mitigations; detectors cannot
+  supply RD or RT selectors.
+- **Actions.** Discard, police and manual destination DSCP marking (0–63).
+  Source-only discard and police need `allow_source_only` on the scope, an
+  Admin to create them and an explicit destination-any confirmation.
+- **Scrubber diversion.** A scrubber profile can name a scope for guarded
+  target-IP diversion, or use a configured `redirect_route_target` for
+  redirect-to-VRF, kept separate from the scope RTs.
+- **Evidence boundary.** prefixd confirms local intent, speaker acceptance and
+  software-peer receipt. VRF import, router installation, packet marking and
+  forwarding remain platform qualification.
+
+See [VPN FlowSpec](docs/how-to/vpn-flowspec.md) and the
+[speaker reference](docs/reference/speaker-backends.md#scoped-vpn-flowspec).
+
+---
+
 ## Reconciliation
 
 ### Automatic State Management
