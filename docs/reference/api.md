@@ -927,23 +927,25 @@ connection-opening SYNs.
 - The rule needs `"protocol": "tcp"`; any other protocol, including `"any"`,
   is refused.
 - At least one flag is required, and no flag may appear in both lists. Unknown
-  flag names and unknown keys are refused.
+  flag names and unknown keys are refused with `422`.
 - Lists are stored in bit order without duplicates, so equivalent spellings are
   one rule identity.
-- `guardrails.allow_tcp_flags_match: true` is required. Otherwise creation
-  returns `422` with `reason` `TcpFlagsMatchNotAllowed` before saving intent or
-  calling the speaker, in either operation mode. Invariant failures use
-  `InvalidMatch`.
+- `guardrails.allow_tcp_flags_match: true` is required. Otherwise preview and
+  creation return `422` before saving intent or calling the speaker, in either
+  operation mode, and creation increments `prefixd_guardrail_rejections_total`
+  with `reason` `TcpFlagsMatchNotAllowed`. Invariant failures also return
+  `422`, counted under `reason` `InvalidMatch`.
 
 TCP flags combine with `src_prefix` and `dst_ports`, and are available on
-manual discard, police and VPN `mark` rules, like the other match components.
-Blackholes and scrubber diversions refuse them; a diversion's return leg never
-takes flags from the request. Both bundled speakers encode them and
-report `flowspec_match.tcp_flags`; a speaker that cannot encode the component
-returns `400`. Each `set` list is one bitmask term with the match bit, and each
-`not_set` flag is its own negated term, ANDed. A speaker rule with type 9 in any
-other form is not a prefixd rule and is never treated as one. Speaker
-acceptance does not prove router installation; qualify your platform first.
+manual discard, police and VPN `mark` rules. Blackholes and scrubber diversions
+refuse them with `400`; a diversion's return leg never takes flags from the
+request. Both bundled speakers encode them and report
+`flowspec_match.tcp_flags`; a speaker that cannot encode the component returns
+`400`. The `set` flags form one bitmask term with the match bit, and each
+`not_set` flag is its own negated term, ANDed. A local speaker rule with a
+type 9 component in any other form fails the inventory read; it is never
+treated as a prefixd rule. Speaker acceptance does not prove router
+installation; qualify your platform first.
 
 **Response (201 Created):**
 

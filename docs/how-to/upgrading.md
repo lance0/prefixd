@@ -513,8 +513,8 @@ GROUP BY pop;
 ```
 
 Older `prefixdctl` binaries are also affected while any rule carries TCP
-flags. `prefixdctl speaker routes` fails to parse the inventory once any route
-has `tcp_flags`, and `prefixdctl mitigations list` and `get` show such rules
+flags. `prefixdctl speaker list-routes` fails to parse the inventory once any
+route has `tcp_flags`, and `prefixdctl mitigations list` and `get` show such rules
 without their flags, so they look wider than they are. Use a current
 `prefixdctl` until no TCP flags rules remain.
 

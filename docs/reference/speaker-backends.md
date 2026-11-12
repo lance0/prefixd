@@ -57,9 +57,9 @@ source ports (type 6), a non-first
 fragment (type 12, bit `0x02` with the match bit), one packet-length range
 (type 10) and TCP flags (type 9). The default is none. rustbgpd, GoBGP and the
 mock report all five in both families. TCP flags encode as ANDed bitmask terms
-with the match bit: one term for the `set` flags, then one negated single-bit
-term per `not_set` flag in bit order. rustbgpd renders them, for example, as
-`0x0002/match & !0x0010/match`. Before any speaker RPC, and before persistence in dry-run
+with the match bit: one term for the `set` flags when there are any, then one
+negated single-bit term per `not_set` flag in bit order. rustbgpd renders them,
+for example, as `0x0002/match & !0x0010/match`. Before any speaker RPC, and before persistence in dry-run
 and enforced modes, the controller refuses a rule with a component the
 selected speaker does not encode. It never drops the component, because that
 would widen the rule. Both adapters emit components in ascending type order and
@@ -322,6 +322,16 @@ the ordinary reader and appears in the guarded inventory only as an occupied key
 whose match still counts for victim overlap; prefixd never deletes it. Guarded
 window issuance and renewal require the controller fence, independently of
 ordinary lease renewal.
+
+A diversion's [return leg](../how-to/scrubber-diversion.md#add-a-symmetric-return-leg)
+is a guarded rule with no destination component and exactly one standard
+community, the profile's `export_community`. The scrubber reader accepts that
+community only under a `prefixd.scrub.` owner, and the controller treats the
+rule as its own only when owner, key, community and revision match a durable
+row. Any other destination-less local rule, guarded by another owner or
+unowned, is an occupied key that affects every victim of its family, or of both
+families when it has no prefix component. The speaker contract is unchanged;
+the released fixtures cover it on v0.81.0 and v0.82.0.
 
 [Manual scrubber diversion](../how-to/scrubber-diversion.md) is disabled by
 default. It requires configured per-POP profiles, qualified forwarding and export

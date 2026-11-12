@@ -103,27 +103,24 @@ cannot stand in for unavailable observation. Additional integrations, match or
 action types, telemetry and distributed coordination need a concrete operator
 requirement and their own qualification.
 
-Diverting attack traffic to an external scrubber is later work. prefixd would
-orchestrate BGP diversion routes or FlowSpec redirect so the victim stays
-reachable while traffic is scrubbed elsewhere.
-[ADR 030](docs/adr/030-scrubber-diversion.md) proposes guarded redirect-to-IP,
-with fresh scrubber readiness, independent profile leases, export isolation,
-clean-return prerequisites and separate router/data-path qualification. It
-builds on the shipped blackhole unicast contract, injection lease and controller
-fence; the redirect action and scrubber workflow remain unimplemented. VRF
-redirect, whole-victim unicast diversion and automatic escalation are later
-slices, each requiring its own qualification.
+Manual [scrubber diversion](docs/how-to/scrubber-diversion.md) is implemented
+behind disabled-by-default profiles on rustbgpd
+([ADR 030](docs/adr/030-scrubber-diversion.md)): guarded redirect-to-IP, VPN
+redirect-to-VRF and an optional symmetric TCP return leg, with fresh scrubber
+readiness, independent profile leases, export isolation and explicit re-arm.
+Router and data-path forwarding qualification remains the operator's gate.
+Detector- and playbook-triggered diversion, whole-victim unicast diversion and
+automatic escalation are later slices, each requiring its own qualification.
 The [speaker contract plan](docs/project/scrubber-diversion-contract.md) records
-the released API gaps, exact action vectors and queued-mutation controls needed
-before the first runtime slice.
+the exact action vectors, failure cases and remaining open checks.
 
 [ADR 026](docs/adr/026-facelift-framework-scope.md) defers framework adoption.
 Loco or an ORM migration is not a prerequisite for these changes.
 
 prefixd remains a control-plane policy controller: packet scrubbing, detection
-algorithms and L7/WAF analysis belong to other systems. Diversion would be
-control-plane orchestration; the scrubbing itself, the return path and detection
-stay external. Default guardrails reject broad match-everything rules.
+algorithms and L7/WAF analysis belong to other systems. Diversion is
+control-plane orchestration; the scrubbing itself, the clean return path and
+detection stay external. Default guardrails reject broad match-everything rules.
 
 See [contributing](CONTRIBUTING.md) and the
 [public issues](https://github.com/lance0/prefixd/issues) for ways to help.

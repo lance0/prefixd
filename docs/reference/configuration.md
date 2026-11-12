@@ -324,15 +324,18 @@ select source prefixes: source addresses may be spoofed, so operators must
 choose the scope from their own evidence. See [source matches](api.md#source-prefix-matches)
 and the [downgrade procedure](../how-to/upgrading.md#source-prefix-matches-and-downgrade).
 
-`allow_tcp_flags_match` enables an optional `tcp_flags` match on manual discard,
-police and VPN mark TCP rules. It defaults to `false`; a request carrying TCP flags then
-returns `422` with `reason="TcpFlagsMatchNotAllowed"` before persistence or
-speaker RPC, including in dry run. Disabling the flag prevents new admissions and
-refuses lifetime extension of existing TCP flags rules with the same `422`.
-It does not remove them: reconciliation keeps re-announcing each one until it
-expires or is withdrawn, so withdraw them explicitly. This flag previously had no effect. The
-match requires protocol 6 and at least one flag, and no flag may be both set and
-not set. Detectors and playbooks do not select TCP flags. See
+`allow_tcp_flags_match` enables an optional `tcp_flags` match on manual
+discard, police and VPN mark TCP rules. It defaults to `false`; a request
+carrying TCP flags then returns `422` before persistence or speaker RPC,
+including in dry run, and creation increments
+`prefixd_guardrail_rejections_total{reason="TcpFlagsMatchNotAllowed"}`.
+Disabling the flag prevents new admissions and refuses lifetime extension of
+existing TCP flags rules with the same `422`. It does not remove them:
+reconciliation keeps re-announcing each one until it expires or is withdrawn,
+so withdraw them explicitly. This flag previously had no effect. The match
+requires protocol 6 and at least one flag, and no flag may be both set and not
+set; a violation returns `422` and counts as `reason="InvalidMatch"`.
+Detectors and playbooks do not select TCP flags. See
 [TCP flags matches](api.md#tcp-flags-matches) and the
 [downgrade procedure](../how-to/upgrading.md#tcp-flags-matches-and-downgrade).
 
@@ -1410,8 +1413,10 @@ A global IP-target profile may add an optional `return_leg`, the symmetric
 return rule of
 [ADR 030](../adr/030-scrubber-diversion.md#amendment-symmetric-return-leg). It
 is refused on VPN-scoped and redirect-to-VRF profiles and is part of the frozen
-profile snapshot, so adding, removing or changing it needs a new `revision` and
-a drained profile.
+profile snapshot: startup refuses adding, removing or changing it while the
+profile has outstanding diversion. Give the profile a new `revision` with the
+change so readiness reports and admissions name the new qualification; prefixd
+does not compare revisions across restarts.
 
 | Field | Required | Meaning |
 | --- | --- | --- |

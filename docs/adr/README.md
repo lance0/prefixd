@@ -35,7 +35,7 @@ Format follows [Michael Nygard's template](https://cognitect.com/blog/2011/11/15
 | [025](025-pluggable-speaker-backends.md) | Pluggable speakers with rustbgpd preferred and GoBGP supported | Accepted | 2026-10-17 |
 | [026](026-facelift-framework-scope.md) | Defer framework migration during the facelift | Accepted | 2026-10-17 |
 | [027](027-blackhole-mitigations.md) | Remotely triggered blackhole host routes as a second mitigation kind | Accepted | 2026-10-19 |
-| [028](028-amplification-matches.md) | Amplification-aware FlowSpec matches | Accepted | 2026-10-19 |
+| [028](028-amplification-matches.md) | Amplification-aware FlowSpec matches | Accepted; amended 2026-11-12 for manual TCP flags | 2026-10-19 |
 | [029](029-upstream-blackholing.md) | Provider-scoped upstream blackholing | Accepted (design only) | 2026-10-24 |
 | [030](030-scrubber-diversion.md) | Guarded diversion to an external scrubber | Accepted; return-leg amendment accepted 2026-11-12 and implemented | 2026-11-02 |
 | [031](031-source-prefix-matches.md) | Manual source-prefix FlowSpec matches | Proposed | 2026-10-22 |

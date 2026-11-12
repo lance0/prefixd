@@ -58,7 +58,7 @@ Follow a procedure for a specific task.
 | Page | Scope |
 |------|-------|
 | [Deployment](how-to/deployment.md) | Configure authentication, peers, TLS, databases and deployment. |
-| [Scrubber diversion](how-to/scrubber-diversion.md) | Configure disabled-by-default profiles, readiness, re-arm and guarded withdrawal. |
+| [Scrubber diversion](how-to/scrubber-diversion.md) | Configure disabled-by-default profiles, symmetric return legs, readiness, re-arm and guarded withdrawal. |
 | [VPN FlowSpec](how-to/vpn-flowspec.md) | Configure scopes, automatic defaults and guarded VPN diversion. |
 | [Extending mitigations](how-to/extending-mitigations.md) | Keep an existing FlowSpec rule for longer. |
 | [Upgrading and rollback](how-to/upgrading.md) | Back up state and apply version-specific upgrade procedures. |
@@ -113,7 +113,7 @@ Follow development plans, contribution guidance and release history.
 | [Changelog](../CHANGELOG.md) | Release history and unreleased changes. |
 | [Contributing](../CONTRIBUTING.md) | Development workflow and checks. |
 | [Release checklist](project/release-checklist.md) | Release preconditions, version bump and publication steps. |
-| [Redirect-to-IP contract plan](project/scrubber-diversion-contract.md) | Proposed speaker dependency, action vectors and failure qualification for guarded scrubber diversion. |
+| [Redirect-to-IP contract plan](project/scrubber-diversion-contract.md) | Speaker contract, action vectors and failure qualification for guarded scrubber diversion and its return leg. |
 | [Security](../SECURITY.md) | Reporting and security guidance. |
 
 Flat guide and reference paths moved into these categories. ADR identifiers and
