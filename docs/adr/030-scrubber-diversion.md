@@ -14,6 +14,10 @@ Extends [ADR 025](025-pluggable-speaker-backends.md) and
 [ADR 027](027-blackhole-mitigations.md); complements
 [ADR 029](029-upstream-blackholing.md).
 
+The [symmetric return-leg amendment](#amendment-symmetric-return-leg) was
+accepted on 2026-11-12 and is not implemented yet. Until it is implemented and
+qualified, diversion covers one direction only.
+
 ## Context and research
 
 An operator with a scrubber wants matching attack traffic sent through it while
@@ -389,6 +393,391 @@ continue renewing. Confirm a non-target router never receives diversion.
 Exercise stale router state after BGP/zebra crashes and record any required
 operator cleanup. No FRR result is a Cisco, Juniper, arbitrary GRE, capacity,
 failure-time or production-scrubbing guarantee.
+
+## Amendment: symmetric return leg
+
+**Status:** Accepted 2026-11-12. Nothing in this section is implemented yet.
+It extends the decision above and changes none of it for profiles without a
+return leg. Four choices are settled:
+
+- The return leg is tagged with a required `export_community`, and the speaker
+  contract does not change.
+- A return leg may overlap other hosts' destination rules, provided the
+  forwarding receipt includes a router-precedence control.
+- A pair counts as two rules against quotas.
+- A profile with a return leg refuses a request that omits the protocol.
+
+### Context
+
+A stateful scrubber that validates TCP handshakes must see both directions of
+a connection. Section 2 keeps clean return traffic outside the redirect's
+ingress scope, so the scrubber sees the client's SYN and ACK but not the
+victim's SYN-ACK. An operator then needs two rules for the same victim:
+
+| Router | Rule |
+| --- | --- |
+| A, internet ingress | `destination 203.0.113.1/32 → redirect 192.0.2.99` |
+| B, client side | `source 203.0.113.1/32, tcp-flags syn-ack → redirect 192.0.2.99` |
+
+UDP and other protocols need only the inbound leg. This amendment adds the
+second rule as an optional **return leg**. Both legs belong to one diversion
+and use the lifecycle in sections 3 and 4. The optional flags selector uses
+the canonical TCP-flags match from the FlowSpec match model. That match is
+defined separately, and this amendment does not fix its field name or
+encoding.
+
+The amendment stays in this ADR because the return leg adds no separate
+mechanism. It reuses this ADR's profile, readiness, owner, window, latch and
+drain rules, and adds the rules that apply to a pair. ADRs
+[004](004-destination-prefix-32-only.md), [027](027-blackhole-mitigations.md)
+and [028](028-amplification-matches.md) record amendments in the same way.
+
+### R1. Configure the return leg on the profile
+
+A global IP-target profile can carry an optional `return_leg`:
+
+```yaml
+    - id: scrubber-a
+      revision: qualified-v2
+      ipv4_target: 192.0.2.99
+      router_peers: [192.0.2.2]        # router A
+      policy_binding: ingress-only-v2
+      # ...other fields as in the manual workflow
+      return_leg:
+        router_peers: [192.0.2.3]      # router B
+        policy_binding: client-side-only-v1
+        export_community: "64496:100"
+        tcp_flags: syn_ack             # optional
+```
+
+- **Target.** The return leg uses the profile's existing `ipv4_target` or
+  `ipv6_target`. It has no target field of its own, because one scrubber must
+  see both directions.
+- **Router peers.** `router_peers` lists the routers that receive return-leg
+  rules. It is non-empty and validated like the inbound peer list. The two
+  lists may overlap when one router carries both legs on different
+  interfaces. prefixd cannot observe interface scope, so the qualification
+  receipt must cover that topology.
+- **Policy binding.** `policy_binding` names the operator's speaker export
+  policy revision for the return leg. The monitor echoes it, as for the
+  inbound binding.
+- **Export community.** `export_community` is a required standard community
+  (`ASN:VALUE`) that prefixd attaches to every return-leg rule. The speaker's
+  export policy can match communities on FlowSpec routes, but it cannot match
+  NLRI shape or owner. The community is therefore what lets the policy send
+  return-leg rules only to the return peers and deny them toward the inbound
+  peers. Inbound-leg rules carry no new attribute, so their bytes do not
+  change. The community must not be a well-known community, and it must
+  differ from any community the profile's scope or ordinary FlowSpec
+  attaches.
+- **TCP flags.** `tcp_flags` is optional. When set, it accepts only
+  `syn_ack`: a SYN+ACK selector expressed with the canonical TCP-flags match
+  from the FlowSpec match model. When omitted, the return leg matches all of the victim's TCP
+  traffic from the mirrored ports. This is gateway-style symmetry and puts more
+  load on the scrubber. No request, detector or playbook supplies or widens
+  this selector, so it does not depend on whether request-supplied TCP-flags
+  matches are enabled.
+
+`return_leg` is refused on VPN-scoped and redirect-to-VRF profiles. VPN return
+legs are out of scope.
+
+`ProfileSnapshot` gains an optional `return_leg` holding all four fields. It
+is serialized only when present, so snapshots without a return leg compare
+equal to existing rows. Every admission freezes this snapshot. Adding,
+removing or changing `return_leg` requires a new profile `revision`. Startup
+refuses the change while the profile has outstanding diversion, as for any
+other change to the frozen snapshot.
+
+### R2. Rule shape
+
+The controller derives the return leg from a validated inbound leg. A request
+never names it, and it is never admitted alone. For an inbound match with
+victim `V`:
+
+| Inbound leg | Return leg |
+| --- | --- |
+| `dst_prefix` `V/32` or `V/128` | `src_prefix` `V/32` or `V/128` |
+| no `src_prefix` | no destination component |
+| `protocol 6` | `protocol 6` |
+| `dst_ports P` | `src_ports P`, the same canonical list; absent when `P` is absent |
+| | the profile's `tcp_flags`, when set |
+| target `T`, owner `O`, revision `r` | target `T`, owner `O`, revision `r`, plus `export_community` |
+
+- **Protocol decides whether a pair is created.** When a profile has a return
+  leg, an inbound request with `protocol: 6` always creates a pair, because a
+  stateful scrubber drops a TCP connection it can see in only one direction.
+  Any other explicit protocol creates the inbound leg alone. A request that
+  omits the protocol is refused, because an any-protocol inbound leg carries
+  TCP without its return path.
+- **Ports are mirrored exactly.** The return leg's ports are never wider or
+  narrower than the inbound leg's. A wider return leg would send the scrubber
+  SYN-ACKs for connections it never saw, and it would drop them.
+- **Source-selected inbound legs are refused.** For a pair, the inbound leg
+  must not carry `src_prefix`. Mirroring it would give the return leg a
+  non-owned destination. Leaving it out would divert responses to clients the
+  scrubber never saw. Source-selected pairs are deferred.
+- **The destination is omitted, not `/0`.** The return leg has no destination
+  component. That omission is distinct from an explicit `/0`, as ADR 031
+  requires.
+
+This shape breaks rules that stay in force everywhere else. ADR 028 permits
+source ports only with UDP and defers TCP flags. ADR 004 and section 1
+require a host destination. ADR 032 refuses global source-only rules and
+source-only redirects. The exception is limited to diversion:
+
+- `GuardedRule` validation accepts one additional shape, the return leg
+  exactly as described above, with a host source and every other component
+  absent. The domain invariant function in ADR 028 does not change. Manual
+  mitigation, playbook and detector paths never produce this shape.
+- The guarded read-back decoder accepts the return shape only under a
+  scrubber profile owner, with exactly the configured community and the same
+  admission revision as a durable row's return leg. An unexplained rule of
+  that shape is untracked intent under the owner and follows section 4.
+- Requests for global source-only rules stay refused under ADR 032.
+
+Each leg's identity is its canonical NLRI hash, so the two legs never share a
+speaker key. Receivers validate destination-less rules differently
+([RFC 8955 §6](https://www.rfc-editor.org/rfc/rfc8955.html#section-6),
+[RFC 9117](https://www.rfc-editor.org/rfc/rfc9117.html)). Router B's
+acceptance is a qualification item, not a controller guarantee.
+
+### R3. Admit, renew and withdraw a pair as one unit
+
+**One row, one owner and one revision.** A pair is one `Diversion` row. The
+row gains an optional `return_rule`, which is part of the immutable snapshot.
+Both legs use the profile's existing owner. A second owner would allow one
+leg's lease to outlive the other's, and it would double the profile's window
+and renewal traffic. With one owner, the legs share the window, the lease
+generation and the deadline, so a lost lease or a stopped controller removes
+both together. Both legs carry the row's single admission revision. [rustbgpd ADR-0144](https://github.com/lance0/rustbgpd/blob/v0.82.0/docs/adr/0144-guarded-flowspec-mutations.md)
+fences a revision per key, and the two keys differ, so one value cannot
+delete a newer admission at either key. The existing unique
+`admission_revision` column and the revision check in `save_diversion` keep
+working unchanged.
+
+**Admission.** The controller runs the existing serialized checks once for
+the pair, then persists the row with both legs in `pending`. In one lifecycle
+pass, it records the window durably and then sends both guarded adds under
+that window: the return leg first, then the inbound leg. Adds for a pair are
+never split across windows or passes. The row becomes `active` only when one
+read-back shows both keys at the row's revision and owner, with the same live
+generation. A pair is never partially active.
+
+**Partial add.** If either add is refused or its outcome is unknown, the pass
+records a failure for the whole row. As for any failed admission, the profile
+latches and the row moves to `withdrawing` with its original actor, reason and
+operation. The controller deletes both legs early and then waits on the drain
+barrier: 30 seconds for this process's admissions or 120 seconds for any
+other's. After the barrier, it deletes each leg again with the recorded owner
+and revision, and requires one complete inventory read that shows both keys
+absent. A leg that was never added returns `NOT_PRESENT`, which counts as
+success for that leg. A row in `withdrawing` never enters the add path, so an
+ambiguous add or delete is never resent as a fresh announcement. A partial
+pair cannot resume: after the drain completes, an operator re-arms the profile
+and admits the pair again with a new revision.
+
+**Renewal and per-pass budget.** These do not change. Each pass reads the
+guarded inventory once, uses at most one window and one renewal per owner,
+and reads back once. The 12-second window-reuse margin is unchanged. The
+renewal covers both legs because they share the generation. Each pass
+re-checks the pair invariant. If one leg is missing, has a different revision
+or generation, or has zero lease time remaining while the other leg is live,
+the row fails, the profile latches and both legs drain. An operator using the
+speaker's break-glass override on one leg therefore withdraws the pair.
+
+**Withdrawal.** Explicit withdrawal, TTL expiry, loss of readiness,
+configuration drain and rollback all withdraw the row, and therefore both
+legs. The controller deletes the inbound leg first, then the return leg, in
+the same pass. The first withdrawal reason and actor stay immutable for the
+pair, and the immutable snapshot keeps each leg's exact rule, owner, target,
+community and revision. The audit records both matches. If one leg's delete
+is ambiguous, the row stays `withdrawing` and the controller retries that
+delete with the same rule and revision. The other leg's repeated delete
+returns `NOT_PRESENT`. Victim exclusion stays in place until the barrier has
+passed and both keys are confirmed absent.
+
+**Restart with one leg outstanding.** A new controller starts unarmed, and the
+row belongs to a different controller incarnation. The controller therefore
+waits the 120-second barrier and runs the same final exact delete and absence
+read for both keys. The row's state decides what happens. Which leg survived
+does not.
+
+**Foreign and ordinary rules.** If another owner, or no owner, holds the
+return key at admission, the admission is refused and nothing is deleted. All
+deletes name the recorded owner and revision, so they cannot remove a foreign
+rule. A foreign rule at a leg's key keeps withdrawal pending and visible. The
+controller never finalizes the withdrawal by deleting that rule.
+
+**Quotas.** Quotas budget rules on routers. A pair therefore counts as two
+against `max_active` and the customer, POP and global caps. Creation rate
+counts one admission. The speaker's per-owner key cap also counts two keys
+for each pair.
+
+**Dry-run.** Dry-run simulates both legs and sends nothing, as in section 4.
+
+### R4. Export scope and evidence per leg
+
+Each leg keeps its own export evidence. The row gains
+`return_export_observation` next to `export_observation`. Both are mutable
+lifecycle fields: they are excluded from the immutable-snapshot comparison
+in Rust and in SQL. A committed export of the inbound leg to a peer outside
+`router_peers` is a conflict. A committed export of the return leg to a peer
+outside `return_leg.router_peers` is also a conflict. Either conflict fails
+the row, latches the profile and drains both legs.
+
+Export reads stay within the three-second budget, and each read is capped at
+two seconds. A pair costs two reads. New pairs read both legs first, and
+established legs rotate across passes. A slow or failed read leaves that
+leg's evidence historical without latching the profile, as today. The
+evidence layers in section 5 apply to each leg separately. `active` means
+both legs were confirmed locally. It does not mean that either router
+installed or forwarded either leg.
+
+### R5. Victim exclusion and conflicts
+
+Victim exclusion covers both legs. The live-victim unique index already
+allows only one outstanding diversion per victim.
+
+**Victim as destination.** The inbound leg keeps section 5's victim-level
+exclusion unchanged.
+
+**Victim as source.** This check is new. A pair is refused while any live or
+pending mitigation, diversion or observed local rule has a source component
+that contains `V`. Destination-less rules whose source contains `V` are
+included. While a pair is outstanding, the same rules are refused admission.
+Ordinary mitigation admission gains this check against outstanding pairs.
+
+**Other destinations.** The return leg has no destination, so it overlaps every
+destination-keyed rule for packets that `V` sends to that destination.
+Refusing all of them would allow one pair per POP, so this overlap is accepted
+on purpose, with these limits:
+
+- It covers only `V`'s TCP traffic from the mirrored ports. With the `syn_ack`
+  selector, it covers only `V`'s SYN-ACK responses.
+- RFC 8955 §5.1 orders a rule that has a destination component ahead of one
+  that does not, so another host's destination rule should take precedence.
+  This ADR does not assume routers follow that order. The forwarding receipt
+  must record it with an overlapping destination-keyed discard for another
+  host as a control, before the return leg is enabled on that router.
+- The local-inventory overlap index classifies the controller's own return
+  legs by their source host, but only when owner, key, community and revision
+  match a durable row. Every other destination-less rule keeps today's
+  conservative treatment as affecting every victim of its family, so a
+  foreign source-only rule still blocks diversion.
+
+**Safelist.** The safelist check on `V`, run before every add and repair,
+covers both legs. A safelist entry for `V` withdraws the pair. Safelisted
+destinations do not block a return leg, because it selects `V`'s responses,
+not traffic to the safelisted host's own services. Configuring `return_leg` on
+the profile is the explicit authorization for that scope. Preview and
+confirmation show the return leg as `destination: any`, together with its
+ports, flags, peers and community. The confirmation string covers both legs
+exactly.
+
+### R6. Loop avoidance and readiness
+
+Each leg follows section 2's rule. The scrubber's clean output for a leg must
+re-enter outside that leg's FlowSpec ingress scope, or in a separate clean
+routing domain. Clean return-leg output still has source `V` and the selected
+flags. If it re-entered router B within the return leg's ingress scope, it
+would be redirected again. The target route must not resolve through either
+leg's ingress scope. The two legs cannot capture each other's clean output:
+the inbound leg matches destination `V`, and the return leg matches source
+`V`. prefixd provisions none of this routing and cannot prove it from BGP
+state.
+
+For a profile with a return leg, the monitor's report adds one required
+object:
+
+```json
+"return_leg": {
+  "policy_binding": "client-side-only-v1",
+  "export_isolated": true,
+  "canary_passed": true
+}
+```
+
+- `policy_binding` must equal the frozen snapshot.
+- `export_isolated` attests that return-leg rules reach only the return peers
+  and inbound rules never reach them, unless a peer is configured in both
+  lists.
+- `canary_passed` attests that a canary TCP connection to a host behind the
+  return routers completed its handshake through both legs, and that the
+  scrubber saw each canary packet exactly once in each direction. Seeing a
+  packet more than once indicates a loop.
+
+The existing fields keep their meaning for the inbound leg and the shared
+scrubber. A report that lacks the object for a return-leg profile is invalid.
+So is a report that includes the object for a profile without a return leg.
+Both make the profile `unknown`. Any failed check makes the whole profile
+`not_ready`. The pair shares one readiness state and one latch, because a
+stateful scrubber that keeps only one leg breaks the victim's TCP sessions.
+Losing either leg's readiness drains both legs.
+
+### R7. Migration and compatibility
+
+- **Schema.** No migration. The return leg, its frozen profile fields and its
+  export evidence live in `snapshot_json`. The `victim`, `admission_revision`
+  and status columns keep their meaning. Admission and mitigation conflict
+  queries gain the victim-as-source check against the JSON snapshot. The
+  live-row bound is 1,000, so that check needs no index.
+- **Older rows and profiles.** A row without `return_rule`, or a profile
+  without `return_leg`, behaves exactly as it does today, with unchanged wire
+  bytes, identities, snapshots and drain.
+- **API and other surfaces.** `CreateDiversion` is unchanged. Diversion
+  responses, `diversion_updated` events, profile listings, CLI output and the
+  dashboard gain optional return-leg fields. When the fields are absent, the
+  row has no return leg. The dashboard must show both legs and their separate
+  evidence before the feature is enabled. Audit details add the return match
+  and community. Metric labels do not change. `prefixd_scrubber_intents`
+  keeps counting rows. OpenAPI, the API reference, the configuration reference
+  and release notes change with the implementation.
+- **Speaker.** The speaker contract does not change. In rustbgpd v0.82.0,
+  `AddGuardedFlowSpecRequest.rule` is an `AddFlowSpecRequest`, which carries
+  standard `communities`. The request requires only non-empty components in
+  ascending order, so a rule without a destination is valid. FlowSpec export
+  policy evaluates standard communities, and a rule without a destination has
+  no prefix in the policy context. This is established from the contract, not
+  from a live test, so the speaker gate in R9 must prove exact add, read-back
+  and export in a live fixture. If that fixture fails on the pinned release,
+  the minimum release is raised rather than gated by version. GoBGP stays
+  unsupported for diversion.
+- **Downgrade and rollback.** `Diversion`, `ProfileSnapshot` and the profile
+  configuration all deny unknown fields. An older controller therefore
+  refuses a configuration that contains `return_leg`, and it cannot read an
+  outstanding pair row. An unreadable row latches every profile and blocks
+  draining. Before downgrading:
+  1. Withdraw every pair and wait for `withdrawn`, which means confirmed local
+     absence of both legs.
+  2. Remove `return_leg` from the configuration with a new revision.
+  3. Verify router removal on both routers separately.
+
+  Withdrawn pair rows stay in the table for audit. An older controller's
+  outstanding-row queries skip them. Its detail endpoint cannot decode them.
+  If an older controller starts with a pair still outstanding, it cannot renew
+  the pair. The speaker lease removes both legs within the lease bound from
+  section 4. The older controller treats the destination-less return leg as
+  affecting every victim, which fails closed.
+
+### R8. Out of scope
+
+- Detector- and playbook-triggered diversion, which is tracked separately.
+- VPN-scoped and redirect-to-VRF return legs.
+- Return legs for UDP, ICMP or other protocols.
+- Source-selected pairs.
+- TCP-flags selectors other than `syn_ack`.
+- Separate targets or scrubbers for each leg.
+
+### R9. Qualification
+
+The return leg stays disabled until all three gates pass for the exact
+backend, router and scrubber:
+
+| Gate | Acceptance |
+| --- | --- |
+| Speaker | A live released-daemon fixture proves guarded add, read-back, revision-fenced delete and peer receipt of the return shape, with exact component and community bytes, for each target family. It also proves that export policy matching the community sends the return leg only to its peers. An older daemon refuses the shape without changing state. |
+| Controller | The fake speaker and the released-daemon tests cover these cases: both legs confirmed before `active`; refusal and unknown outcome of each add, in each order; ambiguous delete of each leg; restart with each single leg outstanding; a foreign rule at the return key; export outside each leg's peer set; one leg removed by the break-glass override; quotas counted per leg; victim-as-source conflicts in both admission paths; the return-leg overlap index; and a negative control showing that today's inventory index treats the return leg as overlapping every victim. |
+| Forwarding | The section 5 receipt for both routers: router B's acceptance of the destination-less rule; installed rules and counters on each router; dirty and clean captures in both directions; handshake completion through a stateful scrubber; a loop negative control that re-enters clean return output inside router B's ingress scope; precedence against an overlapping destination-keyed discard for another host; a UDP diversion that creates no return leg; and removal timing for each leg on withdrawal, TTL expiry, readiness loss and controller stop. |
 
 ## Consequences
 
