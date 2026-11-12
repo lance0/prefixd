@@ -1,5 +1,8 @@
 use super::*;
 use crate::db::{MockRepository, RepositoryTrait};
+
+#[path = "return_leg_tests.rs"]
+mod return_leg;
 use async_trait::async_trait;
 use std::sync::{
     Mutex as StdMutex,
@@ -23,6 +26,15 @@ struct Fake {
     renewals: AtomicUsize,
     export_reads: AtomicUsize,
     export_delay: AtomicU64,
+    /// Keys of attempted guarded adds, in dispatch order.
+    added: StdMutex<Vec<String>>,
+    /// Next add at this key: `true` applies it then reports an unknown
+    /// outcome; `false` refuses it unchanged.
+    fail_add: StdMutex<HashMap<String, bool>>,
+    /// Next delete at this key reports an unknown outcome without deleting.
+    fail_delete: StdMutex<std::collections::HashSet<String>>,
+    /// Committed export peers reported for a key.
+    exports: StdMutex<HashMap<String, Vec<String>>>,
 }
 impl Fake {
     fn live_window(&self, owner: &str, stamp: GuardedStamp) -> Result<Instant> {
@@ -76,10 +88,29 @@ impl ExportObserver for Fake {
     async fn blackhole_exports(&self, _: &ipnet::IpNet) -> Result<Option<Vec<PeerExport>>> {
         Ok(Some(vec![]))
     }
-    async fn flowspec_exports(&self, _: &FlowSpecNlri) -> Result<Option<Vec<PeerExport>>> {
+    async fn flowspec_exports(&self, nlri: &FlowSpecNlri) -> Result<Option<Vec<PeerExport>>> {
         self.export_reads.fetch_add(1, SeqCst);
         tokio::time::sleep(Duration::from_millis(self.export_delay.load(SeqCst))).await;
-        Ok(Some(vec![]))
+        let peers = self
+            .exports
+            .lock()
+            .unwrap()
+            .get(&nlri.compute_hash())
+            .cloned()
+            .unwrap_or_default();
+        Ok(Some(
+            peers
+                .into_iter()
+                .map(|peer_address| PeerExport {
+                    peer_address,
+                    disposition: ExportDisposition::Committed,
+                    reason: String::new(),
+                    explain_code: String::new(),
+                    detail: String::new(),
+                    advertised_path_id: 0,
+                })
+                .collect(),
+        ))
     }
 }
 #[async_trait]
@@ -125,11 +156,23 @@ impl GuardedFlowSpecSpeaker for Fake {
         assert!(
             durable
                 .iter()
-                .any(|row| row.rule.same_admission(rule) && row.windows.contains(&window)),
+                .any(|row| row.legs().any(|leg| leg.same_admission(rule))
+                    && row.windows.contains(&window)),
             "window and revision must be durable before dispatch"
         );
         self.writes.fetch_add(1, SeqCst);
         let until = self.live_window(&rule.owner, window)?;
+        let key = rule.nlri.compute_hash();
+        self.added.lock().unwrap().push(key.clone());
+        if let Some(applied) = self.fail_add.lock().unwrap().remove(&key) {
+            if applied {
+                self.rows.lock().unwrap().insert(key, (rule.clone(), until));
+                return Err(PrefixdError::Internal("unknown add outcome".into()));
+            }
+            return Err(PrefixdError::InvalidRequest(
+                "add refused; nothing changed".into(),
+            ));
+        }
         if self.stall_add.load(SeqCst) {
             self.gate.notified().await;
             return Err(PrefixdError::Internal("unknown add outcome".into()));
@@ -168,6 +211,9 @@ impl GuardedFlowSpecSpeaker for Fake {
         self.writes.fetch_add(1, SeqCst);
         let mut rows = self.rows.lock().unwrap();
         let key = rule.nlri.compute_hash();
+        if self.fail_delete.lock().unwrap().remove(&key) {
+            return Err(PrefixdError::Internal("unknown delete outcome".into()));
+        }
         if rows
             .get(&key)
             .is_some_and(|(held, _)| held.owner != rule.owner || held.revision != rule.revision)
@@ -217,6 +263,7 @@ fn profile(id: &str) -> ScrubberProfile {
         max_active: 10,
         max_new_per_minute: 20,
         reserved_targets: vec![],
+        return_leg: None,
     }
 }
 async fn fixture(mode: OperationMode) -> (Arc<AppState>, Arc<MockRepository>, Arc<Fake>) {
@@ -251,6 +298,10 @@ async fn fixture(mode: OperationMode) -> (Arc<AppState>, Arc<MockRepository>, Ar
         renewals: AtomicUsize::new(0),
         export_reads: AtomicUsize::new(0),
         export_delay: AtomicU64::new(0),
+        added: Default::default(),
+        fail_add: Default::default(),
+        fail_delete: Default::default(),
+        exports: Default::default(),
     });
     let binding = repo
         .register_speaker_target(
@@ -678,6 +729,7 @@ async fn untracked_local_victim_overlaps_refuse_diversion_without_touching_forei
                 redirect_route_target: None,
                 owner: "another-tool".into(),
                 revision: 999,
+                export_community: None,
             };
             fake.rows.lock().unwrap().insert(
                 foreign.compute_hash(),
@@ -831,6 +883,7 @@ fn readiness_rejects_stale_future_wrong_profile_and_policy_reports() {
             capacity_available: true,
             canary_passed: true,
             export_isolated: true,
+            return_leg: None,
         };
         match case {
             0 => {}
@@ -1419,7 +1472,7 @@ fn source_only_inventory_blocks_diversion_across_rds() {
         entries: vec![],
         other_matches: vec![source_only],
     };
-    let observed = Observed::new(&inventory).unwrap();
+    let observed = Observed::new(&inventory, &[]).unwrap();
     let victim: std::net::IpAddr = "203.0.113.1".parse().unwrap();
     assert!(
         observed

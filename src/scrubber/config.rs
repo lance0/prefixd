@@ -1,4 +1,4 @@
-use crate::bgp::validate_redirect_target;
+use crate::bgp::{GuardedRule, validate_redirect_target};
 use crate::error::{PrefixdError, Result};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
@@ -40,6 +40,82 @@ pub struct ScrubberProfile {
     pub max_new_per_minute: u32,
     #[serde(default)]
     pub reserved_targets: Vec<ipnet::IpNet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_leg: Option<ReturnLeg>,
+}
+
+/// The symmetric return leg of a global IP-target profile (ADR 030 R1). It
+/// uses the profile's target, owner, readiness and latch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReturnLeg {
+    /// Routers that receive return-leg rules.
+    pub router_peers: Vec<String>,
+    /// The operator's speaker export policy revision for the return leg.
+    pub policy_binding: String,
+    /// Standard community (`ASN:VALUE`) attached to every return-leg rule.
+    #[schema(example = "64496:100")]
+    pub export_community: String,
+    /// Omitted, the return leg matches all of the victim's TCP traffic from
+    /// the mirrored ports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_flags: Option<ReturnTcpFlags>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReturnTcpFlags {
+    SynAck,
+}
+
+/// The return leg derived from a validated inbound leg (ADR 030 R2), or
+/// `None` when the profile has none or the protocol is not TCP.
+pub fn derive_return(
+    inbound: &GuardedRule,
+    leg: Option<&ReturnLeg>,
+) -> Result<Option<GuardedRule>> {
+    let Some(leg) = leg else {
+        return Ok(None);
+    };
+    match inbound.nlri.protocol {
+        None => {
+            return Err(PrefixdError::InvalidRequest(
+                "this profile's return leg requires an explicit protocol".into(),
+            ));
+        }
+        Some(6) => {}
+        Some(_) => return Ok(None),
+    }
+    if inbound.nlri.src_prefix.is_some() {
+        return Err(PrefixdError::InvalidRequest(
+            "a profile with a return leg refuses source-selected TCP diversion".into(),
+        ));
+    }
+    let rule = GuardedRule {
+        nlri: crate::domain::FlowSpecNlri {
+            dst_prefix: String::new(),
+            src_prefix: Some(inbound.nlri.dst_prefix.clone()),
+            protocol: Some(6),
+            src_ports: crate::domain::canonical_ports(&inbound.nlri.dst_ports),
+            tcp_flags: leg
+                .tcp_flags
+                .map(|ReturnTcpFlags::SynAck| crate::bgp::syn_ack()),
+            ..Default::default()
+        },
+        route_targets: vec![],
+        target: inbound.target,
+        redirect_route_target: None,
+        owner: inbound.owner.clone(),
+        revision: inbound.revision,
+        export_community: Some(leg.export_community.clone()),
+    };
+    if inbound.nlri.scope.is_some() || inbound.redirect_route_target.is_some() {
+        return Err(PrefixdError::InvalidRequest(
+            "return legs require a global IP-target profile".into(),
+        ));
+    }
+    rule.validate()?;
+    Ok(Some(rule))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -55,6 +131,8 @@ pub struct ProfileSnapshot {
     pub destinations: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_route_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_leg: Option<ReturnLeg>,
 }
 
 fn canonical_redirect<'de, D: serde::Deserializer<'de>>(
@@ -107,11 +185,32 @@ impl ScrubberProfile {
             qualification_receipt: self.qualification_receipt.clone(),
             destinations: self.destinations.iter().map(ToString::to_string).collect(),
             redirect_route_target: self.redirect_route_target.clone(),
+            return_leg: self.return_leg.clone(),
         }
     }
 }
 
 impl ScrubberConfig {
+    /// [`Self::validate`], and no return-leg community equals a configured
+    /// blackhole community, which the speaker's export policy also matches.
+    pub fn validate_with(&self, blackhole: &crate::config::BlackholeConfig) -> Result<()> {
+        self.validate()?;
+        let blackhole = blackhole.parsed_communities()?;
+        if self
+            .profiles
+            .iter()
+            .filter_map(|profile| profile.return_leg.as_ref())
+            .filter_map(|leg| crate::bgp::export_community_value(&leg.export_community))
+            .any(|community| blackhole.contains(&community))
+        {
+            return Err(PrefixdError::Config(
+                "a scrubber return-leg export community must differ from every blackhole community"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.enabled && self.profiles.is_empty() {
             return Err(PrefixdError::Config(
@@ -124,6 +223,7 @@ impl ScrubberConfig {
             ));
         }
         let mut names = std::collections::HashSet::new();
+        let mut communities = std::collections::HashSet::new();
         for profile in &self.profiles {
             let url = reqwest::Url::parse(&profile.readiness_url)
                 .map_err(|_| PrefixdError::Config("invalid scrubber readiness URL".into()))?;
@@ -179,26 +279,55 @@ impl ScrubberConfig {
                     "invalid scrubber profile or readiness bounds".into(),
                 ));
             }
-            let mut peers = std::collections::HashSet::new();
-            for peer in &profile.router_peers {
-                let (address, interface) = peer
-                    .split_once('%')
-                    .map_or((peer.as_str(), None), |(a, i)| (a, Some(i)));
-                let address: IpAddr = address
-                    .parse()
-                    .map_err(|_| PrefixdError::Config("invalid scrubber router peer".into()))?;
-                let link_local =
-                    matches!(address, IpAddr::V6(v) if v.segments()[0] & 0xffc0 == 0xfe80);
-                if !peers.insert(peer)
-                    || link_local != interface.is_some()
-                    || interface.is_some_and(str::is_empty)
+            validate_peers(&profile.router_peers)?;
+            if let Some(leg) = &profile.return_leg {
+                // VPN and redirect-to-VRF return legs are out of scope (R8).
+                if profile.scope != "global"
+                    || profile.redirect_route_target.is_some()
+                    || leg.router_peers.is_empty()
+                    || leg.router_peers.len() > 64
+                    || leg.policy_binding.is_empty()
+                    || leg.policy_binding.len() > 256
+                    || crate::bgp::export_community_value(&leg.export_community).is_none()
+                    // A pair holds two rules, so a smaller cap admits no TCP pair.
+                    || profile.max_active < 2
                 {
                     return Err(PrefixdError::Config(
-                        "ambiguous scrubber router peer identity".into(),
+                        "invalid scrubber return leg: it needs a global IP-target profile with max_active of at least 2, 1 to 64 router peers, a policy binding and a canonical ASN:VALUE export community outside 0:x and 65535:x".into(),
+                    ));
+                }
+                validate_peers(&leg.router_peers)?;
+                // Export policy tells each profile's return legs apart by community.
+                if !communities.insert(&leg.export_community) {
+                    return Err(PrefixdError::Config(
+                        "scrubber return legs need distinct export communities".into(),
                     ));
                 }
             }
         }
         Ok(())
     }
+}
+
+/// Unique peer identities; link-local IPv6 peers need their interface.
+fn validate_peers(router_peers: &[String]) -> Result<()> {
+    let mut peers = std::collections::HashSet::new();
+    for peer in router_peers {
+        let (address, interface) = peer
+            .split_once('%')
+            .map_or((peer.as_str(), None), |(a, i)| (a, Some(i)));
+        let address: IpAddr = address
+            .parse()
+            .map_err(|_| PrefixdError::Config("invalid scrubber router peer".into()))?;
+        let link_local = matches!(address, IpAddr::V6(v) if v.segments()[0] & 0xffc0 == 0xfe80);
+        if !peers.insert(peer)
+            || link_local != interface.is_some()
+            || interface.is_some_and(str::is_empty)
+        {
+            return Err(PrefixdError::Config(
+                "ambiguous scrubber router peer identity".into(),
+            ));
+        }
+    }
+    Ok(())
 }

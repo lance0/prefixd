@@ -1406,6 +1406,25 @@ Profiles start unarmed. Their configuration requires restart, and outstanding
 intent prevents retargeting, removal, disabling or mode changes until drained.
 See the [profile example and readiness schema](../how-to/scrubber-diversion.md).
 
+A global IP-target profile may add an optional `return_leg`, the symmetric
+return rule of
+[ADR 030](../adr/030-scrubber-diversion.md#amendment-symmetric-return-leg). It
+is refused on VPN-scoped and redirect-to-VRF profiles and is part of the frozen
+profile snapshot, so adding, removing or changing it needs a new `revision` and
+a drained profile.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `router_peers` | yes | 1–64 routers that receive return-leg rules, validated like the inbound list; the two lists may overlap |
+| `policy_binding` | yes | Speaker export policy revision for the return leg, 1–256 bytes; the monitor echoes it |
+| `export_community` | yes | Canonical standard community `ASN:VALUE` outside `0:x` and `65535:x`, attached to every return-leg rule; unique across profiles and different from every `blackhole.communities` entry |
+| `tcp_flags` | no | Only `syn_ack`; omitted, the return leg matches all of the victim's TCP from the mirrored ports |
+
+The return leg uses the profile's target, owner, readiness and latch. A pair
+counts as two rules against `max_active` and the customer, POP and global
+quotas, so a profile with `return_leg` needs `max_active` of at least 2;
+creation rate counts one admission.
+
 ## VPN FlowSpec scopes
 
 `bgp.vpn_scopes` maps names to `family` (`ipv4` or `ipv6`), `rd`, and nonempty

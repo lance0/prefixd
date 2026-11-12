@@ -36,6 +36,14 @@ pub struct Diversion {
     pub last_error: Option<String>,
     #[serde(default)]
     pub export_observation: Option<DiversionExportObservation>,
+    /// The return leg of a pair (ADR 030 R3), part of the immutable snapshot
+    /// with the inbound `rule`'s owner, target and admission revision. Absent,
+    /// the diversion has no return leg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_rule: Option<GuardedRule>,
+    /// The return leg's own export evidence, with `export_observation`'s rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_export_observation: Option<DiversionExportObservation>,
 }
 
 /// Last per-peer export evidence. A recheck that finds the same peers keeps
@@ -102,11 +110,38 @@ impl Diversion {
                 "generation",
                 "last_error",
                 "export_observation",
+                "return_export_observation",
             ] {
                 object.remove(field);
             }
         }
         Ok(value)
+    }
+    /// The inbound leg, then the return leg when the row is a pair.
+    pub fn legs(&self) -> impl Iterator<Item = &GuardedRule> {
+        std::iter::once(&self.rule).chain(&self.return_rule)
+    }
+    /// Both legs are valid and the return leg is exactly the one the frozen
+    /// profile derives from the inbound leg.
+    pub fn validate(&self) -> crate::error::Result<()> {
+        // The inbound leg is a host-destination rule; only a return leg
+        // carries a community and omits the destination.
+        if self.rule.export_community.is_some() {
+            return Err(crate::error::PrefixdError::Internal(
+                "inconsistent scrubber inbound leg".into(),
+            ));
+        }
+        self.rule.validate()?;
+        match (
+            derive_return(&self.rule, self.profile.return_leg.as_ref())?,
+            &self.return_rule,
+        ) {
+            (None, None) => Ok(()),
+            (Some(expected), Some(saved)) if expected.same_admission(saved) => Ok(()),
+            _ => Err(crate::error::PrefixdError::Internal(
+                "inconsistent scrubber return leg".into(),
+            )),
+        }
     }
     pub fn victim(&self) -> String {
         self.rule
@@ -136,6 +171,10 @@ impl Diversion {
                 object.remove("target");
             }
             details["redirect_route_target"] = serde_json::json!(target);
+        }
+        if let Some(leg) = &self.return_rule {
+            details["return_match"] = serde_json::json!(leg.nlri);
+            details["export_community"] = serde_json::json!(leg.export_community);
         }
         crate::observability::AuditEntry::new(
             actor_type,

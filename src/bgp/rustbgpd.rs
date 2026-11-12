@@ -525,11 +525,24 @@ use super::RUSTBGPD_MAX_PORTS_PER_LIST as MAX_PORTS_PER_LIST;
 
 /// Components in strictly ascending type order; the daemon does not reorder them.
 fn encode_match(nlri: &FlowSpecNlri) -> Result<(i32, Vec<pb::FlowSpecComponent>)> {
-    if nlri.src_prefix.is_some() || nlri.scope.is_some() || nlri.tcp_flags.is_some() {
+    encode_components(nlri, false)
+}
+
+/// `return_leg` admits only a guarded diversion's destination-less return
+/// shape (ADR 030 R2); every other rule keeps the ordinary invariants.
+fn encode_components(
+    nlri: &FlowSpecNlri,
+    return_leg: bool,
+) -> Result<(i32, Vec<pb::FlowSpecComponent>)> {
+    if return_leg {
+        if !crate::bgp::is_return_shape(nlri) {
+            return Err(invalid("invalid diversion return leg"));
+        }
+    } else if nlri.src_prefix.is_some() || nlri.scope.is_some() || nlri.tcp_flags.is_some() {
         nlri.validate()
             .map_err(|error| invalid(&error.to_string()))?;
     }
-    let prefix = if nlri.dst_prefix.is_empty() && nlri.scope.is_some() {
+    let prefix = if nlri.dst_prefix.is_empty() && (nlri.scope.is_some() || return_leg) {
         None
     } else {
         let prefix: ipnet::IpNet = nlri
@@ -744,6 +757,63 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
     {
         return Err(invalid("unsupported local route attributes"));
     }
+    let nlri = decode_components(&route.components, family, scope)?;
+    if (nlri.dst_prefix.is_empty() && (nlri.scope.is_none() || nlri.src_prefix.is_none()))
+        || route.actions.len() != 1
+    {
+        return Err(invalid("missing destination or unsupported actions"));
+    }
+    let (action, expected_ec) = match &route.actions[0].action {
+        Some(pb::flow_spec_action::Action::TrafficRate(rate)) => {
+            let bps = f64::from(rate.rate) * 8.0;
+            if !bps.is_finite() || bps < 0.0 || bps >= u64::MAX as f64 || bps.fract() != 0.0 {
+                return Err(invalid("invalid traffic rate"));
+            }
+            let action = if bps == 0.0 {
+                FlowSpecAction::discard()
+            } else {
+                FlowSpecAction::police(bps as u64)
+            };
+            (action, (0x8006_u64 << 48) | u64::from(rate.rate.to_bits()))
+        }
+        Some(pb::flow_spec_action::Action::TrafficMarking(mark)) => {
+            let dscp = u8::try_from(mark.dscp)
+                .ok()
+                .filter(|dscp| *dscp <= 63)
+                .ok_or_else(|| invalid("DSCP must be between 0 and 63"))?;
+            let action = FlowSpecAction::mark(dscp);
+            let community = action
+                .extended_community()
+                .map_err(|error| invalid(&error.to_string()))?;
+            (action, community)
+        }
+        _ => return Err(invalid("unsupported action")),
+    };
+    let mut expected_communities = vec![expected_ec];
+    let mut targets = route
+        .route_targets
+        .iter()
+        .map(|target| route_target_bytes(target).map_err(|error| invalid(&error.to_string())))
+        .collect::<Result<Vec<_>>>()?;
+    targets.sort_unstable();
+    expected_communities.extend(targets);
+    if route.extended_communities != expected_communities {
+        return Err(invalid("unsupported or inconsistent extended communities"));
+    }
+    let rule = FlowSpecRule::new(nlri, action)
+        .with_owner(route.injection_owner)
+        .with_route_targets(route.route_targets);
+    encode(&rule)?;
+    Ok(rule)
+}
+
+/// Strict match components in ascending type order, in the exact form the
+/// daemon renders for prefixd's injection; any other operator, term or bit fails.
+pub(super) fn decode_components(
+    components: &[pb::FlowSpecComponent],
+    family: i32,
+    scope: Option<VpnFlowSpecIdentity>,
+) -> Result<FlowSpecNlri> {
     let mut nlri = FlowSpecNlri {
         scope,
         dst_prefix: String::new(),
@@ -752,7 +822,7 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
         ..Default::default()
     };
     let mut previous = 0;
-    for component in &route.components {
+    for component in components {
         if component.r#type <= previous || component.offset != 0 {
             return Err(invalid("invalid component order or offset"));
         }
@@ -847,53 +917,7 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
             _ => return Err(invalid("unsupported component")),
         }
     }
-    if (nlri.dst_prefix.is_empty() && (nlri.scope.is_none() || nlri.src_prefix.is_none()))
-        || route.actions.len() != 1
-    {
-        return Err(invalid("missing destination or unsupported actions"));
-    }
-    let (action, expected_ec) = match &route.actions[0].action {
-        Some(pb::flow_spec_action::Action::TrafficRate(rate)) => {
-            let bps = f64::from(rate.rate) * 8.0;
-            if !bps.is_finite() || bps < 0.0 || bps >= u64::MAX as f64 || bps.fract() != 0.0 {
-                return Err(invalid("invalid traffic rate"));
-            }
-            let action = if bps == 0.0 {
-                FlowSpecAction::discard()
-            } else {
-                FlowSpecAction::police(bps as u64)
-            };
-            (action, (0x8006_u64 << 48) | u64::from(rate.rate.to_bits()))
-        }
-        Some(pb::flow_spec_action::Action::TrafficMarking(mark)) => {
-            let dscp = u8::try_from(mark.dscp)
-                .ok()
-                .filter(|dscp| *dscp <= 63)
-                .ok_or_else(|| invalid("DSCP must be between 0 and 63"))?;
-            let action = FlowSpecAction::mark(dscp);
-            let community = action
-                .extended_community()
-                .map_err(|error| invalid(&error.to_string()))?;
-            (action, community)
-        }
-        _ => return Err(invalid("unsupported action")),
-    };
-    let mut expected_communities = vec![expected_ec];
-    let mut targets = route
-        .route_targets
-        .iter()
-        .map(|target| route_target_bytes(target).map_err(|error| invalid(&error.to_string())))
-        .collect::<Result<Vec<_>>>()?;
-    targets.sort_unstable();
-    expected_communities.extend(targets);
-    if route.extended_communities != expected_communities {
-        return Err(invalid("unsupported or inconsistent extended communities"));
-    }
-    let rule = FlowSpecRule::new(nlri, action)
-        .with_owner(route.injection_owner)
-        .with_route_targets(route.route_targets);
-    encode(&rule)?;
-    Ok(rule)
+    Ok(nlri)
 }
 
 fn encode_blackhole(route: &BlackholeRoute) -> pb::AddPathRequest {
@@ -1707,7 +1731,8 @@ impl ExportObserver for RustBgpdAnnouncer {
     }
 
     async fn flowspec_exports(&self, nlri: &FlowSpecNlri) -> Result<Option<Vec<PeerExport>>> {
-        let (afi_safi, components) = encode_match(nlri)?;
+        // A read-only key lookup; a diversion return leg is a valid key here.
+        let (afi_safi, components) = encode_components(nlri, crate::bgp::is_return_shape(nlri))?;
         // Older daemons must refuse a scoped export read explicitly; the
         // disposition RPC alone can ignore scope fields.
         self.validate_scope(nlri.scope.as_ref()).await?;

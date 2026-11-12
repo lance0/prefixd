@@ -541,14 +541,20 @@ impl Pair {
     }
 
     pub async fn start_vpn() -> Self {
-        Self::start_mode(false, true).await
+        Self::start_mode(false, true, None).await
+    }
+
+    /// `go` is router A and `global_only` is router B; rustbgpd exports rules
+    /// carrying `community` only to router B (ADR 030 R1).
+    pub async fn start_return_leg(community: &str) -> Self {
+        Self::start_mode(false, false, Some(community)).await
     }
 
     async fn start_with(unicast: bool) -> Self {
-        Self::start_mode(unicast, false).await
+        Self::start_mode(unicast, false, None).await
     }
 
-    async fn start_mode(unicast: bool, vpn: bool) -> Self {
+    async fn start_mode(unicast: bool, vpn: bool, return_leg: Option<&str>) -> Self {
         assert_ne!(
             std::env::var("TESTCONTAINERS_COMMAND").as_deref(),
             Ok("keep"),
@@ -556,18 +562,34 @@ impl Pair {
         );
         let network = format!("prefixd-peer-{}", uuid::Uuid::new_v4());
         eprintln!("owned peer network: {network}");
-        let mut go = if vpn {
+        // The return-leg receipt reads standard communities, so both of its
+        // routers use the comparator that serializes binary attributes.
+        let mut go = if vpn || return_leg.is_some() {
             gobgp::Speaker::on_vpn_network(&network, "192.0.2.20").await
         } else {
             gobgp::Speaker::on_network(&network).await
         };
-        let mut global_only = if vpn {
+        let mut global_only = if vpn || return_leg.is_some() {
             Some(gobgp::Speaker::on_vpn_network(&network, "192.0.2.21").await)
         } else {
             None
         };
         let go_ip = go.container.get_bridge_ip_address().await.unwrap();
-        let rust = if let Some(global) = &global_only {
+        let rust = if let (Some(community), Some(router_b)) = (return_leg, &global_only) {
+            rustbgpd::Speaker::start_peered_return_leg(
+                &network,
+                &go_ip.to_string(),
+                65010,
+                &router_b
+                    .container
+                    .get_bridge_ip_address()
+                    .await
+                    .unwrap()
+                    .to_string(),
+                community,
+            )
+            .await
+        } else if let Some(global) = &global_only {
             rustbgpd::Speaker::start_peered_vpn(
                 &network,
                 &go_ip.to_string(),

@@ -145,6 +145,8 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
             crate::scrubber::Diversion,
             crate::scrubber::DiversionStatus,
             crate::scrubber::ProfileSnapshot,
+            crate::scrubber::ReturnLeg,
+            crate::scrubber::ReturnTcpFlags,
             crate::scrubber::ProfileState,
             crate::scrubber::ReadinessState,
             crate::scrubber::DiversionExportObservation,
@@ -340,6 +342,32 @@ mod tests {
         for list in ["set", "not_set"] {
             assert!(schemas["TcpFlagsMatch"]["properties"][list].is_object());
         }
+    }
+
+    #[test]
+    fn scrubber_return_leg_is_documented() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let schemas = &doc["components"]["schemas"];
+        for (schema, field) in [
+            ("Diversion", "return_rule"),
+            ("Diversion", "return_export_observation"),
+            ("ProfileSnapshot", "return_leg"),
+            ("ConfiguredProfile", "return_leg"),
+            ("GuardedRule", "export_community"),
+            ("ReturnLeg", "router_peers"),
+            ("ReturnLeg", "policy_binding"),
+            ("ReturnLeg", "export_community"),
+            ("ReturnLeg", "tcp_flags"),
+        ] {
+            assert!(
+                schemas[schema]["properties"][field].is_object(),
+                "{schema}.{field}"
+            );
+        }
+        assert_eq!(
+            schemas["ReturnTcpFlags"]["enum"],
+            serde_json::json!(["syn_ack"])
+        );
     }
 
     #[test]

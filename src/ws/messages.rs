@@ -23,7 +23,7 @@ pub enum WsMessage {
 
     /// A durable diversion admission or lifecycle transition.
     DiversionUpdated {
-        diversion: crate::scrubber::Diversion,
+        diversion: Box<crate::scrubber::Diversion>,
     },
 
     /// Current bounded readiness and re-arm state for a configured profile.

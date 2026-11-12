@@ -18,6 +18,7 @@ fn rule(prefix: &str, target: &str, owner: &str, revision: u64) -> GuardedRule {
         redirect_route_target: None,
         owner: owner.into(),
         revision,
+        export_community: None,
     }
 }
 

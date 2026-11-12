@@ -36,7 +36,16 @@ fn generation(value: Option<pb::LeaseGeneration>) -> Result<GuardedStamp> {
 
 fn encode_guarded(rule: &GuardedRule) -> Result<pb::AddFlowSpecRequest> {
     rule.validate()?;
-    let (afi_safi, components) = encode_match(&rule.nlri)?;
+    // A validated rule with a community is a return leg (ADR 030 R2).
+    let communities = rule
+        .export_community
+        .as_deref()
+        .map(|text| {
+            crate::bgp::export_community_value(text)
+                .ok_or_else(|| invalid("invalid return-leg community"))
+        })
+        .transpose()?;
+    let (afi_safi, components) = encode_components(&rule.nlri, communities.is_some())?;
     let (route_targets, extended_communities) =
         encode_scope_targets(rule.nlri.scope.as_ref(), &rule.route_targets)?;
     let action = match (rule.target, &rule.redirect_route_target) {
@@ -60,6 +69,7 @@ fn encode_guarded(rule: &GuardedRule) -> Result<pb::AddFlowSpecRequest> {
             .unwrap_or_default(),
         route_targets,
         extended_communities,
+        communities: communities.into_iter().collect(),
         actions: vec![pb::FlowSpecAction {
             action: Some(action),
         }],
@@ -104,7 +114,28 @@ fn raw_scope_targets(communities: &[u64]) -> Vec<u64> {
         .collect()
 }
 
+/// The match of a global local rule without a destination component that is
+/// not prefixd's own return leg (ADR 030 R5). prefixd never injects that
+/// shape except as a scrubber return leg, so only the key matters: it occupies
+/// the key and affects every victim of its family. Its other attributes belong
+/// to another owner and never fail the read.
+fn destination_less(route: &pb::FlowSpecRouteEntry, family: i32) -> Result<Option<FlowSpecNlri>> {
+    if !matches!(family, 3 | 4)
+        || route
+            .components
+            .iter()
+            .any(|component| component.r#type == 1)
+        || !route.rd.is_empty()
+    {
+        return Ok(None);
+    }
+    decode_components(&route.components, family, None).map(Some)
+}
+
 fn foreign_match(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecNlri> {
+    if let Some(nlri) = destination_less(&route, family)? {
+        return Ok(nlri);
+    }
     let mut extended_communities = vec![0x8006_u64 << 48];
     extended_communities.extend(raw_scope_targets(&route.extended_communities));
     let route = pb::FlowSpecRouteEntry {
@@ -277,6 +308,42 @@ pub(super) fn decode_guarded(
     if route.extended_communities != extended || route.ipv6_extended_communities != ipv6_extended {
         return Err(invalid("inconsistent redirect action bytes"));
     }
+    // Only a return leg carries a community: exactly one, under a scrubber
+    // owner. The controller then requires a durable row's exact community and
+    // revision before treating it as prefixd intent (ADR 030 R2).
+    let export_community = match route.communities.as_slice() {
+        [] => None,
+        [value] if owner.starts_with(OWNER_NAMESPACE) => {
+            Some(format!("{}:{}", value >> 16, value & 0xffff))
+        }
+        _ => return Err(invalid("unsupported guarded communities")),
+    };
+    if let Some(export_community) = export_community {
+        if !matches!(family, 3 | 4)
+            || route.peer_address != "0.0.0.0"
+            || route.afi_safi != family
+            || !route.rd.is_empty()
+            || !scope_targets.is_empty()
+            || !route.as_path.is_empty()
+        {
+            return Err(invalid("unsupported return-leg attributes"));
+        }
+        let rule = GuardedRule {
+            nlri: decode_components(&route.components, family, None)?,
+            route_targets: vec![],
+            target,
+            redirect_route_target,
+            owner,
+            revision,
+            export_community: Some(export_community),
+        };
+        rule.validate()?;
+        return Ok(GuardedObservation {
+            rule,
+            generation,
+            remaining_ms,
+        });
+    }
     // Validate every match and remaining route attribute through the strict
     // ordinary decoder, after accounting for the complete guarded action above.
     route.injection_owner.clear();
@@ -297,6 +364,7 @@ pub(super) fn decode_guarded(
         redirect_route_target,
         owner,
         revision,
+        export_community: None,
     };
     rule.validate()?;
     Ok(GuardedObservation {
@@ -363,7 +431,7 @@ impl RustBgpdAnnouncer {
                 let route = row.route.ok_or_else(|| invalid("missing local route"))?;
                 if foreign_guarded(&route) {
                     let nlri = foreign_match(route, family)?;
-                    if !keys.insert(nlri.compute_hash()) {
+                    if !keys.insert((family, nlri.compute_hash())) {
                         return Err(invalid("repeated local key"));
                     }
                     other_matches.push(nlri);
@@ -371,16 +439,19 @@ impl RustBgpdAnnouncer {
                     || route.admission_revision.is_some()
                 {
                     let observation = decode_guarded(route, family)?;
-                    if !keys.insert(observation.rule.nlri.compute_hash()) {
+                    if !keys.insert((family, observation.rule.nlri.compute_hash())) {
                         return Err(invalid("repeated guarded key"));
                     }
                     entries.push(observation);
                 } else {
-                    let ordinary = decode(route, family)?;
-                    if !keys.insert(ordinary.nlri.compute_hash()) {
+                    let nlri = match destination_less(&route, family)? {
+                        Some(nlri) => nlri,
+                        None => decode(route, family)?.nlri,
+                    };
+                    if !keys.insert((family, nlri.compute_hash())) {
                         return Err(invalid("repeated local key"));
                     }
-                    other_matches.push(ordinary.nlri);
+                    other_matches.push(nlri);
                 }
             }
         }

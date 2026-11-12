@@ -81,51 +81,87 @@ struct Runtime {
 
 /// One guarded inventory read, parsed once so per-row checks stay linear.
 struct Observed<'a> {
-    /// Destination and key of every local rule, guarded or ordinary.
+    /// Destination and key of every local rule, guarded or ordinary. A
+    /// destination-less rule affects every victim of its family, except this
+    /// controller's own return leg, which is classified by its source host.
     selectors: Vec<(ipnet::IpNet, String)>,
+    /// Source component and key of every other local rule (ADR 030 R5).
+    sources: Vec<(ipnet::IpNet, String)>,
     /// Key to guarded entry.
     guarded: HashMap<String, &'a GuardedObservation>,
 }
 
 impl<'a> Observed<'a> {
-    fn new(inventory: &'a GuardedInventory) -> Result<Self> {
-        let mut selectors = Vec::with_capacity(inventory.len() + inventory.other_matches.len());
-        let mut guarded = HashMap::with_capacity(inventory.len());
-        for nlri in inventory
+    /// A return leg counts as this controller's only when its owner, key,
+    /// community and revision match a durable row's return leg.
+    fn new(inventory: &'a GuardedInventory, durable: &[Diversion]) -> Result<Self> {
+        let returns: HashMap<String, &GuardedRule> = durable
             .iter()
-            .map(|entry| &entry.rule.nlri)
-            .chain(inventory.other_matches.iter())
+            .filter_map(|row| row.return_rule.as_ref())
+            .map(|rule| (rule.nlri.compute_hash(), rule))
+            .collect();
+        let invalid = || PrefixdError::Internal("invalid local speaker inventory".into());
+        let count = inventory.len() + inventory.other_matches.len();
+        let mut selectors = Vec::with_capacity(count);
+        let mut sources = vec![];
+        let mut guarded = HashMap::with_capacity(inventory.len());
+        for (nlri, entry) in inventory
+            .iter()
+            .map(|entry| (&entry.rule.nlri, Some(entry)))
+            .chain(inventory.other_matches.iter().map(|nlri| (nlri, None)))
         {
-            let prefix = if nlri.dst_prefix.is_empty() {
-                match nlri.ip_version() {
+            let key = nlri.compute_hash();
+            let own_return = entry.is_some_and(|entry| {
+                returns
+                    .get(&key)
+                    .is_some_and(|rule| rule.same_admission(&entry.rule))
+            });
+            let source = nlri
+                .src_prefix
+                .as_deref()
+                .map(|source| source.parse::<ipnet::IpNet>().map_err(|_| invalid()))
+                .transpose()?;
+            let prefix = match (own_return, source) {
+                (true, Some(source)) => source,
+                _ if nlri.dst_prefix.is_empty() => match nlri.ip_version() {
                     IpVersion::V4 => "0.0.0.0/0",
                     IpVersion::V6 => "::/0",
                 }
-            } else {
-                &nlri.dst_prefix
+                .parse()
+                .map_err(|_| invalid())?,
+                _ => nlri.dst_prefix.parse().map_err(|_| invalid())?,
+            };
+            if let (false, Some(source)) = (own_return, source) {
+                sources.push((source, key.clone()));
             }
-            .parse::<ipnet::IpNet>()
-            .map_err(|_| PrefixdError::Internal("invalid local speaker inventory".into()))?;
-            selectors.push((prefix, nlri.compute_hash()));
+            if let Some(entry) = entry {
+                guarded.insert(key.clone(), entry);
+            }
+            // A global match with no prefix component names no family, so it
+            // affects every victim of both.
+            if nlri.dst_prefix.is_empty() && nlri.scope.is_none() && source.is_none() {
+                selectors.push(("::/0".parse().map_err(|_| invalid())?, key.clone()));
+            }
+            selectors.push((prefix, key));
         }
-        for (entry, (_, key)) in inventory.iter().zip(&selectors) {
-            guarded.insert(key.clone(), entry);
-        }
-        Ok(Self { selectors, guarded })
+        Ok(Self {
+            selectors,
+            sources,
+            guarded,
+        })
     }
-    /// Another local rule, guarded or ordinary, affects this row's victim.
-    fn foreign_victim_overlap(&self, row: &Diversion, key: &str) -> Result<bool> {
+    /// Another local rule, guarded or ordinary, affects this row's victim. A
+    /// pair also refuses any other rule whose source contains the victim.
+    fn foreign_victim_overlap(&self, row: &Diversion, keys: &[String]) -> Result<bool> {
         let victim = row
             .rule
-            .nlri
-            .dst_prefix
-            .parse::<ipnet::IpNet>()
-            .map_err(|_| PrefixdError::Internal("invalid saved diversion".into()))?
-            .addr();
-        Ok(self
-            .selectors
-            .iter()
-            .any(|(prefix, other)| prefix.contains(&victim) && other != key))
+            .victim()
+            .ok_or_else(|| PrefixdError::Internal("invalid saved diversion".into()))?;
+        let other = |(prefix, key): &(ipnet::IpNet, String)| {
+            prefix.contains(&victim) && !keys.contains(key)
+        };
+        Ok(self.selectors.iter().any(other)
+            || row.return_rule.is_some() && self.sources.iter().any(other))
     }
     fn has_key(&self, key: &str) -> bool {
         self.selectors.iter().any(|(_, other)| other == key)
@@ -152,11 +188,14 @@ fn safelisted(entries: &[crate::db::SafelistEntry], victim: std::net::IpAddr) ->
     Ok(false)
 }
 
-/// Replace export evidence, keeping unchanged evidence and its first
+/// Replace one leg's export evidence, keeping unchanged evidence and its first
 /// observation time so a steady pass writes nothing. A failed read keeps the
 /// last successful peers as historical evidence beside the error.
-fn observe_exports(row: &mut Diversion, result: std::result::Result<Vec<PeerExport>, &str>) {
-    let previous = row.export_observation.take();
+fn observe_exports(
+    evidence: &mut Option<DiversionExportObservation>,
+    result: std::result::Result<Vec<PeerExport>, &str>,
+) {
+    let previous = evidence.take();
     let next = match result {
         Ok(peers) => DiversionExportObservation {
             observed_at: Utc::now(),
@@ -172,28 +211,30 @@ fn observe_exports(row: &mut Diversion, result: std::result::Result<Vec<PeerExpo
             })
         },
     };
-    row.export_observation = Some(match previous {
+    *evidence = Some(match previous {
         Some(previous) if previous.peers == next.peers && previous.error == next.error => previous,
         _ => next,
     });
 }
 
 /// The persisted lifecycle fields a pass may change.
-fn lifecycle(
-    row: &Diversion,
-) -> (
+type Lifecycle = (
     DiversionStatus,
     Option<GuardedStamp>,
     Option<String>,
     Option<String>,
     Option<DiversionExportObservation>,
-) {
+    Option<DiversionExportObservation>,
+);
+
+fn lifecycle(row: &Diversion) -> Lifecycle {
     (
         row.status,
         row.generation,
         row.withdrawal_reason.clone(),
         row.last_error.clone(),
         row.export_observation.clone(),
+        row.return_export_observation.clone(),
     )
 }
 
@@ -218,10 +259,32 @@ struct Readiness {
     capacity_available: bool,
     canary_passed: bool,
     export_isolated: bool,
+    /// Required exactly when the profile has a return leg (ADR 030 R6).
+    #[serde(default)]
+    return_leg: Option<ReturnReadiness>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReturnReadiness {
+    policy_binding: String,
+    export_isolated: bool,
+    canary_passed: bool,
 }
 
 impl Readiness {
     fn state(self, profile: &ScrubberProfile, now: DateTime<Utc>) -> Result<ProfileState> {
+        let return_ready = match (&profile.return_leg, &self.return_leg) {
+            (None, None) => true,
+            (Some(leg), Some(report)) if leg.policy_binding == report.policy_binding => {
+                report.export_isolated && report.canary_passed
+            }
+            _ => {
+                return Err(PrefixdError::InvalidRequest(
+                    "scrubber readiness return leg does not match its profile".into(),
+                ));
+            }
+        };
         if self.profile != profile.id
             || self.revision != profile.revision
             || self.policy_binding != profile.policy_binding
@@ -239,7 +302,8 @@ impl Readiness {
             && self.target_reachable
             && self.capacity_available
             && self.canary_passed
-            && self.export_isolated;
+            && self.export_isolated
+            && return_ready;
         Ok(ProfileState {
             ready,
             readiness: if ready {
@@ -306,7 +370,7 @@ impl ScrubberController {
     }
 
     pub fn new(settings: &crate::config::Settings) -> Result<Self> {
-        settings.scrubber.validate()?;
+        settings.scrubber.validate_with(&settings.blackhole)?;
         let mut runtime = Runtime::default();
         let mut tokens = HashMap::new();
         for profile in &settings.scrubber.profiles {
@@ -684,8 +748,10 @@ impl ScrubberController {
             redirect_route_target: profile.redirect_route_target.clone(),
             owner: Self::owner(state, &profile.id)?,
             revision: 1,
+            export_community: None,
         };
         rule.validate()?;
+        let return_rule = derive_return(&rule, profile.return_leg.as_ref())?;
         Ok(Diversion {
             id: Uuid::new_v4(),
             controller_incarnation: self.incarnation,
@@ -713,6 +779,8 @@ impl ScrubberController {
             generation: None,
             last_error: None,
             export_observation: None,
+            return_rule,
+            return_export_observation: None,
         })
     }
 
@@ -728,6 +796,16 @@ impl ScrubberController {
             confirmation.push_str(&format!(
                 " scope RTs {}",
                 serde_json::to_string(&row.rule.route_targets)?
+            ));
+        }
+        // A pair confirms both legs exactly; the return leg has no destination.
+        if let (Some(leg), Some(profile)) = (&row.return_rule, &row.profile.return_leg) {
+            confirmation.push_str(&format!(
+                "; return leg destination any {} -> {} community {} peers {}",
+                serde_json::to_string(&leg.nlri)?,
+                leg.target_description()?,
+                leg.export_community.as_deref().unwrap_or_default(),
+                serde_json::to_string(&profile.router_peers)?
             ));
         }
         Ok(confirmation)
@@ -809,7 +887,7 @@ impl ScrubberController {
         let _ = state
             .ws_broadcast
             .send(crate::ws::WsMessage::DiversionUpdated {
-                diversion: row.clone(),
+                diversion: Box::new(row.clone()),
             });
         Ok(row)
     }
@@ -877,7 +955,7 @@ impl ScrubberController {
         let _ = state
             .ws_broadcast
             .send(crate::ws::WsMessage::DiversionUpdated {
-                diversion: row.clone(),
+                diversion: Box::new(row.clone()),
             });
         Ok(row)
     }
@@ -1023,10 +1101,19 @@ impl ScrubberController {
                 .drains
                 .entry(row.id)
                 .or_insert_with(|| Instant::now() + wait);
-            match speaker.delete_guarded(&row.rule).await {
-                Ok(()) if Instant::now() >= barrier => finalize.push(index),
-                Ok(()) => {}
-                Err(error) => failures[index] = Some(error),
+            // Inbound leg first, then the return leg. Each delete names its
+            // recorded rule and revision, so a retry after an ambiguous delete
+            // never removes a newer admission or a foreign rule.
+            let mut failure = None;
+            for leg in row.legs() {
+                if let Err(error) = speaker.delete_guarded(leg).await {
+                    failure.get_or_insert(error);
+                }
+            }
+            match failure {
+                None if Instant::now() >= barrier => finalize.push(index),
+                None => {}
+                Some(error) => failures[index] = Some(error),
             }
         }
 
@@ -1046,10 +1133,13 @@ impl ScrubberController {
                 return Ok(failures);
             }
         };
-        let observed = Observed::new(&inventory)?;
+        let observed = Observed::new(&inventory, durable)?;
         for index in finalize {
             let row = &mut rows[index];
-            if observed.has_key(&row.rule.nlri.compute_hash()) {
+            if row
+                .legs()
+                .any(|leg| observed.has_key(&leg.nlri.compute_hash()))
+            {
                 failures[index] = conflict("diversion withdrawal is not confirmed");
                 continue;
             }
@@ -1072,10 +1162,10 @@ impl ScrubberController {
         let mut known: HashMap<&str, HashMap<String, &GuardedRule>> = HashMap::new();
         let mut disputed = std::collections::HashSet::new();
         for intent in durable {
-            known
-                .entry(intent.rule.owner.as_str())
-                .or_default()
-                .insert(intent.rule.nlri.compute_hash(), &intent.rule);
+            let admissions = known.entry(intent.rule.owner.as_str()).or_default();
+            for leg in intent.legs() {
+                admissions.insert(leg.nlri.compute_hash(), leg);
+            }
             if intent.controller_incarnation != self.incarnation
                 || Some(intent.controller_epoch) != runtime.epoch
             {
@@ -1097,24 +1187,40 @@ impl ScrubberController {
         let mut owners: HashMap<String, Vec<usize>> = HashMap::new();
         for &index in &live {
             let row = &mut rows[index];
-            let key = row.rule.nlri.compute_hash();
-            let existing = observed.guarded.get(&key);
+            let keys: Vec<String> = row.legs().map(|leg| leg.nlri.compute_hash()).collect();
+            let held: Vec<_> = keys.iter().map(|key| observed.guarded.get(key)).collect();
+            let existing = held[0];
             failures[index] = if disputed.contains(row.rule.owner.as_str())
                 || !known.contains_key(row.rule.owner.as_str())
             {
                 conflict("guarded owner inventory disagrees with this controller's durable intent")
-            } else if observed.foreign_victim_overlap(row, &key)? {
+            } else if observed.foreign_victim_overlap(row, &keys)? {
                 conflict("another local rule affects the diversion victim")
-            } else if existing.is_none() && observed.has_key(&key) {
+            } else if keys
+                .iter()
+                .zip(&held)
+                .any(|(key, held)| held.is_none() && observed.has_key(key))
+            {
                 conflict("diversion key is held by ordinary or foreign intent")
-            } else if existing.is_some_and(|existing| {
-                !existing.rule.same_admission(&row.rule)
-                    || existing.remaining_ms == 0
-                    || row
-                        .generation
-                        .is_some_and(|generation| generation != existing.generation)
+            } else if row.legs().zip(&held).any(|(leg, held)| {
+                held.is_some_and(|existing| {
+                    !existing.rule.same_admission(leg)
+                        || existing.remaining_ms == 0
+                        || row
+                            .generation
+                            .is_some_and(|generation| generation != existing.generation)
+                })
             }) {
                 conflict("guarded ownership or generation does not match durable intent")
+            } else if held.iter().any(Option::is_some)
+                && held.iter().any(|leg| {
+                    leg.map(|leg| leg.generation) != existing.map(|first| first.generation)
+                })
+            {
+                // A pair is never partially live (ADR 030 R3).
+                conflict(
+                    "diversion pair lost a leg or its shared generation; drain both legs and re-arm",
+                )
             } else if existing.is_none() && row.status == Active {
                 conflict("active diversion lost its speaker generation; drain and re-arm")
             } else if !runtime
@@ -1210,16 +1316,33 @@ impl ScrubberController {
                 }
                 continue;
             }
+            // A pair's adds share this window and pass: the return leg first,
+            // then the inbound leg. Any refusal or unknown outcome fails the
+            // whole row, which then drains both legs (ADR 030 R3).
             for index in adds {
-                match speaker
-                    .add_guarded(&rows[index].rule, window, WINDOW_SECONDS)
-                    .await
-                {
-                    Ok(generation) => {
-                        rows[index].generation = Some(generation);
+                let row = &rows[index];
+                let (mut generation, mut failure) = (None, None);
+                for leg in row.return_rule.iter().chain([&row.rule]) {
+                    match speaker.add_guarded(leg, window, WINDOW_SECONDS).await {
+                        Ok(added) if generation.is_none_or(|first| first == added) => {
+                            generation = Some(added);
+                        }
+                        Ok(_) => {
+                            failure = conflict("diversion legs report different lease generations");
+                            break;
+                        }
+                        Err(error) => {
+                            failure = Some(error);
+                            break;
+                        }
+                    }
+                }
+                match failure {
+                    None => {
+                        rows[index].generation = generation;
                         mutated.push(index);
                     }
-                    Err(error) => failures[index] = Some(error),
+                    failure => failures[index] = failure,
                 }
             }
         }
@@ -1237,18 +1360,21 @@ impl ScrubberController {
                 return Ok(failures);
             }
         };
-        let observed = Observed::new(&inventory)?;
+        let observed = Observed::new(&inventory, durable)?;
         let mut confirmed = vec![];
         for index in mutated {
             let row = &rows[index];
-            let key = row.rule.nlri.compute_hash();
-            if observed.foreign_victim_overlap(row, &key)? {
+            let keys: Vec<String> = row.legs().map(|leg| leg.nlri.compute_hash()).collect();
+            if observed.foreign_victim_overlap(row, &keys)? {
                 failures[index] = conflict("local victim overlap appeared during mutation");
-            } else if !observed.guarded.get(&key).is_some_and(|entry| {
-                entry.rule.same_admission(&row.rule)
-                    && entry.remaining_ms > 0
-                    && Some(entry.generation) == row.generation
+            } else if !row.legs().zip(&keys).all(|(leg, key)| {
+                observed.guarded.get(key).is_some_and(|entry| {
+                    entry.rule.same_admission(leg)
+                        && entry.remaining_ms > 0
+                        && Some(entry.generation) == row.generation
+                })
             }) {
+                // One read-back confirms both legs of a pair.
                 failures[index] = conflict("guarded add is not confirmed by read-back");
             } else {
                 confirmed.push(index);
@@ -1264,23 +1390,50 @@ impl ScrubberController {
             }
             return Ok(failures);
         };
-        let (new, mut established): (Vec<usize>, Vec<usize>) = confirmed
+        // Each leg is one read with its own evidence and peer set (ADR 030 R4).
+        let legs = |index: usize| {
+            [(index, false)]
+                .into_iter()
+                .chain(rows[index].return_rule.is_some().then_some((index, true)))
+        };
+        let (new, established): (Vec<usize>, Vec<usize>) = confirmed
             .iter()
             .partition(|&&index| rows[index].status == Pending);
+        let new: Vec<_> = new.into_iter().flat_map(legs).collect();
+        let mut established: Vec<_> = established.into_iter().flat_map(legs).collect();
         if !established.is_empty() {
             let start = runtime.export_cursor % established.len();
             established.rotate_left(start);
         }
         let mut read = 0;
-        for &index in new.iter().chain(&established) {
+        for &(index, return_leg) in new.iter().chain(&established) {
             let now = Instant::now();
             if now >= export_deadline {
                 break;
             }
+            if failures[index].is_some() {
+                continue;
+            }
             let row = &mut rows[index];
+            let (rule, peers, evidence) = match (return_leg, &row.return_rule) {
+                (true, Some(rule)) => (
+                    rule,
+                    row.profile
+                        .return_leg
+                        .as_ref()
+                        .map(|leg| leg.router_peers.as_slice())
+                        .unwrap_or_default(),
+                    &mut row.return_export_observation,
+                ),
+                _ => (
+                    &row.rule,
+                    row.profile.router_peers.as_slice(),
+                    &mut row.export_observation,
+                ),
+            };
             let result = match tokio::time::timeout_at(
                 export_deadline.min(now + EXPORT_READ),
-                exports.flowspec_exports(&row.rule.nlri),
+                exports.flowspec_exports(&rule.nlri),
             )
             .await
             {
@@ -1292,16 +1445,20 @@ impl ScrubberController {
             if row.status != Pending {
                 read += 1;
             }
-            if result.as_ref().is_ok_and(|peers| {
-                peers.iter().any(|peer| {
+            if result.as_ref().is_ok_and(|observed| {
+                observed.iter().any(|peer| {
                     peer.disposition == ExportDisposition::Committed
-                        && !row.profile.router_peers.contains(&peer.peer_address)
+                        && !peers.contains(&peer.peer_address)
                 })
             }) {
-                failures[index] = conflict("diversion exported outside configured router scope");
+                failures[index] = conflict(if return_leg {
+                    "diversion return leg exported outside its router scope"
+                } else {
+                    "diversion exported outside configured router scope"
+                });
                 continue;
             }
-            observe_exports(row, result);
+            observe_exports(evidence, result);
         }
         runtime.export_cursor = runtime.export_cursor.wrapping_add(read);
 
@@ -1494,7 +1651,9 @@ impl ScrubberController {
             if before != lifecycle(&row) {
                 let _ = state
                     .ws_broadcast
-                    .send(crate::ws::WsMessage::DiversionUpdated { diversion: row });
+                    .send(crate::ws::WsMessage::DiversionUpdated {
+                        diversion: Box::new(row),
+                    });
             }
         }
         Self::publish_profiles(&runtime.profiles);

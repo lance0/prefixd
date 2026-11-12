@@ -470,7 +470,11 @@ preview --file REQUEST.json` returns the complete match/target confirmation;
 `diversions create --file REQUEST.json --confirmation VALUE` records that manual
 intent. `diversions list`, `diversions get ID` and `diversions withdraw ID
 [--reason TEXT]` inspect and drain it; the reason is recorded in the audit log.
-These commands print JSON.
+These commands print JSON. For a profile with a
+[return leg](../how-to/scrubber-diversion.md#add-a-symmetric-return-leg),
+`scrubbers list` includes each profile's `return_leg`, and a pair's preview and
+diversion output include `return_rule` and `return_export_observation`. The
+preview confirmation then covers both legs; pass it to `create` unchanged.
 
 For VPN diversion, the file must use a named-scope envelope:
 
