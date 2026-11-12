@@ -667,6 +667,16 @@ on purpose, with these limits:
   conservative treatment as affecting every victim of its family, so a
   foreign source-only rule still blocks diversion.
 
+  *Implementation note.* Before this amendment, the rustbgpd guarded
+  inventory reader refused any global rule without a destination, so such a
+  rule failed the whole read and latched every profile. The reader now
+  returns the match of a destination-less rule held by another guarded owner,
+  or by no owner, as an occupied key. The index treats it as affecting every
+  victim of its family, or of both families when it has no prefix component,
+  never indexes it by source host and never deletes it. The ordinary FlowSpec
+  reconciler's local read still fails on an unowned rule it cannot decode, as
+  before.
+
 **Safelist.** The safelist check on `V`, run before every add and repair,
 covers both legs. A safelist entry for `V` withdraws the pair. Safelisted
 destinations do not block a return leg, because it selects `V`'s responses,
@@ -746,20 +756,28 @@ Losing either leg's readiness drains both legs.
   unsupported for diversion.
 - **Downgrade and rollback.** `Diversion`, `ProfileSnapshot` and the profile
   configuration all deny unknown fields. An older controller therefore
-  refuses a configuration that contains `return_leg`, and it cannot read an
-  outstanding pair row. An unreadable row latches every profile and blocks
-  draining. Before downgrading:
-  1. Withdraw every pair and wait for `withdrawn`, which means confirmed local
-     absence of both legs.
+  refuses a configuration that contains `return_leg`. Its startup check reads
+  every outstanding diversion and cannot decode a row whose snapshot has a
+  `return_rule` or a `profile.return_leg`, including an inbound-only row
+  admitted under such a profile. While any such row is outstanding at its
+  POP, the older controller refuses to start, so ordinary TTL expiry stops
+  too; recovery is to roll forward and drain. Before downgrading:
+  1. Withdraw every outstanding diversion on a profile with `return_leg` and
+     wait for `withdrawn`, which for a pair means confirmed local absence of
+     both legs.
   2. Remove `return_leg` from the configuration with a new revision.
   3. Verify router removal on both routers separately.
 
-  Withdrawn pair rows stay in the table for audit. An older controller's
-  outstanding-row queries skip them. Its detail endpoint cannot decode them.
-  If an older controller starts with a pair still outstanding, it cannot renew
-  the pair. The speaker lease removes both legs within the lease bound from
-  section 4. The older controller treats the destination-less return leg as
-  affecting every victim, which fails closed.
+  Withdrawn rows stay in the table for audit. An older controller's
+  outstanding-row queries skip them, but its detail endpoint cannot decode a
+  withdrawn row with `return_rule` or `profile.return_leg`. If prefixd is
+  stopped with a pair outstanding, nothing renews it, and the speaker lease
+  removes both legs within the lease bound from section 4.
+
+  *Correction, 2026-11-12.* This bullet originally said an unreadable row
+  latches every profile and that an older controller treats the return leg as
+  affecting every victim. Against the implemented code, the older controller
+  instead refuses to start, as stated above.
 
 ### R8. Out of scope
 
@@ -780,6 +798,22 @@ backend, router and scrubber:
 | Speaker | A live released-daemon fixture proves guarded add, read-back, revision-fenced delete and peer receipt of the return shape, with exact component and community bytes, for each target family. It also proves that export policy matching the community sends the return leg only to its peers. An older daemon refuses the shape without changing state. |
 | Controller | The fake speaker and the released-daemon tests cover these cases: both legs confirmed before `active`; refusal and unknown outcome of each add, in each order; ambiguous delete of each leg; restart with each single leg outstanding; a foreign rule at the return key; export outside each leg's peer set; one leg removed by the break-glass override; quotas counted per leg; victim-as-source conflicts in both admission paths; the return-leg overlap index; and a negative control showing that today's inventory index treats the return leg as overlapping every victim. |
 | Forwarding | The section 5 receipt for both routers: router B's acceptance of the destination-less rule; installed rules and counters on each router; dirty and clean captures in both directions; handshake completion through a stateful scrubber; a loop negative control that re-enters clean return output inside router B's ingress scope; precedence against an overlapping destination-keyed discard for another host; a UDP diversion that creates no return leg; and removal timing for each leg on withdrawal, TTL expiry, readiness loss and controller stop. |
+
+*Implementation notes.*
+
+- **Speaker gate.** rustbgpd v0.81.0, prefixd's minimum, accepts, reads back,
+  fences and exports the return shape exactly as v0.82.0 does, so both pass
+  the speaker gate and the minimum is unchanged. The only older daemon,
+  v0.80.1, has no guarded methods; prefixd's startup version check already
+  refuses it, so the refusal clause is met by that check rather than by a
+  shape-specific test.
+- **Controller gate.** Renewal extends the profile owner's whole lease. When
+  one leg disappears while another healthy diversion of the same profile
+  renews in the same pass, the surviving leg is extended once, by at most one
+  lease period. The row still fails in that pass, and the next pass deletes
+  both legs. A partial pair that is its owner's only row is not renewed.
+- **Foreign rules.** See the R5 implementation note on destination-less rules
+  that are not this controller's return legs.
 
 ## Consequences
 

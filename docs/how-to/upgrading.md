@@ -570,33 +570,34 @@ its export evidence live in `snapshot_json`. Rows and profiles without a return
 leg keep their stored JSON, wire bytes and rule identities. The return leg
 works on rustbgpd v0.81.0 and v0.82.0 without a speaker contract change.
 
-0.25.0 and earlier refuse a configuration containing `return_leg` and cannot
-read an outstanding pair row. An unreadable row latches every profile and
-blocks draining. Before downgrading prefixd:
+0.25.0 and earlier refuse a configuration containing `return_leg`. Their
+startup check also reads every outstanding diversion, and they cannot decode a
+row whose snapshot has a `return_rule` or a `profile.return_leg`. That includes
+UDP and other inbound-only rows admitted under a profile with a return leg.
+While any such row is outstanding at its POP, the older controller refuses to
+start, so ordinary mitigations stop expiring too. The only recovery is to roll
+forward to the current release and drain those rows. Before downgrading
+prefixd:
 
-1. Withdraw every pair with the current controller and wait for `withdrawn`,
-   which means confirmed local absence of both legs. This query must return
-   no rows:
+1. With the current controller, withdraw every outstanding diversion on a
+   profile with `return_leg`, and wait for `withdrawn`. For a pair, that means
+   confirmed local absence of both legs. This query must return no rows:
 
    ```sql
    SELECT id, pop, profile_id, status
    FROM scrubber_diversions
    WHERE status IN ('pending', 'active', 'withdrawing')
-     AND snapshot_json::jsonb ? 'return_rule';
+     AND (snapshot_json::jsonb ? 'return_rule'
+          OR snapshot_json::jsonb -> 'profile' ? 'return_leg');
    ```
 
 2. Remove `return_leg` from the configuration with a new profile `revision`,
    and restart the current controller to confirm it accepts the configuration.
 3. Verify router removal on the inbound and return routers separately.
 
-Withdrawn pair rows stay in the table for audit. An older controller's
-outstanding-row queries skip them, but its detail endpoint cannot decode them.
-If an older controller starts with a pair still outstanding, it cannot renew
-the pair, and the speaker lease removes both legs within the lease bound. Until
-then its rustbgpd reader refuses the return leg's community, so its guarded and
-local FlowSpec inventory reads fail rather than reporting the rule as absent.
-This fails closed, but it also stops ordinary reconciliation until the lease
-expires.
+Withdrawn rows stay in the table for audit. An older controller's
+outstanding-row queries skip them, but its detail endpoint cannot decode a
+withdrawn row that has `return_rule` or `profile.return_leg`.
 
 ## Mitigation origin mode
 

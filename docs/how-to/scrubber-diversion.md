@@ -163,11 +163,25 @@ the diversion becomes `active` only when one read-back shows both. A refused or
 unknown add of either leg, a missing leg, a leg with another revision or
 generation, or an export of either leg outside its own peer list latches the
 profile and drains both legs. Withdrawal deletes the inbound leg, then the
-return leg, and keeps victim exclusion until both keys are confirmed absent. A
-pair counts as two rules against `max_active` and the customer, POP and global
-quotas; the creation rate counts one admission. A pair is also refused while any
-live or pending rule has a source containing the victim, and such rules are
+return leg, and keeps victim exclusion until both keys are confirmed absent.
+Renewal extends the profile owner's whole lease, so when another healthy
+diversion of the same profile renews in the pass that finds a leg missing, the
+surviving leg is extended once; the next pass deletes it. A pair counts as two
+rules against `max_active` and the customer, POP and global quotas, so a
+profile with `return_leg` needs `max_active` of at least 2; the creation rate
+counts one admission. Each profile's `export_community` must be unique and
+differ from every configured blackhole community. A pair is also refused while
+any live or pending rule has a source containing the victim, and such rules are
 refused while the pair is outstanding.
+
+A destination-less local rule that is not one of this controller's return legs,
+whether held by another tool's guarded owner or unowned, occupies its key and
+counts as affecting every victim of its family, or of both families when it has
+no prefix component. It refuses diversion, keeps any withdrawal at its key
+pending and is never deleted; it does not fail the guarded inventory read. The
+ordinary FlowSpec reconciler's local inventory read still fails on an unowned
+local rule it cannot decode, including one without a destination, as it did
+before return legs.
 
 Adding, removing or changing `return_leg` requires a new profile `revision`.
 Startup refuses the change while the profile has outstanding diversion.
@@ -348,7 +362,8 @@ Before rollback, withdraw every enforced diversion, wait for confirmed local
 absence, and verify router removal separately. Keep the durable snapshots and
 withdrawal records. An older controller does not understand their exclusion
 obligations. A controller without return-leg support refuses a configuration
-containing `return_leg` and cannot read an outstanding pair; follow the
+containing `return_leg`, and refuses to start while any diversion admitted
+under such a profile is outstanding; follow the
 [upgrade guide](upgrading.md#downgrading-with-scrubber-return-legs) first. See [ADR 030](../adr/030-scrubber-diversion.md), the
 [speaker contract](../project/scrubber-diversion-contract.md) and rustbgpd's
 [released guarded contract](https://github.com/lance0/rustbgpd/blob/v0.82.0/docs/adr/0144-guarded-flowspec-mutations.md)

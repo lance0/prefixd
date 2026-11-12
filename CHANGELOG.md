@@ -16,11 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before a downgrade; see the
   [downgrade procedure](docs/how-to/upgrading.md#tcp-flags-matches-and-downgrade).
 - Scrubber profiles accept an optional `return_leg`. No migration is required,
-  and rows and profiles without one keep their JSON and wire bytes. Older
-  controllers refuse a configuration with `return_leg` and cannot read an
-  outstanding pair; withdraw every pair and remove `return_leg` before a
-  downgrade; see the
+  and rows and profiles without one keep their JSON and wire bytes. 0.25.0 and
+  earlier refuse a configuration with `return_leg`, and refuse to start while
+  any outstanding diversion was admitted under a profile with `return_leg`,
+  including inbound-only UDP rows, which also stops ordinary TTL expiry.
+  Withdraw every such diversion and remove `return_leg` before a downgrade;
+  recovery is to roll forward and drain. See the
   [downgrade procedure](docs/how-to/upgrading.md#downgrading-with-scrubber-return-legs).
+- A profile with `return_leg` needs `max_active` of at least 2, and each
+  `export_community` must be unique across profiles and differ from every
+  blackhole community.
 - Diversion quotas now count a pair as two rules against the profile's
   `max_active` and the customer, POP and global caps, including for ordinary
   mitigation admission. Rows without a return leg still count once.
