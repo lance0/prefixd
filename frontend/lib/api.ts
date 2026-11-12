@@ -79,10 +79,18 @@ export interface ScrubberState {
   latch_reason: string | null
 }
 
+/** A profile's symmetric return leg (ADR 030 R1); absent when it has none. */
+export interface ScrubberReturnLeg {
+  router_peers: string[]
+  policy_binding: string
+  export_community: string
+  tcp_flags?: "syn_ack"
+}
+
 export interface ScrubberProfiles {
   enabled: boolean
   profiles: Record<string, ScrubberState>
-  configuration: { id: string; revision: string; scope?: string; ipv4_target: string | null; ipv6_target: string | null; redirect_route_target?: string }[]
+  configuration: { id: string; revision: string; scope?: string; ipv4_target: string | null; ipv6_target: string | null; redirect_route_target?: string; return_leg?: ScrubberReturnLeg }[]
 }
 
 export interface DiversionMatch {
@@ -91,7 +99,24 @@ export interface DiversionMatch {
   protocol: number | null
   dst_ports: number[]
   src_ports?: number[]
+  tcp_flags?: TcpFlagsMatch
   scope?: VpnScopeIdentity | null
+}
+
+export interface DiversionRule {
+  nlri: DiversionMatch
+  target?: string
+  redirect_route_target?: string
+  owner: string
+  revision: number
+  route_targets?: string[]
+  export_community?: string
+}
+
+export interface DiversionExportObservation {
+  observed_at: string
+  peers: { peer_address: string; disposition: string; reason: string }[]
+  error?: string | null
 }
 
 export interface DiversionRequest {
@@ -104,14 +129,17 @@ export interface DiversionRequest {
 
 export interface ScrubberDiversion {
   id: string
-  profile: { id: string; revision: string; scope?: string }
-  rule: { nlri: DiversionMatch; target?: string; redirect_route_target?: string; owner: string; revision: number; route_targets?: string[] }
+  profile: { id: string; revision: string; scope?: string; return_leg?: ScrubberReturnLeg }
+  rule: DiversionRule
   expires_at: string
   status: "pending" | "active" | "withdrawing" | "withdrawn" | "simulated"
   dry_run: boolean
   withdrawal_reason: string | null
   last_error: string | null
-  export_observation?: { observed_at: string; peers: { peer_address: string; disposition: string; reason: string }[]; error?: string | null } | null
+  export_observation?: DiversionExportObservation | null
+  /** The pair's destination-less return leg; absent for inbound-only rows. */
+  return_rule?: DiversionRule
+  return_export_observation?: DiversionExportObservation | null
 }
 
 export interface DiversionPreview {

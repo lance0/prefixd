@@ -561,6 +561,43 @@ rustbgpd's 120-second window cap after the last renewal, but lease expiry is
 not router cleanup. Keep the rows for audit; do not delete them to bypass the
 drain.
 
+### Downgrading with scrubber return legs
+
+Releases after 0.25.0 add the optional profile `return_leg`
+([ADR 030 R7](../adr/030-scrubber-diversion.md#r7-migration-and-compatibility)).
+No migration is required: a pair's return leg, its frozen profile fields and
+its export evidence live in `snapshot_json`. Rows and profiles without a return
+leg keep their stored JSON, wire bytes and rule identities. The return leg
+works on rustbgpd v0.81.0 and v0.82.0 without a speaker contract change.
+
+0.25.0 and earlier refuse a configuration containing `return_leg` and cannot
+read an outstanding pair row. An unreadable row latches every profile and
+blocks draining. Before downgrading prefixd:
+
+1. Withdraw every pair with the current controller and wait for `withdrawn`,
+   which means confirmed local absence of both legs. This query must return
+   no rows:
+
+   ```sql
+   SELECT id, pop, profile_id, status
+   FROM scrubber_diversions
+   WHERE status IN ('pending', 'active', 'withdrawing')
+     AND snapshot_json::jsonb ? 'return_rule';
+   ```
+
+2. Remove `return_leg` from the configuration with a new profile `revision`,
+   and restart the current controller to confirm it accepts the configuration.
+3. Verify router removal on the inbound and return routers separately.
+
+Withdrawn pair rows stay in the table for audit. An older controller's
+outstanding-row queries skip them, but its detail endpoint cannot decode them.
+If an older controller starts with a pair still outstanding, it cannot renew
+the pair, and the speaker lease removes both legs within the lease bound. Until
+then its rustbgpd reader refuses the return leg's community, so its guarded and
+local FlowSpec inventory reads fail rather than reporting the rule as absent.
+This fails closed, but it also stops ordinary reconciliation until the lease
+expires.
+
 ## Mitigation origin mode
 
 Migration 015 adds `origin_mode` to mitigations. Each new mitigation records the

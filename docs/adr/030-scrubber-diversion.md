@@ -15,8 +15,9 @@ Extends [ADR 025](025-pluggable-speaker-backends.md) and
 [ADR 029](029-upstream-blackholing.md).
 
 The [symmetric return-leg amendment](#amendment-symmetric-return-leg) was
-accepted on 2026-11-12 and is not implemented yet. Until it is implemented and
-qualified, diversion covers one direction only.
+accepted on 2026-11-12 and implemented behind the optional profile `return_leg`.
+Its speaker and controller gates pass on rustbgpd v0.81.0 and v0.82.0; its
+forwarding gate remains open.
 
 ## Context and research
 
@@ -396,8 +397,9 @@ failure-time or production-scrubbing guarantee.
 
 ## Amendment: symmetric return leg
 
-**Status:** Accepted 2026-11-12. Nothing in this section is implemented yet.
-It extends the decision above and changes none of it for profiles without a
+**Status:** Accepted 2026-11-12. Implemented for global IP-target profiles;
+the R9 speaker and controller gates pass and the forwarding gate is open. It
+extends the decision above and changes none of it for profiles without a
 return leg. Four choices are settled:
 
 - The return leg is tagged with a required `export_community`, and the speaker

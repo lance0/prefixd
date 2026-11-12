@@ -621,3 +621,99 @@ fn vrf_redirect_actions_preserve_all_rt_forms_separately_from_scope_targets() {
         }
     }
 }
+
+/// A diversion return leg (ADR 030 R2): no destination, host source, TCP,
+/// mirrored source ports, SYN+ACK and one standard community.
+fn return_route() -> pb::FlowSpecRouteEntry {
+    let component = |r#type, prefix: &str, value: &str| pb::FlowSpecComponent {
+        r#type,
+        prefix: prefix.into(),
+        value: value.into(),
+        ..Default::default()
+    };
+    pb::FlowSpecRouteEntry {
+        components: vec![
+            component(2, "192.0.2.1/32", ""),
+            component(3, "", "==6"),
+            component(6, "", "==443"),
+            component(9, "", "0x0012/match"),
+        ],
+        communities: vec![(64496 << 16) | 100],
+        injection_owner: "guarded:prefixd.scrub.a".into(),
+        ..route()
+    }
+}
+
+#[test]
+fn return_leg_encodes_and_reads_back_exact_components_and_community() {
+    let decoded = decode_guarded(return_route(), 3).unwrap().rule;
+    assert_eq!(decoded.export_community.as_deref(), Some("64496:100"));
+    assert_eq!(decoded.nlri.dst_prefix, "");
+    assert_eq!(decoded.nlri.src_prefix.as_deref(), Some("192.0.2.1/32"));
+    assert_eq!(decoded.nlri.src_ports, [443]);
+    assert_eq!(decoded.nlri.tcp_flags, Some(crate::bgp::syn_ack()));
+    let payload = encode_guarded(&decoded).unwrap();
+    assert_eq!(payload.afi_safi, 3);
+    assert_eq!(payload.communities, [(64496 << 16) | 100]);
+    let wire: Vec<_> = payload
+        .components
+        .iter()
+        .map(|c| (c.r#type, c.prefix.as_str(), c.value.as_str()))
+        .collect();
+    assert_eq!(
+        wire,
+        [
+            (2, "192.0.2.1/32", ""),
+            (3, "", "=6"),
+            (6, "", "=443"),
+            (9, "", "0x12")
+        ],
+        "ascending types and no destination component"
+    );
+    // The inbound leg keeps its bytes: no community is ever added.
+    let inbound = encode_guarded(&decode_guarded(route(), 3).unwrap().rule).unwrap();
+    assert!(inbound.communities.is_empty());
+    // An IPv6 return leg takes its family from the source.
+    let mut v6 = return_route();
+    v6.afi_safi = 4;
+    v6.components[0].prefix = "2001:db8::1/128".into();
+    v6.extended_communities.clear();
+    v6.ipv6_extended_communities =
+        vec![hex::decode("000c20010db80000000000000000000000990000").unwrap()];
+    v6.actions[0].action = Some(pb::flow_spec_action::Action::RedirectIp(
+        pb::FlowSpecRedirectIp {
+            address: "2001:db8::99".into(),
+            copy: false,
+        },
+    ));
+    let held = decode_guarded(v6, 4).unwrap().rule;
+    assert_eq!(encode_guarded(&held).unwrap().afi_safi, 4);
+    for case in 0..9 {
+        let mut bad = return_route();
+        match case {
+            0 => bad.communities.clear(),
+            1 => bad.communities.push(1 << 16),
+            2 => bad.communities = vec![(65535 << 16) | 1],
+            3 => bad.injection_owner = "guarded:other.tool".into(),
+            4 => bad.components[0].prefix = "192.0.2.0/24".into(),
+            5 => bad.components[0].r#type = 1,
+            6 => bad.components[1].value = "==17".into(),
+            7 => bad.components[3].value = "0x0002/match".into(),
+            8 => bad.components.insert(
+                0,
+                pb::FlowSpecComponent {
+                    r#type: 1,
+                    prefix: "198.51.100.1/32".into(),
+                    ..Default::default()
+                },
+            ),
+            _ => unreachable!(),
+        }
+        assert!(decode_guarded(bad, 3).is_err(), "case {case}");
+    }
+    // An inbound host rule never carries the community.
+    let mut inbound = route();
+    inbound.injection_owner = "guarded:prefixd.scrub.a".into();
+    inbound.communities = vec![(64496 << 16) | 100];
+    assert!(decode_guarded(inbound, 3).is_err());
+}

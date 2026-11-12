@@ -214,6 +214,44 @@ impl RepositoryTrait for MockRepository {
                 "victim has live or pending mitigation intent".into(),
             ));
         }
+        // Mirrors the repository's victim-as-source checks (ADR 030 R5).
+        let contains = |source: Option<&String>, victim: std::net::IpAddr| {
+            source
+                .and_then(|source| source.parse::<ipnet::IpNet>().ok())
+                .is_some_and(|source| source.contains(&victim))
+        };
+        let source_conflict = if intent.return_rule.is_some() {
+            mitigations.iter().any(|row| {
+                row.pop == intent.pop
+                    && (row.is_active()
+                        || pending.iter().any(|w| {
+                            w.mitigation_id == row.mitigation_id && w.completed_at.is_none()
+                        }))
+                    && contains(row.match_criteria.src_prefix.as_ref(), address)
+            }) || diversions.iter().any(|row| {
+                row.pop == intent.pop
+                    && row.status.outstanding()
+                    && contains(row.rule.nlri.src_prefix.as_ref(), address)
+            })
+        } else {
+            diversions.iter().any(|row| {
+                row.pop == intent.pop
+                    && row.status.outstanding()
+                    && row.return_rule.is_some()
+                    && row.rule.victim().is_some_and(|victim| {
+                        contains(intent.rule.nlri.src_prefix.as_ref(), victim)
+                    })
+            })
+        };
+        if source_conflict {
+            return Err(PrefixdError::Conflict(
+                "victim is the source of live or pending mitigation intent".into(),
+            ));
+        }
+        let rules = |rows: &mut dyn Iterator<Item = &&crate::scrubber::Diversion>| {
+            u32::try_from(rows.map(|row| row.legs().count()).sum::<usize>()).unwrap_or(u32::MAX)
+        };
+        let weight = u32::try_from(intent.legs().count()).unwrap_or(u32::MAX);
         let active = diversions
             .iter()
             .filter(|row| row.status.outstanding())
@@ -228,14 +266,14 @@ impl RepositoryTrait for MockRepository {
                 .unwrap_or(u32::MAX),
             1000,
         )?;
-        super::repository::check_active_quota(
+        super::repository::check_room(
             "scrubber_profile",
-            active
-                .iter()
-                .filter(|row| row.pop == intent.pop && row.profile.id == profile.id)
-                .count()
-                .try_into()
-                .unwrap_or(u32::MAX),
+            rules(
+                &mut active
+                    .iter()
+                    .filter(|row| row.pop == intent.pop && row.profile.id == profile.id),
+            ),
+            weight,
             profile.max_active,
         )?;
         for (scope, limit) in [
@@ -243,14 +281,11 @@ impl RepositoryTrait for MockRepository {
             ("pop", quotas.max_active_per_pop),
             ("global", quotas.max_active_global),
         ] {
-            let count = active
-                .iter()
-                .filter(|row| match scope {
-                    "customer" => row.customer_id == intent.customer_id,
-                    "pop" => row.pop == intent.pop,
-                    _ => true,
-                })
-                .count()
+            let count = rules(&mut active.iter().filter(|row| match scope {
+                "customer" => row.customer_id == intent.customer_id,
+                "pop" => row.pop == intent.pop,
+                _ => true,
+            })) as usize
                 + mitigations
                     .iter()
                     .filter(|row| {
@@ -263,9 +298,10 @@ impl RepositoryTrait for MockRepository {
                             }
                     })
                     .count();
-            super::repository::check_active_quota(
+            super::repository::check_room(
                 scope,
                 count.try_into().unwrap_or(u32::MAX),
+                weight,
                 limit,
             )?;
         }
@@ -296,6 +332,10 @@ impl RepositoryTrait for MockRepository {
         intent.rule.revision = self
             .diversion_revision
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(leg) = &mut intent.return_rule {
+            leg.revision = intent.rule.revision;
+        }
+        intent.validate()?;
         self.audit
             .lock()
             .unwrap()
@@ -752,6 +792,26 @@ impl RepositoryTrait for MockRepository {
                 "victim has live or pending scrubber diversion".into(),
             ));
         }
+        // A pair's return leg selects its victim as source (ADR 030 R5).
+        if let Some(source) = m
+            .match_criteria
+            .src_prefix
+            .as_deref()
+            .and_then(|source| source.parse::<ipnet::IpNet>().ok())
+            && diversion_rows.iter().any(|row| {
+                row.pop == m.pop
+                    && row.status.outstanding()
+                    && row.return_rule.is_some()
+                    && row
+                        .rule
+                        .victim()
+                        .is_some_and(|victim| source.contains(&victim))
+            })
+        {
+            return Err(crate::error::PrefixdError::Conflict(
+                "source contains the victim of a live or pending scrubber return leg".into(),
+            ));
+        }
         if m.action_type != crate::domain::ActionType::Blackhole {
             if let Some(customer_id) = &m.customer_id {
                 let count = mitigations
@@ -773,7 +833,8 @@ impl RepositoryTrait for MockRepository {
                                         && existing.customer_id
                                             == m.customer_id.clone().unwrap_or_default()
                                 })
-                                .count(),
+                                .map(|existing| existing.legs().count())
+                                .sum::<usize>(),
                     )
                     .unwrap_or(u32::MAX),
                     quotas.max_active_per_customer,
@@ -796,7 +857,8 @@ impl RepositoryTrait for MockRepository {
                             .filter(|existing| {
                                 existing.status.outstanding() && existing.pop == m.pop
                             })
-                            .count(),
+                            .map(|existing| existing.legs().count())
+                            .sum::<usize>(),
                 )
                 .unwrap_or(u32::MAX),
                 quotas.max_active_per_pop,
@@ -815,7 +877,8 @@ impl RepositoryTrait for MockRepository {
                         + diversion_rows
                             .iter()
                             .filter(|existing| existing.status.outstanding())
-                            .count(),
+                            .map(|existing| existing.legs().count())
+                            .sum::<usize>(),
                 )
                 .unwrap_or(u32::MAX),
                 quotas.max_active_global,

@@ -256,6 +256,7 @@ impl Speaker {
                     },
                     family: Some(pb::Family { afi, safi }),
                     enable_attribute_binary: binary,
+                    enable_nlri_binary: binary,
                     ..Default::default()
                 })
                 .await

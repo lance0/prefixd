@@ -239,7 +239,64 @@ describe("scrubber re-arm and access", () => {
     await render({ rows: [{ ...active, export_observation: { observed_at: "2030-01-01T00:00:00Z", peers, error: "scrubber export observation timed out" } }] })
     expect(await screen.findByText(/Historical peer export observation from 2030-01-01T00:00:00Z; current export unknown/)).toBeInTheDocument()
   })
+
+  it("shows both legs, the return leg as destination any, and separate export evidence", async () => {
+    const inbound = [{ peer_address: "192.0.2.2", disposition: "committed", reason: "" }]
+    const returned = [{ peer_address: "192.0.2.3", disposition: "committed", reason: "" }]
+    const row = pairResult().candidate
+
+    await render({ rows: [{ ...row, status: "active", export_observation: { observed_at: "2030-01-01T00:00:00Z", peers: inbound }, return_export_observation: { observed_at: "2030-01-01T00:00:05Z", peers: returned, error: "scrubber export observation timed out" } }] })
+    expect(await screen.findByText("Return leg: destination any · src 203.0.113.20/32 · protocol 6 · src ports 443 · flags SYN+ACK → 192.0.2.99 · community 64496:100")).toBeInTheDocument()
+    expect(screen.getByText("Both legs observed locally · Expires 2030-01-01T00:00:00Z")).toBeInTheDocument()
+    expect(screen.getByText("Inbound leg peer export observed since 2030-01-01T00:00:00Z")).toBeInTheDocument()
+    expect(screen.getByText(/Historical return leg peer export observation from 2030-01-01T00:00:05Z; current export unknown/)).toBeInTheDocument()
+    const dialog = await openWithdraw()
+
+    expect(dialog).toHaveTextContent("and its return leg destination any · src 203.0.113.20/32")
+    expect(dialog).toHaveTextContent("may expose the victim to the attack again")
+  })
+
+  it("previews and confirms both legs of a pair with the exact confirmation", async () => {
+    await setup()
+    controller.route("POST", "/v1/diversions/preview", () => json(pairResult()))
+    fireEvent.click(screen.getByRole("button", { name: "Preview diversion" }))
+    const confirm = await screen.findByRole("checkbox", { name: "I confirm both legs' traffic matches and the scrubber target." })
+
+    expect(screen.getByText("Return leg: destination any · src 203.0.113.20/32 · protocol 6 · src ports 443 · flags SYN+ACK → 192.0.2.99 · community 64496:100 · peers 192.0.2.3")).toBeInTheDocument()
+    fireEvent.click(confirm)
+    fireEvent.click(screen.getByRole("button", { name: "Create diversion" }))
+    await waitFor(() => expect(controller.calls("POST", "/v1/diversions")).toHaveLength(1))
+    const sent = JSON.parse(controller.calls("POST", "/v1/diversions")[0].body ?? "{}")
+
+    expect(sent.confirmation).toBe(pairResult().confirmation)
+    expect(sent).not.toHaveProperty("return_rule")
+    expect(sent.scope).not.toHaveProperty("tcp_flags")
+  })
+
+  it("shows a profile's return leg and keeps inbound-only profiles unchanged", async () => {
+    const configured = profiles(true, true)
+
+    configured.configuration.push({ id: "b", revision: "v2", ipv4_target: "192.0.2.99", ipv6_target: null, return_leg: { router_peers: ["192.0.2.3"], policy_binding: "client-side-v1", export_community: "64496:100", tcp_flags: "syn_ack" } })
+    await render({ rows: [], scrubbers: () => json(configured) })
+    expect(await screen.findByText("Return leg for TCP: peers 192.0.2.3 · community 64496:100 · SYN+ACK only")).toBeInTheDocument()
+    expect(screen.getByText("Inbound direction only")).toBeInTheDocument()
+  })
 })
+
+function pairResult(): DiversionPreview {
+  const preview = result()
+  const returnLeg = { router_peers: ["192.0.2.3"], policy_binding: "client-side-v1", export_community: "64496:100", tcp_flags: "syn_ack" as const }
+
+  preview.candidate.profile.return_leg = returnLeg
+  delete preview.candidate.rule.nlri.src_prefix
+  preview.candidate.return_rule = {
+    nlri: { dst_prefix: "", src_prefix: "203.0.113.20/32", protocol: 6, dst_ports: [], src_ports: [443], tcp_flags: { set: ["syn", "ack"] } },
+    target: "192.0.2.99", owner: "profile-owner", revision: 1, export_community: "64496:100",
+  }
+  preview.confirmation = "exact-inbound-match; return leg destination any exact-return-match"
+
+  return preview
+}
 
 function vpnResult(family: "ipv4" | "ipv6", routingScope = "TRANSIT"): DiversionPreview {
   const preview = result()

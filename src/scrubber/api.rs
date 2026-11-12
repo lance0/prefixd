@@ -95,6 +95,9 @@ pub struct ConfiguredProfile {
     pub ipv6_target: Option<std::net::IpAddr>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redirect_route_target: Option<String>,
+    /// Absent when the profile has no return leg.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_leg: Option<ReturnLeg>,
 }
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct DiversionPreview {
@@ -179,6 +182,7 @@ pub async fn profiles(
                 ipv4_target: profile.ipv4_target,
                 ipv6_target: profile.ipv6_target,
                 redirect_route_target: profile.redirect_route_target.clone(),
+                return_leg: profile.return_leg.clone(),
             })
             .collect(),
     };

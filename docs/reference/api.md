@@ -3005,7 +3005,8 @@ the `blackhole` object for blackholes. A manual blackhole broadcasts
 `mitigation_created`.
 
 `diversion_updated` carries a [diversion](#manual-scrubber-diversion) after
-admission, withdrawal and each durable lifecycle transition; a steady renewal
+admission, withdrawal and each durable lifecycle transition, including
+`return_rule` and `return_export_observation` for a pair; a steady renewal
 sends nothing. `scrubber_updated` carries one profile's readiness and arm state,
 the same object as `GET /v1/scrubbers` `profiles`, after re-arm and each
 lifecycle pass. Neither replaces a refresh after `resync_required`.
@@ -3472,6 +3473,27 @@ read-back; per-peer export and router forwarding remain distinct evidence.
 `export_observation` keeps `observed_at` while rechecks find the same peers. A
 failed or timed-out read sets `error` and keeps the earlier peers as historical
 evidence; an empty `peers` with no `error` is a successful empty observation.
+
+A profile with a [return leg](../how-to/scrubber-diversion.md#add-a-symmetric-return-leg)
+derives a second rule for TCP requests; `CreateDiversion` is unchanged. A
+diversion with a return leg adds two optional fields; when both are absent, the
+diversion has none:
+
+| Field | Meaning |
+| --- | --- |
+| `return_rule` | The immutable return leg: `nlri` with `dst_prefix` `""` (no destination component), the victim as `src_prefix`, `protocol` 6, the inbound `dst_ports` as `src_ports` and an optional SYN+ACK `tcp_flags`; the inbound `target`, `owner` and `revision`; and `export_community` |
+| `return_export_observation` | The return leg's export evidence, with the same rules as `export_observation`; absent until first read |
+
+`profile.return_leg` in the saved snapshot, and `return_leg` in each
+`GET /v1/scrubbers` `configuration` entry, hold the frozen `router_peers`,
+`policy_binding`, `export_community` and optional `tcp_flags`. `active` means
+one read-back confirmed both legs. Preview and `confirmation` cover both legs:
+`; return leg destination any {match} -> {target} community {community} peers
+[...]` follows the inbound text. A profile with a return leg refuses a request
+without `protocol`, or a TCP request with `src_prefix`, with `400`. A pair is
+also refused with `409` while any live or pending rule has a source containing
+its victim, and such a mitigation or diversion is refused while the pair is
+outstanding. Audit details add `return_match` and `export_community`.
 
 Withdrawal accepts an optional JSON body `{"reason": "..."}` of 1 to 1,024
 UTF-8 bytes of text. An omitted body or reason records `operator withdrawal by

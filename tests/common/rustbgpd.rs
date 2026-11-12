@@ -89,6 +89,54 @@ impl Speaker {
         fixture
     }
 
+    /// Two FlowSpec routers scoped by the return-leg community (ADR 030 R1):
+    /// `peer` (router A) is denied it and `return_peer` (router B) receives
+    /// only rules that carry it.
+    pub async fn start_peered_return_leg(
+        network: &str,
+        peer: &str,
+        peer_asn: u32,
+        return_peer: &str,
+        community: &str,
+    ) -> Self {
+        let fixture = Self::start_peered(network, peer, peer_asn).await;
+        let path = fixture._files.path().join("config.toml");
+        let config = std::fs::read_to_string(&path).unwrap();
+        let inbound = "description = \"owned GoBGP peer\"";
+        assert_eq!(config.matches(inbound).count(), 1);
+        let mut config = config.replacen(
+            inbound,
+            "description = \"inbound router\"\nexport_policy_chain = [\"inbound-only\"]",
+            1,
+        );
+        config.push_str(&format!(
+            r#"
+[[neighbors]]
+address = "{return_peer}"
+remote_asn = {peer_asn}
+description = "return router"
+families = ["ipv4_flowspec", "ipv6_flowspec"]
+hold_time = 9
+export_policy_chain = ["return-only"]
+[policy.definitions.inbound-only]
+default_action = "permit"
+[[policy.definitions.inbound-only.statements]]
+match_community = ["{community}"]
+action = "deny"
+[policy.definitions.return-only]
+default_action = "deny"
+[[policy.definitions.return-only.statements]]
+match_community = ["{community}"]
+action = "permit"
+"#
+        ));
+        std::fs::write(path, config).unwrap();
+        fixture.container.stop_with_timeout(Some(0)).await.unwrap();
+        fixture.container.start().await.unwrap();
+        fixture.ready().await;
+        fixture
+    }
+
     /// The peer also negotiates IPv4/IPv6 unicast. Export policy denies
     /// [`EXPORT_DENIED`], and [`UNREACHABLE_PEER`] is configured but never
     /// Established.

@@ -29,6 +29,7 @@ fn profile() -> ScrubberProfile {
         max_active: 10,
         max_new_per_minute: 20,
         reserved_targets: vec![],
+        return_leg: None,
     }
 }
 fn diversion(pop: &str, host: u8) -> Diversion {
@@ -51,6 +52,7 @@ fn diversion(pop: &str, host: u8) -> Diversion {
             redirect_route_target: None,
             owner: "prefixd.scrubber.fixture".into(),
             revision: 1,
+            export_community: None,
         },
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::seconds(60),
@@ -64,6 +66,8 @@ fn diversion(pop: &str, host: u8) -> Diversion {
         generation: None,
         last_error: None,
         export_observation: None,
+        return_rule: None,
+        return_export_observation: None,
     }
 }
 fn ordinary(pop: &str, prefix: &str) -> Mitigation {
@@ -257,7 +261,12 @@ async fn released_controller_lifecycle_uses_https_postgres_and_independent_guard
             if headers.get("authorization").and_then(|h| h.to_str().ok()) != Some(format!("Bearer {token}").as_str()) {
                 return StatusCode::UNAUTHORIZED.into_response();
             }
-            axum::Json(serde_json::json!({"profile":id,"revision":"v1","policy_binding":"fixture-policy","observed_at":Utc::now(),"valid_until":Utc::now()+chrono::Duration::seconds(8),"process_ready":id!="a" || healthy.load(SeqCst),"filters_ready":true,"target_reachable":true,"capacity_available":true,"canary_passed":true,"export_isolated":true})).into_response()
+            let mut report = serde_json::json!({"profile":id,"revision":"v1","policy_binding":"fixture-policy","observed_at":Utc::now(),"valid_until":Utc::now()+chrono::Duration::seconds(8),"process_ready":id!="a" || healthy.load(SeqCst),"filters_ready":true,"target_reachable":true,"capacity_available":true,"canary_passed":true,"export_isolated":true});
+            // Profile a has a return leg, so its report carries that object.
+            if id == "a" {
+                report["return_leg"] = serde_json::json!({"policy_binding":"client-side-v1","export_isolated":true,"canary_passed":true});
+            }
+            axum::Json(report).into_response()
         }
     }));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -293,6 +302,14 @@ async fn released_controller_lifecycle_uses_https_postgres_and_independent_guard
                 profile.id = id.into();
                 profile.readiness_url = format!("https://{address}/{id}");
                 profile.readiness_token_env = "PREFIXD_RUSTBGPD_TEST_TOKEN".into();
+                if id == "a" {
+                    profile.return_leg = Some(ReturnLeg {
+                        router_peers: vec!["192.0.2.3".into()],
+                        policy_binding: "client-side-v1".into(),
+                        export_community: "64496:100".into(),
+                        tcp_flags: Some(ReturnTcpFlags::SynAck),
+                    });
+                }
                 profile
             })
             .collect(),
@@ -355,7 +372,10 @@ async fn released_controller_lifecycle_uses_https_postgres_and_independent_guard
             .unwrap();
         assert_eq!(
             speaker.guarded_inventory().await.unwrap().len(),
-            admissions.len(),
+            admissions
+                .iter()
+                .map(|row: &Diversion| row.legs().count())
+                .sum::<usize>(),
             "preview sends no mutation"
         );
         request.confirmation = Some(ScrubberController::confirmation(&preview).unwrap());
@@ -371,6 +391,13 @@ async fn released_controller_lifecycle_uses_https_postgres_and_independent_guard
         );
         assert!(row.export_observation.is_some());
         assert!(!row.windows.is_empty());
+        // Profile a admits a pair: one read-back confirmed both legs.
+        assert_eq!(row.return_rule.is_some(), id == "a");
+        assert_eq!(row.return_export_observation.is_some(), id == "a");
+        let inventory = speaker.guarded_inventory().await.unwrap();
+        assert!(row.legs().all(|leg| inventory.iter().any(
+            |entry| entry.rule.same_admission(leg) && Some(entry.generation) == row.generation
+        )));
         admissions.push(row);
     }
     assert_ne!(admissions[0].rule.owner, admissions[1].rule.owner);
@@ -401,7 +428,12 @@ async fn released_controller_lifecycle_uses_https_postgres_and_independent_guard
         state.scrubber.tick(&state).await.unwrap();
     }
     let inventory = speaker.guarded_inventory().await.unwrap();
-    assert!(!inventory.has_key(&admissions[0].rule.nlri));
+    assert!(
+        admissions[0]
+            .legs()
+            .all(|leg| !inventory.has_key(&leg.nlri)),
+        "readiness loss drains both legs of the pair"
+    );
     assert!(
         inventory
             .iter()
@@ -572,6 +604,192 @@ async fn exercise_source_only_diversion_exclusion(
         axum::http::StatusCode::CONFLICT,
         "{error}"
     );
+}
+
+/// ADR 030 R3 to R5 in storage: a pair counts two rules, both admission paths
+/// refuse a source containing a pair's victim, and only lifecycle fields of a
+/// pair snapshot may change.
+async fn exercise_return_leg_pair_store(
+    repo: std::sync::Arc<dyn prefixd::db::RepositoryTrait>,
+    pop: &str,
+) {
+    let settings = common::test_settings();
+    let target = SpeakerTarget::from_config(&settings.bgp).unwrap();
+    repo.register_speaker_target(pop, &target, false)
+        .await
+        .unwrap();
+    let actor = prefixd::observability::CreationActor::Operator("fixture-admin".into());
+    let mut paired = profile();
+    paired.max_active = 4;
+    paired.return_leg = Some(ReturnLeg {
+        router_peers: vec!["192.0.2.3".into()],
+        policy_binding: "client-side-v1".into(),
+        export_community: "64496:100".into(),
+        tcp_flags: Some(ReturnTcpFlags::SynAck),
+    });
+    let pair = |host| {
+        let mut row = diversion(pop, host);
+        row.profile = paired.snapshot();
+        row.return_rule = derive_return(&row.rule, paired.return_leg.as_ref()).unwrap();
+        row
+    };
+    let sourced = |destination: &str, source: &str| {
+        let mut row = ordinary(pop, destination);
+        row.match_criteria.src_prefix = Some(source.into());
+        row
+    };
+    fn status<T>(result: prefixd::error::Result<T>) -> axum::http::StatusCode {
+        result.err().expect("refused").status_code()
+    }
+
+    // Diversion path: a live rule sourced from the victim refuses the pair.
+    repo.admit_mitigation(
+        &sourced("198.51.100.1/32", "203.0.113.50/32"),
+        &settings.quotas,
+        &settings.blackhole,
+        &actor,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        status(
+            repo.admit_diversion(&pair(50), &paired, &settings.quotas)
+                .await
+        ),
+        axum::http::StatusCode::CONFLICT
+    );
+    // Negative control: the same victim without a return leg is admitted.
+    let single = repo
+        .admit_diversion(&diversion(pop, 50), &paired, &settings.quotas)
+        .await
+        .unwrap();
+    assert!(single.return_rule.is_none());
+
+    // One admission revision for both legs, and two rules against the cap.
+    let mut first = repo
+        .admit_diversion(&pair(60), &paired, &settings.quotas)
+        .await
+        .unwrap();
+    let leg = first.return_rule.clone().unwrap();
+    assert_eq!(leg.revision, first.rule.revision);
+    first.validate().unwrap();
+    let error = repo
+        .admit_diversion(&pair(61), &paired, &settings.quotas)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            prefixd::error::PrefixdError::GuardrailViolation(prefixd::error::GuardrailError::QuotaExceeded { quota_type, current: 3, max: 4 }) if quota_type == "scrubber_profile"
+        ),
+        "{error}"
+    );
+    repo.admit_diversion(&diversion(pop, 62), &paired, &settings.quotas)
+        .await
+        .unwrap();
+    // Ordinary admission counts the pair twice: one mitigation and four
+    // diversion rules fill a POP cap of five, where three rows would not.
+    let mut quotas = settings.quotas.clone();
+    quotas.max_active_per_pop = 5;
+    let error = repo
+        .admit_mitigation(
+            &ordinary(pop, "198.51.100.9/32"),
+            &quotas,
+            &settings.blackhole,
+            &actor,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("pop"), "{error}");
+    quotas.max_active_per_pop = 6;
+    repo.admit_mitigation(
+        &ordinary(pop, "198.51.100.9/32"),
+        &quotas,
+        &settings.blackhole,
+        &actor,
+    )
+    .await
+    .unwrap();
+
+    // Mitigation path: the outstanding pair refuses a rule sourced from its victim.
+    assert_eq!(
+        status(
+            repo.admit_mitigation(
+                &sourced("198.51.100.2/32", "203.0.113.0/24"),
+                &settings.quotas,
+                &settings.blackhole,
+                &actor,
+            )
+            .await
+        ),
+        axum::http::StatusCode::CONFLICT
+    );
+    // Negative control: a source holding only inbound-only victims is admitted.
+    repo.admit_mitigation(
+        &sourced("198.51.100.3/32", "203.0.113.62/32"),
+        &settings.quotas,
+        &settings.blackhole,
+        &actor,
+    )
+    .await
+    .unwrap();
+    // A diversion sourced from the pair's victim is refused too.
+    let mut diverted_source = diversion(pop, 70);
+    diverted_source.rule.nlri.src_prefix = Some("203.0.113.60/32".into());
+    assert_eq!(
+        status(
+            repo.admit_diversion(&diverted_source, &profile(), &settings.quotas)
+                .await
+        ),
+        axum::http::StatusCode::CONFLICT
+    );
+
+    // Return-leg evidence is mutable; the return rule is part of the snapshot.
+    first.return_export_observation = Some(DiversionExportObservation {
+        observed_at: Utc::now(),
+        peers: vec![],
+        error: Some("scrubber export observation timed out".into()),
+    });
+    repo.save_diversion(&first, "scrubber_export_observed")
+        .await
+        .unwrap();
+    let restored = repo.get_diversion(first.id).await.unwrap().unwrap();
+    assert_eq!(
+        restored.return_export_observation,
+        first.return_export_observation
+    );
+    let mut changed = first.clone();
+    changed.return_rule.as_mut().unwrap().nlri.src_ports = vec![80];
+    assert_eq!(
+        status(repo.save_diversion(&changed, "invalid").await),
+        axum::http::StatusCode::CONFLICT
+    );
+    let mut backwards = first.clone();
+    backwards.status = DiversionStatus::Withdrawing;
+    backwards.withdrawal_reason = Some("pair withdrawal".into());
+    repo.save_diversion(&backwards, "scrubber_withdraw_requested")
+        .await
+        .unwrap();
+    backwards.status = DiversionStatus::Active;
+    assert_eq!(
+        status(repo.save_diversion(&backwards, "invalid").await),
+        axum::http::StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn postgres_return_leg_pairs_count_twice_and_refuse_victim_sources() {
+    let context = common::TestContext::new().await;
+    exercise_return_leg_pair_store(context.repo.clone(), &context.state.settings.pop).await;
+}
+
+#[tokio::test]
+async fn mock_return_leg_pairs_count_twice_and_refuse_victim_sources() {
+    exercise_return_leg_pair_store(
+        std::sync::Arc::new(prefixd::db::MockRepository::new()),
+        "test-pop",
+    )
+    .await;
 }
 
 #[tokio::test]

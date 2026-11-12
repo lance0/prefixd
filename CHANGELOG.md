@@ -15,8 +15,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rows with `tcp_flags` fail to load on an older controller. Withdraw them
   before a downgrade; see the
   [downgrade procedure](docs/how-to/upgrading.md#tcp-flags-matches-and-downgrade).
+- Scrubber profiles accept an optional `return_leg`. No migration is required,
+  and rows and profiles without one keep their JSON and wire bytes. Older
+  controllers refuse a configuration with `return_leg` and cannot read an
+  outstanding pair; withdraw every pair and remove `return_leg` before a
+  downgrade; see the
+  [downgrade procedure](docs/how-to/upgrading.md#downgrading-with-scrubber-return-legs).
+- Diversion quotas now count a pair as two rules against the profile's
+  `max_active` and the customer, POP and global caps, including for ordinary
+  mitigation admission. Rows without a return leg still count once.
 
 ### Added
+
+- Global IP-target scrubber profiles can add a symmetric `return_leg`
+  ([ADR 030 amendment](docs/adr/030-scrubber-diversion.md#amendment-symmetric-return-leg)).
+  For a TCP diversion, the controller derives a destination-less rule with the
+  victim as source, the mirrored ports as source ports, an optional SYN+ACK
+  selector and a required `export_community`, under the same target, owner,
+  revision, readiness and latch. Both legs are added in one pass and the row is
+  `active` only when one read-back shows both; any failed, missing or
+  mis-exported leg drains both. Requests without a protocol and source-selected
+  TCP requests are refused for such profiles, and VPN and redirect-to-VRF
+  profiles refuse `return_leg`. Readiness reports for these profiles require a
+  `return_leg` object. A pair is refused while any live or pending rule has a
+  source containing its victim, and such rules are refused while the pair is
+  outstanding. Diversion responses, `diversion_updated`, `GET /v1/scrubbers`,
+  OpenAPI, `prefixdctl` JSON, audit details and the dashboard show both legs and
+  each leg's export evidence. Released fixtures on rustbgpd 0.81.0 and 0.82.0
+  prove the exact return-leg add, read-back, revision-fenced delete and
+  community-scoped export to the return peers only; router forwarding remains
+  unqualified.
 
 - Manual discard, police and VPN mark rules accept an RFC 8955 type 9 `tcp_flags` match,
   for example `{"set": ["syn"], "not_set": ["ack"]}`. It requires protocol TCP

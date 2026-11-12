@@ -270,6 +270,7 @@ A row marked open has no test yet.
 | Storage or leadership loss | `storage_and_fence_loss_stop_renewal_and_latch_in_memory` uses the fake speaker | Case 5, controller loss | The same faults against the released daemon |
 | Observation failure | Read-back decoding refuses unsupported or inconsistent rows; `many_active_diversions_renew_once_per_owner_and_slow_exports_only_degrade_evidence` keeps failed export reads distinct | — | Partial or failed inventory against the released daemon |
 | Cap exhaustion | `profile_shares_windows_within_the_speaker_cap_and_refuses_retargeting` stays within the fake's window cap | Case 7, window cap | Owner and key cap exhaustion at the daemon |
+| Return leg ([ADR 030 R9](../adr/030-scrubber-diversion.md#r9-qualification)) | `released_return_leg_reaches_only_its_peers_with_exact_bytes` adds both legs under one window and generation on v0.81.0 and v0.82.0, reads back the destination-less components and community, refuses other-revision deletes, keeps a replacement from a late delete, and receives exact NLRI and community bytes only at the community-permitted peer for each family; `released_controller_lifecycle_uses_https_postgres_and_independent_guarded_leases` admits and drains a pair; the controller cases are in `src/scrubber/return_leg_tests.rs` | — | Router acceptance, installation and forwarding of the destination-less rule |
 
 ## Qualify forwarding after the contract passes
 

@@ -91,7 +91,13 @@ impl FlowSpecNlri {
                 super::VpnFlowSpecFamily::Ipv6 => IpVersion::V6,
             };
         }
-        if self.dst_prefix.contains(':') {
+        // A global rule without a destination takes its family from the source.
+        let address = if self.dst_prefix.is_empty() {
+            self.src_prefix.as_deref().unwrap_or_default()
+        } else {
+            &self.dst_prefix
+        };
+        if address.contains(':') {
             IpVersion::V6
         } else {
             IpVersion::V4

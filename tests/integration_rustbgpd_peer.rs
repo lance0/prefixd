@@ -1531,3 +1531,209 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
     monitor_task.await.unwrap().unwrap();
     pair.remove().await;
 }
+
+/// RFC 1997 standard communities from GoBGP's serialized path attributes.
+fn standard_communities(attributes: &[Vec<u8>]) -> Vec<u32> {
+    attributes
+        .iter()
+        .filter(|attribute| attribute.len() >= 3 && attribute[1] == 8)
+        .flat_map(|attribute| {
+            let header = if attribute[0] & 0x10 == 0 { 3 } else { 4 };
+            attribute[header..]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| u32::from_be_bytes(*bytes))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// ADR 030 R9 speaker gate on a released daemon: the return leg's exact
+/// guarded add, read-back and revision-fenced delete, and peer receipt in
+/// which a community-matching export policy sends it only to router B.
+#[tokio::test]
+#[ignore = "requires isolated pinned Docker speakers; run scripts/test-rustbgpd.sh"]
+async fn released_return_leg_reaches_only_its_peers_with_exact_bytes() {
+    use prefixd::bgp::{FlowSpecReader, GuardedFlowSpecSpeaker, GuardedRule};
+    use prefixd::scrubber::{ReturnLeg, ReturnTcpFlags, derive_return};
+    use std::time::Duration;
+    const COMMUNITY: u32 = (64496 << 16) | 100;
+    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
+    let pair = peer_receipt::Pair::start_return_leg("64496:100").await;
+    let speaker = pair.rust.connect().await;
+    let router_a = &pair.go;
+    let router_b = pair.global_only.as_ref().unwrap();
+    let router_b_address = router_b
+        .container
+        .get_bridge_ip_address()
+        .await
+        .unwrap()
+        .to_string();
+    let leg = ReturnLeg {
+        router_peers: vec![router_b_address.clone()],
+        policy_binding: "client-side-only-v1".into(),
+        export_community: "64496:100".into(),
+        tcp_flags: Some(ReturnTcpFlags::SynAck),
+    };
+    let owner = "prefixd.scrub.returnfixture";
+    for (afi, family, victim, target, revision) in [
+        (1, 3, "203.0.113.20/32", "192.0.2.99", 10),
+        (2, 4, "2001:db8:100::20/128", "2001:db8::99", 20),
+    ] {
+        let inbound = GuardedRule {
+            nlri: FlowSpecNlri {
+                dst_prefix: victim.into(),
+                protocol: Some(6),
+                dst_ports: vec![443],
+                ..Default::default()
+            },
+            route_targets: vec![],
+            target: Some(target.parse().unwrap()),
+            redirect_route_target: None,
+            owner: owner.into(),
+            revision,
+            export_community: None,
+        };
+        let ret = derive_return(&inbound, Some(&leg)).unwrap().unwrap();
+        let window = speaker.issue_window(owner, 30).await.unwrap();
+        let generation = speaker.add_guarded(&ret, window.stamp, 30).await.unwrap();
+        assert_eq!(
+            speaker
+                .add_guarded(&inbound, window.stamp, 30)
+                .await
+                .unwrap(),
+            generation,
+            "both legs share the owner generation"
+        );
+        // Local intent: exact components and the one standard community.
+        let local = pair.rust.received_flow_spec(family, "0.0.0.0").await;
+        let held: Vec<_> = local
+            .received_routes
+            .iter()
+            .filter_map(|row| row.route.as_ref())
+            .filter(|route| !route.communities.is_empty())
+            .collect();
+        assert_eq!(held.len(), 1);
+        let components: Vec<_> = held[0]
+            .components
+            .iter()
+            .map(|c| (c.r#type, c.prefix.as_str(), c.value.as_str()))
+            .collect();
+        eprintln!("return-leg local components {family}: {components:?}");
+        assert_eq!(
+            components.iter().map(|c| c.0).collect::<Vec<_>>(),
+            [2, 3, 6, 9],
+            "no destination component"
+        );
+        assert_eq!(components[0].1, victim);
+        assert_eq!(held[0].communities, [COMMUNITY]);
+        let inventory = speaker.guarded_inventory().await.unwrap();
+        for expected in [&inbound, &ret] {
+            assert!(
+                inventory
+                    .iter()
+                    .any(|entry| entry.rule.same_admission(expected)
+                        && entry.generation == generation
+                        && entry.remaining_ms > 0)
+            );
+        }
+        assert!(
+            speaker.list_active().await.unwrap().is_empty(),
+            "guarded rows, including the return leg, are not ordinary intent"
+        );
+
+        // Peer receipt: router B holds only the return leg, with the exact
+        // NLRI and community bytes; router A holds only the inbound leg.
+        let source: ipnet::IpNet = victim.parse().unwrap();
+        let mut body = vec![2, source.prefix_len()];
+        if afi == 2 {
+            body.push(0);
+        }
+        body.extend(match source.addr() {
+            std::net::IpAddr::V4(address) => address.octets().to_vec(),
+            std::net::IpAddr::V6(address) => address.octets().to_vec(),
+        });
+        body.extend([3, 0x81, 6, 6, 0x91, 0x01, 0xbb, 9, 0x81, 0x12]);
+        let mut expected_nlri = vec![u8::try_from(body.len()).unwrap()];
+        expected_nlri.extend(&body);
+        let receipt = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let b = router_b
+                    .paths_with_binary_attributes(afi, 133, prefixd::bgp::apipb::TableType::AdjIn)
+                    .await;
+                let a = router_a
+                    .paths_with_binary_attributes(afi, 133, prefixd::bgp::apipb::TableType::AdjIn)
+                    .await;
+                if b.len() == 1 && a.len() == 1 {
+                    break (a, b);
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("router A and router B each receive one rule");
+        let (a, b) = receipt;
+        eprintln!(
+            "return-leg peer receipt {family}: B nlri={:02x?} communities={:?}; A communities={:?}",
+            b[0].nlri_binary,
+            standard_communities(&b[0].pattrs_binary),
+            standard_communities(&a[0].pattrs_binary)
+        );
+        assert_eq!(b[0].nlri_binary, expected_nlri, "exact return-leg NLRI");
+        assert_eq!(standard_communities(&b[0].pattrs_binary), [COMMUNITY]);
+        assert!(
+            standard_communities(&a[0].pattrs_binary).is_empty(),
+            "inbound bytes carry no community"
+        );
+        assert_ne!(a[0].nlri_binary, b[0].nlri_binary);
+        // Export evidence at each key matches the receipt.
+        let exports = speaker.flowspec_exports(&ret.nlri).await.unwrap().unwrap();
+        eprintln!("return-leg export dispositions {family}: {exports:?}");
+        for peer in &exports {
+            let committed = peer.disposition == ExportDisposition::Committed;
+            assert_eq!(committed, peer.peer_address == router_b_address, "{peer:?}");
+        }
+
+        // Revision-fenced delete: another revision cannot remove either leg.
+        for rule in [&ret, &inbound] {
+            let mut stale = rule.clone();
+            stale.revision += 1;
+            assert!(speaker.delete_guarded(&stale).await.is_err());
+        }
+        speaker.delete_guarded(&ret).await.unwrap();
+        speaker.delete_guarded(&ret).await.unwrap();
+        let mut replacement = ret.clone();
+        replacement.revision += 1;
+        speaker
+            .add_guarded(&replacement, window.stamp, 30)
+            .await
+            .unwrap();
+        assert!(
+            speaker.delete_guarded(&ret).await.is_err(),
+            "a late delete cannot remove a newer admission at the return key"
+        );
+        speaker.delete_guarded(&replacement).await.unwrap();
+        speaker.delete_guarded(&inbound).await.unwrap();
+        assert!(speaker.guarded_inventory().await.unwrap().is_empty());
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !router_b
+                .paths(afi, prefixd::bgp::apipb::TableType::AdjIn)
+                .await
+                .is_empty()
+                || !router_a
+                    .paths(afi, prefixd::bgp::apipb::TableType::AdjIn)
+                    .await
+                    .is_empty()
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("both routers lose both legs");
+    }
+    eprintln!(
+        "rustbgpd {version} return-leg speaker gate PASS: guarded add/read-back, exact NLRI and community bytes, revision-fenced delete and community-scoped export to router B only; forwarding unqualified"
+    );
+    pair.remove().await;
+}

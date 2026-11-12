@@ -28,6 +28,50 @@ pub struct GuardedRule {
     pub owner: String,
     /// Immutable per admission, independent of the shared owner generation.
     pub revision: u64,
+    /// Standard community (`ASN:VALUE`) carried only by a diversion's return
+    /// leg, so speaker export policy can scope it (ADR 030 R1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_community: Option<String>,
+}
+
+/// The canonical RFC 1997 value of a return-leg community, outside the
+/// reserved `0:x` and well-known `65535:x` ranges.
+pub fn export_community_value(text: &str) -> Option<u32> {
+    let (high, low) = text.split_once(':')?;
+    let (high, low): (u16, u16) = (high.parse().ok()?, low.parse().ok()?);
+    (format!("{high}:{low}") == text && high != 0 && high != u16::MAX)
+        .then_some((u32::from(high) << 16) | u32::from(low))
+}
+
+/// The only TCP-flags selector a return leg may carry: SYN and ACK set.
+pub fn syn_ack() -> crate::domain::TcpFlagsMatch {
+    crate::domain::TcpFlagsMatch {
+        set: [crate::domain::TcpFlag::Syn, crate::domain::TcpFlag::Ack].into(),
+        not_set: Default::default(),
+    }
+}
+
+/// A diversion return leg's match (ADR 030 R2): a global host source, TCP,
+/// optional canonical source ports, optional SYN+ACK and nothing else. It has
+/// no destination component; ordinary rules never take this shape.
+pub fn is_return_shape(nlri: &FlowSpecNlri) -> bool {
+    nlri.scope.is_none()
+        && nlri.dst_prefix.is_empty()
+        && nlri.src_prefix.as_deref().is_some_and(|source| {
+            source.parse::<ipnet::IpNet>().is_ok_and(|prefix| {
+                prefix.prefix_len() == prefix.max_prefix_len() && prefix.to_string() == source
+            })
+        })
+        && nlri.protocol == Some(6)
+        && nlri.dst_ports.is_empty()
+        && nlri.src_ports == crate::domain::canonical_ports(&nlri.src_ports)
+        && nlri.src_ports.len() <= super::RUSTBGPD_MAX_PORTS_PER_LIST
+        && nlri.fragment.is_none()
+        && nlri.packet_length.is_none()
+        && nlri
+            .tcp_flags
+            .as_ref()
+            .is_none_or(|flags| *flags == syn_ack())
 }
 
 pub fn validate_redirect_target(target: IpAddr) -> bool {
@@ -52,7 +96,60 @@ pub fn validate_redirect_target(target: IpAddr) -> bool {
 }
 
 impl GuardedRule {
+    /// The diversion victim: the inbound destination host, or the return
+    /// leg's source host.
+    pub fn victim(&self) -> Option<IpAddr> {
+        let host = if self.export_community.is_some() {
+            self.nlri.src_prefix.as_deref()?
+        } else {
+            &self.nlri.dst_prefix
+        };
+        host.parse::<ipnet::IpNet>()
+            .ok()
+            .map(|prefix| prefix.addr())
+    }
+
+    /// A return leg selects the victim as its source (ADR 030 R2).
+    fn validate_return(&self) -> Result<()> {
+        let victim = self.victim();
+        if !is_return_shape(&self.nlri)
+            || self
+                .export_community
+                .as_deref()
+                .and_then(export_community_value)
+                .is_none()
+            || !self.route_targets.is_empty()
+            || self.redirect_route_target.is_some()
+            || self.revision == 0
+            || !self.target.is_some_and(|target| {
+                validate_redirect_target(target)
+                    && victim.is_some_and(|victim| {
+                        victim.is_ipv4() == target.is_ipv4() && victim != target
+                    })
+            })
+        {
+            return Err(PrefixdError::InvalidRequest(
+                "invalid diversion return leg".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
+        if self.export_community.is_some() {
+            if self.owner.is_empty()
+                || self.owner.len() > 64
+                || !self
+                    .owner
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+            {
+                return Err(PrefixdError::InvalidRequest(
+                    "invalid diversion return leg".into(),
+                ));
+            }
+            return self.validate_return();
+        }
         let prefix: ipnet::IpNet = self.nlri.dst_prefix.parse().map_err(|_| {
             PrefixdError::InvalidRequest("diversion requires a canonical host prefix".into())
         })?;
@@ -124,6 +221,7 @@ impl GuardedRule {
             && self.target == other.target
             && self.redirect_route_target == other.redirect_route_target
             && self.route_targets == other.route_targets
+            && self.export_community == other.export_community
             && self.nlri.compute_hash() == other.nlri.compute_hash()
     }
 }

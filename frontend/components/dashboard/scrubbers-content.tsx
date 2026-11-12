@@ -9,8 +9,9 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { tcpFlagsLabel } from "@/components/dashboard/flowspec-preview"
 import { usePermissions } from "@/hooks/use-permissions"
-import { armScrubber, createDiversion, getDiversions, getScrubbers, previewDiversion, withdrawDiversion, type DiversionPreview, type DiversionRequest, type ScrubberDiversion } from "@/lib/api"
+import { armScrubber, createDiversion, getDiversions, getScrubbers, previewDiversion, withdrawDiversion, type DiversionExportObservation, type DiversionMatch, type DiversionPreview, type DiversionRequest, type ScrubberDiversion, type ScrubberReturnLeg } from "@/lib/api"
 
 export function ScrubbersContent() {
   const permissions = usePermissions()
@@ -79,6 +80,7 @@ export function ScrubbersContent() {
         <CardContent className="space-y-2 text-sm">
           {config.redirect_route_target ? <p>Redirect to VRF RT {config.redirect_route_target}</p> : <p>Targets: {config.ipv4_target ?? "IPv4 unavailable"} · {config.ipv6_target ?? "IPv6 unavailable"}</p>}
           {config.scope && config.scope !== "global" ? <p>Routing scope: {config.scope}</p> : null}
+          {config.return_leg ? <p>Return leg for TCP: {describeReturnLeg(config.return_leg)}</p> : <p>Inbound direction only</p>}
           <p>{state?.ready ? "Fresh readiness" : state?.readiness === "not_ready" ? "Not ready" : "Readiness unknown"} · {state?.armed ? "Armed" : "Unarmed"}</p>
           {state?.latch_reason && <p>{state.latch_reason}</p>}
           <Button variant="outline" disabled={busy || !profiles.data?.enabled || !state?.ready || state?.armed} onClick={() => action(async () => { await armScrubber(config.id, config.revision); setMessage(`Profile ${config.id} re-armed. New intent requires a separate confirmation.`) })}>Re-arm {config.id}</Button>
@@ -106,6 +108,7 @@ export function ScrubbersContent() {
       }}>
         <label className="space-y-1 text-sm">Profile<Select required value={profile} onValueChange={value => { invalidate(); setProfile(value) }}><SelectTrigger aria-label="Profile" className="w-full"><SelectValue placeholder="Select profile" /></SelectTrigger><SelectContent>{profiles.data.configuration.map(config => <SelectItem key={config.id} value={config.id}>{config.id}</SelectItem>)}</SelectContent></Select></label>
         {selectedProfile?.scope && selectedProfile.scope !== "global" ? <p className="text-sm">Requested routing scope: {selectedProfile.scope}</p> : null}
+        {selectedProfile?.return_leg ? <p className="text-sm">A TCP diversion through this profile adds a return leg. Any-protocol and source-selected TCP requests are refused.</p> : null}
         <label className="space-y-1 text-sm">Victim host CIDR<Input required value={victim} onChange={event => setVictim(event.target.value)} placeholder="203.0.113.10/32" /></label>
         <label className="space-y-1 text-sm">Source prefix (optional)<Input value={source} onChange={event => setSource(event.target.value)} /></label>
         <label className="space-y-1 text-sm">Protocol<Select value={protocol} onValueChange={value => { invalidate(); setProtocol(value) }}><SelectTrigger aria-label="Protocol" className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="6">TCP</SelectItem><SelectItem value="17">UDP</SelectItem><SelectItem value="any">Any</SelectItem></SelectContent></Select></label>
@@ -119,8 +122,12 @@ export function ScrubbersContent() {
         <p>{preview.candidate.dry_run ? "Simulation only" : "Proposed diversion"}: {preview.candidate.rule.nlri.dst_prefix} → {describeTarget(preview.candidate.rule)} via {preview.candidate.profile.id}@{preview.candidate.profile.revision}{preview.candidate.rule.nlri.scope ? ` · VPN${preview.candidate.rule.nlri.scope.family === "ipv4" ? "v4" : "v6"} RD ${preview.candidate.rule.nlri.scope.rd} · RT ${(preview.candidate.rule.route_targets ?? []).join(", ")}` : ""}</p>
         {requestScope !== "global" ? <p className="text-sm">Confirmed routing scope: {requestScope}</p> : null}
         <pre className="overflow-x-auto whitespace-pre-wrap text-xs">{JSON.stringify(preview.candidate.rule.nlri, null, 2)}</pre>
+        {preview.candidate.return_rule && <div className="space-y-1">
+          <p>Return leg: {describeNlri(preview.candidate.return_rule.nlri)} → {describeTarget(preview.candidate.return_rule)} · community {preview.candidate.return_rule.export_community} · peers {(preview.candidate.profile.return_leg?.router_peers ?? []).join(", ")}</p>
+          <p className="text-sm text-muted-foreground">The return leg selects the victim&apos;s responses to any destination. Both legs are confirmed, added, renewed and withdrawn together.</p>
+        </div>}
         <p className="text-sm text-muted-foreground">{preview.evidence}</p>
-        <label className="flex items-center gap-2 text-sm"><Checkbox checked={confirmed} onCheckedChange={checked => setConfirmed(checked === true)} />I confirm this traffic match and scrubber target.</label>
+        <label className="flex items-center gap-2 text-sm"><Checkbox checked={confirmed} onCheckedChange={checked => setConfirmed(checked === true)} />{preview.candidate.return_rule ? "I confirm both legs' traffic matches and the scrubber target." : "I confirm this traffic match and scrubber target."}</label>
         <Button disabled={busy || !confirmed || !request || !preview.candidate.dry_run && (Boolean(profiles.error) || !profiles.data.profiles[request?.profile ?? ""]?.armed || !profiles.data.profiles[request?.profile ?? ""]?.ready)} onClick={() => action(async () => {
           if (!request) return
           const result = await createDiversion({ ...request, confirmation: preview.confirmation }, requestScope)
@@ -132,9 +139,11 @@ export function ScrubbersContent() {
       {diversions.data?.length === 0 && <p className="text-sm text-muted-foreground">No outstanding diversion intent.</p>}
       {diversions.data?.map(row => <div key={row.id} className="space-y-2 rounded-md border p-3 text-sm">
         <p>{row.rule.nlri.dst_prefix} → {describeTarget(row.rule)} · {row.profile.id}@{row.profile.revision}{row.rule.nlri.scope ? ` · VPN${row.rule.nlri.scope.family === "ipv4" ? "v4" : "v6"} RD ${row.rule.nlri.scope.rd} · RT ${(row.rule.route_targets ?? []).join(", ")}` : ""}</p>
-        <p>{row.status === "active" ? "Local intent observed" : row.status} · Expires {row.expires_at}</p>
-        {row.status === "withdrawing" && <p>Withdrawal stays pending until outstanding authorization has expired and local absence is confirmed.</p>}
-        {row.export_observation && <details><summary>{row.export_observation.error ? `Historical peer export observation from ${row.export_observation.observed_at}; current export unknown (${row.export_observation.error})` : `Peer export observed since ${row.export_observation.observed_at}`}</summary><ul className="mt-2 space-y-1">{row.export_observation.peers.map(peer => <li key={peer.peer_address}>{peer.peer_address}: {peer.disposition}{peer.reason ? ` (${peer.reason})` : ""}</li>)}</ul></details>}
+        {row.return_rule && <p>Return leg: {describeNlri(row.return_rule.nlri)} → {describeTarget(row.return_rule)} · community {row.return_rule.export_community}</p>}
+        <p>{row.status === "active" ? row.return_rule ? "Both legs observed locally" : "Local intent observed" : row.status} · Expires {row.expires_at}</p>
+        {row.status === "withdrawing" && <p>Withdrawal stays pending until outstanding authorization has expired and local absence is confirmed{row.return_rule ? " for both legs" : ""}.</p>}
+        <ExportEvidence label={row.return_rule ? "Inbound leg peer export" : "Peer export"} observation={row.export_observation} />
+        {row.return_rule && <ExportEvidence label="Return leg peer export" observation={row.return_export_observation} />}
         {(row.withdrawal_reason || row.last_error) && <p>{row.withdrawal_reason || row.last_error}</p>}
         <Button variant="outline" disabled={busy || row.status === "withdrawing"} onClick={event => { withdrawTrigger.current = event.currentTarget; setWithdrawError(""); setWithdrawReason(""); setWithdrawTarget(row) }}>Withdraw {row.rule.nlri.dst_prefix}</Button>
       </div>)}
@@ -150,7 +159,7 @@ export function ScrubbersContent() {
         <AlertDialogHeader>
           <AlertDialogTitle>Withdraw diversion</AlertDialogTitle>
           <AlertDialogDescription>
-            Request withdrawal of the diversion matching <span className="font-mono font-semibold">{withdrawTarget && describeMatch(withdrawTarget)}</span> to scrubber target <span className="font-mono font-semibold">{withdrawTarget && describeTarget(withdrawTarget.rule)}</span> via profile <span className="font-mono">{withdrawTarget?.profile.id}@{withdrawTarget?.profile.revision}</span>.
+            Request withdrawal of the diversion matching <span className="font-mono font-semibold">{withdrawTarget && describeMatch(withdrawTarget)}</span>{withdrawTarget?.return_rule ? <> and its return leg <span className="font-mono font-semibold">{describeNlri(withdrawTarget.return_rule.nlri)}</span></> : null} to scrubber target <span className="font-mono font-semibold">{withdrawTarget && describeTarget(withdrawTarget.rule)}</span> via profile <span className="font-mono">{withdrawTarget?.profile.id}@{withdrawTarget?.profile.revision}</span>.
             Withdrawal returns attack traffic to ordinary routing and may expose the victim to the attack again. No automatic discard, blackhole or fallback replaces it. The request and reason are recorded in the audit log.
           </AlertDialogDescription>
         </AlertDialogHeader>
@@ -170,7 +179,12 @@ export function ScrubbersContent() {
 }
 
 function describeMatch({ rule: { nlri } }: ScrubberDiversion) {
-  const parts = [`dst ${nlri.dst_prefix}`]
+  return describeNlri(nlri)
+}
+
+// A return leg has no destination component: it matches any destination.
+function describeNlri(nlri: DiversionMatch) {
+  const parts = [nlri.dst_prefix ? `dst ${nlri.dst_prefix}` : "destination any"]
 
   if (nlri.scope) parts.unshift(`VPN${nlri.scope.family === "ipv4" ? "v4" : "v6"} RD ${nlri.scope.rd}`)
 
@@ -181,7 +195,20 @@ function describeMatch({ rule: { nlri } }: ScrubberDiversion) {
 
   if (nlri.src_ports?.length) parts.push(`src ports ${nlri.src_ports.join(", ")}`)
 
+  if (nlri.tcp_flags) parts.push(`flags ${tcpFlagsLabel(nlri.tcp_flags)}`)
+
   return parts.join(" · ")
+}
+
+function describeReturnLeg(leg: ScrubberReturnLeg) {
+  return `peers ${leg.router_peers.join(", ")} · community ${leg.export_community} · ${leg.tcp_flags === "syn_ack" ? "SYN+ACK only" : "all TCP from the mirrored ports"}`
+}
+
+// Each leg keeps its own evidence; a failed read is historical, never empty.
+function ExportEvidence({ label, observation }: { label: string; observation?: DiversionExportObservation | null }) {
+  if (!observation) return null
+
+  return <details><summary>{observation.error ? `Historical ${label.toLowerCase()} observation from ${observation.observed_at}; current export unknown (${observation.error})` : `${label} observed since ${observation.observed_at}`}</summary><ul className="mt-2 space-y-1">{observation.peers.map(peer => <li key={peer.peer_address}>{peer.peer_address}: {peer.disposition}{peer.reason ? ` (${peer.reason})` : ""}</li>)}</ul></details>
 }
 
 function describeTarget(rule: ScrubberDiversion["rule"]) {

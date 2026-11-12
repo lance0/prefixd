@@ -88,10 +88,89 @@ redirect's ingress scope, and qualify target reachability, filtering, capacity,
 MTU and loop avoidance externally. The receipt field records an operator's
 qualification reference; prefixd does not independently certify its contents.
 
-Diversion covers one direction only. A stateful scrubber that must also see
-the victim's TCP responses needs a symmetric return leg. That leg is
-[designed in ADR 030](../adr/030-scrubber-diversion.md#amendment-symmetric-return-leg)
-but not implemented. Profiles do not accept a `return_leg` setting yet.
+### Add a symmetric return leg
+
+Without a return leg, diversion covers one direction only. A stateful scrubber
+that validates TCP handshakes must also see the victim's responses. A global
+IP-target profile can add the
+[return leg from ADR 030](../adr/030-scrubber-diversion.md#amendment-symmetric-return-leg):
+
+```yaml
+    - id: scrubber-a
+      revision: qualified-v2
+      ipv4_target: 192.0.2.99
+      router_peers: [192.0.2.2]          # router A, internet ingress
+      policy_binding: ingress-only-v2
+      # ...other fields as above
+      return_leg:
+        router_peers: [192.0.2.3]        # router B, client side
+        policy_binding: client-side-only-v1
+        export_community: "64496:100"
+        tcp_flags: syn_ack               # optional
+```
+
+For an inbound request with `protocol: 6`, the controller derives a second rule
+for the same victim. It has no destination component, the victim as its source
+host, protocol 6, the inbound destination ports as source ports and, when
+`tcp_flags: syn_ack` is set, a SYN+ACK selector. It uses the profile's target,
+owner and admission revision, and it carries `export_community`. Without
+`tcp_flags`, it diverts all of the victim's TCP traffic from those ports to
+the scrubber. Other protocols create the inbound leg alone. A request that omits
+the protocol, or a TCP request with `src_prefix`, is refused. Requests cannot
+supply the return leg or its flags, and VPN or redirect-to-VRF profiles refuse
+`return_leg`.
+
+`export_community` must be a canonical `ASN:VALUE` outside `0:x` and `65535:x`,
+and different from any community the speaker attaches for another purpose. It
+is the only attribute that lets speaker export policy tell the legs apart.
+Inbound rules keep their bytes and carry no community. Configure rustbgpd to
+send rules with the community only to the return routers and to deny them to
+the inbound routers. For example:
+
+```toml
+[policy.definitions.inbound-only]
+default_action = "permit"
+[[policy.definitions.inbound-only.statements]]
+match_community = ["64496:100"]
+action = "deny"
+
+[policy.definitions.return-only]
+default_action = "deny"
+[[policy.definitions.return-only.statements]]
+match_community = ["64496:100"]
+action = "permit"
+```
+
+Bind `inbound-only` with `export_policy_chain` on router A and `return-only` on
+router B. Both peer lists may name the same router when it carries both legs on
+different interfaces; prefixd cannot observe interface scope, so the receipt
+must cover that topology. The released fixtures prove this export isolation on
+rustbgpd 0.81.0 and 0.82.0 and the exact return-leg bytes received by a peer.
+They do not prove that router B installs a rule without a destination: RFC 8955
+§6 and RFC 9117 validation differ by receiver. Qualify router B's acceptance,
+installed rules and counters, and precedence against an overlapping
+destination-keyed discard for another host before enabling the return leg.
+
+Clean output from each leg must re-enter outside that leg's FlowSpec ingress
+scope or in a separate clean routing domain. Clean return output still has the
+victim as source and the selected flags; re-entering router B inside the return
+leg's ingress scope redirects it again. The target route must not resolve
+through either leg's ingress scope.
+
+A pair is one diversion with one owner, one revision, one readiness state and
+one latch. Both legs are added in one lifecycle pass, the return leg first, and
+the diversion becomes `active` only when one read-back shows both. A refused or
+unknown add of either leg, a missing leg, a leg with another revision or
+generation, or an export of either leg outside its own peer list latches the
+profile and drains both legs. Withdrawal deletes the inbound leg, then the
+return leg, and keeps victim exclusion until both keys are confirmed absent. A
+pair counts as two rules against `max_active` and the customer, POP and global
+quotas; the creation rate counts one admission. A pair is also refused while any
+live or pending rule has a source containing the victim, and such rules are
+refused while the pair is outstanding.
+
+Adding, removing or changing `return_leg` requires a new profile `revision`.
+Startup refuses the change while the profile has outstanding diversion.
 
 Set the readiness credential in the controller's environment, install any
 private monitor CA, then enable the profile configuration and restart. Each
@@ -128,10 +207,31 @@ report is refused.
 }
 ```
 
+For a profile with a return leg, the report must also contain this object, and
+a report for a profile without one must omit it:
+
+```json
+"return_leg": {
+  "policy_binding": "client-side-only-v1",
+  "export_isolated": true,
+  "canary_passed": true
+}
+```
+
+`policy_binding` must equal the return leg's configured binding.
+`export_isolated` attests that return-leg rules reach only the return routers
+and inbound rules never reach them, unless a router is in both lists.
+`canary_passed` attests that a canary TCP connection completed its handshake
+through both legs and that the scrubber saw each canary packet exactly once in
+each direction; seeing one twice indicates a loop. A missing, unexpected or
+mismatched object makes the profile `unknown`, and a failed check makes the
+whole profile `not_ready`. Either drains both legs.
+
 The monitor receives a bearer credential from the configured environment
 variable. Reports must match the profile revision and policy binding. All six
-checks must pass, validity must be at most ten seconds, and observation time may
-be at most two seconds in the future. A BGP session or ping does not substitute
+checks, and both return-leg checks where configured, must pass, validity must
+be at most ten seconds, and observation time may be at most two seconds in the
+future. A BGP session or ping does not substitute
 for these checks. The monitor owns the checks and their canary scope.
 
 Requests have a two-second timeout, a 4 KiB response limit and no redirects.
@@ -153,8 +253,10 @@ extend an unhealthy profile's lease. Recovery never clears the latch by itself.
 
 Use **Scrubbers** in the dashboard: inspect the configured targets and readiness,
 explicitly re-arm the profile, then preview a host match and confirm the exact
-traffic selector, target and profile revision. Editing a field invalidates that
-preview. Withdrawal returns traffic to ordinary routing, potentially exposing
+traffic selector, target and profile revision. For a pair, the preview and the
+confirmation string also cover the return leg, shown as `destination: any` with
+its source host, ports, flags, peers and community. Editing a field invalidates
+that preview. Withdrawal returns traffic to ordinary routing, potentially exposing
 the victim to attack again; there is no automatic discard, blackhole or fallback.
 
 The CLI offers the same workflow. Administrative requests use a cookie from an
@@ -208,8 +310,10 @@ leadership epoch are drained, never replayed under fresh authorization.
 ## Read the evidence and failure state
 
 `pending` is durable intent awaiting local confirmation; `active` means the
-exact guarded revision was observed locally. The last timestamped per-peer
-export observation is separate. `committed` means Adj-RIB-Out, not router receipt
+exact guarded revision was observed locally, for both legs of a pair. The last
+timestamped per-peer export observation is separate, and a pair keeps one for
+each leg (`export_observation` and `return_export_observation`). A pair costs
+two export reads. `committed` means Adj-RIB-Out, not router receipt
 or forwarding. Readiness is the external monitor's bounded attestation for its
 tested path, not proof that every victim packet is scrubbed.
 
@@ -243,7 +347,9 @@ missed-feed resync refreshes both resources.
 Before rollback, withdraw every enforced diversion, wait for confirmed local
 absence, and verify router removal separately. Keep the durable snapshots and
 withdrawal records. An older controller does not understand their exclusion
-obligations. See [ADR 030](../adr/030-scrubber-diversion.md), the
+obligations. A controller without return-leg support refuses a configuration
+containing `return_leg` and cannot read an outstanding pair; follow the
+[upgrade guide](upgrading.md#downgrading-with-scrubber-return-legs) first. See [ADR 030](../adr/030-scrubber-diversion.md), the
 [speaker contract](../project/scrubber-diversion-contract.md) and rustbgpd's
 [released guarded contract](https://github.com/lance0/rustbgpd/blob/v0.82.0/docs/adr/0144-guarded-flowspec-mutations.md)
 and [VPN FlowSpec design](https://github.com/lance0/rustbgpd/blob/v0.82.0/docs/adr/0146-vpn-flowspec.md).
