@@ -130,6 +130,9 @@ pub struct MatchCriteria {
     pub fragment: Option<FragmentMatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packet_length: Option<PacketLengthRange>,
+    /// TCP flags (RFC 8955 type 9); requires protocol 6. Absent when not matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_flags: Option<TcpFlagsMatch>,
 }
 
 /// Sorted, deduplicated ports: the one form source ports are stored, compared and hashed in.
@@ -193,6 +196,152 @@ impl FragmentMatch {
         match self {
             Self::NonFirst => 0x02,
         }
+    }
+}
+
+/// One TCP flag of the RFC 8955 type 9 bitmask, declared in bit order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TcpFlag {
+    Fin,
+    Syn,
+    Rst,
+    Psh,
+    Ack,
+    Urg,
+    Ece,
+    Cwr,
+}
+
+impl TcpFlag {
+    const ALL: [Self; 8] = [
+        Self::Fin,
+        Self::Syn,
+        Self::Rst,
+        Self::Psh,
+        Self::Ack,
+        Self::Urg,
+        Self::Ece,
+        Self::Cwr,
+    ];
+
+    pub fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+/// A set of TCP flags held as its bitmask, so it has one canonical form. JSON is
+/// the list of flag names in bit order; duplicates collapse.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TcpFlags(u8);
+
+impl TcpFlags {
+    pub fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
+    fn iter(self) -> impl Iterator<Item = TcpFlag> {
+        TcpFlag::ALL
+            .into_iter()
+            .filter(move |flag| self.0 & flag.bit() != 0)
+    }
+}
+
+impl FromIterator<TcpFlag> for TcpFlags {
+    fn from_iter<I: IntoIterator<Item = TcpFlag>>(flags: I) -> Self {
+        Self(flags.into_iter().fold(0, |mask, flag| mask | flag.bit()))
+    }
+}
+
+impl<const N: usize> From<[TcpFlag; N]> for TcpFlags {
+    fn from(flags: [TcpFlag; N]) -> Self {
+        flags.into_iter().collect()
+    }
+}
+
+impl Serialize for TcpFlags {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter())
+    }
+}
+
+impl<'de> Deserialize<'de> for TcpFlags {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        Ok(Vec::<TcpFlag>::deserialize(deserializer)?
+            .into_iter()
+            .collect())
+    }
+}
+
+/// TCP flags (RFC 8955 type 9) as one conjunction: every `set` flag is set and
+/// every `not_set` flag is clear; other flags are unconstrained.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TcpFlagsMatch {
+    #[serde(default, skip_serializing_if = "TcpFlags::is_empty")]
+    #[schema(value_type = Vec<TcpFlag>)]
+    pub set: TcpFlags,
+    #[serde(default, skip_serializing_if = "TcpFlags::is_empty")]
+    #[schema(value_type = Vec<TcpFlag>)]
+    pub not_set: TcpFlags,
+}
+
+impl TcpFlagsMatch {
+    /// `(set, not_set)` bitmasks, the identity of the match.
+    pub fn masks(&self) -> (u8, u8) {
+        (self.set.bits(), self.not_set.bits())
+    }
+
+    /// The bitmask terms `(not, value)`, ANDed, each with the match bit. The set
+    /// flags form one term; each clear flag needs its own NOT term, because a
+    /// multi-bit NOT term means "not all of these are set".
+    pub fn terms(&self) -> Vec<(bool, u8)> {
+        (!self.set.is_empty())
+            .then_some((false, self.set.bits()))
+            .into_iter()
+            .chain(self.not_set.iter().map(|flag| (true, flag.bit())))
+            .collect()
+    }
+
+    /// Inverse of [`Self::terms`]; any other term list is not prefixd's form.
+    pub fn from_terms(terms: &[(bool, u16)]) -> Option<Self> {
+        let (mut set, mut not_set) = (0, 0);
+        for &(not, value) in terms {
+            *(if not { &mut not_set } else { &mut set }) |= u8::try_from(value).ok()?;
+        }
+        let decoded = Self {
+            set: TcpFlags(set),
+            not_set: TcpFlags(not_set),
+        };
+        let canonical = decoded.terms();
+        (canonical.len() == terms.len()
+            && canonical
+                .iter()
+                .zip(terms)
+                .all(|(&(not, value), &observed)| (not, u16::from(value)) == observed))
+        .then_some(decoded)
+    }
+}
+
+/// `SYN+ACK`, `SYN !ACK` or `!FIN !RST`: set flags joined by `+`, then each clear flag.
+impl std::fmt::Display for TcpFlagsMatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = |flag: TcpFlag| format!("{flag:?}").to_uppercase();
+        let set = self.set.iter().map(name).collect::<Vec<_>>().join("+");
+        let parts = (!set.is_empty())
+            .then_some(set)
+            .into_iter()
+            .chain(self.not_set.iter().map(|flag| format!("!{}", name(flag))));
+        write!(f, "{}", parts.collect::<Vec<_>>().join(" "))
     }
 }
 

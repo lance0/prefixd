@@ -208,7 +208,7 @@ impl GoBgpAnnouncer {
     }
 
     fn build_flowspec_nlri_v4(&self, nlri: &FlowSpecNlri) -> Result<ProtoFlowSpecNlri> {
-        if nlri.src_prefix.is_some() {
+        if nlri.src_prefix.is_some() || nlri.tcp_flags.is_some() {
             nlri.validate()
                 .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
         }
@@ -283,7 +283,7 @@ impl GoBgpAnnouncer {
     }
 
     fn build_flowspec_nlri_v6(&self, nlri: &FlowSpecNlri) -> Result<ProtoFlowSpecNlri> {
-        if nlri.src_prefix.is_some() {
+        if nlri.src_prefix.is_some() || nlri.tcp_flags.is_some() {
             nlri.validate()
                 .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
         }
@@ -440,6 +440,15 @@ fn push_amplification_components(rules: &mut Vec<ProtoFlowSpecRule>, nlri: &Flow
         // Numeric `==` terms, ORed.
         push(6, ports.iter().map(|&port| (0x01, port.into())).collect());
     }
+    if let Some(flags) = &nlri.tcp_flags {
+        let terms = flags.terms().into_iter().enumerate();
+        push(
+            9,
+            terms
+                .map(|(index, (not, value))| (tcp_flags_op(index, not), value.into()))
+                .collect(),
+        );
+    }
     if let Some(range) = nlri.packet_length {
         // `>=min`, then AND `<=max`.
         push(10, vec![(0x03, range.min.into()), (0x45, range.max.into())]);
@@ -448,6 +457,11 @@ fn push_amplification_components(rules: &mut Vec<ProtoFlowSpecRule>, nlri: &Flow
         // Bitmask with the match bit: (data AND mask) == mask.
         push(12, vec![(0x01, fragment.bitmask().into())]);
     }
+}
+
+/// Bitmask term with the match bit, NOT when `not`, ANDed after the first term.
+fn tcp_flags_op(index: usize, not: bool) -> u32 {
+    0x01 | if not { 0x02 } else { 0 } | if index > 0 { 0x40 } else { 0 }
 }
 
 impl FlowSpecAnnouncer for GoBgpAnnouncer {
@@ -768,6 +782,7 @@ impl GoBgpAnnouncer {
         let mut src_ports: Vec<u16> = Vec::new();
         let mut packet_length = None;
         let mut fragment = None;
+        let mut tcp_flags = None;
 
         let mut previous_type = 0;
         for rule in &proto_nlri.rules {
@@ -845,6 +860,32 @@ impl GoBgpAnnouncer {
                     }
                     component.r#type
                 }
+                // Exact terms prefixd emits, width bits masked; anything else is foreign.
+                Some(flow_spec_rule::Rule::Component(component)) if component.r#type == 9 => {
+                    let last = component.items.len().saturating_sub(1);
+                    let terms: Option<Vec<(bool, u16)>> = component
+                        .items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| {
+                            let not = item.op & 0x02 != 0;
+                            let end = if index == last { 0x80 } else { 0 };
+                            (item.op & !0x30 == tcp_flags_op(index, not) | end)
+                                .then(|| u16::try_from(item.value).ok())
+                                .flatten()
+                                .map(|value| (not, value))
+                        })
+                        .collect();
+                    tcp_flags = Some(
+                        terms
+                            .as_deref()
+                            .and_then(crate::domain::TcpFlagsMatch::from_terms)
+                            .ok_or_else(|| {
+                                PrefixdError::Internal("GoBGP unsupported TCP flags match".into())
+                            })?,
+                    );
+                    9
+                }
                 // ADR 028: only the exact operators prefixd emits, width bits masked.
                 Some(flow_spec_rule::Rule::Component(component)) if component.r#type == 10 => {
                     let [min, max] = component.items.as_slice() else {
@@ -912,8 +953,9 @@ impl GoBgpAnnouncer {
             src_ports,
             fragment,
             packet_length,
+            tcp_flags,
         };
-        if decoded.src_prefix.is_some() {
+        if decoded.src_prefix.is_some() || decoded.tcp_flags.is_some() {
             decoded
                 .validate()
                 .map_err(|error| PrefixdError::Internal(error.to_string()))?;

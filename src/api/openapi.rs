@@ -313,7 +313,13 @@ mod tests {
         let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
         let schemas = &doc["components"]["schemas"];
         for schema in ["CreateMitigationRequest", "MitigationResponse"] {
-            for field in ["src_prefix", "src_ports", "fragment", "packet_length"] {
+            for field in [
+                "src_prefix",
+                "src_ports",
+                "fragment",
+                "packet_length",
+                "tcp_flags",
+            ] {
                 assert!(
                     schemas[schema]["properties"][field].is_object(),
                     "{schema}.{field}"
@@ -326,6 +332,13 @@ mod tests {
         );
         for bound in ["min", "max"] {
             assert!(schemas["PacketLengthRange"]["properties"][bound].is_object());
+        }
+        assert_eq!(
+            schemas["TcpFlag"]["enum"],
+            serde_json::json!(["fin", "syn", "rst", "psh", "ack", "urg", "ece", "cwr"])
+        );
+        for list in ["set", "not_set"] {
+            assert!(schemas["TcpFlagsMatch"]["properties"][list].is_object());
         }
     }
 

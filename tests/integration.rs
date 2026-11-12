@@ -14973,10 +14973,20 @@ mod manual_amplification_match {
         allow_length: bool,
         speaker: MockAnnouncer,
     ) -> (Arc<AppState>, Arc<MockRepository>, Arc<MockAnnouncer>) {
+        state_with(allow_fragment, allow_length, false, speaker)
+    }
+
+    fn state_with(
+        allow_fragment: bool,
+        allow_length: bool,
+        allow_tcp_flags: bool,
+        speaker: MockAnnouncer,
+    ) -> (Arc<AppState>, Arc<MockRepository>, Arc<MockAnnouncer>) {
         let mut settings = test_settings();
         settings.mode = prefixd::config::OperationMode::Enforced;
         settings.guardrails.allow_fragment_match = allow_fragment;
         settings.guardrails.allow_packet_length_match = allow_length;
+        settings.guardrails.allow_tcp_flags_match = allow_tcp_flags;
         let repo = Arc::new(MockRepository::new());
         let speaker = Arc::new(speaker);
         let state = AppState::new(
@@ -15075,6 +15085,40 @@ mod manual_amplification_match {
                 packet_length
             );
         }
+    }
+
+    #[tokio::test]
+    async fn tcp_flags_reach_the_speaker_and_storage_in_canonical_form() {
+        let flags = serde_json::json!({ "set": ["syn"], "not_set": ["ack"] });
+        let extra = serde_json::json!({
+            "protocol": "tcp", "dst_ports": [443],
+            "tcp_flags": { "not_set": ["ack", "ack"], "set": ["syn"] }
+        });
+        let (state, repo, speaker) = state(false, false, MockAnnouncer::new());
+        let (status, body) = post(state.clone(), payload(extra.clone())).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(repo.count_active_global().await.unwrap(), 0);
+        assert!(speaker.list_active().await.unwrap().is_empty());
+
+        let (state, repo, speaker) = state_with(false, false, true, MockAnnouncer::new());
+        let (status, body) = post(state, payload(extra)).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["tcp_flags"], flags, "{body}");
+        let saved = repo
+            .get_mitigation(body["mitigation_id"].as_str().unwrap().parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved.match_criteria.tcp_flags).unwrap(),
+            flags
+        );
+        let rules = speaker.list_active().await.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&rules[0].nlri.tcp_flags).unwrap(),
+            flags
+        );
     }
 
     #[tokio::test]

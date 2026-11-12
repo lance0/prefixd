@@ -339,6 +339,7 @@ fn check_intent(config: &BlackholeConfig, intent: &MitigationIntent) -> Result<I
         || !criteria.src_ports.is_empty()
         || criteria.fragment.is_some()
         || criteria.packet_length.is_some()
+        || criteria.tcp_flags.is_some()
     {
         return Err(refused("a blackhole matches only the host prefix"));
     }
@@ -1073,6 +1074,11 @@ mod tests {
         let mut packet_length = base();
         packet_length.match_criteria.packet_length =
             Some(crate::domain::PacketLengthRange { min: 1, max: 1500 });
+        let mut tcp_flags = base();
+        tcp_flags.match_criteria.tcp_flags = Some(crate::domain::TcpFlagsMatch {
+            set: [crate::domain::TcpFlag::Syn].into(),
+            not_set: Default::default(),
+        });
         let mut rate = base();
         rate.action_params.rate_bps = Some(1_000_000);
         for rejected in [
@@ -1083,6 +1089,7 @@ mod tests {
             src_prefix,
             fragment,
             packet_length,
+            tcp_flags,
             rate,
             intent("203.0.113.0/24"),
             intent("203.0.113.10/31"),

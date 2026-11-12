@@ -249,6 +249,12 @@ struct ManualMitigationArgs {
     protocol: String,
     #[arg(long, value_delimiter = ',')]
     dst_ports: Vec<u16>,
+    /// TCP flags that must be set, for example syn,ack; needs --protocol tcp
+    #[arg(long, value_delimiter = ',', value_parser = parse_tcp_flag, conflicts_with = "source_only")]
+    tcp_flags_set: Vec<prefixd::domain::TcpFlag>,
+    /// TCP flags that must be clear, for example ack; needs --protocol tcp
+    #[arg(long, value_delimiter = ',', value_parser = parse_tcp_flag, conflicts_with = "source_only")]
+    tcp_flags_not_set: Vec<prefixd::domain::TcpFlag>,
     #[arg(long, default_value = "discard", value_parser = ["discard", "police", "mark"])]
     action: String,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
@@ -266,6 +272,15 @@ struct ManualMitigationArgs {
 impl ManualMitigationArgs {
     fn vpn_scope(&self) -> Option<&str> {
         self.scope.as_deref().filter(|name| *name != "global")
+    }
+
+    fn tcp_flags(&self) -> Option<prefixd::domain::TcpFlagsMatch> {
+        (!self.tcp_flags_set.is_empty() || !self.tcp_flags_not_set.is_empty()).then(|| {
+            prefixd::domain::TcpFlagsMatch {
+                set: self.tcp_flags_set.iter().copied().collect(),
+                not_set: self.tcp_flags_not_set.iter().copied().collect(),
+            }
+        })
     }
 
     fn request(&self, confirmed: bool) -> Result<(&'static str, serde_json::Value), String> {
@@ -305,6 +320,9 @@ impl ManualMitigationArgs {
         if let Some(dscp) = self.dscp {
             rule["dscp"] = serde_json::json!(dscp);
         }
+        if let Some(flags) = self.tcp_flags() {
+            rule["tcp_flags"] = serde_json::json!(flags);
+        }
         Ok(match self.vpn_scope() {
             Some(scope) => (
                 "/v1/vpn/mitigations",
@@ -339,6 +357,11 @@ enum SafelistCommands {
         /// Prefix to remove
         prefix: String,
     },
+}
+
+fn parse_tcp_flag(value: &str) -> Result<prefixd::domain::TcpFlag, String> {
+    serde_json::from_value(serde_json::json!(value))
+        .map_err(|_| "expected fin, syn, rst, psh, ack, urg, ece or cwr".into())
 }
 
 fn parse_extension_reason(value: &str) -> Result<String, String> {
@@ -423,6 +446,8 @@ struct MitigationResponse {
     fragment: Option<String>,
     #[serde(default)]
     packet_length: Option<PacketLength>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tcp_flags: Option<prefixd::domain::TcpFlagsMatch>,
     created_at: String,
     expires_at: String,
     scope_hash: String,
@@ -462,6 +487,7 @@ impl MitigationResponse {
             self.packet_length
                 .as_ref()
                 .map(|length| (length.min, length.max)),
+            self.tcp_flags.as_ref(),
         );
         match &self.vpn_scope {
             Some(scope) => format!(
@@ -498,6 +524,7 @@ fn match_summary(
     src_ports: &[u16],
     fragment: Option<&str>,
     packet_length: Option<(u16, u16)>,
+    tcp_flags: Option<&prefixd::domain::TcpFlagsMatch>,
 ) -> String {
     let join = |ports: &[u16]| {
         ports
@@ -531,6 +558,9 @@ fn match_summary(
     }
     if let Some((min, max)) = packet_length {
         parts.push(format!("len {min}-{max}"));
+    }
+    if let Some(flags) = tcp_flags {
+        parts.push(format!("flags {flags}"));
     }
     parts.join(" ")
 }
@@ -1036,6 +1066,14 @@ fn require_manual_preview(
             );
         }
     }
+    // A controller that ignored the field would admit a wider rule.
+    if let Some(flags) = rule.tcp_flags()
+        && preview["candidate"]["scope"]["tcp_flags"] != serde_json::json!(flags)
+    {
+        return Err(
+            "controller did not acknowledge the TCP flags match; no rule was created".into(),
+        );
+    }
     Ok(())
 }
 
@@ -1369,6 +1407,7 @@ async fn cmd_speaker_routes(client: &Client, format: OutputFormat) -> Result<(),
                         prefixd::domain::FragmentMatch::NonFirst => "non_first",
                     }),
                     nlri.packet_length.map(|length| (length.min, length.max)),
+                    nlri.tcp_flags.as_ref(),
                 );
                 let actions = rule
                     .actions
@@ -2248,6 +2287,13 @@ mod tests {
             summary(serde_json::json!({ "protocol": 6, "dst_ports": [80, 443] })),
             "tcp dst 80,443"
         );
+        assert_eq!(
+            summary(serde_json::json!({
+                "protocol": 6, "src_prefix": "203.0.113.1/32",
+                "tcp_flags": { "set": ["syn", "ack"] }
+            })),
+            "tcp from 203.0.113.1/32 flags SYN+ACK"
+        );
     }
 
     #[test]
@@ -2358,5 +2404,51 @@ mod tests {
             "missing dscp",
         ]);
         assert!(missing.request(false).is_err());
+    }
+
+    #[test]
+    fn manual_tcp_flags_are_sent_canonically_and_must_be_acknowledged() {
+        let rule = manual_args(&[
+            "203.0.113.10",
+            "--protocol",
+            "tcp",
+            "--tcp-flags-set",
+            "ack,syn",
+            "--tcp-flags-not-set",
+            "rst",
+            "--ttl-seconds",
+            "30",
+            "--reason",
+            "syn flood",
+        ]);
+        let flags = serde_json::json!({"set": ["syn", "ack"], "not_set": ["rst"]});
+        let (path, body) = rule.request(false).unwrap();
+        assert_eq!(path, "/v1/mitigations");
+        assert_eq!(body["tcp_flags"], flags);
+        let mut preview = serde_json::json!({"outcome": "admissible", "candidate": {"scope": {}}});
+        // An older controller that ignored the field would admit a wider rule.
+        assert!(require_manual_preview(&rule, &preview).is_err());
+        preview["candidate"]["scope"]["tcp_flags"] = flags;
+        require_manual_preview(&rule, &preview).unwrap();
+        let plain = manual_args(&["203.0.113.10", "--ttl-seconds", "30", "--reason", "x"]);
+        assert!(plain.request(false).unwrap().1.get("tcp_flags").is_none());
+        for invalid in [
+            &["203.0.113.10", "--tcp-flags-set", "synack"][..],
+            &[
+                "--source-only",
+                "--scope",
+                "TRANSIT",
+                "--src-prefix",
+                "198.51.100.0/24",
+                "--tcp-flags-set",
+                "syn",
+            ],
+        ] {
+            let args = ["prefixdctl", "mitigations", "preview"]
+                .into_iter()
+                .chain(invalid.iter().copied())
+                .chain(["--ttl-seconds", "30", "--reason", "x"]);
+            assert!(Cli::try_parse_from(args).is_err(), "{invalid:?}");
+        }
     }
 }

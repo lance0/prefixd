@@ -1,4 +1,4 @@
-import type { FragmentMatch, PacketLengthRange, VpnScopeSnapshot } from "@/lib/api"
+import type { FragmentMatch, PacketLengthRange, TcpFlagsMatch, VpnScopeSnapshot } from "@/lib/api"
 
 function protocolName(proto: number | null): string {
   if (proto === null) return ""
@@ -10,6 +10,16 @@ function protocolName(proto: number | null): string {
     case 58: return "icmpv6"
     default: return `${proto}`
   }
+}
+
+const TCP_FLAG_ORDER = ["fin", "syn", "rst", "psh", "ack", "urg", "ece", "cwr"]
+
+/** "SYN+ACK", "SYN !ACK" or "!FIN !RST", in bit order like the controller. */
+export function tcpFlagsLabel(flags: TcpFlagsMatch): string {
+  const ordered = (list?: string[]) => [...(list ?? [])].sort((a, b) => TCP_FLAG_ORDER.indexOf(a) - TCP_FLAG_ORDER.indexOf(b)).map((flag) => flag.toUpperCase())
+  const set = ordered(flags.set).join("+")
+
+  return [...(set ? [set] : []), ...ordered(flags.not_set).map((flag) => `!${flag}`)].join(" ")
 }
 
 // Rule syntax for copy/paste, not display: keep plain ASCII and a fixed decimal.
@@ -34,6 +44,7 @@ export interface FlowSpecFields {
   src_ports?: number[]
   fragment?: FragmentMatch | null
   packet_length?: PacketLengthRange | null
+  tcp_flags?: TcpFlagsMatch | null
   action_type: string
   rate_bps: number | null
   dscp?: number | null
@@ -50,6 +61,8 @@ export function describeMatch(fields: Omit<FlowSpecFields, "dst_prefix" | "rate_
   if (fields.src_ports?.length) parts.push(`src ${fields.src_ports.join(", ")}`)
 
   if (fields.dst_ports.length > 0) parts.push(`dst ${fields.dst_ports.join(", ")}`)
+
+  if (fields.tcp_flags) parts.push(`flags ${tcpFlagsLabel(fields.tcp_flags)}`)
 
   if (fields.fragment === "non_first") parts.push("non-first fragments")
 
@@ -78,6 +91,10 @@ export function formatFlowSpecRule(fields: FlowSpecFields): string {
 
   if (fields.src_ports?.length) {
     parts.push("source-port", fields.src_ports.join(","))
+  }
+
+  if (fields.tcp_flags) {
+    parts.push("tcp-flags", tcpFlagsLabel(fields.tcp_flags))
   }
 
   if (fields.packet_length) {

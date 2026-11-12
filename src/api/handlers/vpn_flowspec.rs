@@ -63,6 +63,7 @@ impl SourceOnlyVpnRequest {
             src_ports: Vec::new(),
             fragment: None,
             packet_length: None,
+            tcp_flags: None,
             action: self.action,
             confirm_victim_ip: None,
             rate_bps: self.rate_bps,

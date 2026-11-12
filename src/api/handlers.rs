@@ -94,7 +94,7 @@ use crate::db::{ListCursor, ListParams, MitigationCursor, MitigationListParams};
 use crate::domain::{
     ActionParams, ActionType, AttackEvent, AttackEventInput, FlowSpecAction, FragmentMatch,
     MatchCriteria, Mitigation, MitigationIntent, MitigationRoute, MitigationStatus,
-    PacketLengthRange, execute_withdrawal, find_mitigation_owner, mitigation_rule,
+    PacketLengthRange, TcpFlagsMatch, execute_withdrawal, find_mitigation_owner, mitigation_rule,
     request_withdrawal, validate_confidence, validate_top_src_ports,
 };
 use crate::error::{GuardrailError, PrefixdError};
@@ -308,6 +308,9 @@ pub struct MitigationResponse {
     pub fragment: Option<FragmentMatch>,
     /// Inclusive total IP packet length range; otherwise null
     pub packet_length: Option<PacketLengthRange>,
+    /// TCP flags (RFC 8955 type 9); otherwise null
+    #[schema(example = json!({"set": ["syn"], "not_set": ["ack"]}))]
+    pub tcp_flags: Option<TcpFlagsMatch>,
     /// When the mitigation was created
     pub created_at: String,
     /// When the mitigation was last updated
@@ -401,6 +404,7 @@ impl From<&Mitigation> for MitigationResponse {
             src_ports: crate::domain::canonical_ports(&m.match_criteria.src_ports),
             fragment: m.match_criteria.fragment,
             packet_length: m.match_criteria.packet_length,
+            tcp_flags: m.match_criteria.tcp_flags.clone(),
             created_at: m.created_at.to_rfc3339(),
             updated_at: m.updated_at.to_rfc3339(),
             expires_at: m.expires_at.to_rfc3339(),
@@ -683,6 +687,12 @@ pub struct CreateMitigationRequest {
     /// `guardrails.allow_packet_length_match`. Discard and police only.
     #[serde(default)]
     packet_length: Option<PacketLengthRange>,
+    /// TCP flags (RFC 8955 type 9): every `set` flag is set and every `not_set`
+    /// flag is clear. Needs protocol `tcp`, at least one flag, no flag in both
+    /// lists, and `guardrails.allow_tcp_flags_match`. Discard and police only.
+    #[schema(example = json!({"set": ["syn", "ack"]}))]
+    #[serde(default)]
+    tcp_flags: Option<TcpFlagsMatch>,
     /// discard, police, mark (VPN destination only), or blackhole. A blackhole drops all traffic to the victim
     /// and requires the Admin role, a nonempty reason and `confirm_victim_ip`.
     action: String,
@@ -2391,12 +2401,13 @@ async fn create_blackhole(
         || !req.src_ports.is_empty()
         || req.fragment.is_some()
         || req.packet_length.is_some()
+        || req.tcp_flags.is_some()
         || req.rate_bps.is_some()
         || req.dscp.is_some()
         || req.expires_at_cap.is_some()
     {
         Some(
-            "a blackhole takes no protocol, dst_ports, src_prefix, src_ports, fragment, packet_length, rate_bps, dscp or expires_at_cap",
+            "a blackhole takes no protocol, dst_ports, src_prefix, src_ports, fragment, packet_length, tcp_flags, rate_bps, dscp or expires_at_cap",
         )
     } else {
         None

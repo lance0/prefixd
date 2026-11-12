@@ -186,8 +186,8 @@ prefixdctl mitigations get <id>
 
 `list` ends each row with a `MATCH` column, and `get` prints the same summary
 on its `Match:` line: the protocol, then any source prefix, source ports, destination ports,
-non-first fragments and packet length
-([ADR 028](../adr/028-amplification-matches.md)). For example:
+non-first fragments, packet length
+([ADR 028](../adr/028-amplification-matches.md)) and TCP flags. For example:
 
 ```bash
 prefixdctl mitigations list --status active
@@ -198,12 +198,13 @@ prefixdctl mitigations list --status active
 #   udp src 11211 len 1000-65535  source port with a packet-length range
 #   tcp from 198.51.100.0/24      source prefix
 #   tcp dst 80,443                destination ports
+#   tcp dst 443 flags SYN !ACK    TCP flags: SYN set, ACK clear
 #   any                           every protocol
 #   all traffic                   a blackhole
 ```
 
 `-f json` output includes `src_prefix`, `protocol`, `dst_ports`, `src_ports`, `fragment` and
-`packet_length` as the API returns them.
+`packet_length` as the API returns them, and `tcp_flags` when the rule has one.
 
 A blackhole ([ADR 027](../adr/027-blackhole-mitigations.md)) shows
 `blackhole` in the `ACTION` column of `list`, and `get` adds its saved route:
@@ -509,6 +510,16 @@ For source-only, omit VICTIM and use `--source-only --scope NAME --src-prefix CI
 Creation also needs `--confirm-destination-any`; preview does not. Family/RD/RT
 appear in mitigation and local inventory output. See the
 [VPN procedure](../how-to/vpn-flowspec.md) for authorization and receiver limits.
+
+### TCP flags
+
+`mitigations preview` and `mitigations create` accept `--tcp-flags-set` and
+`--tcp-flags-not-set`, each a comma-separated list of `fin`, `syn`, `rst`,
+`psh`, `ack`, `urg`, `ece` and `cwr`, with `--protocol tcp`. For example,
+`--tcp-flags-set syn --tcp-flags-not-set ack` matches connection-opening SYNs.
+They send one [`tcp_flags`](api.md#tcp-flags-matches) match and are refused with
+`--source-only`. Create requires the controller preview to acknowledge the
+exact match, so a controller that ignores the field cannot admit a wider rule.
 
 ### VPN DSCP marking
 

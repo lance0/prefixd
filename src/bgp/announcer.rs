@@ -94,7 +94,8 @@ pub trait FlowSpecWriter: Send + Sync {
             // Source ports are an equality set; speakers read them back ascending.
             && canonical_ports(&left.src_ports) == canonical_ports(&right.src_ports)
             && left.fragment == right.fragment
-            && left.packet_length == right.packet_length)
+            && left.packet_length == right.packet_length
+            && left.tcp_flags == right.tcp_flags)
     }
 
     /// Unleased upsert; a rule with an owner is refused before any RPC.
@@ -503,6 +504,7 @@ pub struct FlowSpecMatchSupport {
     pub source_ports: bool,
     pub fragment: bool,
     pub packet_length: bool,
+    pub tcp_flags: bool,
 }
 
 impl FlowSpecMatchSupport {
@@ -511,6 +513,7 @@ impl FlowSpecMatchSupport {
         source_ports: true,
         fragment: true,
         packet_length: true,
+        tcp_flags: true,
     };
 
     /// Refuses, before any RPC, a rule with a component this speaker cannot
@@ -529,6 +532,7 @@ impl FlowSpecMatchSupport {
                 self.packet_length,
                 "packet length",
             ),
+            (nlri.tcp_flags.is_some(), self.tcp_flags, "TCP flags"),
         ] {
             if present && !supported {
                 return Err(crate::error::PrefixdError::InvalidRequest(format!(
@@ -621,7 +625,7 @@ mod tests {
         let json = serde_json::to_value(FlowSpecMatchSupport::ALL).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"source_prefix": true, "source_ports": true, "fragment": true, "packet_length": true})
+            serde_json::json!({"source_prefix": true, "source_ports": true, "fragment": true, "packet_length": true, "tcp_flags": true})
         );
         let base = FlowSpecNlri {
             dst_prefix: "192.0.2.1/32".into(),
@@ -661,6 +665,17 @@ mod tests {
                 },
                 "packet length",
             ),
+            (
+                FlowSpecNlri {
+                    protocol: Some(6),
+                    tcp_flags: Some(crate::domain::TcpFlagsMatch {
+                        set: [crate::domain::TcpFlag::Syn].into(),
+                        not_set: Default::default(),
+                    }),
+                    ..base.clone()
+                },
+                "TCP flags",
+            ),
         ];
         // The trait default supports nothing, so only legacy rules pass.
         let none = FlowSpecMatchSupport::default();
@@ -681,6 +696,10 @@ mod tests {
             },
             FlowSpecMatchSupport {
                 packet_length: false,
+                ..all
+            },
+            FlowSpecMatchSupport {
+                tcp_flags: false,
                 ..all
             },
         ];

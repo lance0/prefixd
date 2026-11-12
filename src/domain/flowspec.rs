@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{ActionType, FragmentMatch, MatchCriteria, PacketLengthRange, canonical_ports};
+use super::{
+    ActionType, FragmentMatch, MatchCriteria, PacketLengthRange, TcpFlagsMatch, canonical_ports,
+};
 
 /// IP version for FlowSpec rules
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +40,9 @@ pub struct FlowSpecNlri {
     pub fragment: Option<FragmentMatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packet_length: Option<PacketLengthRange>,
+    /// TCP flags (RFC 8955 type 9); requires protocol 6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_flags: Option<TcpFlagsMatch>,
 }
 
 /// A rule that violates the ADR 028 match invariants.
@@ -61,6 +66,12 @@ pub enum FlowSpecMatchError {
     InvalidSourcePrefix,
     #[error("source and destination prefixes must use the same address family")]
     SourcePrefixFamilyMismatch,
+    #[error("TCP flags match requires protocol 6 (TCP)")]
+    TcpFlagsRequireTcp,
+    #[error("TCP flags match needs at least one set or not_set flag")]
+    EmptyTcpFlags,
+    #[error("TCP flags match cannot require a flag to be both set and not set")]
+    ConflictingTcpFlags,
 }
 
 /// Canonical network CIDR. Explicit /0 remains a component and an identity of its own.
@@ -92,9 +103,17 @@ impl FlowSpecNlri {
         !self.src_ports.is_empty() || self.fragment.is_some() || self.packet_length.is_some()
     }
 
+    /// Rules with only the original components keep their legacy checks and hash.
+    fn is_legacy(&self) -> bool {
+        self.scope.is_none()
+            && !self.is_extended()
+            && self.src_prefix.is_none()
+            && self.tcp_flags.is_none()
+    }
+
     /// The ADR 028 rule invariants. Rules without new components are not checked here.
     pub fn validate(&self) -> Result<(), FlowSpecMatchError> {
-        if self.scope.is_none() && !self.is_extended() && self.src_prefix.is_none() {
+        if self.is_legacy() {
             return Ok(());
         }
         let destination = if self.dst_prefix.is_empty() {
@@ -130,6 +149,18 @@ impl FlowSpecNlri {
                 return Err(FlowSpecMatchError::SourcePrefixFamilyMismatch);
             }
         }
+        if let Some(flags) = &self.tcp_flags {
+            if self.protocol != Some(6) {
+                return Err(FlowSpecMatchError::TcpFlagsRequireTcp);
+            }
+            let (set, not_set) = flags.masks();
+            if set | not_set == 0 {
+                return Err(FlowSpecMatchError::EmptyTcpFlags);
+            }
+            if set & not_set != 0 {
+                return Err(FlowSpecMatchError::ConflictingTcpFlags);
+            }
+        }
         // Source-prefix matching also applies to TCP, ICMP and any-protocol rules.
         if !self.is_extended() {
             return Ok(());
@@ -160,7 +191,7 @@ impl FlowSpecNlri {
     /// Scoped VPN keys include exact RD bytes. Global source-prefix rules keep
     /// v3 and ADR 028 rules keep v2 byte for byte; `None` preserves legacy hashes.
     pub(crate) fn extended_identity(&self) -> Option<String> {
-        if self.scope.is_none() && !self.is_extended() && self.src_prefix.is_none() {
+        if self.is_legacy() {
             return None;
         }
         let mut hasher = Sha256::new();
@@ -201,6 +232,10 @@ impl FlowSpecNlri {
                     hasher.update(port.to_be_bytes());
                 }
             }
+        }
+        if let Some(flags) = &self.tcp_flags {
+            let (set, not_set) = flags.masks();
+            hasher.update([9, set, not_set]);
         }
         if let Some(PacketLengthRange { min, max }) = self.packet_length {
             hasher.update([10]);
@@ -248,6 +283,7 @@ impl From<&MatchCriteria> for FlowSpecNlri {
             src_ports: canonical_ports(&criteria.src_ports),
             fragment: criteria.fragment,
             packet_length: criteria.packet_length,
+            tcp_flags: criteria.tcp_flags.clone(),
         }
     }
 }
@@ -780,6 +816,172 @@ mod tests {
         for (rule, expected) in cases {
             assert_eq!(rule.validate(), expected, "{rule:?}");
         }
+    }
+
+    #[test]
+    fn tcp_flags_are_canonical_tcp_only_and_part_of_identity() {
+        use super::super::{TcpFlag, TcpFlagsMatch};
+        let flags = |json| serde_json::from_value::<TcpFlagsMatch>(json).unwrap();
+        let syn_ack = flags(serde_json::json!({"set": ["ack", "syn", "ack"]}));
+        let syn_not_ack = flags(serde_json::json!({"set": ["syn"], "not_set": ["ack"]}));
+        assert_eq!(syn_ack, flags(serde_json::json!({"set": ["syn", "ack"]})));
+        assert_eq!(
+            serde_json::to_value(&syn_ack).unwrap(),
+            serde_json::json!({"set": ["syn", "ack"]})
+        );
+        assert_eq!(syn_ack.terms(), [(false, 0x12)]);
+        assert_eq!(syn_not_ack.terms(), [(false, 0x02), (true, 0x10)]);
+        let none_of = flags(serde_json::json!({"not_set": ["rst", "fin"]}));
+        assert_eq!(none_of.terms(), [(true, 0x01), (true, 0x04)]);
+        assert_eq!(syn_ack.to_string(), "SYN+ACK");
+        assert_eq!(syn_not_ack.to_string(), "SYN !ACK");
+        assert_eq!(none_of.to_string(), "!FIN !RST");
+        for good in [&syn_ack, &syn_not_ack, &none_of] {
+            let wire: Vec<(bool, u16)> = good
+                .terms()
+                .into_iter()
+                .map(|(not, value)| (not, value.into()))
+                .collect();
+            assert_eq!(TcpFlagsMatch::from_terms(&wire).as_ref(), Some(good));
+        }
+        // Not prefixd's form: a multi-bit NOT term ("not all of"), reordered or
+        // split set terms, a zero term, and a bit beyond the eight named flags.
+        for terms in [
+            &[(true, 0x14)][..],
+            &[(true, 0x10), (false, 0x02)],
+            &[(false, 0x02), (false, 0x10)],
+            &[(false, 0)],
+            &[(false, 0x0100)],
+        ] {
+            assert_eq!(TcpFlagsMatch::from_terms(terms), None, "{terms:?}");
+        }
+        for json in [
+            serde_json::json!({"set": ["syn", "nope"]}),
+            serde_json::json!({"set": ["SYN"]}),
+            serde_json::json!({"set": ["syn"], "any": ["ack"]}),
+            serde_json::json!(2),
+        ] {
+            assert!(serde_json::from_value::<TcpFlagsMatch>(json).is_err());
+        }
+
+        let tcp = FlowSpecNlri {
+            dst_prefix: "192.0.2.1/32".into(),
+            protocol: Some(6),
+            tcp_flags: Some(syn_ack.clone()),
+            ..Default::default()
+        };
+        tcp.validate().unwrap();
+        FlowSpecNlri {
+            dst_prefix: "2001:db8::1/128".into(),
+            src_prefix: Some("2001:db8:1::/48".into()),
+            tcp_flags: Some(syn_not_ack.clone()),
+            ..tcp.clone()
+        }
+        .validate()
+        .unwrap();
+        let both = TcpFlagsMatch {
+            set: [TcpFlag::Syn].into(),
+            not_set: [TcpFlag::Syn, TcpFlag::Ack].into(),
+        };
+        for (rule, error) in [
+            (
+                FlowSpecNlri {
+                    protocol: Some(17),
+                    ..tcp.clone()
+                },
+                FlowSpecMatchError::TcpFlagsRequireTcp,
+            ),
+            (
+                FlowSpecNlri {
+                    protocol: None,
+                    ..tcp.clone()
+                },
+                FlowSpecMatchError::TcpFlagsRequireTcp,
+            ),
+            (
+                FlowSpecNlri {
+                    protocol: Some(17),
+                    src_ports: vec![123],
+                    ..tcp.clone()
+                },
+                FlowSpecMatchError::TcpFlagsRequireTcp,
+            ),
+            (
+                FlowSpecNlri {
+                    tcp_flags: Some(flags(serde_json::json!({}))),
+                    ..tcp.clone()
+                },
+                FlowSpecMatchError::EmptyTcpFlags,
+            ),
+            (
+                FlowSpecNlri {
+                    tcp_flags: Some(flags(serde_json::json!({"set": [], "not_set": []}))),
+                    ..tcp.clone()
+                },
+                FlowSpecMatchError::EmptyTcpFlags,
+            ),
+            (
+                FlowSpecNlri {
+                    tcp_flags: Some(both),
+                    ..tcp.clone()
+                },
+                FlowSpecMatchError::ConflictingTcpFlags,
+            ),
+            (
+                FlowSpecNlri {
+                    dst_prefix: "192.0.2.1/24".into(),
+                    ..tcp.clone()
+                },
+                FlowSpecMatchError::InvalidDestinationPrefix,
+            ),
+        ] {
+            assert_eq!(rule.validate(), Err(error), "{rule:?}");
+        }
+
+        // A rule with flags never shares an identity with the same rule without
+        // them, or with different flags; equivalent spellings share one.
+        let without = FlowSpecNlri {
+            tcp_flags: None,
+            ..tcp.clone()
+        };
+        let other = FlowSpecNlri {
+            tcp_flags: Some(syn_not_ack),
+            ..tcp.clone()
+        };
+        let hashes: std::collections::HashSet<_> = [&tcp, &without, &other]
+            .iter()
+            .map(|rule| rule.compute_hash())
+            .collect();
+        assert_eq!(hashes.len(), 3);
+        let respelled: MatchCriteria = serde_json::from_value(serde_json::json!({
+            "dst_prefix": "192.0.2.1/32", "protocol": 6, "dst_ports": [],
+            "tcp_flags": {"set": ["ack", "syn"]}
+        }))
+        .unwrap();
+        assert_eq!(respelled.compute_scope_hash(), tcp.compute_hash());
+        assert_eq!(FlowSpecNlri::from(&respelled).tcp_flags, tcp.tcp_flags);
+    }
+
+    /// Rows and rules persisted before TCP flags existed keep their bytes and identity.
+    #[test]
+    fn rows_without_tcp_flags_deserialize_unchanged() {
+        let json = r#"{"dst_prefix":"192.0.2.10/32","protocol":6,"dst_ports":[80,443]}"#;
+        let criteria: MatchCriteria = serde_json::from_str(json).unwrap();
+        assert!(criteria.tcp_flags.is_none());
+        assert_eq!(serde_json::to_string(&criteria).unwrap(), json);
+        let nlri: FlowSpecNlri = serde_json::from_str(json).unwrap();
+        assert!(nlri.tcp_flags.is_none());
+        assert_eq!(serde_json::to_string(&nlri).unwrap(), json);
+        assert_eq!(
+            nlri.compute_hash(),
+            FlowSpecNlri {
+                dst_prefix: "192.0.2.10/32".into(),
+                protocol: Some(6),
+                dst_ports: vec![80, 443],
+                ..Default::default()
+            }
+            .compute_hash()
+        );
     }
 
     #[test]

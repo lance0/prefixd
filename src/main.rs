@@ -56,13 +56,6 @@ async fn main() -> anyhow::Result<()> {
         config.settings.observability.log_format,
         &config.settings.observability.log_level,
     );
-    for key in config.settings.guardrails.reserved_flags_set() {
-        tracing::warn!(
-            key,
-            "reserved guardrail flag has no effect; prefixd does not match source prefixes or TCP flags"
-        );
-    }
-
     tracing::info!(
         pop = %config.settings.pop,
         mode = ?config.settings.mode,

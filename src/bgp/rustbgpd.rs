@@ -8,7 +8,8 @@ use crate::{
     config::RustBgpdConfig,
     domain::{
         FlowSpecAction, FlowSpecNlri, FlowSpecRule, FragmentMatch, PacketLengthRange,
-        VpnFlowSpecFamily, VpnFlowSpecIdentity, canonical_route_target, route_target_bytes,
+        TcpFlagsMatch, VpnFlowSpecFamily, VpnFlowSpecIdentity, canonical_route_target,
+        route_target_bytes,
     },
     error::{InjectionRefusalReason, PrefixdError, Result},
 };
@@ -524,7 +525,7 @@ use super::RUSTBGPD_MAX_PORTS_PER_LIST as MAX_PORTS_PER_LIST;
 
 /// Components in strictly ascending type order; the daemon does not reorder them.
 fn encode_match(nlri: &FlowSpecNlri) -> Result<(i32, Vec<pb::FlowSpecComponent>)> {
-    if nlri.src_prefix.is_some() || nlri.scope.is_some() {
+    if nlri.src_prefix.is_some() || nlri.scope.is_some() || nlri.tcp_flags.is_some() {
         nlri.validate()
             .map_err(|error| invalid(&error.to_string()))?;
     }
@@ -584,6 +585,19 @@ fn encode_match(nlri: &FlowSpecNlri) -> Result<(i32, Vec<pb::FlowSpecComponent>)
                 ..Default::default()
             });
         }
+    }
+    if let Some(flags) = &nlri.tcp_flags {
+        // ANDed bitmask terms; the daemon sets the match bit on each.
+        components.push(pb::FlowSpecComponent {
+            r#type: 9,
+            value: flags
+                .terms()
+                .iter()
+                .map(|&(not, value)| format!("{}{value:#04x}", if not { "!" } else { "" }))
+                .collect::<Vec<_>>()
+                .join(" & "),
+            ..Default::default()
+        });
     }
     if let Some(range) = nlri.packet_length {
         components.push(pb::FlowSpecComponent {
@@ -789,6 +803,28 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
                                 == component.value
                     })
                     .ok_or_else(|| invalid("unsupported source port expression"))?;
+            }
+            9 if component.prefix.is_empty() => {
+                let terms: Option<Vec<(bool, u16)>> = component
+                    .value
+                    .split(" & ")
+                    .map(|term| {
+                        let (not, term) = term
+                            .strip_prefix('!')
+                            .map_or((false, term), |term| (true, term));
+                        let hex = term.strip_prefix("0x")?.strip_suffix("/match")?;
+                        u16::from_str_radix(hex, 16)
+                            .ok()
+                            .filter(|value| format!("{value:04x}") == hex)
+                            .map(|value| (not, value))
+                    })
+                    .collect();
+                nlri.tcp_flags = Some(
+                    terms
+                        .as_deref()
+                        .and_then(TcpFlagsMatch::from_terms)
+                        .ok_or_else(|| invalid("unsupported TCP flags expression"))?,
+                );
             }
             10 if component.prefix.is_empty() => {
                 let range = component
@@ -1022,7 +1058,7 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
         Some(self)
     }
     fn match_support(&self) -> FlowSpecMatchSupport {
-        // Types 6, 10 and 12 parse and render alike in every supported release.
+        // Types 6, 9, 10 and 12 parse and render alike in every supported release.
         FlowSpecMatchSupport::ALL
     }
 }
@@ -1884,10 +1920,16 @@ mod tests {
         for component in components {
             component.value = match component.r#type {
                 3 | 5 | 6 => component.value.replace('=', "=="),
-                12 => format!(
-                    "0x{:04x}/match",
-                    u16::from_str_radix(&component.value[2..], 16).unwrap()
-                ),
+                9 | 12 => component
+                    .value
+                    .split(" & ")
+                    .map(|term| {
+                        let (not, hex) = term.strip_prefix('!').map_or(("", term), |t| ("!", t));
+                        let value = u16::from_str_radix(&hex[2..], 16).unwrap();
+                        format!("{not}0x{value:04x}/match")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" & "),
                 _ => component.value.clone(),
             };
         }
@@ -2436,7 +2478,7 @@ mod tests {
             }
             for mutate in [
                 // Unknown component types, descending order and a prefix-shaped value.
-                |c: &mut Vec<pb::FlowSpecComponent>| c[5].r#type = 9,
+                |c: &mut Vec<pb::FlowSpecComponent>| c[5].r#type = 13,
                 |c: &mut Vec<pb::FlowSpecComponent>| c[3].r#type = 4,
                 |c: &mut Vec<pb::FlowSpecComponent>| c.swap(4, 5),
                 |c: &mut Vec<pb::FlowSpecComponent>| c[5].prefix = "192.0.2.1/32".into(),
@@ -2447,6 +2489,100 @@ mod tests {
             }
         }
     }
+    #[tokio::test]
+    async fn tcp_flags_encode_and_read_back_exactly() {
+        use crate::domain::{TcpFlag, TcpFlagsMatch};
+        let writer = RustBgpdAnnouncer::new(
+            Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            None,
+        );
+        let syn_ack = TcpFlagsMatch {
+            set: [TcpFlag::Syn, TcpFlag::Ack].into(),
+            not_set: Default::default(),
+        };
+        let syn_not_ack = TcpFlagsMatch {
+            set: [TcpFlag::Syn].into(),
+            not_set: [TcpFlag::Ack].into(),
+        };
+        for (prefix, source) in [
+            ("192.0.2.1/32", "203.0.113.1/32"),
+            ("2001:db8::1/128", "2001:db8:1::/48"),
+        ] {
+            let tcp = FlowSpecNlri {
+                dst_prefix: prefix.into(),
+                protocol: Some(6),
+                ..Default::default()
+            };
+            for (flags, value) in [(&syn_ack, "0x12"), (&syn_not_ack, "0x02 & !0x10")] {
+                for src_prefix in [None, Some(source.to_owned())] {
+                    let nlri = FlowSpecNlri {
+                        src_prefix,
+                        tcp_flags: Some(flags.clone()),
+                        ..tcp.clone()
+                    };
+                    let (_, components) = encode_match(&nlri).unwrap();
+                    let last = components.last().unwrap();
+                    assert_eq!((last.r#type, last.value.as_str()), (9, value));
+                    let rule = FlowSpecRule::new(nlri.clone(), FlowSpecAction::discard());
+                    let decoded = decode(route(&rule), route(&rule).afi_safi).unwrap();
+                    assert_eq!(decoded.nlri.tcp_flags.as_ref(), Some(flags));
+                    assert_eq!(decoded.nlri_hash(), rule.nlri_hash());
+                    assert!(writer.matches_nlri(&nlri, &decoded.nlri).unwrap());
+                    assert!(!writer.matches_nlri(&tcp, &decoded.nlri).unwrap());
+                }
+            }
+            let syn_rule = FlowSpecRule::new(
+                FlowSpecNlri {
+                    tcp_flags: Some(syn_not_ack.clone()),
+                    ..tcp.clone()
+                },
+                FlowSpecAction::discard(),
+            );
+            assert_eq!(
+                route(&syn_rule).components[2].value,
+                "0x0002/match & !0x0010/match"
+            );
+            // A foreign rule carrying type 9 never decodes as the same rule without it.
+            let plain = FlowSpecRule::new(tcp.clone(), FlowSpecAction::discard());
+            let mut foreign = route(&plain);
+            foreign.components.push(pb::FlowSpecComponent {
+                r#type: 9,
+                value: "0x0012/match".into(),
+                ..Default::default()
+            });
+            let decoded = decode(foreign.clone(), foreign.afi_safi).unwrap();
+            assert_ne!(decoded.nlri_hash(), plain.nlri_hash());
+            assert!(!writer.matches_nlri(&plain.nlri, &decoded.nlri).unwrap());
+            // Any other bitmask form is not prefixd's and fails the read.
+            for value in [
+                "0x0012",
+                "0x12/match",
+                "0x0012/match, 0x0004/match",
+                "0x0002/match & 0x0010/match",
+                "!0x0010/match & 0x0002/match",
+                "!0x0014/match",
+                "0x0000/match",
+                "0x0100/match",
+                "0x0012/match & !0x0002/match",
+                "0x+012/match",
+                "0x0012/match & ",
+                "",
+            ] {
+                let mut bad = foreign.clone();
+                bad.components.last_mut().unwrap().value = value.into();
+                assert!(decode(bad, foreign.afi_safi).is_err(), "{value:?}");
+            }
+            for protocol in ["==17", "==1"] {
+                let mut bad = foreign.clone();
+                bad.components[1].value = protocol.into();
+                assert!(decode(bad, foreign.afi_safi).is_err(), "{protocol}");
+            }
+            let mut no_protocol = foreign.clone();
+            no_protocol.components.remove(1);
+            assert!(decode(no_protocol, foreign.afi_safi).is_err());
+        }
+    }
+
     #[test]
     fn scoped_marking_codec_preserves_exact_dscp_and_rejects_lossy_readback() {
         for (family, prefix, source) in [

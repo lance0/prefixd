@@ -139,7 +139,11 @@ covers the use case, and routers limit range terms, see section 7).
 **TCP flags: deferred.** SYN and ACK floods are not reflection attacks.
 Matching SYN alone drops legitimate connection attempts, and router support is
 partial (section 7). TCP reflection, such as SYN-ACK floods, needs its own
-decision with evidence. `allow_tcp_flags_match` stays reserved.
+decision with evidence. `allow_tcp_flags_match` stays reserved. Amended
+2026-11-12: manual discard and police TCP rules may carry an explicit TCP flags
+match behind `allow_tcp_flags_match`, which is no longer reserved. Detectors and
+playbooks still do not select TCP flags. See
+[TCP flags matches](../reference/api.md#tcp-flags-matches).
 
 **Rule invariants.** Policy, the manual API and playbook validation all apply
 the same invariants, enforced in one domain function:

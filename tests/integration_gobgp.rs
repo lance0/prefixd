@@ -153,6 +153,48 @@ async fn amplification_components_inject_read_and_delete() {
     for rule in &rules {
         speaker.withdraw(rule).await.unwrap();
     }
+    // GoBGP's accepted TCP flags (type 9) terms, after the prefixes.
+    let rules = contract::tcp_flags_rules();
+    for rule in &rules {
+        speaker.announce(rule).await.unwrap();
+    }
+    for afi in [1, 2] {
+        type Components = Vec<(u32, Vec<(u32, u64)>)>;
+        let mut observed: Vec<Components> = fixture
+            .paths(afi, TableType::Global)
+            .await
+            .into_iter()
+            .map(|path| {
+                let Some(nlri::Nlri::FlowSpec(flowspec)) = path.nlri.unwrap().nlri else {
+                    panic!("FlowSpec path expected");
+                };
+                flowspec
+                    .rules
+                    .iter()
+                    .filter_map(|rule| match &rule.rule {
+                        Some(flow_spec_rule::Rule::Component(c)) => {
+                            Some((c.r#type, c.items.iter().map(|i| (i.op, i.value)).collect()))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        observed.sort();
+        println!("GoBGP 4.10.0 afi {afi} TCP flags read-back: {observed:x?}");
+        let protocol = (3, vec![(0x81, 6)]);
+        assert_eq!(
+            observed,
+            [
+                vec![protocol.clone()],
+                vec![protocol.clone(), (9, vec![(0x01, 0x02), (0xc3, 0x10)])],
+                vec![protocol, (9, vec![(0x81, 0x12)])],
+            ]
+        );
+    }
+    for rule in &rules {
+        speaker.withdraw(rule).await.unwrap();
+    }
     contract::run_amplification_contract(&speaker)
         .await
         .unwrap();

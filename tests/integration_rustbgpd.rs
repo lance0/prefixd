@@ -441,6 +441,42 @@ async fn live_rustbgpd_amplification_components_inject_read_and_delete() {
     for rule in &rules {
         speaker.withdraw(rule).await.unwrap();
     }
+    // The daemon's rendering of injected TCP flags (type 9).
+    let rules = contract::tcp_flags_rules();
+    for rule in &rules {
+        speaker.announce(rule).await.unwrap();
+    }
+    for family in [3, 4] {
+        let mut observed: Vec<Vec<(u32, String)>> = fixture
+            .received_flow_spec(family, "0.0.0.0")
+            .await
+            .received_routes
+            .into_iter()
+            .map(|row| {
+                row.route
+                    .unwrap()
+                    .components
+                    .iter()
+                    .filter(|c| c.r#type > 2)
+                    .map(|c| (c.r#type, c.value.clone()))
+                    .collect()
+            })
+            .collect();
+        observed.sort();
+        println!("rustbgpd {version} family {family} TCP flags read-back: {observed:?}");
+        let protocol = (3, "==6".to_string());
+        assert_eq!(
+            observed,
+            [
+                vec![protocol.clone()],
+                vec![protocol.clone(), (9, "0x0002/match & !0x0010/match".into())],
+                vec![protocol, (9, "0x0012/match".into())],
+            ]
+        );
+    }
+    for rule in &rules {
+        speaker.withdraw(rule).await.unwrap();
+    }
     contract::run_amplification_contract(&speaker)
         .await
         .unwrap();
@@ -2044,6 +2080,7 @@ async fn live_vpn_three_key_replacement_expiry_and_restart_preserve_scope() {
             && left.nlri.src_ports == right.nlri.src_ports
             && left.nlri.fragment == right.nlri.fragment
             && left.nlri.packet_length == right.nlri.packet_length
+            && left.nlri.tcp_flags == right.nlri.tcp_flags
     }
 
     fn exact(actual: &[FlowSpecRule], expected: &[FlowSpecRule]) -> bool {

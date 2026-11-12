@@ -317,7 +317,7 @@ pub struct GuardrailsConfig {
     /// Admits rules with an explicit source CIDR in the destination's address family.
     #[serde(default)]
     pub allow_src_prefix_match: bool,
-    /// Reserved (ADR 028): parsed so configurations load, has no effect.
+    /// Admits rules with a TCP flags match.
     #[serde(default)]
     pub allow_tcp_flags_match: bool,
     /// Admits rules with a non-first fragment match.
@@ -343,17 +343,6 @@ impl GuardrailsConfig {
             self.max_ports
         );
         Ok(())
-    }
-
-    /// Reserved flags set to true; startup warns once for each.
-    pub fn reserved_flags_set(&self) -> Vec<&'static str> {
-        [(
-            "guardrails.allow_tcp_flags_match",
-            self.allow_tcp_flags_match,
-        )]
-        .into_iter()
-        .filter_map(|(key, set)| set.then_some(key))
-        .collect()
     }
 }
 
@@ -1121,28 +1110,8 @@ observability:
     }
 
     #[test]
-    fn reserved_guardrail_flags_are_reported_for_the_startup_warning() {
-        let parse = |yaml: &str| crate::config::parse_yaml::<GuardrailsConfig>(yaml).unwrap();
-        assert_eq!(
-            parse("allow_src_prefix_match: true\nallow_tcp_flags_match: true\n")
-                .reserved_flags_set(),
-            ["guardrails.allow_tcp_flags_match"]
-        );
-        assert_eq!(
-            parse("allow_tcp_flags_match: true\n").reserved_flags_set(),
-            ["guardrails.allow_tcp_flags_match"]
-        );
-        // Controls: unset, false, and the enforced opt-ins never warn.
-        for yaml in [
-            "{}",
-            "allow_src_prefix_match: false\nallow_tcp_flags_match: false\n",
-            "allow_fragment_match: true\nallow_packet_length_match: true\n",
-            "allow_src_prefix_match: true\n",
-        ] {
-            assert!(parse(yaml).reserved_flags_set().is_empty(), "{yaml}");
-        }
-        // Shipped configurations neither warn nor opt in to the enforced flags,
-        // and set the default max_ports.
+    fn shipped_configs_keep_match_opt_ins_off() {
+        // Shipped configurations opt in to no match flag and set the default max_ports.
         for (shipped, max_ports) in [
             (include_str!("../../configs/prefixd.yaml"), 5),
             (include_str!("../../configs/prefixd-gobgp.yaml"), 5),
@@ -1150,8 +1119,11 @@ observability:
             let guardrails = crate::config::parse_yaml::<Settings>(shipped)
                 .unwrap()
                 .guardrails;
-            assert!(guardrails.reserved_flags_set().is_empty());
-            assert!(!guardrails.allow_fragment_match && !guardrails.allow_packet_length_match);
+            assert!(
+                !guardrails.allow_fragment_match
+                    && !guardrails.allow_packet_length_match
+                    && !guardrails.allow_tcp_flags_match
+            );
             assert_eq!(guardrails.max_ports, max_ports);
         }
     }
