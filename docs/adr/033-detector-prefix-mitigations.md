@@ -132,7 +132,9 @@ outside this decision.
 
 A detector that only reports individual hosts may still send host events under
 the existing host path. Operators must configure detector-side hostgroup or
-network aggregation before expecting prefix mitigation.
+network aggregation before expecting prefix mitigation. Correlation keeps its
+existing `(victim_ip, vector)` key, so a prefix event forms its own signal group;
+it does not join or corroborate a group for a host inside that prefix.
 
 ### 5. Explicit non-goals
 
