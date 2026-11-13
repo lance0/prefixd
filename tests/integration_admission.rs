@@ -332,3 +332,57 @@ async fn postgres_source_only_quota_is_atomic_and_scoped() {
 async fn mock_source_only_quota_is_atomic_and_scoped() {
     exercise_atomic_source_only_quota(Arc::new(prefixd::db::MockRepository::new())).await;
 }
+
+#[tokio::test]
+async fn mock_repository_enforces_prefix_budget_on_direct_admission() {
+    use prefixd::domain::{
+        ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
+    };
+
+    let settings = common::test_settings();
+    let repo = prefixd::db::MockRepository::new();
+    let mut quotas = settings.quotas;
+    quotas.max_active_prefix_per_customer = 1;
+    let actor = prefixd::observability::CreationActor::Operator("quota-test".into());
+    let row = |prefix: &str| {
+        Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: Some("cust".into()),
+                service_id: None,
+                pop: "iad1".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: prefix.into(),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                    ..Default::default()
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams::default(),
+                ttl_seconds: 60,
+                reason: "prefix quota".into(),
+            },
+            prefix.into(),
+            AttackVector::UdpFlood,
+        )
+    };
+
+    repo.admit_mitigation(&row("203.0.113.0/24"), &quotas, &settings.blackhole, &actor)
+        .await
+        .unwrap();
+    let error = repo
+        .admit_mitigation(
+            &row("198.51.100.0/24"),
+            &quotas,
+            &settings.blackhole,
+            &actor,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        prefixd::error::PrefixdError::GuardrailViolation(
+            prefixd::error::GuardrailError::QuotaExceeded { quota_type, .. }
+        ) if quota_type == "prefix_customer"
+    ));
+}

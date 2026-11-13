@@ -438,3 +438,119 @@ async fn detector_prefix_discard_without_a_port_is_refused() {
     assert_eq!(body["status"], "accepted_no_playbook");
     assert!(speaker.list_active().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn host_length_cidrs_are_normalized_before_inventory_lookup() {
+    for (input, expected) in [
+        ("203.0.113.10/32", "203.0.113.10"),
+        ("2001:db8::10/128", "2001:db8::10"),
+    ] {
+        let (state, repo, speaker) = state(AttackVector::UdpFlood, false);
+        let (status, body) = ingest(state, input, AttackVector::UdpFlood, input).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{input}: {body}");
+        let id: Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+        let mitigation = repo.get_mitigation(id).await.unwrap().unwrap();
+        assert_eq!(mitigation.victim_ip, expected);
+        assert_eq!(
+            mitigation.match_criteria.dst_prefix,
+            format!(
+                "{expected}/{}",
+                if expected.contains(':') { 128 } else { 32 }
+            )
+        );
+        assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn prefix_safelist_rejection_does_not_consume_the_event_or_block_extension_checks() {
+    let (state, repo, speaker) = prefix_state(true, vec!["family-test"], vec!["203.0.113.0/24"]);
+    let (status, body) = ingest_with_ports(
+        state.clone(),
+        "203.0.113.0/24",
+        AttackVector::UdpFlood,
+        "first",
+        &[53],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let original = repo
+        .get_mitigation(body["mitigation_id"].as_str().unwrap().parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+
+    repo.insert_safelist("203.0.113.0/24", "test", None)
+        .await
+        .unwrap();
+    let (status, body) = ingest_with_ports(
+        state.clone(),
+        "203.0.113.0/24",
+        AttackVector::UdpFlood,
+        "would-be-extension",
+        &[53],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(repo.count_active_global().await.unwrap(), 1);
+    assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+    let saved = repo
+        .get_mitigation(original.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.expires_at, original.expires_at);
+
+    repo.remove_safelist("203.0.113.0/24").await.unwrap();
+    let (status, body) = ingest_with_ports(
+        state,
+        "203.0.113.0/24",
+        AttackVector::UdpFlood,
+        "would-be-extension",
+        &[53],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+}
+
+#[tokio::test]
+async fn prefix_customer_transfer_is_rejected_before_extension() {
+    let (state, repo, speaker) = prefix_state(true, vec!["family-test"], vec!["203.0.113.0/24"]);
+    let (status, body) = ingest_with_ports(
+        state.clone(),
+        "203.0.113.0/24",
+        AttackVector::UdpFlood,
+        "owner-a",
+        &[53],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let original = repo
+        .get_mitigation(body["mitigation_id"].as_str().unwrap().parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+
+    {
+        let mut inventory = state.inventory.write().await;
+        inventory.customers[0].customer_id = "new-owner".into();
+    }
+    let (status, body) = ingest_with_ports(
+        state,
+        "203.0.113.0/24",
+        AttackVector::UdpFlood,
+        "owner-b",
+        &[53],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(repo.count_active_global().await.unwrap(), 1);
+    assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+    let saved = repo
+        .get_mitigation(original.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.customer_id.as_deref(), Some("family-test"));
+    assert_eq!(saved.expires_at, original.expires_at);
+}

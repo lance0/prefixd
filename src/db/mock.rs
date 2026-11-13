@@ -853,6 +853,24 @@ impl RepositoryTrait for MockRepository {
                     .unwrap_or(u32::MAX),
                     quotas.max_active_per_customer,
                 )?;
+                if crate::domain::is_prefix_destination(&m.match_criteria.dst_prefix) {
+                    let prefix_count = mitigations
+                        .iter()
+                        .filter(|existing| {
+                            existing.is_active()
+                                && existing.action_type != crate::domain::ActionType::Blackhole
+                                && existing.customer_id.as_ref() == Some(customer_id)
+                                && crate::domain::is_prefix_destination(
+                                    &existing.match_criteria.dst_prefix,
+                                )
+                        })
+                        .count();
+                    super::repository::check_active_quota(
+                        "prefix_customer",
+                        u32::try_from(prefix_count).unwrap_or(u32::MAX),
+                        quotas.max_active_prefix_per_customer,
+                    )?;
+                }
             }
             let count = mitigations
                 .iter()

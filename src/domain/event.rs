@@ -161,7 +161,13 @@ impl AttackEvent {
         // canonical so identity, read-back and withdrawal agree.
         let victim_ip = if input.victim_ip.contains('/') {
             crate::domain::parse_flowspec_destination(&input.victim_ip)
-                .map(|destination| destination.to_string())
+                .map(|destination| {
+                    if destination.prefix_len() == destination.max_prefix_len() {
+                        destination.addr().to_string()
+                    } else {
+                        destination.to_string()
+                    }
+                })
                 .unwrap_or_else(|_| input.victim_ip.clone())
         } else {
             input.victim_ip.clone()

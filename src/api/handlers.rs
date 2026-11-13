@@ -1264,6 +1264,41 @@ async fn handle_ban(
         }
     }
 
+    let guardrails = Guardrails::with_timers(
+        state.settings.guardrails.clone(),
+        state.settings.quotas.clone(),
+        &state.settings.timers,
+    );
+    let mut prefix_safelisted: Option<bool> = None;
+    if is_prefix && let Ok(decision) = &decision {
+        let safelisted = state
+            .repo
+            .is_safelisted(&event.victim_ip)
+            .await
+            .map_err(AppError)?;
+        for (intent, owner) in decision.intents.iter().zip(&owners) {
+            if intent.action_type == ActionType::Blackhole {
+                continue;
+            }
+            if let Ok(Some(existing)) = owner {
+                if existing.customer_id != intent.customer_id {
+                    return Err(AppError(PrefixdError::Conflict(
+                        "prefix ownership changed before mitigation extension".into(),
+                    )));
+                }
+                guardrails
+                    .validate_rule(intent, safelisted)
+                    .map_err(AppError)?;
+            } else if owner.is_ok() {
+                guardrails
+                    .validate(intent, state.repo.as_ref(), safelisted)
+                    .await
+                    .map_err(AppError)?;
+            }
+        }
+        prefix_safelisted = Some(safelisted);
+    }
+
     // Store event
     state.repo.insert_event(&event).await.map_err(AppError)?;
 
@@ -1590,17 +1625,14 @@ async fn handle_ban(
         }
     };
 
-    let guardrails = Guardrails::with_timers(
-        state.settings.guardrails.clone(),
-        state.settings.quotas.clone(),
-        &state.settings.timers,
-    );
-
-    let is_safelisted = state
-        .repo
-        .is_safelisted(&event.victim_ip)
-        .await
-        .map_err(AppError)?;
+    let is_safelisted = match prefix_safelisted {
+        Some(value) => value,
+        None => state
+            .repo
+            .is_safelisted(&event.victim_ip)
+            .await
+            .map_err(AppError)?,
+    };
     let actor = CreationActor::Detector(event.source.clone());
 
     // Each rule is admitted on its own, in policy priority order (ADR 028): every
@@ -1614,6 +1646,14 @@ async fn handle_ban(
         let action_type = intent.action_type;
         let admitted = async {
             if let Some(mut existing) = owner? {
+                if is_prefix {
+                    if existing.customer_id != intent.customer_id {
+                        return Err(PrefixdError::Conflict(
+                            "prefix ownership changed before mitigation extension".into(),
+                        ));
+                    }
+                    guardrails.validate_rule(&intent, is_safelisted)?;
+                }
                 // A blackhole extension is capped at now + max_ttl_seconds.
                 if existing.action_type == ActionType::Blackhole {
                     crate::guardrails::extend_blackhole(
