@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `POST /v1/config/reload` loads and validates inventory, playbooks,
+  `prefixd.yaml`, correlation and alerting before publishing any of them. A
+  failed playbook check previously left the new inventory live. A present
+  `prefixd.yaml` that fails to load now fails the reload even when
+  `correlation.yaml` exists.
+- The reload response adds `restart_required`, the dotted `prefixd.yaml` keys
+  that differ from the running settings but take effect only after a restart.
+  `prefixdctl reload` prints them, and the endpoint is now in OpenAPI.
+
 ## [0.26.0] - 2026-11-12
 
 prefixd 0.26.0 adds an RFC 8955 TCP flags match to manual FlowSpec rules and an

@@ -2972,9 +2972,16 @@ POST /v1/config/reload
 ```json
 {
   "reloaded": ["inventory", "playbooks", "correlation", "alerting"],
+  "restart_required": ["timers.reconciliation_interval_seconds"],
   "timestamp": "2026-02-22T21:00:00Z"
 }
 ```
+
+**Admin only.** Loads and validates every present file before publishing any,
+so a failed reload (500) leaves the running configuration unchanged.
+`reloaded` lists the sections published. `restart_required` lists dotted
+`prefixd.yaml` keys whose file value differs from the running settings but are
+read only at startup; it names keys, never values.
 
 ---
 

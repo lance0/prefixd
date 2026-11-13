@@ -15428,6 +15428,44 @@ mod manual_destination_cidr {
         );
     }
 
+    /// A valid inventory is not published when the playbooks fail; the old
+    /// reload swapped the inventory before loading playbooks.
+    #[tokio::test]
+    async fn failed_playbook_reload_keeps_previous_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("inventory.yaml"), r#"{"customers":[]}"#).unwrap();
+        std::fs::write(
+            dir.path().join("playbooks.yaml"),
+            r#"{"playbooks":[{"name":"broken"}]}"#,
+        )
+        .unwrap();
+        let (mut state, _, _) = state(OperationMode::Enforced, true, owned_inventory());
+        Arc::get_mut(&mut state).unwrap().config_dir = dir.path().into();
+        let error = state.reload_config().await.unwrap_err();
+        assert!(error.to_string().contains("playbooks"), "{error}");
+        assert!(
+            state
+                .inventory
+                .read()
+                .await
+                .lookup_prefix(&"203.0.112.0/22".parse().unwrap())
+                .unwrap()
+                .is_some()
+        );
+        // Control: with the playbooks removed, the same inventory publishes.
+        std::fs::remove_file(dir.path().join("playbooks.yaml")).unwrap();
+        state.reload_config().await.unwrap();
+        assert!(
+            state
+                .inventory
+                .read()
+                .await
+                .lookup_prefix(&"203.0.112.0/22".parse().unwrap())
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn inventory_reload_publishes_between_lifecycle_operations() {
         use std::future::Future;

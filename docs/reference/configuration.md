@@ -1356,7 +1356,19 @@ storage:
 
 ## Hot Reload
 
-Inventory and playbooks can be reloaded without restart:
+`POST /v1/config/reload` reloads exactly these sections, all or nothing:
+
+- `inventory.yaml`
+- `playbooks.yaml`, validated against the running settings and speaker
+- correlation, from `correlation.yaml` or, without it, the `correlation`
+  section of `prefixd.yaml`
+- alerting, from `alerting.yaml` only
+
+Every present file, including `prefixd.yaml`, is loaded and validated before any
+section is published. A failed reload leaves all of them unchanged. Every other
+`prefixd.yaml` key, including `alerting` when there is no `alerting.yaml`, is
+read only at startup; the response's `restart_required` lists the ones that
+differ from the running settings.
 
 ```bash
 # CLI
@@ -1366,7 +1378,6 @@ prefixdctl reload
 curl -X POST http://localhost/v1/config/reload
 ```
 
-Note: `prefixd.yaml` changes require restart.
 
 ---
 

@@ -16,12 +16,13 @@ pub use accounts::{
 mod configuration;
 pub use configuration::{
     __path_get_alerting_config, __path_get_config_inventory, __path_get_config_playbooks,
-    __path_get_config_settings, __path_get_correlation_config, __path_test_alerting,
-    __path_update_alerting_config, __path_update_correlation_config, __path_update_playbooks,
-    ConfigInventoryResponse, ConfigPlaybooksResponse, ConfigSettingsResponse, ReloadResponse,
-    UpdatePlaybooksRequest, get_alerting_config, get_config_inventory, get_config_playbooks,
-    get_config_settings, get_correlation_config, reload_config, test_alerting,
-    update_alerting_config, update_correlation_config, update_playbooks,
+    __path_get_config_settings, __path_get_correlation_config, __path_reload_config,
+    __path_test_alerting, __path_update_alerting_config, __path_update_correlation_config,
+    __path_update_playbooks, ConfigInventoryResponse, ConfigPlaybooksResponse,
+    ConfigSettingsResponse, ReloadResponse, UpdatePlaybooksRequest, get_alerting_config,
+    get_config_inventory, get_config_playbooks, get_config_settings, get_correlation_config,
+    reload_config, test_alerting, update_alerting_config, update_correlation_config,
+    update_playbooks,
 };
 
 mod observations;
