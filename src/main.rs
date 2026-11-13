@@ -269,13 +269,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create auth layer for session-based auth
-    // Secure cookies require HTTPS - check if TLS is configured
-    let secure_cookies = config.settings.http.tls.is_some();
     let auth_layer = create_auth_layer(
         pool,
         repo.clone(),
         config.settings.http.auth.mode,
-        secure_cookies,
+        config.settings.http.secure_cookies(),
     )
     .await;
 

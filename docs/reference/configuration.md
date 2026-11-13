@@ -71,6 +71,11 @@ its cookie. Credential sessions and bearer-mode hybrid sessions are unchanged.
 Credentials authentication uses PostgreSQL operator accounts, Argon2 password
 verification and PostgreSQL-backed browser sessions.
 
+`http.secure_cookies` sets the session cookie's `Secure` attribute. When omitted,
+it is `true` unless `auth.mode` is `none` and native `http.tls` is absent, so
+sessions behind a TLS-terminating proxy stay Secure. Set it to `false` only when
+browsers reach prefixd over plain HTTP, as the shipped Compose quickstart does.
+
 ### TLS
 
 ```yaml

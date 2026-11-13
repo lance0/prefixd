@@ -19,7 +19,7 @@ pub type AuthSession = axum_login::AuthSession<AuthBackend>;
 /// * `pool` - PostgreSQL connection pool for session storage
 /// * `repo` - Repository for operator lookups
 /// * `mode` - Authentication mode used for login and session restoration
-/// * `secure_cookies` - Set to true for HTTPS (production), false for HTTP (dev)
+/// * `secure_cookies` - Whether browsers see HTTPS, natively or at a proxy; see `http.secure_cookies`
 pub async fn create_auth_layer(
     pool: PgPool,
     repo: Arc<dyn RepositoryTrait>,
