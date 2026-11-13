@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rate limiting no longer lets a detector flood block operators.** The single
+  global token bucket is replaced by one bucket per request class (`ingest`,
+  `signals`, `mutation`, `read`) and per client address. Withdrawals never
+  share a bucket with ingestion. `GET /v1/health`, `GET /v1/ready` and
+  `/metrics` are exempt. `http.rate_limit.events_per_second` and `burst` keep
+  their meaning but now size each class and client bucket instead of the whole
+  listener. Clients behind a reverse proxy share the proxy's buckets.
+- New `prefixd_http_rate_limited_total{class}` counter.
+- The API reference no longer documents `X-RateLimit-*` headers, which were
+  never sent, and shows the actual `"rate_limited"` error string.
+
 ## [0.26.0] - 2026-11-12
 
 prefixd 0.26.0 adds an RFC 8955 TCP flags match to manual FlowSpec rules and an
