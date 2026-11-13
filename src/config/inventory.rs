@@ -48,7 +48,9 @@ pub struct Service {
     pub allowed_ports: AllowedPorts,
 }
 
+/// Unknown keys fail closed, for example an unimplemented `range_end`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Asset {
     pub ip: String,
     #[serde(default)]

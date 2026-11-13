@@ -11,12 +11,16 @@ use crate::domain::{
     PacketLengthRange, canonical_ports,
 };
 
+/// Unknown keys fail closed at every level: an ignored match key would widen a
+/// playbook, and an ignored step or override key would change its response.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Playbooks {
     pub playbooks: Vec<Playbook>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Playbook {
     pub name: String,
     #[serde(rename = "match")]
@@ -30,6 +34,7 @@ pub struct Playbook {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PlaybookMatch {
     pub vector: AttackVector,
     #[serde(default)]
@@ -37,6 +42,7 @@ pub struct PlaybookMatch {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PlaybookStep {
     /// The single rule's action. Absent when the step carries `rules`, so a
     /// binary that predates `rules` refuses the step instead of widening it.
@@ -627,6 +633,54 @@ mod tests {
         // An unknown action is refused.
         std::fs::write(&path, yaml("").replace("blackhole", "rtbh")).unwrap();
         assert!(Playbooks::load(&path).is_err());
+    }
+
+    /// An unknown key at any playbook level is refused on load and named: an
+    /// ignored `match.source` would apply a detector-scoped playbook to every
+    /// detector.
+    #[test]
+    fn load_refuses_and_names_unknown_keys_at_every_level() {
+        let base = "playbooks:\n  - name: udp\n    match:\n      vector: udp_flood\n    correlation:\n      min_sources: 2\n    steps:\n      - action: police\n        rate_bps: 5000000\n        ttl_seconds: 120\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("playbooks.yaml");
+        std::fs::write(&path, base).unwrap();
+        Playbooks::load(&path).unwrap();
+        for (anchor, key) in [
+            ("playbooks:\n", "default_playbook: {}\n"),
+            ("  - name: udp\n", "    description: scoped\n"),
+            ("      vector: udp_flood\n", "      source: fastnetmon\n"),
+            ("      vector: udp_flood\n", "      protocol: udp\n"),
+            ("      min_sources: 2\n", "      min_source: 3\n"),
+            ("        ttl_seconds: 120\n", "        ttl: 60\n"),
+        ] {
+            let name = key.trim().split(':').next().unwrap();
+            let yaml = base.replacen(anchor, &format!("{anchor}{key}"), 1);
+            std::fs::write(&path, &yaml).unwrap();
+            let error = Playbooks::load(&path).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("unknown field `{name}`")),
+                "{name}: {error}"
+            );
+        }
+    }
+
+    /// Negative control: the released `PlaybookMatch` shape, without
+    /// `deny_unknown_fields`, accepts `source:` and drops it.
+    #[test]
+    fn released_match_shape_silently_accepted_source() {
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code, reason = "fixture mirrors the released schema")]
+        struct ReleasedMatch {
+            vector: AttackVector,
+            #[serde(default)]
+            require_top_ports: bool,
+        }
+        let yaml = "vector: udp_flood\nsource: fastnetmon\n";
+        crate::config::parse_yaml::<ReleasedMatch>(yaml).unwrap();
+        let error = crate::config::parse_yaml::<PlaybookMatch>(yaml)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `source`"), "{error}");
     }
 
     /// A blackhole drops all traffic, so it never combines with `rules` or an

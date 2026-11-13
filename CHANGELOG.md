@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `playbooks.yaml` and `PUT /v1/config/playbooks` refuse unknown
+  keys at every level and name the key. The unimplemented `match.source`,
+  `match.protocol` and `default_playbook` keys were previously ignored, so a
+  playbook scoped to one detector applied to all of them. Inventory assets
+  refuse unknown keys too, including the unimplemented `range_end`.
+
+### Upgrade notes
+
+- Before upgrading, delete `match.source`, `match.protocol`, `default_playbook`
+  and any other key not in the configuration reference from `playbooks.yaml`,
+  and `range_end` from inventory assets. Otherwise startup and reload fail and
+  name the key.
+
 ## [0.26.0] - 2026-11-12
 
 prefixd 0.26.0 adds an RFC 8955 TCP flags match to manual FlowSpec rules and an
