@@ -258,6 +258,9 @@ pub trait RepositoryTrait: Send + Sync {
     async fn count_active_flowspec_by_customer(&self, customer_id: &str) -> Result<u32>;
     async fn count_active_flowspec_by_pop(&self, pop: &str) -> Result<u32>;
     async fn count_active_flowspec_global(&self) -> Result<u32>;
+    /// Active non-host FlowSpec rows for one customer, for the separate detector
+    /// prefix budget.
+    async fn count_active_prefix_by_customer(&self, customer_id: &str) -> Result<u32>;
     /// Read-only snapshot using admission's 60-second POP window and all row kinds/statuses.
     /// This reserves no capacity; `admit_mitigation` rechecks under its transaction lock.
     async fn check_new_mitigation_rate(&self, pop: &str, max: u32) -> Result<()>;

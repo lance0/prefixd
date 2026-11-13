@@ -105,7 +105,7 @@ Content-Type: application/json
 |-------|------|----------|-------------|
 | `timestamp` | datetime | yes | Event timestamp (ISO 8601) |
 | `source` | string | yes | Detector identifier (e.g. "fastnetmon", "dashboard") |
-| `victim_ip` | string | yes | IPv4 or IPv6 address under attack |
+| `victim_ip` | string | yes | IPv4 or IPv6 address under attack, or a canonical CIDR for an opted-in detector prefix event |
 | `vector` | string | yes | Attack type: `udp_flood`, `syn_flood`, `ack_flood`, `icmp_flood`, `udp_amplification`, `unknown` |
 | `bps` | integer | no | Bits per second |
 | `pps` | integer | no | Packets per second |
@@ -121,8 +121,20 @@ events after their existing confidence normalization. Generic webhook adapters
 retain their configured scaling and clamping to 0–1. Rejected confidence does not consume the external event ID; corrected
 retries can use the same ID. Batch ingestion keeps per-item rejection results.
 
-Automatic detector mitigation uses a canonical host destination: `/32` for IPv4
-and `/128` for IPv6. `icmp_flood` selects protocol 1 for IPv4 and 58 for IPv6 in
+### Detector prefix events
+
+When `guardrails.allow_detector_prefix` is true and the event `source` appears
+in `guardrails.detector_prefix_sources`, `victim_ip` may be a canonical CIDR.
+Host bits are rejected rather than cleared. The prefix must fit the configured
+`dst_prefix_minlen`/`dst_prefix_maxlen` (the default remains host-only), belong
+entirely to one inventory customer, and have no safelist overlap. A prefix
+`discard` match also needs a protocol and destination port; a prefix `police`
+playbook may use protocol only. Prefix events are matched only by
+`scope: prefix` playbooks and are never converted to host rules. A rejected
+prefix is not retried as a host event.
+
+Automatic detector mitigation otherwise uses a canonical host destination:
+`/32` for IPv4 and `/128` for IPv6. `icmp_flood` selects protocol 1 for IPv4 and 58 for IPv6 in
 both event metadata and mitigation intent. TCP and UDP remain 6 and 17. Normal
 prefix, port, TTL, quota and safelist checks still apply.
 
@@ -799,7 +811,9 @@ The existing prefix bounds are the explicit opt-in: this request needs
 `guardrails.dst_prefix_minlen: 22` and an appropriate maximum. IPv6 uses
 `dst_prefix_minlen_v6` and `dst_prefix_maxlen_v6`; for example an owned
 `2001:db8:1234::/48` needs a minimum no greater than 48. Defaults remain
-IPv4 `/32` and IPv6 `/128`. Detectors, playbooks and RTBH remain host-only.
+IPv4 `/32` and IPv6 `/128`. Detector prefix events additionally need
+`guardrails.allow_detector_prefix` and a source allowlist entry; RTBH remains
+host-only.
 
 These bounds apply to new admissions. Previously admitted CIDRs retain their
 saved scope after a restart with tighter bounds, subject to fresh ownership and

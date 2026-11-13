@@ -1314,6 +1314,34 @@ impl RepositoryTrait for MockRepository {
             + self.diversion_rules(|_| true))
     }
 
+    async fn count_active_prefix_by_customer(&self, customer_id: &str) -> Result<u32> {
+        #[cfg(test)]
+        if self
+            .fail_quota_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::error::PrefixdError::Internal(
+                "sensitive storage diagnostic".into(),
+            ));
+        }
+
+        let mitigations = self.mitigations.lock().unwrap();
+        Ok(mitigations
+            .iter()
+            .filter(|m| {
+                m.action_type != crate::domain::ActionType::Blackhole
+                    && m.customer_id.as_deref() == Some(customer_id)
+                    && crate::domain::is_prefix_destination(&m.match_criteria.dst_prefix)
+                    && matches!(
+                        m.status,
+                        MitigationStatus::Pending
+                            | MitigationStatus::Active
+                            | MitigationStatus::Escalated
+                    )
+            })
+            .count() as u32)
+    }
+
     async fn find_expired_mitigations(&self) -> Result<Vec<Mitigation>> {
         self.expired_mitigation_inventory(None).await
     }

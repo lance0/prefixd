@@ -181,6 +181,18 @@ pub enum GuardrailError {
     #[error("source prefix matching requires guardrails.allow_src_prefix_match=true")]
     SrcPrefixNotAllowed,
 
+    #[error("detector prefix matching requires guardrails.allow_detector_prefix=true")]
+    DetectorPrefixNotAllowed,
+
+    #[error("source {source_name:?} is not in guardrails.detector_prefix_sources")]
+    DetectorPrefixSourceNotAllowed { source_name: String },
+
+    #[error("prefix discard rules require a protocol and at least one destination port")]
+    PrefixMatchRequiresPorts,
+
+    #[error("prefix events cannot select a blackhole action")]
+    PrefixBlackholeNotAllowed,
+
     #[error("no allowed ports for service")]
     NoAllowedPorts,
 

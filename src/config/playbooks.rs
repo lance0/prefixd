@@ -29,11 +29,35 @@ pub struct Playbook {
     pub steps: Vec<PlaybookStep>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum EventScope {
+    #[default]
+    Host,
+    Prefix,
+}
+
+impl EventScope {
+    /// A canonical destination's host/prefix shape, without re-parsing the
+    /// policy decision later. Invalid values are rejected before this point.
+    pub fn for_destination(destination: &ipnet::IpNet) -> Self {
+        if destination.prefix_len() == destination.max_prefix_len() {
+            Self::Host
+        } else {
+            Self::Prefix
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PlaybookMatch {
     pub vector: AttackVector,
     #[serde(default)]
     pub require_top_ports: bool,
+    /// Host playbooks keep their existing behavior. A prefix event can only
+    /// select a `prefix` playbook.
+    #[serde(default)]
+    pub scope: EventScope,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -353,6 +377,47 @@ impl Playbooks {
                 }
             }
 
+            if pb.match_criteria.scope == EventScope::Prefix {
+                if pb.steps.len() != 1 {
+                    errors.push(format!(
+                        "{}: prefix playbooks support exactly one step in this slice",
+                        ctx
+                    ));
+                }
+                if let Some(first) = pb.steps.first()
+                    && first.action == Some(PlaybookAction::Discard)
+                    && !pb.match_criteria.require_top_ports
+                {
+                    errors.push(format!(
+                        "{}: prefix discard playbooks require require_top_ports: true",
+                        ctx
+                    ));
+                }
+                if !matches!(
+                    pb.match_criteria.vector,
+                    AttackVector::UdpFlood | AttackVector::SynFlood | AttackVector::AckFlood
+                ) {
+                    errors.push(format!(
+                        "{}: prefix playbooks support udp_flood, syn_flood and ack_flood only",
+                        ctx
+                    ));
+                }
+                for (j, step) in pb.steps.iter().enumerate() {
+                    if !step.rules.is_empty() {
+                        errors.push(format!(
+                            "{} step[{}]: prefix playbooks do not support rules steps",
+                            ctx, j
+                        ));
+                    }
+                    if step.action == Some(PlaybookAction::Blackhole) {
+                        errors.push(format!(
+                            "{} step[{}]: prefix playbooks do not support blackhole",
+                            ctx, j
+                        ));
+                    }
+                }
+            }
+
             for (j, step) in pb.steps.iter().enumerate() {
                 let step_ctx = format!("{} step[{}]", ctx, j);
 
@@ -441,9 +506,16 @@ impl Playbooks {
         Ok(())
     }
 
-    pub fn find_playbook(&self, vector: AttackVector, has_ports: bool) -> Option<&Playbook> {
+    pub fn find_playbook(
+        &self,
+        vector: AttackVector,
+        has_ports: bool,
+        scope: EventScope,
+    ) -> Option<&Playbook> {
         self.playbooks.iter().find(|p| {
-            p.match_criteria.vector == vector && (!p.match_criteria.require_top_ports || has_ports)
+            p.match_criteria.vector == vector
+                && p.match_criteria.scope == scope
+                && (!p.match_criteria.require_top_ports || has_ports)
         })
     }
 
@@ -462,6 +534,7 @@ mod tests {
             match_criteria: PlaybookMatch {
                 vector: AttackVector::UdpFlood,
                 require_top_ports: false,
+                scope: Default::default(),
             },
             correlation: None,
             steps: vec![PlaybookStep {
@@ -473,6 +546,84 @@ mod tests {
                 rules: Vec::new(),
             }],
         }
+    }
+
+    #[test]
+    fn prefix_playbook_accepts_guarded_discard_and_rejects_broad_or_escalating_shapes() {
+        let mut playbook = valid_playbook();
+        playbook.name = "carpet".into();
+        playbook.match_criteria.scope = EventScope::Prefix;
+        playbook.match_criteria.require_top_ports = true;
+        playbook.steps[0].action = Some(PlaybookAction::Discard);
+        playbook.steps[0].rate_bps = None;
+        let valid = Playbooks {
+            playbooks: vec![playbook.clone()],
+        };
+        assert!(valid.validate().is_empty(), "{:?}", valid.validate());
+
+        let mut missing_ports = playbook.clone();
+        missing_ports.match_criteria.require_top_ports = false;
+        let errors = Playbooks {
+            playbooks: vec![missing_ports],
+        }
+        .validate();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("require_top_ports")),
+            "{errors:?}"
+        );
+
+        let mut blackhole = playbook.clone();
+        blackhole.steps[0].action = Some(PlaybookAction::Blackhole);
+        blackhole.steps[0].rate_bps = None;
+        let errors = Playbooks {
+            playbooks: vec![blackhole],
+        }
+        .validate();
+        assert!(
+            errors.iter().any(|error| error.contains("blackhole")),
+            "{errors:?}"
+        );
+
+        let mut two_steps = playbook.clone();
+        two_steps.steps.push(playbook.steps[0].clone());
+        let errors = Playbooks {
+            playbooks: vec![two_steps],
+        }
+        .validate();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("exactly one step")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn prefix_police_does_not_require_ports_but_stays_in_the_supported_vectors() {
+        let mut playbook = valid_playbook();
+        playbook.name = "carpet_police".into();
+        playbook.match_criteria.scope = EventScope::Prefix;
+        playbook.match_criteria.require_top_ports = false;
+        playbook.steps[0].action = Some(PlaybookAction::Police);
+        playbook.steps[0].rate_bps = Some(5_000_000);
+        let valid = Playbooks {
+            playbooks: vec![playbook.clone()],
+        };
+        assert!(valid.validate().is_empty(), "{:?}", valid.validate());
+
+        playbook.match_criteria.vector = AttackVector::IcmpFlood;
+        let errors = Playbooks {
+            playbooks: vec![playbook],
+        }
+        .validate();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("prefix playbooks support")),
+            "{errors:?}"
+        );
     }
 
     #[test]
@@ -498,7 +649,9 @@ mod tests {
             AttackVector::Unknown,
         ] {
             assert!(
-                playbooks.find_playbook(vector, false).is_some(),
+                playbooks
+                    .find_playbook(vector, false, EventScope::Host)
+                    .is_some(),
                 "no shipped playbook for {vector}"
             );
         }
@@ -836,6 +989,7 @@ playbooks:
                 match_criteria: PlaybookMatch {
                     vector: AttackVector::UdpFlood,
                     require_top_ports: false,
+                    scope: Default::default(),
                 },
                 correlation: Some(PlaybookCorrelationOverride {
                     min_sources: Some(2),

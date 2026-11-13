@@ -49,6 +49,92 @@ fn state(
     (state, repo, speaker)
 }
 
+fn prefix_state(
+    allow_detector_prefix: bool,
+    sources: Vec<&str>,
+    prefixes: Vec<&str>,
+) -> (Arc<AppState>, Arc<MockRepository>, Arc<MockAnnouncer>) {
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(MockAnnouncer::new());
+    let mut settings = common::test_settings();
+    settings.mode = OperationMode::Enforced;
+    settings.guardrails.allow_detector_prefix = allow_detector_prefix;
+    settings.guardrails.detector_prefix_sources = sources.into_iter().map(str::to_string).collect();
+    settings.guardrails.dst_prefix_minlen = 24;
+    settings.guardrails.dst_prefix_maxlen = 32;
+    let inventory = Inventory::new(vec![Customer {
+        customer_id: "family-test".into(),
+        name: "Address family test".into(),
+        prefixes: prefixes.into_iter().map(str::to_string).collect(),
+        policy_profile: PolicyProfile::Normal,
+        services: vec![],
+    }]);
+    let mut playbooks = common::test_playbooks();
+    playbooks.playbooks.push(prefixd::config::Playbook {
+        name: "carpet_udp".into(),
+        match_criteria: prefixd::config::PlaybookMatch {
+            vector: AttackVector::UdpFlood,
+            require_top_ports: true,
+            scope: prefixd::config::EventScope::Prefix,
+        },
+        correlation: None,
+        steps: vec![prefixd::config::PlaybookStep {
+            action: Some(prefixd::config::PlaybookAction::Discard),
+            rate_bps: None,
+            ttl_seconds: 120,
+            require_confidence_at_least: None,
+            require_persistence_seconds: None,
+            rules: Vec::new(),
+        }],
+    });
+    let state = AppState::new(
+        settings,
+        inventory,
+        playbooks,
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    (state, repo, speaker)
+}
+
+async fn ingest_with_ports(
+    state: Arc<AppState>,
+    ip: &str,
+    vector: AttackVector,
+    event_id: &str,
+    ports: &[u16],
+) -> (StatusCode, Value) {
+    let response = create_test_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "event_id": event_id,
+                        "timestamp": "2026-10-17T00:00:00Z",
+                        "source": "family-test",
+                        "victim_ip": ip,
+                        "vector": vector,
+                        "confidence": 0.99,
+                        "top_dst_ports": ports,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
 async fn ingest(
     state: Arc<AppState>,
     ip: &str,
@@ -184,5 +270,171 @@ async fn invalid_destinations_are_rejected_before_event_or_speaker_mutation() {
         );
     }
     assert_eq!(repo.count_active_global().await.unwrap(), 0);
+    assert!(speaker.list_active().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn guarded_detector_prefix_announces_one_covering_rule() {
+    let (state, repo, speaker) = prefix_state(true, vec!["family-test"], vec!["203.0.113.0/24"]);
+    let (status, body) = ingest_with_ports(
+        state,
+        "203.0.113.0/24",
+        AttackVector::UdpFlood,
+        "carpet",
+        &[53],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let id: Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+    let mitigation = repo.get_mitigation(id).await.unwrap().unwrap();
+    assert_eq!(mitigation.victim_ip, "203.0.113.0/24");
+    assert_eq!(mitigation.match_criteria.dst_prefix, "203.0.113.0/24");
+    assert_eq!(mitigation.match_criteria.protocol, Some(17));
+    assert_eq!(mitigation.match_criteria.dst_ports, vec![53]);
+    let rules = speaker.list_active().await.unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].nlri.dst_prefix, "203.0.113.0/24");
+    assert_eq!(rules[0].nlri.dst_ports, vec![53]);
+}
+
+#[tokio::test]
+async fn detector_prefix_requires_flag_and_matching_source_before_persistence() {
+    for (allowed, sources) in [(false, vec!["family-test"]), (true, vec!["other-detector"])] {
+        let (state, repo, speaker) = prefix_state(allowed, sources, vec!["203.0.113.0/24"]);
+        let (status, _) = ingest_with_ports(
+            state,
+            "203.0.113.0/24",
+            AttackVector::UdpFlood,
+            "carpet",
+            &[53],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            repo.find_ban_event_by_external_id("family-test", "carpet")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(speaker.list_active().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn detector_prefix_refuses_safelist_overlap_and_ambiguous_ownership() {
+    let (state, repo, speaker) = prefix_state(true, vec!["family-test"], vec!["203.0.113.0/24"]);
+    repo.insert_safelist("203.0.113.10/32", "test", None)
+        .await
+        .unwrap();
+    let (status, _) = ingest_with_ports(
+        state.clone(),
+        "203.0.113.0/24",
+        AttackVector::UdpFlood,
+        "safelisted",
+        &[53],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(speaker.list_active().await.unwrap().is_empty());
+
+    let (state, repo, speaker) = prefix_state(true, vec!["family-test"], vec!["203.0.113.0/24"]);
+    let mut inventory = state.inventory.write().await;
+    let mut second = inventory.customers[0].clone();
+    second.customer_id = "other".into();
+    second.prefixes = vec!["203.0.113.0/25".into()];
+    inventory.customers.push(second);
+    drop(inventory);
+    let (status, _) = ingest_with_ports(
+        state,
+        "203.0.113.0/24",
+        AttackVector::UdpFlood,
+        "ambiguous",
+        &[53],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(repo.count_active_global().await.unwrap(), 0);
+    assert!(speaker.list_active().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn detector_prefix_has_a_separate_customer_budget() {
+    let (mut state, repo, speaker) = prefix_state(
+        true,
+        vec!["family-test"],
+        vec!["203.0.113.0/24", "198.51.100.0/24"],
+    );
+    Arc::get_mut(&mut state)
+        .unwrap()
+        .settings
+        .quotas
+        .max_active_prefix_per_customer = 1;
+    let (first, first_body) = ingest_with_ports(
+        state.clone(),
+        "203.0.113.0/24",
+        AttackVector::UdpFlood,
+        "first-prefix",
+        &[53],
+    )
+    .await;
+    assert_eq!(first, StatusCode::ACCEPTED, "{first_body}");
+    let (second, second_body) = ingest_with_ports(
+        state,
+        "198.51.100.0/24",
+        AttackVector::UdpFlood,
+        "second-prefix",
+        &[53],
+    )
+    .await;
+    assert_eq!(second, StatusCode::UNPROCESSABLE_ENTITY, "{second_body}");
+    assert_eq!(repo.count_active_global().await.unwrap(), 1);
+    assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn detector_prefix_police_can_run_without_a_port() {
+    let (state, repo, speaker) = prefix_state(true, vec!["family-test"], vec!["203.0.113.0/24"]);
+    {
+        let mut playbooks = state.playbooks.write().await;
+        let prefix = playbooks
+            .playbooks
+            .iter_mut()
+            .find(|playbook| playbook.name == "carpet_udp")
+            .unwrap();
+        prefix.match_criteria.require_top_ports = false;
+        prefix.steps[0].action = Some(prefixd::config::PlaybookAction::Police);
+        prefix.steps[0].rate_bps = Some(50_000_000);
+    }
+    let (status, body) = ingest_with_ports(
+        state,
+        "203.0.113.0/24",
+        AttackVector::UdpFlood,
+        "prefix-police",
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let id: Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+    let mitigation = repo.get_mitigation(id).await.unwrap().unwrap();
+    assert_eq!(mitigation.match_criteria.dst_prefix, "203.0.113.0/24");
+    assert_eq!(mitigation.match_criteria.protocol, Some(17));
+    assert!(mitigation.match_criteria.dst_ports.is_empty());
+    assert_eq!(mitigation.action_type, prefixd::domain::ActionType::Police);
+    assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn detector_prefix_discard_without_a_port_is_refused() {
+    let (state, _repo, speaker) = prefix_state(true, vec!["family-test"], vec!["203.0.113.0/24"]);
+    let (status, body) = ingest_with_ports(
+        state,
+        "203.0.113.0/24",
+        AttackVector::UdpFlood,
+        "prefix-no-port",
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["status"], "accepted_no_playbook");
     assert!(speaker.list_active().await.unwrap().is_empty());
 }

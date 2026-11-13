@@ -326,6 +326,15 @@ pub struct GuardrailsConfig {
     /// Admits rules with a packet-length match.
     #[serde(default)]
     pub allow_packet_length_match: bool,
+    /// Admits automatic FlowSpec rules whose destination is a CIDR rather than
+    /// a host. The detector source must also appear in
+    /// `detector_prefix_sources`.
+    #[serde(default)]
+    pub allow_detector_prefix: bool,
+    /// Detector sources allowed to submit a prefix destination. Empty refuses
+    /// all prefix events even when `allow_detector_prefix` is true.
+    #[serde(default)]
+    pub detector_prefix_sources: Vec<String>,
 }
 
 impl GuardrailsConfig {
@@ -342,6 +351,18 @@ impl GuardrailsConfig {
             "guardrails.max_ports is {} but the rustbgpd backend encodes at most {cap} ports per list; set guardrails.max_ports to {cap} or less",
             self.max_ports
         );
+        if self.allow_detector_prefix {
+            anyhow::ensure!(
+                !self.detector_prefix_sources.is_empty(),
+                "guardrails.allow_detector_prefix requires at least one guardrails.detector_prefix_sources entry"
+            );
+            anyhow::ensure!(
+                self.detector_prefix_sources
+                    .iter()
+                    .all(|source| !source.trim().is_empty() && source.len() <= 1024),
+                "guardrails.detector_prefix_sources entries must be nonempty and at most 1024 bytes"
+            );
+        }
         Ok(())
     }
 }
@@ -374,6 +395,10 @@ pub struct QuotasConfig {
     pub max_new_per_minute: u32,
     #[serde(default = "default_max_per_peer")]
     pub max_announcements_per_peer: u32,
+    /// Separate active budget for detector prefix rules. Host rules use the
+    /// ordinary customer/POP/global quotas.
+    #[serde(default = "default_max_prefix_per_customer")]
+    pub max_active_prefix_per_customer: u32,
 }
 
 fn default_max_per_customer() -> u32 {
@@ -390,6 +415,9 @@ fn default_max_new_per_minute() -> u32 {
 }
 fn default_max_per_peer() -> u32 {
     100
+}
+fn default_max_prefix_per_customer() -> u32 {
+    5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -777,6 +805,10 @@ impl Settings {
         settings
             .guardrails
             .validate_for_backend(settings.bgp.mode)?;
+        anyhow::ensure!(
+            settings.quotas.max_active_prefix_per_customer > 0,
+            "quotas.max_active_prefix_per_customer must be nonzero"
+        );
         let correlation_errors = settings.correlation.validate();
         if !correlation_errors.is_empty() {
             return Err(anyhow::anyhow!(
@@ -1088,6 +1120,19 @@ observability:
             let result = parse(&format!("max_ports: {max_ports}\n")).validate_for_backend(backend);
             assert_eq!(result.is_ok(), accepted, "{backend:?} {max_ports}");
         }
+    }
+
+    #[test]
+    fn detector_prefix_requires_a_source_allowlist_when_enabled() {
+        let parse = |yaml: &str| crate::config::parse_yaml::<GuardrailsConfig>(yaml).unwrap();
+        let disabled = parse("max_ports: 5\n");
+        assert!(disabled.validate_for_backend(BgpMode::Rustbgpd).is_ok());
+        let missing = parse("max_ports: 5\nallow_detector_prefix: true\n");
+        assert!(missing.validate_for_backend(BgpMode::Rustbgpd).is_err());
+        let allowed = parse(
+            "max_ports: 5\nallow_detector_prefix: true\ndetector_prefix_sources: [fastnetmon]\n",
+        );
+        assert!(allowed.validate_for_backend(BgpMode::Rustbgpd).is_ok());
     }
 
     #[test]

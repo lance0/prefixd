@@ -1,7 +1,6 @@
-use std::net::IpAddr;
-
 use crate::config::{
-    AllowedPorts, AmplificationConfig, IpContext, Playbook, PlaybookStep, Playbooks, SrcPortsSpec,
+    AllowedPorts, AmplificationConfig, EventScope, IpContext, Playbook, PlaybookStep, Playbooks,
+    SrcPortsSpec,
 };
 
 use crate::domain::{
@@ -51,12 +50,13 @@ impl PolicyEngine {
         event: &AttackEvent,
         context: Option<&IpContext>,
     ) -> Result<PolicyDecision> {
-        let victim_ip: IpAddr = event
-            .victim_ip
-            .parse()
-            .map_err(|_| PrefixdError::InvalidIpAddress(event.victim_ip.clone()))?;
+        let destination =
+            crate::domain::parse_flowspec_destination(&event.victim_ip).map_err(|error| {
+                PrefixdError::InvalidPrefix(format!("{}: {error}", event.victim_ip))
+            })?;
+        let scope = EventScope::for_destination(&destination);
         let vector = event.attack_vector();
-        let why = match self.evaluate_as(event, context, victim_ip, vector) {
+        let why = match self.evaluate_as(event, context, destination, vector, scope) {
             Ok(Some(intents)) => return Ok(PolicyDecision { vector, intents }),
             Ok(None) => "no reflector source ports",
             Err(PrefixdError::NoPlaybookFound(_)) if vector == AttackVector::UdpAmplification => {
@@ -67,7 +67,7 @@ impl PolicyEngine {
         // An amplification event is never less mitigated than a UDP flood (ADR 028).
         let fallback = AttackVector::UdpFlood;
         let mut intents = self
-            .evaluate_as(event, context, victim_ip, fallback)?
+            .evaluate_as(event, context, destination, fallback, scope)?
             .ok_or_else(|| PrefixdError::NoPlaybookFound(fallback.to_string()))?;
         for intent in &mut intents {
             intent
@@ -85,18 +85,18 @@ impl PolicyEngine {
         &self,
         event: &AttackEvent,
         context: Option<&IpContext>,
-        victim_ip: IpAddr,
+        destination: ipnet::IpNet,
         vector: AttackVector,
+        scope: EventScope,
     ) -> Result<Option<Vec<MitigationIntent>>> {
-        let prefix_len = if victim_ip.is_ipv4() { 32 } else { 128 };
-        let dst_prefix = format!("{victim_ip}/{prefix_len}");
+        let dst_prefix = destination.to_string();
         let ports = event.top_dst_ports();
         let has_ports = !ports.is_empty();
 
         // Find matching playbook
         let playbook = self
             .playbooks
-            .find_playbook(vector, has_ports)
+            .find_playbook(vector, has_ports, scope)
             .ok_or_else(|| PrefixdError::NoPlaybookFound(vector.to_string()))?;
 
         // Get initial step
@@ -109,11 +109,21 @@ impl PolicyEngine {
             .unwrap_or("unknown service");
 
         if !step.rules.is_empty() {
+            if scope == EventScope::Prefix {
+                return Err(PrefixdError::GuardrailViolation(
+                    GuardrailError::PrefixMatchRequiresPorts,
+                ));
+            }
             return self.rule_intents(event, context, dst_prefix, vector, playbook, step, service);
         }
         let action = step.flowspec_action().ok_or_else(|| {
             PrefixdError::NoPlaybookFound(format!("{vector} (step has no action)"))
         })?;
+        if scope == EventScope::Prefix && action.action_type == ActionType::Blackhole {
+            return Err(PrefixdError::GuardrailViolation(
+                GuardrailError::PrefixBlackholeNotAllowed,
+            ));
+        }
 
         let reason = format!("{} to {} (playbook: {})", vector, service, playbook.name);
         // A blackhole matches only the host prefix: no protocol, ports or rate (ADR 027).
@@ -135,11 +145,19 @@ impl PolicyEngine {
                 GuardrailError::NoAllowedPorts,
             ));
         }
+        if scope == EventScope::Prefix
+            && action.action_type == ActionType::Discard
+            && dst_ports.is_empty()
+        {
+            return Err(PrefixdError::GuardrailViolation(
+                GuardrailError::PrefixMatchRequiresPorts,
+            ));
+        }
 
         // Build match criteria
         let match_criteria = MatchCriteria {
             dst_prefix,
-            protocol: vector.to_protocol_for(victim_ip),
+            protocol: vector.to_protocol_for(destination.addr()),
             dst_ports,
             ..Default::default()
         };
@@ -370,6 +388,7 @@ mod tests {
                     match_criteria: PlaybookMatch {
                         vector: AttackVector::UdpFlood,
                         require_top_ports: false,
+                        scope: Default::default(),
                     },
                     correlation: None,
                     steps: vec![PlaybookStep {
@@ -386,6 +405,7 @@ mod tests {
                     match_criteria: PlaybookMatch {
                         vector: AttackVector::SynFlood,
                         require_top_ports: false,
+                        scope: Default::default(),
                     },
                     correlation: None,
                     steps: vec![PlaybookStep {
@@ -430,6 +450,129 @@ mod tests {
     }
 
     #[test]
+    fn prefix_playbook_uses_the_canonical_covering_prefix_and_l4_match() {
+        let mut playbooks = test_playbooks();
+        playbooks.playbooks.push(Playbook {
+            name: "carpet_udp".into(),
+            match_criteria: PlaybookMatch {
+                vector: AttackVector::UdpFlood,
+                require_top_ports: true,
+                scope: crate::config::EventScope::Prefix,
+            },
+            correlation: None,
+            steps: vec![PlaybookStep {
+                action: Some(PlaybookAction::Discard),
+                rate_bps: None,
+                ttl_seconds: 120,
+                require_confidence_at_least: None,
+                require_persistence_seconds: None,
+                rules: Vec::new(),
+            }],
+        });
+        let engine = PolicyEngine::new(playbooks, "iad1".into(), 120);
+        let event = make_event("203.0.113.0/24", "udp_flood", &[53]);
+        let decision = engine.evaluate(&event, None).unwrap();
+        assert_eq!(decision.vector, AttackVector::UdpFlood);
+        let intent = &decision.intents[0];
+        assert_eq!(intent.match_criteria.dst_prefix, "203.0.113.0/24");
+        assert_eq!(intent.match_criteria.protocol, Some(17));
+        assert_eq!(intent.match_criteria.dst_ports, vec![53]);
+        assert_eq!(intent.action_type, ActionType::Discard);
+    }
+
+    #[test]
+    fn prefix_police_may_be_protocol_only_but_prefix_discard_may_not() {
+        let mut playbooks = test_playbooks();
+        playbooks.playbooks.push(Playbook {
+            name: "carpet_police".into(),
+            match_criteria: PlaybookMatch {
+                vector: AttackVector::UdpFlood,
+                require_top_ports: false,
+                scope: crate::config::EventScope::Prefix,
+            },
+            correlation: None,
+            steps: vec![PlaybookStep {
+                action: Some(PlaybookAction::Police),
+                rate_bps: Some(50_000_000),
+                ttl_seconds: 120,
+                require_confidence_at_least: None,
+                require_persistence_seconds: None,
+                rules: Vec::new(),
+            }],
+        });
+        let engine = PolicyEngine::new(playbooks, "iad1".into(), 120);
+        let event = make_event("203.0.113.0/24", "udp_flood", &[]);
+        let decision = engine.evaluate(&event, None).unwrap();
+        assert_eq!(
+            decision.intents[0].match_criteria.dst_prefix,
+            "203.0.113.0/24"
+        );
+        assert!(decision.intents[0].match_criteria.dst_ports.is_empty());
+        assert_eq!(decision.intents[0].action_type, ActionType::Police);
+    }
+
+    #[test]
+    fn host_events_do_not_select_prefix_playbooks() {
+        let mut playbooks = test_playbooks();
+        playbooks
+            .playbooks
+            .retain(|playbook| playbook.name != "udp_flood_police");
+        playbooks.playbooks.push(Playbook {
+            name: "carpet_udp".into(),
+            match_criteria: PlaybookMatch {
+                vector: AttackVector::UdpFlood,
+                require_top_ports: true,
+                scope: crate::config::EventScope::Prefix,
+            },
+            correlation: None,
+            steps: vec![PlaybookStep {
+                action: Some(PlaybookAction::Discard),
+                rate_bps: None,
+                ttl_seconds: 120,
+                require_confidence_at_least: None,
+                require_persistence_seconds: None,
+                rules: Vec::new(),
+            }],
+        });
+        let engine = PolicyEngine::new(playbooks, "iad1".into(), 120);
+        let event = make_event("203.0.113.10", "udp_flood", &[53]);
+        assert!(matches!(
+            engine.evaluate(&event, None),
+            Err(PrefixdError::NoPlaybookFound(_))
+        ));
+    }
+
+    #[test]
+    fn prefix_blackhole_is_refused_by_the_policy_scope() {
+        let mut playbooks = test_playbooks();
+        playbooks.playbooks.push(Playbook {
+            name: "carpet_blackhole".into(),
+            match_criteria: PlaybookMatch {
+                vector: AttackVector::UdpFlood,
+                require_top_ports: true,
+                scope: crate::config::EventScope::Prefix,
+            },
+            correlation: None,
+            steps: vec![PlaybookStep {
+                action: Some(PlaybookAction::Blackhole),
+                rate_bps: None,
+                ttl_seconds: 120,
+                require_confidence_at_least: None,
+                require_persistence_seconds: None,
+                rules: Vec::new(),
+            }],
+        });
+        let engine = PolicyEngine::new(playbooks, "iad1".into(), 120);
+        let event = make_event("203.0.113.0/24", "udp_flood", &[53]);
+        assert!(matches!(
+            engine.evaluate(&event, None),
+            Err(PrefixdError::GuardrailViolation(
+                GuardrailError::PrefixBlackholeNotAllowed
+            ))
+        ));
+    }
+
+    #[test]
     fn policy_rejects_invalid_or_prefixed_victims() {
         let engine = PolicyEngine::new(test_playbooks(), "iad1".into(), 120);
         for ip in [
@@ -441,7 +584,7 @@ mod tests {
             let event = make_event(ip, "udp_flood", &[53]);
             assert!(matches!(
                 engine.evaluate(&event, None),
-                Err(PrefixdError::InvalidIpAddress(_))
+                Err(PrefixdError::InvalidPrefix(_))
             ));
         }
     }
@@ -706,6 +849,7 @@ mod tests {
                 match_criteria: PlaybookMatch {
                     vector: AttackVector::UdpFlood,
                     require_top_ports: false,
+                    scope: Default::default(),
                 },
                 correlation: None,
                 steps: vec![PlaybookStep {

@@ -3,6 +3,22 @@
 This guide covers integrating FastNetMon Community Edition with prefixd for
 automated FlowSpec or guarded host-blackhole mitigation.
 
+## Carpet bombing and prefix events
+
+FastNetMon **Advanced** can detect aggregate traffic for a total hostgroup and
+emit `alert_scope: "hostgroup"` with `hostgroup_networks`; per-network hostgroups
+use a separate, undocumented notify shape. The current native adapter and the
+Community notify script are host-only: they require a single `ip` and do not
+map a hostgroup payload. Do not point a hostgroup action at this adapter yet.
+
+prefixd's `/v1/events` endpoint can accept a canonical CIDR when
+`guardrails.allow_detector_prefix` and an exact `detector_prefix_sources` entry
+authorize the source. A hostgroup with one network can be mapped to that event
+by an external shim. A hostgroup payload carries no port list, so a prefix
+discard playbook is not usable; a prefix police playbook can rate-limit the
+protocol only. Multiple networks in one hostgroup need separate events with
+distinct event IDs. See [ADR 033](../../adr/033-detector-prefix-mitigations.md).
+
 ## Overview
 
 FastNetMon detects DDoS attacks via NetFlow/sFlow analysis and calls a notify script when attacks are detected. The `prefixd-fastnetmon.sh` script bridges FastNetMon to prefixd's HTTP APIs (event ingest + mitigation withdraw).

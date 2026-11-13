@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Guarded detector prefix (`carpet-bomb`) FlowSpec admission behind
+  `guardrails.allow_detector_prefix` and an exact
+  `guardrails.detector_prefix_sources` allowlist. Detector events may carry one
+  canonical CIDR; prefix playbooks require `scope: prefix`, and prefix discard
+  rules require an L4 destination port. Whole-prefix inventory ownership,
+  safelist overlap, existing prefix bounds and a separate per-customer prefix
+  quota apply. The feature is off by default and does not add prefix RTBH,
+  detector aggregation or automatic escalation. See ADR 033.
+
 ## [0.26.0] - 2026-11-12
 
 prefixd 0.26.0 adds an RFC 8955 TCP flags match to manual FlowSpec rules and an

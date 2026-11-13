@@ -90,6 +90,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::config::EventScope;
 use crate::db::{ListCursor, ListParams, MitigationCursor, MitigationListParams};
 use crate::domain::{
     ActionParams, ActionType, AttackEvent, AttackEventInput, FlowSpecAction, FragmentMatch,
@@ -544,6 +545,11 @@ fn validate_ip(ip: &str) -> Result<IpAddr, PrefixdError> {
         .map_err(|_| PrefixdError::InvalidRequest(format!("invalid IP address: '{}'", ip)))
 }
 
+fn validate_event_destination(value: &str) -> Result<ipnet::IpNet, PrefixdError> {
+    crate::domain::parse_flowspec_destination(value)
+        .map_err(|error| PrefixdError::InvalidPrefix(format!("{value}: {error}")))
+}
+
 /// Detector metadata cannot select a routing scope; other legacy metadata remains accepted.
 pub struct DetectorEventRequest(AttackEventInput);
 
@@ -748,9 +754,9 @@ pub async fn ingest_event(
     crate::api::auth::require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
 
     // Validate input
-    validate_ip(&input.victim_ip).map_err(AppError)?;
+    validate_event_destination(&input.victim_ip).map_err(AppError)?;
     validate_string_len(&input.source, "source", MAX_STRING_LEN).map_err(AppError)?;
-    validate_string_len(&input.victim_ip, "victim_ip", 45).map_err(AppError)?;
+    validate_string_len(&input.victim_ip, "victim_ip", 64).map_err(AppError)?;
     if let Some(ref eid) = input.event_id {
         validate_string_len(eid, "event_id", MAX_STRING_LEN).map_err(AppError)?;
     }
@@ -1130,9 +1136,28 @@ async fn handle_ban(
     // Create internal event
     let event = AttackEvent::from_input(input);
 
+    let destination = validate_event_destination(&event.victim_ip).map_err(AppError)?;
+    let is_prefix = EventScope::for_destination(&destination) == EventScope::Prefix;
+    if is_prefix {
+        crate::guardrails::check_detector_prefix(&state.settings.guardrails, &event.source)
+            .map_err(AppError)?;
+    }
     let inventory = state.inventory.read().await;
-    let context = inventory.lookup_ip(&event.victim_ip);
-    let is_owned = context.is_some() || inventory.is_owned(&event.victim_ip);
+    let (context, is_owned) = if is_prefix {
+        let context = inventory
+            .lookup_prefix(&destination)
+            .map_err(AppError)?
+            .ok_or_else(|| {
+                AppError(PrefixdError::InvalidRequest(
+                    "destination prefix must be unambiguously owned by one customer".into(),
+                ))
+            })?;
+        (Some(context), true)
+    } else {
+        let context = inventory.lookup_ip(&event.victim_ip);
+        let is_owned = context.is_some() || inventory.is_owned(&event.victim_ip);
+        (context, is_owned)
+    };
     drop(inventory);
     let playbooks = state.playbooks.read().await.clone();
     let policy = PolicyEngine::new(
@@ -1169,6 +1194,18 @@ async fn handle_ban(
         }
         result => result,
     };
+    if is_prefix
+        && decision.as_ref().is_ok_and(|decision| {
+            decision
+                .intents
+                .iter()
+                .any(|intent| intent.action_type == ActionType::Blackhole)
+        })
+    {
+        return Err(AppError(PrefixdError::GuardrailViolation(
+            GuardrailError::PrefixBlackholeNotAllowed,
+        )));
+    }
     if let Some(scope) = state
         .settings
         .bgp
@@ -1262,7 +1299,10 @@ async fn handle_ban(
     let vector = event.attack_vector();
     let event_ports = event.top_dst_ports();
     let has_ports = !event_ports.is_empty();
-    let matching_playbook = playbooks.find_playbook(vector, has_ports);
+    let event_scope = crate::domain::parse_flowspec_destination(&event.victim_ip)
+        .map(|destination| EventScope::for_destination(&destination))
+        .unwrap_or_default();
+    let matching_playbook = playbooks.find_playbook(vector, has_ports, event_scope);
     let playbook_override = matching_playbook.and_then(|p| p.correlation.as_ref());
 
     let mut signal_group_id: Option<Uuid> = None;
@@ -2166,6 +2206,11 @@ pub async fn get_mitigation(
                     .find_playbook(
                         mitigation.vector,
                         !mitigation.match_criteria.dst_ports.is_empty(),
+                        crate::domain::parse_flowspec_destination(
+                            &mitigation.match_criteria.dst_prefix,
+                        )
+                        .map(|destination| EventScope::for_destination(&destination))
+                        .unwrap_or_default(),
                     )
                     .and_then(|p| p.correlation.as_ref());
 
@@ -2891,9 +2936,9 @@ pub async fn ingest_events_batch(
             }
         };
         // Validate input
-        let validation_err = validate_ip(&input.victim_ip)
+        let validation_err = validate_event_destination(&input.victim_ip)
             .and_then(|_| validate_string_len(&input.source, "source", MAX_STRING_LEN))
-            .and_then(|_| validate_string_len(&input.victim_ip, "victim_ip", 45))
+            .and_then(|_| validate_string_len(&input.victim_ip, "victim_ip", 64))
             .and_then(|_| {
                 if let Some(ref eid) = input.event_id {
                     validate_string_len(eid, "event_id", MAX_STRING_LEN)

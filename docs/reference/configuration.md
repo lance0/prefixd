@@ -247,6 +247,10 @@ guardrails:
   allow_packet_length_match: false
   allow_src_prefix_match: false
   allow_tcp_flags_match: false
+
+  # Detector prefix events (ADR 033). Both are required.
+  allow_detector_prefix: false
+  detector_prefix_sources: []
 ```
 
 The destination bounds default to host-only: IPv4 `/32`, IPv6 `/128`. To
@@ -254,7 +258,9 @@ admit manual subnet FlowSpec rules, deliberately lower `dst_prefix_minlen`
 (for example to 22 for IPv4 `/22` through `/32`) or `dst_prefix_minlen_v6`
 (for example to 48 for IPv6 `/48` through `/128`). Keep the corresponding
 maximum at the narrowest prefix you want to permit. These are existing bounds;
-there is no separate subnet switch. Detectors, playbooks and RTBH stay host-only.
+there is no separate subnet switch. Detector prefix events also require
+`allow_detector_prefix: true` and an exact `detector_prefix_sources` entry;
+RTBH stays host-only.
 
 Prefix bounds gate new admissions. Tightening them on restart does not withdraw
 or change previously admitted CIDRs; reconciliation retains their saved scope,
@@ -262,13 +268,14 @@ subject to fresh inventory ownership and safelist checks. Withdraw broad rules
 and drain their pending withdrawals before tightening bounds or returning the
 deployment to host-only operation.
 
-A manual CIDR must be network-aligned and entirely contained in one configured
-customer prefix with no conflicting ownership. Services are not inferred from
-the network's first address. Any safelist overlap, including a protected host
-inside the destination, refuses it. Fresh safety checks also prevent unsafe
-repair, and a new safelist entry withdraws the whole affected owned rule through
-the durable withdrawal path. See [destination CIDRs](api.md#destination-cidrs)
-and the [manual recipe](../cookbook/manual-mitigation.md#subnet-destination).
+A manual or detector CIDR must be network-aligned and entirely contained in one
+configured customer prefix with no conflicting ownership. Services are not
+inferred from the network's first address. Any safelist overlap, including a
+protected host inside the destination, refuses it. Fresh safety checks also
+prevent unsafe repair, and a new safelist entry withdraws the whole affected
+owned rule through the durable withdrawal path. See [destination CIDRs](api.md#destination-cidrs),
+[detector prefix events](api.md#detector-prefix-events) and the
+[manual recipe](../cookbook/manual-mitigation.md#subnet-destination).
 A policing rate covers the matching flow across the destination. Quotas count
 one rule for one CIDR, regardless of its address count.
 
@@ -324,6 +331,16 @@ select source prefixes: source addresses may be spoofed, so operators must
 choose the scope from their own evidence. See [source matches](api.md#source-prefix-matches)
 and the [downgrade procedure](../how-to/upgrading.md#source-prefix-matches-and-downgrade).
 
+`allow_detector_prefix` admits a canonical detector event destination that is
+not a host. It defaults to `false`; `detector_prefix_sources` must also list
+the exact event source, and an empty list refuses every prefix event. The
+destination still passes the same prefix bounds, whole-prefix ownership and
+safelist checks as a manual CIDR. A prefix event selects only a
+`scope: prefix` playbook; a prefix discard needs a destination port, while a
+prefix police step may match protocol only. Detector events cannot select a
+source prefix, VPN scope or action target. See
+[ADR 033](../adr/033-detector-prefix-mitigations.md).
+
 `allow_tcp_flags_match` enables an optional `tcp_flags` match on manual
 discard, police and VPN mark TCP rules. It defaults to `false`; a request
 carrying TCP flags then returns `422` before persistence or speaker RPC,
@@ -351,6 +368,9 @@ quotas:
   
   # Max active FlowSpec rules globally
   max_active_global: 500
+
+  # Separate active budget for detector prefix rules, per customer
+  max_active_prefix_per_customer: 5
   
   # Max new mitigations created at this POP in any trailing 60 seconds
   max_new_per_minute: 30
@@ -363,7 +383,9 @@ FlowSpec admission checks customer, POP, then global quotas atomically in
 PostgreSQL across controllers sharing the database. Only FlowSpec pending, active and escalated
 rows count, including active rows whose TTL has passed but whose lifecycle has not
 yet completed. A mitigation without a customer skips the customer quota. Existing
-owner extensions do not consume a new slot. Admission has a fixed five-second
+owner extensions do not consume a new slot. Detector prefix rules also consume
+the separate per-customer `max_active_prefix_per_customer` budget; host rules
+do not. Admission has a fixed five-second
 admission deadline covering connection acquisition through the insert, after preflight
 checks. COMMIT runs outside the deadline, so a slow COMMIT is not reported as failure.
 Failure returns an error before this request sends an announcement. A connection lost
@@ -1150,11 +1172,11 @@ playbooks:
 ```yaml
 match:
   vector: udp_flood     # Attack vector
-  source: fastnetmon   # Optional: specific detector
-  protocol: udp        # Optional: protocol filter
+  scope: host           # host (default) or prefix
+  require_top_ports: false
 ```
 
-> **NOTE:** `source` and `protocol` are not yet implemented and will be silently ignored if specified. Only `vector` is currently used for playbook matching.
+> **NOTE:** `source` and `protocol` are not yet implemented and will be silently ignored if specified. `scope` and `require_top_ports` are used.
 
 ### Actions
 
@@ -1178,6 +1200,33 @@ police rates, rates that lose wire precision (for example 16,777,217 bits/second
 and a non-null rate on `discard` or `blackhole` are rejected on startup, reload
 and playbook edits. Correct the step before reloading; a failed playbook reload keeps the
 previous running playbooks.
+
+### Prefix playbooks
+
+A `scope: prefix` playbook handles detector events whose `victim_ip` is a CIDR.
+It is never selected for a host event, and a host playbook is never selected for
+a prefix event. Prefix playbooks must contain exactly one step, use `police` or
+`discard` (not `blackhole` or `rules`), and support `udp_flood`, `syn_flood` or
+`ack_flood` only.
+
+A prefix `discard` requires `require_top_ports: true` and at least one
+destination port. A prefix `police` step may omit `require_top_ports`: when the
+detector supplies no port, the rule matches the protocol only and rate-limits
+the covering prefix. It never installs a bare destination-prefix discard.
+The event's destination still has to pass the normal prefix bounds, whole-prefix
+inventory ownership and safelist checks.
+
+```yaml
+playbooks:
+  - name: carpet_udp
+    match:
+      vector: udp_flood
+      scope: prefix
+      require_top_ports: true
+    steps:
+      - action: discard
+        ttl_seconds: 120
+```
 
 ### Step selection
 

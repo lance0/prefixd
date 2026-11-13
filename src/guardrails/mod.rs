@@ -16,6 +16,28 @@ use crate::db::RepositoryTrait;
 use crate::domain::{FlowSpecAction, FlowSpecNlri, MatchCriteria, MitigationIntent};
 use crate::error::{GuardrailError, PrefixdError, Result};
 
+/// Refuse a detector prefix event unless the feature and its source allowlist
+/// are both configured. Host events never call this.
+pub fn check_detector_prefix(config: &GuardrailsConfig, source: &str) -> Result<()> {
+    if !config.allow_detector_prefix {
+        return Err(PrefixdError::GuardrailViolation(
+            GuardrailError::DetectorPrefixNotAllowed,
+        ));
+    }
+    if !config
+        .detector_prefix_sources
+        .iter()
+        .any(|allowed| allowed == source)
+    {
+        return Err(PrefixdError::GuardrailViolation(
+            GuardrailError::DetectorPrefixSourceNotAllowed {
+                source_name: source.into(),
+            },
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_total_lifetime(
     lifetime: chrono::Duration,
     max_seconds: Option<u32>,
@@ -259,6 +281,18 @@ impl Guardrails {
                         max: self.quotas.max_active_per_customer,
                     },
                 ));
+            }
+            if crate::domain::is_prefix_destination(&intent.match_criteria.dst_prefix) {
+                let prefix_count = repo.count_active_prefix_by_customer(cid).await?;
+                if prefix_count >= self.quotas.max_active_prefix_per_customer {
+                    return Err(PrefixdError::GuardrailViolation(
+                        GuardrailError::QuotaExceeded {
+                            quota_type: "prefix_customer".to_string(),
+                            current: prefix_count,
+                            max: self.quotas.max_active_prefix_per_customer,
+                        },
+                    ));
+                }
             }
         }
 
@@ -644,6 +678,8 @@ mod tests {
                 allow_tcp_flags_match: false,
                 allow_fragment_match: false,
                 allow_packet_length_match: false,
+                allow_detector_prefix: false,
+                detector_prefix_sources: Vec::new(),
             },
             QuotasConfig {
                 source_only_limit: None,
@@ -652,8 +688,35 @@ mod tests {
                 max_active_global: 500,
                 max_new_per_minute: 30,
                 max_announcements_per_peer: 100,
+                max_active_prefix_per_customer: 5,
             },
         )
+    }
+
+    #[test]
+    fn detector_prefix_requires_both_the_flag_and_an_exact_source_allowlist() {
+        let (mut config, _) = test_config();
+        assert!(matches!(
+            check_detector_prefix(&config, "fastnetmon"),
+            Err(PrefixdError::GuardrailViolation(
+                GuardrailError::DetectorPrefixNotAllowed
+            ))
+        ));
+        config.allow_detector_prefix = true;
+        assert!(matches!(
+            check_detector_prefix(&config, "fastnetmon"),
+            Err(PrefixdError::GuardrailViolation(
+                GuardrailError::DetectorPrefixSourceNotAllowed { .. }
+            ))
+        ));
+        config.detector_prefix_sources = vec!["fastnetmon".into()];
+        assert!(check_detector_prefix(&config, "fastnetmon").is_ok());
+        assert!(matches!(
+            check_detector_prefix(&config, "other"),
+            Err(PrefixdError::GuardrailViolation(
+                GuardrailError::DetectorPrefixSourceNotAllowed { .. }
+            ))
+        ));
     }
 
     #[test]
@@ -708,6 +771,8 @@ mod tests {
                 allow_tcp_flags_match: true,
                 allow_fragment_match: true,
                 allow_packet_length_match: true,
+                allow_detector_prefix: false,
+                detector_prefix_sources: Vec::new(),
             },
             QuotasConfig {
                 source_only_limit: None,
@@ -716,6 +781,7 @@ mod tests {
                 max_active_global: 5000,
                 max_new_per_minute: 100,
                 max_announcements_per_peer: 500,
+                max_active_prefix_per_customer: 5,
             },
         )
     }

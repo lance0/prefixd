@@ -82,6 +82,7 @@ pub struct AttackEventInput {
     pub event_id: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub source: String,
+    /// Host address, or a canonical CIDR for an opted-in detector prefix event.
     pub victim_ip: String,
     pub vector: AttackVector,
     #[serde(default)]
@@ -156,11 +157,18 @@ pub struct AttackEvent {
 
 impl AttackEvent {
     pub fn from_input(input: AttackEventInput) -> Self {
-        let protocol = input
-            .victim_ip
-            .parse::<IpAddr>()
+        // A host keeps its historical spelling; an accepted prefix is stored
+        // canonical so identity, read-back and withdrawal agree.
+        let victim_ip = if input.victim_ip.contains('/') {
+            crate::domain::parse_flowspec_destination(&input.victim_ip)
+                .map(|destination| destination.to_string())
+                .unwrap_or_else(|_| input.victim_ip.clone())
+        } else {
+            input.victim_ip.clone()
+        };
+        let protocol = crate::domain::parse_flowspec_destination(&victim_ip)
             .ok()
-            .and_then(|ip| input.vector.to_protocol_for(ip))
+            .and_then(|destination| input.vector.to_protocol_for(destination.addr()))
             .map(i32::from);
         let ports = input.top_dst_ports.clone().unwrap_or_default();
 
@@ -170,7 +178,7 @@ impl AttackEvent {
             source: input.source,
             event_timestamp: input.timestamp,
             ingested_at: Utc::now(),
-            victim_ip: input.victim_ip,
+            victim_ip,
             vector: input.vector.to_string(),
             protocol,
             bps: input.bps,
