@@ -80,8 +80,9 @@ when the detector supplies no port: rate-limiting the covering prefix is a
 bounded response, while a bare `dest=<prefix> -> discard` is not. When ports
 are present, the resulting FlowSpec match is the canonical destination prefix
 plus the event's protocol and destination-port list. If a discard event cannot
-produce a port, it is rejected; prefixd does not substitute a broader rule or
-an RTBH action.
+produce a port, no rule is installed and the existing
+`accepted_no_playbook` response is returned; prefixd does not substitute a
+broader rule or an RTBH action.
 
 ### 3. Admission sequence
 
