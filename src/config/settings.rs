@@ -770,7 +770,9 @@ impl Settings {
         settings.http.validate_auth_transport()?;
         settings.blackhole.validate()?;
         settings.amplification.validate()?;
-        settings.scrubber.validate_with(&settings.blackhole)?;
+        settings
+            .scrubber
+            .validate_with(&settings.blackhole, &settings.bgp)?;
         if settings.scrubber.enabled && settings.bgp.mode != BgpMode::Rustbgpd {
             anyhow::bail!("scrubber diversion requires the rustbgpd backend");
         }

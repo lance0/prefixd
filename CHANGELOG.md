@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Refuse scrubber settings at load when a VPN profile names an unknown scope,
+  uses destinations or an IP target outside the scope's address family, or sets
+  a `redirect_route_target` equal to one of the scope's route targets. These
+  profiles previously failed only when a diversion was created, or redirected
+  into the VRF that imports the rule. Fix such a profile before upgrading.
+
 ## [0.26.0] - 2026-11-12
 
 prefixd 0.26.0 adds an RFC 8955 TCP flags match to manual FlowSpec rules and an

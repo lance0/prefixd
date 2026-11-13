@@ -191,10 +191,50 @@ impl ScrubberProfile {
 }
 
 impl ScrubberConfig {
-    /// [`Self::validate`], and no return-leg community equals a configured
-    /// blackhole community, which the speaker's export policy also matches.
-    pub fn validate_with(&self, blackhole: &crate::config::BlackholeConfig) -> Result<()> {
+    /// [`Self::validate`], every VPN profile against its configured scope, and
+    /// no return-leg community equals a configured blackhole community, which
+    /// the speaker's export policy also matches.
+    pub fn validate_with(
+        &self,
+        blackhole: &crate::config::BlackholeConfig,
+        bgp: &crate::config::BgpConfig,
+    ) -> Result<()> {
         self.validate()?;
+        for profile in &self.profiles {
+            let Some(scope) = bgp.resolve_scope(&profile.scope)? else {
+                continue;
+            };
+            let ipv4 = scope.identity.family == crate::domain::VpnFlowSpecFamily::Ipv4;
+            let (target, other) = if ipv4 {
+                (profile.ipv4_target, profile.ipv6_target)
+            } else {
+                (profile.ipv6_target, profile.ipv4_target)
+            };
+            if other.is_some()
+                || (profile.redirect_route_target.is_none() && target.is_none())
+                || profile
+                    .destinations
+                    .iter()
+                    .any(|net| net.addr().is_ipv4() != ipv4)
+            {
+                return Err(PrefixdError::Config(format!(
+                    "scrubber profile {}: destinations and target must use the address family of VPN scope {}",
+                    profile.id, profile.scope
+                )));
+            }
+            // The scope's import RT would redirect back into the VRF that
+            // imports the rule.
+            if profile
+                .redirect_route_target
+                .as_ref()
+                .is_some_and(|target| scope.route_targets.contains(target))
+            {
+                return Err(PrefixdError::Config(format!(
+                    "scrubber profile {}: redirect_route_target must differ from the route targets of VPN scope {}",
+                    profile.id, profile.scope
+                )));
+            }
+        }
         let blackhole = blackhole.parsed_communities()?;
         if self
             .profiles

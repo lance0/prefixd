@@ -1767,6 +1767,60 @@ fn vrf_profiles_canonicalize_action_rt_and_refuse_mixed_targets() {
     assert!(serde_json::from_value::<ScrubberProfile>(input).is_err());
 }
 
+#[test]
+fn vpn_profiles_resolve_their_scope_family_and_action_rt_at_startup() {
+    let blackhole = crate::config::BlackholeConfig::default();
+    let mut bgp: crate::config::BgpConfig =
+        crate::config::parse_yaml("backend: mock\nlocal_asn: 65000\nrouter_id: 192.0.2.1\n")
+            .unwrap();
+    let mut config = ScrubberConfig {
+        enabled: true,
+        profiles: vec![profile("a")],
+        readiness_ca_cert: None,
+    };
+    // Global IP-target profiles need no VPN scope.
+    config.validate_with(&blackhole, &bgp).unwrap();
+    let check = |config: &ScrubberConfig, bgp: &crate::config::BgpConfig| {
+        config
+            .validate_with(&blackhole, bgp)
+            .unwrap_err()
+            .to_string()
+    };
+
+    config.profiles[0].scope = "TRANSIT".into();
+    // Negative control: profile-local validation alone accepts the unknown scope.
+    config.validate().unwrap();
+    assert!(check(&config, &bgp).contains("unknown VPN scope TRANSIT"));
+
+    bgp.vpn_scopes.insert(
+        "TRANSIT".into(),
+        crate::config::parse_yaml("family: ipv4\nrd: '44407:40'\nroute_targets: ['44407:777']")
+            .unwrap(),
+    );
+    config.validate_with(&blackhole, &bgp).unwrap();
+
+    let family = |edit: &dyn Fn(&mut ScrubberProfile)| {
+        let mut changed = config.clone();
+        edit(&mut changed.profiles[0]);
+        changed.validate().unwrap();
+        assert!(check(&changed, &bgp).contains("address family of VPN scope TRANSIT"));
+    };
+    family(&|p| p.destinations = vec!["2001:db8:100::/48".parse().unwrap()]);
+    family(&|p| p.ipv6_target = Some("2001:db8::99".parse().unwrap()));
+    family(&|p| {
+        p.ipv4_target = None;
+        p.ipv6_target = Some("2001:db8::99".parse().unwrap());
+    });
+
+    let profile = &mut config.profiles[0];
+    profile.ipv4_target = None;
+    profile.redirect_route_target = Some("44407:777".into());
+    config.validate().unwrap();
+    assert!(check(&config, &bgp).contains("redirect_route_target must differ"));
+    config.profiles[0].redirect_route_target = Some("44407:888".into());
+    config.validate_with(&blackhole, &bgp).unwrap();
+}
+
 #[tokio::test(start_paused = true)]
 async fn vrf_diversion_keeps_action_target_in_confirmation_audit_and_readiness_drain() {
     let (mut state, repo, fake) = fixture(OperationMode::Enforced).await;

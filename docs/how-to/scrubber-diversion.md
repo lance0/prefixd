@@ -61,7 +61,9 @@ scope RTs use subtype `0x02`; redirect-to-VRF uses RFC 8955/RFC 7674 types
 `0x80`, `0x81` or `0x82` with subtype `0x08`. AS2, IPv4-administrator and AS4
 forms are supported, including `0.ASN:value` to preserve a small-ASN AS4 form.
 The controller requires a named VPN scope for this action and rejects a profile
-mixing IP targets and a VRF action target. Global IP-target diversion keeps its
+mixing IP targets and a VRF action target. At startup it also rejects an action
+route target equal to one of the scope's route targets, which would redirect
+into the VRF that imports the rule. Global IP-target diversion keeps its
 existing behavior.
 No API payload can supply an arbitrary action target.
 
