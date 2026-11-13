@@ -66,19 +66,22 @@ so existing playbooks and host events are unchanged. A prefix event selects
 only a `scope: prefix` playbook; a host event selects only a `scope: host`
 playbook. There is no fallback from one scope to the other.
 
-A prefix playbook must set `require_top_ports: true` and its first step must be
-`police` or `discard` with a nonzero rate where required. The first slice
-refuses `blackhole` steps and multi-rule `rules` steps for prefix playbooks.
-It also refuses prefix playbooks for vectors that cannot produce a port match
-in this model (`icmp_flood` and `unknown`). An unsupported step is a
-configuration error, not a runtime fallback.
+A prefix playbook has exactly one step in this slice; later steps remain
+accepted configuration but are not selected. The first step must be `police`
+or `discard` with a nonzero rate where required. The first slice refuses
+`blackhole` steps and multi-rule `rules` steps for prefix playbooks. It also
+refuses prefix playbooks for vectors that cannot produce a protocol match in
+this model (`icmp_flood` and `unknown`). An unsupported step is a configuration
+error, not a runtime fallback.
 
-A prefix event must contain at least one destination port. The resulting
-FlowSpec match is the canonical destination prefix plus the event's protocol
-and destination-port list. A protocol-only prefix rule and a bare
-`dest=<prefix> -> discard` are refused. If the detector or playbook cannot
-produce a port, the event is rejected; prefixd does not substitute a broader
-rule or an RTBH action.
+A prefix `discard` requires at least one destination port and therefore
+`require_top_ports: true`. A prefix `police` action may match protocol only
+when the detector supplies no port: rate-limiting the covering prefix is a
+bounded response, while a bare `dest=<prefix> -> discard` is not. When ports
+are present, the resulting FlowSpec match is the canonical destination prefix
+plus the event's protocol and destination-port list. If a discard event cannot
+produce a port, it is rejected; prefixd does not substitute a broader rule or
+an RTBH action.
 
 ### 3. Admission sequence
 
@@ -98,8 +101,10 @@ speaker mutation, in both dry-run and enforced mode:
    read refuses admission.
 5. Refuse every safelist overlap, including a protected host inside the
    destination. A failed safelist read refuses admission.
-6. Require a protocol and at least one destination port after the existing
-   allowed-port intersection. Reject an empty or non-canonical port set.
+6. Require a protocol. For `discard`, require at least one destination port
+   after the existing allowed-port intersection; for `police`, an empty port
+   set produces a protocol-only, rate-limited prefix match. Reject a
+   non-canonical port set.
 7. Apply the existing TTL, action, rate, source-prefix, fragment,
    packet-length, authorization, operation-mode, duplicate and immutable
    withdrawal rules. A prefix rule consumes one existing quota slot and one
