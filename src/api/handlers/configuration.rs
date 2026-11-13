@@ -14,12 +14,26 @@ use crate::auth::AuthSession;
 
 #[derive(Serialize, ToSchema)]
 pub struct ReloadResponse {
-    /// List of reloaded config files
+    /// Reloaded configuration sections
     reloaded: Vec<String>,
+    /// `prefixd.yaml` keys that differ from the running config but take effect only after a restart
+    restart_required: Vec<String>,
     /// Reload timestamp
     timestamp: String,
 }
 
+/// Reload configuration files, all or nothing
+#[utoipa::path(
+    post,
+    path = "/v1/config/reload",
+    tag = "config",
+    responses(
+        (status = 200, description = "Reloaded sections and restart-required keys", body = ReloadResponse),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 500, description = "Reload failed; running configuration unchanged")
+    )
+)]
 pub async fn reload_config(
     State(state): State<Arc<AppState>>,
     auth_session: AuthSession,
@@ -30,12 +44,13 @@ pub async fn reload_config(
     let _operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
 
     match state.reload_config().await {
-        Ok(reloaded) => {
+        Ok(report) => {
             crate::observability::CONFIG_RELOADS
                 .with_label_values(&["success"])
                 .inc();
             Ok(Json(ReloadResponse {
-                reloaded,
+                reloaded: report.reloaded,
+                restart_required: report.restart_required,
                 timestamp: chrono::Utc::now().to_rfc3339(),
             }))
         }
