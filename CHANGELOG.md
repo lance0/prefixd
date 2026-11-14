@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set the flag. A deployment that browsers reach over plain HTTP must set
   `http.secure_cookies: false`; the shipped Compose configurations do. See
   [Secure session cookies](docs/how-to/upgrading.md#secure-session-cookies).
+- **quinn-proto, quinn-udp** — Updated quinn-proto 0.11.18 → 0.11.19 and
+  quinn-udp 0.5.14 → 0.5.16 in both lockfiles, which fixes a `MAX_STREAM_DATA`
+  frame opening streams beyond the stream limit (RUSTSEC-2026-0523), a long
+  Retry token panicking or exhausting memory in a QUIC client
+  (RUSTSEC-2026-0524) and a receive loop spinning after a truncated datagram
+  (RUSTSEC-2026-0538). The crates are locked only through reqwest's optional
+  `http3` support, which prefixd does not enable, so no build compiles them.
+  No advisory exception is added.
 
 ## [0.26.0] - 2026-11-12
 
