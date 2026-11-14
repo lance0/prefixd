@@ -329,9 +329,12 @@ async fn start_plain_server(
     let listener = TcpListener::bind(listen).await?;
     tracing::info!(listen = %listen, tls = false, "HTTP server starting");
 
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal(state))
-        .await?;
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(state))
+    .await?;
 
     Ok(())
 }
@@ -403,7 +406,7 @@ async fn start_tls_server(
 
     axum_server::bind_rustls(addr, rustls_config)
         .handle(handle)
-        .serve(router.into_make_service())
+        .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await?;
 
     Ok(())
