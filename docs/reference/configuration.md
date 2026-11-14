@@ -1145,8 +1145,10 @@ match:
 
 Playbooks match on `vector` and `require_top_ports` only. Unknown keys at any
 level of `playbooks.yaml`, including `match.source` and `match.protocol`, are
-refused at load, reload and `PUT /v1/config/playbooks`, and the error names the
-key.
+refused. At startup the error names the file and the key. A refused reload
+keeps the running playbooks, and the controller log names the key.
+`PUT /v1/config/playbooks` returns `400` naming the key. See
+[unknown playbook keys](../how-to/upgrading.md#unknown-playbook-keys).
 
 ### Actions
 

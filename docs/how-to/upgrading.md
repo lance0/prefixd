@@ -599,6 +599,28 @@ Withdrawn rows stay in the table for audit. An older controller's
 outstanding-row queries skip them, but its detail endpoint cannot decode a
 withdrawn row that has `return_rule` or `profile.return_leg`.
 
+## Unknown playbook keys
+
+Releases after 0.26.0 refuse unknown keys at every level of `playbooks.yaml`
+and in `PUT /v1/config/playbooks`. Earlier releases ignored them, so these keys
+never took effect. Before upgrading, edit `playbooks.yaml`:
+
+- Rename `correlation_override:` to `correlation:`. ADR 022 and the 0.18.0
+  changelog used the wrong name, and earlier releases ignored the per-playbook
+  override written that way.
+- Delete `match.source` and `match.protocol`. Playbooks never honored them, so
+  a playbook scoped to one detector or protocol applied to every event of its
+  vector.
+- Delete `default_playbook`. Events of an unknown vector use the playbook that
+  matches `vector: unknown`.
+- Delete any other key not in the
+  [configuration reference](../reference/configuration.md#playbooksyaml).
+
+An unknown key stops startup with an error that names the file and the key. A
+reload that meets one keeps the running playbooks and logs the key, and `PUT`
+returns `400` naming it. Older binaries ignore these keys, so a cleaned file
+also works after a downgrade.
+
 ## Mitigation origin mode
 
 Migration 015 adds `origin_mode` to mitigations. Each new mitigation records the

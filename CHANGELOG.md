@@ -9,18 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Breaking:** `playbooks.yaml` and `PUT /v1/config/playbooks` refuse unknown
-  keys at every level and name the key. The unimplemented `match.source`,
-  `match.protocol` and `default_playbook` keys were previously ignored, so a
-  playbook scoped to one detector applied to all of them. Inventory assets
-  refuse unknown keys too, including the unimplemented `range_end`.
+- **Breaking:** `playbooks.yaml`, `PUT /v1/config/playbooks` and the
+  dashboard YAML editor refuse unknown keys at every level and name the key.
+  The unimplemented `match.source`, `match.protocol` and `default_playbook`
+  keys were previously ignored, so a playbook scoped to one detector applied to
+  all of them. Startup errors now name the configuration file that failed.
+- The configuration reference no longer documents the unimplemented inventory
+  `range_end` field.
 
 ### Upgrade notes
 
-- Before upgrading, delete `match.source`, `match.protocol`, `default_playbook`
-  and any other key not in the configuration reference from `playbooks.yaml`,
-  and `range_end` from inventory assets. Otherwise startup and reload fail and
-  name the key.
+- Before upgrading, rename `correlation_override:` to `correlation:` in
+  `playbooks.yaml`. ADR 022 and the 0.18.0 entry below documented the wrong
+  key, which earlier releases ignored. Delete `match.source`, `match.protocol`,
+  `default_playbook` and any other key not in the configuration reference.
+  Otherwise startup fails and reload is refused, naming the key. See
+  [unknown playbook keys](docs/how-to/upgrading.md#unknown-playbook-keys).
 
 ## [0.26.0] - 2026-11-12
 

@@ -646,7 +646,7 @@ mod tests {
         std::fs::write(&path, base).unwrap();
         Playbooks::load(&path).unwrap();
         for (anchor, key) in [
-            ("playbooks:\n", "default_playbook: {}\n"),
+            ("        ttl_seconds: 120\n", "default_playbook: {}\n"),
             ("  - name: udp\n", "    description: scoped\n"),
             ("      vector: udp_flood\n", "      source: fastnetmon\n"),
             ("      vector: udp_flood\n", "      protocol: udp\n"),
