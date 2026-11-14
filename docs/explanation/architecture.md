@@ -72,8 +72,8 @@ ExaBGP and other daemon adapters remain planned until their recovery contracts
 are implemented and qualified.
 
 The controller remains Rust, axum, sqlx and PostgreSQL behind `RepositoryTrait`.
-[ADR 026](../adr/026-facelift-framework-scope.md) defers the proposed Loco migration
-throughout the facelift.
+[ADR 026](../adr/026-facelift-framework-scope.md), as amended, cancels the proposed
+Loco migration.
 
 ## Data flow
 
