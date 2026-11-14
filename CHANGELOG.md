@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- `http.rate_limit.events_per_second` and `burst` now size one bucket per
+  request class and per client instead of one bucket for the whole listener.
+  Total admitted load can reach the number of classes times the number of
+  clients times the old cap. If you set a low cap to protect PostgreSQL or the
+  speaker, re-evaluate it; see
+  [per-class rate limits](docs/how-to/upgrading.md#per-class-rate-limits).
 - A scrubber profile with a VPN `scope` must use only that scope's address
   family. 0.26.0 started with a scoped profile that also listed destinations or
   a target of the other family; startup now refuses it and names the profile
@@ -19,6 +25,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   route target. Changing a profile requires draining its outstanding
   diversions with the 0.26.0 controller first; see
   [scoped scrubber profiles](docs/how-to/upgrading.md#scoped-scrubber-profiles-use-one-family).
+- Before upgrading, rename `correlation_override:` to `correlation:` in
+  `playbooks.yaml`. ADR 022 and the 0.18.0 entry below documented the wrong
+  key, which earlier releases ignored. Delete `match.source`, `match.protocol`,
+  `default_playbook` and any other key not in the configuration reference.
+  Otherwise startup fails and reload is refused, naming the key. See
+  [unknown playbook keys](docs/how-to/upgrading.md#unknown-playbook-keys).
+
+### Known limitations
+
+- The client key is the TCP peer address, and prefixd does not read forwarded
+  headers. The default Compose stack doesn't publish port 8080, so prefixd sees
+  two clients: nginx, which carries every detector and CLI request, and the
+  dashboard container, which carries every browser session. All detectors
+  therefore share one `ingest` bucket, and all operators share one bucket per
+  class. Class isolation is what keeps a detector flood or login storm from
+  returning 429 to withdrawals in that topology.
+- 429 responses keep the `retry_after_seconds` body field and send no
+  `Retry-After` header.
+
+### Added
+
+- `prefixd_http_rate_limited_total{class}` counts requests rejected with 429,
+  by request class.
 
 ### Changed
 
@@ -35,6 +64,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repeated or dismissed, and focus returns to the opener after Cancel or Escape
   and to the page heading or another stable control after a completed withdrawal.
 
+### Fixed
+
+- **Rate limiting no longer lets a detector flood block operators.** The single
+  global token bucket is replaced by one bucket per request class (`ingest`,
+  `signals`, `mutation`, `read`, `auth`) and per client address. Withdrawals
+  never share a bucket with ingestion, and login and requests to unknown routes
+  use `auth`, not `mutation`. `GET /v1/health`, `GET /v1/ready` and `/metrics`
+  are exempt. 429 rejections log the class and client.
+- The API reference no longer documents `X-RateLimit-*` headers, which were
+  never sent, and shows the actual `"rate_limited"` error string.
+- `/openapi.json` now documents `POST /v1/mitigations/{id}/withdraw`,
+  `GET /v1/safelist` and `POST /v1/config/reload`, so a generated client can
+  withdraw a single mitigation. A test now fails when a `/v1` route is missing
+  from the OpenAPI document or an OpenAPI operation has no route; the WebSocket
+  feed is the only exception.
+- Check each VPN scrubber profile against its scope's address family and route
+  targets when settings load. A family mismatch previously surfaced only when a
+  diversion was created, and an action route target equal to a scope route
+  target redirected into the VRF that imports the rule. An unknown profile
+  scope, which 0.26.0 already refused at startup, is now reported with the
+  profile ID.
+
 ### Security
 
 - Session cookies are now `Secure` by default unless `auth.mode` is `none`,
@@ -50,29 +101,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (RUSTSEC-2026-0538). The crates are locked only through reqwest's optional
   `http3` support, which prefixd does not enable, so no build compiles them.
   No advisory exception is added.
-
-### Fixed
-
-- `/openapi.json` now documents `POST /v1/mitigations/{id}/withdraw`,
-  `GET /v1/safelist` and `POST /v1/config/reload`, so a generated client can
-  withdraw a single mitigation. A test now fails when a `/v1` route is missing
-  from the OpenAPI document or an OpenAPI operation has no route; the WebSocket
-  feed is the only exception.
-- Check each VPN scrubber profile against its scope's address family and route
-  targets when settings load. A family mismatch previously surfaced only when a
-  diversion was created, and an action route target equal to a scope route
-  target redirected into the VRF that imports the rule. An unknown profile
-  scope, which 0.26.0 already refused at startup, is now reported with the
-  profile ID.
-
-### Upgrade notes
-
-- Before upgrading, rename `correlation_override:` to `correlation:` in
-  `playbooks.yaml`. ADR 022 and the 0.18.0 entry below documented the wrong
-  key, which earlier releases ignored. Delete `match.source`, `match.protocol`,
-  `default_playbook` and any other key not in the configuration reference.
-  Otherwise startup fails and reload is refused, naming the key. See
-  [unknown playbook keys](docs/how-to/upgrading.md#unknown-playbook-keys).
 
 ## [0.26.0] - 2026-11-12
 

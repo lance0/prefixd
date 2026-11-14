@@ -3154,6 +3154,10 @@ prefixd_mitigations_active{action_type="discard",pop="iad1"} 5
 # HELP prefixd_http_requests_total Total HTTP requests
 # TYPE prefixd_http_requests_total counter
 prefixd_http_requests_total{method="POST",route="/v1/events",status_class="2xx"} 1543
+
+# HELP prefixd_http_rate_limited_total HTTP requests rejected with 429 by the rate limiter, by request class
+# TYPE prefixd_http_rate_limited_total counter
+prefixd_http_rate_limited_total{class="ingest"} 12
 ```
 
 ### Speaker series
@@ -3425,29 +3429,34 @@ Updates the current operator's notification preferences. `muted_events` contains
 
 ## Rate Limiting
 
-Default limits (configurable):
+`http.rate_limit` sets one token bucket size (`burst`) and refill rate
+(`events_per_second`, default 500 and 100/s). Each request class gets its own
+bucket per client, so a detector flood cannot exhaust an operator's withdrawal
+or a probe:
 
-| Endpoint | Limit |
-|----------|-------|
-| `POST /v1/events` | 100 burst, 10/s sustained |
-| Other endpoints | 1000 burst, 100/s sustained |
+| Class | Requests |
+|-------|----------|
+| `ingest` | `POST /v1/events`, `POST /v1/events/batch` |
+| `signals` | `POST /v1/signals/*` |
+| `mutation` | Every other `POST`, `PUT` and `DELETE`, including withdrawals |
+| `read` | `GET` requests, including `GET /v1/health/detail` |
+| `auth` | `POST /v1/auth/login` and requests to unknown routes, whatever the method |
+| exempt | `GET /v1/health`, `GET /v1/ready`, `GET /metrics` |
 
-**Response Headers:**
-
-```http
-X-RateLimit-Limit: 100
-X-RateLimit-Remaining: 95
-X-RateLimit-Reset: 1705578600
-```
+The client is the TCP peer address; IPv6 peers share one bucket per /64.
+Clients behind a reverse proxy share the proxy's bucket for each class.
+Responses carry no rate-limit headers.
 
 **429 Response:**
 
 ```json
 {
-  "error": "rate limited",
+  "error": "rate_limited",
   "retry_after_seconds": 5
 }
 ```
+
+Rejections increment `prefixd_http_rate_limited_total{class}`.
 
 ## Manual scrubber diversion
 

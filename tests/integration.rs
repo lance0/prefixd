@@ -15680,3 +15680,96 @@ async fn test_event_search_filter_validation() {
         assert_eq!(response.status(), StatusCode::OK, "{filter}");
     }
 }
+
+#[tokio::test]
+async fn ingest_flood_does_not_rate_limit_withdrawal_or_readiness() {
+    use axum::extract::ConnectInfo;
+    let mut settings = test_settings();
+    settings.http.rate_limit = RateLimitConfig {
+        events_per_second: 1,
+        burst: 3,
+    };
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        Arc::new(MockRepository::new()),
+        Arc::new(MockAnnouncer::new()),
+        ".".into(),
+    )
+    .unwrap();
+    let app = create_test_router(state);
+    let send = |method: &str, uri: String, peer: &str, body: String| {
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .extension(ConnectInfo(peer.parse::<std::net::SocketAddr>().unwrap()))
+            .body(Body::from(body))
+            .unwrap();
+        app.clone().oneshot(request)
+    };
+    let detector = "192.0.2.1:4000";
+    let event = serde_json::json!({
+        "event_id": "flood-0", "timestamp": chrono::Utc::now(), "source": "test",
+        "victim_ip": "203.0.113.10", "vector": "udp_flood", "pps": 50000,
+        "top_dst_ports": [53], "confidence": 0.9,
+    });
+    let response = send("POST", "/v1/events".into(), detector, event.to_string())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["mitigation_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let ingest_limited = || {
+        prefixd::observability::metrics::HTTP_RATE_LIMITED
+            .with_label_values(&["ingest"])
+            .get()
+    };
+    let limited_before = ingest_limited();
+    let mut limited = false;
+    for _ in 0..20 {
+        let status = send("POST", "/v1/events".into(), detector, "{}".into())
+            .await
+            .unwrap()
+            .status();
+        limited |= status == StatusCode::TOO_MANY_REQUESTS;
+    }
+    assert!(limited, "flood must exhaust the ingest bucket");
+    assert!(
+        ingest_limited() > limited_before,
+        "ingest 429s must count in prefixd_http_rate_limited_total"
+    );
+
+    // Same peer: the operator withdrawal and probes are untouched by the flood.
+    let withdraw = send(
+        "POST",
+        format!("/v1/mitigations/{id}/withdraw"),
+        detector,
+        serde_json::json!({"reason": "operator"}).to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(withdraw.status(), StatusCode::OK);
+    for _ in 0..10 {
+        let ready = send("GET", "/v1/ready".into(), detector, String::new())
+            .await
+            .unwrap();
+        assert_eq!(ready.status(), StatusCode::OK);
+    }
+    let read = send("GET", "/v1/mitigations".into(), detector, String::new())
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::OK);
+    // Another detector keeps its own ingest bucket.
+    let response = send("POST", "/v1/events".into(), "192.0.2.2:4000", "{}".into())
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+}
