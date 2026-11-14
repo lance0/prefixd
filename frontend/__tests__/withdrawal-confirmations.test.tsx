@@ -119,7 +119,7 @@ async function openSingle(view: "list" | "detail") {
 
   act(() => trigger.focus())
   fireEvent.click(trigger)
-  const dialog = await waitFor(() => screen.getByRole("alertdialog", { name: "Withdraw Mitigation" }))
+  const dialog = await waitFor(() => screen.getByRole("alertdialog", { name: "Withdraw mitigation" }))
 
   return { trigger, dialog }
 }
@@ -129,7 +129,7 @@ async function openBulk() {
   const trigger = screen.getByRole("button", { name: "Withdraw all" })
   act(() => trigger.focus())
   fireEvent.click(trigger)
-  const dialog = await waitFor(() => screen.getByRole("alertdialog", { name: "Bulk Withdraw Mitigations" }))
+  const dialog = await waitFor(() => screen.getByRole("alertdialog", { name: "Withdraw selected mitigations" }))
 
   return { trigger, dialog }
 }
@@ -176,7 +176,7 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     await renderView(view)
     const { dialog } = await openSingle(view)
     expect(dialog).toHaveTextContent("Router convergence and traffic filtering are not verified here")
-    const reason = within(dialog).getByLabelText("Reason (optional)")
+    const reason = within(dialog).getByLabelText("Withdrawal reason (optional)")
     fireEvent.change(reason, { target: { value: "attack resolved" } })
     const submit = within(dialog).getByRole("button", { name: "Withdraw" })
     fireEvent.click(submit)
@@ -208,7 +208,7 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     withdrawals(() => pending.promise.then(() => completed()), completed)
     await renderView(view)
     const { dialog } = await openSingle(view)
-    const reason = within(dialog).getByLabelText("Reason (optional)")
+    const reason = within(dialog).getByLabelText("Withdrawal reason (optional)")
     fireEvent.change(reason, { target: { value: "false positive" } })
     fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" }))
     await act(async () => pending.reject(new Error("Speaker reply lost")))
@@ -230,7 +230,7 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     await renderView(view)
     const { trigger, dialog } = await openSingle(view)
     await waitFor(() => expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus())
-    fireEvent.change(within(dialog).getByLabelText("Reason (optional)"), { target: { value: "cancelled reason" } })
+    fireEvent.change(within(dialog).getByLabelText("Withdrawal reason (optional)"), { target: { value: "cancelled reason" } })
 
     if (action === "Cancel") fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }))
     else fireEvent.keyDown(dialog, { key: "Escape" })
@@ -238,7 +238,7 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     await waitFor(() => expect(trigger).toHaveFocus())
     expect(bodies("POST", `/v1/mitigations/${targets[0].mitigation_id}/withdraw`)).toEqual([])
     const reopened = await openSingle(view)
-    expect(within(reopened.dialog).getByLabelText("Reason (optional)")).toHaveValue("")
+    expect(within(reopened.dialog).getByLabelText("Withdrawal reason (optional)")).toHaveValue("")
   })
 
   it("restores focus to a stable control when completion removes the opener", async () => {
@@ -305,7 +305,7 @@ describe("bulk withdrawal confirmation", { timeout: 10_000 }, () => {
     bulkWithdrawals(() => pending.promise.then(json), () => json(bulkSuccess([targets[1].mitigation_id])))
     await renderView("list")
     const { dialog } = await openBulk()
-    const reason = within(dialog).getByLabelText("Reason (optional)")
+    const reason = within(dialog).getByLabelText("Withdrawal reason (optional)")
     fireEvent.change(reason, { target: { value: "incident resolved" } })
     const submit = within(dialog).getByRole("button", { name: "Withdraw 2" })
     fireEvent.click(submit)
@@ -345,7 +345,7 @@ describe("bulk withdrawal confirmation", { timeout: 10_000 }, () => {
     bulkWithdrawals(() => new Response("Request failed", { status: 500 }), () => json(bulkSuccess(targets.map((target) => target.mitigation_id))))
     await renderView("list")
     const { dialog } = await openBulk()
-    const reason = within(dialog).getByLabelText("Reason (optional)")
+    const reason = within(dialog).getByLabelText("Withdrawal reason (optional)")
     fireEvent.change(reason, { target: { value: "retry whole request" } })
     fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw 2" }))
     expect(await waitFor(() => within(dialog).getByRole("alert"))).toHaveTextContent("Request failed")

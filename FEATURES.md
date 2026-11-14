@@ -564,7 +564,7 @@ Real-time visibility into mitigation state:
 ### Authentication
 
 - **Session-based** - Login with username/password
-- **Secure cookies** - HttpOnly, SameSite=Lax, optional Secure flag
+- **Secure cookies** - HttpOnly, SameSite=Lax, Secure by default (`http.secure_cookies: false` for plain-HTTP access)
 - **Session expiry** - PostgreSQL-backed inactivity expiry
 
 ### Real-Time Updates
