@@ -2336,6 +2336,71 @@ async fn test_update_playbooks_success_writes_file() {
     assert!(written.contains("syn_flood"));
 }
 
+/// An unknown key at any level of the body is refused and named, and the file
+/// is left as it was. The same body without the key saves, as a control.
+#[tokio::test]
+async fn test_update_playbooks_unknown_key_returns_400_and_keeps_file() {
+    let playbook = r#"{"name":"udp","match":{"vector":"udp_flood"MATCH},"steps":[{"action":"police","rate_bps":5000000,"ttl_seconds":120STEP}]}"#;
+    let body = |top: &str, matched: &str, step: &str| {
+        let playbook = playbook.replace("MATCH", matched).replace("STEP", step);
+        format!(r#"{{"playbooks":[{playbook}]{top}}}"#)
+    };
+    let put = |config_dir: std::path::PathBuf, body: String| async move {
+        let response = setup_app_with_config_dir(config_dir)
+            .await
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/config/playbooks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice::<serde_json::Value>(&body).ok(),
+        )
+    };
+
+    for (key, body) in [
+        (
+            "default_playbook",
+            body(r#","default_playbook":{}"#, "", ""),
+        ),
+        ("source", body("", r#","source":"fastnetmon""#, "")),
+        ("ttl", body("", "", r#","ttl":60"#)),
+    ] {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("playbooks.yaml");
+        std::fs::write(&path, "original\n").unwrap();
+        let (status, json) = put(temp_dir.path().to_path_buf(), body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{key}");
+        let json = json.unwrap();
+        assert!(
+            json["errors"][0]
+                .as_str()
+                .is_some_and(|error| error.contains(&format!("unknown field `{key}`"))),
+            "{key}: {json}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");
+        assert!(
+            !temp_dir.path().join("playbooks.yaml.bak").exists(),
+            "{key}"
+        );
+    }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (status, _) = put(temp_dir.path().to_path_buf(), body("", "", "")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(temp_dir.path().join("playbooks.yaml").exists());
+}
+
 #[tokio::test]
 async fn test_update_playbooks_bearer_operator_forbidden() {
     let app = setup_app_with_bearer().await;

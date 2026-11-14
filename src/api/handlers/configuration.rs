@@ -227,6 +227,7 @@ pub async fn get_config_playbooks(
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdatePlaybooksRequest {
     playbooks: Vec<crate::config::Playbook>,
 }
