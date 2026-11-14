@@ -264,7 +264,12 @@ prefixd-browser = "operator"
             settings = {
                 "pop": "browser-smoke",
                 "mode": "enforced",
-                "http": {"listen": f"127.0.0.1:{free_port()}", "auth": {"mode": "credentials"}},
+                # urllib's cookie jar withholds Secure cookies over plain HTTP.
+                "http": {
+                    "listen": f"127.0.0.1:{free_port()}",
+                    "auth": {"mode": "credentials"},
+                    "secure_cookies": False,
+                },
                 "bgp": {
                     "backend": "rustbgpd",
                     "rustbgpd": {"endpoint": endpoint, "bearer_token_env": "PREFIXD_BROWSER_TOKEN"},
