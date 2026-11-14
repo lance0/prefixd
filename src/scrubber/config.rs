@@ -191,10 +191,77 @@ impl ScrubberProfile {
 }
 
 impl ScrubberConfig {
-    /// [`Self::validate`], and no return-leg community equals a configured
-    /// blackhole community, which the speaker's export policy also matches.
-    pub fn validate_with(&self, blackhole: &crate::config::BlackholeConfig) -> Result<()> {
+    /// [`Self::validate`], every VPN profile against its configured scope, and
+    /// no return-leg community equals a configured blackhole community, which
+    /// the speaker's export policy also matches.
+    pub fn validate_with(
+        &self,
+        blackhole: &crate::config::BlackholeConfig,
+        bgp: &crate::config::BgpConfig,
+    ) -> Result<()> {
         self.validate()?;
+        for profile in &self.profiles {
+            let scope = bgp
+                .resolve_scope(&profile.scope)
+                .map_err(|error| match error {
+                    PrefixdError::Config(message) => {
+                        PrefixdError::Config(format!("scrubber profile {}: {message}", profile.id))
+                    }
+                    other => other,
+                })?;
+            let Some(scope) = scope else {
+                continue;
+            };
+            let ipv4 = scope.identity.family == crate::domain::VpnFlowSpecFamily::Ipv4;
+            let (family, target_field, target, other_field, other) = if ipv4 {
+                (
+                    "ipv4",
+                    "ipv4_target",
+                    profile.ipv4_target,
+                    "ipv6_target",
+                    profile.ipv6_target,
+                )
+            } else {
+                (
+                    "ipv6",
+                    "ipv6_target",
+                    profile.ipv6_target,
+                    "ipv4_target",
+                    profile.ipv4_target,
+                )
+            };
+            let mismatch = if let Some(net) = profile
+                .destinations
+                .iter()
+                .find(|net| net.addr().is_ipv4() != ipv4)
+            {
+                Some(format!("destination {net} is not {family}"))
+            } else if profile.redirect_route_target.is_none() && target.is_none() {
+                Some(format!("{target_field} is missing"))
+            } else if other.is_some() {
+                Some(format!("{other_field} is set"))
+            } else {
+                None
+            };
+            if let Some(mismatch) = mismatch {
+                return Err(PrefixdError::Config(format!(
+                    "scrubber profile {}: {mismatch}; VPN scope {} is {family}, so use a separate profile per family",
+                    profile.id, profile.scope
+                )));
+            }
+            // The scope's import RT would redirect back into the VRF that
+            // imports the rule.
+            if profile
+                .redirect_route_target
+                .as_ref()
+                .is_some_and(|target| scope.route_targets.contains(target))
+            {
+                return Err(PrefixdError::Config(format!(
+                    "scrubber profile {}: redirect_route_target must differ from the route targets of VPN scope {}",
+                    profile.id, profile.scope
+                )));
+            }
+        }
         let blackhole = blackhole.parsed_communities()?;
         if self
             .profiles

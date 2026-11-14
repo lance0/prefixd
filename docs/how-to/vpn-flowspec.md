@@ -138,8 +138,11 @@ the DSCP. Qualify receiver installation and packet marking on the pilot.
 ## Guarded scrubber scope
 
 Set `scope: TRANSIT` (or `TRANSIT6`) on an existing qualified scrubber profile.
-Omission retains global diversion. The profile scope must match the victim
-family; use a profile for each family. Keep the existing readiness, policy
+Omission retains global diversion. A scoped profile carries one address
+family: its destinations and IP target must match the scope's family. Startup
+refuses a scoped profile with destinations or a target of the other family, so
+split a dual-stack profile into one profile per family (for example `TRANSIT`
+and `TRANSIT6`) before adding `scope`. Keep the existing readiness, policy
 binding, revision, arm and canary requirements. A configured scope does not
 qualify the receiving VRF or a clean return path.
 

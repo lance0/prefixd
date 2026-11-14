@@ -1454,5 +1454,8 @@ family-specific source prefix floors, short TTL and independent quota fields,
 plus the [TRANSIT BGP example](../../configs/vpn-scopes.yaml.example).
 
 A scrubber profile's optional `scope` selects the named VPN scope; omission is
-global. Use separate profiles for IPv4 and IPv6 scope names. Scope changes need
+global. Use separate profiles for IPv4 and IPv6 scope names. Settings fail to
+load when a profile names an unknown scope, when its destinations or IP target
+use another address family than the scope, or when its `redirect_route_target`
+equals one of the scope's `route_targets`. Scope changes need
 a drained lifecycle and matching readiness/policy qualification before re-arm.

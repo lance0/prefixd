@@ -973,15 +973,44 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
         "TRANSIT6":{"family":"ipv6","rd":"44407:41","route_targets":["44407:778"]}
     }))
     .unwrap();
+    // A scoped profile carries only its scope's address family.
     let profiles = [
-        ("ip4", "TRANSIT", Some("192.0.2.99"), None, None),
-        ("ip6", "TRANSIT6", None, Some("2001:db8:ffff::66"), None),
-        ("rt4", "TRANSIT", None, None, Some("44407:888")),
-        ("rt6", "TRANSIT6", None, None, Some("44407:888")),
+        (
+            "ip4",
+            "TRANSIT",
+            Some("192.0.2.99"),
+            None,
+            None,
+            "203.0.113.0/24",
+        ),
+        (
+            "ip6",
+            "TRANSIT6",
+            None,
+            Some("2001:db8:ffff::66"),
+            None,
+            "2001:db8:100::/48",
+        ),
+        (
+            "rt4",
+            "TRANSIT",
+            None,
+            None,
+            Some("44407:888"),
+            "203.0.113.0/24",
+        ),
+        (
+            "rt6",
+            "TRANSIT6",
+            None,
+            None,
+            Some("44407:888"),
+            "2001:db8:100::/48",
+        ),
     ];
-    let profile_json:Vec<_>=profiles.into_iter().map(|(id,scope,ipv4,ipv6,rt)|json!({
+    let profile_json:Vec<_>=profiles.into_iter().map(|(id,scope,ipv4,ipv6,rt,destination)|json!({
         "id":id,"revision":"v1","scope":scope,"ipv4_target":ipv4,"ipv6_target":ipv6,
-        "redirect_route_target":rt,"destinations":["203.0.113.0/24","2001:db8:100::/48"],
+        "redirect_route_target":rt,"destinations":[destination],
         "router_peers":[pair.rust.peer_address],"policy_binding":"action-fixture",
         "qualification_receipt":"owned HTTP/speaker/peer fixture; traffic enforcement unqualified",
         "readiness_url":format!("https://{address}/{id}"),"readiness_token_env":"PREFIXD_RUSTBGPD_TEST_TOKEN",
@@ -1104,7 +1133,7 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
             }
         }
     });
-    for (id, _, _, _, _) in profiles {
+    for (id, ..) in profiles {
         let (before, _) = request(
             &app,
             "GET",
@@ -1311,7 +1340,7 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
     );
     assert!(accepted_monitor_reads.load(SeqCst) >= reads_before_pause + profiles.len());
     let healthy = state.scrubber.profiles().await;
-    for (id, _, _, _, _) in profiles {
+    for (id, ..) in profiles {
         let profile = &healthy[id];
         assert!(
             profile.armed && profile.ready,

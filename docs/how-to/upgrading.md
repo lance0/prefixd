@@ -561,6 +561,23 @@ rustbgpd's 120-second window cap after the last renewal, but lease expiry is
 not router cleanup. Keep the rows for audit; do not delete them to bypass the
 drain.
 
+### Scoped scrubber profiles use one family
+
+Releases after 0.26.0 refuse to start when a scrubber profile with a VPN
+`scope` lists a destination of the other address family, sets the other
+family's target, or has no `redirect_route_target` and no target of the scope's
+family. They also refuse a
+`redirect_route_target` equal to one of the scope's `route_targets`. 0.26.0
+accepted these profiles at startup. Settings reload does not reapply scrubber
+profiles, so an invalid edit only blocks that reload until the next restart.
+
+Before upgrading, check each profile with `scope:`. Split a dual-stack scoped
+profile into one profile per family, each with its own `id` and `revision`,
+the matching scope (for example `TRANSIT` and `TRANSIT6`), and only that
+family's target and destinations. Because this changes the profile, first
+withdraw its outstanding diversions with the 0.26.0 controller, as described
+above. Global profiles without `scope` are unchanged.
+
 ### Downgrading with scrubber return legs
 
 Releases after 0.25.0 add the optional profile `return_leg`
