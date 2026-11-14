@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard's withdrawal confirmations for mitigations, bulk mitigations and
+  scrubber diversions now share one dialog. Titles use sentence case, the reason
+  field reads "Withdrawal reason (optional)", a pending request cannot be
+  repeated or dismissed, and focus returns to the opener after Cancel or Escape
+  and to the page heading or another stable control after a completed withdrawal.
+
 ### Security
 
 - Session cookies are now `Secure` by default unless `auth.mode` is `none`,

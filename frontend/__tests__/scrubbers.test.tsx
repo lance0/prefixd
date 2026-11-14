@@ -184,6 +184,20 @@ describe("diversion withdrawal", () => {
     expect(JSON.parse(controller.calls("POST", "/v1/diversions/operation-1/withdraw")[0].body ?? "")).toEqual({})
   })
 
+  it("closes after an accepted withdrawal while the diversions refresh is still pending", async () => {
+    await render()
+    controller.route("POST", "/v1/diversions/operation-1/withdraw", () => json({ ...active, status: "withdrawing" }, 202))
+    const dialog = await openWithdraw()
+    const refresh = deferred<Response>()
+
+    controller.route("GET", "/v1/diversions", () => refresh.promise)
+    fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" }))
+    await screen.findByText("Withdrawal requested. Victim exclusion remains until local absence is confirmed.")
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+    refresh.resolve(json([{ ...active, status: "withdrawing" }]))
+    await settle()
+  })
+
   it.each([409, 500])("shows a failed withdrawal (%i) and keeps the diversion row", async status => {
     await render()
     controller.route("POST", "/v1/diversions/operation-1/withdraw", () => json({ error: "withdrawal not accepted" }, status))
