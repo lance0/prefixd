@@ -5,6 +5,9 @@ http:
   listen: "0.0.0.0:8080"
   auth:
     mode: credentials
+  # The Compose quickstart serves plain HTTP on port 80. Remove this line once
+  # browsers reach prefixd over HTTPS, so session cookies are Secure.
+  secure_cookies: false
   # cors_origin: "http://localhost:3000"  # Only needed without a reverse proxy
   rate_limit:
     events_per_second: 100

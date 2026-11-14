@@ -396,8 +396,8 @@ installations must set that variable for the deployment's database.
 
 **Check session cookies:**
 - Browser: Check Developer Tools > Application > Cookies
-- Ensure `session` cookie is set after login
-- If using HTTPS, ensure TLS is correctly terminated and requests include the `Secure` session cookie flag
+- Ensure the `id` session cookie is set after login
+- If login returns 200 but `/v1/auth/me` returns 401 and the dashboard loops back to sign-in over plain HTTP, the browser is withholding the `Secure` cookie. Serve HTTPS or set `http.secure_cookies: false`; see [Secure session cookies](upgrading.md#secure-session-cookies)
 
 ### API Bearer Token Rejected
 
