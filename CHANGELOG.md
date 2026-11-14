@@ -7,13 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- A scrubber profile with a VPN `scope` must use only that scope's address
+  family. 0.26.0 started with a scoped profile that also listed destinations or
+  a target of the other family; startup now refuses it and names the profile
+  and field. Split each such profile into one profile per family, for example
+  `scope: TRANSIT` and `scope: TRANSIT6`, and remove the other family's target
+  and destinations from each. Startup also refuses a `redirect_route_target`
+  equal to one of the scope's `route_targets`; choose the scrubbing VRF's own
+  route target. Changing a profile requires draining its outstanding
+  diversions with the 0.26.0 controller first; see
+  [scoped scrubber profiles](docs/how-to/upgrading.md#scoped-scrubber-profiles-use-one-family).
+
 ### Fixed
 
-- Refuse scrubber settings at load when a VPN profile names an unknown scope,
-  uses destinations or an IP target outside the scope's address family, or sets
-  a `redirect_route_target` equal to one of the scope's route targets. These
-  profiles previously failed only when a diversion was created, or redirected
-  into the VRF that imports the rule. Fix such a profile before upgrading.
+- Check each VPN scrubber profile against its scope's address family and route
+  targets when settings load. A family mismatch previously surfaced only when a
+  diversion was created, and an action route target equal to a scope route
+  target redirected into the VRF that imports the rule. An unknown profile
+  scope, which 0.26.0 already refused at startup, is now reported with the
+  profile ID.
 
 ## [0.26.0] - 2026-11-12
 

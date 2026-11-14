@@ -46,12 +46,16 @@ scrubber:
 
 For redirect-to-VRF, replace both IP targets with one action route target.
 This VPN-only action requires rustbgpd 0.82.0 and a successful family 13 or 14
-probe for the [configured VPN scope](vpn-flowspec.md#configure-scope):
+probe for the [configured VPN scope](vpn-flowspec.md#configure-scope). A
+scoped profile carries only its scope's address family, so keep only that
+family's destinations; startup refuses a mixed-family scoped profile. Use a
+second profile for the other family:
 
 ```yaml
       scope: TRANSIT
       redirect_route_target: "44407:888"
       # Omit ipv4_target and ipv6_target.
+      destinations: [203.0.113.0/24]
 ```
 
 The configured VPN scope's RD and scope RT (for example `44407:777`) identify

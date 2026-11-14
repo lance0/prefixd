@@ -1790,7 +1790,7 @@ fn vpn_profiles_resolve_their_scope_family_and_action_rt_at_startup() {
     config.profiles[0].scope = "TRANSIT".into();
     // Negative control: profile-local validation alone accepts the unknown scope.
     config.validate().unwrap();
-    assert!(check(&config, &bgp).contains("unknown VPN scope TRANSIT"));
+    assert!(check(&config, &bgp).contains("scrubber profile a: unknown VPN scope TRANSIT"));
 
     bgp.vpn_scopes.insert(
         "TRANSIT".into(),
@@ -1799,18 +1799,68 @@ fn vpn_profiles_resolve_their_scope_family_and_action_rt_at_startup() {
     );
     config.validate_with(&blackhole, &bgp).unwrap();
 
-    let family = |edit: &dyn Fn(&mut ScrubberProfile)| {
-        let mut changed = config.clone();
+    bgp.vpn_scopes.insert(
+        "TRANSIT6".into(),
+        crate::config::parse_yaml("family: ipv6\nrd: '44407:41'\nroute_targets: ['44407:778']")
+            .unwrap(),
+    );
+    let mut ipv6 = config.clone();
+    let p6 = &mut ipv6.profiles[0];
+    p6.scope = "TRANSIT6".into();
+    p6.ipv4_target = None;
+    p6.ipv6_target = Some("2001:db8:ffff::99".parse().unwrap());
+    p6.destinations = vec!["2001:db8:100::/48".parse().unwrap()];
+    ipv6.validate_with(&blackhole, &bgp).unwrap();
+
+    // Negative control for each case: profile-local validation accepts it.
+    let family = |base: &ScrubberConfig, edit: &dyn Fn(&mut ScrubberProfile), expected: &str| {
+        let mut changed = base.clone();
         edit(&mut changed.profiles[0]);
         changed.validate().unwrap();
-        assert!(check(&changed, &bgp).contains("address family of VPN scope TRANSIT"));
+        let error = check(&changed, &bgp);
+        assert!(
+            error.contains(&format!("scrubber profile a: {expected}")),
+            "{error}"
+        );
     };
-    family(&|p| p.destinations = vec!["2001:db8:100::/48".parse().unwrap()]);
-    family(&|p| p.ipv6_target = Some("2001:db8::99".parse().unwrap()));
-    family(&|p| {
-        p.ipv4_target = None;
-        p.ipv6_target = Some("2001:db8::99".parse().unwrap());
-    });
+    let v4 = "VPN scope TRANSIT is ipv4";
+    family(
+        &config,
+        &|p| p.destinations.push("2001:db8:100::/48".parse().unwrap()),
+        &format!("destination 2001:db8:100::/48 is not ipv4; {v4}"),
+    );
+    family(
+        &config,
+        &|p| p.ipv6_target = Some("2001:db8::99".parse().unwrap()),
+        &format!("ipv6_target is set; {v4}"),
+    );
+    family(
+        &config,
+        &|p| {
+            p.ipv4_target = None;
+            p.ipv6_target = Some("2001:db8::99".parse().unwrap());
+        },
+        &format!("ipv4_target is missing; {v4}"),
+    );
+    let v6 = "VPN scope TRANSIT6 is ipv6";
+    family(
+        &ipv6,
+        &|p| p.destinations.push("203.0.113.0/24".parse().unwrap()),
+        &format!("destination 203.0.113.0/24 is not ipv6; {v6}"),
+    );
+    family(
+        &ipv6,
+        &|p| p.ipv4_target = Some("192.0.2.99".parse().unwrap()),
+        &format!("ipv4_target is set; {v6}"),
+    );
+    family(
+        &ipv6,
+        &|p| {
+            p.ipv6_target = None;
+            p.ipv4_target = Some("192.0.2.99".parse().unwrap());
+        },
+        &format!("ipv6_target is missing; {v6}"),
+    );
 
     let profile = &mut config.profiles[0];
     profile.ipv4_target = None;

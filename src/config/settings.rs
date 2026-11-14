@@ -1006,6 +1006,30 @@ observability:
     }
 
     #[test]
+    fn load_refuses_a_mixed_family_scoped_scrubber_profile() {
+        let yaml = |destinations: &str| {
+            MINIMAL_SETTINGS_YAML.replace(
+                "  router_id: \"10.10.0.10\"\n",
+                "  router_id: \"10.10.0.10\"\n  vpn_scopes:\n    TRANSIT: {family: ipv4, rd: '44407:40', route_targets: ['44407:777']}\n",
+            ) + &format!(
+                "scrubber:\n  profiles:\n  - {{id: a, revision: v1, scope: TRANSIT, ipv4_target: 192.0.2.99, \
+                 destinations: {destinations}, router_peers: [192.0.2.2], policy_binding: p, \
+                 qualification_receipt: r, readiness_url: 'https://127.0.0.1:1/ready', \
+                 readiness_token_env: PATH, max_ttl_seconds: 300, max_active: 10, max_new_per_minute: 20}}\n"
+            )
+        };
+        // Negative control: the same profile with only its scope's family loads.
+        load_yaml(&yaml("['203.0.113.0/24']")).unwrap();
+        let error = load_yaml(&yaml("['203.0.113.0/24', '2001:db8:100::/48']"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("scrubber profile a: destination 2001:db8:100::/48 is not ipv4; VPN scope TRANSIT is ipv4"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn removed_keys_are_rejected_by_path_without_values() {
         const SECRET: &str = "removed-key-value-must-not-appear";
         let cases = [

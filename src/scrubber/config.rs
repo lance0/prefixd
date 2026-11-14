@@ -201,24 +201,51 @@ impl ScrubberConfig {
     ) -> Result<()> {
         self.validate()?;
         for profile in &self.profiles {
-            let Some(scope) = bgp.resolve_scope(&profile.scope)? else {
+            let scope = bgp
+                .resolve_scope(&profile.scope)
+                .map_err(|error| match error {
+                    PrefixdError::Config(message) => {
+                        PrefixdError::Config(format!("scrubber profile {}: {message}", profile.id))
+                    }
+                    other => other,
+                })?;
+            let Some(scope) = scope else {
                 continue;
             };
             let ipv4 = scope.identity.family == crate::domain::VpnFlowSpecFamily::Ipv4;
-            let (target, other) = if ipv4 {
-                (profile.ipv4_target, profile.ipv6_target)
+            let (family, target_field, target, other_field, other) = if ipv4 {
+                (
+                    "ipv4",
+                    "ipv4_target",
+                    profile.ipv4_target,
+                    "ipv6_target",
+                    profile.ipv6_target,
+                )
             } else {
-                (profile.ipv6_target, profile.ipv4_target)
+                (
+                    "ipv6",
+                    "ipv6_target",
+                    profile.ipv6_target,
+                    "ipv4_target",
+                    profile.ipv4_target,
+                )
             };
-            if other.is_some()
-                || (profile.redirect_route_target.is_none() && target.is_none())
-                || profile
-                    .destinations
-                    .iter()
-                    .any(|net| net.addr().is_ipv4() != ipv4)
+            let mismatch = if let Some(net) = profile
+                .destinations
+                .iter()
+                .find(|net| net.addr().is_ipv4() != ipv4)
             {
+                Some(format!("destination {net} is not {family}"))
+            } else if profile.redirect_route_target.is_none() && target.is_none() {
+                Some(format!("{target_field} is missing"))
+            } else if other.is_some() {
+                Some(format!("{other_field} is set"))
+            } else {
+                None
+            };
+            if let Some(mismatch) = mismatch {
                 return Err(PrefixdError::Config(format!(
-                    "scrubber profile {}: destinations and target must use the address family of VPN scope {}",
+                    "scrubber profile {}: {mismatch}; VPN scope {} is {family}, so use a separate profile per family",
                     profile.id, profile.scope
                 )));
             }
