@@ -1116,16 +1116,6 @@ allowed_ports:
   tcp: [80, 443]   # HTTP/HTTPS
 ```
 
-### IP Ranges
-
-```yaml
-assets:
-  - ip: "203.0.113.100"
-    range_end: "203.0.113.110"  # 11 IPs
-```
-
-> **NOTE:** This field is not yet implemented and will be silently ignored if specified.
-
 ### Policy Profiles
 
 `policy_profile` accepts `strict`, `normal` or `relaxed` and defaults to `normal`.
@@ -1159,12 +1149,16 @@ playbooks:
 
 ```yaml
 match:
-  vector: udp_flood     # Attack vector
-  source: fastnetmon   # Optional: specific detector
-  protocol: udp        # Optional: protocol filter
+  vector: udp_flood        # Attack vector
+  require_top_ports: false # Optional: match only events that carry top ports
 ```
 
-> **NOTE:** `source` and `protocol` are not yet implemented and will be silently ignored if specified. Only `vector` is currently used for playbook matching.
+Playbooks match on `vector` and `require_top_ports` only. Unknown keys at any
+level of `playbooks.yaml`, including `match.source` and `match.protocol`, are
+refused. At startup the error names the file and the key. A refused reload
+keeps the running playbooks, and the controller log names the key.
+`PUT /v1/config/playbooks` returns `400` naming the key. See
+[unknown playbook keys](../how-to/upgrading.md#unknown-playbook-keys).
 
 ### Actions
 
@@ -1256,19 +1250,10 @@ commented examples: the source-port rule discards and the fragment rule
 polices. The dashboard playbook editor cannot edit multi-rule steps yet; edit
 the file and reload.
 
-### Default Playbook
+### Fallback
 
-Fallback when no playbook matches:
-
-> **NOTE:** This field is not yet implemented and will be silently ignored if specified. Fallback behavior is handled by the built-in `unknown` playbook match.
-
-```yaml
-default_playbook:
-  steps:
-    - action: police
-      rate_bps: 1000000
-      ttl_seconds: 60
-```
+There is no `default_playbook` key; it is refused as an unknown key. Events of
+an unknown vector use the playbook that matches `vector: unknown`.
 
 ### Example Playbooks
 
@@ -1454,5 +1439,8 @@ family-specific source prefix floors, short TTL and independent quota fields,
 plus the [TRANSIT BGP example](../../configs/vpn-scopes.yaml.example).
 
 A scrubber profile's optional `scope` selects the named VPN scope; omission is
-global. Use separate profiles for IPv4 and IPv6 scope names. Scope changes need
+global. Use separate profiles for IPv4 and IPv6 scope names. Settings fail to
+load when a profile names an unknown scope, when its destinations or IP target
+use another address family than the scope, or when its `redirect_route_target`
+equals one of the scope's `route_targets`. Scope changes need
 a drained lifecycle and matching readiness/policy qualification before re-arm.

@@ -7,8 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- A scrubber profile with a VPN `scope` must use only that scope's address
+  family. 0.26.0 started with a scoped profile that also listed destinations or
+  a target of the other family; startup now refuses it and names the profile
+  and field. Split each such profile into one profile per family, for example
+  `scope: TRANSIT` and `scope: TRANSIT6`, and remove the other family's target
+  and destinations from each. Startup also refuses a `redirect_route_target`
+  equal to one of the scope's `route_targets`; choose the scrubbing VRF's own
+  route target. Changing a profile requires draining its outstanding
+  diversions with the 0.26.0 controller first; see
+  [scoped scrubber profiles](docs/how-to/upgrading.md#scoped-scrubber-profiles-use-one-family).
+
 ### Changed
 
+- **Breaking:** `playbooks.yaml`, `PUT /v1/config/playbooks` and the
+  dashboard YAML editor refuse unknown keys at every level and name the key.
+  The unimplemented `match.source`, `match.protocol` and `default_playbook`
+  keys were previously ignored, so a playbook scoped to one detector applied to
+  all of them. Startup errors now name the configuration file that failed.
+- The configuration reference no longer documents the unimplemented inventory
+  `range_end` field.
 - The dashboard's withdrawal confirmations for mitigations, bulk mitigations and
   scrubber diversions now share one dialog. Titles use sentence case, the reason
   field reads "Withdrawal reason (optional)", a pending request cannot be
@@ -38,6 +58,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   withdraw a single mitigation. A test now fails when a `/v1` route is missing
   from the OpenAPI document or an OpenAPI operation has no route; the WebSocket
   feed is the only exception.
+- Check each VPN scrubber profile against its scope's address family and route
+  targets when settings load. A family mismatch previously surfaced only when a
+  diversion was created, and an action route target equal to a scope route
+  target redirected into the VRF that imports the rule. An unknown profile
+  scope, which 0.26.0 already refused at startup, is now reported with the
+  profile ID.
+
+### Upgrade notes
+
+- Before upgrading, rename `correlation_override:` to `correlation:` in
+  `playbooks.yaml`. ADR 022 and the 0.18.0 entry below documented the wrong
+  key, which earlier releases ignored. Delete `match.source`, `match.protocol`,
+  `default_playbook` and any other key not in the configuration reference.
+  Otherwise startup fails and reload is refused, naming the key. See
+  [unknown playbook keys](docs/how-to/upgrading.md#unknown-playbook-keys).
 
 ## [0.26.0] - 2026-11-12
 
