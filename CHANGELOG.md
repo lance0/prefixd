@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clients times the old cap. If you set a low cap to protect PostgreSQL or the
   speaker, re-evaluate it; see
   [per-class rate limits](docs/how-to/upgrading.md#per-class-rate-limits).
+- A scrubber profile with a VPN `scope` must use only that scope's address
+  family. 0.26.0 started with a scoped profile that also listed destinations or
+  a target of the other family; startup now refuses it and names the profile
+  and field. Split each such profile into one profile per family, for example
+  `scope: TRANSIT` and `scope: TRANSIT6`, and remove the other family's target
+  and destinations from each. Startup also refuses a `redirect_route_target`
+  equal to one of the scope's `route_targets`; choose the scrubbing VRF's own
+  route target. Changing a profile requires draining its outstanding
+  diversions with the 0.26.0 controller first; see
+  [scoped scrubber profiles](docs/how-to/upgrading.md#scoped-scrubber-profiles-use-one-family).
 
 ### Known limitations
 
@@ -56,6 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   withdraw a single mitigation. A test now fails when a `/v1` route is missing
   from the OpenAPI document or an OpenAPI operation has no route; the WebSocket
   feed is the only exception.
+- Check each VPN scrubber profile against its scope's address family and route
+  targets when settings load. A family mismatch previously surfaced only when a
+  diversion was created, and an action route target equal to a scope route
+  target redirected into the VRF that imports the rule. An unknown profile
+  scope, which 0.26.0 already refused at startup, is now reported with the
+  profile ID.
 
 ### Security
 
