@@ -7,16 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- `http.rate_limit.events_per_second` and `burst` now size one bucket per
+  request class and per client instead of one bucket for the whole listener.
+  Total admitted load can reach the number of classes times the number of
+  clients times the old cap. If you set a low cap to protect PostgreSQL or the
+  speaker, re-evaluate it; see
+  [per-class rate limits](docs/how-to/upgrading.md#per-class-rate-limits).
+
+### Known limitations
+
+- The client key is the TCP peer address, and prefixd does not read forwarded
+  headers. The default Compose stack doesn't publish port 8080, so prefixd sees
+  two clients: nginx, which carries every detector and CLI request, and the
+  dashboard container, which carries every browser session. All detectors
+  therefore share one `ingest` bucket, and all operators share one bucket per
+  class. Class isolation is what keeps a detector flood or login storm from
+  returning 429 to withdrawals in that topology.
+- 429 responses keep the `retry_after_seconds` body field and send no
+  `Retry-After` header.
+
+### Added
+
+- `prefixd_http_rate_limited_total{class}` counts requests rejected with 429,
+  by request class.
+
 ### Fixed
 
 - **Rate limiting no longer lets a detector flood block operators.** The single
   global token bucket is replaced by one bucket per request class (`ingest`,
-  `signals`, `mutation`, `read`) and per client address. Withdrawals never
-  share a bucket with ingestion. `GET /v1/health`, `GET /v1/ready` and
-  `/metrics` are exempt. `http.rate_limit.events_per_second` and `burst` keep
-  their meaning but now size each class and client bucket instead of the whole
-  listener. Clients behind a reverse proxy share the proxy's buckets.
-- New `prefixd_http_rate_limited_total{class}` counter.
+  `signals`, `mutation`, `read`, `auth`) and per client address. Withdrawals
+  never share a bucket with ingestion, and login and requests to unknown routes
+  use `auth`, not `mutation`. `GET /v1/health`, `GET /v1/ready` and `/metrics`
+  are exempt. 429 rejections log the class and client.
 - The API reference no longer documents `X-RateLimit-*` headers, which were
   never sent, and shows the actual `"rate_limited"` error string.
 

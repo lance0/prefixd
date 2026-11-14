@@ -104,7 +104,15 @@ http:
     burst: 500              # Burst capacity
 ```
 
-> **Note:** Rate limiting is always on; omitted keys use the defaults above. Each request class (`ingest`, `signals`, `mutation`, `read`) has its own bucket of this size per client address, so a detector flood cannot exhaust withdrawals or other operator requests. `GET /v1/health`, `GET /v1/ready` and `/metrics` are exempt. A rejected request gets `429 Too Many Requests` with `{"error":"rate_limited","retry_after_seconds":N}`. See [rate limiting](api.md#rate-limiting) for the class of each route.
+> **Note:** Rate limiting is always on; omitted keys use the defaults above. Each request class (`ingest`, `signals`, `mutation`, `read`, `auth`) has its own bucket of this size per client address, so a detector flood cannot exhaust withdrawals or other operator requests. `GET /v1/health`, `GET /v1/ready` and `/metrics` are exempt. A rejected request gets `429 Too Many Requests` with `{"error":"rate_limited","retry_after_seconds":N}`. See [rate limiting](api.md#rate-limiting) for the class of each route.
+
+The client is the TCP peer address. The default Compose stack doesn't publish
+port 8080, so prefixd sees two clients: nginx, which carries detectors and CLI
+traffic, and the dashboard container, which carries every browser session. All
+detectors behind nginx share one `ingest` bucket, and all operators share one
+bucket per class. Class isolation, not per-client keys, is what keeps a detector
+flood or a login storm from returning 429 to withdrawals there. Size `burst` and
+`events_per_second` for the combined detector load through nginx.
 
 ### BGP
 

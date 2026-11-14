@@ -661,6 +661,21 @@ This queue covers withdrawals. Durable create/replace intent and target/process
 generation fencing remain separate work; it is not a complete announcement
 ledger or an active-active controller protocol.
 
+## Per-class rate limits
+
+`http.rate_limit.events_per_second` and `burst` used to size one bucket for the
+whole listener. They now size one bucket per request class (`ingest`, `signals`,
+`mutation`, `read`, `auth`) and per client address; see
+[rate limiting](../reference/api.md#rate-limiting). The keys and defaults are
+unchanged, but total admitted load can reach the number of classes times the
+number of clients times the old cap. If you set a low cap to protect PostgreSQL
+or the speaker, re-evaluate it before upgrading.
+
+The client is the TCP peer address. In the default Compose stack every detector
+and CLI request arrives from nginx and every browser session from the dashboard
+container, so those groups each share one bucket per class; see the
+[configuration note](../reference/configuration.md#rate-limiting).
+
 ---
 
 ## Docker Compose Upgrade

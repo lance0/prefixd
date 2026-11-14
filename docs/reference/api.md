@@ -3435,8 +3435,9 @@ or a probe:
 |-------|----------|
 | `ingest` | `POST /v1/events`, `POST /v1/events/batch` |
 | `signals` | `POST /v1/signals/*` |
-| `mutation` | Every other `POST`, `PUT` and `DELETE`, including withdrawals and login |
+| `mutation` | Every other `POST`, `PUT` and `DELETE`, including withdrawals |
 | `read` | `GET` requests, including `GET /v1/health/detail` |
+| `auth` | `POST /v1/auth/login` and requests to unknown routes, whatever the method |
 | exempt | `GET /v1/health`, `GET /v1/ready`, `GET /metrics` |
 
 The client is the TCP peer address; IPv6 peers share one bucket per /64.

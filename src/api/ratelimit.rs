@@ -21,14 +21,23 @@ pub enum RateLimitClass {
     Ingest,
     /// Detector and corroborator adapters: `POST /v1/signals/*`.
     Signals,
-    /// Every other `POST`, `PUT` and `DELETE`, including withdrawals and login.
+    /// Every other matched `POST`, `PUT` and `DELETE`, including withdrawals.
     Mutation,
-    /// `GET` and other safe methods.
+    /// `GET` and other safe methods on matched routes.
     Read,
+    /// `POST /v1/auth/login` and unmatched routes of any method, so a login
+    /// storm or junk requests through a shared proxy never reach `mutation`.
+    Auth,
 }
 
 impl RateLimitClass {
-    pub const ALL: [Self; 4] = [Self::Ingest, Self::Signals, Self::Mutation, Self::Read];
+    pub const ALL: [Self; 5] = [
+        Self::Ingest,
+        Self::Signals,
+        Self::Mutation,
+        Self::Read,
+        Self::Auth,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -36,20 +45,23 @@ impl RateLimitClass {
             Self::Signals => "signals",
             Self::Mutation => "mutation",
             Self::Read => "read",
+            Self::Auth => "auth",
         }
     }
 
     /// `None` for exempt probes and the metrics scrape.
     fn of(method: &Method, route: Option<&str>) -> Option<Self> {
-        if matches!(route, Some("/v1/health" | "/v1/ready" | "/metrics")) {
-            return None;
-        }
+        let route = match route {
+            Some("/v1/health" | "/v1/ready" | "/metrics") => return None,
+            None | Some("/v1/auth/login") => return Some(Self::Auth),
+            Some(route) => route,
+        };
         if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
             return Some(Self::Read);
         }
         Some(match route {
-            Some(r) if r == "/v1/events" || r.starts_with("/v1/events/") => Self::Ingest,
-            Some(r) if r.starts_with("/v1/signals/") => Self::Signals,
+            r if r == "/v1/events" || r.starts_with("/v1/events/") => Self::Ingest,
+            r if r.starts_with("/v1/signals/") => Self::Signals,
             _ => Self::Mutation,
         })
     }
@@ -111,6 +123,9 @@ impl RateLimiter {
             state
                 .map
                 .retain(|_, b| now.duration_since(b.last_update) < refill);
+            // retain keeps the allocation; release it after a surge of clients.
+            let keep = (state.map.len() * 2).max(64);
+            state.map.shrink_to(keep);
             state.last_prune = now;
         }
 
@@ -156,6 +171,7 @@ pub async fn rate_limit_middleware(
             HTTP_RATE_LIMITED.with_label_values(&[class.as_str()]).inc();
             tracing::warn!(
                 class = class.as_str(),
+                client = ?client,
                 retry_after_seconds = retry_after,
                 "rate limit exceeded"
             );
@@ -209,7 +225,7 @@ mod tests {
         let other = Some("192.0.2.2".parse().unwrap());
         while limiter.check(Ingest, detector).is_ok() {}
         assert!(limiter.check(Ingest, detector).is_err());
-        for class in [Signals, Mutation, Read] {
+        for class in [Signals, Mutation, Read, Auth] {
             assert!(limiter.check(class, detector).is_ok(), "{class:?}");
         }
         assert!(limiter.check(Ingest, other).is_ok());
@@ -250,15 +266,17 @@ mod tests {
                 Some("/v1/diversions/{id}/withdraw"),
                 Some(Mutation),
             ),
-            (Method::POST, Some("/v1/auth/login"), Some(Mutation)),
+            (Method::POST, Some("/v1/auth/login"), Some(Auth)),
             (
                 Method::DELETE,
                 Some("/v1/safelist/{*prefix}"),
                 Some(Mutation),
             ),
             (Method::GET, Some("/v1/health/detail"), Some(Read)),
-            (Method::POST, None, Some(Mutation)),
-            (Method::GET, None, Some(Read)),
+            (Method::POST, Some("/v1/auth/logout"), Some(Mutation)),
+            (Method::POST, None, Some(Auth)),
+            (Method::GET, None, Some(Auth)),
+            (Method::DELETE, None, Some(Auth)),
         ];
         for (method, route, class) in cases {
             assert_eq!(

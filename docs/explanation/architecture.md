@@ -79,9 +79,9 @@ throughout the facelift.
 
 ### Event ingestion and creation
 
-1. HTTP middleware applies the shared request-body and rate limits. The handler
-   authenticates and validates the event, including its timestamp, source, victim
-   address, vector and supported action.
+1. HTTP middleware applies the request-body limit and the `ingest` rate-limit
+   bucket for the client. The handler authenticates and validates the event,
+   including its timestamp, source, victim address, vector and supported action.
 2. A previously stored ban with the same source and external event ID returns a
    duplicate conflict. A distinct event may extend an existing canonical owner;
    these are different operations.
