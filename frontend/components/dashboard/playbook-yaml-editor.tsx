@@ -53,6 +53,11 @@ function parseYaml(text: string): ParsedPlaybooks {
     return { error: `YAML parse error: ${e instanceof Error ? e.message : String(e)}` }
   }
 
+  // Only `playbooks` is sent, so any other top-level key would be dropped without a word.
+  const unknown = isMapping(document) ? Object.keys(document).find((key) => key !== "playbooks") : undefined
+
+  if (unknown !== undefined) return { error: `unknown top-level key \`${unknown}\`; only 'playbooks' is allowed` }
+
   const entries = isMapping(document) ? document.playbooks : undefined
 
   if (!Array.isArray(entries)) {

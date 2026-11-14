@@ -2794,8 +2794,8 @@ Content-Type: application/json
 }
 ```
 
-A body that does not decode, such as an unknown key in a `rules` entry, also
-returns `400` with the decoder's reason as the only entry in `errors`. The
+A body that does not decode, such as an unknown key at any level of a
+playbook, also returns `400` with the decoder's reason as the only entry in `errors`. The
 dashboard's playbook editors show these entries verbatim.
 
 ### Alerting Config
