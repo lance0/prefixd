@@ -113,6 +113,7 @@ Follow development plans, contribution guidance and release history.
 | [Changelog](../CHANGELOG.md) | Release history and unreleased changes. |
 | [Contributing](../CONTRIBUTING.md) | Development workflow and checks. |
 | [Release checklist](project/release-checklist.md) | Release preconditions, version bump and publication steps. |
+| [v1.0 release gates](project/v1-gates.md) | The five gates for prefixd 1.0, with each gate's owner, required evidence and status. |
 | [Redirect-to-IP contract plan](project/scrubber-diversion-contract.md) | Speaker contract, action vectors and failure qualification for guarded scrubber diversion and its return leg. |
 | [Security](../SECURITY.md) | Reporting and security guidance. |
 

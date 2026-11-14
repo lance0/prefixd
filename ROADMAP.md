@@ -114,8 +114,8 @@ automatic escalation are later slices, each requiring its own qualification.
 The [speaker contract plan](docs/project/scrubber-diversion-contract.md) records
 the exact action vectors, failure cases and remaining open checks.
 
-[ADR 026](docs/adr/026-facelift-framework-scope.md) defers framework adoption.
-Loco or an ORM migration is not a prerequisite for these changes.
+[ADR 026](docs/adr/026-facelift-framework-scope.md), as amended, cancels the Loco
+migration. No framework or ORM migration is a prerequisite for these changes.
 
 prefixd remains a control-plane policy controller: packet scrubbing, detection
 algorithms and L7/WAF analysis belong to other systems. Diversion is

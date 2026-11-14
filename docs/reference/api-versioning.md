@@ -10,6 +10,8 @@ API versions use a simple integer prefix: `/v1/`, `/v2/`, etc.
 
 The current stable version is **v1**.
 
+Before prefixd 1.0.0, a minor release can still make a breaking change under `/v1/` and lists it under the release's Upgrade notes; see the [v1.0 release gates](../project/v1-gates.md#api-stability-conflict).
+
 ## Backward Compatibility
 
 Within a major version (e.g., v1), the following changes are considered **non-breaking** and may be introduced at any time:
