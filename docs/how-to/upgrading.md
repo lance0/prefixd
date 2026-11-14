@@ -683,6 +683,25 @@ This queue covers withdrawals. Durable create/replace intent and target/process
 generation fencing remain separate work; it is not a complete announcement
 ledger or an active-active controller protocol.
 
+## Secure session cookies
+
+Session cookies are now `Secure` by default unless `auth.mode` is `none`,
+including behind a TLS-terminating proxy. Previously only native `http.tls` set
+the flag. Browsers do not send a Secure cookie over plain HTTP, so a deployment
+reached over `http://` that keeps an older configuration shows this symptom:
+`POST /v1/auth/login` returns 200, then `/v1/auth/me` returns 401 and the
+dashboard loops back to sign-in.
+
+Fix it in one of two ways:
+
+- Serve the dashboard and API over HTTPS, for example
+  [through nginx](deployment.md#https-via-nginx-recommended-for-production).
+- Set `http.secure_cookies: false` and restart the controller. The shipped
+  Compose configurations already do this for the plain-HTTP quickstart.
+
+The controller logs the effective value at startup as `secure_cookies` on the
+`session cookies` event.
+
 ---
 
 ## Docker Compose Upgrade

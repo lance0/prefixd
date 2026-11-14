@@ -20,6 +20,18 @@ pub struct ReloadResponse {
     timestamp: String,
 }
 
+/// Reload inventory, playbooks, correlation and alerting from disk (admin only)
+#[utoipa::path(
+    post,
+    path = "/v1/config/reload",
+    tag = "config",
+    responses(
+        (status = 200, description = "Configuration reloaded", body = ReloadResponse),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "Admin role required"),
+        (status = 500, description = "Reload failed; files reloaded before the failing one stay applied")
+    )
+)]
 pub async fn reload_config(
     State(state): State<Arc<AppState>>,
     auth_session: AuthSession,
