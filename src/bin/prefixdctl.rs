@@ -1444,6 +1444,8 @@ async fn cmd_speaker_routes(client: &Client, format: OutputFormat) -> Result<(),
 #[derive(Debug, Deserialize, Serialize)]
 struct ReloadResponse {
     reloaded: Vec<String>,
+    #[serde(default)]
+    restart_required: Vec<String>,
     timestamp: String,
 }
 
@@ -1458,6 +1460,9 @@ async fn cmd_reload(client: &Client, format: OutputFormat) -> Result<(), String>
         }
         OutputFormat::Table => {
             println!("Reloaded: {}", resp.reloaded.join(", "));
+            if !resp.restart_required.is_empty() {
+                println!("Restart required: {}", resp.restart_required.join(", "));
+            }
             println!("Timestamp: {}", resp.timestamp);
         }
     }

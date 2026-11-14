@@ -330,15 +330,23 @@ prefixdctl safelist remove 10.0.0.1/32
 
 ### Reload Configuration
 
-Hot-reload inventory and playbooks without restarting:
+Hot-reload inventory, playbooks, correlation and alerting without restarting.
+The reload is all or nothing. `Restart required:` lists changed `prefixd.yaml`
+keys that apply only after a restart, and appears only when there are any:
 
 ```bash
 prefixdctl reload
 
 # Example output:
-# Configuration reloaded
-# Inventory: 150 customers, 2340 assets
-# Playbooks: 12 policies
+# Reloaded: inventory, playbooks, correlation
+# Restart required: timers.reconciliation_interval_seconds
+# Timestamp: 2026-11-14T12:00:00.000000+00:00
+```
+
+When a file is invalid, nothing is published and the command exits nonzero:
+
+```text
+error: 422 Unprocessable Entity: reload failed: playbooks.yaml is invalid: <loader error>; running configuration unchanged
 ```
 
 ### Show Applied Migrations

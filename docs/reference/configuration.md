@@ -1164,7 +1164,8 @@ match:
 Playbooks match on `vector` and `require_top_ports` only. Unknown keys at any
 level of `playbooks.yaml`, including `match.source` and `match.protocol`, are
 refused. At startup the error names the file and the key. A refused reload
-keeps the running playbooks, and the controller log names the key.
+keeps the running configuration and returns `422` naming `playbooks.yaml` and
+the key.
 `PUT /v1/config/playbooks` returns `400` naming the key. See
 [unknown playbook keys](../how-to/upgrading.md#unknown-playbook-keys).
 
@@ -1359,7 +1360,31 @@ storage:
 
 ## Hot Reload
 
-Inventory and playbooks can be reloaded without restart:
+`POST /v1/config/reload` reloads exactly these sections, all or nothing:
+
+- `inventory.yaml`
+- `playbooks.yaml`, validated against the running settings and speaker
+- correlation, from `correlation.yaml` or, without it, the `correlation`
+  section of `prefixd.yaml`
+- alerting, from `alerting.yaml` only
+
+Every present file, including `prefixd.yaml`, is loaded and validated before any
+section is published. A failed reload leaves all of them unchanged. Every other
+`prefixd.yaml` key, including `alerting` when there is no `alerting.yaml`, is
+read only at startup; the response's `restart_required` lists the ones that
+differ from the running settings.
+
+- Startup adds `safelist.prefixes` entries but never deletes them, so removing
+  one from the file does not remove it on restart; use
+  `DELETE /v1/safelist/{prefix}`.
+- Before changing `pop`, the BGP speaker target or `mode`, follow the
+  [upgrade guide](../how-to/upgrading.md#speaker-ownership-upgrade).
+- `restart_required` compares file contents only; it does not detect changed
+  environment-variable overrides such as `DATABASE_URL` or token values.
+
+A file that fails to load or validate returns 422 with an error naming it. Loader
+detail is included for `inventory.yaml` and `playbooks.yaml` only; for other
+files, which can hold secrets, see the controller log.
 
 ```bash
 # CLI
@@ -1368,8 +1393,6 @@ prefixdctl reload
 # API
 curl -X POST http://localhost/v1/config/reload
 ```
-
-Note: `prefixd.yaml` changes require restart.
 
 ---
 

@@ -1183,8 +1183,67 @@ export async function getPops(): Promise<PopInfo[]> {
   return fetchApi<PopInfo[]>("/v1/pops")
 }
 
-export async function reloadConfig(): Promise<void> {
-  await fetchApi("/v1/config/reload", { method: "POST" })
+export interface ReloadResponse {
+  reloaded: string[]
+  /** Changed `prefixd.yaml` keys that apply only after a restart. */
+  restart_required: string[]
+  timestamp: string
+}
+
+export async function reloadConfig(): Promise<ReloadResponse> {
+  return fetchApi<ReloadResponse>("/v1/config/reload", { method: "POST" })
+}
+
+export interface ReloadStatus {
+  tone: "ok" | "warning" | "error"
+  text: string
+}
+
+/** The status line after a reload: keys still waiting on a restart, or the controller's reason. */
+export function reloadStatus(outcome: ReloadResponse | Error): ReloadStatus {
+  if (outcome instanceof Error) {
+    const reason = serverErrors(outcome.message).join("; ").replace(/^reload failed[:;]\s*/i, "")
+
+    return { tone: "error", text: `Reload failed: ${reason}` }
+  }
+
+  if (outcome.restart_required.length > 0) {
+    return { tone: "warning", text: `Reloaded; restart required for ${outcome.restart_required.join(", ")}` }
+  }
+
+  return { tone: "ok", text: "Configuration reloaded" }
+}
+
+export const reloadStatusClass: Record<ReloadStatus["tone"], string> = {
+  ok: "text-sm text-muted-foreground",
+  warning: "text-sm text-warning",
+  error: "text-sm text-destructive",
+}
+
+/**
+ * The controller's reasons from a failed request, verbatim: the `errors` list a playbook PUT
+ * returns, an `error` message, or the raw failure text.
+ */
+export function serverErrors(message: string): string[] {
+  const body = message.replace(/^API error \d+: /, "")
+  let parsed: JsonValue
+
+  try {
+    // SAFETY: JSON.parse yields only JSON values; each field is checked before use.
+    parsed = JSON.parse(body) as JsonValue
+  } catch {
+    return [message]
+  }
+
+  if (parsed instanceof Object && !Array.isArray(parsed)) {
+    const list = parsed.errors
+
+    if (Array.isArray(list) && list.length > 0) return list.map(String)
+
+    if (parsed.error != null) return [String(parsed.error)]
+  }
+
+  return [message]
 }
 
 // Parallel fetch for dashboard data (async-parallel pattern)
