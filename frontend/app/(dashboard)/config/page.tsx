@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useConfigSettings, useConfigPlaybooks } from "@/hooks/use-api"
-import { reloadConfig, updatePlaybooks, type ConfigPlaybook } from "@/lib/api"
+import { reloadConfig, reloadStatus, reloadStatusClass, updatePlaybooks, type ConfigPlaybook, type ReloadStatus } from "@/lib/api"
 import { usePermissions } from "@/hooks/use-permissions"
 import { useTabParam } from "@/hooks/use-tab-param"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -30,7 +30,7 @@ export default function ConfigPage() {
   const { mutate } = useSWRConfig()
   const { canReloadConfig, canEditPlaybooks } = usePermissions()
   const [reloading, setReloading] = useState(false)
-  const [reloadResult, setReloadResult] = useState<string | null>(null)
+  const [reloadResult, setReloadResult] = useState<ReloadStatus | null>(null)
   const [saving, setSaving] = useState(false)
   const [playbookView, setPlaybookView] = useState<"form" | "yaml">("form")
 
@@ -39,12 +39,13 @@ export default function ConfigPage() {
     setReloadResult(null)
 
     try {
-      await reloadConfig()
+      const result = reloadStatus(await reloadConfig())
       await Promise.all([mutate("config-settings"), mutate("config-playbooks"), mutate("config-inventory")])
-      setReloadResult("Config reloaded successfully")
-      setTimeout(() => setReloadResult(null), 5000)
+      setReloadResult(result)
+      // Keys waiting on a restart stay visible until the next reload.
+      if (result.tone === "ok") setTimeout(() => setReloadResult(null), 5000)
     } catch (e) {
-      setReloadResult(`Reload failed: ${e instanceof Error ? e.message : "unknown error"}`)
+      setReloadResult(reloadStatus(e instanceof Error ? e : new Error(String(e))))
     } finally {
       setReloading(false)
     }
@@ -74,8 +75,8 @@ export default function ConfigPage() {
         actions={
           <>
             {reloadResult && (
-              <span role="status" className={`text-sm ${reloadResult.includes("failed") ? "text-destructive" : "text-muted-foreground"}`}>
-                {reloadResult}
+              <span role="status" className={reloadStatusClass[reloadResult.tone]}>
+                {reloadResult.text}
               </span>
             )}
             {canReloadConfig && (
@@ -91,7 +92,7 @@ export default function ConfigPage() {
                       Reload
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>Hot-reload inventory and playbooks from disk</TooltipContent>
+                  <TooltipContent>Hot-reload inventory, playbooks, correlation and alerting from disk</TooltipContent>
                 </Tooltip>
               </TooltipProvider>
             )}

@@ -2978,10 +2978,25 @@ POST /v1/config/reload
 ```
 
 **Admin only.** Loads and validates every present file before publishing any,
-so a failed reload (500) leaves the running configuration unchanged.
+so a failed reload leaves the running configuration unchanged.
 `reloaded` lists the sections published. `restart_required` lists dotted
 `prefixd.yaml` keys whose file value differs from the running settings but are
-read only at startup; it names keys, never values.
+read only at startup; it names keys, never values. A key added or removed under
+a section, such as a map entry, reports the section's path.
+
+**Response (422 Unprocessable Entity):** a present file failed to load or
+validate. The error names the file. It includes the loader detail only for
+`inventory.yaml` and `playbooks.yaml`; for `prefixd.yaml`, `correlation.yaml`
+and `alerting.yaml` it points to the controller log, because loader errors can
+quote secret values.
+
+```json
+{
+  "error": "reload failed: prefixd.yaml is invalid; running configuration unchanged; see controller log"
+}
+```
+
+An unexpected failure returns 500 with the same shape.
 
 ---
 

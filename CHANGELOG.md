@@ -7,16 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The `POST /v1/config/reload` response adds `restart_required`, the dotted
+  `prefixd.yaml` keys that differ from the running settings but take effect
+  only after a restart. `prefixdctl reload` prints them as `Restart required:`,
+  the dashboard shows them after a reload, and the endpoint is now in OpenAPI.
+
+### Changed
+
+- A present `prefixd.yaml` that fails to load now fails `POST
+  /v1/config/reload` even when `correlation.yaml` supplies correlation.
+- A failed reload returns 422 for an invalid file and 500 for an unexpected
+  error, with an `error` message naming the file, instead of an empty 500.
+  Loader detail is echoed only for `inventory.yaml` and `playbooks.yaml`.
+  `prefixdctl reload` and the dashboard show the message.
+- Reload applies the alerting editor's validation to `alerting.yaml`, so an
+  empty webhook URL or missing credential fails the reload instead of
+  replacing working alerting.
+
 ### Fixed
 
 - `POST /v1/config/reload` loads and validates inventory, playbooks,
   `prefixd.yaml`, correlation and alerting before publishing any of them. A
-  failed playbook check previously left the new inventory live. A present
-  `prefixd.yaml` that fails to load now fails the reload even when
-  `correlation.yaml` exists.
-- The reload response adds `restart_required`, the dotted `prefixd.yaml` keys
-  that differ from the running settings but take effect only after a restart.
-  `prefixdctl reload` prints them, and the endpoint is now in OpenAPI.
+  failed playbook check previously left the new inventory live. A reload
+  canceled mid-publish can no longer leave only some sections published, and
+  a concurrent correlation edit can no longer be overwritten by the file it
+  replaced.
 
 ## [0.26.0] - 2026-11-12
 

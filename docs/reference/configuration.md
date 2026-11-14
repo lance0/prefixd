@@ -1370,6 +1370,18 @@ section is published. A failed reload leaves all of them unchanged. Every other
 read only at startup; the response's `restart_required` lists the ones that
 differ from the running settings.
 
+- Startup adds `safelist.prefixes` entries but never deletes them, so removing
+  one from the file does not remove it on restart; use
+  `DELETE /v1/safelist/{prefix}`.
+- Before changing `pop`, the BGP speaker target or `mode`, follow the
+  [upgrade guide](../how-to/upgrading.md#speaker-ownership-upgrade).
+- `restart_required` compares file contents only; it does not detect changed
+  environment-variable overrides such as `DATABASE_URL` or token values.
+
+A file that fails to load or validate returns 422 with an error naming it. Loader
+detail is included for `inventory.yaml` and `playbooks.yaml` only; for other
+files, which can hold secrets, see the controller log.
+
 ```bash
 # CLI
 prefixdctl reload
@@ -1377,7 +1389,6 @@ prefixdctl reload
 # API
 curl -X POST http://localhost/v1/config/reload
 ```
-
 
 ---
 

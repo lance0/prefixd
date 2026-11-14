@@ -2,15 +2,17 @@ use axum::{
     Json,
     extract::State,
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::ToSchema;
 
+use super::ErrorResponse;
 use crate::AppState;
 use crate::api::auth::{require_auth, require_role};
 use crate::auth::AuthSession;
+use crate::state::ReloadError;
 
 #[derive(Serialize, ToSchema)]
 pub struct ReloadResponse {
@@ -30,15 +32,16 @@ pub struct ReloadResponse {
     responses(
         (status = 200, description = "Reloaded sections and restart-required keys", body = ReloadResponse),
         (status = 401, description = "Not authenticated"),
-        (status = 403, description = "Insufficient permissions"),
-        (status = 500, description = "Reload failed; running configuration unchanged")
+        (status = 403, description = "Admin role required"),
+        (status = 422, description = "A configuration file is invalid; running configuration unchanged", body = ErrorResponse),
+        (status = 500, description = "Reload failed; running configuration unchanged", body = ErrorResponse)
     )
 )]
 pub async fn reload_config(
     State(state): State<Arc<AppState>>,
     auth_session: AuthSession,
     headers: HeaderMap,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<Response, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
     let _operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
@@ -52,14 +55,26 @@ pub async fn reload_config(
                 reloaded: report.reloaded,
                 restart_required: report.restart_required,
                 timestamp: chrono::Utc::now().to_rfc3339(),
-            }))
+            })
+            .into_response())
         }
         Err(e) => {
             tracing::error!(target: "prefixd::api::handlers", error = %e, "reload_config failed");
             crate::observability::CONFIG_RELOADS
                 .with_label_values(&["error"])
                 .inc();
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let status = match e {
+                ReloadError::Invalid { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+                ReloadError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            Ok((
+                status,
+                Json(ErrorResponse {
+                    error: e.public_message(),
+                    retry_after_seconds: None,
+                }),
+            )
+                .into_response())
         }
     }
 }
@@ -579,6 +594,10 @@ pub async fn update_correlation_config(
             .into_response());
     }
 
+    // Hold the write guard across save and publish, as reload does, so a
+    // concurrent reload cannot publish the file this edit replaced.
+    let mut correlation_guard = state.correlation_config.write().await;
+
     // Atomic save to correlation.yaml
     let correlation_path = state.correlation_path();
     new_config.save(&correlation_path).map_err(|e| {
@@ -587,11 +606,9 @@ pub async fn update_correlation_config(
     })?;
 
     // Hot-swap in-memory config
-    let previous_enabled = {
-        let current = state.correlation_config.read().await;
-        current.enabled
-    };
-    *state.correlation_config.write().await = new_config.clone();
+    let previous_enabled = correlation_guard.enabled;
+    *correlation_guard = new_config.clone();
+    drop(correlation_guard);
     *state.correlation_loaded_at.write().await = chrono::Utc::now();
 
     // Audit log

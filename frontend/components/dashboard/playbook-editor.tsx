@@ -12,7 +12,7 @@ import { EmptyState } from "@/components/dashboard/states"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Pencil, Trash2, Plus, GripVertical, Save, Undo2, AlertCircle } from "lucide-react"
-import type { ConfigPlaybook, JsonValue, PlaybookRule, PlaybookStep } from "@/lib/api"
+import { serverErrors, type ConfigPlaybook, type PlaybookRule, type PlaybookStep } from "@/lib/api"
 
 const VECTORS = ["udp_flood", "udp_amplification", "syn_flood", "ack_flood", "icmp_flood", "unknown"] as const
 const ACTIONS = ["police", "discard", "blackhole"] as const
@@ -227,32 +227,6 @@ function StepSummary({ step, index }: { step: PlaybookStep; index: number }) {
       ) : null}
     </div>
   )
-}
-
-/**
- * The controller's reasons from a failed save, verbatim: the `errors` list a playbook PUT
- * returns, an `error` message, or the raw failure text.
- */
-export function serverErrors(message: string): string[] {
-  const body = message.replace(/^API error \d+: /, "")
-  let parsed: JsonValue
-
-  try {
-    // SAFETY: JSON.parse yields only JSON values; each field is checked before use.
-    parsed = JSON.parse(body) as JsonValue
-  } catch {
-    return [message]
-  }
-
-  if (parsed instanceof Object && !Array.isArray(parsed)) {
-    const list = parsed.errors
-
-    if (Array.isArray(list) && list.length > 0) return list.map(String)
-
-    if (parsed.error != null) return [String(parsed.error)]
-  }
-
-  return [message]
 }
 
 function formatTtl(seconds: number): string {

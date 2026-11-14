@@ -19,7 +19,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
 import { useHealthDetail, useSafelist, useStats, usePops, useOperators } from "@/hooks/use-api"
-import { addSafelist, removeSafelist, reloadConfig, createOperator, deleteOperator, changePassword, type OperatorInfo } from "@/lib/api"
+import { addSafelist, removeSafelist, reloadConfig, reloadStatus, reloadStatusClass, createOperator, deleteOperator, changePassword, type OperatorInfo, type ReloadStatus } from "@/lib/api"
 import { usePermissions } from "@/hooks/use-permissions"
 import { useAuth } from "@/hooks/use-auth"
 import { useTabParam } from "@/hooks/use-tab-param"
@@ -121,7 +121,7 @@ export default function AdminPage() {
   const [isAddingSafelist, setIsAddingSafelist] = useState(false)
   const [safelistError2, setSafelistError2] = useState<string | null>(null)
   const [isReloading, setIsReloading] = useState(false)
-  const [reloadStatus, setReloadStatus] = useState<"idle" | "success" | "error">("idle")
+  const [reloadResult, setReloadResult] = useState<ReloadStatus | null>(null)
 
   // User management state
   const [showCreateUser, setShowCreateUser] = useState(false)
@@ -166,17 +166,17 @@ export default function AdminPage() {
 
   const handleReloadConfig = async () => {
     setIsReloading(true)
-    setReloadStatus("idle")
-    
+    setReloadResult(null)
+
     try {
-      await reloadConfig()
-      setReloadStatus("success")
+      const result = reloadStatus(await reloadConfig())
+      setReloadResult(result)
       // Refresh all data
       mutate(() => true)
-      setTimeout(() => setReloadStatus("idle"), 3000)
-    } catch {
-      setReloadStatus("error")
-      setTimeout(() => setReloadStatus("idle"), 3000)
+      // Keys waiting on a restart stay visible until the next reload.
+      if (result.tone === "ok") setTimeout(() => setReloadResult(null), 3000)
+    } catch (e) {
+      setReloadResult(reloadStatus(e instanceof Error ? e : new Error(String(e))))
     } finally {
       setIsReloading(false)
     }
@@ -242,9 +242,9 @@ export default function AdminPage() {
         description="Controller health, the safelist and operator accounts."
         actions={
           <>
-            {reloadStatus !== "idle" && (
-              <span role="status" className={reloadStatus === "error" ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>
-                {reloadStatus === "success" ? "Configuration reloaded" : "Reload failed"}
+            {reloadResult && (
+              <span role="status" className={reloadStatusClass[reloadResult.tone]}>
+                {reloadResult.text}
               </span>
             )}
             <Button variant="outline" size="sm" onClick={handleReloadConfig} disabled={isReloading}>

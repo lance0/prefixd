@@ -6698,12 +6698,23 @@ async fn test_correlation_non_finite_yaml_reload_preserves_config() {
                     (standalone.clone(), yaml)
                 };
                 std::fs::write(&path, &content).unwrap();
-                let (status, _) =
+                let (status, rejection) =
                     correlation_config_request(&app, "POST", "/v1/config/reload", "").await;
                 assert_eq!(
                     status,
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    StatusCode::UNPROCESSABLE_ENTITY,
                     "accepted invalid reload: inline={inline}, value={value}"
+                );
+                let file = if inline {
+                    "prefixd.yaml"
+                } else {
+                    "correlation.yaml"
+                };
+                assert_eq!(
+                    rejection["error"],
+                    format!(
+                        "reload failed: {file} is invalid; running configuration unchanged; see controller log"
+                    )
                 );
                 assert_eq!(
                     std::fs::read_to_string(&path).unwrap(),
@@ -6720,6 +6731,44 @@ async fn test_correlation_non_finite_yaml_reload_preserves_config() {
             }
         }
     }
+}
+
+/// A failed reload names the file. `prefixd.yaml` loader text can quote
+/// secret values, so only inventory and playbook detail is echoed.
+#[tokio::test]
+async fn test_reload_error_names_file_without_echoing_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = setup_app_with_config_dir(directory.path().to_path_buf()).await;
+    let settings = directory.path().join("prefixd.yaml");
+    std::fs::write(&settings, "mode: postgres://admin:hunter2@db/prefixd\n").unwrap();
+    let (status, rejection) =
+        correlation_config_request(&app, "POST", "/v1/config/reload", "").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let error = rejection["error"].as_str().unwrap();
+    assert_eq!(
+        error,
+        "reload failed: prefixd.yaml is invalid; running configuration unchanged; see controller log"
+    );
+    assert!(!error.contains("hunter2"));
+
+    std::fs::remove_file(&settings).unwrap();
+    std::fs::write(
+        directory.path().join("playbooks.yaml"),
+        r#"{"playbooks":[{"name":"broken"}]}"#,
+    )
+    .unwrap();
+    let (status, rejection) =
+        correlation_config_request(&app, "POST", "/v1/config/reload", "").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let error = rejection["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("reload failed: playbooks.yaml is invalid: ")
+            && error.ends_with("; running configuration unchanged")
+            && error.len()
+                > "reload failed: playbooks.yaml is invalid: ; running configuration unchanged"
+                    .len(),
+        "{error}"
+    );
 }
 
 /// VAL-ADAPT-016: POST /v1/config/reload refreshes correlation config from YAML
@@ -15463,6 +15512,120 @@ mod manual_destination_cidr {
                 .lookup_prefix(&"203.0.112.0/22".parse().unwrap())
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// `restart_required` compares the file with the running settings: an
+    /// unchanged file reports nothing, a changed key its dotted path, and
+    /// `alerting` only while no `alerting.yaml` hot-reloads it.
+    #[tokio::test]
+    async fn reload_reports_restart_required_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _, _) = state(OperationMode::Enforced, true, owned_inventory());
+        Arc::get_mut(&mut state).unwrap().config_dir = dir.path().into();
+        let write = |settings: &prefixd::config::Settings| {
+            std::fs::write(
+                dir.path().join("prefixd.yaml"),
+                serde_saphyr::to_string(settings).unwrap(),
+            )
+            .unwrap()
+        };
+        write(&state.settings);
+        assert!(
+            state
+                .reload_config()
+                .await
+                .unwrap()
+                .restart_required
+                .is_empty()
+        );
+
+        let mut edited = state.settings.clone();
+        edited.timers.reconciliation_interval_seconds += 1;
+        edited.alerting.events = vec![prefixd::alerting::AlertEventType::MitigationCreated];
+        edited.correlation.min_sources += 1;
+        write(&edited);
+        assert_eq!(
+            state.reload_config().await.unwrap().restart_required,
+            ["alerting.events", "timers.reconciliation_interval_seconds"]
+        );
+        std::fs::write(
+            dir.path().join("alerting.yaml"),
+            "events:\n  - mitigation.created\n",
+        )
+        .unwrap();
+        assert_eq!(
+            state.reload_config().await.unwrap().restart_required,
+            ["timers.reconciliation_interval_seconds"]
+        );
+        // Nothing restart-only was applied.
+        assert_ne!(
+            state.settings.timers.reconciliation_interval_seconds,
+            edited.timers.reconciliation_interval_seconds
+        );
+        // With `alerting.yaml` gone, inline alerting is compared with the
+        // reloaded alerting that is running, not with the startup settings.
+        std::fs::remove_file(dir.path().join("alerting.yaml")).unwrap();
+        write(&state.settings);
+        assert_eq!(
+            state.reload_config().await.unwrap().restart_required,
+            ["alerting.events"]
+        );
+    }
+
+    /// `alerting.yaml` gets the editor's semantic validation, so an empty
+    /// webhook fails the whole reload instead of replacing working alerting.
+    #[tokio::test]
+    async fn invalid_alerting_reload_keeps_previous_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("inventory.yaml"), r#"{"customers":[]}"#).unwrap();
+        std::fs::write(
+            dir.path().join("alerting.yaml"),
+            "destinations:\n  - type: slack\n    webhook_url: \"\"\n",
+        )
+        .unwrap();
+        let (mut state, _, _) = state(OperationMode::Enforced, true, owned_inventory());
+        Arc::get_mut(&mut state).unwrap().config_dir = dir.path().into();
+        let error = state.reload_config().await.unwrap_err();
+        assert!(
+            error.to_string().contains("webhook_url is required"),
+            "{error}"
+        );
+        assert!(state.alerting.read().await.config().destinations.is_empty());
+        assert!(
+            state
+                .inventory
+                .read()
+                .await
+                .lookup_prefix(&"203.0.112.0/22".parse().unwrap())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// A present `prefixd.yaml` that fails to load fails the reload even when
+    /// `correlation.yaml` supplies correlation; nothing is published.
+    #[tokio::test]
+    async fn broken_settings_reload_keeps_previous_correlation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _, _) = state(OperationMode::Enforced, true, owned_inventory());
+        Arc::get_mut(&mut state).unwrap().config_dir = dir.path().into();
+        let before = state.correlation_config.read().await.min_sources;
+        let mut correlation = state.correlation_config.read().await.clone();
+        correlation.min_sources = before + 1;
+        correlation
+            .save(dir.path().join("correlation.yaml"))
+            .unwrap();
+        std::fs::write(dir.path().join("prefixd.yaml"), "mode: [broken\n").unwrap();
+        let error = state.reload_config().await.unwrap_err();
+        assert!(error.to_string().starts_with("prefixd.yaml: "), "{error}");
+        assert_eq!(state.correlation_config.read().await.min_sources, before);
+        // Control: without the broken file, the same correlation.yaml publishes.
+        std::fs::remove_file(dir.path().join("prefixd.yaml")).unwrap();
+        state.reload_config().await.unwrap();
+        assert_eq!(
+            state.correlation_config.read().await.min_sources,
+            before + 1
         );
     }
 

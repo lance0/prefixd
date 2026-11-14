@@ -6,8 +6,8 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { StatusPill } from "@/components/dashboard/status-pill"
 import { AlertCircle, Save, Undo2 } from "lucide-react"
-import type { ConfigPlaybook, JsonValue } from "@/lib/api"
-import { SaveErrors, serverErrors, validatePlaybooks } from "@/components/dashboard/playbook-editor"
+import { serverErrors, type ConfigPlaybook, type JsonValue } from "@/lib/api"
+import { SaveErrors, validatePlaybooks } from "@/components/dashboard/playbook-editor"
 
 // Preserve merge keys accepted by the editor while keeping YAML 1.2 core types.
 const PLAYBOOK_YAML_SCHEMA = yaml.CORE_SCHEMA.withTags(yaml.mergeTag)
