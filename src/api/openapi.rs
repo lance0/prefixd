@@ -276,7 +276,9 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    const METHODS: &[&str] = &["get", "post", "put", "delete", "patch"];
+    const METHODS: &[&str] = &[
+        "get", "post", "put", "delete", "patch", "head", "options", "trace",
+    ];
 
     /// Routes with no OpenAPI operation. The WebSocket feed is an `any` upgrade
     /// that OpenAPI cannot describe; the API reference documents it instead.
@@ -302,10 +304,18 @@ mod tests {
     /// the shared route functions.
     fn routed_operations() -> BTreeSet<(String, String)> {
         let source = include_str!("routes.rs");
-        assert!(
-            !source.contains(".nest("),
-            "teach this test to read nested routers"
-        );
+        for unread in [
+            ".nest(",
+            ".nest_service(",
+            ".route_service(",
+            ".fallback(",
+            ".fallback_service(",
+        ] {
+            assert!(
+                !source.contains(unread),
+                "routes.rs uses `{unread}..)`, which this test does not read; teach it"
+            );
+        }
         for (start, _) in source.match_indices(".merge(") {
             let args = call_args(&source[start + ".merge(".len()..]);
             let callee = args.split('(').next().unwrap().trim();

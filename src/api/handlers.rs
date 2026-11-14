@@ -2517,12 +2517,13 @@ fn blackhole_rejection_reason(violation: &GuardrailError) -> &'static str {
     request_body = WithdrawRequest,
     responses(
         (status = 200, description = "Withdrawal processed; `status` shows the terminal state", body = MitigationResponse),
-        (status = 400, description = "Overlong reason, or mitigation is not active"),
+        (status = 400, description = "Malformed JSON, overlong reason, or mitigation is not active"),
         (status = 401, description = "Not authenticated"),
         (status = 403, description = "Operator role required"),
         (status = 404, description = "Mitigation not found"),
         (status = 409, description = "Mitigation belongs to another POP or owner, or would revive a pending deletion"),
-        (status = 500, description = "Outcome uncertain; withdrawal intent is retained and reconciliation retries it")
+        (status = 422, description = "Request body does not match the schema, such as a missing `reason`"),
+        (status = 500, description = "Withdrawal failed or its outcome is uncertain. If withdrawal intent was recorded, reconciliation retries it. Re-read the mitigation for its status.")
     )
 )]
 pub async fn withdraw_mitigation(

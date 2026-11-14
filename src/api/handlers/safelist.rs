@@ -147,7 +147,8 @@ async fn withdraw_covered_mitigations(
     tag = "safelist",
     responses(
         (status = 200, description = "Safelist entries", body = Vec<crate::db::SafelistEntry>),
-        (status = 401, description = "Not authenticated")
+        (status = 401, description = "Not authenticated"),
+        (status = 500, description = "Safelist could not be read")
     )
 )]
 pub async fn list_safelist(
