@@ -151,9 +151,9 @@ async function run() {
   })
   await page.screenshot({ path: resolve(outputDir, "active.png"), fullPage: true })
   await withdraw.click()
-  const dialog = page.getByRole("alertdialog", { name: "Withdraw Mitigation", exact: true })
+  const dialog = page.getByRole("alertdialog", { name: "Withdraw mitigation", exact: true })
   await dialog.waitFor()
-  await dialog.getByLabel("Reason (optional)", { exact: true }).fill(reason)
+  await dialog.getByLabel("Withdrawal reason (optional)", { exact: true }).fill(reason)
   await activeFixture()
 
   // Forward the real request once. Hold its real response until the pending UI
@@ -184,7 +184,7 @@ async function run() {
   await dialog.waitFor()
   // Radix keeps a closed dialog visible during its exit animation.
   assert.equal(await dialog.getAttribute("data-state"), "open", "pending dialog must remain open")
-  const pending = dialog.getByRole("button", { name: "Withdrawing...", exact: true })
+  const pending = dialog.getByRole("button", { name: "Withdrawing…", exact: true })
   await pending.waitFor()
   assert(await pending.isDisabled(), "pending confirmation must be disabled")
   assert(await dialog.getByRole("button", { name: "Cancel", exact: true }).isDisabled())

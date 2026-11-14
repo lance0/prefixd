@@ -59,6 +59,9 @@ export function WithdrawConfirmDialog({
 
     try {
       done = await onConfirm(reason)
+    } catch {
+      // A rejected request did not complete; keep the dialog open for a retry.
+      done = false
     } finally {
       inFlight.current = false
       setBusy(false)

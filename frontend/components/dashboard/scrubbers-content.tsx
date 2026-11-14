@@ -47,7 +47,7 @@ export function ScrubbersContent() {
   }
 
   async function confirmWithdraw(reason: string) {
-    if (!withdrawTarget || busy) return false
+    if (!withdrawTarget) return false
     setBusy(true); setWithdrawError(""); setMessage("")
 
     try {
@@ -55,10 +55,15 @@ export function ScrubbersContent() {
       setMessage("Withdrawal requested. Victim exclusion remains until local absence is confirmed.")
 
       return true
-    } catch (error) { setWithdrawError(error instanceof Error ? error.message : "The withdrawal could not be confirmed."); return false }
-    finally {
+    } catch (error) {
+      setWithdrawError(error instanceof Error ? error.message : "The withdrawal could not be confirmed.")
+
+      return false
+    } finally {
       setBusy(false)
-      await Promise.all([profiles.mutate(), diversions.mutate()])
+      // Refresh in the background: a stalled read must not hold the dialog's pending lock.
+      // SWR records refresh failures in each hook's error state.
+      void Promise.all([profiles.mutate(), diversions.mutate()]).catch(() => {})
     }
   }
 
