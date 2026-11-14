@@ -31,9 +31,9 @@ Format follows [Michael Nygard's template](https://cognitect.com/blog/2011/11/15
 | [021](021-corroborating-signals.md) | Corroborating Signals | Accepted | 2026-04-19 |
 | [022](022-confidence-decay.md) | Confidence Decay for Signal Groups | Accepted | 2026-05-11 |
 | [023](023-rustbgpd-over-grpc.md) | Drive rustbgpd over gRPC instead of embedding its crates | Accepted (updates 001) | 2026-09-28 |
-| [024](024-loco-staged-migration.md) | Migrate to loco-rs in stages | Deferred by [026](026-facelift-framework-scope.md) | 2026-09-28 |
+| [024](024-loco-staged-migration.md) | Migrate to loco-rs in stages | Withdrawn 2026-11-14 by [026](026-facelift-framework-scope.md) | 2026-09-28 |
 | [025](025-pluggable-speaker-backends.md) | Pluggable speakers with rustbgpd preferred and GoBGP supported | Accepted | 2026-10-17 |
-| [026](026-facelift-framework-scope.md) | Defer framework migration during the facelift | Accepted | 2026-10-17 |
+| [026](026-facelift-framework-scope.md) | Defer framework migration during the facelift | Accepted; amended 2026-11-14 to cancel the Loco migration | 2026-10-17 |
 | [027](027-blackhole-mitigations.md) | Remotely triggered blackhole host routes as a second mitigation kind | Accepted | 2026-10-19 |
 | [028](028-amplification-matches.md) | Amplification-aware FlowSpec matches | Accepted; amended 2026-11-12 for manual TCP flags | 2026-10-19 |
 | [029](029-upstream-blackholing.md) | Provider-scoped upstream blackholing | Accepted (design only) | 2026-10-24 |
