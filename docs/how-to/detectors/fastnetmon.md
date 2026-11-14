@@ -12,11 +12,18 @@ Community notify script are host-only: they require a single `ip` and do not
 map a hostgroup payload. Do not point a hostgroup action at this adapter yet.
 
 prefixd's `/v1/events` endpoint can accept a canonical CIDR when
-`guardrails.allow_detector_prefix` and an exact `detector_prefix_sources` entry
-authorize the source. A hostgroup with one network can be mapped to that event
-by an external shim. A hostgroup payload carries no port list, so a prefix
-discard playbook is not usable; a `udp_flood` prefix police playbook can
-rate-limit UDP to the prefix. TCP prefix police needs a destination port.
+`guardrails.allow_detector_prefix` is true and the event's `source` label is in
+`detector_prefix_sources`. That list filters the label the caller supplies; it
+does not authenticate FastNetMon, so any caller holding event-ingestion
+credentials can use an allowlisted label. A hostgroup with one network can be
+mapped to that event by an external shim. The published total-hostgroup
+payload carries no port list, so a prefix discard playbook is not usable and
+only a portless `udp_flood` prefix police playbook applies. TCP prefix police
+needs a destination port.
+
+prefixd does not yet complete the FastNetMon integration for prefixes: the
+native hostgroup adapter is separate follow-up work, and no router platform is
+qualified for prefix rules.
 Multiple networks in one hostgroup need separate events with distinct event
 IDs. See [ADR 033](../../adr/033-detector-prefix-mitigations.md).
 
@@ -40,10 +47,12 @@ curl -X POST "${PREFIXD_API}/v1/events" \
 Treat `400` and `422` as final and never resend a refused prefix as a host
 event. Send the unban with the same `source` and `event_id`.
 
-A protocol-only police rule is one shared rate bucket for all UDP to the whole
-prefix, legitimate traffic included. Size `rate_bps` above the prefix's normal
-aggregate UDP peak, not a per-host figure, and check how the router applies the
-rate (per interface, line card or system) before relying on it.
+Portless UDP police is an owner-approved exception, not an operator-confirmed
+requirement. It is one shared rate bucket for all UDP to the whole prefix,
+legitimate DNS and QUIC included. Size `rate_bps` for the prefix's normal
+aggregate UDP traffic, not a per-host figure, and measure how the router
+allocates the policer (per interface, line card or system) during
+qualification before relying on it.
 
 ## Overview
 

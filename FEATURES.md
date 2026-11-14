@@ -145,8 +145,9 @@ Safety limits that prevent accidental broad impact.
   ownership and any safelist overlap are refused. RTBH stays host-only; no
   per-address rule expansion
 - **Detector prefix events** - Opt-in `allow_detector_prefix` plus an exact
-  source allowlist lets a detector submit one covering CIDR. A prefix discard
-  needs an L4 port; a `udp_flood` prefix police rule may be protocol-only.
+  `source` label allowlist (a filter, not authentication) lets a detector
+  submit one covering CIDR. A prefix discard needs an L4 port; a `udp_flood`
+  prefix police rule may be protocol-only as an owner-approved exception.
   Whole-prefix ownership, safelist, prefix bounds and a separate per-customer
   detector prefix quota still apply. Prefixd does not aggregate host events or infer the prefix
 - **Safelist protection** - Any overlap protects infrastructure, including hosts inside a broader destination

@@ -343,7 +343,12 @@ and the [downgrade procedure](../how-to/upgrading.md#source-prefix-matches-and-d
 
 `allow_detector_prefix` admits a canonical detector event destination that is
 not a host. It defaults to `false`; `detector_prefix_sources` must also list
-the exact event source, and an empty list refuses every prefix event. The
+the exact event `source` label, and an empty list refuses every prefix event.
+`detector_prefix_sources` filters the event's `source` label; it does not
+authenticate a detector. The event endpoint authenticates the caller, and the
+caller supplies `source`, so every caller authorized to ingest events is trusted
+to supply that label and can send a prefix event under an allowlisted `source`.
+Restrict who holds event-ingestion credentials if that matters. The
 destination still passes the same prefix bounds, whole-prefix ownership and
 safelist checks as a manual CIDR. A prefix event selects only a
 `scope: prefix` playbook; a prefix discard needs a destination port, while a
@@ -1220,20 +1225,27 @@ a prefix event. Prefix playbooks must contain exactly one step, use `police` or
 `ack_flood` only.
 
 A prefix `discard` requires `require_top_ports: true` and at least one
-destination port. A `udp_flood` prefix `police` step may omit
-`require_top_ports`: when the detector supplies no port, the rule matches UDP
-only and rate-limits the covering prefix. `syn_flood` and `ack_flood` prefix
-police requires `require_top_ports: true`, because policing all TCP to a
-customer prefix is too broad a default. prefixd never installs a bare
+destination port. `syn_flood` and `ack_flood` prefix police also requires
+`require_top_ports: true`: those vectors become TCP matches without TCP-flag
+filters, so a portless rule would police all TCP to the prefix, and even with a
+port it affects all matching TCP to that port. prefixd never installs a bare
 destination-prefix discard. The event's destination still has to pass the
 normal prefix bounds, whole-prefix inventory ownership and safelist checks.
 
-A protocol-only police rule is one shared rate bucket for all UDP to the whole
-prefix, legitimate traffic included. Size `rate_bps` above the prefix's normal
-aggregate UDP peak, not a per-host figure: a `/24` whose hosts together peak at
-400 Mb/s of legitimate UDP needs a rate above that. Where the router applies
-the rate (per interface, line card or system) is router-specific; confirm it on
-your platform before relying on it.
+A `udp_flood` prefix `police` step may omit `require_top_ports`; when the
+detector supplies no port, the rule matches UDP only and rate-limits the
+covering prefix. This is an explicit exception the project approves (ADR 033),
+not an operator-confirmed requirement; set `require_top_ports: true` to require
+protocol plus port for UDP as well.
+
+The exception rate-limits legitimate UDP across the whole prefix, including DNS
+and QUIC where present: the rule is one shared rate bucket for all UDP to the
+prefix. Size `rate_bps` for the prefix's normal aggregate UDP traffic, not a
+per-host figure: a `/24` whose hosts together peak at 400 Mb/s of legitimate
+UDP needs a rate above that. Where the router allocates the policer (per
+interface, line card or system) is router-specific and must be measured during
+platform qualification before you rely on it. No router platform is qualified
+yet.
 
 A host rule for an address inside an active prefix rule is more specific and
 takes precedence for that host (RFC 8955 §5.1). prefixd admits host and prefix

@@ -342,8 +342,10 @@ pub struct GuardrailsConfig {
     /// `detector_prefix_sources`.
     #[serde(default)]
     pub allow_detector_prefix: bool,
-    /// Detector sources allowed to submit a prefix destination. Empty refuses
-    /// all prefix events even when `allow_detector_prefix` is true.
+    /// Event `source` labels allowed to submit a prefix destination. This
+    /// filters a caller-supplied label; it does not authenticate a detector,
+    /// so every authorized ingestion caller is trusted to supply it. Empty
+    /// refuses all prefix events even when `allow_detector_prefix` is true.
     #[serde(default)]
     pub detector_prefix_sources: Vec<String>,
 }

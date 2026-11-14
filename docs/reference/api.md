@@ -125,11 +125,15 @@ retries can use the same ID. Batch ingestion keeps per-item rejection results.
 
 When `guardrails.allow_detector_prefix` is true and the event `source` appears
 in `guardrails.detector_prefix_sources`, `victim_ip` may be a canonical CIDR.
+The allowlist filters the `source` label the caller supplies; it does not
+authenticate a detector, so every caller authorized to ingest events is trusted
+to supply that label.
 Host bits are rejected rather than cleared. The prefix must fit the configured
 `dst_prefix_minlen`/`dst_prefix_maxlen` (the default remains host-only), belong
 entirely to one inventory customer, and have no safelist overlap. A prefix
 `discard` needs a protocol and destination port; a prefix `police` may match
-protocol only for `udp_flood`. Prefix events are matched only by
+protocol only for `udp_flood`, an owner-approved exception that rate-limits all
+UDP to the prefix, legitimate DNS and QUIC included. Prefix events are matched only by
 `scope: prefix` playbooks and are never converted to host rules. A
 `udp_amplification` prefix event uses the `udp_flood` prefix playbook; there is
 no source-port reflection match for prefixes. The controller's

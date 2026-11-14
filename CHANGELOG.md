@@ -24,10 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Guarded detector prefix (carpet-bombing) FlowSpec admission behind
   `guardrails.allow_detector_prefix` and an exact
-  `guardrails.detector_prefix_sources` allowlist. Detector events may carry one
-  canonical CIDR; prefix playbooks require `scope: prefix`. A prefix discard
-  needs a destination port, and prefix police may omit the port only for
-  `udp_flood`. Whole-prefix inventory ownership, safelist overlap and the
+  `guardrails.detector_prefix_sources` allowlist of event `source` labels. The
+  allowlist filters a caller-supplied label and does not authenticate a
+  detector. Detector events may carry one canonical CIDR; prefix playbooks
+  require `scope: prefix`. A prefix discard needs a destination port, and
+  prefix police may omit the port only for `udp_flood`, an approved exception
+  that rate-limits all UDP to the prefix. Whole-prefix inventory ownership, safelist overlap and the
   existing prefix bounds apply. The feature is off by default and does not add
   prefix RTBH, detector aggregation, reflection source-port matching or
   automatic escalation. See ADR 033.

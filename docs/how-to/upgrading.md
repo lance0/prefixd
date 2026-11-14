@@ -405,7 +405,7 @@ status or local speaker read-back does not establish router cleanup.
 
 Detector prefix events are off by default. Enabling
 `guardrails.allow_detector_prefix` and `guardrails.detector_prefix_sources`
-lets an allowlisted detector submit one canonical CIDR; a `scope: prefix`
+lets an event whose `source` label is allowlisted submit one canonical CIDR; a `scope: prefix`
 playbook is then eligible. Older controllers ignore both keys and the playbook
 scope, but they reject the CIDR as an invalid IP, so they do not install a host
 rule from it. prefixd 0.26 and older ignore `scope` and treat a prefix playbook
