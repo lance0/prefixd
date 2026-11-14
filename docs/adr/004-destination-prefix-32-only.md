@@ -2,10 +2,11 @@
 
 ## Status
 
-Accepted; amended 2026-10-23 to permit explicit manual destination CIDRs. An
-amendment for guarded detector prefix events is proposed in
-[ADR 033](033-detector-prefix-mitigations.md). The original 2026-01-15
-decision required a single IPv4 host.
+Accepted; amended 2026-10-23 to permit explicit manual destination CIDRs and
+amended under [ADR 033](033-detector-prefix-mitigations.md) (accepted
+2026-11-14) to permit guarded detector prefix events. Router qualification of
+detector prefix rules is pending. The original 2026-01-15 decision required a
+single IPv4 host.
 
 ## Context
 
@@ -23,11 +24,10 @@ unsafe, especially where customers or protected infrastructure share space.
 ## Decision
 
 Keep default destination bounds at IPv4 `/32` and IPv6 `/128`. Detector events
-and playbooks construct host destinations. The amendment proposed in
-[ADR 033](033-detector-prefix-mitigations.md) would let
-`guardrails.allow_detector_prefix` and an exact
-`guardrails.detector_prefix_sources` entry authorize a prefix event that
-selects only a prefix playbook. RTBH stays host-only.
+construct host destinations unless `guardrails.allow_detector_prefix` and an
+exact `guardrails.detector_prefix_sources` label entry admit a prefix event
+under [ADR 033](033-detector-prefix-mitigations.md). A prefix event selects only
+a prefix playbook. RTBH stays host-only.
 
 Manual discard and police requests accept either a bare IP or an aligned CIDR
 in the existing `victim_ip` string. An operator must deliberately relax the
@@ -37,9 +37,9 @@ configuration flag, detector aggregation or route splitting is introduced.
 
 - Reject destination host bits with a suggested network; never silently widen
   a supplied address. Canonicalize accepted CIDRs before computing new identity.
-  Existing saved identities remain unchanged. Under the ADR 033 proposal, a
-  detector prefix event uses the same canonicalization and ownership checks,
-  plus its source allowlist.
+  Existing saved identities remain unchanged. Under ADR 033, a detector
+  prefix event uses the same canonicalization and ownership checks, plus its
+  source label allowlist.
 - Require the entire CIDR to fit inside one configured customer prefix. Refuse
   conflicting ownership within the range. Do not assemble ownership from a
   union of smaller allocations or infer a service from a base-address asset.
