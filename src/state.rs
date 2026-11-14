@@ -276,6 +276,9 @@ impl AppState {
                     errors.join("; ")
                 )));
             }
+            for warning in new_playbooks.prefix_scope_warnings(&self.settings.guardrails) {
+                tracing::warn!(%warning, "prefix playbook is unreachable");
+            }
             *playbooks_guard = new_playbooks;
             drop(playbooks_guard);
             *self.playbooks_loaded_at.write().await = Utc::now();

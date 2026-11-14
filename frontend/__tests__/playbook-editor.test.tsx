@@ -69,3 +69,37 @@ describe("playbook YAML editor", () => {
     expect(onSave.mock.calls[0][0][1].correlation).toEqual({ min_sources: 2 })
   })
 })
+
+describe("prefix playbooks", () => {
+  const prefix = [
+    {
+      name: "carpet_udp",
+      match: { vector: "udp_flood", require_top_ports: false, scope: "prefix" },
+      correlation: null,
+      steps: [{ action: "police", rate_bps: 50000000, ttl_seconds: 120, require_confidence_at_least: null, require_persistence_seconds: null }],
+    },
+  ] satisfies ConfigPlaybook[]
+
+  it("keeps scope through the form editor and labels the playbook", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    render(<PlaybookEditor playbooks={[...fromApi, ...prefix]} onSave={onSave} saving={false} />)
+    expect(screen.getAllByText("prefix").length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole("button", { name: "Remove playbook udp_flood_police_first" }))
+    fireEvent.click(screen.getByRole("button", { name: /Save all/ }))
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1))
+    expect(onSave.mock.calls[0][0]).toEqual([fromApi[1], prefix[0]])
+  })
+
+  it("keeps scope through the YAML editor", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    render(<PlaybookYamlEditor playbooks={prefix} onSave={onSave} saving={false} />)
+    const text = yamlText()
+    expect(text).toContain("scope: prefix")
+
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: text.replace("ttl_seconds: 120", "ttl_seconds: 121") } })
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }))
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1))
+    expect(onSave.mock.calls[0][0][0].match).toEqual({ vector: "udp_flood", require_top_ports: false, scope: "prefix" })
+    expect(onSave.mock.calls[0][0][0].steps[0].ttl_seconds).toBe(121)
+  })
+})

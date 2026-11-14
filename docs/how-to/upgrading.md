@@ -401,6 +401,27 @@ with the current controller and drain pending withdrawals first. Verify removal
 from the original speaker before stopping the controller. A database terminal
 status or local speaker read-back does not establish router cleanup.
 
+## Detector prefix events and downgrade
+
+Detector prefix events are off by default. Enabling
+`guardrails.allow_detector_prefix` and `guardrails.detector_prefix_sources`
+lets an allowlisted detector submit one canonical CIDR; a `scope: prefix`
+playbook is then eligible. Older controllers ignore both keys and the playbook
+scope, but they reject the CIDR as an invalid IP, so they do not install a host
+rule from it. prefixd 0.26 and older ignore `scope` and treat a prefix playbook
+as a host playbook, selecting the first playbook that matches a vector. Upgrade
+the controller first, and list each vector's prefix playbooks after its host
+playbooks, so that an older controller reading the same file still selects the
+host playbook. Detector-created prefix rules count toward
+`quotas.max_active_prefix_per_customer`; manual CIDRs do not.
+
+Prefix rules use the existing destination bounds. Tightening the bounds does
+not withdraw saved intent. Before downgrading to a controller without detector
+prefix support, pause prefix creation and withdraw every live non-host
+destination, including manual CIDRs, with the current controller. Drain their
+pending withdrawals on the original speaker target and verify removal before
+stopping the controller. No database migration is required.
+
 ## Source-prefix matches and downgrade
 
 prefixd 0.23.0 adds optional `src_prefix` to manual FlowSpec matches. No

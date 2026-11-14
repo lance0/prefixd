@@ -91,6 +91,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::config::EventScope;
 use crate::db::{ListCursor, ListParams, MitigationCursor, MitigationListParams};
 use crate::domain::{
     ActionParams, ActionType, AttackEvent, AttackEventInput, FlowSpecAction, FragmentMatch,
@@ -545,6 +546,11 @@ fn validate_ip(ip: &str) -> Result<IpAddr, PrefixdError> {
         .map_err(|_| PrefixdError::InvalidRequest(format!("invalid IP address: '{}'", ip)))
 }
 
+fn validate_event_destination(value: &str) -> Result<ipnet::IpNet, PrefixdError> {
+    crate::domain::parse_flowspec_destination(value)
+        .map_err(|error| PrefixdError::InvalidPrefix(format!("{value}: {error}")))
+}
+
 /// Detector metadata cannot select a routing scope; other legacy metadata remains accepted.
 pub struct DetectorEventRequest(AttackEventInput);
 
@@ -751,9 +757,9 @@ pub async fn ingest_event(
     crate::api::auth::require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
 
     // Validate input
-    validate_ip(&input.victim_ip).map_err(AppError)?;
+    validate_event_destination(&input.victim_ip).map_err(AppError)?;
     validate_string_len(&input.source, "source", MAX_STRING_LEN).map_err(AppError)?;
-    validate_string_len(&input.victim_ip, "victim_ip", 45).map_err(AppError)?;
+    validate_string_len(&input.victim_ip, "victim_ip", 64).map_err(AppError)?;
     if let Some(ref eid) = input.event_id {
         validate_string_len(eid, "event_id", MAX_STRING_LEN).map_err(AppError)?;
     }
@@ -1133,9 +1139,36 @@ async fn handle_ban(
     // Create internal event
     let event = AttackEvent::from_input(input);
 
+    let destination = validate_event_destination(&event.victim_ip).map_err(AppError)?;
+    let is_prefix = EventScope::for_destination(&destination) == EventScope::Prefix;
+    // Every prefix refusal before persistence is logged and counted like the
+    // host path's guardrail refusals.
+    let refuse = |error: PrefixdError, reason: Option<&str>| {
+        refuse_prefix_event(&event.source, &event.victim_ip, error, reason)
+    };
+    if is_prefix {
+        crate::guardrails::check_detector_prefix(&state.settings.guardrails, &event.source)
+            .map_err(|error| refuse(error, None))?;
+    }
     let inventory = state.inventory.read().await;
-    let context = inventory.lookup_ip(&event.victim_ip);
-    let is_owned = context.is_some() || inventory.is_owned(&event.victim_ip);
+    let (context, is_owned) = if is_prefix {
+        let context = inventory
+            .lookup_prefix(&destination)
+            .map_err(AppError)?
+            .ok_or_else(|| {
+                refuse(
+                    PrefixdError::InvalidRequest(format!(
+                        "destination prefix {destination} must fit within one inventory customer prefix without conflicting ownership"
+                    )),
+                    Some("PrefixOwnership"),
+                )
+            })?;
+        (Some(context), true)
+    } else {
+        let context = inventory.lookup_ip(&event.victim_ip);
+        let is_owned = context.is_some() || inventory.is_owned(&event.victim_ip);
+        (context, is_owned)
+    };
     drop(inventory);
     let playbooks = state.playbooks.read().await.clone();
     let policy = PolicyEngine::new(
@@ -1172,6 +1205,19 @@ async fn handle_ban(
         }
         result => result,
     };
+    if is_prefix
+        && decision.as_ref().is_ok_and(|decision| {
+            decision
+                .intents
+                .iter()
+                .any(|intent| intent.action_type == ActionType::Blackhole)
+        })
+    {
+        return Err(refuse(
+            PrefixdError::GuardrailViolation(GuardrailError::PrefixBlackholeNotAllowed),
+            None,
+        ));
+    }
     if let Some(scope) = state
         .settings
         .bgp
@@ -1230,6 +1276,54 @@ async fn handle_ban(
         }
     }
 
+    let guardrails = Guardrails::with_timers(
+        state.settings.guardrails.clone(),
+        state.settings.quotas.clone(),
+        &state.settings.timers,
+    );
+    let mut prefix_safelisted: Option<bool> = None;
+    if is_prefix && let Ok(decision) = &decision {
+        let safelisted = state
+            .repo
+            .is_safelisted(&event.victim_ip)
+            .await
+            .map_err(AppError)?;
+        for (intent, owner) in decision.intents.iter().zip(&owners) {
+            if intent.action_type == ActionType::Blackhole {
+                continue;
+            }
+            if let Ok(Some(existing)) = owner {
+                if existing.customer_id != intent.customer_id {
+                    return Err(refuse(
+                        PrefixdError::Conflict(format!(
+                            "prefix {} ownership changed before mitigation extension",
+                            event.victim_ip
+                        )),
+                        Some("PrefixOwnership"),
+                    ));
+                }
+                guardrails
+                    .validate_rule(intent, safelisted)
+                    .map_err(|error| refuse(error, None))?;
+                // Ownership is keyed by match, not action: never renew a saved
+                // rule, such as a manual portless discard, that a detector
+                // prefix event could not create.
+                crate::guardrails::check_prefix_l4(existing.action_type, &existing.match_criteria)
+                    .map_err(|error| refuse(error, None))?;
+            } else if owner.is_ok() {
+                guardrails
+                    .validate(intent, state.repo.as_ref(), safelisted)
+                    .await
+                    .map_err(|error| refuse(error, None))?;
+                guardrails
+                    .validate_detector_prefix_quota(intent, state.repo.as_ref())
+                    .await
+                    .map_err(|error| refuse(error, None))?;
+            }
+        }
+        prefix_safelisted = Some(safelisted);
+    }
+
     // Store event
     state.repo.insert_event(&event).await.map_err(AppError)?;
 
@@ -1265,7 +1359,10 @@ async fn handle_ban(
     let vector = event.attack_vector();
     let event_ports = event.top_dst_ports();
     let has_ports = !event_ports.is_empty();
-    let matching_playbook = playbooks.find_playbook(vector, has_ports);
+    let event_scope = crate::domain::parse_flowspec_destination(&event.victim_ip)
+        .map(|destination| EventScope::for_destination(&destination))
+        .unwrap_or_default();
+    let matching_playbook = playbooks.find_playbook(vector, has_ports, event_scope);
     let playbook_override = matching_playbook.and_then(|p| p.correlation.as_ref());
 
     let mut signal_group_id: Option<Uuid> = None;
@@ -1553,17 +1650,14 @@ async fn handle_ban(
         }
     };
 
-    let guardrails = Guardrails::with_timers(
-        state.settings.guardrails.clone(),
-        state.settings.quotas.clone(),
-        &state.settings.timers,
-    );
-
-    let is_safelisted = state
-        .repo
-        .is_safelisted(&event.victim_ip)
-        .await
-        .map_err(AppError)?;
+    let is_safelisted = match prefix_safelisted {
+        Some(value) => value,
+        None => state
+            .repo
+            .is_safelisted(&event.victim_ip)
+            .await
+            .map_err(AppError)?,
+    };
     let actor = CreationActor::Detector(event.source.clone());
 
     // Each rule is admitted on its own, in policy priority order (ADR 028): every
@@ -1577,6 +1671,14 @@ async fn handle_ban(
         let action_type = intent.action_type;
         let admitted = async {
             if let Some(mut existing) = owner? {
+                if is_prefix {
+                    if existing.customer_id != intent.customer_id {
+                        return Err(PrefixdError::Conflict(
+                            "prefix ownership changed before mitigation extension".into(),
+                        ));
+                    }
+                    guardrails.validate_rule(&intent, is_safelisted)?;
+                }
                 // A blackhole extension is capped at now + max_ttl_seconds.
                 if existing.action_type == ActionType::Blackhole {
                     crate::guardrails::extend_blackhole(
@@ -1626,14 +1728,7 @@ async fn handle_ban(
                     .validate(&intent, state.repo.as_ref(), is_safelisted)
                     .await
                 {
-                    let reason = match &e {
-                        PrefixdError::GuardrailViolation(g) => format!("{:?}", g)
-                            .split_whitespace()
-                            .next()
-                            .unwrap_or("unknown")
-                            .to_string(),
-                        _ => "unknown".to_string(),
-                    };
+                    let reason = guardrail_reason(&e);
                     crate::observability::metrics::GUARDRAIL_REJECTIONS
                         .with_label_values(&[&reason])
                         .inc();
@@ -1799,6 +1894,41 @@ async fn handle_ban(
             rules,
         }),
     ))
+}
+
+/// The `prefixd_guardrail_rejections_total` reason for a guardrail error.
+fn guardrail_reason(error: &PrefixdError) -> String {
+    match error {
+        PrefixdError::GuardrailViolation(g) => format!("{:?}", g)
+            .split_whitespace()
+            .next()
+            .unwrap_or("unknown")
+            .to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+/// Log and count a detector prefix event refused before persistence. Storage
+/// failures pass through uncounted, as on the host path.
+fn refuse_prefix_event(
+    source: &str,
+    destination: &str,
+    error: PrefixdError,
+    reason: Option<&str>,
+) -> AppError {
+    let reason = match (reason, &error) {
+        (Some(reason), _) => reason.to_string(),
+        (None, PrefixdError::GuardrailViolation(_)) => guardrail_reason(&error),
+        (None, _) => return AppError(error),
+    };
+    crate::observability::metrics::EVENTS_REJECTED
+        .with_label_values(&[source, "guardrail"])
+        .inc();
+    crate::observability::metrics::GUARDRAIL_REJECTIONS
+        .with_label_values(&[&reason])
+        .inc();
+    tracing::warn!(error = %error, source, destination, %reason, "detector prefix event refused");
+    AppError(error)
 }
 
 /// The live mitigation a rule would extend, or why this rule cannot proceed.
@@ -2169,6 +2299,11 @@ pub async fn get_mitigation(
                     .find_playbook(
                         mitigation.vector,
                         !mitigation.match_criteria.dst_ports.is_empty(),
+                        crate::domain::parse_flowspec_destination(
+                            &mitigation.match_criteria.dst_prefix,
+                        )
+                        .map(|destination| EventScope::for_destination(&destination))
+                        .unwrap_or_default(),
                     )
                     .and_then(|p| p.correlation.as_ref());
 
@@ -2912,9 +3047,9 @@ pub async fn ingest_events_batch(
             }
         };
         // Validate input
-        let validation_err = validate_ip(&input.victim_ip)
+        let validation_err = validate_event_destination(&input.victim_ip)
             .and_then(|_| validate_string_len(&input.source, "source", MAX_STRING_LEN))
-            .and_then(|_| validate_string_len(&input.victim_ip, "victim_ip", 45))
+            .and_then(|_| validate_string_len(&input.victim_ip, "victim_ip", 64))
             .and_then(|_| {
                 if let Some(ref eid) = input.event_id {
                     validate_string_len(eid, "event_id", MAX_STRING_LEN)

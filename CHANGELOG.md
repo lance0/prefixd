@@ -20,6 +20,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diversions with the 0.26.0 controller first; see
   [scoped scrubber profiles](docs/how-to/upgrading.md#scoped-scrubber-profiles-use-one-family).
 
+### Added
+
+- Guarded detector prefix (carpet-bombing) FlowSpec admission behind
+  `guardrails.allow_detector_prefix` and an exact
+  `guardrails.detector_prefix_sources` allowlist. Detector events may carry one
+  canonical CIDR; prefix playbooks require `scope: prefix`. A prefix discard
+  needs a destination port, and prefix police may omit the port only for
+  `udp_flood`. Whole-prefix inventory ownership, safelist overlap and the
+  existing prefix bounds apply. The feature is off by default and does not add
+  prefix RTBH, detector aggregation, reflection source-port matching or
+  automatic escalation. See ADR 033.
+- `quotas.max_active_prefix_per_customer` (default 5) caps active
+  detector-created prefix rules per customer. Manual CIDRs neither check nor
+  consume it; every rule still counts toward the customer, POP and global
+  quotas.
+- Refused detector prefix events log a warning and increment
+  `prefixd_events_rejected_total{reason="guardrail"}` and
+  `prefixd_guardrail_rejections_total` with `reason` `DetectorPrefixNotAllowed`,
+  `DetectorPrefixSourceNotAllowed`, `PrefixOwnership`,
+  `PrefixMatchRequiresPorts`, `PrefixBlackholeNotAllowed` or the existing
+  guardrail reason, such as `Safelisted`, `PrefixLengthViolation` or
+  `QuotaExceeded`.
+- Startup and playbook reload warn when a `scope: prefix` playbook is loaded
+  while `guardrails.allow_detector_prefix` is false or the destination bounds
+  admit hosts only.
+
 ### Changed
 
 - **Breaking:** `playbooks.yaml`, `PUT /v1/config/playbooks` and the
@@ -29,6 +55,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all of them. Startup errors now name the configuration file that failed.
 - The configuration reference no longer documents the unimplemented inventory
   `range_end` field.
+- Detector events (`/v1/events` and batch) now accept a host-length CIDR
+  (`203.0.113.10/32`, `2001:db8::10/128`) and store it as the bare address.
+- An invalid detector `victim_ip` now returns `invalid prefix: <value>:
+  destination must be an IPv4 or IPv6 address or CIDR` instead of
+  `invalid IP address: '<value>'`. The status code is unchanged.
 - The dashboard's withdrawal confirmations for mitigations, bulk mitigations and
   scrubber diversions now share one dialog. Titles use sentence case, the reason
   field reads "Withdrawal reason (optional)", a pending request cannot be

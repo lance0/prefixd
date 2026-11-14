@@ -332,3 +332,117 @@ async fn postgres_source_only_quota_is_atomic_and_scoped() {
 async fn mock_source_only_quota_is_atomic_and_scoped() {
     exercise_atomic_source_only_quota(Arc::new(prefixd::db::MockRepository::new())).await;
 }
+
+async fn prefix_quota_row(
+    repo: &dyn RepositoryTrait,
+    prefix: &str,
+    detector: bool,
+) -> prefixd::domain::Mitigation {
+    use prefixd::domain::*;
+    let mut event_id = uuid::Uuid::new_v4();
+    // Detector rows reference their persisted event; manual rows do not.
+    if detector {
+        let event = AttackEvent::from_input(
+            serde_json::from_value(serde_json::json!({
+                "timestamp": "2026-11-14T00:00:00Z",
+                "source": "fastnetmon",
+                "victim_ip": prefix,
+                "vector": "udp_flood",
+            }))
+            .unwrap(),
+        );
+        repo.insert_event(&event).await.unwrap();
+        event_id = event.event_id;
+    }
+    let mut row = Mitigation::from_intent(
+        MitigationIntent {
+            event_id,
+            customer_id: Some("cust-prefix".into()),
+            service_id: None,
+            pop: "prefix-quota".into(),
+            match_criteria: MatchCriteria {
+                dst_prefix: prefix.into(),
+                protocol: Some(17),
+                dst_ports: vec![53],
+                ..Default::default()
+            },
+            action_type: ActionType::Discard,
+            action_params: ActionParams::default(),
+            ttl_seconds: 60,
+            reason: "prefix quota".into(),
+        },
+        prefix.into(),
+        AttackVector::UdpFlood,
+    );
+    row.activate();
+    row
+}
+
+/// The detector prefix budget is atomic, counts only detector-created non-host
+/// rows and never caps manual CIDRs or host rules.
+async fn exercise_atomic_detector_prefix_quota(repo: Arc<dyn RepositoryTrait>) {
+    use prefixd::domain::MitigationStatus;
+    use prefixd::observability::CreationActor;
+    let settings = common::test_settings();
+    let mut quotas = settings.quotas;
+    quotas.max_active_prefix_per_customer = 1;
+    let detector = CreationActor::Detector("fastnetmon".into());
+    let operator = CreationActor::Operator("quota-test".into());
+    let is_prefix_quota = |error: &prefixd::error::PrefixdError| matches!(error, prefixd::error::PrefixdError::GuardrailViolation(prefixd::error::GuardrailError::QuotaExceeded { quota_type, .. }) if quota_type == "prefix_customer");
+
+    let first = prefix_quota_row(repo.as_ref(), "203.0.113.0/24", true).await;
+    let second = prefix_quota_row(repo.as_ref(), "2001:db8:100::/48", true).await;
+    // Both bypass API preflight. The repository lock must admit only one.
+    let (left, right) = tokio::join!(
+        repo.admit_mitigation(&first, &quotas, &settings.blackhole, &detector),
+        repo.admit_mitigation(&second, &quotas, &settings.blackhole, &detector),
+    );
+    assert_ne!(left.is_ok(), right.is_ok(), "{left:?} {right:?}");
+    assert!(is_prefix_quota(
+        left.as_ref().err().or(right.as_ref().err()).unwrap()
+    ));
+    assert_eq!(
+        repo.count_active_detector_prefix_by_customer("cust-prefix")
+            .await
+            .unwrap(),
+        1
+    );
+
+    // Manual CIDRs admit past the budget and are not counted against it.
+    for prefix in ["198.51.100.0/24", "2001:db8:200::/48"] {
+        let manual = prefix_quota_row(repo.as_ref(), prefix, false).await;
+        repo.admit_mitigation(&manual, &quotas, &settings.blackhole, &operator)
+            .await
+            .unwrap();
+    }
+    // A detector host rule is not a prefix rule.
+    let host = prefix_quota_row(repo.as_ref(), "203.0.113.10/32", true).await;
+    repo.admit_mitigation(&host, &quotas, &settings.blackhole, &detector)
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.count_active_detector_prefix_by_customer("cust-prefix")
+            .await
+            .unwrap(),
+        1
+    );
+
+    let mut admitted = if left.is_ok() { first } else { second };
+    admitted.status = MitigationStatus::Expired;
+    repo.update_mitigation(&admitted).await.unwrap();
+    let replacement = prefix_quota_row(repo.as_ref(), "192.0.2.0/24", true).await;
+    repo.admit_mitigation(&replacement, &quotas, &settings.blackhole, &detector)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn postgres_detector_prefix_quota_is_atomic_and_detector_only() {
+    let context = common::TestContext::new().await;
+    exercise_atomic_detector_prefix_quota(context.repo.clone()).await;
+}
+
+#[tokio::test]
+async fn mock_detector_prefix_quota_is_atomic_and_detector_only() {
+    exercise_atomic_detector_prefix_quota(Arc::new(prefixd::db::MockRepository::new())).await;
+}

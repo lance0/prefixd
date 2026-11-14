@@ -142,8 +142,13 @@ Safety limits that prevent accidental broad impact.
 - **/128 only (IPv6)** - Host-only by default
 - **Manual destination CIDRs** - Deliberately relaxed existing prefix bounds
   allow one owned subnet for discard/police. Host bits, partial/conflicting
-  ownership and any safelist overlap are refused. Automatic mitigation and
-  RTBH stay host-only; no per-address rule expansion
+  ownership and any safelist overlap are refused. RTBH stays host-only; no
+  per-address rule expansion
+- **Detector prefix events** - Opt-in `allow_detector_prefix` plus an exact
+  source allowlist lets a detector submit one covering CIDR. A prefix discard
+  needs an L4 port; a `udp_flood` prefix police rule may be protocol-only.
+  Whole-prefix ownership, safelist, prefix bounds and a separate per-customer
+  detector prefix quota still apply. Prefixd does not aggregate host events or infer the prefix
 - **Safelist protection** - Any overlap protects infrastructure, including hosts inside a broader destination
 
 ### TTL Enforcement

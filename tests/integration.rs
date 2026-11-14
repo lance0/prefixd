@@ -1154,6 +1154,8 @@ fn test_settings() -> Settings {
             allow_tcp_flags_match: false,
             allow_fragment_match: false,
             allow_packet_length_match: false,
+            allow_detector_prefix: false,
+            detector_prefix_sources: Vec::new(),
         },
         quotas: QuotasConfig {
             source_only_limit: None,
@@ -1162,6 +1164,7 @@ fn test_settings() -> Settings {
             max_active_global: 500,
             max_new_per_minute: 30,
             max_announcements_per_peer: 100,
+            max_active_prefix_per_customer: 5,
         },
         timers: TimersConfig {
             default_ttl_seconds: 120,
@@ -1216,6 +1219,7 @@ fn test_playbooks() -> Playbooks {
             match_criteria: PlaybookMatch {
                 vector: AttackVector::UdpFlood,
                 require_top_ports: false,
+                scope: Default::default(),
             },
             correlation: None,
             steps: vec![PlaybookStep {
@@ -8499,6 +8503,7 @@ async fn test_late_corroborator_finalizes_with_playbook_override() {
             match_criteria: PlaybookMatch {
                 vector: AttackVector::UdpFlood,
                 require_top_ports: false,
+                scope: Default::default(),
             },
             correlation: Some(PlaybookCorrelationOverride {
                 min_sources: Some(2),
