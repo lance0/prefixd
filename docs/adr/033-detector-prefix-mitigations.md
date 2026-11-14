@@ -2,8 +2,11 @@
 
 ## Status
 
-Proposed 2026-11-13. Amends [ADR 004](004-destination-prefix-32-only.md) and
-extends [ADR 010](010-signal-driven-architecture.md),
+Accepted. Detector-driven prefix mitigation remains opt-in. Router installation, traffic matching, policing behavior and withdrawal/restoration require platform-specific qualification.
+
+Proposed 2026-11-13 and accepted 2026-11-14. Amends
+[ADR 004](004-destination-prefix-32-only.md) and extends
+[ADR 010](010-signal-driven-architecture.md),
 [ADR 012](012-playbook-policy-engine.md) and
 [ADR 028](028-amplification-matches.md). This decision adds no detector,
 built-in aggregation, prefix RTBH or automatic playbook escalation.
@@ -36,9 +39,20 @@ turn an unowned or ambiguous address range into a broad discard.
 
 Add `guardrails.allow_detector_prefix: false` and
 `guardrails.detector_prefix_sources: []`. Both must be explicitly configured
-before a detector may send a non-host destination. The source allowlist is an
-exact match against the authenticated event's `source`; an empty list refuses
-all prefix events. A prefix event cannot select an action, rate, owner,
+before a detector may send a non-host destination. The allowlist is an exact
+match against the event's `source` field; an empty list refuses all prefix
+events.
+
+`detector_prefix_sources` filters a label; it does not authenticate a detector.
+The event endpoint authenticates the caller, and the caller then supplies
+`source` in the request body. Every caller authorized to ingest events is
+therefore trusted to supply that label honestly: any of them can send a prefix
+event under an allowlisted `source`. The allowlist limits which labels may
+request a prefix, not who sends them. This decision does not bind an
+authenticated caller to a source label; deployments that need that separation
+must restrict who holds event-ingestion credentials.
+
+A prefix event cannot select an action, rate, owner,
 community, VPN scope or speaker. The detector supplies the destination and
 traffic attributes only. The controller's automatic `bgp.default_scope` (VPN)
 still applies to a prefix rule exactly as it does to a host rule.
@@ -80,22 +94,32 @@ A `udp_amplification` prefix event follows the existing amplification fallback
 playbook. An unsupported step is a configuration error, not a runtime fallback.
 
 A prefix `discard` requires at least one destination port and therefore
-`require_top_ports: true`. A prefix `police` may match protocol only, without a
-destination port, for `udp_flood` alone. `syn_flood` and `ack_flood` prefix
-police also requires `require_top_ports: true`: policing all TCP to a customer
-prefix is too broad a default. A bare `dest=<prefix> -> discard` is never
-installed. When ports are present, the resulting FlowSpec match is the
+`require_top_ports: true`. `syn_flood` and `ack_flood` prefix police also
+requires `require_top_ports: true`. Those vectors translate to TCP matches
+without TCP-flag filters, so a portless rule would police all TCP to the
+prefix, and even with a port the rule affects all matching TCP to that port.
+TCP prefix police without a port is revisited only with a concrete required
+rule and qualification evidence, possibly using TCP flags or another narrower
+match. A bare `dest=<prefix> -> discard` is never installed.
+
+A `udp_flood` prefix `police` may match protocol only, without a destination
+port. This is an explicit exception the project approves; it is not an
+operator-confirmed requirement. The recorded operator requirement was
+protocol plus a port for prefix police and discard, and a playbook that sets
+`require_top_ports: true` meets it. When ports are present, the resulting FlowSpec match is the
 canonical destination prefix plus the event's protocol and destination-port
 list. If an event cannot produce the port a playbook requires, no rule is
 installed and the existing `accepted_no_playbook` response is returned;
 prefixd does not substitute a broader rule or an RTBH action.
 
-A protocol-only UDP police rule is one shared rate bucket for all UDP traffic
-to the whole prefix, legitimate traffic included. Every host in the prefix
-competes for the configured rate, so the rate must be sized for the prefix's
-normal aggregate UDP load, not for one host. Whether the router polices per
-interface, per line card or per system is router-specific; that blast radius
-needs the ASR9900 receipt before any operator relies on it.
+The exception has a collateral effect. A protocol-only UDP police rule is one
+shared rate bucket for all UDP traffic to the whole prefix, legitimate traffic
+included: DNS, QUIC and any other UDP service in the prefix are rate-limited
+with the attack. Every host competes for the configured rate, so the rate must
+reflect the prefix's normal aggregate UDP traffic, not one host's. Whether the
+router allocates the policer per interface, per line card or per system is
+router-specific and must be measured during qualification before any operator
+relies on it.
 
 A more-specific rule wins. RFC 8955 §5.1 orders FlowSpec rules by destination
 prefix specificity, so a host rule for an address inside an active prefix rule
@@ -156,6 +180,12 @@ stable parent identity, merge/unmerge rules, overlapping-owner handling and a
 withdrawal model for a rule that never existed as a single admission; that is
 outside this decision.
 
+FastNetMon Advanced's published total-hostgroup payload carries no port list,
+so it can only reach a portless `udp_flood` police playbook. A native
+FastNetMon hostgroup adapter is separate follow-up work; this decision and its
+first implementation accept the controller event shape but do not complete the
+FastNetMon integration.
+
 A detector that only reports individual hosts may still send host events under
 the existing host path. Operators must configure detector-side hostgroup or
 network aggregation before expecting prefix mitigation. Correlation keeps its
@@ -189,7 +219,9 @@ A detector can now produce one guarded prefix FlowSpec rule, avoiding a
 per-host rule explosion while retaining inventory, safelist, quota, TTL and
 withdrawal controls. Host-only deployments are unchanged because the feature
 requires three explicit opt-ins: the guardrail flag, a source allowlist entry
-and a relaxed prefix minimum.
+and a relaxed prefix minimum. The source allowlist is a label filter, so every
+authorized ingestion caller is trusted with prefix events under an allowlisted
+label.
 
 The first slice deliberately refuses cases that have no safe narrow match:
 prefix discard without a destination port, TCP prefix police without a
@@ -204,6 +236,18 @@ capability before detector onboarding and never fall back to a host event.
 
 ## Qualification
 
+No router platform is qualified by this decision. Each claimed platform and
+software version must show, in a dated receipt for the exact component
+combination:
+
+- the installed rules, as the router reports them;
+- that matching traffic is affected and nonmatching traffic is not;
+- the effective policing scope (per interface, line card or system);
+- restoration of traffic after withdrawal.
+
+FRR evidence cannot qualify ASR9900, and neither platform may be claimed from
+another's results.
+
 Unit and integration tests cover both families, canonicalization, host-bit
 rejection, the guardrail and source allowlist, whole-prefix ownership,
 safelist overlap, missing ports, blackhole/rules refusal, dry-run parity,
@@ -211,6 +255,5 @@ quota and creation-rate behavior, batch ingestion, duplicate events, unban by
 event ID, immutable withdrawal and reconciliation after a safety change.
 
 Speaker fixtures must show the exact prefix + protocol + port rule through
-add, local read-back, export observation and delete. Router installation and
-traffic matching still require dated FRR and ASR9900 receipts for the exact
-component combination. Do not claim ASR9900 support from FRR results.
+add, local read-back, export observation and delete. A speaker fixture does not
+establish router installation or traffic matching.
