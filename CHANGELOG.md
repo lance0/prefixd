@@ -48,9 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `prefixd_http_rate_limited_total{class}` counts requests rejected with 429,
   by request class.
-
-### Added
-
+- The `POST /v1/config/reload` response adds `restart_required`, the dotted
+  `prefixd.yaml` keys that differ from the running settings but take effect
+  only after a restart. `prefixdctl reload` prints them as `Restart required:`
+  and the dashboard shows them after a reload.
 - Guarded detector prefix (carpet-bombing) FlowSpec admission behind
   `guardrails.allow_detector_prefix` and an exact
   `guardrails.detector_prefix_sources` allowlist of event `source` labels. The
@@ -96,6 +97,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field reads "Withdrawal reason (optional)", a pending request cannot be
   repeated or dismissed, and focus returns to the opener after Cancel or Escape
   and to the page heading or another stable control after a completed withdrawal.
+- A present `prefixd.yaml` that fails to load now fails `POST
+  /v1/config/reload` even when `correlation.yaml` supplies correlation.
+- A failed reload returns 422 for an invalid file and 500 for an unexpected
+  error, with an `error` message naming the file, instead of an empty 500.
+  Loader detail is echoed only for `inventory.yaml` and `playbooks.yaml`.
+  `prefixdctl reload` and the dashboard show the message.
+- Reload applies the alerting editor's validation to `alerting.yaml`, so an
+  empty webhook URL or missing credential fails the reload instead of
+  replacing working alerting.
 
 ### Fixed
 
@@ -118,6 +128,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target redirected into the VRF that imports the rule. An unknown profile
   scope, which 0.26.0 already refused at startup, is now reported with the
   profile ID.
+- `POST /v1/config/reload` loads and validates inventory, playbooks,
+  `prefixd.yaml`, correlation and alerting before publishing any of them. A
+  failed playbook check previously left the new inventory live. A reload
+  canceled mid-publish can no longer leave only some sections published, and
+  a concurrent correlation edit can no longer be overwritten by the file it
+  replaced.
 
 ### Security
 

@@ -243,84 +243,266 @@ impl AppState {
         self.config_dir.join("correlation.yaml")
     }
 
-    /// Reload inventory and playbooks from config files
-    pub async fn reload_config(&self) -> Result<Vec<String>> {
-        let mut reloaded = Vec::new();
+    /// Reload inventory, playbooks, correlation and alerting, all or nothing.
+    ///
+    /// Every present file is loaded and validated before any is published, so a
+    /// failed reload leaves the running configuration unchanged. Lifecycle
+    /// operations and config edits see the old set or the new set, never a mix:
+    /// the lifecycle lock is taken first, then the editors' write guards, the
+    /// same order the handlers use. Inventory has no editor, so it is parsed before the locks are taken.
+    pub async fn reload_config(&self) -> std::result::Result<ReloadReport, ReloadError> {
+        let present = |name: &str| {
+            let path = self.config_dir.join(name);
+            path.exists().then_some(path)
+        };
+        let inventory = present("inventory.yaml")
+            .map(|path| Inventory::load(&path).map_err(|e| invalid("inventory.yaml", e)))
+            .transpose()?;
 
-        // Reload inventory
-        let inventory_path = self.config_dir.join("inventory.yaml");
-        if inventory_path.exists() {
-            let new_inventory = Inventory::load(&inventory_path)
-                .map_err(|e| PrefixdError::Config(format!("inventory: {}", e)))?;
-            // Admission and repair use whole-prefix ownership. Publish a new
-            // inventory between lifecycle operations, never after their safety
-            // check but before a speaker mutation.
-            let _mitigation_guard = self.mitigation_lock.lock().await;
-            *self.inventory.write().await = new_inventory;
-            *self.inventory_loaded_at.write().await = Utc::now();
-            reloaded.push("inventory".to_string());
-            tracing::info!("reloaded inventory.yaml");
-        }
+        let _mitigation_guard = self.mitigation_lock.lock().await;
+        let mut playbooks_guard = self.playbooks.write().await;
+        let mut alerting_guard = self.alerting.write().await;
+        let mut correlation_guard = self.correlation_config.write().await;
 
-        // Reload playbooks
-        let playbooks_path = self.config_dir.join("playbooks.yaml");
-        if playbooks_path.exists() {
-            let mut playbooks_guard = self.playbooks.write().await;
-            let new_playbooks = Playbooks::load(&playbooks_path)
-                .map_err(|e| PrefixdError::Config(format!("playbooks: {}", e)))?;
-            let errors =
-                new_playbooks.check_settings(&self.settings, self.announcer.capabilities());
-            if !errors.is_empty() {
-                return Err(PrefixdError::Config(format!(
-                    "playbooks: {}",
-                    errors.join("; ")
-                )));
+        let playbooks = present("playbooks.yaml")
+            .map(|path| {
+                let playbooks = Playbooks::load(&path).map_err(|e| invalid("playbooks.yaml", e))?;
+                let errors =
+                    playbooks.check_settings(&self.settings, self.announcer.capabilities());
+                if errors.is_empty() {
+                    Ok(playbooks)
+                } else {
+                    Err(invalid("playbooks.yaml", errors.join("; ")))
+                }
+            })
+            .transpose()?;
+        let settings = present("prefixd.yaml")
+            .map(|path| Settings::load(&path).map_err(|e| invalid("prefixd.yaml", e)))
+            .transpose()?;
+        let correlation_file = present("correlation.yaml")
+            .map(|path| CorrelationConfig::load(&path).map_err(|e| invalid("correlation.yaml", e)))
+            .transpose()?;
+        let alerting = present("alerting.yaml")
+            .map(|path| {
+                let alerting = crate::alerting::AlertingConfig::load(&path)
+                    .map_err(|e| invalid("alerting.yaml", e))?;
+                let errors = alerting.validate();
+                if errors.is_empty() {
+                    Ok(alerting)
+                } else {
+                    Err(invalid("alerting.yaml", errors.join("; ")))
+                }
+            })
+            .transpose()?;
+        let restart_required = match &settings {
+            // Without `alerting.yaml`, inline alerting applies only at startup;
+            // compare it with what is running, which an earlier reload may have set.
+            Some(file) => {
+                self.restart_required(file, alerting.is_none().then(|| alerting_guard.config()))?
             }
-            for warning in new_playbooks.prefix_scope_warnings(&self.settings.guardrails) {
+            None => Vec::new(),
+        };
+        let correlation = correlation_file.or(settings.map(|s| s.correlation));
+
+        // Everything validated. Take the remaining guards, then publish with no
+        // further await, so a canceled reload cannot publish only some sections.
+        let mut inventory_guard = self.inventory.write().await;
+        let mut inventory_loaded_at = self.inventory_loaded_at.write().await;
+        let mut playbooks_loaded_at = self.playbooks_loaded_at.write().await;
+        let mut correlation_loaded_at = self.correlation_loaded_at.write().await;
+        let mut alerting_loaded_at = self.alerting_loaded_at.write().await;
+        let now = Utc::now();
+        let mut reloaded = Vec::new();
+        if let Some(inventory) = inventory {
+            *inventory_guard = inventory;
+            *inventory_loaded_at = now;
+            reloaded.push("inventory".to_string());
+        }
+        if let Some(playbooks) = playbooks {
+            for warning in playbooks.prefix_scope_warnings(&self.settings.guardrails) {
                 tracing::warn!(%warning, "prefix playbook is unreachable");
             }
-            *playbooks_guard = new_playbooks;
-            drop(playbooks_guard);
-            *self.playbooks_loaded_at.write().await = Utc::now();
+            *playbooks_guard = playbooks;
+            *playbooks_loaded_at = now;
             reloaded.push("playbooks".to_string());
-            tracing::info!("reloaded playbooks.yaml");
         }
-
-        // Reload correlation config: prefer standalone correlation.yaml, fall back to prefixd.yaml
-        let correlation_path = self.correlation_path();
-        if correlation_path.exists() {
-            let new_config = crate::correlation::CorrelationConfig::load(&correlation_path)
-                .map_err(|e| PrefixdError::Config(format!("correlation.yaml: {}", e)))?;
-            *self.correlation_config.write().await = new_config;
-            *self.correlation_loaded_at.write().await = Utc::now();
+        if let Some(correlation) = correlation {
+            *correlation_guard = correlation;
+            *correlation_loaded_at = now;
             reloaded.push("correlation".to_string());
-            tracing::info!("reloaded correlation config from correlation.yaml");
-        } else {
-            let prefixd_yaml_path = self.config_dir.join("prefixd.yaml");
-            if prefixd_yaml_path.exists() {
-                let new_settings = Settings::load(&prefixd_yaml_path)
-                    .map_err(|e| PrefixdError::Config(format!("prefixd.yaml: {}", e)))?;
-                *self.correlation_config.write().await = new_settings.correlation;
-                *self.correlation_loaded_at.write().await = Utc::now();
-                reloaded.push("correlation".to_string());
-                tracing::info!("reloaded correlation config from prefixd.yaml");
+        }
+        if let Some(alerting) = alerting {
+            *alerting_guard = AlertingService::new(alerting);
+            *alerting_loaded_at = now;
+            reloaded.push("alerting".to_string());
+        }
+        tracing::info!(reloaded = ?reloaded, "reloaded configuration");
+        if !restart_required.is_empty() {
+            // Key names only; values may hold secrets.
+            tracing::warn!(keys = ?restart_required, "prefixd.yaml changes need a restart");
+        }
+        Ok(ReloadReport {
+            reloaded,
+            restart_required,
+        })
+    }
+
+    /// `prefixd.yaml` keys whose file value differs from the running settings.
+    /// Correlation is hot-reloaded. Alerting is compared with `running_alerting`
+    /// when given, and skipped when `alerting.yaml` hot-reloads it.
+    fn restart_required(
+        &self,
+        file: &Settings,
+        running_alerting: Option<&crate::alerting::AlertingConfig>,
+    ) -> Result<Vec<String>> {
+        use crate::alerting::AlertingConfig;
+        let internal = |e: serde_json::Error| PrefixdError::Internal(format!("settings: {e}"));
+        let to_value = |settings: &Settings, alerting: Option<&AlertingConfig>| {
+            let mut value = serde_json::to_value(settings).map_err(internal)?;
+            if let Some(object) = value.as_object_mut() {
+                object.remove("correlation");
+                object.remove("alerting");
+                if let Some(alerting) = alerting {
+                    let alerting = serde_json::to_value(alerting).map_err(internal)?;
+                    object.insert("alerting".into(), alerting);
+                }
+            }
+            Ok::<_, PrefixdError>(value)
+        };
+        let running = to_value(&self.settings, running_alerting)?;
+        let new = to_value(file, running_alerting.map(|_| &file.alerting))?;
+        let mut keys = Vec::new();
+        diff_keys("", &running, &new, &mut keys);
+        Ok(keys)
+    }
+}
+
+/// What a successful reload published and what still needs a restart.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReloadReport {
+    pub reloaded: Vec<String>,
+    pub restart_required: Vec<String>,
+}
+
+/// Why a reload failed. Nothing was published either way.
+#[derive(Debug, thiserror::Error)]
+pub enum ReloadError {
+    /// A present file failed to load or validate.
+    #[error("{file}: {detail}")]
+    Invalid { file: &'static str, detail: String },
+    #[error(transparent)]
+    Internal(#[from] PrefixdError),
+}
+
+impl ReloadError {
+    /// Operator-facing message. Loader text is echoed only for files that hold
+    /// no secrets: `prefixd.yaml` and `alerting.yaml` errors can quote values.
+    pub fn public_message(&self) -> String {
+        match self {
+            Self::Invalid { file, detail }
+                if matches!(*file, "inventory.yaml" | "playbooks.yaml") =>
+            {
+                format!(
+                    "reload failed: {file} is invalid: {detail}; running configuration unchanged"
+                )
+            }
+            Self::Invalid { file, .. } => format!(
+                "reload failed: {file} is invalid; running configuration unchanged; see controller log"
+            ),
+            Self::Internal(_) => {
+                "reload failed; running configuration unchanged; see controller log".to_string()
             }
         }
+    }
+}
 
-        // Reload alerting (from alerting.yaml if present)
-        let alerting_path = self.alerting_path();
-        if alerting_path.exists() {
-            let mut alerting_guard = self.alerting.write().await;
-            let new_config = crate::alerting::AlertingConfig::load(&alerting_path)
-                .map_err(|e| PrefixdError::Config(format!("alerting: {}", e)))?;
-            let new_service = AlertingService::new(new_config);
-            *alerting_guard = new_service;
-            drop(alerting_guard);
-            *self.alerting_loaded_at.write().await = Utc::now();
-            reloaded.push("alerting".to_string());
-            tracing::info!("reloaded alerting.yaml");
+fn invalid(file: &'static str, error: impl std::fmt::Display) -> ReloadError {
+    ReloadError::Invalid {
+        file,
+        detail: error.to_string(),
+    }
+}
+
+/// Dotted paths whose values differ. A key on one side only reports its
+/// parent, because map keys can be operator data.
+fn diff_keys(path: &str, a: &serde_json::Value, b: &serde_json::Value, out: &mut Vec<String>) {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Object(a), Value::Object(b)) => {
+            let same_keys = a.len() == b.len() && a.keys().all(|key| b.contains_key(key));
+            if !same_keys && !path.is_empty() {
+                out.push(path.to_string());
+                return;
+            }
+            let keys: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+            for key in keys {
+                let path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                match (a.get(key), b.get(key)) {
+                    (Some(a), Some(b)) => diff_keys(&path, a, b, out),
+                    _ => out.push(path),
+                }
+            }
         }
+        _ if a != b => out.push(path.to_string()),
+        _ => {}
+    }
+}
 
-        Ok(reloaded)
+#[cfg(test)]
+mod tests {
+    use super::diff_keys;
+    use serde_json::json;
+
+    fn diff(a: serde_json::Value, b: serde_json::Value) -> Vec<String> {
+        let mut out = Vec::new();
+        diff_keys("", &a, &b, &mut out);
+        out
+    }
+
+    #[test]
+    fn diff_keys_reports_dotted_paths_and_never_values() {
+        let running = json!({"timers": {"a": 1, "b": {"c": "x"}}, "pop": "p1", "list": [1]});
+        assert!(diff(running.clone(), running.clone()).is_empty());
+        assert_eq!(
+            diff(
+                running.clone(),
+                json!({"timers": {"a": 1, "b": {"c": "y"}}, "pop": "p1", "list": [1]})
+            ),
+            ["timers.b.c"]
+        );
+        assert_eq!(
+            diff(
+                running.clone(),
+                json!({"timers": {"a": 1, "b": {"c": "x"}}, "pop": "p1", "list": [2]})
+            ),
+            ["list"]
+        );
+        // Added and removed keys name the parent, not the (possibly data) key.
+        assert_eq!(
+            diff(
+                running.clone(),
+                json!({"timers": {"a": 1, "b": {"c": "x", "secret-name": 1}}, "pop": "p1", "list": [1]})
+            ),
+            ["timers.b"]
+        );
+        assert_eq!(
+            diff(
+                running.clone(),
+                json!({"timers": {"b": {"c": "x"}}, "pop": "p1", "list": [1]})
+            ),
+            ["timers"]
+        );
+        // A top-level key is a schema field name.
+        assert_eq!(
+            diff(
+                running,
+                json!({"timers": {"a": 1, "b": {"c": "x"}}, "list": [1]})
+            ),
+            ["pop"]
+        );
     }
 }

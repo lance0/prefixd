@@ -130,14 +130,16 @@ the host rule's action instead of the prefix rule's.
 
 ### 3. Admission sequence
 
-Every detector prefix event passes these checks before persistence or any
-speaker mutation, in both dry-run and enforced mode:
+Every detector prefix `ban` passes these checks before persistence or any
+speaker mutation, in both dry-run and enforced mode. Withdrawal is separate
+from admission: an authorized `unban` resolves `(source, event_id)` and
+withdraws the saved rules without passing the current creation checks, so it
+still works after `allow_detector_prefix` is disabled or ownership, safelist or
+bounds change. An unknown event ID returns 202 `not_found`, as for a host.
 
 1. Parse and canonicalize the destination; reject host bits, mixed forms and
    malformed families.
-2. Require `allow_detector_prefix` and an allowlisted source for a prefix
-   `ban`. A prefix `unban` correlates by source and event ID like a host
-   unban; an unknown event ID returns 202 `not_found`.
+2. Require `allow_detector_prefix` and an allowlisted `source` label.
 3. Apply the existing destination bounds: the prefix length must be within
    `guardrails.dst_prefix_minlen`/`dst_prefix_maxlen` (and the IPv6 variants).
    These default to host-only, so relaxing them is a deliberate operator act.
@@ -204,8 +206,10 @@ it does not join or corroborate a group for a host inside that prefix.
   accepted configuration but do not drive progression.
 - **Source-prefix selection.** Detector payloads still cannot select a source
   prefix; that remains a manual, opt-in match.
-- **A new speaker contract.** The rule uses the existing global FlowSpec
-  encoders. GoBGP and rustbgpd capability checks remain as before.
+- **A new speaker contract.** The rule uses the existing FlowSpec encoders:
+  global, or the automatic VPN default scope when `bgp.default_scope` selects
+  one ([ADR 032](032-vpn-flowspec-scope.md)). GoBGP and rustbgpd capability
+  checks remain as before.
 - **Reflection and amplification prefixes.** A `udp_amplification` prefix
   event that would match a reflector source port against random destination
   ports is not covered; it falls back to the `udp_flood` prefix playbook. A
@@ -249,10 +253,13 @@ FRR evidence cannot qualify ASR9900, and neither platform may be claimed from
 another's results.
 
 Unit and integration tests cover both families, canonicalization, host-bit
-rejection, the guardrail and source allowlist, whole-prefix ownership,
-safelist overlap, missing ports, blackhole/rules refusal, dry-run parity,
-quota and creation-rate behavior, batch ingestion, duplicate events, unban by
-event ID, immutable withdrawal and reconciliation after a safety change.
+rejection, the guardrail and source label allowlist, whole-prefix ownership,
+safelist overlap, missing ports, blackhole/rules refusal, dry-run parity, the
+detector prefix quota, batch ingestion, unban by event ID and extension by a
+re-sent event. Creation-rate limits, duplicate events and immutable withdrawal
+are covered by the shared host-path tests that prefix events reuse. The
+safety-change test exercises withdrawal on a safelist add, not a
+reconciliation pass.
 
 Speaker fixtures must show the exact prefix + protocol + port rule through
 add, local read-back, export observation and delete. A speaker fixture does not

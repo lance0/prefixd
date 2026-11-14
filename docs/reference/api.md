@@ -157,8 +157,10 @@ curl -X POST http://localhost/v1/events \
 
 Treat `400` and `422` as final: the prefix was malformed, unowned, too broad,
 safelisted, over quota or not authorized. Never resend a refused prefix as a
-host event. An unban uses the same `source` and `event_id`; an unknown event ID
-returns `202` with `status: "not_found"`, as for a host. A re-sent prefix with a
+host event. An unban uses the same `source` and `event_id` and is not subject to
+the prefix admission checks, so it still withdraws after the opt-in is disabled
+or ownership, safelist or bounds change; an unknown event ID returns `202` with
+`status: "not_found"`, as for a host. A re-sent prefix with a
 new event ID extends the same rule. A host event for an address inside an
 active prefix creates its own host rule, which takes precedence for that host
 (RFC 8955 §5.1); prefixd does not reconcile the overlap.
@@ -3028,9 +3030,31 @@ POST /v1/config/reload
 ```json
 {
   "reloaded": ["inventory", "playbooks", "correlation", "alerting"],
+  "restart_required": ["timers.reconciliation_interval_seconds"],
   "timestamp": "2026-02-22T21:00:00Z"
 }
 ```
+
+**Admin only.** Loads and validates every present file before publishing any,
+so a failed reload leaves the running configuration unchanged.
+`reloaded` lists the sections published. `restart_required` lists dotted
+`prefixd.yaml` keys whose file value differs from the running settings but are
+read only at startup; it names keys, never values. A key added or removed under
+a section, such as a map entry, reports the section's path.
+
+**Response (422 Unprocessable Entity):** a present file failed to load or
+validate. The error names the file. It includes the loader detail only for
+`inventory.yaml` and `playbooks.yaml`; for `prefixd.yaml`, `correlation.yaml`
+and `alerting.yaml` it points to the controller log, because loader errors can
+quote secret values.
+
+```json
+{
+  "error": "reload failed: prefixd.yaml is invalid; running configuration unchanged; see controller log"
+}
+```
+
+An unexpected failure returns 500 with the same shape.
 
 ---
 

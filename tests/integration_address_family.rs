@@ -644,6 +644,9 @@ async fn detector_prefix_outside_the_length_bounds_is_refused_before_persistence
 async fn detector_prefix_unban_by_event_id_withdraws_the_prefix_rule() {
     let (state, repo, speaker) = prefix_state(true, vec!["family-test"], vec!["203.0.113.0/24"]);
     let id = ban_prefix(&state, "carpet").await;
+    // Withdrawal does not depend on current admission: a later ownership
+    // change that would refuse a new ban does not block the unban.
+    state.inventory.write().await.customers[0].customer_id = "new-owner".into();
     let mut unban = prefix_event("carpet", "203.0.113.0/24", &[53]);
     unban["action"] = json!("unban");
     let (status, body) = post(state.clone(), "/v1/events", unban).await;
