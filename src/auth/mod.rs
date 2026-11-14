@@ -13,13 +13,27 @@ use crate::db::RepositoryTrait;
 
 pub type AuthSession = axum_login::AuthSession<AuthBackend>;
 
+/// Session cookie attributes shared by production and test routers.
+pub fn session_layer<S: tower_sessions::SessionStore>(
+    store: S,
+    secure: bool,
+) -> tower_sessions::SessionManagerLayer<S> {
+    tower_sessions::SessionManagerLayer::new(store)
+        .with_secure(secure)
+        .with_same_site(tower_sessions::cookie::SameSite::Lax)
+        .with_http_only(true)
+        .with_expiry(tower_sessions::Expiry::OnInactivity(
+            tower_sessions::cookie::time::Duration::days(7),
+        ))
+}
+
 /// Create the auth manager layer for the router
 ///
 /// # Arguments
 /// * `pool` - PostgreSQL connection pool for session storage
 /// * `repo` - Repository for operator lookups
 /// * `mode` - Authentication mode used for login and session restoration
-/// * `secure_cookies` - Set to true for HTTPS (production), false for HTTP (dev)
+/// * `secure_cookies` - Whether browsers see HTTPS, natively or at a proxy; see `http.secure_cookies`
 pub async fn create_auth_layer(
     pool: PgPool,
     repo: Arc<dyn RepositoryTrait>,
@@ -40,14 +54,7 @@ pub async fn create_auth_layer(
         }
     });
 
-    // Session layer configuration
-    let session_layer = tower_sessions::SessionManagerLayer::new(PostgresStore::new(pool))
-        .with_secure(secure_cookies)
-        .with_same_site(tower_sessions::cookie::SameSite::Lax)
-        .with_http_only(true)
-        .with_expiry(tower_sessions::Expiry::OnInactivity(
-            tower_sessions::cookie::time::Duration::days(7),
-        ));
+    let session_layer = session_layer(PostgresStore::new(pool), secure_cookies);
 
     // Auth backend
     let backend = AuthBackend::new(repo, mode);

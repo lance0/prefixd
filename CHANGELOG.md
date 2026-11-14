@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Session cookies are now `Secure` by default unless `auth.mode` is `none`,
+  including behind a TLS-terminating proxy. Previously only native `http.tls`
+  set the flag. A deployment that browsers reach over plain HTTP must set
+  `http.secure_cookies: false`; the shipped Compose configurations do. See
+  [Secure session cookies](docs/how-to/upgrading.md#secure-session-cookies).
 - **quinn-proto, quinn-udp** — Updated quinn-proto 0.11.18 → 0.11.19 and
   quinn-udp 0.5.14 → 0.5.16 in both lockfiles, which fixes a `MAX_STREAM_DATA`
   frame opening streams beyond the stream limit (RUSTSEC-2026-0523), a long
