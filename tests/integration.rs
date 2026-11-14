@@ -457,6 +457,79 @@ async fn test_repair_yields_to_operator_and_rechecks_stale_candidate() {
     );
 }
 
+async fn login_set_cookie(secure_cookies: Option<bool>) -> String {
+    use argon2::{Argon2, PasswordHasher};
+    let repo = Arc::new(MockRepository::new());
+    let hash = Argon2::default()
+        .hash_password_with_salt(b"cookie-test-password", b"cookie-attribute-test")
+        .unwrap()
+        .to_string();
+    repo.create_operator(
+        "cookie-checker",
+        &hash,
+        prefixd::domain::OperatorRole::Viewer,
+        None,
+    )
+    .await
+    .unwrap();
+    let mut settings = test_settings();
+    settings.http.auth.mode = AuthMode::Credentials;
+    settings.http.secure_cookies = secure_cookies;
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo,
+        Arc::new(MockAnnouncer::new()),
+        ".".into(),
+    )
+    .unwrap();
+    let response = create_test_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"username":"cookie-checker","password":"cookie-test-password"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn test_login_cookie_is_secure_by_default_and_explicit_false_omits_secure() {
+    let cookie = login_set_cookie(None).await;
+    let attributes: Vec<&str> = cookie.split(';').skip(1).map(str::trim).collect();
+    for expected in [
+        "Secure",
+        "HttpOnly",
+        "SameSite=Lax",
+        "Path=/",
+        "Max-Age=604800",
+    ] {
+        assert!(
+            attributes.contains(&expected),
+            "{expected} missing: {cookie}"
+        );
+    }
+
+    let cookie = login_set_cookie(Some(false)).await;
+    let attributes: Vec<&str> = cookie.split(';').skip(1).map(str::trim).collect();
+    assert!(!attributes.contains(&"Secure"), "Secure present: {cookie}");
+    assert!(attributes.contains(&"HttpOnly"), "{cookie}");
+}
+
 #[tokio::test]
 async fn test_authenticated_single_and_bulk_withdrawals_record_session_actor() {
     use argon2::{Argon2, PasswordHasher};

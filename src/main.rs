@@ -269,11 +269,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create auth layer for session-based auth
+    let secure_cookies = config.settings.http.secure_cookies();
+    tracing::info!(secure_cookies, "session cookies");
     let auth_layer = create_auth_layer(
         pool,
         repo.clone(),
         config.settings.http.auth.mode,
-        config.settings.http.secure_cookies(),
+        secure_cookies,
     )
     .await;
 

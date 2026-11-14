@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session cookies are now `Secure` by default unless `auth.mode` is `none`,
   including behind a TLS-terminating proxy. Previously only native `http.tls`
   set the flag. A deployment that browsers reach over plain HTTP must set
-  `http.secure_cookies: false`; the shipped Compose configurations do.
+  `http.secure_cookies: false`; the shipped Compose configurations do. See
+  [Secure session cookies](docs/how-to/upgrading.md#secure-session-cookies).
 
 ## [0.26.0] - 2026-11-12
 

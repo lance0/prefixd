@@ -41,7 +41,16 @@ http:
   
   # Optional CORS origin when not fronted by nginx
   cors_origin: "http://localhost:3000"
+
+  # Session cookie Secure attribute; set false only for plain-HTTP browser access
+  secure_cookies: true
 ```
+
+`http.secure_cookies` sets the session cookie's `Secure` attribute. When omitted,
+it is `true` unless `auth.mode` is `none` and native `http.tls` is absent, so
+sessions behind a TLS-terminating proxy stay Secure. Set it to `false` only when
+browsers reach prefixd over plain HTTP, as the shipped Compose quickstart does.
+See [Secure session cookies](../how-to/upgrading.md#secure-session-cookies).
 
 ### Authentication
 
@@ -69,12 +78,8 @@ sign-out controls. `/v1/auth/logout` still deletes a retained session and clears
 its cookie. Credential sessions and bearer-mode hybrid sessions are unchanged.
 
 Credentials authentication uses PostgreSQL operator accounts, Argon2 password
-verification and PostgreSQL-backed browser sessions.
-
-`http.secure_cookies` sets the session cookie's `Secure` attribute. When omitted,
-it is `true` unless `auth.mode` is `none` and native `http.tls` is absent, so
-sessions behind a TLS-terminating proxy stay Secure. Set it to `false` only when
-browsers reach prefixd over plain HTTP, as the shipped Compose quickstart does.
+verification and PostgreSQL-backed browser sessions. Session cookie attributes
+are set by [`http.secure_cookies`](#http-server).
 
 ### TLS
 
