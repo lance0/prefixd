@@ -229,8 +229,10 @@ another database or another tool writing to the same physical speaker. See
 Authentication is selected by deployment mode:
 
 - `credentials`: PostgreSQL-backed operator sessions with viewer/operator/admin
-  role checks. Session cookies are HttpOnly and SameSite=Lax; Secure is enabled
-  when native HTTP TLS is configured. Session expiry is based on inactivity.
+  role checks. Session cookies are HttpOnly and SameSite=Lax. They are Secure
+  unless [`http.secure_cookies`](../reference/configuration.md#http-server) is
+  `false`, including behind a TLS-terminating proxy. Session expiry is based on
+  inactivity.
 - `bearer`: the configured token provides operator-level API access; existing
   authenticated sessions retain their own roles.
 - `mtls`: startup requires native TLS with client verification; accepted clients

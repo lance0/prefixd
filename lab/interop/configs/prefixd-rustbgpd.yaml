@@ -9,6 +9,8 @@ http:
   auth:
     mode: bearer
     bearer_token_env: "PREFIXD_API_TOKEN"
+  # The lab serves plain HTTP; urllib's cookie jar would withhold a Secure session.
+  secure_cookies: false
 
 bgp:
   backend: rustbgpd
