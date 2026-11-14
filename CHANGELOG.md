@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `http3` support, which prefixd does not enable, so no build compiles them.
   No advisory exception is added.
 
+### Fixed
+
+- `/openapi.json` now documents `POST /v1/mitigations/{id}/withdraw`,
+  `GET /v1/safelist` and `POST /v1/config/reload`, so a generated client can
+  withdraw a single mitigation. A test now fails when a `/v1` route is missing
+  from the OpenAPI document or an OpenAPI operation has no route; the WebSocket
+  feed is the only exception.
+
 ## [0.26.0] - 2026-11-12
 
 prefixd 0.26.0 adds an RFC 8955 TCP flags match to manual FlowSpec rules and an
