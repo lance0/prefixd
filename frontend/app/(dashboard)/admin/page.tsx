@@ -173,6 +173,7 @@ export default function AdminPage() {
       setReloadResult(result)
       // Refresh all data
       mutate(() => true)
+
       // Keys waiting on a restart stay visible until the next reload.
       if (result.tone === "ok") setTimeout(() => setReloadResult(null), 3000)
     } catch (e) {

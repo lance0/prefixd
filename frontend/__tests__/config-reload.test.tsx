@@ -10,6 +10,7 @@ const restartRequired = "Reloaded; restart required for http.listen, timers.reco
 const invalid = "Reload failed: prefixd.yaml is invalid; running configuration unchanged; see controller log"
 
 beforeEach(() => signIn(controller, "credentials", operatorResponse("admin")))
+
 afterEach(cleanup)
 
 async function reload(button: string, response: Response, expected: string) {
@@ -26,12 +27,14 @@ async function expectReloadStatus(button: string) {
     restart_required: ["http.listen", "timers.reconciliation_interval_seconds"],
     timestamp: "2026-11-14T00:00:00Z",
   }), restartRequired)
+
   expect(warning).toHaveAttribute("role", "status")
   expect(warning).toHaveClass("text-warning")
 
   const failure = await reload(button, json({
     error: "reload failed: prefixd.yaml is invalid; running configuration unchanged; see controller log",
   }, 422), invalid)
+
   expect(failure).toHaveAttribute("role", "status")
   expect(failure).toHaveClass("text-destructive")
   expect(screen.queryByText(restartRequired)).toBeNull()

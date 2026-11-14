@@ -42,6 +42,7 @@ export default function ConfigPage() {
       const result = reloadStatus(await reloadConfig())
       await Promise.all([mutate("config-settings"), mutate("config-playbooks"), mutate("config-inventory")])
       setReloadResult(result)
+
       // Keys waiting on a restart stay visible until the next reload.
       if (result.tone === "ok") setTimeout(() => setReloadResult(null), 5000)
     } catch (e) {
