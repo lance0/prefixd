@@ -128,10 +128,45 @@ in `guardrails.detector_prefix_sources`, `victim_ip` may be a canonical CIDR.
 Host bits are rejected rather than cleared. The prefix must fit the configured
 `dst_prefix_minlen`/`dst_prefix_maxlen` (the default remains host-only), belong
 entirely to one inventory customer, and have no safelist overlap. A prefix
-`discard` match also needs a protocol and destination port; a prefix `police`
-playbook may use protocol only. Prefix events are matched only by
-`scope: prefix` playbooks and are never converted to host rules. A rejected
-prefix is not retried as a host event.
+`discard` needs a protocol and destination port; a prefix `police` may match
+protocol only for `udp_flood`. Prefix events are matched only by
+`scope: prefix` playbooks and are never converted to host rules. A
+`udp_amplification` prefix event uses the `udp_flood` prefix playbook; there is
+no source-port reflection match for prefixes. The controller's
+`bgp.default_scope` still applies. A host-length CIDR (`/32`, `/128`) is a host
+event and is stored as the bare address.
+
+```bash
+curl -X POST http://localhost/v1/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event_id": "fnm-hostgroup-7781",
+    "timestamp": "2026-11-14T09:00:00Z",
+    "source": "fastnetmon",
+    "victim_ip": "203.0.113.0/24",
+    "vector": "udp_flood",
+    "pps": 4200000,
+    "top_dst_ports": [53],
+    "confidence": 0.9
+  }'
+```
+
+Treat `400` and `422` as final: the prefix was malformed, unowned, too broad,
+safelisted, over quota or not authorized. Never resend a refused prefix as a
+host event. An unban uses the same `source` and `event_id`; an unknown event ID
+returns `202` with `status: "not_found"`, as for a host. A re-sent prefix with a
+new event ID extends the same rule. A host event for an address inside an
+active prefix creates its own host rule, which takes precedence for that host
+(RFC 8955 §5.1); prefixd does not reconcile the overlap.
+
+A refusal before persistence logs a warning and increments
+`prefixd_events_rejected_total{reason="guardrail"}` and
+`prefixd_guardrail_rejections_total` with `reason` `DetectorPrefixNotAllowed`,
+`DetectorPrefixSourceNotAllowed`, `PrefixOwnership`,
+`PrefixMatchRequiresPorts`, `PrefixBlackholeNotAllowed` or the existing
+guardrail reason, such as `Safelisted`, `PrefixLengthViolation` or
+`QuotaExceeded`. A customer `/24` sub-allocated inside another customer's
+configured aggregate has conflicting ownership and cannot be prefix-mitigated.
 
 Automatic detector mitigation otherwise uses a canonical host destination:
 `/32` for IPv4 and `/128` for IPv6. `icmp_flood` selects protocol 1 for IPv4 and 58 for IPv6 in
@@ -352,7 +387,7 @@ success: if some events fail, the rest are still processed. Each result's
   "rejected": 1,
   "results": [
     { "index": 0, "event_id": "550e8400-...", "status": "accepted", "mitigation_id": "660e8400-..." },
-    { "index": 1, "event_id": "00000000-...", "status": "rejected", "error": "invalid IP address" }
+    { "index": 1, "event_id": "00000000-...", "status": "rejected", "error": "invalid prefix: not-an-ip: destination must be an IPv4 or IPv6 address or CIDR" }
   ]
 }
 ```

@@ -145,15 +145,6 @@ impl PolicyEngine {
                 GuardrailError::NoAllowedPorts,
             ));
         }
-        if scope == EventScope::Prefix
-            && action.action_type == ActionType::Discard
-            && dst_ports.is_empty()
-        {
-            return Err(PrefixdError::GuardrailViolation(
-                GuardrailError::PrefixMatchRequiresPorts,
-            ));
-        }
-
         // Build match criteria
         let match_criteria = MatchCriteria {
             dst_prefix,
@@ -161,6 +152,9 @@ impl PolicyEngine {
             dst_ports,
             ..Default::default()
         };
+        if scope == EventScope::Prefix {
+            crate::guardrails::check_prefix_l4(action.action_type, &match_criteria)?;
+        }
         Ok(Some(vec![self.intent(
             event,
             context,

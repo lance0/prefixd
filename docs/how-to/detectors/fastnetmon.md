@@ -15,9 +15,35 @@ prefixd's `/v1/events` endpoint can accept a canonical CIDR when
 `guardrails.allow_detector_prefix` and an exact `detector_prefix_sources` entry
 authorize the source. A hostgroup with one network can be mapped to that event
 by an external shim. A hostgroup payload carries no port list, so a prefix
-discard playbook is not usable; a prefix police playbook can rate-limit the
-protocol only. Multiple networks in one hostgroup need separate events with
-distinct event IDs. See [ADR 033](../../adr/033-detector-prefix-mitigations.md).
+discard playbook is not usable; a `udp_flood` prefix police playbook can
+rate-limit UDP to the prefix. TCP prefix police needs a destination port.
+Multiple networks in one hostgroup need separate events with distinct event
+IDs. See [ADR 033](../../adr/033-detector-prefix-mitigations.md).
+
+A shim posts one event per attacked network:
+
+```bash
+curl -X POST "${PREFIXD_API}/v1/events" \
+  -H "Authorization: Bearer ${PREFIXD_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event_id": "fnm-hostgroup-customer-a-1731574800",
+    "timestamp": "2026-11-14T09:00:00Z",
+    "source": "fastnetmon",
+    "victim_ip": "203.0.113.0/24",
+    "vector": "udp_flood",
+    "pps": 4200000,
+    "confidence": 0.9
+  }'
+```
+
+Treat `400` and `422` as final and never resend a refused prefix as a host
+event. Send the unban with the same `source` and `event_id`.
+
+A protocol-only police rule is one shared rate bucket for all UDP to the whole
+prefix, legitimate traffic included. Size `rate_bps` above the prefix's normal
+aggregate UDP peak, not a per-host figure, and check how the router applies the
+rate (per interface, line card or system) before relying on it.
 
 ## Overview
 

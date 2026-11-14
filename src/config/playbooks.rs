@@ -252,6 +252,8 @@ impl Playbooks {
     }
 
     fn validate_steps(&self) -> Result<()> {
+        let errors = self.prefix_scope_errors();
+        anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
         for (i, playbook) in self.playbooks.iter().enumerate() {
             for (j, step) in playbook.steps.iter().enumerate() {
                 step.check(playbook.match_criteria.vector)
@@ -339,6 +341,88 @@ impl Playbooks {
         errors
     }
 
+    /// ADR 033 prefix playbook shape, enforced by load, save and the API alike:
+    /// one police or discard step for udp_flood, syn_flood or ack_flood. Only
+    /// UDP police may run without a destination port.
+    fn prefix_scope_errors(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (i, pb) in self.playbooks.iter().enumerate() {
+            if pb.match_criteria.scope != EventScope::Prefix {
+                continue;
+            }
+            let ctx = format!("playbook[{}] ({:?})", i, pb.name);
+            if pb.steps.len() != 1 {
+                errors.push(format!(
+                    "{ctx}: prefix playbooks support exactly one step in this slice"
+                ));
+            }
+            if let Some(first) = pb.steps.first()
+                && !pb.match_criteria.require_top_ports
+            {
+                if first.action == Some(PlaybookAction::Discard) {
+                    errors.push(format!(
+                        "{ctx}: prefix discard playbooks require require_top_ports: true"
+                    ));
+                } else if first.action == Some(PlaybookAction::Police)
+                    && pb.match_criteria.vector != AttackVector::UdpFlood
+                {
+                    errors.push(format!(
+                        "{ctx}: prefix police without a destination port is udp_flood only; set require_top_ports: true"
+                    ));
+                }
+            }
+            if !matches!(
+                pb.match_criteria.vector,
+                AttackVector::UdpFlood | AttackVector::SynFlood | AttackVector::AckFlood
+            ) {
+                errors.push(format!(
+                    "{ctx}: prefix playbooks support udp_flood, syn_flood and ack_flood only"
+                ));
+            }
+            for (j, step) in pb.steps.iter().enumerate() {
+                if !step.rules.is_empty() {
+                    errors.push(format!(
+                        "{ctx} step[{j}]: prefix playbooks do not support rules steps"
+                    ));
+                }
+                if step.action == Some(PlaybookAction::Blackhole) {
+                    errors.push(format!(
+                        "{ctx} step[{j}]: prefix playbooks do not support blackhole"
+                    ));
+                }
+            }
+        }
+        errors
+    }
+
+    /// Prefix playbooks the current guardrails make unreachable. Startup and
+    /// reload log these; they are not errors because the opt-in may follow.
+    pub fn prefix_scope_warnings(&self, guardrails: &GuardrailsConfig) -> Vec<String> {
+        if !self
+            .playbooks
+            .iter()
+            .any(|pb| pb.match_criteria.scope == EventScope::Prefix)
+        {
+            return Vec::new();
+        }
+        let mut warnings = Vec::new();
+        if !guardrails.allow_detector_prefix {
+            warnings.push(
+                "scope: prefix playbooks are loaded but guardrails.allow_detector_prefix is false; prefix events are refused".to_string(),
+            );
+        }
+        let v4 = guardrails.dst_prefix_minlen < 32
+            && guardrails.dst_prefix_maxlen >= guardrails.dst_prefix_minlen;
+        let v6_min = guardrails.dst_prefix_minlen_v6.unwrap_or(128);
+        let v6 = v6_min < 128 && guardrails.dst_prefix_maxlen_v6.unwrap_or(128) >= v6_min;
+        if !v4 && !v6 {
+            warnings.push(
+                "scope: prefix playbooks are loaded but guardrails.dst_prefix_minlen and dst_prefix_minlen_v6 admit hosts only; prefix events are refused".to_string(),
+            );
+        }
+        warnings
+    }
+
     /// Validate all playbook rules, returning a list of errors (empty = valid).
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
@@ -349,6 +433,7 @@ impl Playbooks {
             return errors;
         }
 
+        errors.extend(self.prefix_scope_errors());
         for (i, pb) in self.playbooks.iter().enumerate() {
             let ctx = format!("playbook[{}] ({:?})", i, pb.name);
 
@@ -374,47 +459,6 @@ impl Playbooks {
                         "{}: first step must not have escalation requirements",
                         ctx
                     ));
-                }
-            }
-
-            if pb.match_criteria.scope == EventScope::Prefix {
-                if pb.steps.len() != 1 {
-                    errors.push(format!(
-                        "{}: prefix playbooks support exactly one step in this slice",
-                        ctx
-                    ));
-                }
-                if let Some(first) = pb.steps.first()
-                    && first.action == Some(PlaybookAction::Discard)
-                    && !pb.match_criteria.require_top_ports
-                {
-                    errors.push(format!(
-                        "{}: prefix discard playbooks require require_top_ports: true",
-                        ctx
-                    ));
-                }
-                if !matches!(
-                    pb.match_criteria.vector,
-                    AttackVector::UdpFlood | AttackVector::SynFlood | AttackVector::AckFlood
-                ) {
-                    errors.push(format!(
-                        "{}: prefix playbooks support udp_flood, syn_flood and ack_flood only",
-                        ctx
-                    ));
-                }
-                for (j, step) in pb.steps.iter().enumerate() {
-                    if !step.rules.is_empty() {
-                        errors.push(format!(
-                            "{} step[{}]: prefix playbooks do not support rules steps",
-                            ctx, j
-                        ));
-                    }
-                    if step.action == Some(PlaybookAction::Blackhole) {
-                        errors.push(format!(
-                            "{} step[{}]: prefix playbooks do not support blackhole",
-                            ctx, j
-                        ));
-                    }
                 }
             }
 
@@ -624,6 +668,75 @@ mod tests {
                 .any(|error| error.contains("prefix playbooks support")),
             "{errors:?}"
         );
+    }
+
+    #[test]
+    fn portless_prefix_police_is_udp_flood_only() {
+        let mut playbook = valid_playbook();
+        playbook.name = "carpet_police".into();
+        playbook.match_criteria.scope = EventScope::Prefix;
+        playbook.match_criteria.require_top_ports = false;
+        playbook.steps[0].action = Some(PlaybookAction::Police);
+        playbook.steps[0].rate_bps = Some(5_000_000);
+        for vector in [AttackVector::SynFlood, AttackVector::AckFlood] {
+            let mut tcp = playbook.clone();
+            tcp.match_criteria.vector = vector;
+            let errors = Playbooks {
+                playbooks: vec![tcp.clone()],
+            }
+            .validate();
+            assert!(
+                errors.iter().any(|error| error.contains("udp_flood only")),
+                "{vector}: {errors:?}"
+            );
+            tcp.match_criteria.require_top_ports = true;
+            let errors = Playbooks {
+                playbooks: vec![tcp],
+            }
+            .validate();
+            assert!(errors.is_empty(), "{vector}: {errors:?}");
+        }
+    }
+
+    /// Startup and file reload use `load`, so the prefix shape is enforced
+    /// there too, not only by the API's `validate`.
+    #[test]
+    fn load_and_save_refuse_unsupported_prefix_playbooks() {
+        let mut playbook = valid_playbook();
+        playbook.match_criteria.scope = EventScope::Prefix;
+        playbook.match_criteria.vector = AttackVector::Unknown;
+        let invalid = Playbooks {
+            playbooks: vec![playbook],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("playbooks.yaml");
+        assert!(invalid.save(&path).is_err());
+        std::fs::write(&path, serde_saphyr::to_string(&invalid).unwrap()).unwrap();
+        let error = Playbooks::load(&path).unwrap_err().to_string();
+        assert!(error.contains("prefix playbooks support"), "{error}");
+    }
+
+    #[test]
+    fn unreachable_prefix_playbooks_are_reported() {
+        let mut playbook = valid_playbook();
+        playbook.match_criteria.scope = EventScope::Prefix;
+        let playbooks = Playbooks {
+            playbooks: vec![playbook],
+        };
+        let mut guardrails: GuardrailsConfig = crate::config::parse_yaml(
+            "max_ports: 5\ndst_prefix_minlen: 32\ndst_prefix_maxlen: 32\n",
+        )
+        .unwrap();
+        let warnings = playbooks.prefix_scope_warnings(&guardrails);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        guardrails.allow_detector_prefix = true;
+        guardrails.dst_prefix_minlen = 24;
+        assert!(playbooks.prefix_scope_warnings(&guardrails).is_empty());
+        let host_only = Playbooks {
+            playbooks: vec![valid_playbook()],
+        };
+        guardrails.allow_detector_prefix = false;
+        assert!(host_only.prefix_scope_warnings(&guardrails).is_empty());
     }
 
     #[test]

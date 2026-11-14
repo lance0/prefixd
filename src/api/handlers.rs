@@ -1138,9 +1138,14 @@ async fn handle_ban(
 
     let destination = validate_event_destination(&event.victim_ip).map_err(AppError)?;
     let is_prefix = EventScope::for_destination(&destination) == EventScope::Prefix;
+    // Every prefix refusal before persistence is logged and counted like the
+    // host path's guardrail refusals.
+    let refuse = |error: PrefixdError, reason: Option<&str>| {
+        refuse_prefix_event(&event.source, &event.victim_ip, error, reason)
+    };
     if is_prefix {
         crate::guardrails::check_detector_prefix(&state.settings.guardrails, &event.source)
-            .map_err(AppError)?;
+            .map_err(|error| refuse(error, None))?;
     }
     let inventory = state.inventory.read().await;
     let (context, is_owned) = if is_prefix {
@@ -1148,9 +1153,12 @@ async fn handle_ban(
             .lookup_prefix(&destination)
             .map_err(AppError)?
             .ok_or_else(|| {
-                AppError(PrefixdError::InvalidRequest(
-                    "destination prefix must be unambiguously owned by one customer".into(),
-                ))
+                refuse(
+                    PrefixdError::InvalidRequest(format!(
+                        "destination prefix {destination} must fit within one inventory customer prefix without conflicting ownership"
+                    )),
+                    Some("PrefixOwnership"),
+                )
             })?;
         (Some(context), true)
     } else {
@@ -1202,9 +1210,10 @@ async fn handle_ban(
                 .any(|intent| intent.action_type == ActionType::Blackhole)
         })
     {
-        return Err(AppError(PrefixdError::GuardrailViolation(
-            GuardrailError::PrefixBlackholeNotAllowed,
-        )));
+        return Err(refuse(
+            PrefixdError::GuardrailViolation(GuardrailError::PrefixBlackholeNotAllowed),
+            None,
+        ));
     }
     if let Some(scope) = state
         .settings
@@ -1282,18 +1291,31 @@ async fn handle_ban(
             }
             if let Ok(Some(existing)) = owner {
                 if existing.customer_id != intent.customer_id {
-                    return Err(AppError(PrefixdError::Conflict(
-                        "prefix ownership changed before mitigation extension".into(),
-                    )));
+                    return Err(refuse(
+                        PrefixdError::Conflict(format!(
+                            "prefix {} ownership changed before mitigation extension",
+                            event.victim_ip
+                        )),
+                        Some("PrefixOwnership"),
+                    ));
                 }
                 guardrails
                     .validate_rule(intent, safelisted)
-                    .map_err(AppError)?;
+                    .map_err(|error| refuse(error, None))?;
+                // Ownership is keyed by match, not action: never renew a saved
+                // rule, such as a manual portless discard, that a detector
+                // prefix event could not create.
+                crate::guardrails::check_prefix_l4(existing.action_type, &existing.match_criteria)
+                    .map_err(|error| refuse(error, None))?;
             } else if owner.is_ok() {
                 guardrails
                     .validate(intent, state.repo.as_ref(), safelisted)
                     .await
-                    .map_err(AppError)?;
+                    .map_err(|error| refuse(error, None))?;
+                guardrails
+                    .validate_detector_prefix_quota(intent, state.repo.as_ref())
+                    .await
+                    .map_err(|error| refuse(error, None))?;
             }
         }
         prefix_safelisted = Some(safelisted);
@@ -1703,14 +1725,7 @@ async fn handle_ban(
                     .validate(&intent, state.repo.as_ref(), is_safelisted)
                     .await
                 {
-                    let reason = match &e {
-                        PrefixdError::GuardrailViolation(g) => format!("{:?}", g)
-                            .split_whitespace()
-                            .next()
-                            .unwrap_or("unknown")
-                            .to_string(),
-                        _ => "unknown".to_string(),
-                    };
+                    let reason = guardrail_reason(&e);
                     crate::observability::metrics::GUARDRAIL_REJECTIONS
                         .with_label_values(&[&reason])
                         .inc();
@@ -1876,6 +1891,41 @@ async fn handle_ban(
             rules,
         }),
     ))
+}
+
+/// The `prefixd_guardrail_rejections_total` reason for a guardrail error.
+fn guardrail_reason(error: &PrefixdError) -> String {
+    match error {
+        PrefixdError::GuardrailViolation(g) => format!("{:?}", g)
+            .split_whitespace()
+            .next()
+            .unwrap_or("unknown")
+            .to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+/// Log and count a detector prefix event refused before persistence. Storage
+/// failures pass through uncounted, as on the host path.
+fn refuse_prefix_event(
+    source: &str,
+    destination: &str,
+    error: PrefixdError,
+    reason: Option<&str>,
+) -> AppError {
+    let reason = match (reason, &error) {
+        (Some(reason), _) => reason.to_string(),
+        (None, PrefixdError::GuardrailViolation(_)) => guardrail_reason(&error),
+        (None, _) => return AppError(error),
+    };
+    crate::observability::metrics::EVENTS_REJECTED
+        .with_label_values(&[source, "guardrail"])
+        .inc();
+    crate::observability::metrics::GUARDRAIL_REJECTIONS
+        .with_label_values(&[&reason])
+        .inc();
+    tracing::warn!(error = %error, source, destination, %reason, "detector prefix event refused");
+    AppError(error)
 }
 
 /// The live mitigation a rule would extend, or why this rule cannot proceed.

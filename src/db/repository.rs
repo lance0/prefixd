@@ -279,6 +279,11 @@ impl Repository {
     }
 }
 
+/// Active detector-created non-host FlowSpec rows for one customer. Detector
+/// rows reference their persisted event; manual CIDRs do not. `NULLIF` keeps
+/// the cast safe whatever order the planner evaluates the predicates in.
+const ACTIVE_DETECTOR_PREFIX_BY_CUSTOMER: &str = "SELECT COUNT(*) FROM mitigations m WHERE m.action_type != 'blackhole' AND m.customer_id = $1 AND m.status IN ('pending', 'active', 'escalated') AND masklen(NULLIF(m.match_json::jsonb->>'dst_prefix', '')::inet) < CASE WHEN family(NULLIF(m.match_json::jsonb->>'dst_prefix', '')::inet) = 6 THEN 128 ELSE 32 END AND EXISTS (SELECT 1 FROM events e WHERE e.event_id = m.triggering_event_id)";
+
 #[async_trait]
 impl RepositoryTrait for Repository {
     async fn list_diversions(&self, pop: &str) -> Result<Vec<crate::scrubber::Diversion>> {
@@ -800,9 +805,12 @@ impl RepositoryTrait for Repository {
                     let count: i64 = sqlx::query_scalar(concat!("SELECT (SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND customer_id = $1 AND status IN ('pending', 'active', 'escalated')) + (SELECT ", diversion_rules!(), " FROM scrubber_diversions WHERE customer_id = $1 AND status IN ('pending','active','withdrawing'))"))
                         .bind(customer_id).fetch_one(&mut *tx).await?;
                     check_active_quota("customer", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_per_customer)?;
-                    if crate::domain::is_prefix_destination(&m.match_criteria.dst_prefix) {
+                    // The detector prefix budget never caps manual CIDRs.
+                    if matches!(actor, CreationActor::Detector(_))
+                        && crate::domain::is_prefix_destination(&m.match_criteria.dst_prefix)
+                    {
                         let prefix_count: i64 = sqlx::query_scalar(
-                            "SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND customer_id = $1 AND status IN ('pending', 'active', 'escalated') AND match_json::jsonb->>'dst_prefix' <> '' AND masklen((match_json::jsonb->>'dst_prefix')::inet) < CASE WHEN family((match_json::jsonb->>'dst_prefix')::inet) = 6 THEN 128 ELSE 32 END",
+                            ACTIVE_DETECTOR_PREFIX_BY_CUSTOMER,
                         )
                         .bind(customer_id).fetch_one(&mut *tx).await?;
                         check_active_quota("prefix_customer", u32::try_from(prefix_count).unwrap_or(u32::MAX), quotas.max_active_prefix_per_customer)?;
@@ -1183,14 +1191,12 @@ impl RepositoryTrait for Repository {
         Ok(row.0 as u32)
     }
 
-    async fn count_active_prefix_by_customer(&self, customer_id: &str) -> Result<u32> {
+    async fn count_active_detector_prefix_by_customer(&self, customer_id: &str) -> Result<u32> {
         let mut connection = self.bounded_read_connection().await?;
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND customer_id = $1 AND status IN ('pending', 'active', 'escalated') AND match_json::jsonb->>'dst_prefix' <> '' AND masklen((match_json::jsonb->>'dst_prefix')::inet) < CASE WHEN family((match_json::jsonb->>'dst_prefix')::inet) = 6 THEN 128 ELSE 32 END",
-        )
-        .bind(customer_id)
-        .fetch_one(&mut *connection)
-        .await?;
+        let row: (i64,) = sqlx::query_as(ACTIVE_DETECTOR_PREFIX_BY_CUSTOMER)
+            .bind(customer_id)
+            .fetch_one(&mut *connection)
+            .await?;
         Ok(row.0 as u32)
     }
 

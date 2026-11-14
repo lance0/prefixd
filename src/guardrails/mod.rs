@@ -13,7 +13,7 @@ use std::net::IpAddr;
 
 use crate::config::{GuardrailsConfig, QuotasConfig, TimersConfig};
 use crate::db::RepositoryTrait;
-use crate::domain::{FlowSpecAction, FlowSpecNlri, MatchCriteria, MitigationIntent};
+use crate::domain::{ActionType, FlowSpecAction, FlowSpecNlri, MatchCriteria, MitigationIntent};
 use crate::error::{GuardrailError, PrefixdError, Result};
 
 /// Refuse a detector prefix event unless the feature and its source allowlist
@@ -33,6 +33,18 @@ pub fn check_detector_prefix(config: &GuardrailsConfig, source: &str) -> Result<
             GuardrailError::DetectorPrefixSourceNotAllowed {
                 source_name: source.into(),
             },
+        ));
+    }
+    Ok(())
+}
+
+/// A detector prefix rule needs a destination port unless it polices UDP
+/// (ADR 033): no portless prefix discard, and no portless TCP prefix police.
+pub fn check_prefix_l4(action_type: ActionType, criteria: &MatchCriteria) -> Result<()> {
+    let portless_ok = action_type == ActionType::Police && criteria.protocol == Some(17);
+    if criteria.dst_ports.is_empty() && !portless_ok {
+        return Err(PrefixdError::GuardrailViolation(
+            GuardrailError::PrefixMatchRequiresPorts,
         ));
     }
     Ok(())
@@ -265,6 +277,33 @@ impl Guardrails {
         Ok(())
     }
 
+    /// The separate detector prefix budget (ADR 033). Detector admission alone
+    /// calls this; manual CIDRs neither check nor consume it.
+    pub async fn validate_detector_prefix_quota(
+        &self,
+        intent: &MitigationIntent,
+        repo: &dyn RepositoryTrait,
+    ) -> Result<()> {
+        let Some(cid) = &intent.customer_id else {
+            return Ok(());
+        };
+        if !crate::domain::is_prefix_destination(&intent.match_criteria.dst_prefix) {
+            return Ok(());
+        }
+        let current = repo.count_active_detector_prefix_by_customer(cid).await?;
+        let max = self.quotas.max_active_prefix_per_customer;
+        if current >= max {
+            return Err(PrefixdError::GuardrailViolation(
+                GuardrailError::QuotaExceeded {
+                    quota_type: "prefix_customer".to_string(),
+                    current,
+                    max,
+                },
+            ));
+        }
+        Ok(())
+    }
+
     async fn validate_quotas(
         &self,
         intent: &MitigationIntent,
@@ -281,18 +320,6 @@ impl Guardrails {
                         max: self.quotas.max_active_per_customer,
                     },
                 ));
-            }
-            if crate::domain::is_prefix_destination(&intent.match_criteria.dst_prefix) {
-                let prefix_count = repo.count_active_prefix_by_customer(cid).await?;
-                if prefix_count >= self.quotas.max_active_prefix_per_customer {
-                    return Err(PrefixdError::GuardrailViolation(
-                        GuardrailError::QuotaExceeded {
-                            quota_type: "prefix_customer".to_string(),
-                            current: prefix_count,
-                            max: self.quotas.max_active_prefix_per_customer,
-                        },
-                    ));
-                }
             }
         }
 
@@ -691,6 +718,30 @@ mod tests {
                 max_active_prefix_per_customer: 5,
             },
         )
+    }
+
+    #[test]
+    fn prefix_l4_allows_portless_udp_police_only() {
+        let criteria = |protocol, ports: &[u16]| MatchCriteria {
+            dst_prefix: "203.0.113.0/24".into(),
+            protocol: Some(protocol),
+            dst_ports: ports.to_vec(),
+            ..Default::default()
+        };
+        assert!(check_prefix_l4(ActionType::Police, &criteria(17, &[])).is_ok());
+        for (action, protocol) in [
+            (ActionType::Police, 6),
+            (ActionType::Discard, 17),
+            (ActionType::Discard, 6),
+        ] {
+            assert!(matches!(
+                check_prefix_l4(action, &criteria(protocol, &[])),
+                Err(PrefixdError::GuardrailViolation(
+                    GuardrailError::PrefixMatchRequiresPorts
+                ))
+            ));
+            assert!(check_prefix_l4(action, &criteria(protocol, &[53])).is_ok());
+        }
     }
 
     #[test]

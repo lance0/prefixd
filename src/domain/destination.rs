@@ -9,8 +9,6 @@ pub enum DestinationError {
     HostBits { network: IpNet },
 }
 
-/// Parse a literal address or an exact network, rejecting implicit widening.
-/// Admission still needs prefix-length, whole-prefix ownership and safelist checks.
 /// Whether a valid destination string denotes a non-host prefix. Invalid
 /// values return false; callers parse and reject them separately.
 pub fn is_prefix_destination(value: &str) -> bool {
@@ -18,6 +16,8 @@ pub fn is_prefix_destination(value: &str) -> bool {
         .is_ok_and(|destination| destination.prefix_len() != destination.max_prefix_len())
 }
 
+/// Parse a literal address or an exact network, rejecting implicit widening.
+/// Admission still needs prefix-length, whole-prefix ownership and safelist checks.
 pub fn parse_flowspec_destination(value: &str) -> Result<IpNet, DestinationError> {
     let prefix = if value.contains('/') {
         value

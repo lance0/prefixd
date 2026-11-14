@@ -408,8 +408,12 @@ Detector prefix events are off by default. Enabling
 lets an allowlisted detector submit one canonical CIDR; a `scope: prefix`
 playbook is then eligible. Older controllers ignore both keys and the playbook
 scope, but they reject the CIDR as an invalid IP, so they do not install a host
-rule from it. Do not apply a prefix playbook to an older controller: it ignores
-`scope` and may treat the playbook as a host rule. Upgrade the controller first.
+rule from it. prefixd 0.26 and older ignore `scope` and treat a prefix playbook
+as a host playbook, selecting the first playbook that matches a vector. Upgrade
+the controller first, and list each vector's prefix playbooks after its host
+playbooks, so that an older controller reading the same file still selects the
+host playbook. Detector-created prefix rules count toward
+`quotas.max_active_prefix_per_customer`; manual CIDRs do not.
 
 Prefix rules use the existing destination bounds. Tightening the bounds does
 not withdraw saved intent. Before downgrading to a controller without detector

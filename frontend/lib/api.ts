@@ -1297,6 +1297,8 @@ export interface ConfigPlaybook {
   match: {
     vector: string
     require_top_ports?: boolean
+    /** `prefix` playbooks handle detector CIDR events only (ADR 033); omitted means `host`. */
+    scope?: "host" | "prefix"
   }
   /** Per-playbook correlation override; the API sends null when none is set. Editors must round-trip it. */
   correlation?: {

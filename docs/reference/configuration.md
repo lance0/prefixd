@@ -337,8 +337,13 @@ the exact event source, and an empty list refuses every prefix event. The
 destination still passes the same prefix bounds, whole-prefix ownership and
 safelist checks as a manual CIDR. A prefix event selects only a
 `scope: prefix` playbook; a prefix discard needs a destination port, while a
-prefix police step may match protocol only. Detector events cannot select a
-source prefix, VPN scope or action target. See
+`udp_flood` prefix police step may match protocol only. Detector events cannot
+select a source prefix, VPN scope or action target; `bgp.default_scope` still
+applies. A customer prefix sub-allocated inside another customer's configured
+aggregate has conflicting ownership and cannot be prefix-mitigated. Startup and
+playbook reload log a warning when a `scope: prefix` playbook is loaded while
+`allow_detector_prefix` is false or the destination bounds admit hosts only.
+See [detector prefix events](api.md#detector-prefix-events) and
 [ADR 033](../adr/033-detector-prefix-mitigations.md).
 
 `allow_tcp_flags_match` enables an optional `tcp_flags` match on manual
@@ -369,7 +374,7 @@ quotas:
   # Max active FlowSpec rules globally
   max_active_global: 500
 
-  # Separate active budget for detector prefix rules, per customer
+  # Separate active budget for detector-created prefix rules, per customer
   max_active_prefix_per_customer: 5
   
   # Max new mitigations created at this POP in any trailing 60 seconds
@@ -383,9 +388,9 @@ FlowSpec admission checks customer, POP, then global quotas atomically in
 PostgreSQL across controllers sharing the database. Only FlowSpec pending, active and escalated
 rows count, including active rows whose TTL has passed but whose lifecycle has not
 yet completed. A mitigation without a customer skips the customer quota. Existing
-owner extensions do not consume a new slot. Detector prefix rules also consume
-the separate per-customer `max_active_prefix_per_customer` budget; host rules
-do not. Admission has a fixed five-second
+owner extensions do not consume a new slot. Detector-created prefix rules also
+consume the separate per-customer `max_active_prefix_per_customer` budget (must
+be nonzero). Host rules and manual CIDRs neither check nor consume it. Admission has a fixed five-second
 admission deadline covering connection acquisition through the insert, after preflight
 checks. COMMIT runs outside the deadline, so a slow COMMIT is not reported as failure.
 Failure returns an error before this request sends an announcement. A connection lost
@@ -1210,11 +1215,24 @@ a prefix event. Prefix playbooks must contain exactly one step, use `police` or
 `ack_flood` only.
 
 A prefix `discard` requires `require_top_ports: true` and at least one
-destination port. A prefix `police` step may omit `require_top_ports`: when the
-detector supplies no port, the rule matches the protocol only and rate-limits
-the covering prefix. It never installs a bare destination-prefix discard.
-The event's destination still has to pass the normal prefix bounds, whole-prefix
-inventory ownership and safelist checks.
+destination port. A `udp_flood` prefix `police` step may omit
+`require_top_ports`: when the detector supplies no port, the rule matches UDP
+only and rate-limits the covering prefix. `syn_flood` and `ack_flood` prefix
+police requires `require_top_ports: true`, because policing all TCP to a
+customer prefix is too broad a default. prefixd never installs a bare
+destination-prefix discard. The event's destination still has to pass the
+normal prefix bounds, whole-prefix inventory ownership and safelist checks.
+
+A protocol-only police rule is one shared rate bucket for all UDP to the whole
+prefix, legitimate traffic included. Size `rate_bps` above the prefix's normal
+aggregate UDP peak, not a per-host figure: a `/24` whose hosts together peak at
+400 Mb/s of legitimate UDP needs a rate above that. Where the router applies
+the rate (per interface, line card or system) is router-specific; confirm it on
+your platform before relying on it.
+
+A host rule for an address inside an active prefix rule is more specific and
+takes precedence for that host (RFC 8955 §5.1). prefixd admits host and prefix
+rules independently and does not reconcile the overlap.
 
 ```yaml
 playbooks:

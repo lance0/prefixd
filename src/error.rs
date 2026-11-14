@@ -187,7 +187,7 @@ pub enum GuardrailError {
     #[error("source {source_name:?} is not in guardrails.detector_prefix_sources")]
     DetectorPrefixSourceNotAllowed { source_name: String },
 
-    #[error("prefix discard rules require a protocol and at least one destination port")]
+    #[error("prefix rules require a protocol and at least one destination port, except UDP police")]
     PrefixMatchRequiresPorts,
 
     #[error("prefix events cannot select a blackhole action")]
