@@ -148,6 +148,31 @@ impl Default for MockRepository {
     }
 }
 
+/// Mirrors PostgreSQL's detector prefix budget: an active non-host FlowSpec row
+/// whose triggering event was persisted. Manual CIDRs have no event row.
+fn is_detector_prefix(
+    m: &Mitigation,
+    customer_id: &String,
+    detector_events: &std::collections::HashSet<Uuid>,
+) -> bool {
+    m.is_active()
+        && m.action_type != crate::domain::ActionType::Blackhole
+        && m.customer_id.as_ref() == Some(customer_id)
+        && crate::domain::is_prefix_destination(&m.match_criteria.dst_prefix)
+        && detector_events.contains(&m.triggering_event_id)
+}
+
+impl MockRepository {
+    fn detector_event_ids(&self) -> std::collections::HashSet<Uuid> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| event.event_id)
+            .collect()
+    }
+}
+
 #[async_trait]
 impl RepositoryTrait for MockRepository {
     async fn list_diversions(&self, pop: &str) -> Result<Vec<crate::scrubber::Diversion>> {
@@ -746,6 +771,8 @@ impl RepositoryTrait for MockRepository {
         blackhole: &crate::config::BlackholeConfig,
         actor: &crate::observability::CreationActor,
     ) -> Result<()> {
+        // Snapshot before the admission locks, as PostgreSQL reads events inside its lock.
+        let detector_events = self.detector_event_ids();
         let mut mitigations = self.mitigations.lock().unwrap();
         let diversion_rows = self.diversions.lock().unwrap();
         let destination = if m.match_criteria.dst_prefix.is_empty() {
@@ -853,6 +880,22 @@ impl RepositoryTrait for MockRepository {
                     .unwrap_or(u32::MAX),
                     quotas.max_active_per_customer,
                 )?;
+                // The detector prefix budget never caps manual CIDRs.
+                if matches!(actor, crate::observability::CreationActor::Detector(_))
+                    && crate::domain::is_prefix_destination(&m.match_criteria.dst_prefix)
+                {
+                    let prefix_count = mitigations
+                        .iter()
+                        .filter(|existing| {
+                            is_detector_prefix(existing, customer_id, &detector_events)
+                        })
+                        .count();
+                    super::repository::check_active_quota(
+                        "prefix_customer",
+                        u32::try_from(prefix_count).unwrap_or(u32::MAX),
+                        quotas.max_active_prefix_per_customer,
+                    )?;
+                }
             }
             let count = mitigations
                 .iter()
@@ -1312,6 +1355,28 @@ impl RepositoryTrait for MockRepository {
             })
             .count() as u32
             + self.diversion_rules(|_| true))
+    }
+
+    async fn count_active_detector_prefix_by_customer(&self, customer_id: &str) -> Result<u32> {
+        #[cfg(test)]
+        if self
+            .fail_quota_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::error::PrefixdError::Internal(
+                "sensitive storage diagnostic".into(),
+            ));
+        }
+
+        let detector_events = self.detector_event_ids();
+        let customer_id = customer_id.to_string();
+        Ok(self
+            .mitigations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| is_detector_prefix(m, &customer_id, &detector_events))
+            .count() as u32)
     }
 
     async fn find_expired_mitigations(&self) -> Result<Vec<Mitigation>> {

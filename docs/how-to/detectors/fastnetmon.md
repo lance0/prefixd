@@ -3,6 +3,57 @@
 This guide covers integrating FastNetMon Community Edition with prefixd for
 automated FlowSpec or guarded host-blackhole mitigation.
 
+## Carpet bombing and prefix events
+
+FastNetMon **Advanced** can detect aggregate traffic for a total hostgroup and
+emit `alert_scope: "hostgroup"` with `hostgroup_networks`; per-network hostgroups
+use a separate, undocumented notify shape. The current native adapter and the
+Community notify script are host-only: they require a single `ip` and do not
+map a hostgroup payload. Do not point a hostgroup action at this adapter yet.
+
+prefixd's `/v1/events` endpoint can accept a canonical CIDR when
+`guardrails.allow_detector_prefix` is true and the event's `source` label is in
+`detector_prefix_sources`. That list filters the label the caller supplies; it
+does not authenticate FastNetMon, so any caller holding event-ingestion
+credentials can use an allowlisted label. A hostgroup with one network can be
+mapped to that event by an external shim. The published total-hostgroup
+payload carries no port list, so a prefix discard playbook is not usable and
+only a portless `udp_flood` prefix police playbook applies. TCP prefix police
+needs a destination port.
+
+prefixd does not yet complete the FastNetMon integration for prefixes: the
+native hostgroup adapter is separate follow-up work, and no router platform is
+qualified for prefix rules.
+Multiple networks in one hostgroup need separate events with distinct event
+IDs. See [ADR 033](../../adr/033-detector-prefix-mitigations.md).
+
+A shim posts one event per attacked network:
+
+```bash
+curl -X POST "${PREFIXD_API}/v1/events" \
+  -H "Authorization: Bearer ${PREFIXD_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event_id": "fnm-hostgroup-customer-a-1731574800",
+    "timestamp": "2026-11-14T09:00:00Z",
+    "source": "fastnetmon",
+    "victim_ip": "203.0.113.0/24",
+    "vector": "udp_flood",
+    "pps": 4200000,
+    "confidence": 0.9
+  }'
+```
+
+Treat `400` and `422` as final and never resend a refused prefix as a host
+event. Send the unban with the same `source` and `event_id`.
+
+Portless UDP police is an owner-approved exception, not an operator-confirmed
+requirement. It is one shared rate bucket for all UDP to the whole prefix,
+legitimate DNS and QUIC included. Size `rate_bps` for the prefix's normal
+aggregate UDP traffic, not a per-host figure, and measure how the router
+allocates the policer (per interface, line card or system) during
+qualification before relying on it.
+
 ## Overview
 
 FastNetMon detects DDoS attacks via NetFlow/sFlow analysis and calls a notify script when attacks are detected. The `prefixd-fastnetmon.sh` script bridges FastNetMon to prefixd's HTTP APIs (event ingest + mitigation withdraw).

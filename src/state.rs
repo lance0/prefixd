@@ -319,6 +319,9 @@ impl AppState {
             reloaded.push("inventory".to_string());
         }
         if let Some(playbooks) = playbooks {
+            for warning in playbooks.prefix_scope_warnings(&self.settings.guardrails) {
+                tracing::warn!(%warning, "prefix playbook is unreachable");
+            }
             *playbooks_guard = playbooks;
             *playbooks_loaded_at = now;
             reloaded.push("playbooks".to_string());

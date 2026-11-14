@@ -196,6 +196,8 @@ pub fn test_settings() -> Settings {
             allow_tcp_flags_match: false,
             allow_fragment_match: false,
             allow_packet_length_match: false,
+            allow_detector_prefix: false,
+            detector_prefix_sources: Vec::new(),
         },
         quotas: QuotasConfig {
             source_only_limit: None,
@@ -204,6 +206,7 @@ pub fn test_settings() -> Settings {
             max_active_global: 1000,
             max_new_per_minute: 60,
             max_announcements_per_peer: 200,
+            max_active_prefix_per_customer: 5,
         },
         timers: TimersConfig {
             default_ttl_seconds: 120,
@@ -266,6 +269,7 @@ pub fn test_playbooks() -> Playbooks {
                 match_criteria: PlaybookMatch {
                     vector: AttackVector::UdpFlood,
                     require_top_ports: false,
+                    scope: Default::default(),
                 },
                 correlation: None,
                 steps: vec![PlaybookStep {
@@ -282,6 +286,7 @@ pub fn test_playbooks() -> Playbooks {
                 match_criteria: PlaybookMatch {
                     vector: AttackVector::SynFlood,
                     require_top_ports: false,
+                    scope: Default::default(),
                 },
                 correlation: None,
                 steps: vec![PlaybookStep {

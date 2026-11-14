@@ -253,10 +253,13 @@ FRR evidence cannot qualify ASR9900, and neither platform may be claimed from
 another's results.
 
 Unit and integration tests cover both families, canonicalization, host-bit
-rejection, the guardrail and source allowlist, whole-prefix ownership,
-safelist overlap, missing ports, blackhole/rules refusal, dry-run parity,
-quota and creation-rate behavior, batch ingestion, duplicate events, unban by
-event ID, immutable withdrawal and reconciliation after a safety change.
+rejection, the guardrail and source label allowlist, whole-prefix ownership,
+safelist overlap, missing ports, blackhole/rules refusal, dry-run parity, the
+detector prefix quota, batch ingestion, unban by event ID and extension by a
+re-sent event. Creation-rate limits, duplicate events and immutable withdrawal
+are covered by the shared host-path tests that prefix events reuse. The
+safety-change test exercises withdrawal on a safelist add, not a
+reconciliation pass.
 
 Speaker fixtures must show the exact prefix + protocol + port rule through
 add, local read-back, export observation and delete. A speaker fixture does not

@@ -13,8 +13,42 @@ use std::net::IpAddr;
 
 use crate::config::{GuardrailsConfig, QuotasConfig, TimersConfig};
 use crate::db::RepositoryTrait;
-use crate::domain::{FlowSpecAction, FlowSpecNlri, MatchCriteria, MitigationIntent};
+use crate::domain::{ActionType, FlowSpecAction, FlowSpecNlri, MatchCriteria, MitigationIntent};
 use crate::error::{GuardrailError, PrefixdError, Result};
+
+/// Refuse a detector prefix event unless the feature and its source allowlist
+/// are both configured. Host events never call this.
+pub fn check_detector_prefix(config: &GuardrailsConfig, source: &str) -> Result<()> {
+    if !config.allow_detector_prefix {
+        return Err(PrefixdError::GuardrailViolation(
+            GuardrailError::DetectorPrefixNotAllowed,
+        ));
+    }
+    if !config
+        .detector_prefix_sources
+        .iter()
+        .any(|allowed| allowed == source)
+    {
+        return Err(PrefixdError::GuardrailViolation(
+            GuardrailError::DetectorPrefixSourceNotAllowed {
+                source_name: source.into(),
+            },
+        ));
+    }
+    Ok(())
+}
+
+/// A detector prefix rule needs a destination port unless it polices UDP
+/// (ADR 033): no portless prefix discard, and no portless TCP prefix police.
+pub fn check_prefix_l4(action_type: ActionType, criteria: &MatchCriteria) -> Result<()> {
+    let portless_ok = action_type == ActionType::Police && criteria.protocol == Some(17);
+    if criteria.dst_ports.is_empty() && !portless_ok {
+        return Err(PrefixdError::GuardrailViolation(
+            GuardrailError::PrefixMatchRequiresPorts,
+        ));
+    }
+    Ok(())
+}
 
 pub(crate) fn validate_total_lifetime(
     lifetime: chrono::Duration,
@@ -239,6 +273,33 @@ impl Guardrails {
         }
         if criteria.tcp_flags.is_some() && !self.config.allow_tcp_flags_match {
             return refuse(GuardrailError::TcpFlagsMatchNotAllowed);
+        }
+        Ok(())
+    }
+
+    /// The separate detector prefix budget (ADR 033). Detector admission alone
+    /// calls this; manual CIDRs neither check nor consume it.
+    pub async fn validate_detector_prefix_quota(
+        &self,
+        intent: &MitigationIntent,
+        repo: &dyn RepositoryTrait,
+    ) -> Result<()> {
+        let Some(cid) = &intent.customer_id else {
+            return Ok(());
+        };
+        if !crate::domain::is_prefix_destination(&intent.match_criteria.dst_prefix) {
+            return Ok(());
+        }
+        let current = repo.count_active_detector_prefix_by_customer(cid).await?;
+        let max = self.quotas.max_active_prefix_per_customer;
+        if current >= max {
+            return Err(PrefixdError::GuardrailViolation(
+                GuardrailError::QuotaExceeded {
+                    quota_type: "prefix_customer".to_string(),
+                    current,
+                    max,
+                },
+            ));
         }
         Ok(())
     }
@@ -644,6 +705,8 @@ mod tests {
                 allow_tcp_flags_match: false,
                 allow_fragment_match: false,
                 allow_packet_length_match: false,
+                allow_detector_prefix: false,
+                detector_prefix_sources: Vec::new(),
             },
             QuotasConfig {
                 source_only_limit: None,
@@ -652,8 +715,59 @@ mod tests {
                 max_active_global: 500,
                 max_new_per_minute: 30,
                 max_announcements_per_peer: 100,
+                max_active_prefix_per_customer: 5,
             },
         )
+    }
+
+    #[test]
+    fn prefix_l4_allows_portless_udp_police_only() {
+        let criteria = |protocol, ports: &[u16]| MatchCriteria {
+            dst_prefix: "203.0.113.0/24".into(),
+            protocol: Some(protocol),
+            dst_ports: ports.to_vec(),
+            ..Default::default()
+        };
+        assert!(check_prefix_l4(ActionType::Police, &criteria(17, &[])).is_ok());
+        for (action, protocol) in [
+            (ActionType::Police, 6),
+            (ActionType::Discard, 17),
+            (ActionType::Discard, 6),
+        ] {
+            assert!(matches!(
+                check_prefix_l4(action, &criteria(protocol, &[])),
+                Err(PrefixdError::GuardrailViolation(
+                    GuardrailError::PrefixMatchRequiresPorts
+                ))
+            ));
+            assert!(check_prefix_l4(action, &criteria(protocol, &[53])).is_ok());
+        }
+    }
+
+    #[test]
+    fn detector_prefix_requires_both_the_flag_and_an_exact_source_allowlist() {
+        let (mut config, _) = test_config();
+        assert!(matches!(
+            check_detector_prefix(&config, "fastnetmon"),
+            Err(PrefixdError::GuardrailViolation(
+                GuardrailError::DetectorPrefixNotAllowed
+            ))
+        ));
+        config.allow_detector_prefix = true;
+        assert!(matches!(
+            check_detector_prefix(&config, "fastnetmon"),
+            Err(PrefixdError::GuardrailViolation(
+                GuardrailError::DetectorPrefixSourceNotAllowed { .. }
+            ))
+        ));
+        config.detector_prefix_sources = vec!["fastnetmon".into()];
+        assert!(check_detector_prefix(&config, "fastnetmon").is_ok());
+        assert!(matches!(
+            check_detector_prefix(&config, "other"),
+            Err(PrefixdError::GuardrailViolation(
+                GuardrailError::DetectorPrefixSourceNotAllowed { .. }
+            ))
+        ));
     }
 
     #[test]
@@ -708,6 +822,8 @@ mod tests {
                 allow_tcp_flags_match: true,
                 allow_fragment_match: true,
                 allow_packet_length_match: true,
+                allow_detector_prefix: false,
+                detector_prefix_sources: Vec::new(),
             },
             QuotasConfig {
                 source_only_limit: None,
@@ -716,6 +832,7 @@ mod tests {
                 max_active_global: 5000,
                 max_new_per_minute: 100,
                 max_announcements_per_peer: 500,
+                max_active_prefix_per_customer: 5,
             },
         )
     }

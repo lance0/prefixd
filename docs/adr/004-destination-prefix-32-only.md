@@ -4,8 +4,9 @@
 
 Accepted; amended 2026-10-23 to permit explicit manual destination CIDRs and
 amended under [ADR 033](033-detector-prefix-mitigations.md) (accepted
-2026-11-14) to permit guarded detector prefix events. Router qualification of
-detector prefix rules is pending. The original 2026-01-15 decision required a
+2026-11-14) to permit guarded detector prefix events. For detector prefix
+rules, router installation, traffic matching, policing behavior and
+withdrawal/restoration require platform-specific qualification. The original 2026-01-15 decision required a
 single IPv4 host.
 
 ## Context

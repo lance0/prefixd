@@ -364,6 +364,7 @@ function ReadOnlyPlaybookCard({ playbook }: { playbook: ConfigPlaybook }) {
         <div className="flex items-center gap-2">
           <CardTitle>{playbook.name}</CardTitle>
           <Badge variant="outline">{playbook.match.vector}</Badge>
+          {playbook.match.scope === "prefix" && <Badge variant="secondary">prefix</Badge>}
           {playbook.match.require_top_ports && (
             <Badge variant="secondary">top ports required</Badge>
           )}
@@ -483,6 +484,7 @@ export function PlaybookEditor({ playbooks: initialPlaybooks, onSave, saving }: 
                     <div className="flex items-center gap-2">
                       <CardTitle>{playbook.name || <span className="italic text-muted-foreground">unnamed</span>}</CardTitle>
                       <Badge variant="outline">{playbook.match.vector}</Badge>
+                      {playbook.match.scope === "prefix" && <Badge variant="secondary">prefix</Badge>}
                       {playbook.match.require_top_ports && (
                         <Badge variant="secondary">top ports required</Badge>
                       )}
