@@ -2,8 +2,8 @@
 
 ## Status
 
-Proposed 2026-11-13. Extends [ADR 004](004-destination-prefix-32-only.md),
-[ADR 010](010-signal-driven-architecture.md),
+Proposed 2026-11-13. Amends [ADR 004](004-destination-prefix-32-only.md) and
+extends [ADR 010](010-signal-driven-architecture.md),
 [ADR 012](012-playbook-policy-engine.md) and
 [ADR 028](028-amplification-matches.md). This decision adds no detector,
 built-in aggregation, prefix RTBH or automatic playbook escalation.
@@ -40,7 +40,8 @@ before a detector may send a non-host destination. The source allowlist is an
 exact match against the authenticated event's `source`; an empty list refuses
 all prefix events. A prefix event cannot select an action, rate, owner,
 community, VPN scope or speaker. The detector supplies the destination and
-traffic attributes only.
+traffic attributes only. The controller's automatic `bgp.default_scope` (VPN)
+still applies to a prefix rule exactly as it does to a host rule.
 
 The existing `/v1/events` and batch event `victim_ip` field accepts an exact
 IPv4 or IPv6 CIDR only when both controls permit it. A bare address keeps its
@@ -50,14 +51,16 @@ same field and the existing prefix bounds.
 
 This is an additive API extension. Older controllers reject the CIDR as an
 invalid IP; they do not reinterpret it as a host or install a wider global
-rule. A detector that needs this feature must target a controller that
-advertises the capability in its authenticated health/documentation and must
-not retry a rejected prefix event as a host event.
+rule. A detector that needs this feature must target a controller whose
+authenticated `GET /v1/config/settings` response reports
+`guardrails.allow_detector_prefix: true`, and must not retry a rejected prefix
+event as a host event.
 
 `unban` continues to correlate by external event ID and withdraws what the
 original event created. A prefix ban and its unban must use the same source
 and event ID; matching a new host address to a prefix mitigation is not
-supported.
+supported. An unban for an unknown prefix event ID returns 202 `not_found`,
+as it does for a host.
 
 ### 2. Scope-specific playbooks
 
@@ -66,23 +69,40 @@ so existing playbooks and host events are unchanged. A prefix event selects
 only a `scope: prefix` playbook; a host event selects only a `scope: host`
 playbook. There is no fallback from one scope to the other.
 
-A prefix playbook has exactly one step in this slice; later steps remain
-accepted configuration but are not selected. The first step must be `police`
-or `discard` with a nonzero rate where required. The first slice refuses
-`blackhole` steps and multi-rule `rules` steps for prefix playbooks. It also
-refuses prefix playbooks for vectors that cannot produce a protocol match in
-this model (`icmp_flood` and `unknown`). An unsupported step is a configuration
-error, not a runtime fallback.
+A prefix playbook has exactly one step in this slice; a prefix playbook with
+more steps is refused at load. The step must be `police` or `discard` with a
+nonzero rate where required. The first slice refuses `blackhole` steps and
+multi-rule `rules` steps for prefix playbooks. Prefix playbooks are accepted
+only for `udp_flood`, `syn_flood` and `ack_flood`; every other vector,
+including `icmp_flood`, `unknown` and `udp_amplification`, is refused at load.
+A `udp_amplification` prefix event follows the existing amplification fallback
+([ADR 028](028-amplification-matches.md)) and selects the `udp_flood` prefix
+playbook. An unsupported step is a configuration error, not a runtime fallback.
 
 A prefix `discard` requires at least one destination port and therefore
-`require_top_ports: true`. A prefix `police` action may match protocol only
-when the detector supplies no port: rate-limiting the covering prefix is a
-bounded response, while a bare `dest=<prefix> -> discard` is not. When ports
-are present, the resulting FlowSpec match is the canonical destination prefix
-plus the event's protocol and destination-port list. If a discard event cannot
-produce a port, no rule is installed and the existing
-`accepted_no_playbook` response is returned; prefixd does not substitute a
-broader rule or an RTBH action.
+`require_top_ports: true`. A prefix `police` may match protocol only, without a
+destination port, for `udp_flood` alone. `syn_flood` and `ack_flood` prefix
+police also requires `require_top_ports: true`: policing all TCP to a customer
+prefix is too broad a default. A bare `dest=<prefix> -> discard` is never
+installed. When ports are present, the resulting FlowSpec match is the
+canonical destination prefix plus the event's protocol and destination-port
+list. If an event cannot produce the port a playbook requires, no rule is
+installed and the existing `accepted_no_playbook` response is returned;
+prefixd does not substitute a broader rule or an RTBH action.
+
+A protocol-only UDP police rule is one shared rate bucket for all UDP traffic
+to the whole prefix, legitimate traffic included. Every host in the prefix
+competes for the configured rate, so the rate must be sized for the prefix's
+normal aggregate UDP load, not for one host. Whether the router polices per
+interface, per line card or per system is router-specific; that blast radius
+needs the ASR9900 receipt before any operator relies on it.
+
+A more-specific rule wins. RFC 8955 §5.1 orders FlowSpec rules by destination
+prefix specificity, so a host rule for an address inside an active prefix rule
+takes precedence for that host. prefixd admits host and prefix rules
+independently and does not reconcile the overlap: a host event inside an
+active prefix creates its own host rule, and that host's traffic then follows
+the host rule's action instead of the prefix rule's.
 
 ### 3. Admission sequence
 
@@ -91,8 +111,9 @@ speaker mutation, in both dry-run and enforced mode:
 
 1. Parse and canonicalize the destination; reject host bits, mixed forms and
    malformed families.
-2. Require `allow_detector_prefix`, an allowlisted source and the event action
-   `ban`. Reject a prefix `unban` without a matching original event ID.
+2. Require `allow_detector_prefix` and an allowlisted source for a prefix
+   `ban`. A prefix `unban` correlates by source and event ID like a host
+   unban; an unknown event ID returns 202 `not_found`.
 3. Apply the existing destination bounds: the prefix length must be within
    `guardrails.dst_prefix_minlen`/`dst_prefix_maxlen` (and the IPv6 variants).
    These default to host-only, so relaxing them is a deliberate operator act.
@@ -102,24 +123,28 @@ speaker mutation, in both dry-run and enforced mode:
    read refuses admission.
 5. Refuse every safelist overlap, including a protected host inside the
    destination. A failed safelist read refuses admission.
-6. Require a protocol. For `discard`, require at least one destination port
-   after the existing allowed-port intersection; for `police`, an empty port
-   set produces a protocol-only, rate-limited prefix match. Reject a
-   non-canonical port set.
+6. Require a protocol. For `discard`, and for `syn_flood` or `ack_flood`
+   `police`, require at least one destination port after the existing
+   allowed-port intersection. For `udp_flood` `police`, an empty port set
+   produces a protocol-only, rate-limited prefix match.
 7. Apply the existing TTL, action, rate, source-prefix, fragment,
    packet-length, authorization, operation-mode, duplicate and immutable
    withdrawal rules. A prefix rule consumes one existing quota slot and one
    creation-rate slot.
-8. In addition, enforce `quotas.max_active_prefix_per_customer` for non-host
-   FlowSpec rules. This is a separate budget from the total per-customer
-   quota; the default is five and zero is invalid. The existing POP and global
-   quotas still apply.
+8. In addition, enforce `quotas.max_active_prefix_per_customer` for
+   detector-created prefix rules. This is a separate budget from the total
+   per-customer quota; the default is five and zero is invalid. Manual CIDRs
+   neither check nor consume it. The existing customer, POP and global quotas
+   still apply to both.
 
-The same checks run on reconciliation and repair. A later safelist or
+Reconciliation and repair keep the saved destination scope and recheck
+whole-prefix inventory ownership and safelist overlap. A later safelist or
 ownership change withdraws the whole affected rule through the existing
 durable withdrawal path; it does not split or replace the prefix with host
-rules. Reconciliation must never restore a broad rule that no longer passes
-ownership, safelist or prefix-length checks.
+rules. Reconciliation never restores a prefix rule that no longer passes
+ownership or safelist checks. It does not recheck prefix-length bounds:
+tightening them refuses new admissions and extensions, while an active rule
+runs until it expires or is withdrawn.
 
 ### 4. Aggregation remains the detector's responsibility
 
@@ -151,6 +176,10 @@ it does not join or corroborate a group for a host inside that prefix.
   prefix; that remains a manual, opt-in match.
 - **A new speaker contract.** The rule uses the existing global FlowSpec
   encoders. GoBGP and rustbgpd capability checks remain as before.
+- **Reflection and amplification prefixes.** A `udp_amplification` prefix
+  event that would match a reflector source port against random destination
+  ports is not covered; it falls back to the `udp_flood` prefix playbook. A
+  source-port prefix match for reflection is the obvious next slice.
 - **Router qualification.** A local RPC acknowledgement or read-back does not
   establish prefix matching or installed forwarding on a router.
 
@@ -163,7 +192,9 @@ requires three explicit opt-ins: the guardrail flag, a source allowlist entry
 and a relaxed prefix minimum.
 
 The first slice deliberately refuses cases that have no safe narrow match:
-protocol-only prefixes, ICMP/unknown vectors, RTBH and detector aggregation.
+prefix discard without a destination port, TCP prefix police without a
+destination port, ICMP/unknown vectors, RTBH and controller-side aggregation.
+Prefix police without a port is allowed only for `udp_flood`.
 Those refusals are visible at admission rather than being hidden behind a
 broader rule. The detector must supply a useful prefix and port signal.
 
