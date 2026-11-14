@@ -23,17 +23,7 @@ import { IncidentReportDialog } from "@/components/dashboard/incident-report-dia
 import { formatRoutingScope, withdrawMitigation, getIncidentReport, isNotFound, type Mitigation } from "@/lib/api"
 import { copyText } from "@/lib/clipboard"
 import { toast } from "sonner"
-import {
-  AlertDialog,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
+import { WithdrawConfirmDialog } from "@/components/dashboard/withdraw-confirm-dialog"
 import { usePermissions } from "@/hooks/use-permissions"
 import { formatConfidence } from "@/lib/confidence"
 import { ConfidenceBar } from "@/components/dashboard/confidence-bar"
@@ -107,11 +97,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
 
   const [copied, setCopied] = useState<string | null>(null)
   const [showWithdrawDialog, setShowWithdrawDialog] = useState(false)
-  const [withdrawReason, setWithdrawReason] = useState("")
-  const [isWithdrawing, setIsWithdrawing] = useState(false)
   const [withdrawError, setWithdrawError] = useState<string | null>(null)
-  const withdrawInFlight = useRef(false)
-  const withdrawCompleted = useRef(false)
   const withdrawTrigger = useRef<HTMLButtonElement | null>(null)
   const victimLink = useRef<HTMLAnchorElement | null>(null)
   const [reportMarkdown, setReportMarkdown] = useState<string | null>(null)
@@ -129,23 +115,19 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
     setTimeout(() => setCopied(null), 2000)
   }
 
-  const handleWithdraw = async () => {
-    if (!mitigation || withdrawInFlight.current) return
-    withdrawInFlight.current = true
-    setIsWithdrawing(true)
+  const handleWithdraw = async (reason: string) => {
+    if (!mitigation) return false
     setWithdrawError(null)
 
     try {
-      await withdrawMitigation(mitigation.mitigation_id, withdrawReason || "Manual withdrawal", "dashboard")
-      withdrawCompleted.current = true
-      setShowWithdrawDialog(false)
-      setWithdrawReason("")
+      await withdrawMitigation(mitigation.mitigation_id, reason || "Manual withdrawal", "dashboard")
       mutate()
+
+      return true
     } catch (e) {
       setWithdrawError(e instanceof Error ? e.message : "Failed to withdraw")
-    } finally {
-      withdrawInFlight.current = false
-      setIsWithdrawing(false)
+
+      return false
     }
   }
 
@@ -250,7 +232,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                   variant="destructive"
                   size="sm"
                   onClick={() => {
-                    withdrawCompleted.current = false
+                    setWithdrawError(null)
                     setShowWithdrawDialog(true)
                   }}
                 >
@@ -556,60 +538,28 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
         </div>
       </div>
 
-      {/* Withdraw Confirmation Dialog */}
-      <AlertDialog open={showWithdrawDialog} onOpenChange={(open) => {
-        if (!open && !withdrawInFlight.current) {
+      <WithdrawConfirmDialog
+        open={showWithdrawDialog}
+        onClose={() => {
           setShowWithdrawDialog(false)
-          setWithdrawReason("")
           setWithdrawError(null)
-        }
-      }}>
-        <AlertDialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" onCloseAutoFocus={(event) => {
-          event.preventDefault()
-          const target = !withdrawCompleted.current && withdrawTrigger.current?.isConnected ? withdrawTrigger.current : victimLink.current
-          target?.focus()
-        }}>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Withdraw Mitigation</AlertDialogTitle>
-            <AlertDialogDescription>
-              Request withdrawal for <span className="font-mono font-semibold">{mitigation?.dst_prefix || mitigation?.victim_ip}</span>
-              {mitigation?.vpn_scope ? <> in <span className="font-mono">{formatRoutingScope(mitigation.vpn_scope)}</span></> : null}
-              {mitigation?.src_prefix ? <> from source <span className="font-mono">{mitigation.src_prefix}</span></> : null}
-              {" "}({mitigation?.action_type}).
-              Local completion is recorded in the audit log. Router convergence and traffic filtering are not verified here.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="py-4">
-            <Label htmlFor="reason">Reason (optional)</Label>
-            <Input
-              id="reason"
-              placeholder="e.g., False positive, attack subsided"
-              value={withdrawReason}
-              disabled={isWithdrawing}
-              onChange={(e) => setWithdrawReason(e.target.value)}
-              className="mt-2"
-            />
-            {withdrawError && (
-              <div role="alert" className="text-sm text-destructive mt-2">
-                <p>{withdrawError}</p>
-                <p>Cleanup may still be pending; a pending request retains its original recorded reason.</p>
-              </div>
-            )}
-            <p role="status" className="text-sm text-muted-foreground mt-2">{isWithdrawing ? "Waiting for local withdrawal completion..." : ""}</p>
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={isWithdrawing}>Cancel</AlertDialogCancel>
-            <Button
-              type="button"
-              onClick={handleWithdraw}
-              disabled={isWithdrawing}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              {isWithdrawing ? "Withdrawing..." : "Withdraw"}
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+        }}
+        title="Withdraw mitigation"
+        description={<>
+          Request withdrawal for <span className="font-mono font-semibold">{mitigation.dst_prefix || mitigation.victim_ip}</span>
+          {mitigation.vpn_scope ? <> in <span className="font-mono">{formatRoutingScope(mitigation.vpn_scope)}</span></> : null}
+          {mitigation.src_prefix ? <> from source <span className="font-mono">{mitigation.src_prefix}</span></> : null}
+          {" "}({mitigation.action_type}).
+          Local completion is recorded in the audit log. Router convergence and traffic filtering are not verified here.
+        </>}
+        reasonPlaceholder="e.g., False positive, attack subsided"
+        pendingStatus="Waiting for local withdrawal completion..."
+        onConfirm={handleWithdraw}
+        error={withdrawError}
+        errorDetail="Cleanup may still be pending; a pending request retains its original recorded reason."
+        trigger={withdrawTrigger}
+        fallback={victimLink}
+      />
 
       <IncidentReportDialog
         markdown={reportMarkdown}

@@ -57,17 +57,18 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
         super::handlers::preview_manual_flowspec,
         super::handlers::extend_mitigation,
         super::handlers::get_mitigation,
+        super::handlers::withdraw_mitigation,
         super::handlers::bulk_withdraw_mitigations,
         super::handlers::bulk_acknowledge_mitigations,
         super::handlers::list_events,
         super::handlers::list_audit,
         super::handlers::get_stats,
         super::handlers::list_pops,
+        super::handlers::reload_config,
         super::handlers::get_config_settings,
         super::handlers::get_config_inventory,
         super::handlers::get_config_playbooks,
         super::handlers::update_playbooks,
-        super::handlers::reload_config,
         super::handlers::get_alerting_config,
         super::handlers::update_alerting_config,
         super::handlers::test_alerting,
@@ -93,6 +94,7 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
         super::handlers::create_operator,
         super::handlers::delete_operator,
         super::handlers::change_password,
+        super::handlers::list_safelist,
         super::handlers::add_safelist,
         super::handlers::remove_safelist,
     ),
@@ -109,6 +111,7 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
             super::handlers::FlowSpecAdmissionOutcome,
             super::handlers::ExtendMitigationRequest,
             super::handlers::ExtendMitigationResponse,
+            super::handlers::WithdrawRequest,
             MitigationResponse,
             BlackholeRouteResponse,
             MitigationsListResponse,
@@ -271,6 +274,122 @@ impl utoipa::Modify for StandbyResponses {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    const METHODS: &[&str] = &[
+        "get", "post", "put", "delete", "patch", "head", "options", "trace",
+    ];
+
+    /// Routes with no OpenAPI operation. The WebSocket feed is an `any` upgrade
+    /// that OpenAPI cannot describe; the API reference documents it instead.
+    const NOT_IN_OPENAPI: &[&str] = &["/v1/ws/feed"];
+
+    /// Text between a call's opening parenthesis (already consumed) and its
+    /// matching close.
+    fn call_args(rest: &str) -> &str {
+        let mut depth = 1;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' if depth == 1 => return &rest[..i],
+                ')' => depth -= 1,
+                _ => {}
+            }
+        }
+        panic!("unbalanced call in routes.rs");
+    }
+
+    /// `(path, method)` for every `/v1` route registered in `routes.rs`. axum
+    /// cannot list a router's routes, so this reads the `.route(..)` calls in
+    /// the shared route functions.
+    fn routed_operations() -> BTreeSet<(String, String)> {
+        let source = include_str!("routes.rs");
+        for unread in [
+            ".nest(",
+            ".nest_service(",
+            ".route_service(",
+            ".fallback(",
+            ".fallback_service(",
+        ] {
+            assert!(
+                !source.contains(unread),
+                "routes.rs uses `{unread}..)`, which this test does not read; teach it"
+            );
+        }
+        for (start, _) in source.match_indices(".merge(") {
+            let args = call_args(&source[start + ".merge(".len()..]);
+            let callee = args.split('(').next().unwrap().trim();
+            assert!(
+                source.contains(&format!("fn {callee}(")),
+                "routes merged from `{callee}` live outside routes.rs; teach this test to read them"
+            );
+        }
+
+        let call = regex::Regex::new(r"\b([a-z_][a-z0-9_]*)\(").unwrap();
+        let mut operations = BTreeSet::new();
+        let mut skipped = Vec::new();
+        for (start, _) in source.match_indices(".route(") {
+            let args = call_args(&source[start + ".route(".len()..]);
+            let path = args.split('"').nth(1).expect("route path literal");
+            if !path.starts_with("/v1/") {
+                continue;
+            }
+            if NOT_IN_OPENAPI.contains(&path) {
+                skipped.push(path);
+                continue;
+            }
+            // axum's `{*prefix}` wildcard is the OpenAPI `{prefix}` parameter.
+            let path = path.replace("{*", "{");
+            let mut methods = call.captures_iter(args).peekable();
+            assert!(methods.peek().is_some(), "{path}: no method router");
+            for method in methods {
+                let method = &method[1];
+                assert!(
+                    METHODS.contains(&method),
+                    "{path}: unrecognized method router `{method}`; teach this test"
+                );
+                assert!(
+                    operations.insert((path.clone(), method.to_string())),
+                    "{path}: {method} routed twice"
+                );
+            }
+        }
+        assert_eq!(
+            skipped, NOT_IN_OPENAPI,
+            "stale NOT_IN_OPENAPI entry, or route listed twice"
+        );
+        operations
+    }
+
+    #[test]
+    fn openapi_documents_every_v1_route() {
+        let routed = routed_operations();
+        // Anchor: the parser sees the real route table.
+        assert!(routed.contains(&("/v1/mitigations/{id}/withdraw".into(), "post".into())));
+        assert!(routed.contains(&("/v1/safelist/{prefix}".into(), "delete".into())));
+
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let documented: BTreeSet<(String, String)> = doc["paths"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(path, _)| path.starts_with("/v1/"))
+            .flat_map(|(path, item)| {
+                item.as_object()
+                    .unwrap()
+                    .keys()
+                    .filter(|key| METHODS.contains(&key.as_str()))
+                    .map(move |method| (path.clone(), method.clone()))
+            })
+            .collect();
+
+        let missing: Vec<_> = routed.difference(&documented).collect();
+        let unrouted: Vec<_> = documented.difference(&routed).collect();
+        assert!(
+            missing.is_empty() && unrouted.is_empty(),
+            "routes missing from OpenAPI: {missing:?}\nOpenAPI operations with no route: {unrouted:?}"
+        );
+    }
 
     #[test]
     fn state_changing_operations_document_standby() {

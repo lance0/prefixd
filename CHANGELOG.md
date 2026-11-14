@@ -11,11 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The `POST /v1/config/reload` response adds `restart_required`, the dotted
   `prefixd.yaml` keys that differ from the running settings but take effect
-  only after a restart. `prefixdctl reload` prints them as `Restart required:`,
-  the dashboard shows them after a reload, and the endpoint is now in OpenAPI.
+  only after a restart. `prefixdctl reload` prints them as `Restart required:`
+  and the dashboard shows them after a reload.
 
 ### Changed
 
+- The dashboard's withdrawal confirmations for mitigations, bulk mitigations and
+  scrubber diversions now share one dialog. Titles use sentence case, the reason
+  field reads "Withdrawal reason (optional)", a pending request cannot be
+  repeated or dismissed, and focus returns to the opener after Cancel or Escape
+  and to the page heading or another stable control after a completed withdrawal.
 - A present `prefixd.yaml` that fails to load now fails `POST
   /v1/config/reload` even when `correlation.yaml` supplies correlation.
 - A failed reload returns 422 for an invalid file and 500 for an unexpected
@@ -26,8 +31,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty webhook URL or missing credential fails the reload instead of
   replacing working alerting.
 
+### Security
+
+- Session cookies are now `Secure` by default unless `auth.mode` is `none`,
+  including behind a TLS-terminating proxy. Previously only native `http.tls`
+  set the flag. A deployment that browsers reach over plain HTTP must set
+  `http.secure_cookies: false`; the shipped Compose configurations do. See
+  [Secure session cookies](docs/how-to/upgrading.md#secure-session-cookies).
+- **quinn-proto, quinn-udp** — Updated quinn-proto 0.11.18 → 0.11.19 and
+  quinn-udp 0.5.14 → 0.5.16 in both lockfiles, which fixes a `MAX_STREAM_DATA`
+  frame opening streams beyond the stream limit (RUSTSEC-2026-0523), a long
+  Retry token panicking or exhausting memory in a QUIC client
+  (RUSTSEC-2026-0524) and a receive loop spinning after a truncated datagram
+  (RUSTSEC-2026-0538). The crates are locked only through reqwest's optional
+  `http3` support, which prefixd does not enable, so no build compiles them.
+  No advisory exception is added.
+
 ### Fixed
 
+- `/openapi.json` now documents `POST /v1/mitigations/{id}/withdraw`,
+  `GET /v1/safelist` and `POST /v1/config/reload`, so a generated client can
+  withdraw a single mitigation. A test now fails when a `/v1` route is missing
+  from the OpenAPI document or an OpenAPI operation has no route; the WebSocket
+  feed is the only exception.
 - `POST /v1/config/reload` loads and validates inventory, playbooks,
   `prefixd.yaml`, correlation and alerting before publishing any of them. A
   failed playbook check previously left the new inventory live. A reload

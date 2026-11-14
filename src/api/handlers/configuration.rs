@@ -24,7 +24,7 @@ pub struct ReloadResponse {
     timestamp: String,
 }
 
-/// Reload configuration files, all or nothing
+/// Reload inventory, playbooks, correlation and alerting from disk, all or nothing (admin only)
 #[utoipa::path(
     post,
     path = "/v1/config/reload",
