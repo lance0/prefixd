@@ -370,11 +370,12 @@ impl ScrubberController {
     }
 
     pub fn new(settings: &crate::config::Settings) -> Result<Self> {
-        settings.scrubber.validate_with(&settings.blackhole)?;
+        settings
+            .scrubber
+            .validate_with(&settings.blackhole, &settings.bgp)?;
         let mut runtime = Runtime::default();
         let mut tokens = HashMap::new();
         for profile in &settings.scrubber.profiles {
-            settings.bgp.resolve_scope(&profile.scope)?;
             crate::observability::metrics::SCRUBBER_READY
                 .with_label_values(&[&profile.id])
                 .set(0.0);

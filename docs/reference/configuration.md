@@ -114,7 +114,15 @@ http:
     burst: 500              # Burst capacity
 ```
 
-> **Note:** Rate limiting is applied globally via middleware to **all routes** and is always-on. Even if `events_per_second` and `burst` are omitted, default values are used. When a client exceeds the configured rate, the API responds with `429 Too Many Requests` and a body of the form `{"error":"rate_limited","retry_after_seconds":N}`, where `N` is the number of seconds to wait before retrying.
+> **Note:** Rate limiting is always on; omitted keys use the defaults above. Each request class (`ingest`, `signals`, `mutation`, `read`, `auth`) has its own bucket of this size per client address, so a detector flood cannot exhaust withdrawals or other operator requests. `GET /v1/health`, `GET /v1/ready` and `/metrics` are exempt. A rejected request gets `429 Too Many Requests` with `{"error":"rate_limited","retry_after_seconds":N}`. See [rate limiting](api.md#rate-limiting) for the class of each route.
+
+The client is the TCP peer address. The default Compose stack doesn't publish
+port 8080, so prefixd sees two clients: nginx, which carries detectors and CLI
+traffic, and the dashboard container, which carries every browser session. All
+detectors behind nginx share one `ingest` bucket, and all operators share one
+bucket per class. Class isolation, not per-client keys, is what keeps a detector
+flood or a login storm from returning 429 to withdrawals there. Size `burst` and
+`events_per_second` for the combined detector load through nginx.
 
 ### BGP
 
@@ -1116,16 +1124,6 @@ allowed_ports:
   tcp: [80, 443]   # HTTP/HTTPS
 ```
 
-### IP Ranges
-
-```yaml
-assets:
-  - ip: "203.0.113.100"
-    range_end: "203.0.113.110"  # 11 IPs
-```
-
-> **NOTE:** This field is not yet implemented and will be silently ignored if specified.
-
 ### Policy Profiles
 
 `policy_profile` accepts `strict`, `normal` or `relaxed` and defaults to `normal`.
@@ -1159,12 +1157,17 @@ playbooks:
 
 ```yaml
 match:
-  vector: udp_flood     # Attack vector
-  source: fastnetmon   # Optional: specific detector
-  protocol: udp        # Optional: protocol filter
+  vector: udp_flood        # Attack vector
+  require_top_ports: false # Optional: match only events that carry top ports
 ```
 
-> **NOTE:** `source` and `protocol` are not yet implemented and will be silently ignored if specified. Only `vector` is currently used for playbook matching.
+Playbooks match on `vector` and `require_top_ports` only. Unknown keys at any
+level of `playbooks.yaml`, including `match.source` and `match.protocol`, are
+refused. At startup the error names the file and the key. A refused reload
+keeps the running configuration and returns `422` naming `playbooks.yaml` and
+the key.
+`PUT /v1/config/playbooks` returns `400` naming the key. See
+[unknown playbook keys](../how-to/upgrading.md#unknown-playbook-keys).
 
 ### Actions
 
@@ -1256,19 +1259,10 @@ commented examples: the source-port rule discards and the fragment rule
 polices. The dashboard playbook editor cannot edit multi-rule steps yet; edit
 the file and reload.
 
-### Default Playbook
+### Fallback
 
-Fallback when no playbook matches:
-
-> **NOTE:** This field is not yet implemented and will be silently ignored if specified. Fallback behavior is handled by the built-in `unknown` playbook match.
-
-```yaml
-default_playbook:
-  steps:
-    - action: police
-      rate_bps: 1000000
-      ttl_seconds: 60
-```
+There is no `default_playbook` key; it is refused as an unknown key. Events of
+an unknown vector use the playbook that matches `vector: unknown`.
 
 ### Example Playbooks
 
@@ -1476,5 +1470,8 @@ family-specific source prefix floors, short TTL and independent quota fields,
 plus the [TRANSIT BGP example](../../configs/vpn-scopes.yaml.example).
 
 A scrubber profile's optional `scope` selects the named VPN scope; omission is
-global. Use separate profiles for IPv4 and IPv6 scope names. Scope changes need
+global. Use separate profiles for IPv4 and IPv6 scope names. Settings fail to
+load when a profile names an unknown scope, when its destinations or IP target
+use another address family than the scope, or when its `redirect_route_target`
+equals one of the scope's `route_targets`. Scope changes need
 a drained lifecycle and matching readiness/policy qualification before re-arm.

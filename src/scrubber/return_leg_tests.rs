@@ -842,9 +842,12 @@ fn return_legs_need_a_global_ip_profile_peers_and_a_canonical_community() {
         communities: vec!["64496:100".into()],
         ..Default::default()
     };
-    assert!(config.validate_with(&blackhole).is_err());
+    let bgp: crate::config::BgpConfig =
+        crate::config::parse_yaml("backend: mock\nlocal_asn: 65000\nrouter_id: 192.0.2.1\n")
+            .unwrap();
+    assert!(config.validate_with(&blackhole, &bgp).is_err());
     blackhole.communities = vec!["64496:666".into()];
-    config.validate_with(&blackhole).unwrap();
+    config.validate_with(&blackhole, &bgp).unwrap();
     // Only `syn_ack` is a configurable selector.
     let yaml = "router_peers: [192.0.2.3]\npolicy_binding: v1\nexport_community: '64496:100'\n";
     let parsed: ReturnLeg =

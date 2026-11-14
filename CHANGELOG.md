@@ -7,8 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- `http.rate_limit.events_per_second` and `burst` now size one bucket per
+  request class and per client instead of one bucket for the whole listener.
+  Total admitted load can reach the number of classes times the number of
+  clients times the old cap. If you set a low cap to protect PostgreSQL or the
+  speaker, re-evaluate it; see
+  [per-class rate limits](docs/how-to/upgrading.md#per-class-rate-limits).
+- A scrubber profile with a VPN `scope` must use only that scope's address
+  family. 0.26.0 started with a scoped profile that also listed destinations or
+  a target of the other family; startup now refuses it and names the profile
+  and field. Split each such profile into one profile per family, for example
+  `scope: TRANSIT` and `scope: TRANSIT6`, and remove the other family's target
+  and destinations from each. Startup also refuses a `redirect_route_target`
+  equal to one of the scope's `route_targets`; choose the scrubbing VRF's own
+  route target. Changing a profile requires draining its outstanding
+  diversions with the 0.26.0 controller first; see
+  [scoped scrubber profiles](docs/how-to/upgrading.md#scoped-scrubber-profiles-use-one-family).
+- Before upgrading, rename `correlation_override:` to `correlation:` in
+  `playbooks.yaml`. ADR 022 and the 0.18.0 entry below documented the wrong
+  key, which earlier releases ignored. Delete `match.source`, `match.protocol`,
+  `default_playbook` and any other key not in the configuration reference.
+  Otherwise startup fails and reload is refused, naming the key. See
+  [unknown playbook keys](docs/how-to/upgrading.md#unknown-playbook-keys).
+
+### Known limitations
+
+- The client key is the TCP peer address, and prefixd does not read forwarded
+  headers. The default Compose stack doesn't publish port 8080, so prefixd sees
+  two clients: nginx, which carries every detector and CLI request, and the
+  dashboard container, which carries every browser session. All detectors
+  therefore share one `ingest` bucket, and all operators share one bucket per
+  class. Class isolation is what keeps a detector flood or login storm from
+  returning 429 to withdrawals in that topology.
+- 429 responses keep the `retry_after_seconds` body field and send no
+  `Retry-After` header.
+
 ### Added
 
+- `prefixd_http_rate_limited_total{class}` counts requests rejected with 429,
+  by request class.
 - The `POST /v1/config/reload` response adds `restart_required`, the dotted
   `prefixd.yaml` keys that differ from the running settings but take effect
   only after a restart. `prefixdctl reload` prints them as `Restart required:`
@@ -16,6 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `playbooks.yaml`, `PUT /v1/config/playbooks` and the
+  dashboard YAML editor refuse unknown keys at every level and name the key.
+  The unimplemented `match.source`, `match.protocol` and `default_playbook`
+  keys were previously ignored, so a playbook scoped to one detector applied to
+  all of them. Startup errors now name the configuration file that failed.
+- The configuration reference no longer documents the unimplemented inventory
+  `range_end` field.
 - The dashboard's withdrawal confirmations for mitigations, bulk mitigations and
   scrubber diversions now share one dialog. Titles use sentence case, the reason
   field reads "Withdrawal reason (optional)", a pending request cannot be
@@ -30,6 +76,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reload applies the alerting editor's validation to `alerting.yaml`, so an
   empty webhook URL or missing credential fails the reload instead of
   replacing working alerting.
+
+### Fixed
+
+- **Rate limiting no longer lets a detector flood block operators.** The single
+  global token bucket is replaced by one bucket per request class (`ingest`,
+  `signals`, `mutation`, `read`, `auth`) and per client address. Withdrawals
+  never share a bucket with ingestion, and login and requests to unknown routes
+  use `auth`, not `mutation`. `GET /v1/health`, `GET /v1/ready` and `/metrics`
+  are exempt. 429 rejections log the class and client.
+- The API reference no longer documents `X-RateLimit-*` headers, which were
+  never sent, and shows the actual `"rate_limited"` error string.
+- `/openapi.json` now documents `POST /v1/mitigations/{id}/withdraw`,
+  `GET /v1/safelist` and `POST /v1/config/reload`, so a generated client can
+  withdraw a single mitigation. A test now fails when a `/v1` route is missing
+  from the OpenAPI document or an OpenAPI operation has no route; the WebSocket
+  feed is the only exception.
+- Check each VPN scrubber profile against its scope's address family and route
+  targets when settings load. A family mismatch previously surfaced only when a
+  diversion was created, and an action route target equal to a scope route
+  target redirected into the VRF that imports the rule. An unknown profile
+  scope, which 0.26.0 already refused at startup, is now reported with the
+  profile ID.
+- `POST /v1/config/reload` loads and validates inventory, playbooks,
+  `prefixd.yaml`, correlation and alerting before publishing any of them. A
+  failed playbook check previously left the new inventory live. A reload
+  canceled mid-publish can no longer leave only some sections published, and
+  a concurrent correlation edit can no longer be overwritten by the file it
+  replaced.
 
 ### Security
 
@@ -46,20 +120,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (RUSTSEC-2026-0538). The crates are locked only through reqwest's optional
   `http3` support, which prefixd does not enable, so no build compiles them.
   No advisory exception is added.
-
-### Fixed
-
-- `/openapi.json` now documents `POST /v1/mitigations/{id}/withdraw`,
-  `GET /v1/safelist` and `POST /v1/config/reload`, so a generated client can
-  withdraw a single mitigation. A test now fails when a `/v1` route is missing
-  from the OpenAPI document or an OpenAPI operation has no route; the WebSocket
-  feed is the only exception.
-- `POST /v1/config/reload` loads and validates inventory, playbooks,
-  `prefixd.yaml`, correlation and alerting before publishing any of them. A
-  failed playbook check previously left the new inventory live. A reload
-  canceled mid-publish can no longer leave only some sections published, and
-  a concurrent correlation edit can no longer be overwritten by the file it
-  replaced.
 
 ## [0.26.0] - 2026-11-12
 

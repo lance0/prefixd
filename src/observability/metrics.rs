@@ -449,6 +449,15 @@ pub static HTTP_REQUEST_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static HTTP_RATE_LIMITED: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "prefixd_http_rate_limited_total",
+        "HTTP requests rejected with 429 by the rate limiter, by request class",
+        &["class"]
+    )
+    .unwrap()
+});
+
 pub static HTTP_IN_FLIGHT: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!(
         "prefixd_http_in_flight_requests",
@@ -630,6 +639,9 @@ pub fn init_metrics(pop: &str) {
     Lazy::force(&HTTP_REQUESTS_TOTAL);
     Lazy::force(&HTTP_REQUEST_DURATION);
     Lazy::force(&HTTP_IN_FLIGHT);
+    for class in crate::api::ratelimit::RateLimitClass::ALL {
+        HTTP_RATE_LIMITED.with_label_values(&[class.as_str()]);
+    }
     // Correlation engine metrics
     Lazy::force(&SIGNAL_GROUPS_TOTAL);
     Lazy::force(&SIGNAL_GROUP_SOURCES);

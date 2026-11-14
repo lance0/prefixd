@@ -135,6 +135,7 @@ impl Default for SourceConfig {
 /// override the global `min_sources` and `confidence_threshold` for events
 /// matching that playbook.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PlaybookCorrelationOverride {
     /// Override for the minimum number of distinct sources.
     #[serde(default)]

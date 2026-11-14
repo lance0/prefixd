@@ -80,13 +80,31 @@ Per-playbook override on `PlaybookCorrelationOverride`:
 
 ```yaml
 playbooks:
-  - vector: udp_flood
-    correlation_override:
+  - name: udp_flood_fast_decay
+    match:
+      vector: udp_flood
+    correlation:
       confidence_decay_half_life_seconds: 60   # faster decay for noisy vector
-  - vector: dns_amplification
-    correlation_override:
+    steps:
+      - action: police
+        rate_bps: 5000000
+        ttl_seconds: 120
+  - name: dns_amplification_no_decay
+    match:
+      vector: dns_amplification
+    correlation:
       confidence_decay_half_life_seconds: 0    # explicitly disable for this playbook
+    steps:
+      - action: police
+        rate_bps: 5000000
+        ttl_seconds: 120
 ```
+
+*Correction, 2026-11-14.* This example originally used a `correlation_override:`
+key directly under a `vector:` entry. The playbook key has always been
+`correlation:`, beside `name`, `match` and `steps`. Earlier releases ignored
+`correlation_override:` without an error; startup and reload now refuse it as
+an unknown key.
 
 Override resolution (`effective_decay_half_life()`):
 

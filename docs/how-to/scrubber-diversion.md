@@ -46,12 +46,16 @@ scrubber:
 
 For redirect-to-VRF, replace both IP targets with one action route target.
 This VPN-only action requires rustbgpd 0.82.0 and a successful family 13 or 14
-probe for the [configured VPN scope](vpn-flowspec.md#configure-scope):
+probe for the [configured VPN scope](vpn-flowspec.md#configure-scope). A
+scoped profile carries only its scope's address family, so keep only that
+family's destinations; startup refuses a mixed-family scoped profile. Use a
+second profile for the other family:
 
 ```yaml
       scope: TRANSIT
       redirect_route_target: "44407:888"
       # Omit ipv4_target and ipv6_target.
+      destinations: [203.0.113.0/24]
 ```
 
 The configured VPN scope's RD and scope RT (for example `44407:777`) identify
@@ -61,7 +65,9 @@ scope RTs use subtype `0x02`; redirect-to-VRF uses RFC 8955/RFC 7674 types
 `0x80`, `0x81` or `0x82` with subtype `0x08`. AS2, IPv4-administrator and AS4
 forms are supported, including `0.ASN:value` to preserve a small-ASN AS4 form.
 The controller requires a named VPN scope for this action and rejects a profile
-mixing IP targets and a VRF action target. Global IP-target diversion keeps its
+mixing IP targets and a VRF action target. At startup it also rejects an action
+route target equal to one of the scope's route targets, which would redirect
+into the VRF that imports the rule. Global IP-target diversion keeps its
 existing behavior.
 No API payload can supply an arbitrary action target.
 

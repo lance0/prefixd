@@ -2,19 +2,20 @@
 
 ## Status
 
-Deferred during the current facelift by
-[ADR 026](026-facelift-framework-scope.md). The eventual-adoption decision is
-retained; framework boot, ORM changes and framework-driven MSRV work are outside
-the current delivery scope. The evaluation and staged proposal below are
-historical context and must be revalidated before resuming.
+Withdrawn 2026-11-14 by the
+[ADR 026 amendment](026-facelift-framework-scope.md#amendment-cancel-the-planned-loco-migration).
+prefixd no longer plans to adopt loco-rs. ADR 026 had first deferred this
+migration during the facelift while keeping the eventual-adoption decision; the
+amendment cancels that decision. The evaluation and staged proposal below are
+historical context only.
 
 **Historical proposed supersession:** [ADR 009 — PostgreSQL Over SQLite](009-postgresql-over-sqlite.md)
-(the "no ORM abstraction layer" clause only). It is not activated while this
-migration is deferred; ADR 009 remains operative.
+(the "no ORM abstraction layer" clause only). It was never activated; ADR 009
+remains operative.
 
 Version, dependency and MSRV assumptions below record the original evaluation.
-Revalidate them against the selected release before Phase 0; this PR adds no
-framework dependency or runtime migration.
+A future framework proposal must revalidate them; this ADR added no framework
+dependency or runtime migration.
 
 ## Date
 

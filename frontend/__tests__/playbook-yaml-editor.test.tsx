@@ -73,13 +73,14 @@ describe("playbook YAML editing", () => {
   it("preserves merged action values before validation and submission", async () => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     render(<PlaybookYamlEditor playbooks={playbooks} onSave={onSave} saving={false} />)
-    edit(`defaults: &defaults
-  action: discard
-playbooks:
+    edit(`playbooks:
   - name: merged-policy
     match:
       vector: udp_flood
     steps:
+      - &defaults
+        action: discard
+        ttl_seconds: 60
       - <<: *defaults
         ttl_seconds: 75
         rate_bps: 8000000
@@ -89,8 +90,24 @@ playbooks:
     await waitFor(() => expect(onSave).toHaveBeenCalledWith([{
       name: "merged-policy",
       match: { vector: "udp_flood" },
-      steps: [{ action: "discard", ttl_seconds: 75, rate_bps: 8000000 }],
+      steps: [
+        { action: "discard", ttl_seconds: 60 },
+        { action: "discard", ttl_seconds: 75, rate_bps: 8000000 },
+      ],
     }]))
+  })
+
+  it("names an unknown top-level key instead of dropping it", () => {
+    const onSave = vi.fn()
+    render(<PlaybookYamlEditor playbooks={playbooks} onSave={onSave} saving={false} />)
+    edit(`${yamlText()}default_playbook:
+  steps: []
+`)
+
+    expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled()
+    expect(screen.getByText("unknown top-level key `default_playbook`; only 'playbooks' is allowed")).toBeVisible()
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }))
+    expect(onSave).not.toHaveBeenCalled()
   })
 
   it.each([

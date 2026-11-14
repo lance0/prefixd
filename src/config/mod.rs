@@ -8,7 +8,7 @@ pub use playbooks::*;
 pub use settings::*;
 pub use vpn_scope::*;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 
 /// Fixed parsing policy for operator-owned configuration. No includes or interpolation.
@@ -35,17 +35,22 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn load(config_dir: &Path) -> Result<Self> {
-        let mut settings = Settings::load(config_dir.join("prefixd.yaml"))?;
-        match crate::correlation::CorrelationConfig::load(config_dir.join("correlation.yaml")) {
+        let path = |name: &str| config_dir.join(name);
+        let failed = |name: &str| format!("failed to load {}", path(name).display());
+        let mut settings =
+            Settings::load(path("prefixd.yaml")).with_context(|| failed("prefixd.yaml"))?;
+        match crate::correlation::CorrelationConfig::load(path("correlation.yaml")) {
             Ok(correlation) => settings.correlation = correlation,
             Err(error)
                 if error
                     .downcast_ref::<std::io::Error>()
                     .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.context(failed("correlation.yaml"))),
         }
-        let inventory = Inventory::load(config_dir.join("inventory.yaml"))?;
-        let playbooks = Playbooks::load(config_dir.join("playbooks.yaml"))?;
+        let inventory =
+            Inventory::load(path("inventory.yaml")).with_context(|| failed("inventory.yaml"))?;
+        let playbooks =
+            Playbooks::load(path("playbooks.yaml")).with_context(|| failed("playbooks.yaml"))?;
 
         Ok(Self {
             settings,
@@ -120,8 +125,25 @@ mod tests {
             "window_seconds: 0\n",
         )
         .unwrap();
-        let error = AppConfig::load(directory.path()).unwrap_err();
-        assert!(error.to_string().contains("window_seconds must be > 0"));
+        let error = format!("{:#}", AppConfig::load(directory.path()).unwrap_err());
+        assert!(error.contains("correlation.yaml"), "{error}");
+        assert!(error.contains("window_seconds must be > 0"), "{error}");
+    }
+
+    /// A startup error names the file and the unknown key.
+    #[test]
+    fn startup_error_names_file_and_unknown_key() {
+        let directory = fixture();
+        let path = directory.path().join("playbooks.yaml");
+        let playbooks = std::fs::read_to_string(&path).unwrap().replacen(
+            "    match:\n",
+            "    match:\n      source: fastnetmon\n",
+            1,
+        );
+        std::fs::write(&path, playbooks).unwrap();
+        let error = format!("{:#}", AppConfig::load(directory.path()).unwrap_err());
+        assert!(error.contains("playbooks.yaml"), "{error}");
+        assert!(error.contains("unknown field `source`"), "{error}");
     }
 
     #[test]
