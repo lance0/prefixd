@@ -16,12 +16,13 @@ pub use accounts::{
 mod configuration;
 pub use configuration::{
     __path_get_alerting_config, __path_get_config_inventory, __path_get_config_playbooks,
-    __path_get_config_settings, __path_get_correlation_config, __path_test_alerting,
-    __path_update_alerting_config, __path_update_correlation_config, __path_update_playbooks,
-    ConfigInventoryResponse, ConfigPlaybooksResponse, ConfigSettingsResponse, ReloadResponse,
-    UpdatePlaybooksRequest, get_alerting_config, get_config_inventory, get_config_playbooks,
-    get_config_settings, get_correlation_config, reload_config, test_alerting,
-    update_alerting_config, update_correlation_config, update_playbooks,
+    __path_get_config_settings, __path_get_correlation_config, __path_reload_config,
+    __path_test_alerting, __path_update_alerting_config, __path_update_correlation_config,
+    __path_update_playbooks, ConfigInventoryResponse, ConfigPlaybooksResponse,
+    ConfigSettingsResponse, ReloadResponse, UpdatePlaybooksRequest, get_alerting_config,
+    get_config_inventory, get_config_playbooks, get_config_settings, get_correlation_config,
+    reload_config, test_alerting, update_alerting_config, update_correlation_config,
+    update_playbooks,
 };
 
 mod observations;
@@ -35,8 +36,8 @@ pub use observations::{
 
 mod safelist;
 pub use safelist::{
-    __path_add_safelist, __path_remove_safelist, AddSafelistRequest, AddSafelistResponse,
-    add_safelist, list_safelist, remove_safelist,
+    __path_add_safelist, __path_list_safelist, __path_remove_safelist, AddSafelistRequest,
+    AddSafelistResponse, add_safelist, list_safelist, remove_safelist,
 };
 
 mod signals;
@@ -718,14 +719,16 @@ pub struct CreateMitigationRequest {
     #[serde(default)]
     expires_at_cap: Option<DateTime<Utc>>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct WithdrawRequest {
+    /// Legacy field, ignored: the authenticated principal is recorded as the actor
     #[serde(default)]
     #[allow(
         dead_code,
         reason = "Caller-supplied actor is ignored; request authentication determines the actor"
     )]
     operator_id: String,
+    /// Why the mitigation is withdrawn; retained with the withdrawal intent and audit entry
     reason: String,
 }
 // Handlers
@@ -2640,6 +2643,24 @@ fn blackhole_rejection_reason(violation: &GuardrailError) -> &'static str {
     }
 }
 
+/// Withdraw one active mitigation (operator role)
+#[utoipa::path(
+    post,
+    path = "/v1/mitigations/{id}/withdraw",
+    tag = "mitigations",
+    params(("id" = Uuid, Path, description = "Mitigation ID")),
+    request_body = WithdrawRequest,
+    responses(
+        (status = 200, description = "Withdrawal processed; `status` shows the terminal state", body = MitigationResponse),
+        (status = 400, description = "Malformed JSON, overlong reason, or mitigation is not active"),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "Operator role required"),
+        (status = 404, description = "Mitigation not found"),
+        (status = 409, description = "Mitigation belongs to another POP or owner, or would revive a pending deletion"),
+        (status = 422, description = "Request body does not match the schema, such as a missing `reason`"),
+        (status = 500, description = "Withdrawal failed or its outcome is uncertain. If withdrawal intent was recorded, reconciliation retries it. Re-read the mitigation for its status.")
+    )
+)]
 pub async fn withdraw_mitigation(
     State(state): State<Arc<AppState>>,
     auth_session: AuthSession,

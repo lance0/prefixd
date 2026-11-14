@@ -71,6 +71,9 @@ pub struct HttpConfig {
     /// CORS allowed origin (e.g., "http://localhost:3000"). Omit when using a reverse proxy.
     #[serde(default)]
     pub cors_origin: Option<String>,
+    /// Session cookie `Secure` attribute; see [`HttpConfig::secure_cookies`].
+    #[serde(default)]
+    pub secure_cookies: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +85,14 @@ pub struct TlsConfig {
 }
 
 impl HttpConfig {
+    /// Browsers usually reach prefixd through a TLS-terminating proxy, which the
+    /// controller cannot see, so session cookies are `Secure` unless explicitly
+    /// disabled or authentication is off without native TLS.
+    pub fn secure_cookies(&self) -> bool {
+        self.secure_cookies
+            .unwrap_or(self.tls.is_some() || self.auth.mode != AuthMode::None)
+    }
+
     /// mTLS authorization trusts the native listener to verify client certificates.
     pub(crate) fn validate_auth_transport(&self) -> crate::error::Result<()> {
         if self.auth.mode != AuthMode::Mtls {
@@ -904,6 +915,27 @@ mod tests {
                 serde_json::json!({ "drain_timeout_seconds": 30 })
             );
         }
+    }
+
+    #[test]
+    fn secure_cookies_default_on_unless_auth_is_off_without_tls() {
+        let http = |yaml: &str| crate::config::parse_yaml::<HttpConfig>(yaml).unwrap();
+        let base = "listen: \"0.0.0.0:8080\"\n";
+        assert!(http(&format!("{base}auth: {{mode: credentials}}\n")).secure_cookies());
+        assert!(http(&format!("{base}auth: {{mode: bearer}}\n")).secure_cookies());
+        assert!(!http(&format!("{base}auth: {{mode: none}}\n")).secure_cookies());
+        assert!(
+            http(&format!(
+                "{base}auth: {{mode: none}}\ntls: {{cert_path: c, key_path: k}}\n"
+            ))
+            .secure_cookies()
+        );
+        assert!(
+            !http(&format!(
+                "{base}auth: {{mode: credentials}}\nsecure_cookies: false\n"
+            ))
+            .secure_cookies()
+        );
     }
 
     #[test]

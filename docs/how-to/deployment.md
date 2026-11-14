@@ -214,6 +214,11 @@ When deploying to a remote server, ensure:
 2. Users access the dashboard via the server's IP/hostname on port 80 (through nginx)
 3. The browser never connects directly to the backend - all API calls are proxied through nginx
 
+The shipped `configs/prefixd.yaml` and `configs/prefixd-gobgp.yaml` set
+`http.secure_cookies: false` because this quickstart serves plain HTTP on port
+80, and browsers do not send a Secure cookie over HTTP. Remove that line once
+browsers use HTTPS; see [HTTPS via nginx](#https-via-nginx-recommended-for-production).
+
 ```bash
 # Access dashboard from your workstation
 open http://your-server
@@ -759,6 +764,10 @@ nginx:
     - "443:443"
     - "80:80"
 ```
+
+Once browsers reach prefixd over HTTPS, delete `secure_cookies: false` from
+`configs/prefixd.yaml` (or `configs/prefixd-gobgp.yaml` for the GoBGP profile)
+and restart the controller, so session cookies carry the `Secure` attribute.
 
 > **Let's Encrypt**: For automated certificate renewal, use certbot with the nginx plugin or mount certificates from an external certbot container.
 
