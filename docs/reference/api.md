@@ -1233,6 +1233,9 @@ Withdrawal intent is saved before calling the speaker. An uncertain speaker
 reply or database completion failure leaves cleanup pending; reconciliation
 retries it, including after a controller restart. The mitigation keeps its
 previous status until deletion and the terminal-state/audit transaction succeed.
+A `500` can also come before intent is saved, when the mitigation lookup or the
+intent write fails; then nothing is pending. After a `500`, re-read the
+mitigation for its status.
 Pending cleanup is excluded from announcement repair. The original principal
 and reason are retained when the scheduler completes the request; the legacy
 `operator_id` request field does not override the authenticated principal.

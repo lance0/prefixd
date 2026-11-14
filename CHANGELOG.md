@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `prefixd_http_rate_limited_total{class}` counts requests rejected with 429,
   by request class.
 
+### Changed
+
+- The dashboard's withdrawal confirmations for mitigations, bulk mitigations and
+  scrubber diversions now share one dialog. Titles use sentence case, the reason
+  field reads "Withdrawal reason (optional)", a pending request cannot be
+  repeated or dismissed, and focus returns to the opener after Cancel or Escape
+  and to the page heading or another stable control after a completed withdrawal.
+
 ### Fixed
 
 - **Rate limiting no longer lets a detector flood block operators.** The single
@@ -43,6 +51,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are exempt. 429 rejections log the class and client.
 - The API reference no longer documents `X-RateLimit-*` headers, which were
   never sent, and shows the actual `"rate_limited"` error string.
+- `/openapi.json` now documents `POST /v1/mitigations/{id}/withdraw`,
+  `GET /v1/safelist` and `POST /v1/config/reload`, so a generated client can
+  withdraw a single mitigation. A test now fails when a `/v1` route is missing
+  from the OpenAPI document or an OpenAPI operation has no route; the WebSocket
+  feed is the only exception.
+
+### Security
+
+- Session cookies are now `Secure` by default unless `auth.mode` is `none`,
+  including behind a TLS-terminating proxy. Previously only native `http.tls`
+  set the flag. A deployment that browsers reach over plain HTTP must set
+  `http.secure_cookies: false`; the shipped Compose configurations do. See
+  [Secure session cookies](docs/how-to/upgrading.md#secure-session-cookies).
+- **quinn-proto, quinn-udp** — Updated quinn-proto 0.11.18 → 0.11.19 and
+  quinn-udp 0.5.14 → 0.5.16 in both lockfiles, which fixes a `MAX_STREAM_DATA`
+  frame opening streams beyond the stream limit (RUSTSEC-2026-0523), a long
+  Retry token panicking or exhausting memory in a QUIC client
+  (RUSTSEC-2026-0524) and a receive loop spinning after a truncated datagram
+  (RUSTSEC-2026-0538). The crates are locked only through reqwest's optional
+  `http3` support, which prefixd does not enable, so no build compiles them.
+  No advisory exception is added.
 
 ## [0.26.0] - 2026-11-12
 

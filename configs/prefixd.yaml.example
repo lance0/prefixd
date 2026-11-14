@@ -17,6 +17,9 @@ http:
   rate_limit:
     events_per_second: 100
     burst: 500
+  # Session cookies are Secure unless auth.mode is none. Set false only when
+  # browsers reach prefixd over plain HTTP.
+  # secure_cookies: true
   # TLS configuration (optional)
   # tls:
   #   cert_path: "/etc/prefixd/server.crt"

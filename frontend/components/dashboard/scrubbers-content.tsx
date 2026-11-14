@@ -2,14 +2,13 @@
 
 import { useRef, useState } from "react"
 import useSWR from "swr"
-import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { tcpFlagsLabel } from "@/components/dashboard/flowspec-preview"
+import { WithdrawConfirmDialog } from "@/components/dashboard/withdraw-confirm-dialog"
 import { usePermissions } from "@/hooks/use-permissions"
 import { armScrubber, createDiversion, getDiversions, getScrubbers, previewDiversion, withdrawDiversion, type DiversionExportObservation, type DiversionMatch, type DiversionPreview, type DiversionRequest, type ScrubberDiversion, type ScrubberReturnLeg } from "@/lib/api"
 
@@ -33,7 +32,6 @@ export function ScrubbersContent() {
   const [message, setMessage] = useState("")
   const [error, setError] = useState("")
   const [withdrawTarget, setWithdrawTarget] = useState<ScrubberDiversion | null>(null)
-  const [withdrawReason, setWithdrawReason] = useState("")
   const [withdrawError, setWithdrawError] = useState("")
   const withdrawTrigger = useRef<HTMLButtonElement | null>(null)
   const heading = useRef<HTMLHeadingElement | null>(null)
@@ -48,18 +46,24 @@ export function ScrubbersContent() {
     finally { setBusy(false) }
   }
 
-  async function confirmWithdraw() {
-    if (!withdrawTarget || busy) return
+  async function confirmWithdraw(reason: string) {
+    if (!withdrawTarget) return false
     setBusy(true); setWithdrawError(""); setMessage("")
 
     try {
-      await withdrawDiversion(withdrawTarget.id, withdrawReason)
-      setWithdrawTarget(null); setWithdrawReason("")
+      await withdrawDiversion(withdrawTarget.id, reason)
       setMessage("Withdrawal requested. Victim exclusion remains until local absence is confirmed.")
-    } catch (error) { setWithdrawError(error instanceof Error ? error.message : "The withdrawal could not be confirmed.") }
-    finally {
+
+      return true
+    } catch (error) {
+      setWithdrawError(error instanceof Error ? error.message : "The withdrawal could not be confirmed.")
+
+      return false
+    } finally {
       setBusy(false)
-      await Promise.all([profiles.mutate(), diversions.mutate()])
+      // Refresh in the background: a stalled read must not hold the dialog's pending lock.
+      // SWR records refresh failures in each hook's error state.
+      void Promise.all([profiles.mutate(), diversions.mutate()]).catch(() => {})
     }
   }
 
@@ -145,36 +149,25 @@ export function ScrubbersContent() {
         <ExportEvidence label={row.return_rule ? "Inbound leg peer export" : "Peer export"} observation={row.export_observation} />
         {row.return_rule && <ExportEvidence label="Return leg peer export" observation={row.return_export_observation} />}
         {(row.withdrawal_reason || row.last_error) && <p>{row.withdrawal_reason || row.last_error}</p>}
-        <Button variant="outline" disabled={busy || row.status === "withdrawing"} onClick={event => { withdrawTrigger.current = event.currentTarget; setWithdrawError(""); setWithdrawReason(""); setWithdrawTarget(row) }}>Withdraw {row.rule.nlri.dst_prefix}</Button>
+        <Button variant="outline" disabled={busy || row.status === "withdrawing"} onClick={event => { withdrawTrigger.current = event.currentTarget; setWithdrawError(""); setWithdrawTarget(row) }}>Withdraw {row.rule.nlri.dst_prefix}</Button>
       </div>)}
       <p className="text-xs text-muted-foreground">Local observation and peer export do not prove router installation or scrubber forwarding.</p>
     </CardContent></Card>
-    <AlertDialog open={!!withdrawTarget} onOpenChange={open => { if (!open && !busy) { setWithdrawTarget(null); setWithdrawReason(""); setWithdrawError("") } }}>
-      <AlertDialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" onCloseAutoFocus={event => {
-        event.preventDefault()
-        const trigger = withdrawTrigger.current
-        const target = trigger?.isConnected && !trigger.disabled ? trigger : heading.current
-        target?.focus()
-      }}>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Withdraw diversion</AlertDialogTitle>
-          <AlertDialogDescription>
-            Request withdrawal of the diversion matching <span className="font-mono font-semibold">{withdrawTarget && describeMatch(withdrawTarget)}</span>{withdrawTarget?.return_rule ? <> and its return leg <span className="font-mono font-semibold">{describeNlri(withdrawTarget.return_rule.nlri)}</span></> : null} to scrubber target <span className="font-mono font-semibold">{withdrawTarget && describeTarget(withdrawTarget.rule)}</span> via profile <span className="font-mono">{withdrawTarget?.profile.id}@{withdrawTarget?.profile.revision}</span>.
-            Withdrawal returns attack traffic to ordinary routing and may expose the victim to the attack again. No automatic discard, blackhole or fallback replaces it. The request and reason are recorded in the audit log.
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <div className="py-4">
-          <Label htmlFor="diversion-withdraw-reason">Withdrawal reason (optional)</Label>
-          <Input id="diversion-withdraw-reason" className="mt-2" maxLength={1024} placeholder="e.g., Attack subsided" value={withdrawReason} disabled={busy} onChange={event => setWithdrawReason(event.target.value)} />
-          {withdrawError && <p role="alert" className="mt-2 text-sm text-destructive">{withdrawError}</p>}
-          <p role="status" className="mt-2 text-sm text-muted-foreground">{busy ? "Waiting for the controller to record the withdrawal..." : ""}</p>
-        </div>
-        <AlertDialogFooter>
-          <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
-          <Button type="button" onClick={confirmWithdraw} disabled={busy} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">{busy ? "Withdrawing..." : "Withdraw"}</Button>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+    <WithdrawConfirmDialog
+      open={!!withdrawTarget}
+      onClose={() => { setWithdrawTarget(null); setWithdrawError("") }}
+      title="Withdraw diversion"
+      description={<>
+        Request withdrawal of the diversion matching <span className="font-mono font-semibold">{withdrawTarget && describeMatch(withdrawTarget)}</span>{withdrawTarget?.return_rule ? <> and its return leg <span className="font-mono font-semibold">{describeNlri(withdrawTarget.return_rule.nlri)}</span></> : null} to scrubber target <span className="font-mono font-semibold">{withdrawTarget && describeTarget(withdrawTarget.rule)}</span> via profile <span className="font-mono">{withdrawTarget?.profile.id}@{withdrawTarget?.profile.revision}</span>.
+        Withdrawal returns attack traffic to ordinary routing and may expose the victim to the attack again. No automatic discard, blackhole or fallback replaces it. The request and reason are recorded in the audit log.
+      </>}
+      reasonPlaceholder="e.g., Attack subsided"
+      pendingStatus="Waiting for the controller to record the withdrawal..."
+      onConfirm={confirmWithdraw}
+      error={withdrawError}
+      trigger={withdrawTrigger}
+      fallback={heading}
+    />
   </div>
 }
 
