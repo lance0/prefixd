@@ -6,6 +6,10 @@ not a 1.0 dependency. Every release, including 1.0, also follows the
 [release checklist](release-checklist.md); gate 5 relies on it rather than
 repeating it.
 
+This list is provisional. It records the current intended shape of 1.0; the
+gates and their evidence will change as the project matures, and no release
+date is implied.
+
 A gate is met only when every required item links to evidence: a dated receipt,
 a CI run, a published release or the source that implements it. A checkbox or a
 plan is not evidence. Failed and superseded runs stay recorded with their
@@ -41,9 +45,8 @@ Define what each public surface promises at 1.0 and from when.
   major release, and the deprecation process.
 - The API versioning policy and the README agree; see
   [API stability conflict](#api-stability-conflict).
-- The freeze point: from the first `1.0.0-rc.N` release, these surfaces take no
-  breaking change. A breaking change found necessary after that ships in a new
-  release candidate, under that release's Upgrade notes.
+- Open: when these surfaces freeze before 1.0 (for example, at the first
+  release candidate).
 - Tests that hold the frozen shape where a test can, such as route and OpenAPI
   parity.
 
