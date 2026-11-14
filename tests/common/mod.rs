@@ -170,6 +170,7 @@ pub fn test_settings() -> Settings {
             rate_limit: RateLimitConfig::default(),
             tls: None,
             cors_origin: None,
+            secure_cookies: None,
         },
         bgp: BgpConfig {
             vpn_scopes: Default::default(),
