@@ -496,6 +496,9 @@ pub async fn admit_blackhole(
     mitigation.origin_mode = Some(settings.mode);
     repo.admit_mitigation(&mitigation, &settings.quotas, config, actor)
         .await?;
+    if let Some(lease) = lease {
+        lease.observe_leased_write(&mitigation);
+    }
     if !enforced {
         return Ok(BlackholeAdmission {
             mitigation,
@@ -1557,6 +1560,11 @@ mod tests {
             (0, 1)
         );
         assert!(lease.generation().is_some());
+        // The committed row bounds renewal at once, before any reconcile read.
+        assert_eq!(
+            lease.health().renew_until,
+            Some(admission.mitigation.expires_at)
+        );
         assert_eq!(*speaker.lease_seconds.lock().unwrap(), [60]);
 
         // An older daemon answers UNIMPLEMENTED: nothing is installed, the row

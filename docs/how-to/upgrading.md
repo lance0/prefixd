@@ -359,6 +359,12 @@ connecting to the speaker.
   stays unconfirmed or the withdrawal stays pending with its original rule,
   actor, reason and operation ID. A process that lost the lock without seeing
   it can keep issuing RPCs for up to about 4 seconds plus one RPC deadline.
+- **Leased routes in standby.** A standby still renews the injection lease
+  and reads active intent on the reconciliation interval to bound that
+  renewal by the leased TTLs, so a failover keeps live leased routes live. A
+  standby that cannot read the database stops renewing at its bound and
+  reports `speaker.lease.state` as `standby`
+  ([leased TTLs](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls)).
 - **Crashed hosts.** PostgreSQL holds a crashed host's lock until it ends that
   session. The fence session sets server-side TCP keepalives (10 seconds idle,
   then three probes 5 seconds apart) to bound the delay; do not block them

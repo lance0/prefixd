@@ -664,8 +664,13 @@ every `lease_seconds / 3`, each with that interval as its deadline. It takes
 no lifecycle mutex and no database access, and it is not gated by the
 controller fence: renewal only extends routes this owner already holds and
 can never add or resurrect one, so a database outage that puts the controller
-in standby does not let leased blackholes lapse mid-attack. Adds, deletes and
-re-adds stay fenced. A reply past the deadline counts as a failed renewal.
+in standby does not let leased blackholes lapse mid-attack. Renewal is
+bounded, not unbounded: one margin after the latest `expires_at` of the rows
+this owner holds, from the last successful read or leased write, it stops so
+the speaker removes them within one more lease. A standby reads leased intent
+to follow the same bound
+([ADR 003](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls)).
+Adds, deletes and re-adds stay fenced. A reply past the deadline counts as a failed renewal.
 An in-time reply for a superseded generation records its RPC outcome but cannot
 restore the held lease. In dry-run the
 controller never renews, because `RenewLease` is a speaker mutation; health

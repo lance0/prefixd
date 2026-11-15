@@ -133,6 +133,26 @@ impl ReconciliationLoop {
             .or_else(|| self.state.as_ref().and_then(|state| state.lease.as_deref()))
     }
 
+    /// A successful active-intent read is the evidence of the leased routes'
+    /// TTLs, so it bounds renewal to the latest leased `expires_at` it saw, or
+    /// to the read itself when it saw none. It runs first in every pass, before
+    /// an expiry backlog can delay it, and on a timer in standby, which can
+    /// read the database while another controller holds the fence.
+    ///
+    /// Fail-closed: a failed read, like any unreadable inventory, never
+    /// refreshes the bound, so the previous one stands and renewal stops at it.
+    async fn observe_leased_intent(&self) -> anyhow::Result<()> {
+        let Some(lease) = self.lease() else {
+            return Ok(());
+        };
+        let rows = self
+            .repo
+            .active_mitigation_inventory(self.owning_pop())
+            .await?;
+        lease.observe_intent_expiry(crate::domain::leased_expiry(&rows, lease.owner()));
+        Ok(())
+    }
+
     /// Wire the shared `AppState` for paths that need live access to the
     /// correlation config or playbooks (currently: ADR 022 confidence
     /// decay refresh). Without this, decay refresh is a no-op and
@@ -198,17 +218,37 @@ impl ReconciliationLoop {
         );
         let mut fence = self.state.as_ref().map(|state| state.fence.subscribe());
         loop {
-            // Standby runs nothing; on taking the fence, reconcile at once.
+            // Standby mutates nothing and only reads leased intent, so its
+            // unfenced renewal follows the TTL bound; on taking the fence,
+            // reconcile at once.
             if let Some(fence) = fence.as_mut() {
-                tokio::select! {
-                    closed = async { fence.wait_for(|active| *active).await.is_err() } => {
-                        if closed {
-                            return;
+                if !*fence.borrow() {
+                    let mut reads = tokio::time::interval(self.interval);
+                    reads.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        // Taking the fence or shutting down cancels a stalled read.
+                        let read = async {
+                            reads.tick().await;
+                            self.observe_leased_intent().await
+                        };
+                        tokio::select! {
+                            biased;
+                            closed = async { fence.wait_for(|active| *active).await.is_err() } => {
+                                if closed {
+                                    return;
+                                }
+                                break;
+                            }
+                            _ = shutdown.recv() => {
+                                tracing::info!("reconciliation loop shutting down");
+                                return;
+                            }
+                            result = read => {
+                                if let Err(error) = result {
+                                    tracing::warn!(%error, "standby leased-intent read failed");
+                                }
+                            }
                         }
-                    }
-                    _ = shutdown.recv() => {
-                        tracing::info!("reconciliation loop shutting down");
-                        return;
                     }
                 }
             }
@@ -280,6 +320,7 @@ impl ReconciliationLoop {
         let mut blackholes = None;
         // Each stage is independent; a speaker failure must not stop expiry or health updates.
         for (stage, result) in [
+            ("leased intent", self.observe_leased_intent().await),
             ("withdrawals", self.expire_mitigations().await),
             ("signal groups", self.expire_signal_groups().await),
             ("corroborator cache", self.sweep_corroborator_cache().await),
@@ -5599,6 +5640,204 @@ mod tests {
             ..live_config()
         };
         blackhole_reconciler(repo, speaker, config, false).with_lease(lease)
+    }
+
+    /// A successful active-intent read bounds renewal to the latest leased
+    /// TTL. Leased FlowSpec and leased blackholes share the bound; an unleased
+    /// row with a longer TTL, or a row still pending, does not extend it.
+    #[tokio::test]
+    async fn a_leased_intent_read_bounds_renewal_to_the_latest_leased_ttl() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let lease = Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60));
+        let reconciler = leased_reconciler(repo.clone(), speaker.clone(), lease.clone());
+        // An empty leased set bounds renewal to the read itself.
+        let before = chrono::Utc::now();
+        reconciler.reconcile().await.unwrap();
+        let read_at = lease.health().renew_until.expect("the read was successful");
+        assert!(read_at >= before && read_at <= chrono::Utc::now());
+        // Only committed leased intent counts, whichever route kind holds it.
+        let mut rule = leased_rule_row("192.0.2.10/32");
+        rule.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+        let mut blackhole = leased_row("192.0.2.1");
+        blackhole.expires_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let mut unleased = action_mitigation("192.0.2.11/32", FlowSpecAction::discard());
+        unleased.expires_at = chrono::Utc::now() + chrono::Duration::hours(2);
+        let mut pending = leased_rule_row("192.0.2.12/32");
+        pending.expires_at = chrono::Utc::now() + chrono::Duration::hours(3);
+        pending.status = MitigationStatus::Pending;
+        for mitigation in [&rule, &blackhole, &unleased, &pending] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(lease.health().renew_until, Some(blackhole.expires_at));
+    }
+
+    /// A database outage past every leased TTL: reconciliation fails, renewal
+    /// continues through `expires_at` plus one lease, then stops at the bound
+    /// with no failed renewal recorded. Fail-closed: the unreadable inventory
+    /// never refreshes the bound.
+    #[tokio::test(start_paused = true)]
+    async fn a_database_outage_stops_renewal_one_lease_after_the_leased_ttl() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let lease = Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60));
+        let reconciler = leased_reconciler(repo.clone(), speaker.clone(), lease.clone());
+        let mut row = leased_row("192.0.2.1");
+        row.expires_at = chrono::Utc::now() + chrono::Duration::seconds(120);
+        repo.insert_mitigation(&row).await.unwrap();
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.leased_adds.load(SeqCst), 1);
+        lease.renew_once(speaker.as_ref()).await;
+        assert_eq!(speaker.renewals.load(SeqCst), 1);
+
+        repo.fail_active_reads.store(true, SeqCst);
+        let mut last_renewed = 0;
+        for elapsed in (20..=300).step_by(20) {
+            tokio::time::advance(Duration::from_secs(20)).await;
+            assert!(reconciler.reconcile().await.is_err());
+            let before = speaker.renewals.load(SeqCst);
+            lease.renew_once(speaker.as_ref()).await;
+            if speaker.renewals.load(SeqCst) > before {
+                last_renewed = elapsed;
+            }
+        }
+        // The cutoff is expires_at (120 s) plus one lease (60 s); the last
+        // renewal is sent only if its 20 s deadline ends by then.
+        assert!((140..=160).contains(&last_renewed), "{last_renewed}");
+        let health = lease.health();
+        assert_eq!(health.renewal_stopped, Some("ttl_bound"));
+        assert_eq!(health.last_renewal_result, Some("success"));
+        assert_eq!(health.renew_until, Some(row.expires_at));
+        assert_eq!(health.state, crate::domain::LeaseState::Expired);
+    }
+
+    /// An outage inside the latest leased TTL keeps renewing, including for a
+    /// shorter leased row whose own TTL passes meanwhile (the bound is
+    /// owner-wide). When reads return, the expired row is withdrawn, never
+    /// re-added even by a full re-add, and the row inside its TTL keeps
+    /// renewing.
+    #[tokio::test(start_paused = true)]
+    async fn recovery_from_an_outage_withdraws_expired_rows_and_keeps_live_ones() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let lease = Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60));
+        let reconciler = leased_reconciler(repo.clone(), speaker.clone(), lease.clone());
+        let mut long = leased_row("192.0.2.1");
+        long.expires_at = chrono::Utc::now() + chrono::Duration::seconds(600);
+        let mut short = leased_row("192.0.2.2");
+        short.expires_at = chrono::Utc::now() + chrono::Duration::seconds(60);
+        for mitigation in [&long, &short] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.leased_adds.load(SeqCst), 2);
+
+        repo.fail_active_reads.store(true, SeqCst);
+        for step in 1..=10 {
+            tokio::time::advance(Duration::from_secs(20)).await;
+            assert!(reconciler.reconcile().await.is_err());
+            lease.renew_once(speaker.as_ref()).await;
+            assert_eq!(speaker.renewals.load(SeqCst), step);
+        }
+        assert_eq!(lease.health().renewal_stopped, None);
+        // The paused test clock leaves the wall clock behind: expire the short
+        // row as 200 s of outage would have.
+        let mut expired = repo
+            .get_mitigation(short.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        expired.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        repo.update_mitigation(&expired).await.unwrap();
+
+        repo.fail_active_reads.store(false, SeqCst);
+        // As a refused renewal would after a lapse: re-add every active row.
+        lease.request_readd();
+        reconciler.reconcile().await.unwrap();
+        assert!(
+            !repo
+                .get_mitigation(short.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active()
+        );
+        assert_eq!(
+            speaker.leased_adds.load(SeqCst),
+            3,
+            "only the live row is re-added"
+        );
+        let routes = speaker.routes().await;
+        let prefixes: Vec<_> = routes
+            .iter()
+            .map(|route| route.prefix().to_string())
+            .collect();
+        assert_eq!(prefixes, ["192.0.2.1/32"]);
+        lease.renew_once(speaker.as_ref()).await;
+        assert_eq!(speaker.renewals.load(SeqCst), 11);
+        let health = lease.health();
+        assert_eq!(health.renewal_stopped, None);
+        assert_eq!(health.renew_until, Some(long.expires_at));
+        assert_eq!(health.state, crate::domain::LeaseState::Live);
+    }
+
+    /// A standby mutates nothing but reads leased intent on the interval, so
+    /// its unfenced renewal follows the same TTL bound as the active
+    /// controller. One that cannot read stops at its own bound and reports
+    /// `standby`, never `expired`, since the active controller may keep the
+    /// lease live.
+    #[tokio::test(start_paused = true)]
+    async fn standby_reads_leased_intent_and_reports_standby_at_its_bound() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let fence = Arc::new(crate::fence::ControllerFence::new(false));
+        let state = action_state(repo.clone(), speaker.clone())
+            .with_fence(fence.clone())
+            .unwrap();
+        let lease =
+            Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60).with_fence(fence));
+        lease.take_readd();
+        lease.observe_add(crate::bgp::LeaseGeneration {
+            incarnation: 1,
+            sequence: 1,
+        });
+        let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+            .with_app_state(state)
+            .with_lease(lease.clone());
+        let mut row = leased_row("192.0.2.1");
+        row.expires_at = chrono::Utc::now() + chrono::Duration::seconds(10);
+        repo.insert_mitigation(&row).await.unwrap();
+        let (shutdown, rx) = broadcast::channel(1);
+        let task = tokio::spawn(async move { reconciler.run(rx).await });
+        let settle = || async {
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+        };
+        settle().await;
+        assert_eq!(lease.health().renew_until, Some(row.expires_at));
+        let mut later = leased_row("192.0.2.2");
+        later.expires_at = chrono::Utc::now() + chrono::Duration::seconds(300);
+        repo.insert_mitigation(&later).await.unwrap();
+        tokio::time::advance(Duration::from_secs(30)).await;
+        settle().await;
+        assert_eq!(lease.health().renew_until, Some(later.expires_at));
+        assert_eq!(speaker.leased_adds.load(SeqCst), 0, "standby adds nothing");
+        assert_eq!(lease.health().state, crate::domain::LeaseState::Live);
+
+        repo.fail_active_reads.store(true, SeqCst);
+        tokio::time::advance(Duration::from_secs(600)).await;
+        settle().await;
+        let health = lease.health();
+        assert_eq!(health.renewal_stopped, Some("ttl_bound"));
+        assert_eq!(health.state, crate::domain::LeaseState::Standby);
+        shutdown.send(()).unwrap();
+        task.await.unwrap();
     }
 
     /// As at admission, only an unleased repair add that replaced a different

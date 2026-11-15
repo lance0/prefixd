@@ -192,7 +192,9 @@ async fn main() -> anyhow::Result<()> {
         .as_ref()
         .is_some_and(|rustbgpd| rustbgpd.leased_flowspec);
     let lease = if (blackhole.enabled && blackhole.leased) || leased_flowspec {
-        let keeper = prefixd::domain::LeaseKeeper::new(owner.clone(), blackhole.lease_seconds);
+        let keeper = prefixd::domain::LeaseKeeper::new(owner.clone(), blackhole.lease_seconds)
+            .with_reconcile_interval(config.settings.timers.reconciliation_interval_seconds)
+            .with_fence(controller_fence.clone());
         // RenewLease is a speaker mutation, so dry-run never renews: leased
         // routes left by an enforced run lapse within one lease.
         let keeper = Arc::new(

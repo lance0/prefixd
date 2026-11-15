@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- The lease state adds `standby`. During a PostgreSQL outage the active
+  controller loses its fence within seconds, so once renewal stops at the TTL
+  bound it reports `standby` with `renewal_stopped: "ttl_bound"`, not
+  `expired`, even after rustbgpd has removed the routes, because another
+  controller could still be renewing the owner. `expired` at the bound appears
+  only when reads fail while the fence is still held. To detect an outage
+  stop, alert on `renewal_stopped` in health detail together with
+  `prefixd_controller_fence_active`, not on
+  `prefixd_injection_lease_state{state="expired"}` alone.
 - Mitigation behavior is unchanged, but Compose installs keep the
   `playbooks.yaml` an earlier release copied into the `prefixd-config` volume,
   so startup and reload now warn that `udp_flood_police_first`,
@@ -19,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limitations
 
+- The TTL bound on lease renewal is owner-wide, because the rustbgpd lease is.
+  During a PostgreSQL outage every leased FlowSpec rule and leased blackhole of
+  a controller is renewed until the latest leased `expires_at` among them,
+  plus the margin, and lapses within one more lease. A 60-second rule next to
+  an 1800-second rule can stay installed for about 1800 seconds plus the
+  margin and one lease. Expiry withdraws it once the database returns.
+- The margin is `max(blackhole.lease_seconds,
+  timers.reconciliation_interval_seconds + blackhole.lease_seconds / 3)`, so a
+  reconciliation interval longer than the lease lengthens that tail by up to
+  one interval.
 - TTL expiry, reconciliation repair, the safety rechecks and the lease re-add
   keep the durable speaker retry budget and hold the lifecycle mutex for one
   rule at a time. Against a speaker that never answers, an interactive request
@@ -39,6 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Health detail `speaker.lease` adds `renew_until` and `renewal_stopped`, and
+  its `state`, like `prefixd_injection_lease_state`, adds `standby`. `expired`
+  also covers a renewal that stopped at the TTL bound one lease ago.
 - The shipped `configs/playbooks.yaml` gives every playbook one step. The three
   police playbooks carried a later discard step with confidence and persistence
   thresholds that the controller accepted and validated but never ran, so
@@ -61,6 +83,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Leased FlowSpec rules and leased blackholes are no longer renewed
+  indefinitely during a PostgreSQL outage. Renewal stays independent of the
+  database and the fence, but it now stops one margin after the latest leased
+  `expires_at`, and rustbgpd removes the routes within one more lease. The
+  read at the start of every reconciliation pass sets that bound, and each
+  leased admission and TTL extension raises it at once, so a row added after
+  the last read keeps renewing until its own expiry. A refreshed bound renews
+  at once and never re-adds an expired row. A standby reads leased intent on
+  the reconciliation interval, so its renewal follows the same bound and a
+  failover keeps live leased routes live. A stop at the bound is reported as
+  `renewal_stopped: "ttl_bound"`, not as a failed renewal.
 - A speaker that accepts a connection and never answers no longer stalls the
   controller for minutes. Admission, manual creation, operator withdrawal,
   detector unban and safelist withdrawal hold the lifecycle mutex and now make
