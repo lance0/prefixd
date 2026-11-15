@@ -458,8 +458,8 @@ fn prefix_settings() -> Settings {
     settings.guardrails.dst_prefix_minlen_v6 = Some(48);
     settings.guardrails.dst_prefix_maxlen_v6 = Some(128);
     settings.bgp.vpn_scopes = serde_json::from_value(json!({
-        "TRANSIT": {"family":"ipv4","rd":"44407:40","route_targets":["44407:777"]},
-        "NEXT4": {"family":"ipv4","rd":"44407:41","route_targets":["44407:778"]}
+        "TRANSIT": {"family":"ipv4","rd":"64500:40","route_targets":["64500:777"]},
+        "NEXT4": {"family":"ipv4","rd":"64500:41","route_targets":["64500:778"]}
     }))
     .unwrap();
     settings.bgp.default_scope = "TRANSIT".into();
@@ -530,8 +530,8 @@ async fn detector_prefix_event_inherits_vpn_default_scope_and_snapshots_it() {
         .expect("the automatic default scope is part of the saved prefix mitigation");
     assert_eq!(snapshot.name, "TRANSIT");
     assert_eq!(snapshot.identity.family, VpnFlowSpecFamily::Ipv4);
-    assert_eq!(snapshot.identity.rd(), "44407:40");
-    assert_eq!(snapshot.route_targets, vec!["44407:777"]);
+    assert_eq!(snapshot.identity.rd(), "64500:40");
+    assert_eq!(snapshot.route_targets, vec!["64500:777"]);
     assert_eq!(
         saved.scope_hash,
         saved.match_criteria.scope_hash_for(saved.action_type),
@@ -551,8 +551,8 @@ async fn detector_prefix_event_inherits_vpn_default_scope_and_snapshots_it() {
         .as_ref()
         .expect("a prefix rule under a VPN default scope is originated in that VRF");
     assert_eq!(wire_scope.family, VpnFlowSpecFamily::Ipv4);
-    assert_eq!(wire_scope.rd(), "44407:40");
-    assert_eq!(rule.route_targets, vec!["44407:777"]);
+    assert_eq!(wire_scope.rd(), "64500:40");
+    assert_eq!(rule.route_targets, vec!["64500:777"]);
     assert_eq!(rule.nlri_hash(), saved.scope_hash);
 }
 
@@ -645,8 +645,8 @@ async fn detector_prefix_dry_run_uses_the_same_vpn_decision_without_a_speaker_ca
         dry_rule, enforced_rule,
         "dry run resolves the same scoped rule as enforced mode"
     );
-    assert_eq!(dry_rule["nlri"]["scope"]["rd"], "44407:40");
-    assert_eq!(dry_rule["route_targets"], json!(["44407:777"]));
+    assert_eq!(dry_rule["nlri"]["scope"]["rd"], "64500:40");
+    assert_eq!(dry_rule["route_targets"], json!(["64500:777"]));
     assert_eq!(dry_announcements, 0, "dry run never calls the speaker");
     assert_eq!(enforced_announcements, 1);
     assert_eq!(dry_origin, Some(OperationMode::DryRun));
@@ -697,11 +697,11 @@ async fn reconciliation_and_withdrawal_reuse_the_saved_prefix_scope_snapshot() {
         .expect("repair keeps the admitted VPN scope");
     assert_eq!(
         scope.rd(),
-        "44407:40",
+        "64500:40",
         "repair uses the saved snapshot, not the new default scope"
     );
     assert_eq!(scope.family, VpnFlowSpecFamily::Ipv4);
-    assert_eq!(rule.route_targets, vec!["44407:777"]);
+    assert_eq!(rule.route_targets, vec!["64500:777"]);
     assert_eq!(rule.nlri_hash(), saved.scope_hash);
 
     // Withdrawal also follows the saved snapshot after the default changed.

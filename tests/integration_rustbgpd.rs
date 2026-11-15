@@ -2429,8 +2429,8 @@ async fn live_vpn_detector_prefix_scope_snapshot_survives_repair_and_withdrawal(
     settings.guardrails.dst_prefix_minlen = 24;
     settings.guardrails.dst_prefix_maxlen = 32;
     settings.bgp.vpn_scopes = serde_json::from_value(json!({
-        "TRANSIT": {"family":"ipv4","rd":"44407:40","route_targets":["44407:777"]},
-        "NEXT4": {"family":"ipv4","rd":"44407:41","route_targets":["44407:778"]}
+        "TRANSIT": {"family":"ipv4","rd":"64500:40","route_targets":["64500:777"]},
+        "NEXT4": {"family":"ipv4","rd":"64500:41","route_targets":["64500:778"]}
     }))
     .unwrap();
     settings.bgp.default_scope = "TRANSIT".into();
@@ -2500,8 +2500,8 @@ async fn live_vpn_detector_prefix_scope_snapshot_survives_repair_and_withdrawal(
     assert_eq!(saved.origin_mode, Some(OperationMode::Enforced));
     let snapshot = saved.match_criteria.scope.as_ref().unwrap();
     assert_eq!(snapshot.name, "TRANSIT");
-    assert_eq!(snapshot.identity.rd(), "44407:40");
-    assert_eq!(snapshot.route_targets, vec!["44407:777"]);
+    assert_eq!(snapshot.identity.rd(), "64500:40");
+    assert_eq!(snapshot.route_targets, vec!["64500:777"]);
     assert_eq!(saved.match_criteria.dst_prefix, "203.0.113.0/24");
     assert_eq!(saved.match_criteria.protocol, Some(17));
     assert_eq!(saved.match_criteria.dst_ports, vec![53]);
@@ -2537,7 +2537,7 @@ async fn live_vpn_detector_prefix_scope_snapshot_survives_repair_and_withdrawal(
     let admitted = wait_for_expected(expected.clone()).await;
     let scope = admitted.nlri.scope.as_ref().unwrap();
     assert_eq!(scope.family.afi_safi(), 13);
-    assert_eq!(scope.rd(), "44407:40");
+    assert_eq!(scope.rd(), "64500:40");
     assert_eq!(admitted.actions[0].action_type, ActionType::Discard);
 
     let receipt = fixture.received_flow_spec(13, "0.0.0.0").await;
@@ -2546,10 +2546,10 @@ async fn live_vpn_detector_prefix_scope_snapshot_survives_repair_and_withdrawal(
         .received_routes
         .iter()
         .filter_map(|row| row.route.as_ref())
-        .filter(|row| row.rd == "44407:40")
+        .filter(|row| row.rd == "64500:40")
         .collect();
     assert_eq!(raw.len(), 1);
-    assert_eq!(raw[0].route_targets, vec!["44407:777"]);
+    assert_eq!(raw[0].route_targets, vec!["64500:777"]);
 
     // The daemon loses the rule; a fresh controller whose automatic default now
     // names another IPv4 scope repairs the saved payload, not a NEW4 rule.
@@ -2577,10 +2577,10 @@ async fn live_vpn_detector_prefix_scope_snapshot_survives_repair_and_withdrawal(
     let repaired = wait_for_expected(expected).await;
     assert_eq!(
         repaired.nlri.scope.as_ref().unwrap().rd(),
-        "44407:40",
+        "64500:40",
         "repair uses the saved snapshot, not the new default scope"
     );
-    assert_eq!(repaired.route_targets, vec!["44407:777"]);
+    assert_eq!(repaired.route_targets, vec!["64500:777"]);
 
     let app = create_test_router(restarted);
     let (status, body) = post_event(&app, event("carpet", "unban")).await;
