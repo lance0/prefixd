@@ -29,6 +29,41 @@ fn route() -> pb::FlowSpecRouteEntry {
     }
 }
 
+/// A lease generation needs both halves; either zero means none was issued.
+#[test]
+fn lease_generation_requires_nonzero_incarnation_and_sequence() {
+    let stamp = |incarnation, sequence| {
+        generation(Some(pb::LeaseGeneration {
+            incarnation,
+            sequence,
+        }))
+    };
+    assert_eq!(
+        stamp(2, 3).unwrap(),
+        GuardedStamp {
+            incarnation: 2,
+            sequence: 3
+        }
+    );
+    for (incarnation, sequence) in [(0, 3), (2, 0), (0, 0)] {
+        assert!(
+            stamp(incarnation, sequence).is_err(),
+            "{incarnation}/{sequence}"
+        );
+    }
+    assert!(generation(None).is_err());
+    let window = pb::MutationWindow::from(GuardedStamp {
+        incarnation: 2,
+        sequence: 3,
+    });
+    assert_eq!((window.incarnation, window.sequence), (2, 3));
+    let lease = pb::LeaseGeneration::from(GuardedStamp {
+        incarnation: 2,
+        sequence: 3,
+    });
+    assert_eq!((lease.incarnation, lease.sequence), (2, 3));
+}
+
 #[test]
 fn guarded_readback_requires_exact_supported_action_and_lease_fields() {
     let valid = route();
