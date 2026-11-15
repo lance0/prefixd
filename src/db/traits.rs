@@ -78,6 +78,8 @@ pub struct EventListParams {
     pub query: Option<String>,
     pub source: Option<String>,
     pub vector: Option<String>,
+    /// Any of these outcomes; `not_recorded` matches events without one.
+    pub outcomes: Option<Vec<crate::domain::EventOutcome>>,
 }
 
 /// Stable continuation position for public mitigation listings.
@@ -205,6 +207,13 @@ pub trait RepositoryTrait: Send + Sync {
         .await
     }
     async fn list_events_filtered(&self, params: &EventListParams) -> Result<Vec<AttackEvent>>;
+    /// Record what ingestion did with a stored event. An outcome is written
+    /// once; a later call for the same event changes nothing.
+    async fn record_event_outcome(
+        &self,
+        event_id: Uuid,
+        record: &crate::domain::EventOutcomeRecord,
+    ) -> Result<()>;
 
     // Audit Log
     async fn insert_audit(&self, entry: &AuditEntry) -> Result<()>;

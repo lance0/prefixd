@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react"
 import Link from "next/link"
 import { Eye, Search, Filter, RefreshCw, Download } from "lucide-react"
-import { Tag } from "@/components/dashboard/status-pill"
+import { EVENT_OUTCOME_LABELS, EventOutcomePill, Tag } from "@/components/dashboard/status-pill"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatBps, formatPps, formatRelative } from "@/lib/format"
@@ -12,10 +12,15 @@ import { ConfidenceBar } from "@/components/dashboard/confidence-bar"
 import { EventDetailPanel } from "@/components/dashboard/event-detail-panel"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useEvents } from "@/hooks/use-api"
 import { cn } from "@/lib/utils"
-import { getAllEvents } from "@/lib/api"
+import { EVENT_OUTCOMES, getAllEvents } from "@/lib/api"
 import { downloadCsv } from "@/lib/csv"
+
+/** Every outcome that means the event did not mitigate because it was refused or failed. */
+const REFUSED_OUTCOMES = "guardrail_rejected,safelisted,conflict,failed"
+const NO_FILTERS = { q: "", source: "", vector: "", outcome: "" }
 
 function validFilter(value: string): boolean {
   return !value.includes("\0") && new TextEncoder().encode(value).length <= 256
@@ -27,8 +32,8 @@ interface EventsContentLiveProps {
 
 export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {}) {
   const { formatTime } = useTimeFormat()
-  const [drafts, setDrafts] = useState({ q: initialEventId ?? "", source: "", vector: "" })
-  const [filters, setFilters] = useState({ q: validFilter(initialEventId ?? "") ? initialEventId ?? "" : "", source: "", vector: "" })
+  const [drafts, setDrafts] = useState({ ...NO_FILTERS, q: initialEventId ?? "" })
+  const [filters, setFilters] = useState({ ...NO_FILTERS, q: validFilter(initialEventId ?? "") ? initialEventId ?? "" : "" })
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined])
   const [showFilters, setShowFilters] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(initialEventId?.toLowerCase() ?? null)
@@ -36,7 +41,7 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
   const [exportError, setExportError] = useState<string | null>(null)
   const exportInFlight = useRef(false)
   const listRef = useRef<HTMLElement>(null)
-  const params = { q: filters.q || undefined, source: filters.source || undefined, vector: filters.vector || undefined }
+  const params = { q: filters.q || undefined, source: filters.source || undefined, vector: filters.vector || undefined, outcome: filters.outcome || undefined }
   const { data: eventsResp, error, isLoading, mutate } = useEvents({ ...params, limit: 20, cursor: cursors.at(-1) })
   const events = eventsResp?.events
   const currentPage = cursors.length
@@ -75,11 +80,12 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
 
     try {
       const matching = await getAllEvents(params)
-      const headers = ["event_id", "event_timestamp", "ingested_at", "source", "victim_ip", "vector", "bps", "pps", "confidence"]
+      const headers = ["event_id", "event_timestamp", "ingested_at", "source", "victim_ip", "vector", "bps", "pps", "confidence", "outcome", "outcome_reason"]
 
       const rows = matching.map((e) => [
         e.event_id, e.event_timestamp, e.ingested_at, e.source, e.victim_ip, e.vector,
         String(e.bps ?? ""), String(e.pps ?? ""), String(e.confidence ?? ""),
+        e.outcome ?? "not_recorded", e.outcome_reason ?? "",
       ])
 
       downloadCsv(`events-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows)
@@ -159,6 +165,18 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
               autoComplete="off"
             />
           ))}
+          <Select value={drafts.outcome || "all"} onValueChange={(value) => changeFilter("outcome", value === "all" ? "" : value)}>
+            <SelectTrigger className="h-9 w-full sm:w-56" aria-label="Outcome">
+              <SelectValue placeholder="Outcome" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All outcomes</SelectItem>
+              <SelectItem value={REFUSED_OUTCOMES}>Any refusal or failure</SelectItem>
+              {EVENT_OUTCOMES.map((outcome) => (
+                <SelectItem key={outcome} value={outcome}>{EVENT_OUTCOME_LABELS[outcome]}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
         {filtersInvalid && <p id="event-filter-error" role="alert" className="p-3 text-sm text-destructive">Filters must be at most 256 UTF-8 bytes without null characters. Showing the last valid filters.</p>}
         {exportError && <p role="alert" className="p-3 text-sm text-destructive">{exportError}. No file was downloaded.</p>}
@@ -178,7 +196,7 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
             <EmptyState
               title="No matching events"
               description="Nothing matches this search or filter."
-              action={<Button variant="outline" size="sm" onClick={() => { setDrafts({ q: "", source: "", vector: "" }); setFilters({ q: "", source: "", vector: "" }); setCursors([undefined]); setSelectedId(null) }}>Clear search and filters</Button>}
+              action={<Button variant="outline" size="sm" onClick={() => { setDrafts(NO_FILTERS); setFilters(NO_FILTERS); setCursors([undefined]); setSelectedId(null) }}>Clear search and filters</Button>}
             />
           ) : (
             <EmptyState title="No events yet" description="Signals from detectors and operators will appear here as they arrive." />
@@ -189,6 +207,7 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
                 <TableRow className="hover:bg-transparent">
                   <TableHead aria-sort="descending">Received</TableHead>
                   <TableHead>Target</TableHead>
+                  <TableHead>Outcome</TableHead>
                   <TableHead>Source</TableHead>
                   <TableHead>Vector</TableHead>
                   <TableHead className="text-right">Traffic</TableHead>
@@ -222,6 +241,14 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
                         <span className="mt-0.5 block text-xs text-muted-foreground md:hidden">
                           {vector} · {event.source} · {formatRelative(event.ingested_at, now)}
                         </span>
+                      </TableCell>
+                      <TableCell className="min-w-0 p-0 md:px-3 md:py-2">
+                        <EventOutcomePill outcome={event.outcome} />
+                        {event.outcome_reason && (
+                          <span className="mt-1 block max-w-64 truncate text-xs text-muted-foreground" title={event.outcome_reason}>
+                            {event.outcome_reason}
+                          </span>
+                        )}
                       </TableCell>
                       <TableCell className="hidden md:table-cell">
                         <Tag>{event.source}</Tag>

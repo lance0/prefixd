@@ -337,6 +337,11 @@ add reports `"announcement_outcome": "unconfirmed"` as above.
 | 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length, blackhole source allowlist, VPN scope capability and victim checks, etc.) |
 | 429 | Rate limited |
 
+A refused event that was stored records its [outcome](#event-outcomes). A
+guardrail or conflict refusal of a valid event, stored or not, also writes a
+[`reject` audit entry](#event-refusal-audit). Duplicates, invalid requests and
+a speaker target mismatch write neither.
+
 ### Batch Ingest Events
 
 ```http
@@ -427,6 +432,7 @@ Authorization: Bearer <token>
 | `q` | string | Literal case-insensitive substring of IP or event UUID; at most 256 UTF-8 bytes without NUL. Empty matches all rows. |
 | `source` | string | Exact case-sensitive source, 1–256 UTF-8 bytes without NUL; omit for all sources. `All` and `all` are literal identifiers. |
 | `vector` | string | Exact case-sensitive vector, 1–256 UTF-8 bytes without NUL; omit for all vectors. |
+| `outcome` | string | Comma-separated exact [outcomes](#event-outcomes); every token must be valid and nonempty. `not_recorded` matches events without a recorded outcome. Omit for every outcome. |
 | `limit` | integer | Max results (default 100, max 1000) |
 | `cursor` | string | Opaque `e1` continuation from the previous `next_cursor` (maximum 128 bytes) |
 | `start` | string | RFC3339 start (inclusive); see [list filters](#list-filters) |
@@ -445,7 +451,10 @@ are ordinary characters, not wildcard syntax. Invalid filters return `400`.
 
 The dashboard renders 20 rows per page in newest-ingested order and displays
 page counts, not a total. Source and vector use exact text inputs because there
-is no complete historical catalog; a blank input omits that filter. An event
+is no complete historical catalog; a blank input omits that filter. The outcome
+column shows each event's outcome and reason, and the outcome filter offers each
+outcome plus "Any refusal or failure" (`guardrail_rejected`, `safelisted`,
+`conflict` and `failed`). An event
 UUID deep link starts a server search, so older events can open their detail
 panel. Invalid filter drafts retain the last valid results and disable export.
 
@@ -475,7 +484,10 @@ also retains visited pages for the app lifetime. Large-history memory and
       "pps": 800000,
       "top_dst_ports_json": "[53,123]",
       "confidence": 0.95,
-      "action": "ban"
+      "action": "ban",
+      "outcome": "mitigated",
+      "outcome_reason": null,
+      "outcome_mitigation_ids": ["660e8400-e29b-41d4-a716-446655440001"]
     }
   ],
   "count": 1,
@@ -486,6 +498,41 @@ also retains visited pages for the app lifetime. Large-history memory and
 
 `top_src_ports_json` appears only on events whose detector sent
 `top_src_ports`, in the detector's order (`"[]"` when it sent an empty list).
+
+#### Event outcomes
+
+Every event the controller stores records what ingestion did with it, once,
+when processing finishes. This covers single, batch and signal-adapter events.
+`outcome_mitigation_ids` lists the mitigations the event created, extended or
+withdrew (`[]` when none). `outcome_reason` explains an event that did not
+mitigate; for `mitigated`, `extended` and `dry_run` it names the first refused
+rule of a partial admission and is otherwise `null`.
+
+| Outcome | Meaning |
+|---------|---------|
+| `mitigated` | Created at least one enforced mitigation |
+| `extended` | Only extended mitigations that already existed |
+| `dry_run` | Created or extended simulated mitigations in dry-run mode; nothing was announced |
+| `guardrail_rejected` | Every rule was refused by a guardrail; the reason names the guardrail, quota or setting |
+| `safelisted` | The destination is safelisted |
+| `no_playbook` | No playbook matched the event |
+| `not_owned` | The destination is not in the inventory |
+| `awaiting_corroboration` | Recorded in a signal group that has not met its corroboration threshold |
+| `conflict` | Refused because a dry-run simulation, a manual mark, another injection owner or an ownership change holds the match |
+| `failed` | Admission or withdrawal failed after the event was stored |
+| `withdrawn` | A detector `unban` withdrew the ban's mitigations |
+| `not_recorded` | Stored before outcomes were recorded, by an older controller after a downgrade, or processing did not finish |
+
+A client-error reason repeats the error the detector received. A server error
+is summarized as its HTTP status, for example `500 Internal Server Error; see
+controller logs`, so storage and speaker details never reach the event list.
+An outcome value this controller does not recognize reads as `not_recorded`.
+
+Refusals that happen before the event is stored, such as a detector prefix
+event outside its opt-in, bounds or ownership, a policy with no allowed ports,
+a blackhole source outside its allowlist, or every rule owned by a dry-run
+simulation, leave no event row, so the detector can retry the same event ID.
+They appear only in the audit log; see [event refusal audit](#event-refusal-audit).
 
 ---
 
@@ -3190,6 +3237,18 @@ by an active quota write `reject_rule` entries targeting their event, with
 `scope`, `scope_hash`, `action_type`, `quota_type`, `current`, `max` and
 `reason`. These also cover refusals within a partially admitted event.
 Audit write failures are logged; admitted rules remain visible in the response.
+
+#### Event refusal audit
+
+A detector event refused by a guardrail or a conflict writes a `reject` entry
+with `actor_type: "detector"`, `actor_id` set to the event `source`,
+`target_type: "event"` and `target_id` set to the event UUID. `details` holds
+`external_event_id`, `victim_ip`, `vector`, `outcome`, `guardrail` (the
+`prefixd_guardrail_rejections_total` reason, such as `Safelisted`,
+`QuotaExceeded` or `DetectorPrefixNotAllowed`, or `Conflict`), `reason` (the error the
+detector received) and `stored`. When `stored` is `false` the refusal came
+before storage and `target_id` names no event row. This entry is written in
+addition to any `reject_rule` entries for the same event.
 
 Every blackhole add the speaker accepts, at admission and on repair or leased
 re-add, writes an `announce` entry targeting the mitigation, with

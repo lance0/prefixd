@@ -7,7 +7,7 @@ import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogClose, DialogContent, DialogTitle } from "@/components/ui/dialog"
-import { Tag } from "./status-pill"
+import { EventOutcomePill, Tag } from "./status-pill"
 import { Field, FieldList } from "./field"
 import { ConfidenceBar } from "./confidence-bar"
 import type { Event } from "@/lib/api"
@@ -136,6 +136,15 @@ export function EventDetailPanel({ event, onClose, fallbackFocusRef }: EventDeta
               )}
               <Field label="Source">{event.source}</Field>
               <Field label="Vector">{event.vector.replace(/_/g, " ")}</Field>
+              <Field label="Outcome" className="sm:col-span-2">
+                <EventOutcomePill outcome={event.outcome} />
+                {event.outcome_reason && <span className="mt-1 block break-words text-sm">{event.outcome_reason}</span>}
+                {event.outcome_mitigation_ids?.map((id) => (
+                  <Link key={id} href={`/mitigations/${id}`} className="mt-1 block break-all rounded-sm font-mono text-xs hover:underline">
+                    {id}
+                  </Link>
+                ))}
+              </Field>
             </FieldList>
 
             <Card>

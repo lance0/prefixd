@@ -557,7 +557,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                   action, raw_details
+                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids
             FROM events 
             WHERE source = $1 AND external_event_id = $2 AND action = 'ban'
             ORDER BY ingested_at DESC
@@ -580,7 +580,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                   action, raw_details
+                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids
             FROM events
             WHERE ($2::timestamptz IS NULL OR (ingested_at, event_id) < ($2, $5))
               AND ($3::timestamptz IS NULL OR ingested_at >= $3)
@@ -589,6 +589,7 @@ impl RepositoryTrait for Repository {
               AND ($7::text IS NULL OR vector = $7)
               AND ($8::text IS NULL OR strpos(lower(victim_ip), lower($8)) > 0
                    OR strpos(event_id::text, lower($8)) > 0)
+              AND ($9::text[] IS NULL OR COALESCE(outcome, 'not_recorded') = ANY($9))
             ORDER BY ingested_at DESC, event_id DESC LIMIT $1
             "#,
         )
@@ -600,9 +601,34 @@ impl RepositoryTrait for Repository {
         .bind(filters.source.as_deref())
         .bind(filters.vector.as_deref())
         .bind(filters.query.as_deref())
+        .bind(filters.outcomes.as_ref().map(|outcomes| {
+            outcomes
+                .iter()
+                .map(|outcome| outcome.as_str())
+                .collect::<Vec<_>>()
+        }))
         .fetch_all(&self.pool)
         .await?;
         Ok(events)
+    }
+
+    async fn record_event_outcome(
+        &self,
+        event_id: Uuid,
+        record: &crate::domain::EventOutcomeRecord,
+    ) -> Result<()> {
+        // Written once: a later call never replaces a recorded outcome.
+        sqlx::query(
+            "UPDATE events SET outcome = $2, outcome_reason = $3, outcome_mitigation_ids = $4
+             WHERE event_id = $1 AND outcome IS NULL",
+        )
+        .bind(event_id)
+        .bind(record.outcome.as_str())
+        .bind(&record.outcome_reason)
+        .bind(&record.outcome_mitigation_ids)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn insert_audit(&self, entry: &AuditEntry) -> Result<()> {
@@ -1419,7 +1445,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                   action, raw_details
+                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids
             FROM events WHERE victim_ip = $1 ORDER BY ingested_at DESC LIMIT $2
             "#,
         )
@@ -2445,7 +2471,7 @@ mod checked_timestamp_rows {
         }
         check_row!(
             AttackEvent,
-            "gen_random_uuid() AS event_id, NULL::text AS external_event_id, 'test'::text AS source, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, 17::integer AS protocol, NULL::bigint AS bps, NULL::bigint AS pps, '[]'::text AS top_dst_ports_json, NULL::text AS top_src_ports_json, NULL::real AS confidence, 'ban'::text AS action, NULL::jsonb AS raw_details",
+            "gen_random_uuid() AS event_id, NULL::text AS external_event_id, 'test'::text AS source, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, 17::integer AS protocol, NULL::bigint AS bps, NULL::bigint AS pps, '[]'::text AS top_dst_ports_json, NULL::text AS top_src_ports_json, NULL::real AS confidence, 'ban'::text AS action, NULL::jsonb AS raw_details, NULL::text AS outcome, NULL::text AS outcome_reason, '{}'::uuid[] AS outcome_mitigation_ids",
             [event_timestamp, ingested_at],
             []
         );

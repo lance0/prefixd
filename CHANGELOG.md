@@ -77,6 +77,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Startup and playbook reload warn when a `scope: prefix` playbook is loaded
   while `guardrails.allow_detector_prefix` is false or the destination bounds
   admit hosts only.
+- Each stored event records its outcome: `mitigated`, `extended`, `dry_run`,
+  `guardrail_rejected`, `safelisted`, `no_playbook`, `not_owned`,
+  `awaiting_corroboration`, `conflict`, `failed` or `withdrawn`, with
+  `outcome_reason` and `outcome_mitigation_ids`. `GET /v1/events` returns the
+  three fields and filters by a comma-separated `outcome`. Events stored
+  before migration 020, or by an older controller after a downgrade, report
+  `not_recorded`; replay infers no outcome. The Events page adds an outcome
+  column and filter, and the event panel shows the reason and mitigations.
+- A guardrail or conflict refusal of a detector event writes a `reject` audit
+  entry with the event's `source`, destination, outcome, guardrail reason and
+  whether it was stored. A refusal before storage, such as a detector prefix
+  event outside its opt-in, still leaves no event row so the event ID stays
+  retryable; the audit entry is its record.
 
 ### Changed
 
