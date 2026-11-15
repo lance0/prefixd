@@ -73,10 +73,9 @@ pub struct ArmProfile {
 #[derive(Debug, Clone, Default, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WithdrawDiversion {
-    /// Recorded with the first withdrawal request; 1 to 1,024 UTF-8 bytes of
-    /// text. Omitted, the controller records `operator withdrawal by <user>`.
-    #[serde(default)]
-    pub reason: Option<String>,
+    /// Recorded with the first withdrawal request; nonblank, at most 1,024
+    /// UTF-8 bytes. A later request's reason is checked but not recorded.
+    pub reason: String,
 }
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct ScrubberProfiles {
@@ -350,9 +349,9 @@ pub async fn get(
     .await;
     Ok(response(result, StatusCode::OK))
 }
-#[utoipa::path(post,path="/v1/diversions/{id}/withdraw",tag="scrubbers",params(("id"=Uuid,Path)),request_body(content=WithdrawDiversion,description="Optional; omit the body or send {}"),responses(
+#[utoipa::path(post,path="/v1/diversions/{id}/withdraw",tag="scrubbers",params(("id"=Uuid,Path)),request_body=WithdrawDiversion,responses(
     (status=202,body=Diversion,description="Withdrawal retained until authorization expiry, final fenced delete and complete local absence"),
-    (status=400,body=ErrorResponse,description="Empty or oversized reason"),
+    (status=400,body=ErrorResponse,description="Blank or oversized reason"),
     (status=401,description="Authentication required"),
     (status=403,description="Administrator role required"),
     (status=404,body=ErrorResponse,description="Unknown diversion"),
@@ -366,10 +365,9 @@ pub async fn withdraw(
     session: AuthSession,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-    body: Option<Json<WithdrawDiversion>>,
+    Json(WithdrawDiversion { reason }): Json<WithdrawDiversion>,
 ) -> std::result::Result<Response, StatusCode> {
     let actor = admin(&state, &session, &headers)?;
-    let reason = body.and_then(|Json(body)| body.reason);
     let result = detached(&state, move |state| async move {
         state.scrubber.withdraw(&state, id, &actor, reason).await
     })

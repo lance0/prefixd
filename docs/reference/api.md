@@ -798,11 +798,13 @@ instead submits an attack event through `POST /v1/events`, which applies playboo
 | `expires_at_cap` | RFC 3339 timestamp | no | Initial creation's absolute expiry ceiling, for maintenance recreation |
 
 Reasons on manual creation, single/bulk withdrawal and safelist additions accept
-up to 1,024 UTF-8 bytes, including an empty string. Manual creation and withdrawal
-require a string `reason`; safelist additions also accept an omitted or `null`
-reason. Authorized requests with an overlong reason return `400`; a missing or
-non-string required reason returns `422`. Withdrawal records add the authenticated
-actor prefix after checking the submitted reason's byte length.
+up to 1,024 UTF-8 bytes. Manual creation and safelist additions accept an empty
+string; a withdrawal reason must contain non-whitespace text. Manual creation and
+withdrawal require a string `reason`; safelist additions also accept an omitted
+or `null` reason. Authorized requests with an overlong reason, or a withdrawal
+with a blank one, return `400`; a missing or non-string required reason returns
+`422`. Withdrawal records add the authenticated actor prefix after checking the
+submitted reason.
 
 Policing rates must round-trip exactly through the speaker's `f32` bytes/second
 encoding. Rates of 1, 7, 8 and 9 bits/second are supported, including fractional
@@ -1274,6 +1276,10 @@ Content-Type: application/json
 }
 ```
 
+`reason` is required: non-whitespace text of at most 1,024 UTF-8 bytes. A blank
+or overlong reason returns `400` with
+`{"error": "invalid request: reason must contain text and be at most 1024 UTF-8 bytes"}`.
+
 **Response (200 OK):**
 
 ```json
@@ -1336,7 +1342,7 @@ Content-Type: application/json
 |---|---|---|---|
 | `mitigation_ids` | array of UUIDs | yes | Up to 100 mitigation IDs to withdraw |
 | `operator_id` | string | yes | Operator performing the withdrawal |
-| `reason` | string | yes | Reason for withdrawal |
+| `reason` | string | yes | Non-whitespace reason for withdrawal, at most 1,024 UTF-8 bytes; blank returns `400` |
 
 **Response (200 OK):**
 
@@ -3549,7 +3555,7 @@ playbook requests cannot choose a scrubber target.
 | `POST /v1/diversions` | Persist manual intent before guarded mutation; returns `202` |
 | `GET /v1/diversions` | Outstanding intent, including pending withdrawals |
 | `GET /v1/diversions/{id}` | Saved match/action/profile, revision and timestamped export observation |
-| `POST /v1/diversions/{id}/withdraw` | Retain withdrawal until authorization expiry and confirmed local absence; optional `reason` |
+| `POST /v1/diversions/{id}/withdraw` | Retain withdrawal until authorization expiry and confirmed local absence; required `reason` |
 
 Creation takes `profile`, `scope` (a complete host FlowSpec match), bounded
 `ttl_seconds`, `reason` and the exact `confirmation` returned by preview.
@@ -3587,10 +3593,11 @@ also refused with `409` while any live or pending rule has a source containing
 its victim, and such a mitigation or diversion is refused while the pair is
 outstanding. Audit details add `return_match` and `export_community`.
 
-Withdrawal accepts an optional JSON body `{"reason": "..."}` of 1 to 1,024
-UTF-8 bytes of text. An omitted body or reason records `operator withdrawal by
-<user>`. The first withdrawal reason and requester are immutable; a later
-request, or a controller latch that already recorded a reason, keeps them.
+Withdrawal requires a JSON body `{"reason": "..."}` with non-whitespace text of
+at most 1,024 UTF-8 bytes. A blank or overlong reason returns `400`, and an
+omitted reason `422`. The first withdrawal reason and requester are immutable; a
+later request, or a controller latch that already recorded a reason, keeps
+them. A later request still needs a valid reason, which is not recorded.
 
 | Status | Meaning |
 | --- | --- |

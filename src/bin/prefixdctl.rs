@@ -132,9 +132,10 @@ enum DiversionCommands {
     },
     Withdraw {
         id: uuid::Uuid,
-        /// Recorded with the first withdrawal request in the audit log
-        #[arg(long)]
-        reason: Option<String>,
+        /// Nonblank, at most 1,024 UTF-8 bytes; recorded with the first
+        /// withdrawal request in the audit log
+        #[arg(long, value_parser = parse_reason)]
+        reason: String,
     },
 }
 
@@ -213,7 +214,7 @@ enum MitigationCommands {
         ttl_seconds: u32,
 
         /// Nonblank explanation, at most 1,024 UTF-8 bytes
-        #[arg(short, long, value_parser = parse_extension_reason)]
+        #[arg(short, long, value_parser = parse_reason)]
         reason: String,
     },
 
@@ -222,8 +223,8 @@ enum MitigationCommands {
         /// Mitigation ID
         id: String,
 
-        /// Reason for withdrawal
-        #[arg(short, long)]
+        /// Nonblank reason for withdrawal, at most 1,024 UTF-8 bytes
+        #[arg(short, long, value_parser = parse_reason)]
         reason: String,
 
         /// Operator ID
@@ -265,7 +266,7 @@ struct ManualMitigationArgs {
     /// Explicit requested lifetime, subject to current controller policy
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     ttl_seconds: u32,
-    #[arg(short, long, value_parser = parse_extension_reason)]
+    #[arg(short, long, value_parser = parse_reason)]
     reason: String,
 }
 
@@ -364,7 +365,7 @@ fn parse_tcp_flag(value: &str) -> Result<prefixd::domain::TcpFlag, String> {
         .map_err(|_| "expected fin, syn, rst, psh, ack, urg, ece or cwr".into())
 }
 
-fn parse_extension_reason(value: &str) -> Result<String, String> {
+fn parse_reason(value: &str) -> Result<String, String> {
     if value.trim().is_empty() || value.len() > 1024 {
         return Err("reason must contain text and be at most 1024 UTF-8 bytes".into());
     }
@@ -903,12 +904,11 @@ async fn cmd_diversions(client: &Client, command: DiversionCommands) -> Result<(
         DiversionCommands::List => client.get("/v1/diversions").await?,
         DiversionCommands::Get { id } => client.get(&format!("/v1/diversions/{id}")).await?,
         DiversionCommands::Withdraw { id, reason } => {
-            let body = match reason {
-                Some(reason) => serde_json::json!({ "reason": reason }),
-                None => serde_json::json!({}),
-            };
             client
-                .post(&format!("/v1/diversions/{id}/withdraw"), &body)
+                .post(
+                    &format!("/v1/diversions/{id}/withdraw"),
+                    &serde_json::json!({ "reason": reason }),
+                )
                 .await?
         }
         DiversionCommands::Preview { file } => {
@@ -2244,8 +2244,32 @@ mod tests {
         ] {
             assert!(parse(&invalid).is_err(), "{invalid:?}");
         }
-        assert!(parse_extension_reason(&"é".repeat(512)).is_ok());
-        assert!(parse_extension_reason(&"é".repeat(513)).is_err());
+        assert!(parse_reason(&"é".repeat(512)).is_ok());
+        assert!(parse_reason(&"é".repeat(513)).is_err());
+    }
+
+    #[test]
+    fn withdrawals_require_a_nonblank_reason() {
+        let id = "7f72a903-63d1-4a4a-a5db-0517e0a7df1d";
+        for command in [
+            &[
+                "prefixdctl",
+                "mitigations",
+                "withdraw",
+                id,
+                "--operator",
+                "ops",
+            ][..],
+            &["prefixdctl", "diversions", "withdraw", id],
+        ] {
+            assert!(Cli::try_parse_from(command).is_err(), "{command:?}");
+            for blank in ["", " \t"] {
+                let args = command.iter().copied().chain(["--reason", blank]);
+                assert!(Cli::try_parse_from(args).is_err(), "{command:?} {blank:?}");
+            }
+            let args = command.iter().copied().chain(["--reason", "attack ended"]);
+            assert!(Cli::try_parse_from(args).is_ok(), "{command:?}");
+        }
     }
 
     #[test]
