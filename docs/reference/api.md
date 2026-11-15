@@ -2814,8 +2814,7 @@ Returns playbook definitions from `playbooks.yaml`.
       "name": "udp_flood_police_first",
       "match": { "vector": "udp_flood", "require_top_ports": false },
       "steps": [
-        { "action": "police", "rate_bps": 5000000, "ttl_seconds": 120 },
-        { "action": "discard", "rate_bps": null, "ttl_seconds": 300, "require_confidence_at_least": 0.7, "require_persistence_seconds": 120 }
+        { "action": "police", "rate_bps": 5000000, "ttl_seconds": 120 }
       ]
     }
   ],
@@ -2837,8 +2836,7 @@ Content-Type: application/json
       "name": "udp_flood_police_first",
       "match": { "vector": "udp_flood", "require_top_ports": false },
       "steps": [
-        { "action": "police", "rate_bps": 5000000, "ttl_seconds": 120 },
-        { "action": "discard", "ttl_seconds": 300, "require_confidence_at_least": 0.7, "require_persistence_seconds": 120 }
+        { "action": "police", "rate_bps": 5000000, "ttl_seconds": 120 }
       ]
     }
   ]
@@ -2860,6 +2858,13 @@ Content-Type: application/json
 - `ttl_seconds` must be 1-86400
 - `require_confidence_at_least` must be 0.0-1.0
 - First step must not have escalation requirements
+
+A playbook may carry more than one step. These rules accept that shape, but the
+controller executes only the first step. After a successful update it logs the
+same warnings as startup and reload: one for each playbook with more than one
+step, and one when a `scope: prefix` playbook is unreachable under the current
+guardrails. Warnings do not change the response; see
+[step selection](configuration.md#step-selection).
 
 **Error response (400):**
 
