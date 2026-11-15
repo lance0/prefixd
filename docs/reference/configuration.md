@@ -815,7 +815,13 @@ Shutdown signals reconciliation to stop and waits for the configured drain
 period before continuing server shutdown. This wait does not prove that in-flight
 requests or reconciliation have completed. Shutdown does not withdraw rules from
 the independent speaker. Controller-driven TTL cleanup requires the controller
-to run; rules can remain while prefixd is stopped.
+to run; unleased rules can remain while prefixd is stopped.
+
+The service manager must wait longer than the drain before it kills prefixd.
+The Compose controller services set `stop_grace_period: 35s` for the shipped
+30 seconds, and systemd's default `TimeoutStopSec` is 90 seconds. Raise them
+with `drain_timeout_seconds`. Lease renewal continues during the drain, so the
+drain does not shorten the time leased rules survive after prefixd exits.
 
 Only `drain_timeout_seconds` is accepted in `shutdown`; unknown fields cause a
 configuration error. The removed `preserve_announcements` key below fails

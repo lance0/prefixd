@@ -260,6 +260,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Compose gives both controller services `stop_grace_period: 35s`. Docker's
+  default of 10 seconds killed prefixd partway through the 30-second
+  `shutdown.drain_timeout_seconds` drain on `docker compose stop`, `restart`
+  and controller replacement. Raise it if you raise the drain timeout.
 - `GET /v1/health` no longer returns `500` when a request carries a session
   cookie and PostgreSQL is down. `GET /v1/ready`, `/metrics` and
   `/openapi.json` no longer read the session either, so they answer the same

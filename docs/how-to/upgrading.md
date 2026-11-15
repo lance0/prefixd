@@ -935,6 +935,9 @@ Replacing only the controller can preserve the independent speaker's sessions:
    `prefixd-gobgp`. If GoBGP itself is recreated, recreate both the namespace
    owner and controller together:
    `docker compose --profile gobgp up -d --no-build --force-recreate gobgp prefixd-gobgp`.
+   The old controller drains for `shutdown.drain_timeout_seconds` (30) before
+   it exits; the Compose `stop_grace_period` of 35 seconds lets the drain
+   finish.
 3. Verify API availability, ownership, speaker observation and reconciliation
    after startup; no fixed recovery time is guaranteed.
 4. The speaker may retain announcements while prefixd restarts. Application TTL

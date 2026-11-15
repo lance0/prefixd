@@ -10,6 +10,8 @@ x-controller: &controller
     RUST_LOG: sqlx::postgres::notice=warn,info
     PREFIXD_API_TOKEN: ${PREFIXD_API_TOKEN:-}
     DATABASE_URL: postgres://prefixd:${POSTGRES_PASSWORD:-prefixd_secret}@postgres:5432/prefixd
+  # Above shutdown.drain_timeout_seconds (30), so stop and restart let the drain finish.
+  stop_grace_period: 35s
   restart: unless-stopped
 
 services:
