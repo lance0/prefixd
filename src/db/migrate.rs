@@ -161,6 +161,10 @@ const LOCK_NOT_AVAILABLE_HINT: &str = "; another session held a conflicting lock
 /// Apply every embedded migration this database has not recorded yet.
 pub async fn run(pool: &PgPool) -> Result<()> {
     let mut connection = pool.acquire().await?;
+    // The session lock lives as long as this session. Closing it on drop, never
+    // returning it to the pool, keeps a cancelled start from leaving the lock
+    // held by a pooled connection.
+    connection.close_on_drop();
     acquire_lock(&mut connection).await?;
     let result = reconcile(&mut connection).await;
     release_lock(connection).await;
@@ -194,8 +198,8 @@ async fn acquire_lock(connection: &mut PgConnection) -> Result<()> {
     }
 }
 
-/// Release the session lock before the pooled connection is reused. A session
-/// that cannot release it is discarded, so the lock never leaks into later use.
+/// Release the session lock promptly. The connection closes when it drops, so
+/// a failed release still ends with the session.
 async fn release_lock(mut connection: sqlx::pool::PoolConnection<sqlx::Postgres>) {
     let released = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
         .bind(LOCK_KEY)
@@ -203,13 +207,9 @@ async fn release_lock(mut connection: sqlx::pool::PoolConnection<sqlx::Postgres>
         .await;
     match released {
         Ok(true) => {}
-        Ok(false) => {
-            tracing::error!("the database migration lock was not held at release");
-            let _ = connection.close().await;
-        }
+        Ok(false) => tracing::error!("the database migration lock was not held at release"),
         Err(error) => {
             tracing::error!(error = %error, "failed to release the database migration lock");
-            let _ = connection.close().await;
         }
     }
 }
