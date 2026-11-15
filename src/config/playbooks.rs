@@ -429,6 +429,23 @@ impl Playbooks {
         warnings
     }
 
+    /// Playbooks whose later steps the controller never runs. Startup and
+    /// reload log these; the steps stay accepted so existing files keep
+    /// loading and keep their written order.
+    pub fn unexecuted_steps_warnings(&self) -> Vec<String> {
+        self.playbooks
+            .iter()
+            .filter(|playbook| playbook.steps.len() > 1)
+            .map(|playbook| {
+                format!(
+                    "playbook {:?} has {} steps; only the first step runs, later steps are not executed",
+                    playbook.name,
+                    playbook.steps.len()
+                )
+            })
+            .collect()
+    }
+
     /// Validate all playbook rules, returning a list of errors (empty = valid).
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
@@ -746,6 +763,65 @@ mod tests {
     }
 
     #[test]
+    fn multi_step_playbooks_warn_that_later_steps_are_not_executed() {
+        let mut two_step = valid_playbook();
+        two_step.name = "two_step".to_string();
+        two_step.steps.push(PlaybookStep {
+            action: Some(PlaybookAction::Discard),
+            rate_bps: None,
+            ttl_seconds: 300,
+            rules: Vec::new(),
+            require_confidence_at_least: Some(0.7),
+            require_persistence_seconds: Some(120),
+        });
+        let playbooks = Playbooks {
+            playbooks: vec![valid_playbook(), two_step],
+        };
+        let warnings = playbooks.unexecuted_steps_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("two_step"), "{warnings:?}");
+        assert!(
+            warnings[0].contains("later steps are not executed"),
+            "{warnings:?}"
+        );
+    }
+
+    /// Multi-step playbooks remain valid configuration: they load, validate and
+    /// keep their steps, and the warning is the only new surface.
+    #[test]
+    fn multi_step_playbooks_still_load_with_a_warning() {
+        let mut two_step = valid_playbook();
+        two_step.name = "two_step".to_string();
+        two_step.steps.push(PlaybookStep {
+            action: Some(PlaybookAction::Discard),
+            rate_bps: None,
+            ttl_seconds: 300,
+            rules: Vec::new(),
+            require_confidence_at_least: Some(0.7),
+            require_persistence_seconds: Some(120),
+        });
+        let playbooks = Playbooks {
+            playbooks: vec![two_step],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("playbooks.yaml");
+        std::fs::write(&path, serde_saphyr::to_string(&playbooks).unwrap()).unwrap();
+
+        let loaded = Playbooks::load(&path).unwrap();
+        assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
+        assert_eq!(loaded.playbooks[0].steps.len(), 2);
+        assert_eq!(loaded.unexecuted_steps_warnings().len(), 1);
+    }
+
+    #[test]
+    fn single_step_playbooks_do_not_warn_about_unexecuted_steps() {
+        let playbooks = Playbooks {
+            playbooks: vec![valid_playbook()],
+        };
+        assert!(playbooks.unexecuted_steps_warnings().is_empty());
+    }
+
+    #[test]
     fn test_validate_valid_playbooks() {
         let pb = Playbooks {
             playbooks: vec![valid_playbook()],
@@ -758,6 +834,13 @@ mod tests {
         let playbooks: Playbooks =
             crate::config::parse_yaml(include_str!("../../configs/playbooks.yaml")).unwrap();
         assert!(playbooks.validate().is_empty());
+        // Every shipped playbook is one step, so startup has nothing to warn
+        // about and no default install carries steps that never run.
+        assert!(
+            playbooks.unexecuted_steps_warnings().is_empty(),
+            "{:?}",
+            playbooks.unexecuted_steps_warnings()
+        );
         // The notify script sends no top_dst_ports, so a vector without a
         // port-independent playbook would silently stop at accepted_no_playbook.
         for vector in [

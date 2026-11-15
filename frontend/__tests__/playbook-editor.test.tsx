@@ -70,6 +70,21 @@ describe("playbook YAML editor", () => {
   })
 })
 
+describe("unexecuted steps", () => {
+  it("marks only steps after the first as not executed in the card view", () => {
+    render(<PlaybookEditor playbooks={fromApi} onSave={vi.fn()} saving={false} />)
+    // Only udp_flood_police_first has two steps, so one badge total.
+    expect(screen.getAllByText("not executed")).toHaveLength(1)
+  })
+
+  it("explains in the edit view that later steps are never selected", () => {
+    render(<PlaybookEditor playbooks={fromApi} onSave={vi.fn()} saving={false} />)
+    fireEvent.click(screen.getByRole("button", { name: "Edit playbook udp_flood_police_first" }))
+    expect(screen.getAllByText("Not executed:")).toHaveLength(1)
+    expect(screen.getByText(/prefixd runs only the first step of a playbook today/)).toBeInTheDocument()
+  })
+})
+
 describe("prefix playbooks", () => {
   const prefix = [
     {

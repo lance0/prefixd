@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The shipped `configs/playbooks.yaml` gives every playbook one step. The three
+  police playbooks carried a later discard step with confidence and persistence
+  thresholds that the controller accepted and validated but never ran, so
+  `udp_flood_police_first` read as "discard after 120 s" while it policed at the
+  same rate for the whole attack. Each now has the single police step that
+  actually ran, with the same `rate_bps` and `ttl_seconds`. Startup and playbook
+  reload log a warning for every playbook with more than one step, naming the
+  playbook and stating that later steps are not executed, and the dashboard
+  playbook editor marks steps after the first as not executed. Existing files
+  with extra steps still load unchanged; validation rules are unchanged.
+
 ### Fixed
 
 - The release workflow stages its assets in `release-assets/` instead of

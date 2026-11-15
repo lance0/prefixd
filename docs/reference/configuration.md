@@ -1221,10 +1221,10 @@ playbooks:
       - action: police
         rate_bps: 10000000
         ttl_seconds: 120
-      - action: discard
-        ttl_seconds: 300
-        require_confidence_at_least: 0.8
 ```
+
+Use one step per playbook. The controller executes only the first step, so any
+later step is accepted and validated but never run.
 
 ### Match Criteria
 
@@ -1257,7 +1257,8 @@ the key.
 |--------|------|-------------|
 | `rate_bps` | integer | Positive bit rate exactly representable as an `f32` bytes/second traffic rate (police only) |
 | `ttl_seconds` | integer | Mitigation duration |
-| `require_confidence_at_least` | float | Min confidence for this step |
+| `require_confidence_at_least` | float | Min confidence for this step; accepted on steps after the first, which do not run |
+| `require_persistence_seconds` | integer | Min persistence for this step; accepted on steps after the first, which do not run |
 
 Policing rates are preserved exactly by both speaker backends. Fractional
 bytes/second are supported: 1, 7, 8 and 9 bits/second are valid. Missing or zero
@@ -1315,17 +1316,25 @@ playbooks:
 
 ### Step selection
 
-The controller uses the first step of the matching playbook. Later steps and
-`require_confidence_at_least` / `require_persistence_seconds` remain accepted in
-the playbook schema, but automatic progression to later steps is unavailable.
-The second step below is retained configuration, not an automatic fallback:
+The controller uses the first step of the matching playbook and never runs
+later ones. Later steps and `require_confidence_at_least` /
+`require_persistence_seconds` remain accepted in the playbook schema, so an
+existing file with more than one step still loads and validates unchanged, but
+automatic progression to later steps is unavailable. Startup and playbook
+reload log one warning per playbook with more than one step, naming it and
+stating that later steps are not executed. The dashboard playbook editor marks
+steps after the first as not executed.
+
+The shipped `configs/playbooks.yaml` gives every playbook exactly one step, so
+what it says is what runs. The two-step shape below is accepted configuration,
+not an automatic fallback; write one step instead until progression ships:
 
 ```yaml
 steps:
-  - action: police        # Step 1: Rate limit
+  - action: police        # Step 1: the only step that runs
     rate_bps: 10000000
     ttl_seconds: 120
-  - action: discard       # Later step: not selected automatically
+  - action: discard       # Later step: accepted, warned about, never run
     ttl_seconds: 300
     require_confidence_at_least: 0.7
 ```
@@ -1389,7 +1398,7 @@ an unknown vector use the playbook that matches `vector: unknown`.
 
 ```yaml
 playbooks:
-  # UDP flood: police; the later discard step is not selected automatically
+  # UDP flood: police
   - name: udp_flood
     match:
       vector: udp_flood
@@ -1397,9 +1406,6 @@ playbooks:
       - action: police
         rate_bps: 10000000
         ttl_seconds: 120
-      - action: discard
-        ttl_seconds: 300
-        require_confidence_at_least: 0.8
 
   # SYN flood: immediate discard
   - name: syn_flood

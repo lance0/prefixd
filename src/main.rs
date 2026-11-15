@@ -187,6 +187,9 @@ async fn main() -> anyhow::Result<()> {
     {
         tracing::warn!(%warning, "prefix playbook is unreachable");
     }
+    for warning in config.playbooks.unexecuted_steps_warnings() {
+        tracing::warn!(%warning, "playbook steps are not executed");
+    }
     // The lease probe is the capability check and recovers a live generation
     // after a restart (ADR 027); it is asked only when the lease is configured.
     let blackhole = &config.settings.blackhole;
