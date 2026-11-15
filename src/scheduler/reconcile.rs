@@ -133,6 +133,17 @@ impl ReconciliationLoop {
             .or_else(|| self.state.as_ref().and_then(|state| state.lease.as_deref()))
     }
 
+    /// A successful active-intent read is the only evidence of the leased
+    /// routes' TTLs, so it bounds renewal: one lease past the latest leased
+    /// `expires_at` this read saw, or past the read itself when it saw none.
+    /// Failed reads never call this, so the previous bound stands.
+    fn observe_leased_intent(&self, rows: &[crate::domain::Mitigation]) {
+        let Some(lease) = self.lease() else {
+            return;
+        };
+        lease.observe_intent_expiry(crate::domain::leased_expiry(rows, lease.owner()));
+    }
+
     /// Wire the shared `AppState` for paths that need live access to the
     /// correlation config or playbooks (currently: ADR 022 confidence
     /// decay refresh). Without this, decay refresh is a no-op and
@@ -623,6 +634,7 @@ impl ReconciliationLoop {
         let pending = self.repo.pending_withdrawals(pop).await?;
         let pending_keys = pending_ownership_keys(&pending)?;
         let mut active = self.repo.active_mitigation_inventory(pop).await?;
+        self.observe_leased_intent(&active);
         active.retain(|mitigation| {
             mitigation.is_active() && pop.is_none_or(|pop| mitigation.pop == pop)
         });
@@ -1195,7 +1207,9 @@ impl ReconciliationLoop {
         let mut owner_counts = HashMap::<String, usize>::new();
         let mut desired = Vec::new();
         let now = chrono::Utc::now();
-        for mitigation in self.repo.active_mitigation_inventory(pop).await? {
+        let rows = self.repo.active_mitigation_inventory(pop).await?;
+        self.observe_leased_intent(&rows);
+        for mitigation in rows {
             if mitigation.action_type != ActionType::Blackhole
                 || mitigation.is_dry_run_origin()
                 || pop.is_some_and(|pop| mitigation.pop != pop)
@@ -5447,6 +5461,38 @@ mod tests {
             ..live_config()
         };
         blackhole_reconciler(repo, speaker, config, false).with_lease(lease)
+    }
+
+    /// A successful active-intent read bounds renewal to the latest leased
+    /// TTL. Leased FlowSpec and leased blackholes share the bound; an unleased
+    /// row with a longer TTL, or a row still pending, does not extend it.
+    #[tokio::test]
+    async fn a_leased_intent_read_bounds_renewal_to_the_latest_leased_ttl() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let lease = Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60));
+        let reconciler = leased_reconciler(repo.clone(), speaker.clone(), lease.clone());
+        // An empty leased set bounds renewal to the read itself.
+        let before = chrono::Utc::now();
+        reconciler.reconcile().await.unwrap();
+        let read_at = lease.health().renew_until.expect("the read was successful");
+        assert!(read_at >= before && read_at <= chrono::Utc::now());
+        // Only committed leased intent counts, whichever route kind holds it.
+        let mut rule = leased_rule_row("192.0.2.10/32");
+        rule.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+        let mut blackhole = leased_row("192.0.2.1");
+        blackhole.expires_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let mut unleased = action_mitigation("192.0.2.11/32", FlowSpecAction::discard());
+        unleased.expires_at = chrono::Utc::now() + chrono::Duration::hours(2);
+        let mut pending = leased_rule_row("192.0.2.12/32");
+        pending.expires_at = chrono::Utc::now() + chrono::Duration::hours(3);
+        pending.status = MitigationStatus::Pending;
+        for mitigation in [&rule, &blackhole, &unleased, &pending] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(lease.health().renew_until, Some(blackhole.expires_at));
     }
 
     /// As at admission, only an unleased repair add that replaced a different

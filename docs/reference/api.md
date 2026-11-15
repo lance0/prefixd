@@ -2529,7 +2529,8 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
       "state": "live",
       "generation": {"incarnation": 1311768467294899695, "sequence": 4},
       "last_renewal_at": "2026-10-18T12:00:00Z",
-      "last_renewal_result": "success"
+      "last_renewal_result": "success",
+      "renew_until": "2026-10-18T12:30:00Z"
     },
     "blackhole_exports": {
       "historical": false,
@@ -2586,7 +2587,14 @@ still be live), `expired` (the speaker refused the generation, or no
 renewal succeeded for a whole lease) or `not_renewing` (dry-run, which never
 renews). `generation` is held in memory and
 changes after a speaker restart. `last_renewal_result` is `success`,
-`not_live` or `error`. Health performs no rule inventory probe.
+`not_live` or `error`. `renew_until` is the latest `expires_at` among the
+routes this owner holds, from the last successful read of active intent; an
+empty leased set sets it to the read itself and it is null before the first
+successful read. Renewal is unfenced but stops one lease after `renew_until`,
+so a database outage cannot renew leased routes past every TTL; `renewal_stopped`
+is then `ttl_bound`, which is a bound, not a failed renewal. `renewal_stopped`
+is omitted while renewal continues and in dry-run. Health performs no rule
+inventory probe.
 
 `blackhole_exports` is present when `blackhole_export` is true (rustbgpd). It
 summarizes the last reconciliation pass's
@@ -3418,7 +3426,11 @@ the last replacement. Audit and error logs identify the affected prefix.
 With [leased blackholes](configuration.md#leased-blackholes),
 `prefixd_injection_lease_renewals_total{result}` counts renewals by `success`,
 `not_live` (the speaker refused the generation, which triggers a full
-re-add) and `error`. `prefixd_injection_lease_state{state}` is `1` for the
+re-add) and `error`. A renewal that stops at the
+[TTL bound](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls)
+sends no RPC and increments none of them; health detail reports
+`renewal_stopped: "ttl_bound"` instead. `prefixd_injection_lease_state{state}`
+is `1` for the
 current state (`none`, `live`, `renewal_failing`, `expired` or
 `not_renewing`) and `0` for
 the others, matching health detail's `speaker.lease.state` after each

@@ -50,6 +50,12 @@ supersedes "standby never renews" below; and a dry-run controller never
 renews, so switching an enforced leased controller to dry-run lets its leased
 routes lapse within one lease.
 
+Status note 2026-11-15 (TTL bound): unfenced renewal is bounded by the leased
+routes' TTLs, so an outage cannot renew them past every TTL. The keeper stops
+renewing one lease after the latest leased `expires_at` from its last
+successful read; see
+[ADR 003](003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls).
+
 Status note 2026-10-20 (unicast injection contract): rustbgpd 0.79.0 also
 ships requirements (a), (b) and (c), and prefixd now requires 0.79.0. Deletes
 set `allow_missing` and treat `NOT_PRESENT` as absent; `NOT_FOUND` is an
@@ -477,14 +483,16 @@ blackholes. The owner identity also keys the
   or from `ListInjectionLeases(owner)`.
 - **Renewal task.** A dedicated task calls `RenewLease(owner, generation,
   lease_seconds)` about every `lease_seconds / 3` with its own deadline, while
-  it holds a generation. It never takes the lifecycle mutex, touches the
-  database or waits for reconciliation. Renewal never resurrects a lease. A
+  it holds a generation and one lease after the latest leased `expires_at`
+  from the last successful read. It never takes the lifecycle mutex, touches
+  the database or waits for reconciliation. Renewal never resurrects a lease. A
   generation that is not live returns `FAILED_PRECONDITION` (ADR-0141 §2). A
   controller stall longer than the lease removes rustbgpd's routes. Whether
   traffic then reaches the victim depends on the other routes the network
   holds (ADR-0141 §5).
-- **Visibility.** The lease state (live, renewal failing or expired) and the
-  last renewal result appear in authenticated operational health. A renewal
+- **Visibility.** The lease state (live, renewal failing or expired), the
+  last renewal result and the TTL bound (`renew_until`, `renewal_stopped`)
+  appear in authenticated operational health. A renewal
   result counter and a lease-state gauge appear in metrics. Public liveness is
   unchanged.
 - **Adoption and re-add.** After a prefixd restart within the lease, prefixd

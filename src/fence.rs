@@ -369,7 +369,9 @@ impl InjectionLeases for FencedAnnouncer {
     /// Not fenced: renewal only extends what this owner already holds and can
     /// never add or resurrect anything, and a second process with the same owner
     /// renewing is harmless. Gating it on the fence would tie it to the database,
-    /// so an outage longer than the lease would drop every leased blackhole.
+    /// so an outage longer than the lease would drop every leased route even
+    /// inside its TTL. The keeper's TTL bound, from the last successful read,
+    /// stops renewal once an outage outlasts every leased TTL (ADR 003).
     async fn renew_lease(
         &self,
         owner: &str,

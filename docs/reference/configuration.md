@@ -247,6 +247,13 @@ key back to `true` to recover. To turn the lease off:
 - **Lost lease.** A refused renewal, a changed lease generation or a speaker
   restart re-adds every active leased FlowSpec rule and leased blackhole at
   once. Lease expiry is never recorded as a withdrawal.
+- **Database outages.** Renewal is unfenced and needs no database, but it is
+  bounded by leased TTLs: it continues until one lease after the latest
+  `expires_at` among the rows this owner holds, from the last successful read
+  of active intent, then stops and rustbgpd removes the rules within one more
+  lease. Leased FlowSpec and leased blackholes share the bound. See
+  [leased blackholes](#leased-blackholes) and
+  [ADR 003](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls).
 - **Unknown rules.** Another owner's rule at a desired match is reported in
   `prefixd_unknown_local_routes{kind="flowspec"}` as a repair error and never
   touched.
@@ -1043,9 +1050,20 @@ routes the network holds can still apply.
   [upgrade guide](../how-to/upgrading.md#mitigation-origin-mode) already asks.
 - **Database outages.** Renewal needs no database and no controller fence, so
   a PostgreSQL outage that puts the controller in standby does not drop leased
-  blackholes. New adds and withdrawals wait for the fence.
+  blackholes while the leased routes are inside their TTL. Renewal is bounded
+  rather than unbounded: it continues until one lease after the latest
+  `expires_at` among the rows this owner holds, from the last successful read
+  of active intent, then stops so rustbgpd removes them within one more lease.
+  Leased FlowSpec rules and leased blackholes share that bound; unleased
+  routes, pending rows and dry-run rows do not extend it. A read that succeeds
+  again refreshes it and renewal resumes. Before the first successful read,
+  renewal is bounded to one lease after startup, so a standby that cannot read
+  the database lets the adopted lease lapse. New adds and withdrawals wait for
+  the fence. Health reports `renewal_stopped: "ttl_bound"` and
+  `renew_until`; a stop at the bound is not a renewal failure. See
+  [leased TTLs](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls).
 - **Visibility.** Health detail reports `speaker.lease` (owner, state,
-  generation and the last renewal), and
+  generation, the last renewal, `renew_until` and `renewal_stopped`), and
   [metrics](api.md#metrics) count renewals and report the lease state.
 ### Amplification
 

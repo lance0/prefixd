@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Leased FlowSpec rules and leased blackholes no longer outlive their TTL
+  during a PostgreSQL outage. Renewal stays independent of the database and
+  the fence, but the lease keeper now remembers the latest leased `expires_at`
+  from its last successful read and stops renewing one lease after it, so
+  rustbgpd removes the routes within one more lease instead of renewing them
+  indefinitely. A standby follows the same bound, a successful read refreshes
+  it, and health reports `renew_until` plus `renewal_stopped: "ttl_bound"`
+  rather than a renewal failure.
 - The release workflow stages its assets in `release-assets/` instead of
   `dist/`. The checkout tracks `dist/systemd/`, so the v0.27.0 run tagged the
   release and pushed both images but failed to create the GitHub Release when
