@@ -60,6 +60,7 @@ export function WithdrawConfirmDialog({
 
   const confirm = async () => {
     const trimmed = reason.trim()
+
     if (inFlight.current || !trimmed || overLimit) return
     inFlight.current = true
     setBusy(true)

@@ -191,11 +191,13 @@ describe("WithdrawConfirmDialog", () => {
 
     expect(reason(dialog)).toBeRequired()
     expect(submit).toBeDisabled()
+
     for (const blank of [" ", "\t\n  "]) {
       fireEvent.change(reason(dialog), { target: { value: blank } })
       expect(submit).toBeDisabled()
       fireEvent.click(submit)
     }
+
     expect(onConfirm).not.toHaveBeenCalled()
 
     fireEvent.change(reason(dialog), { target: { value: "  Attack subsided  " } })

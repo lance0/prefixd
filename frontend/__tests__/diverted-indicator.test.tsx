@@ -1,4 +1,4 @@
-import { act, screen, waitFor } from "@testing-library/react"
+import { act, screen, waitFor, within } from "@testing-library/react"
 import { Suspense } from "react"
 import { describe, expect, it } from "vitest"
 import { findDiversion } from "@/components/dashboard/diverted-indicator"
@@ -84,6 +84,20 @@ describe("Diverted indicator", () => {
     expect(links[0]).toHaveAttribute("href", "/scrubbers#diversion-operation-1")
   })
 
+  it("tells the Mitigations list once when diversion state is unknown, keeping rows quiet", async () => {
+    signIn(controller, "credentials", operatorResponse("viewer"))
+    controller.route("GET", "/v1/config/inventory", () => json({ customers: [] }))
+    controller.route("GET", "/v1/pops", () => json([]))
+    controller.route("GET", "/v1/mitigations", () => json({ mitigations: [mitigation, { ...mitigation, mitigation_id: "mit-2" }], count: 2, next_cursor: null, has_more: false }))
+    serveDiversions(() => failure(500))
+    renderApp(<MitigationsContentLive />, { url: "/mitigations" })
+    const notice = await screen.findByText(/^Diversion state unknown\./)
+
+    expect(within(notice).getByRole("link", { name: "check Scrubbers" })).toHaveAttribute("href", "/scrubbers")
+    expect(screen.getAllByText(/Diversion state unknown/)).toHaveLength(1)
+    expect(screen.queryByRole("link", { name: /open Scrubbers/ })).not.toBeInTheDocument()
+  })
+
   async function renderDetail(response: () => Response) {
     signIn(controller, "none", null)
     controller.route("GET", "/v1/config/inventory", () => json({ customers: [] }))
@@ -106,19 +120,45 @@ describe("Diverted indicator", () => {
     expect(screen.queryByRole("link", { name: /open Scrubbers/ })).not.toBeInTheDocument()
   })
 
-  async function renderHistory(rows: ScrubberDiversion[]) {
+  async function renderHistory(rows: ScrubberDiversion[] | Response) {
     signIn(controller, "credentials", operatorResponse("viewer"))
     controller.route("GET", "/v1/ip/203.0.113.20/history", () => json({ ip: "203.0.113.20", events: [], mitigations: [mitigation], customer: null, service: null }))
-    serveDiversions(() => json(rows))
-    renderApp(<IpHistoryPage />, { url: "/ip-history?ip=203.0.113.20" })
+    serveDiversions(() => rows instanceof Response ? rows : json(rows))
+    const view = renderApp(<IpHistoryPage />, { url: "/ip-history?ip=203.0.113.20" })
     await screen.findByRole("link", { name: "Mitigation" })
-    await waitFor(() => expect(controller.calls("GET", "/v1/diversions")).toHaveLength(1))
+    await waitFor(() => expect(controller.calls("GET", "/v1/diversions").length).toBeGreaterThanOrEqual(1))
     await settle()
+
+    return view
   }
 
   it("shows the diversion on IP history", async () => {
     await renderHistory([diversion()])
     expect(screen.getByRole("link", { name: "Diverted through scrubber profile scrubber-a: open Scrubbers" }).closest("header")).not.toBeNull()
+  })
+
+  it("names the VPN routing table of a scoped diversion on IP history", async () => {
+    const scoped = diversion()
+
+    scoped.rule.nlri.scope = { family: "ipv4", rd: "44407:40" }
+    await renderHistory([scoped])
+    expect(screen.getByRole("link", { name: "Diverted · VPNv4 RD 44407:40 through scrubber profile scrubber-a: open Scrubbers" })).toHaveTextContent("Diverted · VPNv4 RD 44407:40")
+  })
+
+  it("shows unknown diversion state on IP history when the read fails", async () => {
+    await renderHistory(failure(500))
+    expect(await screen.findByText("Diversion state unknown")).toBeInTheDocument()
+    expect(screen.queryByRole("link", { name: /open Scrubbers/ })).not.toBeInTheDocument()
+  })
+
+  it("switches a shown Diverted pill to unknown when a later refresh fails", async () => {
+    const view = await renderHistory([diversion()])
+
+    expect(screen.getByRole("link", { name: "Diverted through scrubber profile scrubber-a: open Scrubbers" })).toBeInTheDocument()
+    serveDiversions(() => failure(500))
+    await act(async () => { await view.mutate()("scrubber-diversions").catch(() => {}) })
+    expect(await screen.findByText("Diversion state unknown")).toBeInTheDocument()
+    expect(screen.queryByRole("link", { name: /open Scrubbers/ })).not.toBeInTheDocument()
   })
 
   it("shows nothing on IP history for an address that is not diverted", async () => {

@@ -44,15 +44,31 @@ export function DivertedIndicator({ host, scope, pop, showUnknown = false }: { h
   const state = row && DIVERTING[row.status]
 
   if (!row || !state) return null
+  const vpn = row.rule.nlri.scope
+  // IP history matches any scope, so a VPN diversion names its routing table.
+  const label = vpn ? `${state.label} · VPN${vpn.family === "ipv4" ? "v4" : "v6"} RD ${vpn.rd}` : state.label
 
   return (
     <Link
       href={`/scrubbers#diversion-${row.id}`}
       onClick={event => event.stopPropagation()}
-      aria-label={`${state.label} through scrubber profile ${row.profile.id}: open Scrubbers`}
+      aria-label={`${label} through scrubber profile ${row.profile.id}: open Scrubbers`}
       className="rounded-sm hover:underline"
     >
-      <StatusPill tone={state.tone} icon={<Split aria-hidden="true" />}>{state.label}</StatusPill>
+      <StatusPill tone={state.tone} icon={<Split aria-hidden="true" />}>{label}</StatusPill>
     </Link>
+  )
+}
+
+/** One line for a list whose rows stay quiet when the diversions read fails. */
+export function DiversionsUnknownNotice({ className }: { className?: string }) {
+  const { error } = useDiversions()
+
+  if (!error) return null
+
+  return (
+    <p role="status" className={className}>
+      Diversion state unknown. Rows below may be diverted; <Link href="/scrubbers" className="rounded-sm underline">check Scrubbers</Link>.
+    </p>
   )
 }

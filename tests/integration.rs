@@ -12462,12 +12462,14 @@ mod anonymous_auth {
                     assert_eq!(status, StatusCode::FORBIDDEN, "{role:?} {path}");
                 }
             }
-            for path in ["/v1/diversions/preview", "/v1/diversions"] {
-                let status = request(&app, "POST", path, None, Some(diversion.clone()))
+            for (path, body) in &mutations {
+                let status = request(&app, "POST", path, None, Some(body.clone()))
                     .await
                     .status();
                 assert_eq!(status, StatusCode::UNAUTHORIZED, "anonymous {path}");
             }
+            // Scrubbers are disabled in this fixture, so even Admin persists nothing;
+            // the 403s above, not this check, prove the role boundary.
             assert!(repo.list_diversions("test1").await.unwrap().is_empty());
         }
     }
