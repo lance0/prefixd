@@ -409,20 +409,48 @@ impl DestinationConfig {
         }
     }
 
-    /// Errors for `*_env` keys, naming the key and variable but never a value.
-    fn env_errors(&self, ctx: &str) -> Vec<String> {
+    /// Errors for `*_env` keys at `path`, such as `alerting.destinations[0]`,
+    /// naming the key and variable but never a value.
+    fn env_errors(&self, path: &str) -> Vec<String> {
         let mut errors = Vec::new();
         for (field, value, env) in self.secrets() {
             let Some(env) = env else { continue };
             if value.is_some_and(|value| !value.is_empty()) {
-                errors.push(format!("{ctx}: set {field} or {field}_env, not both"));
+                errors.push(format!(
+                    "{path}: set {field} or {field}_env, not both; edit alerting.yaml"
+                ));
             } else if std::env::var(env).unwrap_or_default().is_empty() {
                 errors.push(format!(
-                    "{ctx}: {field}_env names environment variable '{env}', which is not set or empty"
+                    "{path}.{field}_env names environment variable '{env}', which is not set or empty"
                 ));
             }
         }
         errors
+    }
+
+    /// What this destination's `*_env` keys are bound to: its type, each
+    /// variable name, and the non-secret field that picks where a value is
+    /// sent. `None` without `*_env` keys.
+    fn env_binding(&self) -> Option<serde_json::Value> {
+        let envs: Vec<_> = self
+            .secrets()
+            .into_iter()
+            .filter_map(|(field, _, env)| env.map(|env| (field, env)))
+            .collect();
+        if envs.is_empty() {
+            return None;
+        }
+        let target = match self {
+            Self::Telegram { chat_id, .. } => chat_id.as_str(),
+            Self::Pagerduty { events_url, .. } => events_url,
+            Self::Opsgenie { region, .. } => region,
+            Self::Generic {
+                url, url_env: None, ..
+            } => url,
+            // The variable is itself the destination URL.
+            _ => "",
+        };
+        Some(serde_json::json!([self.destination_type(), envs, target]))
     }
 
     /// A redacted `***` beside a `*_env` key stands for the variable, so it is
@@ -565,25 +593,35 @@ impl AlertingConfig {
         Ok(config)
     }
 
-    /// `${VAR}` placeholders and unusable `*_env` keys, which startup, reload
-    /// and the editor refuse. Messages name keys and variables, never values.
+    /// `${VAR}` placeholders, missing secrets and unusable `*_env` keys, which
+    /// startup and reload refuse. Messages name keys and variables, never values.
     pub fn load_errors(&self) -> Vec<String> {
-        let mut errors = serde_json::to_value(self)
-            .map(|value| crate::config::env_placeholder_errors(&value))
-            .unwrap_or_default();
-        errors.extend(self.env_errors());
+        let mut errors = self.placeholder_errors();
+        errors.extend(self.secret_errors());
         errors
     }
 
-    /// Unusable `*_env` keys only.
-    pub fn env_errors(&self) -> Vec<String> {
-        self.destinations
-            .iter()
-            .enumerate()
-            .flat_map(|(i, dest)| {
-                dest.env_errors(&format!("destination[{i}] ({})", dest.destination_type()))
+    fn placeholder_errors(&self) -> Vec<String> {
+        serde_json::to_value(self)
+            .map(|value| {
+                crate::config::env_placeholder_errors(&serde_json::json!({ "alerting": value }))
             })
-            .collect()
+            .unwrap_or_default()
+    }
+
+    /// Missing secrets and unusable `*_env` keys only. Generic `secret` is optional.
+    pub fn secret_errors(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (i, dest) in self.destinations.iter().enumerate() {
+            let path = format!("alerting.destinations[{i}]");
+            for (field, value, env) in dest.secrets() {
+                if env.is_none() && field != "secret" && value.is_none_or(str::is_empty) {
+                    errors.push(format!("{path}: {field} or {field}_env is required"));
+                }
+            }
+            errors.extend(dest.env_errors(&path));
+        }
+        errors
     }
 
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
@@ -643,13 +681,11 @@ impl AlertingConfig {
     }
 
     pub fn validate(&self) -> Vec<String> {
-        let mut errors = serde_json::to_value(self)
-            .map(|value| crate::config::env_placeholder_errors(&value))
-            .unwrap_or_default();
+        let mut errors = self.placeholder_errors();
 
         for (i, dest) in self.destinations.iter().enumerate() {
             let ctx = format!("destination[{}] ({})", i, dest.destination_type());
-            let env_errors = dest.env_errors(&ctx);
+            let env_errors = dest.env_errors(&format!("alerting.destinations[{i}]"));
             if !env_errors.is_empty() {
                 errors.extend(env_errors);
                 continue;
@@ -752,6 +788,22 @@ impl AlertingConfig {
 
         for (i, dest) in self.destinations.iter_mut().enumerate() {
             dest.clear_env_sentinels();
+            // The editor may keep an existing `*_env` key, never add or retarget
+            // one: a new variable name or destination would send that variable,
+            // such as DATABASE_URL, wherever the request says. This runs before
+            // any environment lookup, so a refusal reveals nothing about one.
+            if let Some(binding) = dest.env_binding()
+                && !current
+                    .destinations
+                    .iter()
+                    .any(|existing| existing.env_binding().as_ref() == Some(&binding))
+            {
+                errors.push(format!(
+                    "alerting.destinations[{i}]: set *_env keys in alerting.yaml on the controller \
+                     host; the editor keeps one only for an unchanged destination"
+                ));
+                continue;
+            }
             let ctx = format!("destination[{}] ({})", i, dest.destination_type());
             match dest {
                 DestinationConfig::Slack {
@@ -767,9 +819,10 @@ impl AlertingConfig {
                             .filter_map(|d| match d {
                                 DestinationConfig::Slack {
                                     webhook_url: u,
+                                    webhook_url_env: None,
                                     channel: existing_channel,
                                     ..
-                                } => {
+                                } if !u.is_empty() => {
                                     if channel_match.is_some() && channel_match == *existing_channel
                                     {
                                         return Some(u.clone());
@@ -785,9 +838,11 @@ impl AlertingConfig {
                                 .destinations
                                 .iter()
                                 .filter_map(|d| match d {
-                                    DestinationConfig::Slack { webhook_url: u, .. } => {
-                                        Some(u.clone())
-                                    }
+                                    DestinationConfig::Slack {
+                                        webhook_url: u,
+                                        webhook_url_env: None,
+                                        ..
+                                    } if !u.is_empty() => Some(u.clone()),
                                     _ => None,
                                 })
                                 .collect::<Vec<_>>()
@@ -814,9 +869,11 @@ impl AlertingConfig {
                             .destinations
                             .iter()
                             .filter_map(|d| match d {
-                                DestinationConfig::Discord { webhook_url: u, .. } => {
-                                    Some(u.clone())
-                                }
+                                DestinationConfig::Discord {
+                                    webhook_url: u,
+                                    webhook_url_env: None,
+                                    ..
+                                } if !u.is_empty() => Some(u.clone()),
                                 _ => None,
                             })
                             .collect();
@@ -839,7 +896,11 @@ impl AlertingConfig {
                             .destinations
                             .iter()
                             .filter_map(|d| match d {
-                                DestinationConfig::Teams { webhook_url: u, .. } => Some(u.clone()),
+                                DestinationConfig::Teams {
+                                    webhook_url: u,
+                                    webhook_url_env: None,
+                                    ..
+                                } if !u.is_empty() => Some(u.clone()),
                                 _ => None,
                             })
                             .collect();
@@ -867,9 +928,10 @@ impl AlertingConfig {
                             .filter_map(|d| match d {
                                 DestinationConfig::Telegram {
                                     bot_token: t,
+                                    bot_token_env: None,
                                     chat_id: c,
                                     ..
-                                } if c == &cid => Some(t.clone()),
+                                } if c == &cid && !t.is_empty() => Some(t.clone()),
                                 _ => None,
                             })
                             .collect();
@@ -899,9 +961,10 @@ impl AlertingConfig {
                             .filter_map(|d| match d {
                                 DestinationConfig::Pagerduty {
                                     routing_key: k,
+                                    routing_key_env: None,
                                     events_url: e,
                                     ..
-                                } if e == &eu => Some(k.clone()),
+                                } if e == &eu && !k.is_empty() => Some(k.clone()),
                                 _ => None,
                             })
                             .collect();
@@ -929,9 +992,10 @@ impl AlertingConfig {
                             .filter_map(|d| match d {
                                 DestinationConfig::Opsgenie {
                                     api_key: k,
+                                    api_key_env: None,
                                     region: reg,
                                     ..
-                                } if reg == &r => Some(k.clone()),
+                                } if reg == &r && !k.is_empty() => Some(k.clone()),
                                 _ => None,
                             })
                             .collect();
@@ -948,35 +1012,38 @@ impl AlertingConfig {
                         }
                     }
                 }
-                DestinationConfig::Generic { secret, url, .. } => {
+                DestinationConfig::Generic {
+                    secret,
+                    url,
+                    url_env,
+                    ..
+                } => {
                     if secret.as_deref() == Some(REDACTED) {
                         let u = url.clone();
-                        let matches: Vec<String> = if u == REDACTED {
-                            // URL is also redacted — match by uniqueness among Generic destinations
-                            current
-                                .destinations
-                                .iter()
-                                .filter_map(|d| match d {
-                                    DestinationConfig::Generic {
-                                        secret: Some(s), ..
-                                    } => Some(s.clone()),
-                                    _ => None,
-                                })
-                                .collect()
-                        } else {
-                            current
-                                .destinations
-                                .iter()
-                                .filter_map(|d| match d {
-                                    DestinationConfig::Generic {
-                                        secret: Some(s),
-                                        url: existing_url,
-                                        ..
-                                    } if existing_url == &u => Some(s.clone()),
-                                    _ => None,
-                                })
-                                .collect()
-                        };
+                        // Inline signing secrets only; an env-backed URL matches by variable.
+                        let matches: Vec<String> = current
+                            .destinations
+                            .iter()
+                            .filter_map(|d| match d {
+                                DestinationConfig::Generic {
+                                    secret: Some(s),
+                                    secret_env: None,
+                                    url: existing_url,
+                                    url_env: existing_url_env,
+                                    ..
+                                } if !s.is_empty()
+                                    && match url_env {
+                                        Some(_) => existing_url_env == url_env,
+                                        // URL also redacted: match by uniqueness.
+                                        None if u == REDACTED => existing_url_env.is_none(),
+                                        None => existing_url_env.is_none() && existing_url == &u,
+                                    } =>
+                                {
+                                    Some(s.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect();
                         match matches.as_slice() {
                             [s] => *secret = Some(s.clone()),
                             [] => errors.push(format!(
@@ -1809,7 +1876,7 @@ mod tests {
             (
                 format!("destinations:\n  - type: opsgenie\n    api_key_env: {MISSING_ENV}\n"),
                 format!(
-                    "destination[0] (opsgenie): api_key_env names environment variable \
+                    "alerting.destinations[0].api_key_env names environment variable \
                      '{MISSING_ENV}', which is not set or empty"
                 ),
             ),
@@ -1818,7 +1885,9 @@ mod tests {
                     "destinations:\n  - type: telegram\n    chat_id: '1'\n    \
                      bot_token: inline-secret-canary\n    bot_token_env: {PRESENT_ENV}\n"
                 ),
-                "destination[0] (telegram): set bot_token or bot_token_env, not both".into(),
+                "alerting.destinations[0]: set bot_token or bot_token_env, not both; edit \
+                 alerting.yaml"
+                    .into(),
             ),
         ] {
             std::fs::write(&path, &yaml).unwrap();
@@ -1828,6 +1897,22 @@ mod tests {
             let config: AlertingConfig = crate::config::parse_yaml(&yaml).unwrap();
             assert_eq!(config.validate(), vec![expected]);
         }
+
+        // Defaults let a destination omit its secret; loading still requires one.
+        std::fs::write(&path, "destinations:\n  - type: pagerduty\n").unwrap();
+        assert_eq!(
+            format!("{:#}", AlertingConfig::load(&path).unwrap_err()),
+            "alerting.destinations[0]: routing_key or routing_key_env is required"
+        );
+        std::fs::write(
+            &path,
+            "destinations:\n  - type: generic\n    url: https://example.com/hook\n",
+        )
+        .unwrap();
+        assert!(
+            AlertingConfig::load(&path).is_ok(),
+            "generic secret is optional"
+        );
     }
 
     #[test]
@@ -1837,7 +1922,7 @@ mod tests {
         // Negative control: the parser alone accepts the literal placeholder,
         // which earlier releases then sent as the routing key.
         let config: AlertingConfig = crate::config::parse_yaml(yaml).unwrap();
-        let expected = "destinations[0].routing_key looks like ${VAR} substitution, which \
+        let expected = "alerting.destinations[0].routing_key looks like ${VAR} substitution, which \
                         prefixd does not perform; set the value, or use the matching *_env key \
                         where one exists";
         assert_eq!(config.validate(), vec![expected.to_string()]);
@@ -1871,5 +1956,110 @@ mod tests {
             serde_json::to_value(&incoming).unwrap(),
             serde_json::to_value(&current).unwrap()
         );
+    }
+
+    fn editor_merge(current: &AlertingConfig, incoming: serde_json::Value) -> Vec<String> {
+        let mut incoming: AlertingConfig = serde_json::from_value(incoming).unwrap();
+        let mut errors = incoming.merge_secrets(current);
+        if errors.is_empty() {
+            errors = incoming.validate();
+        }
+        errors
+    }
+
+    #[test]
+    fn editor_cannot_add_or_retarget_env_keys() {
+        let current: AlertingConfig = serde_json::from_value(serde_json::json!({
+            "destinations": [{ "type": "pagerduty", "routing_key_env": PRESENT_ENV }],
+        }))
+        .unwrap();
+        let refused = "alerting.destinations[0]: set *_env keys in alerting.yaml on the \
+                       controller host; the editor keeps one only for an unchanged destination";
+        let retargeted = serde_json::json!({
+            "destinations": [{
+                "type": "pagerduty",
+                "routing_key_env": PRESENT_ENV,
+                "events_url": "https://attacker.example/x",
+            }],
+        });
+        // Negative control: the payload is otherwise valid, so without the
+        // binding check the editor would send the variable to that URL.
+        let control: AlertingConfig = serde_json::from_value(retargeted.clone()).unwrap();
+        assert!(control.validate().is_empty());
+        assert_eq!(editor_merge(&current, retargeted), vec![refused]);
+        for env in [MISSING_ENV, "DATABASE_URL"] {
+            // Refused before any lookup, so the error does not reveal whether
+            // the variable exists.
+            let added = serde_json::json!({
+                "destinations": [{ "type": "pagerduty", "routing_key_env": env }],
+            });
+            assert_eq!(
+                editor_merge(&AlertingConfig::default(), added),
+                vec![refused]
+            );
+        }
+        let kept = serde_json::json!({ "destinations": [current.destinations[0].redacted()] });
+        assert!(editor_merge(&current, kept).is_empty());
+    }
+
+    #[test]
+    fn redacted_merge_ignores_env_backed_candidates() {
+        let current: AlertingConfig = serde_json::from_value(serde_json::json!({
+            "destinations": [
+                { "type": "slack", "webhook_url_env": PRESENT_ENV },
+                { "type": "slack", "webhook_url": "https://hooks.slack.com/inline" },
+                { "type": "pagerduty", "routing_key_env": PRESENT_ENV },
+                { "type": "pagerduty", "routing_key": "inline-routing-key" },
+                {
+                    "type": "generic", "url_env": PRESENT_ENV,
+                    "secret": "env-url-signing-secret",
+                },
+                {
+                    "type": "generic", "url": "https://example.com/hook",
+                    "secret": "inline-url-signing-secret",
+                },
+            ],
+        }))
+        .unwrap();
+        let mut incoming: AlertingConfig = serde_json::from_value(serde_json::json!({
+            "destinations": current.destinations.iter().map(|d| d.redacted()).collect::<Vec<_>>(),
+        }))
+        .unwrap();
+        assert!(incoming.merge_secrets(&current).is_empty());
+        // Generic `url` has no redacted merge, so only the other secrets compare.
+        for (index, dest) in incoming.destinations.iter().enumerate().take(4) {
+            assert_eq!(
+                serde_json::to_value(dest).unwrap(),
+                serde_json::to_value(&current.destinations[index]).unwrap()
+            );
+        }
+        let secrets: Vec<_> = incoming.destinations[4..]
+            .iter()
+            .map(|dest| match dest {
+                DestinationConfig::Generic { secret, .. } => secret.clone(),
+                _ => panic!("expected generic"),
+            })
+            .collect();
+        assert_eq!(
+            secrets,
+            [
+                Some("env-url-signing-secret".to_string()),
+                Some("inline-url-signing-secret".to_string())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_errors_omit_the_request_url() {
+        let url = "https://127.0.0.1:1/hook-secret-canary";
+        let client = reqwest::Client::new();
+        // Negative control: reqwest's own error text carries the URL.
+        let raw = client.get(url).send().await.unwrap_err();
+        assert!(raw.to_string().contains("hook-secret-canary"), "{raw}");
+        let error = generic::send(&client, url, None, &HashMap::new(), &Alert::test_alert())
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("webhook request failed"), "{error}");
+        assert!(!error.contains("hook-secret-canary"), "{error}");
     }
 }

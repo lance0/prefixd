@@ -2709,8 +2709,15 @@ async fn alert_destination_url_rejections_preserve_running_and_saved_config() {
 async fn alerting_editor_keeps_env_backed_secrets_out_of_saved_config() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("alerting.yaml");
+    // PATH is set in every test environment, so no test mutates the environment.
+    let path_value = std::env::var("PATH").unwrap();
+    let mut settings = test_settings();
+    settings.alerting = serde_json::from_value(serde_json::json!({
+        "destinations": [{ "type": "pagerduty", "routing_key_env": "PATH" }],
+    }))
+    .unwrap();
     let state = AppState::new(
-        test_settings(),
+        settings,
         test_inventory(),
         test_playbooks(),
         Arc::new(MockRepository::new()),
@@ -2740,37 +2747,33 @@ async fn alerting_editor_keeps_env_backed_secrets_out_of_saved_config() {
             )
         }
     };
-    // PATH is set in every test environment, so no test mutates the environment.
-    let path_value = std::env::var("PATH").unwrap();
-    let env_backed = serde_json::json!({
-        "destinations": [{ "type": "pagerduty", "routing_key_env": "PATH" }],
-    });
-
-    let (status, body) = send("PUT", Some(env_backed)).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["destinations"][0]["routing_key"], "***");
-    assert_eq!(body["destinations"][0]["routing_key_env"], "PATH");
-    let saved = std::fs::read_to_string(&path).unwrap();
-    assert!(saved.contains("routing_key_env: PATH"), "{saved}");
-    assert!(!saved.contains(&path_value));
 
     // The dashboard round-trips GET output, including the `***` sentinel.
     let (status, current) = send("GET", None).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, body) = send("PUT", Some(current)).await;
+    assert_eq!(current["destinations"][0]["routing_key"], "***");
+    assert_eq!(current["destinations"][0]["routing_key_env"], "PATH");
+    let (status, body) = send("PUT", Some(current.clone())).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("routing_key_env: PATH"), "{saved}");
+    assert!(!saved.contains(&path_value));
 
+    let refused = "alerting.destinations[0]: set *_env keys in alerting.yaml on the controller \
+                   host; the editor keeps one only for an unchanged destination";
+    let mut retargeted = current.clone();
+    retargeted["destinations"][0]["events_url"] = "https://attacker.example/x".into();
     for (destination, error) in [
+        (retargeted["destinations"][0].clone(), refused),
         (
-            serde_json::json!({ "type": "pagerduty", "routing_key_env": "PREFIXD_TEST_UNSET_ALERT_SECRET" }),
-            "destination[0] (pagerduty): routing_key_env names environment variable \
-             'PREFIXD_TEST_UNSET_ALERT_SECRET', which is not set or empty",
+            serde_json::json!({ "type": "pagerduty", "routing_key_env": "DATABASE_URL" }),
+            refused,
         ),
         (
             serde_json::json!({ "type": "pagerduty", "routing_key": "${PAGERDUTY_ROUTING_KEY}" }),
-            "destinations[0].routing_key looks like ${VAR} substitution, which prefixd does \
-             not perform; set the value, or use the matching *_env key where one exists",
+            "alerting.destinations[0].routing_key looks like ${VAR} substitution, which \
+             prefixd does not perform; set the value, or use the matching *_env key where one \
+             exists",
         ),
     ] {
         let (status, body) = send(
@@ -2781,6 +2784,8 @@ async fn alerting_editor_keeps_env_backed_secrets_out_of_saved_config() {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body, serde_json::json!({ "errors": [error] }));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        let (_, running) = send("GET", None).await;
+        assert_eq!(running, current);
     }
 }
 
@@ -15811,7 +15816,9 @@ mod manual_destination_cidr {
         Arc::get_mut(&mut state).unwrap().config_dir = dir.path().into();
         let error = state.reload_config().await.unwrap_err();
         assert!(
-            error.to_string().contains("webhook_url is required"),
+            error
+                .to_string()
+                .contains("webhook_url or webhook_url_env is required"),
             "{error}"
         );
         assert!(state.alerting.read().await.config().destinations.is_empty());

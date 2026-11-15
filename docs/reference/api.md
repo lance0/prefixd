@@ -2863,7 +2863,7 @@ Content-Type: application/json
 
 **Admin only.** Validates, merges redacted secrets (`***`) with existing values, writes to `alerting.yaml` (with `.bak` backup), and hot-reloads the alerting service. Returns the updated config with secrets redacted.
 
-**Secret merge:** If a secret field (e.g. `webhook_url`, `bot_token`, `routing_key`, `api_key`, `secret`) equals `"***"`, the server carries forward the real secret from the matching existing destination. New destinations must provide actual secrets. Each secret field also accepts its `*_env` key, which names an environment variable instead; a `"***"` value beside a `*_env` key keeps the variable and is not merged. Setting both a literal secret and its `*_env` key is rejected.
+**Secret merge:** If a secret field (e.g. `webhook_url`, `bot_token`, `routing_key`, `api_key`, `secret`) equals `"***"`, the server carries forward the real secret from the matching existing destination. New destinations must provide actual secrets. A destination may keep an existing `*_env` key, with `"***"` beside it, only when its type, variable name and `events_url`, `url`, `chat_id` or `region` match a running destination. A new or changed `*_env` key returns 400 before any variable is read; set `*_env` keys in `alerting.yaml` on the controller host. Setting both a literal secret and its `*_env` key is rejected. Inherited `"***"` secrets come only from destinations with inline secrets.
 
 **Validation rules:**
 - Slack/Discord/Teams: `webhook_url` required, max 1024 UTF-8 bytes, must be valid `https://` URL
@@ -2873,7 +2873,7 @@ Content-Type: application/json
 - Generic: `url` required, max 1024 UTF-8 bytes, must be valid `https://` URL
 - URL host protections: `localhost`, `.localhost`, and literal private/local IPs (including `169.254.169.254`) are rejected
 - A `*_env` key must name a set, nonempty variable; URL checks apply to its value
-- A string value written as `${...}` is rejected, naming its key; prefixd does not expand placeholders
+- A string value written entirely as `${...}` is rejected, naming its key; prefixd does not expand placeholders
 
 **Error response (400):**
 

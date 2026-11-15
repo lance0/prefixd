@@ -811,13 +811,7 @@ impl Settings {
         reject_removed_keys(&content)?;
         let settings: Settings = crate::config::parse_yaml(&content)?;
         let mut errors = crate::config::env_placeholder_errors(&serde_json::to_value(&settings)?);
-        errors.extend(
-            settings
-                .alerting
-                .env_errors()
-                .into_iter()
-                .map(|error| format!("alerting {error}")),
-        );
+        errors.extend(settings.alerting.secret_errors());
         anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
         settings.bgp.validate_vpn_scopes()?;
         settings.http.validate_auth_transport()?;
@@ -1073,7 +1067,7 @@ observability:
         .unwrap();
         assert_eq!(
             Settings::load(&path).unwrap_err().to_string(),
-            "alerting destination[0] (pagerduty): routing_key_env names environment variable \
+            "alerting.destinations[0].routing_key_env names environment variable \
              'PREFIXD_TEST_UNSET_ALERT_SECRET', which is not set or empty"
         );
     }
