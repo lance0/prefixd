@@ -10,17 +10,18 @@ import { Button } from "@/components/ui/button"
 import { usePermissions } from "@/hooks/use-permissions"
 import { useStats, useOpenSignalGroupCount } from "@/hooks/use-api"
 
-const navItems = [
-  { href: "/", label: "Overview", icon: LayoutDashboard, adminOnly: false },
-  { href: "/mitigations", label: "Mitigations", icon: Shield, adminOnly: false },
-  { href: "/scrubbers", label: "Scrubbers", icon: Split, adminOnly: false },
-  { href: "/events", label: "Events", icon: Activity, adminOnly: false },
-  { href: "/correlation", label: "Correlation", icon: Waypoints, adminOnly: false },
-  { href: "/inventory", label: "Inventory", icon: Database, adminOnly: false },
-  { href: "/ip-history", label: "IP history", icon: History, adminOnly: false },
-  { href: "/audit-log", label: "Audit log", icon: FileText, adminOnly: false },
-  { href: "/config", label: "Configuration", icon: FileCode, adminOnly: false },
-  { href: "/admin", label: "Administration", icon: Settings, adminOnly: true },
+// `requires` hides a page from roles the controller would refuse.
+const navItems: { href: string; label: string; icon: typeof Shield; requires?: "isOperator" | "isAdmin" }[] = [
+  { href: "/", label: "Overview", icon: LayoutDashboard },
+  { href: "/mitigations", label: "Mitigations", icon: Shield },
+  { href: "/scrubbers", label: "Scrubbers", icon: Split },
+  { href: "/events", label: "Events", icon: Activity },
+  { href: "/correlation", label: "Correlation", icon: Waypoints },
+  { href: "/inventory", label: "Inventory", icon: Database },
+  { href: "/ip-history", label: "IP history", icon: History },
+  { href: "/audit-log", label: "Audit log", icon: FileText, requires: "isOperator" },
+  { href: "/config", label: "Configuration", icon: FileCode },
+  { href: "/admin", label: "Administration", icon: Settings, requires: "isAdmin" },
 ]
 
 interface SidebarProps {
@@ -34,7 +35,7 @@ export function Sidebar({ onClose, isCollapsed = false, onToggleCollapse }: Side
   const permissions = usePermissions()
   const { data: stats } = useStats()
   const openGroupCount = useOpenSignalGroupCount()
-  const visibleNavItems = navItems.filter(item => !item.adminOnly || permissions.isAdmin)
+  const visibleNavItems = navItems.filter(item => !item.requires || permissions[item.requires])
 
   const navigation = (collapsed: boolean) => (
     <nav aria-label="Main navigation" className="flex-1 space-y-1 overflow-y-auto px-3 py-5">

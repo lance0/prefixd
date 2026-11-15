@@ -151,10 +151,10 @@ export function useDashboard() {
   )
 }
 
-// Operator management (admin only)
-export function useOperators() {
+// Operator management (admin only); `enabled: false` skips the request for other roles.
+export function useOperators(enabled = true) {
   return useSWR(
-    "operators",
+    enabled ? "operators" : null,
     api.getOperators,
     {
       refreshInterval: 0,
@@ -321,15 +321,16 @@ export function useOpenSignalGroupCount() {
   return data?.count ?? 0
 }
 
+/** Admin only; `null` skips the request for other roles. */
 export function useCachedCorroborators(params: {
   source?: string
   limit?: number
-} = {}) {
-  const key = `cached-corroborators:${params.source ?? ""}:${params.limit ?? 100}`
+} | null = {}) {
+  const key = params === null ? null : `cached-corroborators:${params.source ?? ""}:${params.limit ?? 100}`
 
   return useSWR(
     key,
-    () => api.getCachedCorroborators(params),
+    () => api.getCachedCorroborators(params ?? {}),
     {
       refreshInterval: 30_000,
       revalidateOnFocus: true,

@@ -171,8 +171,9 @@ describe("list pagination", () => {
       target_type: "mitigation", target_id: `route-${index + 1}`, details: { group: index === 0 ? "outside" : "matching" },
     }))
 
+    signIn(controller, "credentials", operatorResponse("operator"))
     controller.route("GET", "/v1/audit", () => json({ entries, count: entries.length, next_cursor: null, has_more: false }))
-    renderApp(<AuditLogContentLive />, { withoutAuth: true })
+    renderApp(<AuditLogContentLive />)
     await screen.findByText("Page 1 of 3")
     fireEvent.click(screen.getByRole("button", { name: "Next" }))
     fireEvent.click(screen.getByRole("button", { name: "Next" }))

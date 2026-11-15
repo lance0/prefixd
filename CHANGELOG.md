@@ -276,6 +276,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canceled mid-publish can no longer leave only some sections published, and
   a concurrent correlation edit can no longer be overwritten by the file it
   replaced.
+- The dashboard no longer requests data the signed-in role cannot read. A
+  viewer's Overview shows recent events without the audit and no longer reports
+  "Unable to load recent activity", the Audit log page tells a viewer it needs
+  the operator role instead of showing `API error 403`, and the sidebar hides
+  it from viewers. The Administration page lists operator accounts only for an
+  admin, and the Correlation cache tab tells non-admins it needs the admin
+  role. The controller's authorization is unchanged.
 
 ### Security
 

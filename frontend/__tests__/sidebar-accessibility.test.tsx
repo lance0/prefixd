@@ -40,7 +40,8 @@ describe("sidebar accessible counts", () => {
 
 // Navigation role matrix. The sidebar is defense in depth: the controller enforces each role.
 describe("sidebar navigation by role", () => {
-  const everyone = ["Overview", "Mitigations", "Scrubbers", "Events", "Correlation", "Inventory", "IP history", "Audit log", "Configuration"]
+  const viewer = ["Overview", "Mitigations", "Scrubbers", "Events", "Correlation", "Inventory", "IP history", "Configuration"]
+  const operator = ["Overview", "Mitigations", "Scrubbers", "Events", "Correlation", "Inventory", "IP history", "Audit log", "Configuration"]
 
   async function navFor(role: OperatorRole) {
     signIn(controller, "credentials", operatorResponse(role))
@@ -54,9 +55,9 @@ describe("sidebar navigation by role", () => {
   }
 
   it.each([
-    ["viewer", everyone],
-    ["operator", everyone],
-    ["admin", [...everyone, "Administration"]],
+    ["viewer", viewer],
+    ["operator", operator],
+    ["admin", [...operator, "Administration"]],
   ] as const)("shows %s the expected pages", async (role, pages) => {
     expect(await navFor(role)).toEqual(pages)
   })
