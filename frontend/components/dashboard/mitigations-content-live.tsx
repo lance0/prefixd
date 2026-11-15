@@ -525,7 +525,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                         <span className="flex flex-wrap items-center justify-end gap-1 md:justify-start">
                           <StatusBadge status={mitigation.status} />
                           <OriginTag origin={mitigation.origin_mode} />
-                          <DivertedIndicator host={mitigation.victim_ip} scope={mitigation.vpn_scope?.identity ?? null} />
+                          <DivertedIndicator host={mitigation.victim_ip} scope={mitigation.vpn_scope?.identity ?? null} pop={mitigation.pop} />
                         </span>
                       </TableCell>
                       <TableCell className="order-3 p-0 md:px-3 md:py-2">

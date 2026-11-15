@@ -206,7 +206,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
             <>
               <StatusBadge status={mitigation.status} />
               <OriginTag origin={mitigation.origin_mode} showUnknown />
-              <DivertedIndicator host={mitigation.victim_ip} scope={mitigation.vpn_scope?.identity ?? null} showUnknown />
+              <DivertedIndicator host={mitigation.victim_ip} scope={mitigation.vpn_scope?.identity ?? null} pop={mitigation.pop} showUnknown />
               <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} dscp={mitigation.dscp} />
               <Tag>{mitigation.vector.replace(/_/g, " ")}</Tag>
               <span className="text-muted-foreground">POP <span className="font-mono text-foreground">{mitigation.pop}</span></span>

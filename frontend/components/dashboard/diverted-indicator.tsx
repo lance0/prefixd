@@ -16,14 +16,16 @@ const DIVERTING: Partial<Record<ScrubberDiversion["status"], { label: string; to
 
 /**
  * The outstanding diversion of one host, if any. `scope` null means global routing only;
- * undefined means any scope. Simulations divert nothing.
+ * undefined means any scope. `pop`, when given, must own the diversion: a mitigation in
+ * another POP is not diverted by this controller. Simulations divert nothing.
  */
-export function findDiversion(rows: ScrubberDiversion[], host: string, scope?: VpnScopeIdentity | null) {
+export function findDiversion(rows: ScrubberDiversion[], host: string, scope?: VpnScopeIdentity | null, pop?: string) {
   const target = parseDestination(host)
 
   if (!target || target.prefixLength !== target.maxLength) return undefined
 
   return rows.find(row => DIVERTING[row.status]
+    && (pop === undefined || row.pop === pop)
     && parseDestination(row.rule.nlri.dst_prefix)?.prefix === target.prefix
     && (scope === undefined || ((row.rule.nlri.scope?.family ?? null) === (scope?.family ?? null)
       && (row.rule.nlri.scope?.rd ?? null) === (scope?.rd ?? null))))
@@ -33,12 +35,12 @@ export function findDiversion(rows: ScrubberDiversion[], host: string, scope?: V
  * Links a diverted victim to its diversion on the Scrubbers page. A failed read is unknown,
  * never "not diverted"; `showUnknown` says so where there is room.
  */
-export function DivertedIndicator({ host, scope, showUnknown = false }: { host: string; scope?: VpnScopeIdentity | null; showUnknown?: boolean }) {
+export function DivertedIndicator({ host, scope, pop, showUnknown = false }: { host: string; scope?: VpnScopeIdentity | null; pop?: string; showUnknown?: boolean }) {
   const { data, error } = useDiversions()
 
   if (error) return showUnknown ? <StatusPill tone="neutral">Diversion state unknown</StatusPill> : null
 
-  const row = data && findDiversion(data, host, scope)
+  const row = data && findDiversion(data, host, scope, pop)
   const state = row && DIVERTING[row.status]
 
   if (!row || !state) return null

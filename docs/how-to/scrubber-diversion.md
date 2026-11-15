@@ -286,8 +286,8 @@ diversions and per-peer export evidence; re-arm, preview, creation and
 withdrawal require an Administrator, and the controller refuses them for other
 roles. Mitigations rows, the mitigation detail page and IP history show
 **Diverted**, **Diversion pending** or **Diversion withdrawing** for a victim
-host with outstanding diversion intent, linked to its row on **Scrubbers**. This
-is local intent, not proof of router forwarding.
+host with outstanding diversion intent at this controller's POP, linked to its
+row on **Scrubbers**. This is local intent, not proof of router forwarding.
 
 The CLI offers the same workflow. Administrative requests use a cookie from an
 authenticated administrator session through `--session-cookie` or

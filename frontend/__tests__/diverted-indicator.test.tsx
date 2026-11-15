@@ -12,7 +12,7 @@ const controller = useFakeController()
 
 function diversion(overrides: Partial<ScrubberDiversion> = {}, dst = "203.0.113.20/32"): ScrubberDiversion {
   return {
-    id: "operation-1", profile: { id: "scrubber-a", revision: "v1" },
+    id: "operation-1", pop: "iad1", profile: { id: "scrubber-a", revision: "v1" },
     rule: { nlri: { dst_prefix: dst, protocol: 6, dst_ports: [443] }, target: "192.0.2.99", owner: "owner", revision: 1 },
     expires_at: "2030-01-01T00:00:00Z", status: "active", dry_run: false, withdrawal_reason: null, last_error: null,
     ...overrides,
@@ -45,6 +45,12 @@ describe("findDiversion", () => {
     expect(findDiversion(rows, host, null)?.id).toBe(id)
   })
 
+  it("matches only the owning POP when a POP is given", () => {
+    expect(findDiversion([diversion()], "203.0.113.20", null, "iad1")?.id).toBe("operation-1")
+    expect(findDiversion([diversion()], "203.0.113.20", null, "fra1")).toBeUndefined()
+    expect(findDiversion([diversion()], "203.0.113.20")?.id).toBe("operation-1")
+  })
+
   it("keeps global and VPN routing apart unless any scope is asked for", () => {
     const scoped = diversion()
 
@@ -66,7 +72,10 @@ describe("Diverted indicator", () => {
     signIn(controller, "credentials", operatorResponse(role))
     controller.route("GET", "/v1/config/inventory", () => json({ customers: [] }))
     controller.route("GET", "/v1/pops", () => json([]))
-    controller.route("GET", "/v1/mitigations", () => json({ mitigations: [mitigation, { ...mitigation, mitigation_id: "mit-2", victim_ip: "203.0.113.21", dst_prefix: "203.0.113.21/32" }], count: 2, next_cursor: null, has_more: false }))
+    const otherHost = { ...mitigation, mitigation_id: "mit-2", victim_ip: "203.0.113.21", dst_prefix: "203.0.113.21/32" }
+    const otherPop = { ...mitigation, mitigation_id: "mit-3", pop: "fra1" }
+
+    controller.route("GET", "/v1/mitigations", () => json({ mitigations: [mitigation, otherHost, otherPop], count: 3, next_cursor: null, has_more: false }))
     serveDiversions(() => json([diversion()]))
     renderApp(<MitigationsContentLive />, { url: "/mitigations" })
     const links = await screen.findAllByRole("link", { name: "Diverted through scrubber profile scrubber-a: open Scrubbers" })

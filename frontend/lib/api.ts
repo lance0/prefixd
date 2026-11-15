@@ -129,6 +129,8 @@ export interface DiversionRequest {
 
 export interface ScrubberDiversion {
   id: string
+  /** The controller POP that owns this diversion. */
+  pop: string
   profile: { id: string; revision: string; scope?: string; return_leg?: ScrubberReturnLeg }
   rule: DiversionRule
   expires_at: string

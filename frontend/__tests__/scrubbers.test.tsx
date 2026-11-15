@@ -27,7 +27,7 @@ afterEach(() => {
 function result(dryRun = false): DiversionPreview {
   return {
     candidate: {
-      id: "operation-1", profile: { id: "a", revision: "v1" },
+      id: "operation-1", pop: "iad1", profile: { id: "a", revision: "v1" },
       rule: { nlri: { dst_prefix: "203.0.113.20/32", src_prefix: "198.51.100.0/24", protocol: 6, dst_ports: [443] }, target: "192.0.2.99", owner: "profile-owner", revision: 1 },
       expires_at: "2030-01-01T00:00:00Z", status: dryRun ? "simulated" : "pending", dry_run: dryRun, withdrawal_reason: null, last_error: null,
     },
