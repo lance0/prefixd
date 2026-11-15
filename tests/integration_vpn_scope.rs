@@ -355,3 +355,88 @@ async fn automatic_family_map_can_select_global_for_one_family_explicitly() {
             .is_some_and(|scope| scope.family.afi_safi() == 14)
     }));
 }
+
+/// Health detail used to probe each VPN family on every request; a dashboard or
+/// Viewer could drive one speaker RIB read per request per family.
+#[tokio::test(start_paused = true)]
+async fn health_detail_probes_each_vpn_family_once_per_window() {
+    use prefixd::bgp::{FlowSpecAnnouncer, FlowSpecWriter};
+    use prefixd::domain::{FlowSpecRule, VpnFlowSpecIdentity};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    struct Probes(AtomicUsize);
+    impl FlowSpecAnnouncer for Probes {
+        fn backend(&self) -> &'static str {
+            "probe-test"
+        }
+    }
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for Probes {
+        fn register_scope(&self, _: Option<&VpnFlowSpecIdentity>) -> prefixd::error::Result<()> {
+            Ok(())
+        }
+        async fn validate_scope(
+            &self,
+            _: Option<&VpnFlowSpecIdentity>,
+        ) -> prefixd::error::Result<()> {
+            self.0.fetch_add(1, SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            Ok(())
+        }
+        async fn announce(&self, _: &FlowSpecRule) -> prefixd::error::Result<()> {
+            panic!("health must not mutate")
+        }
+        async fn withdraw(&self, _: &FlowSpecRule) -> prefixd::error::Result<()> {
+            panic!("health must not mutate")
+        }
+    }
+    let speaker = Arc::new(Probes(AtomicUsize::new(0)));
+    let app = create_test_router(
+        AppState::new(
+            settings(),
+            common::test_inventory(),
+            common::test_playbooks(),
+            Arc::new(MockRepository::new()),
+            speaker.clone(),
+            ".".into(),
+        )
+        .unwrap(),
+    );
+    let health = || async {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/health/detail")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        body["speaker"]["vpn_families"].clone()
+    };
+    // Five concurrent requests, then five more inside the same window.
+    let concurrent = futures_util::future::join_all((0..5).map(|_| health())).await;
+    for _ in 0..5 {
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        health().await;
+    }
+    assert_eq!(speaker.0.load(SeqCst), 2, "one probe per family per window");
+    let families = concurrent[0].as_array().unwrap();
+    assert_eq!(families.len(), 2);
+    for family in families {
+        assert_eq!(family["status"], "supported");
+        assert!(
+            family["observed_at"].is_string(),
+            "a cached result is dated"
+        );
+    }
+    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    health().await;
+    assert_eq!(speaker.0.load(SeqCst), 4, "an expired window probes again");
+}

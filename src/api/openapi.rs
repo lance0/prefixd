@@ -414,6 +414,19 @@ mod tests {
     }
 
     #[test]
+    fn vpn_family_probes_document_their_age() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let family = &doc["components"]["schemas"]["VpnFamilyCapability"];
+        assert_eq!(family["properties"]["observed_at"]["format"], "date-time");
+        assert!(
+            family["required"]
+                .as_array()
+                .unwrap()
+                .contains(&"observed_at".into())
+        );
+    }
+
+    #[test]
     fn manual_blackhole_is_documented() {
         let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
         let schemas = &doc["components"]["schemas"];

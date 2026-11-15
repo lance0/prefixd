@@ -673,8 +673,7 @@ impl ScrubberController {
             ));
         }
         state
-            .announcer
-            .validate_scope(scope.as_ref().map(|scope| &scope.identity))
+            .precheck_scope(scope.as_ref().map(|scope| &scope.identity))
             .await?;
         let mut nlri = req.scope.clone();
         nlri.scope = scope.as_ref().map(|scope| scope.identity.clone());

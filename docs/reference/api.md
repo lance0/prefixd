@@ -2437,6 +2437,9 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
   },
   "speaker": {
     "backend": "rustbgpd",
+    "vpn_families": [
+      {"family": "ipv4", "status": "supported", "observed_at": "2026-10-18T12:00:00Z"}
+    ],
     "capabilities": {
       "rule_reader": true,
       "peer_observer": true,
@@ -3624,9 +3627,15 @@ short TTL and quota; it never creates a global rule. Preview is available to
 Operators; creation requires Administrator. See the
 [VPN procedure](../how-to/vpn-flowspec.md) for complete examples and boundaries.
 
-Authenticated `speaker.vpn_families` health entries report `family` and a fresh
-`supported`, `unsupported` or `error` result. A transport/auth error remains an
-error. Raw local inventory rules carry optional NLRI `scope` and rule
+Authenticated `speaker.vpn_families` health entries report `family`, a
+`supported`, `unsupported` or `error` result, and `observed_at`, when the
+read-only probe behind it finished. Health probes each configured family at most
+once per 10 s window and returns that result, including an error, until the
+window ends; concurrent requests share one in-flight probe, bounded at 2 s.
+A transport/auth error or timeout remains an error, never `unsupported` or an
+empty result. Admission pre-checks reuse a `supported` result from the same
+window; any other result is probed again, and the speaker still probes before
+every VPN mutation. Raw local inventory rules carry optional NLRI `scope` and rule
 `route_targets`; these are local intent evidence, not router installation.
 
 Guarded VPN preview and creation use `POST /v1/vpn/diversions/preview` and

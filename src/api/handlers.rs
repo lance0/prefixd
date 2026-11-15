@@ -823,10 +823,7 @@ async fn persist_new_mitigation(
     actor: &CreationActor,
 ) -> crate::error::Result<Option<AnnouncementOutcome>> {
     let rule = flowspec_rule_for_admission(state, mitigation)?;
-    state
-        .announcer
-        .validate_scope(rule.nlri.scope.as_ref())
-        .await?;
+    state.precheck_scope(rule.nlri.scope.as_ref()).await?;
     let mut quotas = state.settings.quotas.clone();
     if mitigation.match_criteria.dst_prefix.is_empty() {
         let policy = crate::guardrails::source_only_policy(state, &mitigation.match_criteria)?;

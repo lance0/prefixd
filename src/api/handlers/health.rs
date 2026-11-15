@@ -49,7 +49,8 @@ pub struct HealthResponse {
 #[derive(Serialize, ToSchema)]
 pub struct SpeakerHealth {
     backend: &'static str,
-    /// Fresh read-only VPN family probes for configured scopes.
+    /// Read-only VPN family probes for configured scopes, at most one per
+    /// family per 10 s window; `observed_at` dates each result.
     vpn_families: Vec<VpnFamilyCapability>,
     capabilities: crate::bgp::SpeakerCapabilities,
     /// Enforced detector blackholes run without the rustbgpd injection lease, so
@@ -74,8 +75,10 @@ pub struct SpeakerHealth {
 #[derive(Serialize, ToSchema)]
 pub struct VpnFamilyCapability {
     family: crate::domain::VpnFlowSpecFamily,
-    /// supported, unsupported, or error; a transport failure is not unsupported.
+    /// supported, unsupported, or error; a transport failure or timeout is not unsupported.
     status: &'static str,
+    /// When the probe behind `status` finished; health reuses it for up to 10 s.
+    observed_at: chrono::DateTime<chrono::Utc>,
 }
 
 async fn observe_vpn_families(state: &AppState) -> Vec<VpnFamilyCapability> {
@@ -88,23 +91,20 @@ async fn observe_vpn_families(state: &AppState) -> Vec<VpnFamilyCapability> {
             .iter()
             .find(|(_, policy)| policy.family == family)?;
         Some(async move {
-            let result = match policy.snapshot(name) {
-                Ok(snapshot) => tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    state.announcer.validate_scope(Some(&snapshot.identity)),
-                )
-                .await
-                .ok(),
-                Err(error) => Some(Err(error)),
-            };
-            let status = match result {
-                Some(Ok(())) => "supported",
-                Some(Err(crate::error::PrefixdError::UnsupportedFlowSpecScope { .. })) => {
-                    "unsupported"
+            let probe = match policy.snapshot(name) {
+                Ok(snapshot) => {
+                    state
+                        .vpn_probes
+                        .observe(state.announcer.as_ref(), &snapshot.identity)
+                        .await
                 }
-                _ => "error",
+                Err(_) => crate::bgp::VpnProbe::error(),
             };
-            VpnFamilyCapability { family, status }
+            VpnFamilyCapability {
+                family,
+                status: probe.status,
+                observed_at: probe.observed_at,
+            }
         })
     });
     futures_util::future::join_all(probes).await
