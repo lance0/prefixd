@@ -207,6 +207,7 @@ function StepSummary({ step, index }: { step: PlaybookStep; index: number }) {
   return (
     <div className="flex flex-wrap items-start gap-x-3 gap-y-1 rounded-sm bg-muted/40 px-3 py-2 text-xs">
       <span className="text-muted-foreground w-4">{index + 1}.</span>
+      {index > 0 ? <Badge variant="outline" className="border-warning/40 text-warning">not executed</Badge> : null}
       {step.rules?.length ? (
         <div className="min-w-0 flex-1 basis-56">
           <span className="text-muted-foreground">{step.rules.length} rules, each its own mitigation</span>
@@ -327,6 +328,7 @@ function StepEditor({
               max={1}
               step={0.1}
               value={step.require_confidence_at_least ?? ""}
+              aria-describedby={`${id}-not-executed`}
               onChange={(e) => onChange({ ...step, require_confidence_at_least: e.target.value ? Number(e.target.value) : undefined })}
               className="w-24 h-8 text-xs"
               placeholder="optional"
@@ -340,6 +342,7 @@ function StepEditor({
               type="number"
               min={0}
               value={step.require_persistence_seconds ?? ""}
+              aria-describedby={`${id}-not-executed`}
               onChange={(e) => onChange({ ...step, require_persistence_seconds: e.target.value ? Number(e.target.value) : undefined })}
               className="w-24 h-8 text-xs"
               placeholder="optional"
@@ -353,6 +356,13 @@ function StepEditor({
           <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
         </Button>
       </div>
+
+      {!isFirst ? (
+        <p id={`${id}-not-executed`} className="basis-full text-xs text-muted-foreground">
+          <span className="font-medium text-warning">Not executed:</span> prefixd runs only the first step of a
+          playbook today, so this step is saved and validated but never selected.
+        </p>
+      ) : null}
     </div>
   )
 }
