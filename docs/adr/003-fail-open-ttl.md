@@ -84,10 +84,13 @@ Two things refresh it:
   below a leased write committed since the previous read, so a row added after
   a read cannot lapse inside its TTL while the next read is late.
 
-Renewal stops once `now > renew_until + margin`, where the margin is
+Renewal stops at the cutoff, `renew_until + margin`, where the margin is
 `max(blackhole.lease_seconds, timers.reconciliation_interval_seconds +
-blackhole.lease_seconds / 3)`. rustbgpd then removes the owner's leased routes
-within one more lease. A read or write that refreshes the bound after a stop
+blackhole.lease_seconds / 3)`. A renewal is sent only if its own deadline ends
+by the cutoff, so no accepted renewal lands after it, and rustbgpd removes the
+owner's leased routes within one lease of the cutoff. A row past its TTL but
+not yet withdrawn keeps its past `expires_at`, so rereading it never grants a
+fresh margin. A read or write that refreshes the bound after a stop
 renews at once, including for a rule still inside its TTL.
 
 The lease is owner-wide, so the bound is too. During an outage, every leased

@@ -95,15 +95,30 @@ struct RenewUntil {
 }
 
 impl RenewUntil {
-    /// `None` (an empty leased set) bounds renewal to now.
-    fn from_expiry(expires_at: Option<DateTime<Utc>>) -> Self {
-        let now = Utc::now();
-        let remaining = expires_at
-            .map(|expires_at| (expires_at - now).to_std().unwrap_or_default())
-            .unwrap_or_default();
+    /// `None` (an empty leased set) bounds renewal to now. A past expiry, such
+    /// as a row awaiting withdrawal, keeps its past deadline, so rereading it
+    /// never grants a fresh margin; one older than the monotonic clock can
+    /// represent falls back to `floor`.
+    fn from_expiry(expires_at: Option<DateTime<Utc>>, floor: Instant) -> Self {
+        let (now, instant) = (Utc::now(), Instant::now());
+        let Some(expires_at) = expires_at else {
+            return Self {
+                deadline: instant,
+                at: now,
+            };
+        };
+        let deadline = match (expires_at - now).to_std() {
+            Ok(remaining) => instant + remaining,
+            Err(_) => (now - expires_at)
+                .to_std()
+                .ok()
+                .and_then(|overdue| instant.checked_sub(overdue))
+                .unwrap_or(floor)
+                .min(instant),
+        };
         Self {
-            deadline: Instant::now() + remaining,
-            at: expires_at.unwrap_or(now),
+            deadline,
+            at: expires_at,
         }
     }
 
@@ -235,7 +250,7 @@ impl LeaseKeeper {
     // ponytail: one reader (the reconciliation task) observes at a time; a
     // second concurrent reader would need per-read write tokens.
     pub fn observe_intent_expiry(&self, latest_expiry: Option<DateTime<Utc>>) {
-        let read = RenewUntil::from_expiry(latest_expiry);
+        let read = RenewUntil::from_expiry(latest_expiry, self.started);
         let mut held = self.held.lock().unwrap();
         let written = held.written_since_read.take();
         held.renew_until = Some(read.later(written));
@@ -249,7 +264,7 @@ impl LeaseKeeper {
         if !leased_by(mitigation, &self.owner) {
             return;
         }
-        let written = RenewUntil::from_expiry(Some(mitigation.expires_at));
+        let written = RenewUntil::from_expiry(Some(mitigation.expires_at), self.started);
         let mut held = self.held.lock().unwrap();
         held.written_since_read = Some(written.later(held.written_since_read));
         held.renew_until = Some(written.later(held.renew_until));
@@ -277,22 +292,25 @@ impl LeaseKeeper {
         self.publish(self.state());
     }
 
-    /// `now > renew_until + margin`: the outage has outlasted every leased
-    /// route's TTL, so renewal stops rather than propping the routes up.
-    /// Without a read or write, the bound is one margin after startup.
+    /// The outage has outlasted every leased route's TTL, so renewal stops
+    /// rather than propping the routes up. A renewal is sent only if its own
+    /// deadline ends by `renew_until + margin`, so no renewal the speaker
+    /// accepts lands after that cutoff. Without a read or write, the bound is
+    /// one margin after startup.
     fn stopped_at_bound(&self, held: &Held) -> bool {
-        Instant::now() > self.bound_deadline(held) + self.margin
+        Instant::now() + self.renew_interval() > self.cutoff(held)
     }
 
-    /// One lease after the stop has also passed: no leased route can still be
-    /// within a renewal, whatever the speaker held.
+    /// One lease after the cutoff has also passed: no leased route can still
+    /// be within an accepted renewal, whatever the speaker held.
     fn lapsed_at_bound(&self, held: &Held) -> bool {
-        Instant::now() > self.bound_deadline(held) + self.margin + self.lease_duration()
+        Instant::now() > self.cutoff(held) + self.lease_duration()
     }
 
-    fn bound_deadline(&self, held: &Held) -> Instant {
+    fn cutoff(&self, held: &Held) -> Instant {
         held.renew_until
             .map_or(self.started, |bound| bound.deadline)
+            + self.margin
     }
 
     /// One warning per outage, naming the bound rather than a renewal failure.
@@ -997,10 +1015,11 @@ mod tests {
         keeper.observe_intent_expiry(None);
         let reported = keeper.health().renew_until.expect("the read is recorded");
         assert!(reported >= read_at && reported <= Utc::now());
-        tokio::time::advance(Duration::from_secs(60)).await;
+        // The last renewal must end, deadline included, by the cutoff.
+        tokio::time::advance(Duration::from_secs(39)).await;
         keeper.renew_once(&speaker).await;
         assert_eq!(speaker.renewals.load(SeqCst), 1);
-        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::time::advance(Duration::from_secs(2)).await;
         keeper.renew_once(&speaker).await;
         assert_eq!(speaker.renewals.load(SeqCst), 1);
         assert_eq!(keeper.health().renewal_stopped, Some("ttl_bound"));
@@ -1120,12 +1139,12 @@ mod tests {
         // A read that started before the write committed saw no leased row.
         keeper.observe_intent_expiry(None);
         assert_eq!(keeper.health().renew_until, Some(row.expires_at));
-        tokio::time::advance(Duration::from_secs(355)).await;
+        tokio::time::advance(Duration::from_secs(335)).await;
         keeper.renew_once(&speaker).await;
         assert_eq!(
             speaker.renewals.load(SeqCst),
             1,
-            "inside expiry plus one lease"
+            "ends inside expiry plus one lease"
         );
         tokio::time::advance(Duration::from_secs(10)).await;
         keeper.renew_once(&speaker).await;
@@ -1134,6 +1153,31 @@ mod tests {
         // Once that write was observed, a later read may lower the bound again.
         keeper.observe_intent_expiry(None);
         assert_ne!(keeper.health().renew_until, Some(row.expires_at));
+    }
+
+    /// A row past its TTL but not yet withdrawn keeps its past deadline:
+    /// rereading it never grants a fresh margin.
+    #[tokio::test(start_paused = true)]
+    async fn rereading_an_overdue_row_never_extends_renewal() {
+        let speaker = FaultyBlackholes::default();
+        let keeper = LeaseKeeper::new(OWNER.into(), 60);
+        keeper.take_readd();
+        keeper.observe_add(
+            speaker
+                .announce_leased_blackhole(&route(), 60)
+                .await
+                .unwrap()
+                .0,
+        );
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let overdue = Utc::now() - chrono::Duration::seconds(50);
+        for _ in 0..3 {
+            keeper.observe_intent_expiry(Some(overdue));
+        }
+        assert_eq!(keeper.health().renew_until, Some(overdue));
+        keeper.renew_once(&speaker).await;
+        assert_eq!(speaker.renewals.load(SeqCst), 0);
+        assert_eq!(keeper.health().renewal_stopped, Some("ttl_bound"));
     }
 
     /// Unleased, dry-run and other owners' rows never raise the bound.
@@ -1192,7 +1236,7 @@ mod tests {
                 .0,
         );
         keeper.observe_intent_expiry(None);
-        tokio::time::advance(Duration::from_secs(129)).await;
+        tokio::time::advance(Duration::from_secs(119)).await;
         keeper.renew_once(&speaker).await;
         assert_eq!(speaker.renewals.load(SeqCst), 1);
         tokio::time::advance(Duration::from_secs(2)).await;

@@ -229,6 +229,11 @@ impl ReconciliationLoop {
                     let mut reads = tokio::time::interval(self.interval);
                     reads.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     loop {
+                        // Taking the fence or shutting down cancels a stalled read.
+                        let read = async {
+                            reads.tick().await;
+                            self.observe_leased_intent().await
+                        };
                         tokio::select! {
                             biased;
                             closed = async { fence.wait_for(|active| *active).await.is_err() } => {
@@ -241,8 +246,8 @@ impl ReconciliationLoop {
                                 tracing::info!("reconciliation loop shutting down");
                                 return;
                             }
-                            _ = reads.tick() => {
-                                if let Err(error) = self.observe_leased_intent().await {
+                            result = read => {
+                                if let Err(error) = result {
                                     tracing::warn!(%error, "standby leased-intent read failed");
                                 }
                             }
@@ -5553,8 +5558,9 @@ mod tests {
                 last_renewed = elapsed;
             }
         }
-        // The bound is expires_at (120 s) plus one lease (60 s).
-        assert!((160..=180).contains(&last_renewed), "{last_renewed}");
+        // The cutoff is expires_at (120 s) plus one lease (60 s); the last
+        // renewal is sent only if its 20 s deadline ends by then.
+        assert!((140..=160).contains(&last_renewed), "{last_renewed}");
         let health = lease.health();
         assert_eq!(health.renewal_stopped, Some("ttl_bound"));
         assert_eq!(health.last_renewal_result, Some("success"));

@@ -2597,8 +2597,9 @@ leased admission or TTL extension raises it. An empty leased set sets it to
 the read itself, and it is null before the first read or leased write.
 Renewal is unfenced but stops one margin after `renew_until`, the larger of
 `blackhole.lease_seconds` and `timers.reconciliation_interval_seconds` plus a
-third of the lease, so a database outage cannot renew leased routes past the
-owner's latest leased TTL; `renewal_stopped` is then `ttl_bound`, which is a
+third of the lease: the last renewal is sent only if its deadline ends by then.
+A database outage therefore cannot renew leased routes past the owner's latest
+leased TTL; `renewal_stopped` is then `ttl_bound`, which is a
 bound, not a failed renewal. The bound is owner-wide, so a leased route can
 outlive its own TTL while a later leased TTL keeps the lease live.
 `renewal_stopped` is omitted while renewal continues, while no generation is
