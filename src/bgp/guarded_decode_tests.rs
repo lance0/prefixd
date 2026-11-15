@@ -163,6 +163,20 @@ fn guarded_refusals_name_their_cause_and_other_failures_stay_unconfirmed() {
             "{text}"
         );
     }
+    // The `reason` log field and error text are an operational surface: pin them.
+    for (refusal, reason) in [
+        (GuardedRefusal::InvalidArgument, "invalid_argument"),
+        (GuardedRefusal::WindowNotLive, "window_not_live"),
+        (GuardedRefusal::RevisionMismatch, "revision_mismatch"),
+        (GuardedRefusal::OwnerMismatch, "owner_mismatch"),
+        (GuardedRefusal::KeyUnowned, "key_unowned"),
+        (GuardedRefusal::GenerationNotLive, "generation_not_live"),
+        (GuardedRefusal::ResourceExhausted, "resource_exhausted"),
+        (GuardedRefusal::Unimplemented, "unimplemented"),
+        (GuardedRefusal::PermissionDenied, "permission_denied"),
+    ] {
+        assert_eq!(refusal.as_str(), reason);
+    }
     for unknown in [
         tonic::Status::failed_precondition("WINDOW_NOT_LIVE"),
         status(Code::FailedPrecondition, "rustbgpd", None),
