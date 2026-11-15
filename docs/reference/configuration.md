@@ -230,7 +230,9 @@ storage:
   connection_string: "postgres://prefixd:password@postgres:5432/prefixd"
 ```
 
-`DATABASE_URL` overrides this value. The controller also opens one dedicated
+`DATABASE_URL` overrides this value. With `DATABASE_URL` set, you can omit
+`storage` entirely; startup fails if neither supplies a connection string. The
+controller also opens one dedicated
 fence connection from it, which holds a session advisory lock, so it must be a
 direct or session-mode connection; PgBouncer transaction pooling breaks the
 lock. See [controller fence connection](../how-to/deployment.md#controller-fence-connection).
@@ -1399,6 +1401,34 @@ playbooks:
 
 ---
 
+## Alert destination secrets
+
+Each alert secret is given inline or through its `*_env` key, which names an
+environment variable. Set one or the other, not both.
+
+| Destination | Secret | Environment key |
+|-------------|--------|-----------------|
+| `slack`, `discord`, `teams` | `webhook_url` | `webhook_url_env` |
+| `telegram` | `bot_token` | `bot_token_env` |
+| `pagerduty` | `routing_key` | `routing_key_env` |
+| `opsgenie` | `api_key` | `api_key_env` |
+| `generic` | `url`, `secret` | `url_env`, `secret_env` |
+
+```yaml
+destinations:
+  - type: pagerduty
+    routing_key_env: PAGERDUTY_ROUTING_KEY
+  - type: generic
+    url: "https://example.com/webhook"
+    secret_env: WEBHOOK_SECRET
+```
+
+prefixd reads the variable each time it sends an alert and never writes its
+value to `alerting.yaml`. Startup, reload and the alerting editor refuse a
+destination whose variable is unset or empty, naming the key and the variable
+but not the value. `GET /v1/config/alerting` shows the variable name beside the
+redacted `***` value. Generic `headers` values have no `*_env` form.
+
 ## Alert destination URLs
 
 The alerting configuration editor requires HTTPS for Slack, Discord, Teams,
@@ -1427,14 +1457,21 @@ to alert destinations as needed.
 
 ### Using Environment Variables in Config
 
+prefixd does not expand `${VAR}` placeholders. Keys ending in `_env` name an
+environment variable instead, such as `http.auth.bearer_token_env`,
+`bgp.rustbgpd.bearer_token_env` and the
+[alert destination secrets](#alert-destination-secrets). `DATABASE_URL`
+overrides `storage.connection_string`.
+
 ```yaml
 http:
   auth:
     bearer_token_env: "PREFIXD_API_TOKEN"
-
-storage:
-  connection_string: "${DATABASE_URL}"
 ```
+
+Startup and reload refuse any `prefixd.yaml` or `alerting.yaml` string value
+written as `${...}`, naming its key, because it would otherwise be used
+literally.
 
 ---
 

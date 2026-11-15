@@ -2706,6 +2706,85 @@ async fn alert_destination_url_rejections_preserve_running_and_saved_config() {
 }
 
 #[tokio::test]
+async fn alerting_editor_keeps_env_backed_secrets_out_of_saved_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alerting.yaml");
+    let state = AppState::new(
+        test_settings(),
+        test_inventory(),
+        test_playbooks(),
+        Arc::new(MockRepository::new()),
+        Arc::new(MockAnnouncer::new()),
+        dir.path().to_path_buf(),
+    )
+    .unwrap();
+    let app = create_test_router(state.clone());
+    let send = |method: &str, body: Option<serde_json::Value>| {
+        let request = Request::builder()
+            .method(method)
+            .uri("/v1/config/alerting")
+            .header("content-type", "application/json");
+        let body = body.map_or_else(Body::empty, |body| {
+            Body::from(serde_json::to_vec(&body).unwrap())
+        });
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request.body(body).unwrap()).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        }
+    };
+    // PATH is set in every test environment, so no test mutates the environment.
+    let path_value = std::env::var("PATH").unwrap();
+    let env_backed = serde_json::json!({
+        "destinations": [{ "type": "pagerduty", "routing_key_env": "PATH" }],
+    });
+
+    let (status, body) = send("PUT", Some(env_backed)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["destinations"][0]["routing_key"], "***");
+    assert_eq!(body["destinations"][0]["routing_key_env"], "PATH");
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("routing_key_env: PATH"), "{saved}");
+    assert!(!saved.contains(&path_value));
+
+    // The dashboard round-trips GET output, including the `***` sentinel.
+    let (status, current) = send("GET", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send("PUT", Some(current)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+
+    for (destination, error) in [
+        (
+            serde_json::json!({ "type": "pagerduty", "routing_key_env": "PREFIXD_TEST_UNSET_ALERT_SECRET" }),
+            "destination[0] (pagerduty): routing_key_env names environment variable \
+             'PREFIXD_TEST_UNSET_ALERT_SECRET', which is not set or empty",
+        ),
+        (
+            serde_json::json!({ "type": "pagerduty", "routing_key": "${PAGERDUTY_ROUTING_KEY}" }),
+            "destinations[0].routing_key looks like ${VAR} substitution, which prefixd does \
+             not perform; set the value, or use the matching *_env key where one exists",
+        ),
+    ] {
+        let (status, body) = send(
+            "PUT",
+            Some(serde_json::json!({ "destinations": [destination] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, serde_json::json!({ "errors": [error] }));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+    }
+}
+
+#[tokio::test]
 async fn test_reload_config_reloads_alerting_yaml() {
     let dir = tempfile::tempdir().unwrap();
     let config_dir = dir.path().to_path_buf();

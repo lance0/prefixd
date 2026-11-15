@@ -26,6 +26,40 @@ pub(crate) fn parse_yaml<'de, T: serde::Deserialize<'de>>(
     )
 }
 
+/// Key paths of string values written as `${VAR}`. The loader never expands
+/// them, so each would be used literally; values are not echoed.
+pub(crate) fn env_placeholder_errors(value: &serde_json::Value) -> Vec<String> {
+    fn walk(path: &str, value: &serde_json::Value, errors: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(s) if s.starts_with("${") && s.ends_with('}') => {
+                errors.push(format!(
+                    "{path} looks like ${{VAR}} substitution, which prefixd does not perform; \
+                     set the value, or use the matching *_env key where one exists"
+                ))
+            }
+            serde_json::Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    walk(&format!("{path}[{i}]"), item, errors);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (key, item) in map {
+                    let path = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    walk(&path, item, errors);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut errors = Vec::new();
+    walk("", value, &mut errors);
+    errors
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub settings: Settings,
