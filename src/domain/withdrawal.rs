@@ -202,6 +202,16 @@ impl WithdrawalRequest {
         self.terminal_status == "expired"
     }
 
+    /// The `prefixd_mitigations_withdrawn_total` reason for completing this
+    /// request, the same whether the caller or reconciliation completes it.
+    pub fn withdrawn_metric_reason(&self) -> &'static str {
+        match (self.actor_type.as_str(), self.actor.as_str()) {
+            ("detector", _) => "detector_unban",
+            ("system", super::SAFELIST_RECHECK_ACTOR) => "safelisted",
+            _ => "operator",
+        }
+    }
+
     /// The persisted FlowSpec rule; any other kind fails closed before parsing.
     pub fn flowspec_rule(&self) -> Result<FlowSpecRule> {
         if self.rule_kind != FLOWSPEC_KIND {

@@ -431,11 +431,7 @@ impl ReconciliationLoop {
                     .with_label_values(&[
                         mitigation.action_type.to_string().as_str(),
                         mitigation.pop.as_str(),
-                        if request.actor_type == "detector" {
-                            "detector_unban"
-                        } else {
-                            "operator"
-                        },
+                        request.withdrawn_metric_reason(),
                     ])
                     .inc();
                 WsMessage::MitigationWithdrawn {
@@ -4107,7 +4103,7 @@ mod tests {
         assert_eq!(pending[0].operation_id, request.operation_id);
     }
 
-    /// A retried withdrawal counts under its requester: detector unban or operator.
+    /// A retried withdrawal counts under its requester: detector unban, safelist or operator.
     #[tokio::test]
     async fn retried_withdrawals_count_under_their_requester() {
         let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
@@ -4121,9 +4117,29 @@ mod tests {
         let state = action_state(repo.clone(), speaker.clone());
         let reconciler =
             ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false).with_app_state(state);
-        for (prefix, actor_type, reason, other) in [
-            ("192.0.2.73/32", "detector", "detector_unban", "operator"),
-            ("192.0.2.74/32", "operator", "operator", "detector_unban"),
+        for (prefix, actor_type, actor, reason, other) in [
+            (
+                "192.0.2.73/32",
+                "detector",
+                "a",
+                "detector_unban",
+                "operator",
+            ),
+            (
+                "192.0.2.74/32",
+                "operator",
+                "a",
+                "operator",
+                "detector_unban",
+            ),
+            // A safelist withdrawal left to reconciliation keeps its reason.
+            (
+                "192.0.2.75/32",
+                "system",
+                crate::domain::SAFELIST_RECHECK_ACTOR,
+                "safelisted",
+                "operator",
+            ),
         ] {
             let mitigation = action_mitigation(prefix, FlowSpecAction::discard());
             repo.insert_mitigation(&mitigation).await.unwrap();
@@ -4136,7 +4152,7 @@ mod tests {
                 &mitigation,
                 false,
                 actor_type,
-                "a",
+                actor,
                 "test".into(),
                 true,
                 None,

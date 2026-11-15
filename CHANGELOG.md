@@ -42,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and refuses the admission when the read fails or does not answer. After one
   failed delete, a safelist addition records the remaining withdrawals for
   reconciliation instead of calling the speaker again.
+- A safelist withdrawal that reconciliation completes now counts in
+  `prefixd_mitigations_withdrawn_total` under `reason="safelisted"`, as an
+  immediate one does, instead of `operator`.
 - Completing a withdrawal reads its own pending request by operation ID instead
   of loading every pending request to find one.
 - The release workflow stages its assets in `release-assets/` instead of

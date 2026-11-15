@@ -20,6 +20,8 @@ use super::{
 
 /// Reason recorded on the system withdrawal that replaces an add.
 pub const SAFELISTED_AFTER_ADMISSION: &str = "safelisted after admission";
+/// The system actor recorded on a safelist-driven withdrawal.
+pub const SAFELIST_RECHECK_ACTOR: &str = "safelist-recheck";
 
 /// The route a blackhole was admitted with. It is stored in the row's action
 /// parameters and as the `rule_json` of its withdrawal intent; repair and
@@ -282,7 +284,7 @@ pub async fn request_safelisted_withdrawal(
         mitigation,
         false,
         "system",
-        "safelist-recheck",
+        SAFELIST_RECHECK_ACTOR,
         SAFELISTED_AFTER_ADMISSION.into(),
         !dry_run,
         binding,

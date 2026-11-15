@@ -999,11 +999,7 @@ async fn withdraw_and_notify(
             .with_label_values(&[
                 mitigation.action_type.to_string().as_str(),
                 mitigation.pop.as_str(),
-                if request.actor_type == "detector" {
-                    "detector_unban"
-                } else {
-                    "operator"
-                },
+                request.withdrawn_metric_reason(),
             ])
             .inc();
         (
