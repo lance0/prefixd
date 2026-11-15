@@ -41,12 +41,41 @@ struct Cli {
     /// Retire unexpired dry-run mitigations locally, audit and exit without connecting
     #[arg(long, conflicts_with = "adopt_legacy_speaker")]
     retire_dry_run_intent: bool,
+
+    /// Validate configuration and exit without connecting to PostgreSQL or the speaker
+    #[arg(
+        long,
+        conflicts_with_all = ["adopt_legacy_speaker", "retire_dry_run_intent"]
+    )]
+    check_config: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let cli = Cli::parse();
+
+    if cli.check_config {
+        let check = prefixd::config::AppConfig::check(&cli.config);
+        for key in &check.unknown_keys {
+            eprintln!("{key}");
+        }
+        for warning in &check.warnings {
+            eprintln!("{warning}");
+        }
+        if check.is_ok() {
+            println!("{}", check.summary());
+            for skipped in prefixd::config::CHECK_CONFIG_SKIPPED {
+                println!("skipped: {skipped}");
+            }
+            return Ok(());
+        }
+        // One error per line, already naming its file, in startup's redacted text.
+        for error in &check.errors {
+            eprintln!("{error}");
+        }
+        std::process::exit(1);
+    }
 
     // Load config
     let config = AppConfig::load(&cli.config)?;
@@ -62,6 +91,11 @@ async fn main() -> anyhow::Result<()> {
         "starting prefixd"
     );
     tracing::info!(alerting_source = config.alerting_source, "loaded alerting");
+    // This release ignores unknown keys after naming them; the next refuses
+    // them, so a typo such as `guardrails.max_port` is not silent meanwhile.
+    for unknown in &config.unknown_keys {
+        tracing::warn!("{unknown}");
+    }
     prefixd::observability::init_metrics(&config.settings.pop);
 
     // Init database

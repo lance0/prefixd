@@ -258,8 +258,13 @@ impl CorrelationConfig {
 
     /// Load correlation config from a YAML file.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let config: CorrelationConfig = crate::config::parse_secret_yaml(&content)?;
+        Ok(Self::load_with_unknown_keys(path)?.0)
+    }
+
+    /// [`CorrelationConfig::load`], also returning the keys the document
+    /// contains but this release ignores. Startup warns about each of them.
+    pub fn load_with_unknown_keys<P: AsRef<Path>>(path: P) -> Result<(Self, Vec<String>)> {
+        let (config, unknown_keys) = Self::from_yaml(&std::fs::read_to_string(path)?)?;
         let errors = config.validate();
         if !errors.is_empty() {
             return Err(anyhow::anyhow!(
@@ -267,7 +272,14 @@ impl CorrelationConfig {
                 errors.join("; ")
             ));
         }
-        Ok(config)
+        Ok((config, unknown_keys))
+    }
+
+    /// Parse a `correlation.yaml` document and collect its unknown keys.
+    /// Validation stays separate ([`CorrelationConfig::validate`]) so
+    /// `--check-config` can report every error.
+    pub fn from_yaml(content: &str) -> Result<(Self, Vec<String>)> {
+        crate::config::parse_secret_yaml(content)
     }
 
     /// Save correlation config to a YAML file with atomic write and backup.

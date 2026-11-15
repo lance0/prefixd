@@ -251,8 +251,13 @@ impl PlaybookRule {
 
 impl Playbooks {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let playbooks: Playbooks = crate::config::parse_yaml(&content)?;
+        Self::from_yaml(&std::fs::read_to_string(path)?)
+    }
+
+    /// [`Playbooks::load`] for an already-read document, so validation can run
+    /// without a file, as `--check-config` does.
+    pub fn from_yaml(content: &str) -> Result<Self> {
+        let playbooks: Playbooks = crate::config::parse_yaml(content)?;
         playbooks.validate_steps()?;
         Ok(playbooks)
     }

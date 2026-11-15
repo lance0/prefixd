@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `prefixd --check-config` validates the configuration directory and exits
+  before connecting to PostgreSQL or the speaker. It runs the same checks as
+  startup, prints every error on its own line with the file it came from, and
+  exits 1 on any error. Checks that need a live speaker or database are skipped
+  and named in the output. With leased FlowSpec on by default, a refused
+  restart no longer has to be diagnosed while active mitigations lapse.
+- `prefixd --check-config` names each unknown configuration key, with its full
+  key path, for `prefixd.yaml`, `correlation.yaml` and `alerting.yaml`.
+
+### Changed
+
+- Unknown configuration keys are reported with their full key path, including
+  alert destination keys such as `alerting.destinations[0].chanel`, and ignored
+  in this release; the next release refuses them. Only key paths are reported,
+  never values.
+
 ### Fixed
 
 - The release workflow stages its assets in `release-assets/` instead of

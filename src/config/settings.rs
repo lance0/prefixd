@@ -807,48 +807,90 @@ pub const REMOVED_KEYS: &[&str] = &[
 
 impl Settings {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        reject_removed_keys(&content)?;
-        let settings: Settings = crate::config::parse_secret_yaml(&content)?;
-        // Alerting reports in the alerting editor's form, under its section.
-        let mut document = serde_json::to_value(&settings)?;
-        if let Some(object) = document.as_object_mut() {
-            object.remove("alerting");
+        Ok(Self::load_with_unknown_keys(path)?.0)
+    }
+
+    /// [`Settings::load`], also returning the keys the document contains but
+    /// this release ignores. Startup warns about each of them.
+    pub fn load_with_unknown_keys<P: AsRef<Path>>(path: P) -> Result<(Self, Vec<String>)> {
+        let (settings, unknown_keys) = Self::from_yaml(&std::fs::read_to_string(path)?)?;
+        let errors = settings.validate_errors();
+        anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
+        Ok((settings, unknown_keys))
+    }
+
+    /// Parse a `prefixd.yaml` document and collect its unknown keys. The
+    /// cross-checks are separate ([`Settings::validate_errors`]) so
+    /// `--check-config` can report every error instead of the first.
+    pub fn from_yaml(content: &str) -> Result<(Self, Vec<String>)> {
+        reject_removed_keys(content)?;
+        let (settings, mut unknown_keys) = crate::config::parse_secret_yaml(content)?;
+        // `AlertingConfig` is internally tagged, so serde_ignored cannot see
+        // inside its destination variants; the alerting module checks them.
+        if let Ok(document) = crate::config::parse_yaml::<serde_json::Value>(content)
+            && let Some(alerting) = document.get("alerting")
+        {
+            unknown_keys.extend(
+                crate::alerting::AlertingConfig::unknown_destination_keys(alerting)
+                    .into_iter()
+                    .map(|key| format!("alerting.{key}")),
+            );
         }
-        let mut errors = crate::config::env_placeholder_errors(&document);
+        Ok((settings, unknown_keys))
+    }
+
+    /// Every cross-check startup runs before it connects, in startup order.
+    /// Each message names the key it refuses and never a value.
+    pub fn validate_errors(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        // Alerting reports in the alerting editor's form, under its section.
+        match serde_json::to_value(self) {
+            Ok(mut document) => {
+                if let Some(object) = document.as_object_mut() {
+                    object.remove("alerting");
+                }
+                errors.extend(crate::config::env_placeholder_errors(&document));
+            }
+            Err(error) => errors.push(error.to_string()),
+        }
         errors.extend(
-            settings
-                .alerting
+            self.alerting
                 .load_errors()
                 .into_iter()
                 .map(|error| format!("alerting: {error}")),
         );
-        anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
-        settings.bgp.validate_vpn_scopes()?;
-        settings.http.validate_auth_transport()?;
-        settings.blackhole.validate()?;
-        settings.amplification.validate()?;
-        settings
-            .scrubber
-            .validate_with(&settings.blackhole, &settings.bgp)?;
-        if settings.scrubber.enabled && settings.bgp.mode != BgpMode::Rustbgpd {
-            anyhow::bail!("scrubber diversion requires the rustbgpd backend");
+        if let Err(error) = self.bgp.validate_vpn_scopes() {
+            errors.push(error.to_string());
         }
-        settings
-            .guardrails
-            .validate_for_backend(settings.bgp.mode)?;
-        anyhow::ensure!(
-            settings.quotas.max_active_prefix_per_customer > 0,
-            "quotas.max_active_prefix_per_customer must be nonzero"
-        );
-        let correlation_errors = settings.correlation.validate();
+        if let Err(error) = self.http.validate_auth_transport() {
+            errors.push(error.to_string());
+        }
+        if let Err(error) = self.blackhole.validate() {
+            errors.push(error.to_string());
+        }
+        if let Err(error) = self.amplification.validate() {
+            errors.push(error.to_string());
+        }
+        if let Err(error) = self.scrubber.validate_with(&self.blackhole, &self.bgp) {
+            errors.push(error.to_string());
+        }
+        if self.scrubber.enabled && self.bgp.mode != BgpMode::Rustbgpd {
+            errors.push("scrubber diversion requires the rustbgpd backend".to_string());
+        }
+        if let Err(error) = self.guardrails.validate_for_backend(self.bgp.mode) {
+            errors.push(error.to_string());
+        }
+        if self.quotas.max_active_prefix_per_customer == 0 {
+            errors.push("quotas.max_active_prefix_per_customer must be nonzero".to_string());
+        }
+        let correlation_errors = self.correlation.validate();
         if !correlation_errors.is_empty() {
-            return Err(anyhow::anyhow!(
+            errors.push(format!(
                 "invalid correlation config in settings: {}",
                 correlation_errors.join("; ")
             ));
         }
-        Ok(settings)
+        errors
     }
 }
 

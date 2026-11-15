@@ -30,16 +30,49 @@ pub(crate) fn parse_yaml<'de, T: serde::Deserialize<'de>>(
 /// [`parse_yaml`] for files that hold secrets: `prefixd.yaml`,
 /// `correlation.yaml` and `alerting.yaml`. Serde errors can quote the
 /// offending value, so the error keeps only the key path, line, column and
-/// what was expected.
-pub(crate) fn parse_secret_yaml<T: serde::de::DeserializeOwned>(content: &str) -> Result<T> {
+/// what was expected. Keys the type does not know are returned instead of
+/// being dropped silently; only their paths are read, never their values.
+pub(crate) fn parse_secret_yaml<T: serde::de::DeserializeOwned>(
+    content: &str,
+) -> Result<(T, Vec<String>)> {
     let mut path = None;
-    serde_saphyr::with_deserializer_from_str_with_options(content, yaml_options(), |de| {
-        serde_path_to_error::deserialize(de).map_err(|error| {
-            path = Some(error.path().to_string());
-            error.into_inner()
+    let mut unknown_keys = Vec::new();
+    let value =
+        serde_saphyr::with_deserializer_from_str_with_options(content, yaml_options(), |de| {
+            let mut record = |ignored: serde_ignored::Path<'_>| {
+                unknown_keys.push(unknown_key_path(&ignored));
+            };
+            let de = serde_ignored::Deserializer::new(de, &mut record);
+            serde_path_to_error::deserialize::<_, T>(de).map_err(|error| {
+                path = Some(error.path().to_string());
+                error.into_inner()
+            })
         })
-    })
-    .map_err(|error| anyhow::anyhow!(redacted_yaml_error(path.as_deref(), &error)))
+        .map_err(|error| anyhow::anyhow!(redacted_yaml_error(path.as_deref(), &error)))?;
+    Ok((value, unknown_keys))
+}
+
+/// serde_ignored writes a sequence index as `destinations.0` and marks every
+/// `Option` it descends through with a `?` segment. Report
+/// `destinations[0].chanel`, matching the key paths parse errors use.
+fn unknown_key_path(path: &serde_ignored::Path<'_>) -> String {
+    let raw = path.to_string();
+    let mut key = String::new();
+    for segment in raw.split('.') {
+        if segment.is_empty() || segment == "?" {
+            continue;
+        }
+        match segment.parse::<usize>() {
+            Ok(index) => key.push_str(&format!("[{index}]")),
+            Err(_) => {
+                if !key.is_empty() {
+                    key.push('.');
+                }
+                key.push_str(segment);
+            }
+        }
+    }
+    if key.is_empty() { raw } else { key }
 }
 
 fn redacted_yaml_error(path: Option<&str>, error: &serde_saphyr::Error) -> String {
@@ -120,6 +153,66 @@ pub(crate) fn env_placeholder_errors(value: &serde_json::Value) -> Vec<String> {
     errors
 }
 
+/// A configuration key the loader does not know: either a typo or a key from
+/// another release. Only the path is collected; values are never read, so
+/// nothing secret can reach a warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownKey {
+    /// The file it appeared in: `prefixd.yaml`, `correlation.yaml` or
+    /// `alerting.yaml`.
+    pub file: &'static str,
+    /// The full key path, such as `guardrails.max_port`.
+    pub key: String,
+}
+
+impl std::fmt::Display for UnknownKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}: unknown key `{}`; ignored in this release, refused in the next",
+            self.file, self.key
+        )
+    }
+}
+
+/// Startup checks `--check-config` cannot run because each needs a live
+/// speaker or database. Printed on every check so a clean exit is not read as
+/// coverage of them.
+pub const CHECK_CONFIG_SKIPPED: &[&str] = &[
+    "playbook checks against the speaker's FlowSpec match and blackhole-lease capabilities",
+    "blackhole, VPN scope and injection-lease support checks",
+    "scrubber readiness and outstanding-diversion checks",
+    "database registration, fencing and migrations",
+];
+
+/// Validation of a configuration directory without PostgreSQL or a speaker.
+#[derive(Debug, Default)]
+pub struct ConfigCheck {
+    /// Every error, each already naming its file, in startup's redacted text.
+    pub errors: Vec<String>,
+    /// Keys the loader ignores, which startup warns about.
+    pub unknown_keys: Vec<UnknownKey>,
+    /// Other configuration-only warnings, such as unreachable prefix playbooks.
+    pub warnings: Vec<String>,
+    /// Files parsed and checked.
+    pub validated: Vec<&'static str>,
+}
+
+impl ConfigCheck {
+    pub fn is_ok(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    /// The one-line success summary; `--check-config` prints it and exits 0.
+    pub fn summary(&self) -> String {
+        format!(
+            "configuration OK: {} validated, {} unknown key(s) ignored",
+            self.validated.join(", "),
+            self.unknown_keys.len()
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub settings: Settings,
@@ -127,16 +220,34 @@ pub struct AppConfig {
     pub playbooks: Playbooks,
     /// The file alerting came from: `alerting.yaml` or `prefixd.yaml`.
     pub alerting_source: &'static str,
+    /// Keys the loaded files contain but this release ignores. Startup warns
+    /// about each; the next release refuses them.
+    pub unknown_keys: Vec<UnknownKey>,
 }
 
 impl AppConfig {
     pub fn load(config_dir: &Path) -> Result<Self> {
         let path = |name: &str| config_dir.join(name);
         let failed = |name: &str| format!("failed to load {}", path(name).display());
-        let mut settings =
-            Settings::load(path("prefixd.yaml")).with_context(|| failed("prefixd.yaml"))?;
-        match crate::correlation::CorrelationConfig::load(path("correlation.yaml")) {
-            Ok(correlation) => settings.correlation = correlation,
+        let (mut settings, unknown_keys) = Settings::load_with_unknown_keys(path("prefixd.yaml"))
+            .with_context(|| failed("prefixd.yaml"))?;
+        let mut unknown_keys: Vec<UnknownKey> = unknown_keys
+            .into_iter()
+            .map(|key| UnknownKey {
+                file: "prefixd.yaml",
+                key,
+            })
+            .collect();
+        match crate::correlation::CorrelationConfig::load_with_unknown_keys(path(
+            "correlation.yaml",
+        )) {
+            Ok((correlation, keys)) => {
+                settings.correlation = correlation;
+                unknown_keys.extend(keys.into_iter().map(|key| UnknownKey {
+                    file: "correlation.yaml",
+                    key,
+                }));
+            }
             Err(error)
                 if error
                     .downcast_ref::<std::io::Error>()
@@ -146,10 +257,14 @@ impl AppConfig {
         // A present alerting.yaml replaces inline alerting. Either one gets the
         // destination checks reload and the alerting editor apply.
         let mut alerting_source = "prefixd.yaml";
-        match crate::alerting::AlertingConfig::load(path("alerting.yaml")) {
-            Ok(alerting) => {
+        match crate::alerting::AlertingConfig::load_with_unknown_keys(path("alerting.yaml")) {
+            Ok((alerting, keys)) => {
                 settings.alerting = alerting;
                 alerting_source = "alerting.yaml";
+                unknown_keys.extend(keys.into_iter().map(|key| UnknownKey {
+                    file: "alerting.yaml",
+                    key,
+                }));
             }
             Err(error)
                 if error
@@ -175,13 +290,507 @@ impl AppConfig {
             inventory,
             playbooks,
             alerting_source,
+            unknown_keys,
         })
+    }
+
+    /// Validate every file startup loads and report all errors, without
+    /// connecting to PostgreSQL or the speaker. Checks that need a live
+    /// speaker are listed in [`CHECK_CONFIG_SKIPPED`] instead of being faked.
+    pub fn check(config_dir: &Path) -> ConfigCheck {
+        let path = |name: &str| config_dir.join(name);
+        let failed = |name: &str| format!("failed to load {}", path(name).display());
+        let mut check = ConfigCheck::default();
+
+        let mut settings = None;
+        match std::fs::read_to_string(path("prefixd.yaml")) {
+            Err(error) => check
+                .errors
+                .push(format!("{}: {error}", failed("prefixd.yaml"))),
+            Ok(content) => match Settings::from_yaml(&content) {
+                Ok((loaded, keys)) => {
+                    check.validated.push("prefixd.yaml");
+                    check
+                        .unknown_keys
+                        .extend(keys.into_iter().map(|key| UnknownKey {
+                            file: "prefixd.yaml",
+                            key,
+                        }));
+                    for error in loaded.validate_errors() {
+                        check
+                            .errors
+                            .push(format!("{}: {error}", failed("prefixd.yaml")));
+                    }
+                    settings = Some(loaded);
+                }
+                Err(error) => check
+                    .errors
+                    .push(format!("{}: {error:#}", failed("prefixd.yaml"))),
+            },
+        }
+        // Startup refuses before connecting when neither source names a
+        // database; that gate reads the same environment override.
+        if let Some(loaded) = &settings
+            && loaded.storage.connection_string.is_empty()
+            && std::env::var("DATABASE_URL")
+                .ok()
+                .filter(|url| !url.is_empty())
+                .is_none()
+        {
+            check
+                .errors
+                .push("set DATABASE_URL or storage.connection_string".to_string());
+        }
+
+        match std::fs::read_to_string(path("correlation.yaml")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => check
+                .errors
+                .push(format!("{}: {error}", failed("correlation.yaml"))),
+            Ok(content) => match crate::correlation::CorrelationConfig::from_yaml(&content) {
+                Ok((correlation, keys)) => {
+                    check.validated.push("correlation.yaml");
+                    check
+                        .unknown_keys
+                        .extend(keys.into_iter().map(|key| UnknownKey {
+                            file: "correlation.yaml",
+                            key,
+                        }));
+                    let errors = correlation.validate();
+                    if !errors.is_empty() {
+                        check.errors.push(format!(
+                            "{}: invalid correlation config: {}",
+                            failed("correlation.yaml"),
+                            errors.join("; ")
+                        ));
+                    }
+                }
+                Err(error) => check
+                    .errors
+                    .push(format!("{}: {error:#}", failed("correlation.yaml"))),
+            },
+        }
+
+        // A present alerting.yaml replaces inline alerting, exactly as startup
+        // resolves it before validating the effective destinations.
+        let mut alerting_source = "prefixd.yaml";
+        match std::fs::read_to_string(path("alerting.yaml")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => check
+                .errors
+                .push(format!("{}: {error}", failed("alerting.yaml"))),
+            Ok(content) => match crate::alerting::AlertingConfig::from_yaml(&content) {
+                Ok((alerting, keys)) => {
+                    check.validated.push("alerting.yaml");
+                    alerting_source = "alerting.yaml";
+                    check
+                        .unknown_keys
+                        .extend(keys.into_iter().map(|key| UnknownKey {
+                            file: "alerting.yaml",
+                            key,
+                        }));
+                    let errors = alerting.load_errors();
+                    if !errors.is_empty() {
+                        check.errors.push(format!(
+                            "{}: {}",
+                            failed("alerting.yaml"),
+                            errors.join("; ")
+                        ));
+                    }
+                    if let Some(settings) = settings.as_mut() {
+                        settings.alerting = alerting;
+                    }
+                }
+                Err(error) => check
+                    .errors
+                    .push(format!("{}: {error:#}", failed("alerting.yaml"))),
+            },
+        }
+        if let Some(settings) = &settings {
+            let errors = settings.alerting.validate();
+            if !errors.is_empty() {
+                check.errors.push(format!(
+                    "{}: alerting: {}",
+                    failed(alerting_source),
+                    errors.join("; ")
+                ));
+            }
+        }
+
+        for name in ["inventory.yaml", "playbooks.yaml"] {
+            match std::fs::read_to_string(path(name)) {
+                Err(error) => check.errors.push(format!("{}: {error}", failed(name))),
+                Ok(content) if name == "inventory.yaml" => match Inventory::from_yaml(&content) {
+                    Ok(_) => check.validated.push("inventory.yaml"),
+                    Err(error) => check
+                        .errors
+                        .push(format!("{}: {error:#}", failed("inventory.yaml"))),
+                },
+                Ok(content) => match Playbooks::from_yaml(&content) {
+                    Ok(playbooks) => {
+                        check.validated.push("playbooks.yaml");
+                        if let Some(settings) = &settings {
+                            check.warnings.extend(
+                                playbooks
+                                    .prefix_scope_warnings(&settings.guardrails)
+                                    .into_iter()
+                                    .map(|warning| format!("playbooks.yaml: {warning}")),
+                            );
+                        }
+                    }
+                    Err(error) => check
+                        .errors
+                        .push(format!("{}: {error:#}", failed("playbooks.yaml"))),
+                },
+            }
+        }
+
+        check
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sections `Settings` requires, with values that pass every cross-check.
+    const REQUIRED: &[(&str, &str)] = &[
+        (
+            "http",
+            "http: {listen: '127.0.0.1:8080', auth: {mode: none}}",
+        ),
+        ("bgp", "bgp: {local_asn: 65010, router_id: 192.0.2.1}"),
+        ("guardrails", "guardrails: {require_ttl: true}"),
+        ("quotas", "quotas: {max_active_per_customer: 20}"),
+        ("timers", "timers: {default_ttl_seconds: 120}"),
+        ("observability", "observability: {log_level: info}"),
+    ];
+
+    /// A document with every required section: `overrides` replace the
+    /// sections they name, and anything else is appended as a new section.
+    fn settings_document(overrides: &[(&str, &str)]) -> String {
+        let mut document = String::from("pop: iad1\n");
+        for (name, default) in REQUIRED {
+            let text = overrides
+                .iter()
+                .find(|(other, _)| other == name)
+                .map_or(*default, |(_, text)| *text);
+            document.push_str(text);
+            document.push('\n');
+        }
+        for (name, text) in overrides {
+            if !REQUIRED.iter().any(|(required, _)| required == name) {
+                document.push_str(text);
+                document.push('\n');
+            }
+        }
+        document
+    }
+
+    fn settings_unknown_keys(document: &str) -> Vec<String> {
+        Settings::from_yaml(document)
+            .expect("document must parse")
+            .1
+    }
+
+    /// A typo in every section that this release only warns about is reported
+    /// with its full key path. Sections that already reject unknown keys have
+    /// their own test below.
+    #[test]
+    fn unknown_keys_are_reported_with_their_section_path() {
+        let cases = [
+            (
+                "settings",
+                "root",
+                "guardrailsx: {max_port: 1}",
+                "guardrailsx",
+            ),
+            (
+                "http",
+                "http",
+                "http: {listen: '127.0.0.1:8080', auth: {mode: none}, max_body: 1}",
+                "http.max_body",
+            ),
+            (
+                "auth",
+                "http",
+                "http: {listen: '127.0.0.1:8080', auth: {mode: none, token: x}}",
+                "http.auth.token",
+            ),
+            (
+                "guardrails",
+                "guardrails",
+                "guardrails: {max_port: 5}",
+                "guardrails.max_port",
+            ),
+            (
+                "quotas",
+                "quotas",
+                "quotas: {maxactive: 2}",
+                "quotas.maxactive",
+            ),
+            ("timers", "timers", "timers: {ttl: 120}", "timers.ttl"),
+            (
+                "storage",
+                "storage",
+                "storage: {dsn: postgres://ignored}",
+                "storage.dsn",
+            ),
+            (
+                "safelist",
+                "safelist",
+                "safelist: {prefix: [10.0.0.0/8]}",
+                "safelist.prefix",
+            ),
+            (
+                "alerting",
+                "alerting",
+                "alerting: {event: [mitigation.created]}",
+                "alerting.event",
+            ),
+            (
+                "correlation",
+                "correlation",
+                "correlation: {windows: 30}",
+                "correlation.windows",
+            ),
+        ];
+        for (section, name, text, expected) in cases {
+            let document = settings_document(&[(name, text)]);
+            assert_eq!(
+                settings_unknown_keys(&document),
+                vec![expected.to_string()],
+                "{section}"
+            );
+        }
+    }
+
+    /// `bgp`, `observability`, `blackhole`, `amplification` and `shutdown`
+    /// already refuse unknown keys; the following release extends that refusal
+    /// to every section.
+    #[test]
+    fn strict_sections_still_refuse_unknown_keys_by_path() {
+        let cases = [
+            (
+                "bgp",
+                "bgp",
+                "bgp: {local_asn: 65010, router_id: 192.0.2.1, asn: 65010}",
+                "asn",
+            ),
+            (
+                "observability",
+                "observability",
+                "observability: {log_levle: info}",
+                "log_levle",
+            ),
+            (
+                "blackhole",
+                "blackhole",
+                "blackhole: {lease_second: 60}",
+                "lease_second",
+            ),
+            (
+                "amplification",
+                "amplification",
+                "amplification: {port: 53}",
+                "port",
+            ),
+            (
+                "shutdown",
+                "shutdown",
+                "shutdown: {drain_timeout_second: 30}",
+                "drain_timeout_second",
+            ),
+            ("scrubber", "scrubber", "scrubber: {profile: []}", "profile"),
+        ];
+        for (section, name, text, key) in cases {
+            let document = settings_document(&[(name, text)]);
+            let error = Settings::from_yaml(&document).unwrap_err();
+            let error = format!("{error:#}");
+            assert!(
+                error.contains(&format!("unknown field `{key}`")),
+                "{section}: {error}"
+            );
+        }
+    }
+
+    /// Destination variants are internally tagged, so the alerting module
+    /// checks their keys: a `chanel:` typo is reported under its destination.
+    #[test]
+    fn alerting_destination_typos_are_reported_with_their_path() {
+        let document = settings_document(&[(
+            "alerting",
+            "alerting:\n  destinations:\n    - type: slack\n      \
+             webhook_url: https://example.invalid/hook\n      chanel: ops",
+        )]);
+        assert_eq!(
+            settings_unknown_keys(&document),
+            vec!["alerting.destinations[0].chanel"]
+        );
+        let (_, keys) = crate::alerting::AlertingConfig::from_yaml(
+            "destinations:\n  - type: generic\n    url: https://example.invalid/hook\n    event: mitigation.created\n",
+        )
+        .unwrap();
+        assert_eq!(keys, vec!["destinations[0].event"]);
+    }
+
+    /// Unknown-key reports carry the path only: a typo beside a secret never
+    /// repeats the secret, inline or in `alerting.yaml`.
+    #[test]
+    fn unknown_keys_never_report_values() {
+        const CANARY: &str = "hunter2-canary";
+        let alerting = format!(
+            "alerting:\n  destinations:\n    - type: generic\n      \
+             url: https://example.invalid/hook?token={CANARY}\n      chanel: ops"
+        );
+        let inline = settings_document(&[("alerting", alerting.as_str())]);
+        let keys = settings_unknown_keys(&inline);
+        assert_eq!(keys, vec!["alerting.destinations[0].chanel"]);
+        assert!(!keys.join(" ").contains(CANARY));
+        let (_, keys) = crate::alerting::AlertingConfig::from_yaml(&format!(
+            "destinations:\n  - type: generic\n    url: https://example.invalid/hook?token={CANARY}\n    chanel: ops\n"
+        ))
+        .unwrap();
+        assert_eq!(keys, vec!["destinations[0].chanel"]);
+        assert!(!keys.join(" ").contains(CANARY));
+        // The value of an unknown key is never read, so it cannot leak either.
+        let keys = settings_unknown_keys(&settings_document(&[(
+            "guardrails",
+            &format!("guardrails: {{max_port: {CANARY}}}"),
+        )]));
+        assert_eq!(keys, vec!["guardrails.max_port"]);
+        assert!(!keys.join(" ").contains(CANARY));
+    }
+
+    /// The configuration the repository ships has no key this release would
+    /// only warn about, so an upgrade from a shipped file is quiet.
+    #[test]
+    fn shipped_configurations_have_no_unknown_keys() {
+        for (name, document) in [
+            ("prefixd.yaml", include_str!("../../configs/prefixd.yaml")),
+            (
+                "prefixd-gobgp.yaml",
+                include_str!("../../configs/prefixd-gobgp.yaml"),
+            ),
+            (
+                "prefixd.yaml.example",
+                include_str!("../../configs/prefixd.yaml.example"),
+            ),
+        ] {
+            let (_, keys) = Settings::from_yaml(document).expect(name);
+            assert!(keys.is_empty(), "{name}: {keys:?}");
+        }
+        let (_, keys) = crate::correlation::CorrelationConfig::from_yaml(include_str!(
+            "../../configs/correlation.yaml"
+        ))
+        .unwrap();
+        assert!(keys.is_empty(), "correlation.yaml: {keys:?}");
+    }
+
+    /// The check accepts a valid directory and names what it validated.
+    #[test]
+    fn check_accepts_a_valid_directory() {
+        let directory = fixture();
+        let check = AppConfig::check(directory.path());
+        assert!(check.is_ok(), "{:?}", check.errors);
+        assert!(check.unknown_keys.is_empty());
+        assert_eq!(
+            check.validated,
+            vec!["prefixd.yaml", "inventory.yaml", "playbooks.yaml"]
+        );
+        let summary = check.summary();
+        assert!(summary.contains("configuration OK"), "{summary}");
+        assert!(summary.contains("prefixd.yaml"), "{summary}");
+    }
+
+    /// Every error is reported, not just the first, and unknown keys are
+    /// reported beside them.
+    #[test]
+    fn check_reports_all_errors_and_unknown_keys() {
+        let directory = fixture();
+        let mut settings: Settings =
+            parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+        settings.correlation.confidence_threshold = 0.5;
+        settings.quotas.max_active_prefix_per_customer = 0;
+        settings.blackhole.lease_seconds = 2;
+        let mut document = serde_saphyr::to_string(&settings).unwrap();
+        document.push_str("guardrailsx: {max_port: 1}\n");
+        std::fs::write(directory.path().join("prefixd.yaml"), document).unwrap();
+        std::fs::write(
+            directory.path().join("correlation.yaml"),
+            "close_after: 5\n",
+        )
+        .unwrap();
+
+        let check = AppConfig::check(directory.path());
+        assert!(!check.is_ok());
+        let keys: Vec<_> = check
+            .unknown_keys
+            .iter()
+            .map(|key| key.to_string())
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "prefixd.yaml: unknown key `guardrailsx`; ignored in this release, refused in the next",
+                "correlation.yaml: unknown key `close_after`; ignored in this release, refused in the next",
+            ]
+        );
+        assert_eq!(check.errors.len(), 2, "{:?}", check.errors);
+        let errors = check.errors.join("\n");
+        assert!(
+            errors.contains("quotas.max_active_prefix_per_customer must be nonzero"),
+            "{errors}"
+        );
+        assert!(
+            errors.contains("blackhole.lease_seconds must be 5..=3600, got 2"),
+            "{errors}"
+        );
+        for error in &check.errors {
+            assert!(
+                error.starts_with(&format!(
+                    "failed to load {}",
+                    directory.path().join("prefixd.yaml").display()
+                )),
+                "{error}"
+            );
+        }
+    }
+
+    /// `alerting.yaml` replaces inline alerting, exactly as startup resolves it,
+    /// and its unknown keys are reported under that file.
+    #[test]
+    fn check_reports_standalone_alerting_unknown_keys_and_errors() {
+        let directory = fixture();
+        std::fs::write(
+            directory.path().join("alerting.yaml"),
+            "destinations:\n  - type: generic\n    url: http://example.invalid/hook\n    chanel: ops\n",
+        )
+        .unwrap();
+        let check = AppConfig::check(directory.path());
+        assert!(!check.is_ok());
+        assert_eq!(
+            check
+                .unknown_keys
+                .iter()
+                .map(|key| key.to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "alerting.yaml: unknown key `destinations[0].chanel`; ignored in this release, refused in the next"
+            ]
+        );
+        assert_eq!(check.errors.len(), 1, "{:?}", check.errors);
+        assert!(
+            check.errors[0].contains("alerting.yaml"),
+            "{:?}",
+            check.errors
+        );
+        assert!(
+            check.errors[0].contains("url must use https"),
+            "{:?}",
+            check.errors
+        );
+    }
 
     fn fixture() -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();

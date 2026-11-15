@@ -330,6 +330,38 @@ pub enum DestinationConfig {
     },
 }
 
+/// Keys each destination type accepts beside the `type` discriminator. A typo
+/// outside them is reported, not applied. `unknown_destination_keys_track_the_variants`
+/// keeps this table equal to what serde serializes for every variant.
+const DESTINATION_KEYS: [(&str, &[&str]); 7] = [
+    (
+        "slack",
+        &["webhook_url", "webhook_url_env", "channel", "events"],
+    ),
+    ("discord", &["webhook_url", "webhook_url_env", "events"]),
+    ("teams", &["webhook_url", "webhook_url_env", "events"]),
+    (
+        "telegram",
+        &["bot_token", "bot_token_env", "chat_id", "events"],
+    ),
+    (
+        "pagerduty",
+        &["routing_key", "routing_key_env", "events_url", "events"],
+    ),
+    ("opsgenie", &["api_key", "api_key_env", "region", "events"]),
+    (
+        "generic",
+        &[
+            "url",
+            "url_env",
+            "secret",
+            "secret_env",
+            "headers",
+            "events",
+        ],
+    ),
+];
+
 fn default_pagerduty_url() -> String {
     "https://events.pagerduty.com/v2/enqueue".into()
 }
@@ -598,11 +630,60 @@ pub struct AlertingConfig {
 
 impl AlertingConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let config: AlertingConfig = crate::config::parse_secret_yaml(&content)?;
-        let errors = config.load_errors();
+        Ok(Self::load_with_unknown_keys(path)?.0)
+    }
+
+    /// [`AlertingConfig::load`], also returning the keys the document contains
+    /// but this release ignores. Startup warns about each of them.
+    pub fn load_with_unknown_keys<P: AsRef<Path>>(path: P) -> Result<(Self, Vec<String>)> {
+        let config = Self::from_yaml(&std::fs::read_to_string(path)?)?;
+        let errors = config.0.load_errors();
         anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
         Ok(config)
+    }
+
+    /// Parse an alerting document and collect its unknown keys. The secret and
+    /// placeholder checks stay separate ([`AlertingConfig::load_errors`]) so
+    /// `--check-config` can report every error.
+    pub fn from_yaml(content: &str) -> Result<(Self, Vec<String>)> {
+        let (config, mut unknown_keys) = crate::config::parse_secret_yaml(content)?;
+        if let Ok(document) = crate::config::parse_yaml::<serde_json::Value>(content) {
+            unknown_keys.extend(Self::unknown_destination_keys(&document));
+        }
+        Ok((config, unknown_keys))
+    }
+
+    /// Keys this release ignores inside `destinations`, as paths such as
+    /// `destinations[0].chanel`. `DestinationConfig` is internally tagged, so
+    /// serde_ignored cannot see its variant fields; the known keys come from
+    /// [`DESTINATION_KEYS`], which
+    /// `unknown_destination_keys_track_the_variants` keeps in step. Only key
+    /// names are read, never values.
+    pub(crate) fn unknown_destination_keys(document: &serde_json::Value) -> Vec<String> {
+        let Some(destinations) = document
+            .get("destinations")
+            .and_then(|list| list.as_array())
+        else {
+            return Vec::new();
+        };
+        let mut unknown = Vec::new();
+        for (index, destination) in destinations.iter().enumerate() {
+            let Some(object) = destination.as_object() else {
+                continue;
+            };
+            let kind = object.get("type").and_then(|kind| kind.as_str());
+            let Some((_, known)) =
+                kind.and_then(|kind| DESTINATION_KEYS.iter().find(|(name, _)| *name == kind))
+            else {
+                continue;
+            };
+            for key in object.keys() {
+                if key != "type" && !known.contains(&key.as_str()) {
+                    unknown.push(format!("destinations[{index}].{key}"));
+                }
+            }
+        }
+        unknown
     }
 
     /// `${VAR}` placeholders, missing secrets and unusable `*_env` keys, which
@@ -1404,6 +1485,100 @@ mod tests {
         );
     }
 
+    /// [`DESTINATION_KEYS`] is the runtime source of truth for which destination
+    /// keys are known, so it must equal what serde serializes for each variant.
+    #[test]
+    fn unknown_destination_keys_track_the_variants() {
+        let events = vec![AlertEventType::MitigationCreated];
+        let destinations = [
+            DestinationConfig::Slack {
+                webhook_url: "https://example.invalid/hook".into(),
+                webhook_url_env: Some("SLACK_WEBHOOK_URL".into()),
+                channel: Some("#alerts".into()),
+                events: events.clone(),
+            },
+            DestinationConfig::Discord {
+                webhook_url: "https://example.invalid/hook".into(),
+                webhook_url_env: Some("DISCORD_WEBHOOK_URL".into()),
+                events: events.clone(),
+            },
+            DestinationConfig::Teams {
+                webhook_url: "https://example.invalid/hook".into(),
+                webhook_url_env: Some("TEAMS_WEBHOOK_URL".into()),
+                events: events.clone(),
+            },
+            DestinationConfig::Telegram {
+                bot_token: "00123".into(),
+                bot_token_env: Some("TELEGRAM_BOT_TOKEN".into()),
+                chat_id: "-100123".into(),
+                events: events.clone(),
+            },
+            DestinationConfig::Pagerduty {
+                routing_key: "00123".into(),
+                routing_key_env: Some("PAGERDUTY_ROUTING_KEY".into()),
+                events_url: "https://events.pagerduty.com/v2/enqueue".into(),
+                events: events.clone(),
+            },
+            DestinationConfig::Opsgenie {
+                api_key: "00123".into(),
+                api_key_env: Some("OPSGENIE_API_KEY".into()),
+                region: "us".into(),
+                events: events.clone(),
+            },
+            DestinationConfig::Generic {
+                url: "https://example.invalid/hook".into(),
+                url_env: Some("GENERIC_URL".into()),
+                secret: Some("00123".into()),
+                secret_env: Some("GENERIC_SECRET".into()),
+                headers: std::collections::HashMap::from([(
+                    "X-Custom".to_string(),
+                    "1".to_string(),
+                )]),
+                events: events.clone(),
+            },
+        ];
+        assert_eq!(destinations.len(), DESTINATION_KEYS.len());
+        for destination in destinations {
+            let value = serde_json::to_value(&destination).unwrap();
+            let mut serialized: Vec<&str> = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            serialized.sort_unstable();
+            let (_, known) = DESTINATION_KEYS
+                .iter()
+                .find(|(name, _)| *name == destination.destination_type())
+                .unwrap();
+            let mut known: Vec<&str> = known.to_vec();
+            known.push("type");
+            known.sort_unstable();
+            assert_eq!(serialized, known, "{}", destination.destination_type());
+        }
+    }
+
+    /// A typo in a destination is reported with its key path, and the value
+    /// beside it is never repeated.
+    #[test]
+    fn unknown_destination_keys_name_the_path_only() {
+        const CANARY: &str = "hunter2-canary";
+        let document: serde_json::Value = crate::config::parse_yaml(&format!(
+            "destinations:\n  - type: slack\n    webhook_url: https://example.invalid/{CANARY}\n    chanel: ops\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            AlertingConfig::unknown_destination_keys(&document),
+            vec!["destinations[0].chanel"]
+        );
+        let (_, unknown_keys) = AlertingConfig::from_yaml(&format!(
+            "destinations:\n  - type: slack\n    webhook_url: https://example.invalid/{CANARY}\n    chanel: ops\n"
+        ))
+        .unwrap();
+        assert_eq!(unknown_keys, vec!["destinations[0].chanel"]);
+        assert!(!unknown_keys.join(" ").contains(CANARY));
+    }
+
     #[test]
     fn test_stored_config_with_legacy_escalated_event_still_parses() {
         let dest: DestinationConfig = serde_json::from_value(serde_json::json!({
@@ -2026,8 +2201,11 @@ mod tests {
             if source.get("destinations").is_none() {
                 return Ok(false);
             }
-            let config: AlertingConfig =
-                crate::config::parse_secret_yaml(yaml).map_err(|e| e.to_string())?;
+            let (config, unknown_keys) =
+                AlertingConfig::from_yaml(yaml).map_err(|e| e.to_string())?;
+            if !unknown_keys.is_empty() {
+                return Err(format!("unknown keys {unknown_keys:?}"));
+            }
             let dropped = dropped_keys(&source, &serde_json::to_value(&config).unwrap());
             if !dropped.is_empty() {
                 return Err(format!("ignored keys {dropped:?}"));
