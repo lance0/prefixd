@@ -609,10 +609,24 @@ impl RepositoryTrait for MockRepository {
         Ok(())
     }
 
-    async fn list_audit(&self, params: &ListParams) -> Result<Vec<AuditEntry>> {
+    async fn list_audit_filtered(
+        &self,
+        filters: &super::AuditListParams,
+    ) -> Result<Vec<AuditEntry>> {
+        let params = &filters.pagination;
         let audit = self.audit.lock().unwrap();
         let mut matching: Vec<_> = audit
             .iter()
+            .filter(|e| {
+                filters
+                    .target_type
+                    .as_ref()
+                    .is_none_or(|t| e.target_type.as_ref() == Some(t))
+                    && filters
+                        .target_id
+                        .as_ref()
+                        .is_none_or(|id| e.target_id.as_ref() == Some(id))
+            })
             .filter(|e| {
                 params
                     .cursor
@@ -729,7 +743,10 @@ impl RepositoryTrait for MockRepository {
         } else {
             mitigation.withdraw(Some(pending.reason.clone()));
         }
-        self.audit.lock().unwrap().push(pending.audit_entry());
+        self.audit
+            .lock()
+            .unwrap()
+            .push(pending.audit_entry(mitigation));
         pending.completed_at = Some(Utc::now());
         Ok(Some(mitigation.clone()))
     }

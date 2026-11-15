@@ -3116,6 +3116,13 @@ Authorization: Bearer <token>
 | `cursor` | string | Opaque `a1` continuation from the previous `next_cursor` (maximum 128 bytes) |
 | `start` | string | RFC3339 start (inclusive); see [list filters](#list-filters) |
 | `end` | string | RFC3339 end (exclusive); see [list filters](#list-filters) |
+| `target_type` | string | Exact, case-sensitive target type such as `mitigation`, `event` or `safelist`; 1-256 UTF-8 bytes without NUL |
+| `target_id` | string | Exact, case-sensitive target identifier such as a mitigation UUID; 1-256 UTF-8 bytes without NUL |
+
+`target_type` and `target_id` apply independently; pass both to list one
+target's history, for example
+`GET /v1/audit?target_type=mitigation&target_id=7f72a903-63d1-4a4a-a5db-0517e0a7df1d`.
+An empty, oversized or NUL-containing value returns `400`.
 
 Results order by `(timestamp, audit_id)` descending, including tied timestamps.
 Copy `next_cursor` unchanged with the same filters; omit `cursor` to start a fresh
@@ -3178,6 +3185,30 @@ as `actor_id` (the adapter name for a generic webhook) and the triggering
     "origin_mode": "enforced",
     "reason": "udp_flood to DNS (playbook: udp_flood_police)",
     "event_id": "0b6a5d4e-8f0e-4d55-9a3c-6f1d2e7b9c10"
+  }
+}
+```
+
+A completed withdrawal writes one `withdraw` entry, or `expire` for a TTL
+expiry, in the transaction that records the terminal status. This covers
+operator, bulk, safelist and scheduler-completed withdrawals. `details` holds the
+retained `reason` and `operation_id`, `previous_expires_at` (the scheduled
+expiry the operation cut short) and `ended_at` (when the lifetime ended, equal
+to the mitigation's `withdrawn_at`). Entries written before
+`previous_expires_at` and `ended_at` were added omit them.
+
+```json
+{
+  "actor_type": "operator",
+  "actor_id": "jsmith",
+  "action": "withdraw",
+  "target_type": "mitigation",
+  "target_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d",
+  "details": {
+    "reason": "jsmith: false positive",
+    "operation_id": "3c2d9a51-0f7e-4b8e-9a6d-2f1c0b7e4d93",
+    "previous_expires_at": "2026-01-18T10:33:00Z",
+    "ended_at": "2026-01-18T10:31:00Z"
   }
 }
 ```

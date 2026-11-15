@@ -18,7 +18,7 @@ use crate::db::ListParams;
 use crate::error::PrefixdError;
 
 use super::{
-    AppError, CursorQuery, ErrorResponse, MitigationResponse, clamp_limit, decode_list_cursor,
+    AppError, ErrorResponse, LimitQuery, MitigationResponse, clamp_limit, decode_list_cursor,
     encode_list_cursor, parse_date_range, validate_ip,
 };
 
@@ -34,12 +34,24 @@ pub struct AuditListResponse {
     has_more: bool,
 }
 
+#[derive(Deserialize)]
+pub struct ListAuditQuery {
+    limit: Option<u32>,
+    cursor: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+    target_type: Option<String>,
+    target_id: Option<String>,
+}
+
 /// List audit log entries
 #[utoipa::path(
     get,
     path = "/v1/audit",
     tag = "audit",
     params(
+        ("target_type" = Option<String>, Query, description = "Exact case-sensitive target type, e.g. mitigation; 1-256 UTF-8 bytes without NUL. Omit for every type."),
+        ("target_id" = Option<String>, Query, description = "Exact case-sensitive target identifier, e.g. a mitigation UUID; 1-256 UTF-8 bytes without NUL. Omit for every target."),
         ("limit" = Option<u32>, Query, description = "Max results (default 100)"),
         ("cursor" = Option<String>, Query, description = "Opaque a1 continuation from next_cursor (max 128 bytes); superseded timestamp-only cursors are rejected"),
         ("start" = Option<String>, Query, description = "Inclusive RFC3339 start; empty or malformed supplied values are invalid"),
@@ -47,18 +59,33 @@ pub struct AuditListResponse {
     ),
     responses(
         (status = 200, description = "List of audit log entries", body = AuditListResponse),
-        (status = 400, description = "Invalid date filter or invalid/superseded audit cursor", body = ErrorResponse)
+        (status = 400, description = "Invalid target/date filter or invalid/superseded audit cursor", body = ErrorResponse)
     )
 )]
 pub async fn list_audit(
     State(state): State<Arc<AppState>>,
     auth_session: AuthSession,
     headers: HeaderMap,
-    Query(query): Query<CursorQuery>,
+    Query(query): Query<ListAuditQuery>,
 ) -> Result<axum::response::Response, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
     let _operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
+
+    for (name, value) in [
+        ("target_type", &query.target_type),
+        ("target_id", &query.target_id),
+    ] {
+        if value
+            .as_ref()
+            .is_some_and(|v| v.is_empty() || v.len() > 256 || v.contains('\0'))
+        {
+            return Ok(AppError(PrefixdError::InvalidRequest(format!(
+                "invalid audit {name} filter; expected 1-256 UTF-8 bytes without NUL"
+            )))
+            .into_response());
+        }
+    }
 
     let limit = clamp_limit(query.limit.unwrap_or(100));
     let cursor = match query.cursor.as_deref() {
@@ -83,7 +110,11 @@ pub async fn list_audit(
 
     let mut entries = state
         .repo
-        .list_audit(&params)
+        .list_audit_filtered(&crate::db::AuditListParams {
+            pagination: params,
+            target_type: query.target_type,
+            target_id: query.target_id,
+        })
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -305,7 +336,7 @@ pub async fn get_ip_history(
     auth_session: AuthSession,
     headers: HeaderMap,
     Path(ip): Path<String>,
-    Query(query): Query<CursorQuery>,
+    Query(query): Query<LimitQuery>,
 ) -> Result<Json<IpHistoryResponse>, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
