@@ -37,7 +37,7 @@ function parsePorts(input: string): number[] | null {
 }
 
 /** Mirrors the controller's diversion checks; the controller re-checks everything and stays authoritative. */
-export function validateDiversion(form: DiversionForm, profile?: ScrubberProfiles["configuration"][number]): FormErrors {
+function validateDiversion(form: DiversionForm, profile?: ScrubberProfiles["configuration"][number]): FormErrors {
   const errors: FormErrors = {}
   const victim = parseDestination(form.victim)
 
