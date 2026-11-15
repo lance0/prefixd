@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { screen, waitFor } from "@testing-library/react"
+import { screen, waitFor, within } from "@testing-library/react"
 import { Sidebar } from "@/components/dashboard/sidebar"
 import { Dialog } from "@/components/ui/dialog"
-import { json, operatorResponse, renderApp, settle, signIn, useFakeController } from "./support/fake-controller"
+import { deferred, json, operatorResponse, renderApp, settle, signIn, useFakeController } from "./support/fake-controller"
+import type { OperatorRole } from "@/lib/auth"
 
 const controller = useFakeController()
 
@@ -34,5 +35,39 @@ describe("sidebar accessible counts", () => {
     await renderSidebar({ mitigations: 3, groups: 7 })
     expect(screen.getByRole("link", { name: /^Mitigations\s*3$/ })).toHaveAttribute("href", "/mitigations")
     expect(screen.getByRole("link", { name: /^Correlation\s*7$/ })).toHaveAttribute("href", "/correlation")
+  })
+})
+
+// Navigation role matrix. The sidebar is defense in depth: the controller enforces each role.
+describe("sidebar navigation by role", () => {
+  const everyone = ["Overview", "Mitigations", "Scrubbers", "Events", "Correlation", "Inventory", "IP history", "Audit log", "Configuration"]
+
+  async function navFor(role: OperatorRole) {
+    signIn(controller, "credentials", operatorResponse(role))
+    controller.route("GET", "/v1/stats", () => json({ total_active: 0, total_mitigations: 0, total_events: 0, pops: [] }))
+    controller.route("GET", "/v1/signal-groups", () => json({ groups: [], count: 0, next_cursor: null, has_more: false }))
+    renderApp(<Dialog><Sidebar /></Dialog>)
+    await waitFor(() => expect(controller.calls("GET", "/v1/auth/me")).toHaveLength(1))
+    await settle()
+
+    return within(screen.getByRole("navigation", { name: "Main navigation" })).getAllByRole("link").map(link => link.textContent)
+  }
+
+  it.each([
+    ["viewer", everyone],
+    ["operator", everyone],
+    ["admin", [...everyone, "Administration"]],
+  ] as const)("shows %s the expected pages", async (role, pages) => {
+    expect(await navFor(role)).toEqual(pages)
+  })
+
+  it("hides Administration until the session settles", async () => {
+    controller.route("GET", "/v1/health", () => deferred<Response>().promise)
+    controller.route("GET", "/v1/auth/me", () => deferred<Response>().promise)
+    controller.route("GET", "/v1/stats", () => json({ total_active: 0, total_mitigations: 0, total_events: 0, pops: [] }))
+    controller.route("GET", "/v1/signal-groups", () => json({ groups: [], count: 0, next_cursor: null, has_more: false }))
+    renderApp(<Dialog><Sidebar /></Dialog>)
+    await waitFor(() => expect(controller.calls("GET", "/v1/auth/me")).toHaveLength(1))
+    expect(screen.queryByRole("link", { name: "Administration" })).not.toBeInTheDocument()
   })
 })

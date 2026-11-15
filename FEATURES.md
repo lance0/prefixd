@@ -615,11 +615,11 @@ for commands and mode-specific authentication.
 
 ### Role-Based Access Control
 
-| Role | Dashboard | Mitigations | Withdraw | Safelist | Users | Config |
-|------|-----------|-------------|----------|----------|-------|--------|
-| `viewer` | Read | Read | No | Read | No | No |
-| `operator` | Read | Read | Yes | Read | No | No |
-| `admin` | Read | Read | Yes | Full | Full | Full |
+| Role | Dashboard | Mitigations | Withdraw | Scrubbers | Safelist | Users | Config |
+|------|-----------|-------------|----------|-----------|----------|-------|--------|
+| `viewer` | Read | Read | No | Read | Read | No | No |
+| `operator` | Read | Read | Yes | Read | Read | No | No |
+| `admin` | Read | Read | Yes | Full | Full | Full | Full |
 
 **Permission hierarchy:** `admin > operator > viewer`
 

@@ -66,7 +66,13 @@ async fn main() -> anyhow::Result<()> {
     // Init database
     // DATABASE_URL env var takes precedence over config file
     let connection_string = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| config.settings.storage.connection_string.clone());
+        .ok()
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| config.settings.storage.connection_string.clone());
+    anyhow::ensure!(
+        !connection_string.is_empty(),
+        "set DATABASE_URL or storage.connection_string"
+    );
     tracing::info!("initializing PostgreSQL database");
 
     let pool = db::init_postgres_pool(&connection_string).await?;

@@ -897,12 +897,9 @@ impl ScrubberController {
         state: &AppState,
         id: Uuid,
         actor: &str,
-        reason: Option<String>,
+        reason: String,
     ) -> Result<Diversion> {
-        if reason
-            .as_deref()
-            .is_some_and(|reason| reason.trim().is_empty() || reason.len() > 1024)
-        {
+        if reason.trim().is_empty() || reason.len() > 1024 {
             return Err(PrefixdError::InvalidRequest(
                 "reason must contain text and be at most 1024 UTF-8 bytes".into(),
             ));
@@ -926,10 +923,7 @@ impl ScrubberController {
         if row.status.outstanding() {
             row.status = DiversionStatus::Withdrawing;
             // The first withdrawal reason and requester are immutable.
-            if row.withdrawal_reason.is_none() {
-                row.withdrawal_reason =
-                    Some(reason.unwrap_or_else(|| format!("operator withdrawal by {actor}")));
-            }
+            row.withdrawal_reason.get_or_insert(reason);
             row.withdrawal_actor.get_or_insert(actor.into());
             state
                 .repo

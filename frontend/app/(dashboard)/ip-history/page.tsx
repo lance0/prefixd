@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Search, AlertTriangle, Shield, FileText } from "lucide-react"
 import { PageHeader } from "@/components/dashboard/page-header"
+import { DivertedIndicator } from "@/components/dashboard/diverted-indicator"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 import { ActionBadge } from "@/components/dashboard/action-badge"
 import { Tag } from "@/components/dashboard/status-pill"
@@ -106,6 +107,7 @@ export default function IpHistoryPage() {
         <PageHeader
           title="IP history"
           description="Every event and mitigation recorded for one address, newest first."
+          meta={activeIp ? <DivertedIndicator host={activeIp} showUnknown /> : null}
           actions={activeIp ? (
             <Button variant="outline" size="sm" onClick={handleGenerateReport}>
               <FileText className="size-4" aria-hidden="true" />

@@ -181,7 +181,7 @@ reconciliation retries the same deletion with the original actor and reason.
 It never re-announces a rule with pending withdrawal.
 
 In the dashboard, **Withdraw** on a mitigation's detail page opens a
-confirmation dialog with an optional reason, then sends the same request.
+confirmation dialog that requires a reason, then sends the same request.
 
 ## 6. Read the audit entry and confirm absence
 

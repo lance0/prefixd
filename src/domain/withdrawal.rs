@@ -170,7 +170,8 @@ impl WithdrawalRequest {
         })
     }
 
-    pub fn audit_entry(&self) -> crate::observability::AuditEntry {
+    /// The completion audit for `finished`, the row this operation just ended.
+    pub fn audit_entry(&self, finished: &Mitigation) -> crate::observability::AuditEntry {
         use crate::observability::{ActorType, AuditEntry};
         let actor_type = match self.actor_type.as_str() {
             "operator" => ActorType::Operator,
@@ -187,7 +188,13 @@ impl WithdrawalRequest {
             },
             Some("mitigation"),
             Some(self.mitigation_id.to_string()),
-            serde_json::json!({"reason": self.reason, "operation_id": self.operation_id}),
+            serde_json::json!({
+                "reason": self.reason,
+                "operation_id": self.operation_id,
+                // The scheduled expiry this operation cut short, and when the lifetime ended.
+                "previous_expires_at": finished.expires_at,
+                "ended_at": finished.withdrawn_at,
+            }),
         )
     }
 

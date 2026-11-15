@@ -52,7 +52,7 @@ async function open() {
 }
 
 function reason(dialog: HTMLElement) {
-  return within(dialog).getByLabelText("Withdrawal reason (optional)")
+  return within(dialog).getByLabelText("Withdrawal reason")
 }
 
 function escape() {
@@ -176,9 +176,55 @@ describe("WithdrawConfirmDialog", () => {
     expect(alert).toHaveTextContent("Withdrawal failed.")
     expect(alert).toHaveTextContent("2 of 3 rules were not withdrawn.")
     expect(within(dialog).getByRole("status")).toHaveTextContent("")
-    expect(within(dialog).getByRole("button", { name: "Withdraw 3" })).toBeEnabled()
     expect(within(dialog).getByText("Per-rule results")).toBeInTheDocument()
-    expect(reason(dialog)).toHaveAttribute("maxLength", "1024")
     expect(reason(dialog)).toHaveAttribute("placeholder", "e.g., Attack subsided")
+    fireEvent.change(reason(dialog), { target: { value: "Retry" } })
+    expect(within(dialog).getByRole("button", { name: "Withdraw 3" })).toBeEnabled()
+  })
+
+  it("requires a reason and sends it trimmed", async () => {
+    const onConfirm = vi.fn(() => Promise.resolve(true))
+
+    setup({ onConfirm })
+    const dialog = await open()
+    const submit = within(dialog).getByRole("button", { name: "Withdraw" })
+
+    expect(reason(dialog)).toBeRequired()
+    expect(submit).toBeDisabled()
+
+    for (const blank of [" ", "\t\n  "]) {
+      fireEvent.change(reason(dialog), { target: { value: blank } })
+      expect(submit).toBeDisabled()
+      fireEvent.click(submit)
+    }
+
+    expect(onConfirm).not.toHaveBeenCalled()
+
+    fireEvent.change(reason(dialog), { target: { value: "  Attack subsided  " } })
+    fireEvent.click(submit)
+    expect(onConfirm).toHaveBeenCalledWith("Attack subsided")
+    await closed()
+  })
+
+  it("counts UTF-8 bytes against the API's 1,024-byte limit", async () => {
+    const onConfirm = vi.fn(() => Promise.resolve(true))
+
+    setup({ onConfirm })
+    const dialog = await open()
+    const submit = within(dialog).getByRole("button", { name: "Withdraw" })
+
+    // 512 two-byte characters fill the limit exactly; one more passes a
+    // 1,024-character check but not the API's byte check.
+    // Surrounding whitespace is trimmed before sending, so it does not count.
+    fireEvent.change(reason(dialog), { target: { value: `  ${"é".repeat(512)}  ` } })
+    expect(within(dialog).getByText("1024 / 1024 bytes")).toBeInTheDocument()
+    expect(submit).toBeEnabled()
+
+    fireEvent.change(reason(dialog), { target: { value: "é".repeat(513) } })
+    expect(within(dialog).getByText("1026 / 1024 bytes (over limit)")).toBeInTheDocument()
+    expect(reason(dialog)).toHaveAttribute("aria-invalid", "true")
+    expect(submit).toBeDisabled()
+    fireEvent.click(submit)
+    expect(onConfirm).not.toHaveBeenCalled()
   })
 })

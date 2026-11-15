@@ -609,7 +609,11 @@ impl RepositoryTrait for Repository {
         Self::insert_audit_on(&mut *self.pool.acquire().await?, entry).await
     }
 
-    async fn list_audit(&self, params: &ListParams) -> Result<Vec<AuditEntry>> {
+    async fn list_audit_filtered(
+        &self,
+        filters: &super::AuditListParams,
+    ) -> Result<Vec<AuditEntry>> {
+        let params = &filters.pagination;
         let rows = sqlx::query_as::<_, AuditRow>(
             r#"
             SELECT audit_id, timestamp, schema_version, actor_type, actor_id, action, target_type, target_id, details_json
@@ -617,6 +621,8 @@ impl RepositoryTrait for Repository {
             WHERE ($2::timestamptz IS NULL OR (timestamp, audit_id) < ($2, $5))
               AND ($3::timestamptz IS NULL OR timestamp >= $3)
               AND ($4::timestamptz IS NULL OR timestamp < $4)
+              AND ($6::text IS NULL OR target_type = $6)
+              AND ($7::text IS NULL OR target_id = $7)
             ORDER BY timestamp DESC, audit_id DESC LIMIT $1
             "#,
         )
@@ -625,6 +631,8 @@ impl RepositoryTrait for Repository {
         .bind(params.start)
         .bind(params.end)
         .bind(params.cursor.map(|c| c.id))
+        .bind(filters.target_type.as_deref())
+        .bind(filters.target_id.as_deref())
         .fetch_all(&self.pool)
         .await?;
 
@@ -736,7 +744,7 @@ impl RepositoryTrait for Repository {
             .bind(now)
             .execute(&mut *transaction)
             .await?;
-        let entry = pending.audit_entry();
+        let entry = pending.audit_entry(&mitigation);
         sqlx::query("INSERT INTO audit_log (audit_id, timestamp, actor_type, actor_id, action, target_type, target_id, details_json) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
             .bind(entry.audit_id)
             .bind(entry.timestamp)

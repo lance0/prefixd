@@ -3,7 +3,7 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { cn } from "@/lib/utils"
-import { LayoutDashboard, Shield, Activity, FileText, Settings, X, ChevronsLeft, ChevronsRight, FileCode, Database, History, Waypoints } from "lucide-react"
+import { LayoutDashboard, Shield, Activity, FileText, Settings, X, ChevronsLeft, ChevronsRight, FileCode, Database, History, Split, Waypoints } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { DialogClose, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
@@ -13,7 +13,7 @@ import { useStats, useOpenSignalGroupCount } from "@/hooks/use-api"
 const navItems = [
   { href: "/", label: "Overview", icon: LayoutDashboard, adminOnly: false },
   { href: "/mitigations", label: "Mitigations", icon: Shield, adminOnly: false },
-  { href: "/scrubbers", label: "Scrubbers", icon: Waypoints, adminOnly: true },
+  { href: "/scrubbers", label: "Scrubbers", icon: Split, adminOnly: false },
   { href: "/events", label: "Events", icon: Activity, adminOnly: false },
   { href: "/correlation", label: "Correlation", icon: Waypoints, adminOnly: false },
   { href: "/inventory", label: "Inventory", icon: Database, adminOnly: false },
