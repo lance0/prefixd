@@ -1,6 +1,8 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { ScrubbersContent } from "@/components/dashboard/scrubbers-content"
+import { Sidebar } from "@/components/dashboard/sidebar"
+import { Dialog } from "@/components/ui/dialog"
 import { createDiversion, previewDiversion, type DiversionPreview, type DiversionRequest, type ScrubberDiversion, type ScrubberProfiles } from "@/lib/api"
 import type { OperatorRole } from "@/lib/auth"
 import { deferred, failure, json, operatorResponse, renderApp, settle, signIn, useFakeController } from "./support/fake-controller"
@@ -134,6 +136,91 @@ describe("manual scrubber workflow", { timeout: 10_000 }, () => {
     expect(JSON.parse(controller.calls("POST", "/v1/diversions/preview")[0].body ?? "{}").scope.protocol).toBeNull()
   })
 
+  it("shows the proposed rule as FlowSpec rule text, not raw NLRI JSON", async () => {
+    await setup()
+    fireEvent.click(screen.getByRole("button", { name: "Preview diversion" }))
+    await screen.findByRole("checkbox", { name: "I confirm this traffic match and scrubber target." })
+    expect(screen.getByText("match destination 203.0.113.20/32 source 198.51.100.0/24 protocol tcp destination-port 443 then redirect 192.0.2.99")).toBeInTheDocument()
+    expect(screen.queryByText(/"dst_prefix"/)).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ["Victim host CIDR", "203.0.113.20", "Diversion needs one host. Use 203.0.113.20/32."],
+    ["Victim host CIDR", "203.0.113.0/24", "Diversion needs one host. Use 203.0.113.0/32."],
+    ["Source prefix (optional)", "198.51.100.1/24", "Host bits are set. Use 198.51.100.0/24 to match that network."],
+    ["Source prefix (optional)", "2001:db8::/64", "Source prefix must match the victim's address family."],
+    ["Destination ports (optional)", "80, http", "Comma-separated ports, 0-65535."],
+    ["Lifetime in seconds", "3601", "Lifetime must be a whole number from 5 to 3600 seconds. The profile may allow less."],
+    ["Reason", "   ", "A reason is required for the audit log."],
+  ])("refuses %s %j before any preview request", async (label, value, message) => {
+    await setup()
+    const input = screen.getByLabelText(label)
+
+    fireEvent.change(input, { target: { value } })
+    fireEvent.click(screen.getByRole("button", { name: "Preview diversion" }))
+    expect(await screen.findByText(message)).toBeInTheDocument()
+    expect(input).toHaveAttribute("aria-invalid", "true")
+    expect(input).toHaveAccessibleDescription(message)
+    await settle()
+    expect(controller.calls("POST", "/v1/diversions/preview")).toHaveLength(0)
+  })
+
+  it("requires a profile before previewing", async () => {
+    signIn(controller, "credentials", operatorResponse("admin"))
+    controller.route("GET", "/v1/scrubbers", () => json(profiles(true, true)))
+    controller.route("GET", "/v1/diversions", () => json([]))
+    renderApp(<ScrubbersContent />, { url: "/scrubbers" })
+    fireEvent.click(await screen.findByRole("button", { name: "Preview diversion" }))
+    expect(await screen.findByText("Select a scrubber profile.")).toBeInTheDocument()
+    expect(screen.getByRole("combobox", { name: "Profile" })).toHaveAttribute("aria-invalid", "true")
+    await settle()
+    expect(controller.calls("POST", "/v1/diversions/preview")).toHaveLength(0)
+  })
+
+  it("offers source ports only for UDP and never sends them for TCP", async () => {
+    await setup()
+    expect(screen.queryByLabelText("Source ports (optional)")).not.toBeInTheDocument()
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Protocol" }), { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "UDP" }))
+    fireEvent.change(screen.getByLabelText("Source ports (optional)"), { target: { value: "53, 123" } })
+    fireEvent.click(screen.getByRole("button", { name: "Preview diversion" }))
+    await waitFor(() => expect(controller.calls("POST", "/v1/diversions/preview")).toHaveLength(1))
+    expect(JSON.parse(controller.calls("POST", "/v1/diversions/preview")[0].body ?? "{}").scope).toMatchObject({ protocol: 17, src_ports: [53, 123] })
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Protocol" }), { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "TCP" }))
+    expect(screen.queryByLabelText("Source ports (optional)")).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "Preview diversion" }))
+    await waitFor(() => expect(controller.calls("POST", "/v1/diversions/preview")).toHaveLength(2))
+    const sent = JSON.parse(controller.calls("POST", "/v1/diversions/preview")[1].body ?? "{}").scope
+
+    expect(sent.protocol).toBe(6)
+    expect(sent).not.toHaveProperty("src_ports")
+  })
+
+  it("refuses requests a return-leg profile cannot take before preview", async () => {
+    const configured = profiles(true, true)
+
+    configured.configuration[0].return_leg = { router_peers: ["192.0.2.3"], policy_binding: "client-side-v1", export_community: "64496:100", tcp_flags: "syn_ack" }
+    signIn(controller, "credentials", operatorResponse("admin"))
+    controller.route("GET", "/v1/scrubbers", () => json(configured))
+    controller.route("GET", "/v1/diversions", () => json([]))
+    renderApp(<ScrubbersContent />, { url: "/scrubbers" })
+    await screen.findByText("New diversion")
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Profile" }), { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "a" }))
+    fireEvent.change(screen.getByLabelText("Victim host CIDR"), { target: { value: "203.0.113.20/32" } })
+    fireEvent.change(screen.getByLabelText("Source prefix (optional)"), { target: { value: "198.51.100.0/24" } })
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Investigated attack" } })
+    fireEvent.click(screen.getByRole("button", { name: "Preview diversion" }))
+    expect(await screen.findByText("A TCP diversion through this profile cannot select a source prefix.")).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText("Source prefix (optional)"), { target: { value: "" } })
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Protocol" }), { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "Any" }))
+    expect(await screen.findByText("This profile's return leg needs a protocol. Choose TCP or UDP.")).toBeInTheDocument()
+    await settle()
+    expect(controller.calls("POST", "/v1/diversions/preview")).toHaveLength(0)
+  })
+
   it("discards a shown preview when the protocol changes", async () => {
     await setup()
     fireEvent.click(screen.getByRole("button", { name: "Preview diversion" }))
@@ -234,6 +321,18 @@ describe("scrubber re-arm and access", () => {
     expect(mutations()).toHaveLength(0)
   })
 
+  it("gives Scrubbers its own navigation icon", async () => {
+    signIn(controller, "credentials", operatorResponse("admin"))
+    controller.route("GET", "/v1/stats", () => json({ total_active: 0, total_mitigations: 0, total_events: 0, pops: [] }))
+    controller.route("GET", "/v1/signal-groups", () => json({ groups: [], count: 0, next_cursor: null, has_more: false }))
+    renderApp(<Dialog><Sidebar /></Dialog>)
+    const scrubbers = await screen.findByRole("link", { name: "Scrubbers" })
+    const icon = (name: string) => screen.getByRole("link", { name }).querySelector("svg")?.getAttribute("class")
+
+    expect(scrubbers.querySelector("svg")).toHaveClass("lucide-split")
+    expect(icon("Scrubbers")).not.toBe(icon("Correlation"))
+  })
+
   it("shows non-administrators the requirement and sends no mutations", async () => {
     await render({ role: "operator" })
     await settle()
@@ -242,16 +341,68 @@ describe("scrubber re-arm and access", () => {
     expect(mutations()).toHaveLength(0)
   })
 
-  it("reports unknown state when scrubber observations cannot be refreshed", async () => {
+  it("reports unknown profile state when scrubber profiles cannot be loaded", async () => {
     await render({ scrubbers: () => failure(500) })
-    expect(await screen.findByRole("alert")).toHaveTextContent("Scrubber observations could not be refreshed. Current state is unknown.")
+    const alert = await screen.findByRole("alert")
+
+    expect(alert).toHaveTextContent("Unable to load scrubber profiles")
+    expect(alert).toHaveTextContent("Profile readiness and arm state are unknown.")
+    expect(screen.queryByRole("button", { name: /Re-arm/ })).not.toBeInTheDocument()
   })
 
-  it("labels export evidence from a failed read as historical", async () => {
+  it("never shows a failed diversions read as an empty list", async () => {
+    signIn(controller, "credentials", operatorResponse("admin"))
+    controller.route("GET", "/v1/scrubbers", () => json(profiles(true, true)))
+    controller.route("GET", "/v1/diversions", () => failure(500))
+    renderApp(<ScrubbersContent />, { url: "/scrubbers" })
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unable to load diversions")
+    expect(screen.queryByText("No outstanding diversion intent.")).not.toBeInTheDocument()
+  })
+
+  it("shows loading rows until profiles and diversions arrive", async () => {
+    const scrubbers = deferred<Response>()
+    const rows = deferred<Response>()
+
+    signIn(controller, "credentials", operatorResponse("admin"))
+    controller.route("GET", "/v1/scrubbers", () => scrubbers.promise)
+    controller.route("GET", "/v1/diversions", () => rows.promise)
+    renderApp(<ScrubbersContent />, { url: "/scrubbers" })
+    expect(await screen.findByRole("status", { name: "Loading scrubber profiles" })).toBeInTheDocument()
+    expect(screen.getByRole("status", { name: "Loading diversions" })).toBeInTheDocument()
+    expect(screen.getByRole("heading", { level: 1, name: "Scrubbers" })).toBeInTheDocument()
+    expect(screen.queryByText("No outstanding diversion intent.")).not.toBeInTheDocument()
+    await act(async () => { scrubbers.resolve(json(profiles(true, true))); rows.resolve(json([])) })
+    expect(await screen.findByText("No outstanding diversion intent.")).toBeInTheDocument()
+    expect(screen.queryByRole("status", { name: "Loading diversions" })).not.toBeInTheDocument()
+  })
+
+  it("shows readiness and arm state as status pills", async () => {
+    await render({ armed: false, ready: true, rows: [] })
+    expect(await screen.findByText("Fresh readiness")).toHaveAttribute("data-tone", "success")
+    expect(screen.getByText("Unarmed")).toHaveAttribute("data-tone", "warning")
+  })
+
+  it("counts down to expiry in the display time zone instead of a raw timestamp", async () => {
+    const expiresAt = new Date(Date.now() + 10 * 60_000 + 30_000).toISOString()
+
+    await render({ rows: [{ ...active, expires_at: expiresAt }] })
+    const line = await screen.findByText(/Local intent observed/)
+
+    expect(line).toHaveTextContent(/Expires in 10m · \d{2} \w{3} \d{2}:\d{2}:\d{2} UTC/)
+    expect(line).not.toHaveTextContent(expiresAt)
+    expect(screen.getByText("Active")).toHaveAttribute("data-tone", "success")
+  })
+
+  it("labels export evidence from a failed read as historical in a per-peer table", async () => {
     const peers = [{ peer_address: "192.0.2.2", disposition: "committed", reason: "" }]
 
     await render({ rows: [{ ...active, export_observation: { observed_at: "2030-01-01T00:00:00Z", peers, error: "scrubber export observation timed out" } }] })
-    expect(await screen.findByText(/Historical peer export observation from 2030-01-01T00:00:00Z; current export unknown/)).toBeInTheDocument()
+    expect(await screen.findByText(/Historical observation from .*Current export is unknown: scrubber export observation timed out/)).not.toHaveTextContent("2030-01-01T00:00:00Z")
+    const table = screen.getByRole("table", { name: "Peer export" })
+
+    expect(within(table).getByRole("columnheader", { name: "Export at observation" })).toBeInTheDocument()
+    expect(within(table).getByText("192.0.2.2")).toBeInTheDocument()
+    expect(within(table).getByText("Committed")).toHaveAttribute("data-tone", "neutral")
   })
 
   it("shows both legs, the return leg as destination any, and separate export evidence", async () => {
@@ -261,9 +412,16 @@ describe("scrubber re-arm and access", () => {
 
     await render({ rows: [{ ...row, status: "active", export_observation: { observed_at: "2030-01-01T00:00:00Z", peers: inbound }, return_export_observation: { observed_at: "2030-01-01T00:00:05Z", peers: returned, error: "scrubber export observation timed out" } }] })
     expect(await screen.findByText("Return leg: destination any · src 203.0.113.20/32 · protocol 6 · src ports 443 · flags SYN+ACK → 192.0.2.99 · community 64496:100")).toBeInTheDocument()
-    expect(screen.getByText("Both legs observed locally · Expires 2030-01-01T00:00:00Z")).toBeInTheDocument()
-    expect(screen.getByText("Inbound leg peer export observed since 2030-01-01T00:00:00Z")).toBeInTheDocument()
-    expect(screen.getByText(/Historical return leg peer export observation from 2030-01-01T00:00:05Z; current export unknown/)).toBeInTheDocument()
+    expect(screen.getByText(/Both legs observed locally/)).toHaveTextContent(/Expires in .* · 01 Jan 2030 00:00:00 UTC/)
+    const inboundTable = screen.getByRole("table", { name: "Inbound leg peer export" })
+    const returnTable = screen.getByRole("table", { name: "Return leg peer export" })
+
+    expect(within(inboundTable).getByText("192.0.2.2")).toBeInTheDocument()
+    expect(within(inboundTable).getByText("Committed")).toHaveAttribute("data-tone", "success")
+    expect(within(inboundTable).queryByText("192.0.2.3")).not.toBeInTheDocument()
+    expect(within(returnTable).getByText("192.0.2.3")).toBeInTheDocument()
+    expect(within(returnTable).getByText("Committed")).toHaveAttribute("data-tone", "neutral")
+    expect(screen.getByText(/Historical observation from/)).toHaveTextContent("Historical observation from 01 Jan 2030 00:00:05 UTC. Current export is unknown: scrubber export observation timed out")
     const dialog = await openWithdraw()
 
     expect(dialog).toHaveTextContent("and its return leg destination any · src 203.0.113.20/32")
@@ -406,7 +564,7 @@ describe("configured VRF redirect target", { timeout: 10_000 }, () => {
     const configured = profiles(true, true)
     configured.configuration[0] = { ...configured.configuration[0], scope: "TRANSIT", ipv4_target: null, redirect_route_target: "44407:888" }
     await render({ rows: [{ ...preview.candidate, status: "active" }], scrubbers: () => json(configured) })
-    expect(screen.getByText("Redirect to VRF RT 44407:888")).toBeInTheDocument()
+    expect(screen.getByText("VRF RT 44407:888")).toBeInTheDocument()
     expect(screen.getByText(/203.0.113.20\/32 → VRF RT 44407:888/)).toHaveTextContent("RT 44407:777")
     const dialog = await openWithdraw()
     expect(within(dialog).getByText("VRF RT 44407:888")).toBeInTheDocument()
