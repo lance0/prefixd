@@ -300,6 +300,7 @@ mod tests {
             "127.0.0.1",
             "169.254.1.1",
             "224.0.0.1",
+            "240.0.0.1",
             "255.255.255.255",
             "::",
             "::1",
@@ -312,6 +313,161 @@ mod tests {
         }
         for value in ["192.0.2.99", "10.1.1.1", "2001:db8::99", "fd00::99"] {
             assert!(validate_redirect_target(value.parse().unwrap()), "{value}");
+        }
+    }
+
+    /// Breaks one field of an otherwise valid rule.
+    type Breakage = fn(&mut GuardedRule);
+
+    fn return_leg() -> GuardedRule {
+        GuardedRule {
+            nlri: FlowSpecNlri {
+                src_prefix: Some("192.0.2.1/32".into()),
+                protocol: Some(6),
+                src_ports: vec![443],
+                tcp_flags: Some(syn_ack()),
+                ..Default::default()
+            },
+            route_targets: vec![],
+            target: Some("198.51.100.99".parse().unwrap()),
+            redirect_route_target: None,
+            owner: "prefixd.scrub.a".into(),
+            revision: 7,
+            export_community: Some("64496:100".into()),
+        }
+    }
+
+    /// Each return-leg field is checked on its own: one bad field refuses the leg.
+    #[test]
+    fn return_leg_refuses_each_invalid_field_independently() {
+        let valid = return_leg();
+        valid.validate().unwrap();
+        assert_eq!(valid.victim(), "192.0.2.1".parse().ok());
+        let v6 = GuardedRule {
+            nlri: FlowSpecNlri {
+                src_prefix: Some("2001:db8::1/128".into()),
+                ..valid.nlri.clone()
+            },
+            target: Some("2001:db8::99".parse().unwrap()),
+            ..valid.clone()
+        };
+        v6.validate().unwrap();
+        let cases: [(&str, Breakage); 14] = [
+            ("zero revision", |r| r.revision = 0),
+            ("no target", |r| r.target = None),
+            ("target is victim", |r| r.target = r.victim()),
+            ("cross-family target", |r| {
+                r.target = Some("2001:db8::99".parse().unwrap())
+            }),
+            ("unsafe target", |r| {
+                r.target = Some("127.0.0.1".parse().unwrap())
+            }),
+            ("scope route targets", |r| {
+                r.route_targets = vec!["44407:777".into()]
+            }),
+            ("VRF redirect", |r| {
+                r.redirect_route_target = Some("44407:888".into())
+            }),
+            ("reserved community", |r| {
+                r.export_community = Some("0:100".into())
+            }),
+            ("non-canonical community", |r| {
+                r.export_community = Some("64496:0100".into())
+            }),
+            ("empty owner", |r| r.owner.clear()),
+            ("long owner", |r| r.owner = "a".repeat(65)),
+            ("owner byte", |r| r.owner = "prefixd.scrub/a".into()),
+            ("not a return shape", |r| r.nlri.protocol = Some(17)),
+            ("destination", |r| {
+                r.nlri.dst_prefix = "203.0.113.1/32".into()
+            }),
+        ];
+        for (name, mutate) in cases {
+            let mut rule = valid.clone();
+            mutate(&mut rule);
+            assert!(rule.validate().is_err(), "{name}");
+        }
+        let mut longest = valid.clone();
+        longest.owner = "a".repeat(64);
+        longest.validate().unwrap();
+    }
+
+    /// Each inbound diversion field is checked on its own: one bad field refuses the rule.
+    #[test]
+    fn host_diversion_refuses_each_invalid_field_independently() {
+        let global = GuardedRule {
+            nlri: FlowSpecNlri {
+                dst_prefix: "192.0.2.1/32".into(),
+                protocol: Some(6),
+                dst_ports: vec![443],
+                ..Default::default()
+            },
+            route_targets: vec![],
+            target: Some("192.0.2.99".parse().unwrap()),
+            redirect_route_target: None,
+            owner: "prefixd.scrub.a".into(),
+            revision: 7,
+            export_community: None,
+        };
+        global.validate().unwrap();
+        let vrf = GuardedRule {
+            nlri: FlowSpecNlri {
+                scope: Some(
+                    crate::domain::VpnFlowSpecIdentity::new(
+                        crate::domain::VpnFlowSpecFamily::Ipv4,
+                        "44407:40",
+                    )
+                    .unwrap(),
+                ),
+                ..global.nlri.clone()
+            },
+            route_targets: vec!["44407:777".into()],
+            target: None,
+            redirect_route_target: Some("44407:888".into()),
+            ..global.clone()
+        };
+        vrf.validate().unwrap();
+        let mut longest = global.clone();
+        longest.owner = "a".repeat(64);
+        longest.validate().unwrap();
+        let cases: [(&str, &GuardedRule, Breakage); 14] = [
+            ("network prefix", &global, |r| {
+                r.nlri.dst_prefix = "192.0.2.0/24".into()
+            }),
+            ("zero revision", &global, |r| r.revision = 0),
+            ("empty owner", &global, |r| r.owner.clear()),
+            ("long owner", &global, |r| r.owner = "a".repeat(65)),
+            ("owner byte", &global, |r| {
+                r.owner = "prefixd.scrub/a".into()
+            }),
+            ("cross-family target", &global, |r| {
+                r.target = Some("2001:db8::99".parse().unwrap())
+            }),
+            ("unsafe target", &global, |r| {
+                r.target = Some("127.0.0.1".parse().unwrap())
+            }),
+            ("target is victim", &global, |r| {
+                r.target = Some("192.0.2.1".parse().unwrap())
+            }),
+            ("no action", &global, |r| r.target = None),
+            ("global scope targets", &global, |r| {
+                r.route_targets = vec!["44407:777".into()]
+            }),
+            ("invalid nlri", &global, |r| r.nlri.src_ports = vec![53]),
+            ("non-canonical VRF target", &vrf, |r| {
+                r.redirect_route_target = Some("44407:0888".into())
+            }),
+            ("VPN without scope targets", &vrf, |r| {
+                r.route_targets.clear()
+            }),
+            ("invalid scope target", &vrf, |r| {
+                r.route_targets = vec!["not-a-target".into()]
+            }),
+        ];
+        for (name, base, mutate) in cases {
+            let mut rule = base.clone();
+            mutate(&mut rule);
+            assert!(rule.validate().is_err(), "{name}");
         }
     }
 
