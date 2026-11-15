@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A speaker that accepts a connection and never answers no longer stalls the
+  controller for minutes. Admission, manual creation, operator withdrawal,
+  detector unban and safelist withdrawal hold the lifecycle mutex and now make
+  one speaker attempt bounded by three seconds; reconciliation keeps the
+  three-attempt, 30-second budget and repairs the durable intent. A timed-out
+  add returns an unconfirmed outcome and a timed-out delete stays pending with
+  its recorded actor, reason and operation ID.
+- Completing a withdrawal reads its own pending request by operation ID instead
+  of loading every pending request to find one.
 - The release workflow stages its assets in `release-assets/` instead of
   `dist/`. The checkout tracks `dist/systemd/`, so the v0.27.0 run tagged the
   release and pushed both images but failed to create the GitHub Release when

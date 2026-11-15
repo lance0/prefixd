@@ -2320,9 +2320,16 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
         .unwrap();
     assert!(!persisted.speaker_delete_required);
     let deletes_before = speaker.deletes.load(SeqCst);
-    prefixd::domain::execute_withdrawal(&reconstructed, speaker.as_ref(), true, &persisted, None)
-        .await
-        .unwrap();
+    prefixd::domain::execute_withdrawal(
+        &reconstructed,
+        speaker.as_ref(),
+        true,
+        &persisted,
+        None,
+        prefixd::bgp::RetryPolicy::Durable,
+    )
+    .await
+    .unwrap();
     assert_eq!(speaker.deletes.load(SeqCst), deletes_before);
 }
 
@@ -5790,10 +5797,16 @@ async fn test_blackhole_admission_dry_run_sends_nothing_and_enforced_adds_the_fr
         serde_json::from_str::<prefixd::domain::BlackholeRule>(&rule_json).unwrap(),
         frozen
     );
-    let withdrawn =
-        prefixd::domain::execute_withdrawal(context.repo.as_ref(), &speaker, false, &request, None)
-            .await
-            .unwrap();
+    let withdrawn = prefixd::domain::execute_withdrawal(
+        context.repo.as_ref(),
+        &speaker,
+        false,
+        &request,
+        None,
+        prefixd::bgp::RetryPolicy::Durable,
+    )
+    .await
+    .unwrap();
     assert_eq!(withdrawn.status, MitigationStatus::Withdrawn);
     assert!(
         announcer

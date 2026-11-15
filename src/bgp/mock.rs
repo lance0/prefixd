@@ -730,6 +730,70 @@ impl BlackholeSpeaker for FaultyBlackholes {
     }
 }
 
+/// Test speaker that accepts the request and never answers a FlowSpec mutation.
+/// Each attempt models a backend spending its own deadline, so a bounded call
+/// shows one attempt where the retrying path spends the whole budget.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct MuteFlowSpec {
+    /// Attempts started by `announce`.
+    pub adds: std::sync::atomic::AtomicUsize,
+    /// Attempts started by `withdraw`.
+    pub deletes: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl MuteFlowSpec {
+    /// What one unanswered attempt costs on the retrying path.
+    pub const ATTEMPT: std::time::Duration = std::time::Duration::from_secs(30);
+    /// Attempts one call makes before it reports no answer.
+    pub const ATTEMPTS: usize = 3;
+
+    async fn mute(&self, attempts: &std::sync::atomic::AtomicUsize) -> Result<()> {
+        for _ in 0..Self::ATTEMPTS {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(Self::ATTEMPT).await;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl crate::bgp::FlowSpecWriter for MuteFlowSpec {
+    async fn announce(&self, _rule: &FlowSpecRule) -> Result<()> {
+        self.mute(&self.adds).await?;
+        Err(crate::error::PrefixdError::BgpAnnouncementFailed(
+            "no answer".into(),
+        ))
+    }
+    async fn withdraw(&self, _rule: &FlowSpecRule) -> Result<()> {
+        self.mute(&self.deletes).await?;
+        Err(crate::error::PrefixdError::BgpWithdrawalFailed(
+            "no answer".into(),
+        ))
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl crate::bgp::FlowSpecReader for MuteFlowSpec {
+    async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
+        Ok(vec![])
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl FlowSpecAnnouncer for MuteFlowSpec {
+    fn backend(&self) -> &'static str {
+        "mock"
+    }
+    fn reader(&self) -> Option<&dyn crate::bgp::FlowSpecReader> {
+        Some(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -872,9 +936,16 @@ mod tests {
                 assert_eq!(retried.actor, "original-actor");
                 assert_eq!(retried.reason, "original-reason");
                 assert_eq!(retried.rule_json, request.rule_json);
-                let finished = execute_withdrawal(&repo, &speaker, false, &retried, None)
-                    .await
-                    .unwrap();
+                let finished = execute_withdrawal(
+                    &repo,
+                    &speaker,
+                    false,
+                    &retried,
+                    None,
+                    crate::bgp::RetryPolicy::Durable,
+                )
+                .await
+                .unwrap();
                 assert_eq!(finished.status, MitigationStatus::Withdrawn);
                 let held = speaker.list_active().await.unwrap();
                 assert_eq!(held.len(), 2);

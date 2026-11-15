@@ -5,7 +5,7 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bgp::{AddOutcome, BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer};
+use crate::bgp::{AddOutcome, BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer, RetryPolicy};
 use crate::config::BlackholeConfig;
 use crate::db::RepositoryTrait;
 use crate::error::{PrefixdError, Result};
@@ -145,6 +145,7 @@ pub async fn announce_blackhole(
     mitigation: &Mitigation,
     binding: Option<&VerifiedSpeakerBinding>,
     lease: Option<&LeaseKeeper>,
+    policy: RetryPolicy,
 ) -> Result<BlackholeAnnouncement> {
     let rule = blackhole_rule(mitigation)?;
     let route = rule.route()?;
@@ -155,12 +156,16 @@ pub async fn announce_blackhole(
         .is_safelisted(&route.prefix().addr().to_string())
         .await?
     {
-        let withdrawn = withdraw_safelisted(repo, announcer, false, mitigation, binding).await?;
+        let withdrawn =
+            withdraw_safelisted(repo, announcer, false, mitigation, binding, policy).await?;
         return Ok(BlackholeAnnouncement::Withdrawn(Box::new(withdrawn)));
     }
     let start = std::time::Instant::now();
     let outcome = if rule.owner.is_empty() {
-        speaker.announce_blackhole(&route).await?
+        match policy {
+            RetryPolicy::Bounded => speaker.announce_blackhole_bounded(&route).await?,
+            RetryPolicy::Durable => speaker.announce_blackhole(&route).await?,
+        }
     } else {
         let lease = lease
             .filter(|lease| lease.owner() == rule.owner)
@@ -171,9 +176,18 @@ pub async fn announce_blackhole(
                     rule.prefix, rule.owner
                 ))
             })?;
-        let (generation, outcome) = speaker
-            .announce_leased_blackhole(&route, lease.lease_seconds())
-            .await?;
+        let (generation, outcome) = match policy {
+            RetryPolicy::Bounded => {
+                speaker
+                    .announce_leased_blackhole_bounded(&route, lease.lease_seconds())
+                    .await?
+            }
+            RetryPolicy::Durable => {
+                speaker
+                    .announce_leased_blackhole(&route, lease.lease_seconds())
+                    .await?
+            }
+        };
         lease.observe_add(generation);
         outcome
     };
@@ -231,6 +245,7 @@ pub async fn withdraw_safelisted(
     dry_run: bool,
     mitigation: &Mitigation,
     binding: Option<&VerifiedSpeakerBinding>,
+    policy: RetryPolicy,
 ) -> Result<Mitigation> {
     let request = request_withdrawal(
         repo,
@@ -245,7 +260,7 @@ pub async fn withdraw_safelisted(
     .await?;
     tracing::warn!(mitigation_id = %mitigation.mitigation_id, operation_id = %request.operation_id,
         "mitigation destination safelisted after admission; withdrawing");
-    let withdrawn = execute_withdrawal(repo, announcer, dry_run, &request, binding).await?;
+    let withdrawn = execute_withdrawal(repo, announcer, dry_run, &request, binding, policy).await?;
     crate::observability::metrics::MITIGATIONS_WITHDRAWN
         .with_label_values(&[withdrawn.action_type.as_str(), &withdrawn.pop, "safelisted"])
         .inc();

@@ -492,7 +492,18 @@ Independent housekeeping and peer observations continue after failed mutations.
 Each scheduler mutation rechecks the current row and pending intent under the
 shared lifecycle mutex; the mutex is released before the next rule. Both gRPC adapters
 bound complete mutation responses, including body and trailers, to 30 seconds
-per attempt, with at most three attempts.
+per attempt, with at most three attempts, on the repair path: each reconciliation
+pass retries a failed announce or delete from the durable intent.
+
+A caller holding the lifecycle mutex cannot wait for that budget, so admission,
+manual creation, operator withdrawal, detector unban and the safelist
+withdrawal make one attempt bounded by three seconds. A speaker that accepts
+connections and never answers therefore costs an accepted request one short
+wait instead of a retry storm that would freeze ingest, withdrawals and expiry
+for minutes. A timed-out add returns an unconfirmed outcome, and a timed-out
+delete stays pending with its recorded actor, reason and operation ID; both are
+repaired by the next reconciliation pass. Health still reports the daemon's own
+state, so an unconfirmed add is never presented as a successful install.
 
 Active mitigation gauges count local database status, including expired or
 pending rows awaiting confirmed cleanup; they are not proof of enforcement.

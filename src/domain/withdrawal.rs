@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use crate::bgp::FlowSpecAnnouncer;
+use crate::bgp::{FlowSpecAnnouncer, RetryPolicy};
 use crate::db::RepositoryTrait;
 use crate::error::{PrefixdError, Result};
 
@@ -393,8 +393,9 @@ pub async fn execute_withdrawal(
     dry_run: bool,
     request: &WithdrawalRequest,
     binding: Option<&super::VerifiedSpeakerBinding>,
+    policy: RetryPolicy,
 ) -> Result<Mitigation> {
-    finish_withdrawal_request(repo, Some(announcer), dry_run, request, binding).await
+    finish_withdrawal_request(repo, Some(announcer), dry_run, request, binding, policy).await
 }
 
 /// Complete a request that needs no speaker deletion, without a speaker connection.
@@ -403,7 +404,8 @@ pub async fn complete_local_withdrawal(
     request: &WithdrawalRequest,
     binding: Option<&super::VerifiedSpeakerBinding>,
 ) -> Result<Mitigation> {
-    finish_withdrawal_request(repo, None, false, request, binding).await
+    // No speaker call happens, so the attempt budget cannot apply.
+    finish_withdrawal_request(repo, None, false, request, binding, RetryPolicy::Durable).await
 }
 
 async fn finish_withdrawal_request(
@@ -412,6 +414,7 @@ async fn finish_withdrawal_request(
     dry_run: bool,
     request: &WithdrawalRequest,
     binding: Option<&super::VerifiedSpeakerBinding>,
+    policy: RetryPolicy,
 ) -> Result<Mitigation> {
     let validate_target = |request: &WithdrawalRequest| match binding {
         Some(binding) => {
@@ -429,13 +432,9 @@ async fn finish_withdrawal_request(
     };
     validate_target(request)?;
     let request = repo
-        .pending_withdrawals(Some(&request.pop))
+        .pending_withdrawal(request.operation_id, &request.pop)
         .await?
-        .into_iter()
-        .find(|pending| {
-            pending.operation_id == request.operation_id
-                && pending.mitigation_id == request.mitigation_id
-        })
+        .filter(|pending| pending.mitigation_id == request.mitigation_id)
         .ok_or_else(|| {
             PrefixdError::Conflict("withdrawal operation is no longer pending".into())
         })?;
@@ -457,24 +456,33 @@ async fn finish_withdrawal_request(
     if request.speaker_delete_required
         && let Some(announcer) = announcer
     {
+        let bounded = policy.is_bounded();
         // Each kind deletes only its own persisted route; an error keeps the intent pending.
         match &route {
             PersistedRoute::FlowSpec(rule) => {
                 announcer.match_support().require(&rule.nlri)?;
-                announcer.withdraw(rule).await?
+                if bounded {
+                    announcer.withdraw_bounded(rule).await?
+                } else {
+                    announcer.withdraw(rule).await?
+                }
             }
             PersistedRoute::Blackhole(rule) => {
                 // The recorded owner, never the current configuration or an override.
-                announcer
-                    .blackhole()
-                    .ok_or_else(|| {
-                        PrefixdError::Conflict(
-                            "pending blackhole withdrawal requires a blackhole-capable speaker"
-                                .into(),
-                        )
-                    })?
-                    .withdraw_blackhole(&rule.prefix, &rule.owner)
-                    .await?
+                let blackhole = announcer.blackhole().ok_or_else(|| {
+                    PrefixdError::Conflict(
+                        "pending blackhole withdrawal requires a blackhole-capable speaker".into(),
+                    )
+                })?;
+                if bounded {
+                    blackhole
+                        .withdraw_blackhole_bounded(&rule.prefix, &rule.owner)
+                        .await?
+                } else {
+                    blackhole
+                        .withdraw_blackhole(&rule.prefix, &rule.owner)
+                        .await?
+                }
             }
         }
     }
@@ -700,6 +708,126 @@ mod tests {
         assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
     }
 
+    /// A mute speaker: every attempt spends its own deadline and reports no
+    /// answer, which is what a wedged daemon looks like to the controller.
+    fn mute() -> crate::bgp::MuteFlowSpec {
+        crate::bgp::MuteFlowSpec::default()
+    }
+
+    /// The operator withdrawal path holds the lifecycle mutex. A timed-out delete
+    /// makes one attempt, keeps the recorded intent and stays pending, so
+    /// reconciliation completes exactly that request.
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_delete_keeps_the_recorded_intent_and_stays_pending() {
+        use crate::bgp::GUARDED_RPC_DEADLINE;
+        use std::sync::atomic::Ordering::SeqCst;
+        let repo = MockRepository::new();
+        let mitigation = mitigation("192.0.2.1/32");
+        repo.insert_mitigation(&mitigation).await.unwrap();
+        let speaker = mute();
+        let request = request_withdrawal(
+            &repo,
+            &mitigation,
+            false,
+            "operator",
+            "alice",
+            "too broad".into(),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let started = tokio::time::Instant::now();
+        let error =
+            execute_withdrawal(&repo, &speaker, false, &request, None, RetryPolicy::Bounded)
+                .await
+                .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(error, PrefixdError::BgpWithdrawalFailed(_)),
+            "{error}"
+        );
+        assert!(
+            elapsed <= GUARDED_RPC_DEADLINE + std::time::Duration::from_millis(10),
+            "{elapsed:?}"
+        );
+        assert_eq!(
+            speaker.deletes.load(SeqCst),
+            1,
+            "one attempt under the mutex"
+        );
+
+        // The recorded intent survives the timeout unchanged.
+        let pending = repo
+            .pending_withdrawal(request.operation_id, &request.pop)
+            .await
+            .unwrap()
+            .expect("a timed-out delete stays pending");
+        assert_eq!(pending.operation_id, request.operation_id);
+        assert_eq!(pending.mitigation_id, mitigation.mitigation_id);
+        assert_eq!(pending.actor_type, "operator");
+        assert_eq!(pending.actor, "alice");
+        assert_eq!(pending.reason, "too broad");
+        assert_eq!(pending.mitigation_updated_at, request.mitigation_updated_at);
+        assert_eq!(pending.nlri_hash, request.nlri_hash);
+        assert!(pending.completed_at.is_none());
+        assert!(
+            repo.get_mitigation(mitigation.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active(),
+            "the row is not withdrawn while the delete is unconfirmed"
+        );
+    }
+
+    /// Completing one request must not read every pending request: the lookup is
+    /// by operation ID, so the cost does not grow with the pending set.
+    #[tokio::test]
+    async fn completion_reads_only_the_requested_pending_row() {
+        let repo = MockRepository::new();
+        let speaker = MockAnnouncer::new();
+        for suffix in 1..=4 {
+            let other = mitigation(&format!("192.0.2.{suffix}/32"));
+            repo.insert_mitigation(&other).await.unwrap();
+            request_withdrawal(
+                &repo,
+                &other,
+                false,
+                "operator",
+                "alice",
+                "other".into(),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let target = mitigation("192.0.2.5/32");
+        repo.insert_mitigation(&target).await.unwrap();
+        let request = request_withdrawal(
+            &repo,
+            &target,
+            false,
+            "operator",
+            "alice",
+            "target".into(),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let (_, scans) = repo.lifecycle_read_counts();
+        execute_withdrawal(&repo, &speaker, false, &request, None, RetryPolicy::Durable)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.lifecycle_read_counts().1,
+            scans,
+            "completion must not scan the pending-withdrawal table"
+        );
+    }
+
     /// A simulation with its own pending withdrawal is left to the scheduler;
     /// another simulation's pending request does not hide it.
     #[tokio::test]
@@ -765,14 +893,22 @@ mod tests {
                 if message == "speaker target ownership is missing or mismatched")
         };
         assert!(binding(
-            execute_withdrawal(&repo, &speaker, false, &targeted, None).await
+            execute_withdrawal(
+                &repo,
+                &speaker,
+                false,
+                &targeted,
+                None,
+                RetryPolicy::Durable
+            )
+            .await
         ));
         assert!(binding(
             complete_local_withdrawal(&repo, &targeted, None).await
         ));
         assert_eq!(speaker.list_active().await.unwrap().len(), 1);
         assert_eq!(repo.pending_withdrawals(None).await.unwrap().len(), 1);
-        execute_withdrawal(&repo, &speaker, false, &request, None)
+        execute_withdrawal(&repo, &speaker, false, &request, None, RetryPolicy::Durable)
             .await
             .unwrap();
         assert!(speaker.list_active().await.unwrap().is_empty());
@@ -916,7 +1052,7 @@ mod tests {
         .unwrap();
         assert!(retried.speaker_delete_required);
         assert!(
-            execute_withdrawal(&repo, &speaker, true, &retried, None)
+            execute_withdrawal(&repo, &speaker, true, &retried, None, RetryPolicy::Durable)
                 .await
                 .is_err()
         );
@@ -929,7 +1065,7 @@ mod tests {
                 .is_active()
         );
         assert_eq!(repo.pending_withdrawals(None).await.unwrap().len(), 1);
-        execute_withdrawal(&repo, &speaker, false, &request, None)
+        execute_withdrawal(&repo, &speaker, false, &request, None, RetryPolicy::Durable)
             .await
             .unwrap();
         assert_eq!(speaker.announced_count().await, 0);
@@ -950,7 +1086,7 @@ mod tests {
         .unwrap();
         assert!(!request.speaker_delete_required);
         assert_eq!(
-            execute_withdrawal(&repo, &speaker, true, &request, None)
+            execute_withdrawal(&repo, &speaker, true, &request, None, RetryPolicy::Durable)
                 .await
                 .unwrap()
                 .status,
@@ -1001,7 +1137,7 @@ mod tests {
         stale.operation_id = Uuid::new_v4();
         assert!(repo.finish_withdrawal(&stale).await.unwrap().is_none());
         assert!(
-            execute_withdrawal(&repo, &speaker, false, &stale, None)
+            execute_withdrawal(&repo, &speaker, false, &stale, None, RetryPolicy::Durable)
                 .await
                 .is_err()
         );
@@ -1010,7 +1146,7 @@ mod tests {
         repo.update_mitigation(&mitigation).await.unwrap();
         assert!(repo.finish_withdrawal(&request).await.unwrap().is_none());
         assert!(
-            execute_withdrawal(&repo, &speaker, false, &request, None)
+            execute_withdrawal(&repo, &speaker, false, &request, None, RetryPolicy::Durable)
                 .await
                 .is_err()
         );
@@ -1261,7 +1397,7 @@ mod tests {
             let frozen = request.flowspec_rule().unwrap();
             assert_eq!(frozen.nlri.src_prefix, owner.match_criteria.src_prefix);
             assert_eq!(request.ownership_key().unwrap(), route.ownership_key());
-            execute_withdrawal(&repo, &writer, false, &request, None)
+            execute_withdrawal(&repo, &writer, false, &request, None, RetryPolicy::Durable)
                 .await
                 .unwrap();
             let remaining = writer.list_active().await.unwrap();
@@ -1528,9 +1664,16 @@ mod tests {
         // The rule is installed; a refused delete leaves it and the pending intent intact.
         let unsupported = MockAnnouncer::without_match_support();
         unsupported.announce(&rule).await.unwrap();
-        let error = execute_withdrawal(&repo, &unsupported, false, &request, None)
-            .await
-            .unwrap_err();
+        let error = execute_withdrawal(
+            &repo,
+            &unsupported,
+            false,
+            &request,
+            None,
+            RetryPolicy::Durable,
+        )
+        .await
+        .unwrap_err();
         assert!(
             error
                 .to_string()
@@ -1541,9 +1684,16 @@ mod tests {
         // Control: a speaker that encodes the component completes the same request.
         let supported = MockAnnouncer::new();
         supported.announce(&rule).await.unwrap();
-        execute_withdrawal(&repo, &supported, false, &request, None)
-            .await
-            .unwrap();
+        execute_withdrawal(
+            &repo,
+            &supported,
+            false,
+            &request,
+            None,
+            RetryPolicy::Durable,
+        )
+        .await
+        .unwrap();
         assert_eq!(supported.announced_count().await, 0);
     }
 
@@ -1599,7 +1749,7 @@ mod tests {
         request.rule_kind = "blackhole".into();
         let request = repo.begin_withdrawal(&request).await.unwrap();
         assert!(
-            execute_withdrawal(&repo, &speaker, false, &request, None)
+            execute_withdrawal(&repo, &speaker, false, &request, None, RetryPolicy::Durable)
                 .await
                 .is_err()
         );

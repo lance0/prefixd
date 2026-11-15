@@ -109,6 +109,7 @@ async fn withdraw_covered_mitigations(
             state.is_dry_run(),
             &mitigation,
             binding,
+            crate::bgp::RetryPolicy::Bounded,
         )
         .await
         {
@@ -576,6 +577,7 @@ mod tests {
             false,
             request,
             None,
+            crate::bgp::RetryPolicy::Durable,
         )
         .await
         .unwrap();

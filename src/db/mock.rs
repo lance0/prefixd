@@ -738,6 +738,20 @@ impl RepositoryTrait for MockRepository {
             .collect())
     }
 
+    async fn pending_withdrawal(
+        &self,
+        operation_id: Uuid,
+        pop: &str,
+    ) -> Result<Option<WithdrawalRequest>> {
+        Ok(self
+            .withdrawals
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.operation_id == operation_id && r.completed_at.is_none() && r.pop == pop)
+            .cloned())
+    }
+
     async fn finish_withdrawal(&self, request: &WithdrawalRequest) -> Result<Option<Mitigation>> {
         let mut mitigations = self.mitigations.lock().unwrap();
         let mut withdrawals = self.withdrawals.lock().unwrap();
