@@ -333,7 +333,7 @@ describe("scrubber re-arm and access", () => {
     expect(icon("Scrubbers")).not.toBe(icon("Correlation"))
   })
 
-  it.each(["viewer", "operator"] as const)("shows a %s profiles and diversions read-only and offers no mutation", async role => {
+  it.each(["viewer", "operator"] as const)("shows the %s role profiles and diversions read-only and offers no mutation", async role => {
     await render({ role, armed: false })
     expect(await screen.findByText("203.0.113.20/32 → 192.0.2.99 · a@v1")).toBeInTheDocument()
     expect(screen.getByText("Fresh readiness")).toBeInTheDocument()

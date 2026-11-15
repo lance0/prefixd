@@ -62,7 +62,7 @@ function serveDiversions(response: () => Response) {
 }
 
 describe("Diverted indicator", () => {
-  it.each(["viewer", "operator"] as const)("links a diverted Mitigations row to Scrubbers for a %s", async role => {
+  it.each(["viewer", "operator"] as const)("links a diverted Mitigations row to Scrubbers for the %s role", async role => {
     signIn(controller, "credentials", operatorResponse(role))
     controller.route("GET", "/v1/config/inventory", () => json({ customers: [] }))
     controller.route("GET", "/v1/pops", () => json([]))
