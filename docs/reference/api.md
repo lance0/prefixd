@@ -3053,8 +3053,9 @@ a section, such as a map entry, reports the section's path.
 **Response (422 Unprocessable Entity):** a present file failed to load or
 validate. The error names the file. It includes the loader detail only for
 `inventory.yaml` and `playbooks.yaml`; for `prefixd.yaml`, `correlation.yaml`
-and `alerting.yaml` it points to the controller log. That log entry names the
-key path, line and column but never the value, because these files hold secrets.
+and `alerting.yaml` it points to the controller log. For a YAML parse error,
+that log entry names the key path, line and column but never the value, because
+these files hold secrets.
 
 ```json
 {

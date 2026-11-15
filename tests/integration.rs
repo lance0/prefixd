@@ -7033,6 +7033,13 @@ async fn reload_log_redacts_secret_file_loader_errors() {
     let settings = format!("pop: iad1\nmode: {CANARY}\n");
     let alerting = format!("destinations: [{{type: {CANARY}}}]\n");
     let correlation = format!("webhook_adapters: [{{name: a, auth: {{type: {CANARY}}}}}]\n");
+    // A password-like string where a map or a count belongs.
+    let headers = format!(
+        "pop: iad1\nalerting: {{destinations: [{{type: generic, url: \"https://example.com/hook\", \
+         headers: \"postgres://a:{CANARY}@db\"}}]}}\n"
+    );
+    let count =
+        format!("pop: iad1\nquotas: {{max_active_per_customer: \"postgres://a:{CANARY}@db\"}}\n");
     // Negative control: the loader text these files produced before quotes the value.
     for raw in [
         serde_saphyr::from_str::<prefixd::config::Settings>(&settings)
@@ -7042,6 +7049,9 @@ async fn reload_log_redacts_secret_file_loader_errors() {
             .unwrap_err()
             .to_string(),
         serde_saphyr::from_str::<prefixd::correlation::CorrelationConfig>(&correlation)
+            .unwrap_err()
+            .to_string(),
+        serde_saphyr::from_str::<prefixd::config::Settings>(&headers)
             .unwrap_err()
             .to_string(),
     ] {
@@ -7059,6 +7069,17 @@ async fn reload_log_redacts_secret_file_loader_errors() {
             alerting,
             "alerting.yaml: destinations[0].type: unknown variant, expected one of slack, discord, \
              teams, telegram, pagerduty, opsgenie, generic at line 1 column 17",
+        ),
+        (
+            "prefixd.yaml",
+            headers,
+            "prefixd.yaml: alerting.destinations[0]: invalid type, expected a map at line 2 \
+             column 27",
+        ),
+        (
+            "prefixd.yaml",
+            count,
+            "prefixd.yaml: quotas.max_active_per_customer: invalid u32 at line 2 column 35",
         ),
         (
             "correlation.yaml",

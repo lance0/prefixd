@@ -1523,10 +1523,12 @@ differ from the running settings.
 A file that fails to load or validate returns 422 with an error naming it. Loader
 detail is included for `inventory.yaml` and `playbooks.yaml` only; for other
 files, which can hold secrets, see the controller log. For `prefixd.yaml`,
-`correlation.yaml` and `alerting.yaml`, the log and startup errors give the key
-path, line, column and what was expected, never the value, for example
-`prefixd.yaml: mode: unknown variant, expected one of dry-run, enforced at line 2
-column 7`.
+`correlation.yaml` and `alerting.yaml`, a YAML parse error in the log or at
+startup gives the key path, line, column and what was expected, never the value,
+for example `prefixd.yaml: mode: unknown variant, expected one of dry-run,
+enforced at line 2 column 7`. Key text stops at its first `:`. Validation that
+runs after parsing has no line or column; its messages name the keys they check
+and may name non-secret identifiers, such as a VPN scope or adapter name.
 
 ```bash
 # CLI
