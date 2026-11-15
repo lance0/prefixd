@@ -279,7 +279,13 @@ impl CorrelationConfig {
     /// Validation stays separate ([`CorrelationConfig::validate`]) so
     /// `--check` can report every error.
     pub fn from_yaml(content: &str) -> Result<(Self, Vec<String>)> {
-        crate::config::parse_secret_yaml(content)
+        let (config, mut unknown_keys) = crate::config::parse_secret_yaml(content)?;
+        // Adapter `auth` and `transforms` are internally tagged, which
+        // serde_ignored cannot see inside; the webhook module checks them.
+        if let Ok(document) = crate::config::parse_yaml::<serde_json::Value>(content) {
+            unknown_keys.extend(super::webhook::unknown_adapter_keys(&document));
+        }
+        Ok((config, unknown_keys))
     }
 
     /// Save correlation config to a YAML file with atomic write and backup.

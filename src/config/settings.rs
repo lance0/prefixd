@@ -917,16 +917,24 @@ impl Settings {
     pub fn from_yaml(content: &str) -> Result<(Self, Vec<String>)> {
         reject_removed_keys(content)?;
         let (settings, mut unknown_keys) = crate::config::parse_secret_yaml(content)?;
-        // `AlertingConfig` is internally tagged, so serde_ignored cannot see
-        // inside its destination variants; the alerting module checks them.
-        if let Ok(document) = crate::config::parse_yaml::<serde_json::Value>(content)
-            && let Some(alerting) = document.get("alerting")
-        {
-            unknown_keys.extend(
-                crate::alerting::AlertingConfig::unknown_destination_keys(alerting)
-                    .into_iter()
-                    .map(|key| format!("alerting.{key}")),
-            );
+        // Alert destinations and webhook adapter `auth` and `transforms` are
+        // internally tagged, so serde_ignored cannot see inside them; their
+        // modules check them.
+        if let Ok(document) = crate::config::parse_yaml::<serde_json::Value>(content) {
+            if let Some(alerting) = document.get("alerting") {
+                unknown_keys.extend(
+                    crate::alerting::AlertingConfig::unknown_destination_keys(alerting)
+                        .into_iter()
+                        .map(|key| format!("alerting.{key}")),
+                );
+            }
+            if let Some(correlation) = document.get("correlation") {
+                unknown_keys.extend(
+                    crate::correlation::webhook::unknown_adapter_keys(correlation)
+                        .into_iter()
+                        .map(|key| format!("correlation.{key}")),
+                );
+            }
         }
         Ok((settings, unknown_keys))
     }

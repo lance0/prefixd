@@ -666,24 +666,17 @@ impl AlertingConfig {
         else {
             return Vec::new();
         };
-        let mut unknown = Vec::new();
-        for (index, destination) in destinations.iter().enumerate() {
-            let Some(object) = destination.as_object() else {
-                continue;
-            };
-            let kind = object.get("type").and_then(|kind| kind.as_str());
-            let Some((_, known)) =
-                kind.and_then(|kind| DESTINATION_KEYS.iter().find(|(name, _)| *name == kind))
-            else {
-                continue;
-            };
-            for key in object.keys() {
-                if key != "type" && !known.contains(&key.as_str()) {
-                    unknown.push(format!("destinations[{index}].{key}"));
-                }
-            }
-        }
-        unknown
+        destinations
+            .iter()
+            .enumerate()
+            .flat_map(|(index, destination)| {
+                crate::config::unknown_tagged_keys(
+                    destination,
+                    &format!("destinations[{index}]"),
+                    &DESTINATION_KEYS,
+                )
+            })
+            .collect()
     }
 
     /// `${VAR}` placeholders, missing secrets and unusable `*_env` keys, which

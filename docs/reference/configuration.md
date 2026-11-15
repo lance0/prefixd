@@ -1697,7 +1697,11 @@ path in the `file` field and the key path in the `key` field.
 The next release refuses these keys instead. Remove every key a check reports
 before upgrading. Alert destination keys are reported under
 `alerting.destinations[N]`, from `alerting.yaml` or the inline `alerting`
-section, so a `chanel:` typo cannot be mistaken for configuration. This covers
+section, so a `chanel:` typo cannot be mistaken for configuration. Webhook
+adapter `auth` and `transforms` keys are reported the same way, such as
+`webhook_adapters[0].auth.heder`. A key is cut at its first character that no
+configuration key uses, so a flow-style typo such as `{token_env:SECRET}`
+reports `token_env` and never the text after it. This covers
 `prefixd.yaml`, `correlation.yaml` and `alerting.yaml`; `inventory.yaml` is not
 checked for unknown keys yet.
 

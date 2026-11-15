@@ -54,7 +54,8 @@ pub(crate) fn parse_secret_yaml<T: serde::de::DeserializeOwned>(
 
 /// serde_ignored writes a sequence index as `destinations.0` and marks every
 /// `Option` it descends through with a `?` segment. Report
-/// `destinations[0].chanel`, matching the key paths parse errors use.
+/// `destinations[0].chanel`, matching the key paths parse errors use. A
+/// redacted segment ends the path, since what follows belongs to its key.
 fn unknown_key_path(path: &serde_ignored::Path<'_>) -> String {
     let raw = path.to_string();
     let mut key = String::new();
@@ -62,17 +63,61 @@ fn unknown_key_path(path: &serde_ignored::Path<'_>) -> String {
         if segment.is_empty() || segment == "?" {
             continue;
         }
-        match segment.parse::<usize>() {
-            Ok(index) => key.push_str(&format!("[{index}]")),
-            Err(_) => {
-                if !key.is_empty() {
-                    key.push('.');
-                }
-                key.push_str(segment);
-            }
+        if let Ok(index) = segment.parse::<usize>() {
+            key.push_str(&format!("[{index}]"));
+            continue;
+        }
+        if !key.is_empty() {
+            key.push('.');
+        }
+        let safe = redacted_key(segment);
+        key.push_str(safe);
+        if safe.len() != segment.len() {
+            break;
         }
     }
-    if key.is_empty() { raw } else { key }
+    if key.is_empty() {
+        redacted_key("").to_string()
+    } else {
+        key
+    }
+}
+
+/// The leading identifier characters of an unknown key. A flow-style typo
+/// such as `{token_env:SECRET}` or `{token SECRET}` parses as one key, so key
+/// text stops at the first character no configuration key uses.
+pub(crate) fn redacted_key(key: &str) -> &str {
+    let end = key
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .unwrap_or(key.len());
+    if end == 0 { "<redacted>" } else { &key[..end] }
+}
+
+/// Keys of an internally tagged object that its variant does not declare, as
+/// `{path}.{key}`. serde_ignored cannot see inside internally tagged enums, so
+/// each variant's keys come from a table that a drift test holds equal to
+/// serde. Only key names are read, never values; an unknown `type` is left to
+/// parsing to refuse.
+pub(crate) fn unknown_tagged_keys(
+    value: &serde_json::Value,
+    path: &str,
+    variants: &[(&str, &[&str])],
+) -> Vec<String> {
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    let Some((_, known)) = object
+        .get("type")
+        .and_then(|kind| kind.as_str())
+        .and_then(|kind| variants.iter().find(|(name, _)| *name == kind))
+    else {
+        return Vec::new();
+    };
+    object
+        .keys()
+        .filter(|key| *key != "type" && !known.contains(&key.as_str()))
+        .map(|key| format!("{path}.{}", redacted_key(key)))
+        .collect()
 }
 
 fn redacted_yaml_error(path: Option<&str>, error: &serde_saphyr::Error) -> String {
@@ -674,6 +719,27 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(keys, vec!["destinations[0].chanel"]);
+        assert!(!keys.join(" ").contains(CANARY));
+        // A flow-style typo with no space after the colon, or with a space
+        // instead of a colon, parses as one key; the key stops before it.
+        for typo in [format!("token_env:{CANARY}"), format!("token {CANARY}")] {
+            let keys = settings_unknown_keys(&settings_document(&[(
+                "http",
+                &format!("http: {{listen: '127.0.0.1:8080', auth: {{mode: none, {typo}}}}}"),
+            )]));
+            let expected = if typo.contains(':') {
+                "http.auth.token_env"
+            } else {
+                "http.auth.token"
+            };
+            assert_eq!(keys, vec![expected]);
+            assert!(!keys.join(" ").contains(CANARY), "{keys:?}");
+        }
+        let (_, keys) = crate::alerting::AlertingConfig::from_yaml(&format!(
+            "destinations:\n  - {{type: generic, url: https://example.invalid/hook, secret_x:{CANARY}}}\n"
+        ))
+        .unwrap();
+        assert_eq!(keys, vec!["destinations[0].secret_x"]);
         assert!(!keys.join(" ").contains(CANARY));
         // The value of an unknown key is never read, so it cannot leak either.
         let keys = settings_unknown_keys(&settings_document(&[(

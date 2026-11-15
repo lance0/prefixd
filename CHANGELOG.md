@@ -50,7 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Unknown configuration keys are reported with their full key path, including
-  alert destination keys such as `alerting.destinations[0].chanel`, and ignored
+  alert destination keys such as `alerting.destinations[0].chanel` and webhook
+  adapter `auth` and `transforms` keys, and ignored
   in this release; the next release refuses them. Startup and reload log an
   `unknown configuration key ignored; the next release refuses it` warning with
   `file` and `key` fields. Only key paths are reported, never values.
