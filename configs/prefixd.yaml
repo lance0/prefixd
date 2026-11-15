@@ -4,7 +4,11 @@ mode: enforced
 http:
   listen: "0.0.0.0:8080"
   auth:
-    mode: credentials
+    # Bearer authentication accepts the token below and existing dashboard
+    # sessions, so operators still sign in. Detectors and prefixdctl need the
+    # token. Compose reads it from .env; startup refuses an empty value.
+    mode: bearer
+    bearer_token_env: "PREFIXD_API_TOKEN"
   # The Compose quickstart serves plain HTTP on port 80. Remove this line once
   # browsers reach prefixd over HTTPS, so session cookies are Secure.
   secure_cookies: false

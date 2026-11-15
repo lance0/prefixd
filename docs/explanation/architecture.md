@@ -237,7 +237,9 @@ Authentication is selected by deployment mode:
   `false`, including behind a TLS-terminating proxy. Session expiry is based on
   inactivity.
 - `bearer`: the configured token provides operator-level API access; existing
-  authenticated sessions retain their own roles.
+  authenticated sessions retain their own roles. It is one process-wide token,
+  not a per-detector credential, so it cannot separate ingestion from manual
+  withdrawal or name the caller in audit.
 - `mtls`: startup requires native TLS with client verification; accepted clients
   receive the current administrative trust level, not per-certificate roles.
 - `none`: bypasses authentication and role checks for development/test use.

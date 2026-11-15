@@ -21,6 +21,13 @@ Use the release tag that matches your controller. `latest` and `main` follow
 the main branch, not a release; see
 [image publication](../how-to/deployment.md#image-publication-and-selection).
 
+Inside a Compose controller, Compose supplies the endpoint and the `.env` token,
+so no flags are needed:
+
+```bash
+docker compose exec prefixd-rustbgpd prefixdctl status
+```
+
 For a short interactive command, add this alias to your Bash or Zsh configuration:
 
 ```sh
@@ -35,16 +42,21 @@ Scripts and container commands continue to use the installed `prefixdctl` binary
 ### Environment Variables
 
 ```bash
-export PREFIXD_API=http://localhost         # API endpoint (nginx entrypoint)
+export PREFIXD_API=http://127.0.0.1:8080    # API endpoint (controller listener)
 export PREFIXD_API_TOKEN=your-token-here    # Bearer token
 ```
+
+The default endpoint is the controller's native listener on port 8080. Host
+access to a Compose stack uses the nginx edge instead:
+`PREFIXD_API=http://localhost`. Inside a Compose controller, `PREFIXD_API` is
+already set to `http://127.0.0.1:8080`, as is the token from `.env`.
 
 ### Command-Line Options
 
 ```bash
 prefixdctl -a http://localhost -t $TOKEN <command>
 
-# Direct daemon access (without nginx)
+# Default: direct daemon access (without nginx)
 prefixdctl -a http://127.0.0.1:8080 -t $TOKEN <command>
 ```
 
@@ -55,8 +67,10 @@ prefixdctl -a http://127.0.0.1:8080 -t $TOKEN <command>
 | `-f, --format` | - | Output format: `table` (default) or `json` |
 
 HTTP command examples below assume bearer mode with a configured token. The CLI
-does not perform session login; the default Compose credentials mode needs a
-session-capable client such as curl.
+does not perform session login. `credentials` mode accepts sessions only, so it
+needs a session-capable client such as curl; `bearer` mode accepts the token and
+existing dashboard sessions. The shipped Compose stack uses `bearer` with a
+token generated into `.env`.
 
 ---
 

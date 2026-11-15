@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The shipped Compose configurations now use `bearer` authentication with a
+  token generated into `.env`. Detectors and `docker compose exec ...
+  prefixdctl` work on a fresh stack without flags. `bearer` still accepts
+  dashboard sessions, so administrator login, roles and audit are unchanged.
+- `prefixdctl` defaults to `http://127.0.0.1:8080`, the controller's own
+  listener, instead of port 80. Host access to a Compose stack still uses
+  `PREFIXD_API=http://localhost` through nginx.
+- An existing Compose deployment that pulls this change must set
+  `PREFIXD_API_TOKEN` in `.env`, or restore `http.auth.mode: credentials`,
+  before recreating the controller. Startup refuses `bearer` mode with an
+  empty token.
+
 ### Fixed
 
 - The release workflow stages its assets in `release-assets/` instead of

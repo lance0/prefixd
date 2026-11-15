@@ -59,17 +59,29 @@ http:
   auth:
     # Mode: none, bearer, mtls, or credentials
     mode: credentials
-    
-    # Bearer token (use env var for security)
+
+    # Bearer token (use env var for security); required for mode=bearer
     bearer_token_env: "PREFIXD_API_TOKEN"
 ```
+
+The shipped Compose configurations use `bearer` with a token generated into
+`.env`, so detectors and `prefixdctl` work out of the box.
 
 | Mode | Dashboard | API/CLI | Notes |
 |------|-----------|---------|-------|
 | `none` | Anonymous; login returns 403 | No auth | Development only |
-| `bearer` | N/A | Bearer token | API-only access |
+| `bearer` | Existing sessions continue | Bearer token | Hybrid; one shared token |
 | `mtls` | N/A | Client certificates | Machine-to-machine |
-| `credentials` | Session login | Session cookie | Recommended |
+| `credentials` | Session login | Session cookie | Session-only; recommended |
+
+Mode names describe the primary credential, not an exclusive one. `bearer`
+accepts the token and existing dashboard sessions, so it is effectively hybrid:
+operator login, roles and audit still apply, while detectors and the CLI use one
+process-wide token. That token carries the `operator` role for every holder; it
+cannot separate detector ingestion from manual withdrawals, carry a token name
+into audit, or be revoked per source. Named, scoped API tokens replace this
+shared credential when they land. `credentials` accepts session cookies only and
+rejects `Authorization: Bearer`.
 
 In `none` mode, requests have anonymous administrator permissions. Named sessions
 are ignored before request tracing, `/v1/auth/me` returns 401, and WebSocket
@@ -1466,9 +1478,9 @@ destinations:
 ```
 
 The variable must be in the controller's own environment. The shipped Compose
-stack forwards only `RUST_LOG`, `PREFIXD_API_TOKEN` and `DATABASE_URL` to the
-controller, not other `.env` entries, so add each variable to the controller
-service in `docker-compose.override.yml`:
+stack sets only `RUST_LOG`, `PREFIXD_API_TOKEN`, `PREFIXD_API` and
+`DATABASE_URL` in the controller, not other `.env` entries, so add each variable
+to the controller service in `docker-compose.override.yml`:
 
 ```yaml
 services:
@@ -1516,8 +1528,8 @@ to alert destinations as needed.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PREFIXD_API_TOKEN` | Bearer token for auth | Required if mode=bearer |
-| `PREFIXD_API` | API URL for prefixdctl | `http://127.0.0.1` |
+| `PREFIXD_API_TOKEN` | Bearer token for detectors and prefixdctl | Required if mode=bearer |
+| `PREFIXD_API` | API URL for prefixdctl | `http://127.0.0.1:8080` |
 | `RUST_LOG` | Complete tracing filter override | Configured filter; default `info` quiets PostgreSQL notices |
 | `DATABASE_URL` | PostgreSQL connection | Config value |
 

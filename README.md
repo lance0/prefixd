@@ -84,17 +84,28 @@ PostgreSQL and rustbgpd from published images. Nothing compiles locally.
 ```bash
 git clone https://github.com/lance0/prefixd.git
 cd prefixd
+token=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env 2>/dev/null | tail -1)
+if [ -z "$token" ] || [ "$token" = "your-secret-token-here" ]; then
+  sed '/^PREFIXD_API_TOKEN=/d' .env > .env.tmp 2>/dev/null || :
+  printf 'PREFIXD_API_TOKEN=%s\n' "$(openssl rand -hex 32)" >> .env.tmp
+  mv .env.tmp .env
+fi
+chmod 600 .env
 docker compose --profile rustbgpd up -d --pull always --no-build
 ```
 
-Create the first administrator at the hidden password prompt, then check
-liveness:
+The generated token authenticates detectors and `prefixdctl`; Compose loads it
+from `.env`. Create the first administrator at the hidden password prompt, then
+check the stack:
 
 ```bash
 docker compose exec prefixd-rustbgpd prefixdctl operators create \
   --username admin --role admin
+docker compose exec prefixd-rustbgpd prefixdctl status
 curl http://localhost/v1/health
 ```
+
+The [quickstart](docs/tutorials/quickstart.md) sends one test event end to end.
 
 Open `http://localhost` and sign in. nginx serves the dashboard and API on port
 80, and rustbgpd publishes BGP on 179. Prometheus (9091) and Grafana (3001) bind

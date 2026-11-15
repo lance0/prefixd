@@ -7,9 +7,25 @@ Rust or JavaScript toolchain is needed. Run commands from the repository root.
 
 ## Start and log in
 
+The shipped configuration authenticates detectors and `prefixdctl` with a
+bearer token. Generate one into the repository's `.env` before the first start;
+Compose loads that file for every later command:
+
 ```bash
 git clone https://github.com/lance0/prefixd.git
 cd prefixd
+token=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env 2>/dev/null | tail -1)
+if [ -z "$token" ] || [ "$token" = "your-secret-token-here" ]; then
+  sed '/^PREFIXD_API_TOKEN=/d' .env > .env.tmp 2>/dev/null || :
+  printf 'PREFIXD_API_TOKEN=%s\n' "$(openssl rand -hex 32)" >> .env.tmp
+  mv .env.tmp .env
+fi
+chmod 600 .env
+```
+
+Then start the stack and create the first dashboard administrator:
+
+```bash
 docker compose --profile rustbgpd up -d --pull always --no-build
 docker compose --profile rustbgpd ps
 curl http://localhost/v1/health
@@ -20,12 +36,63 @@ docker compose exec prefixd-rustbgpd prefixdctl operators create \
 open http://localhost
 ```
 
-Log in with that account. The shipped main config enables credentials,
-enforced operation and [leased FlowSpec](../reference/configuration.md#leased-flowspec):
+`docker compose exec` runs the CLI with `PREFIXD_API=http://127.0.0.1:8080` and
+the generated token already in its environment, so no flags are needed:
+
+```bash
+docker compose exec prefixd-rustbgpd prefixdctl status
+```
+
+Sign in with that administrator account. The `bearer` mode is hybrid: it
+accepts the token and existing dashboard sessions, so operator login, roles and
+the audit trail still apply. The token itself has the `operator` role: it can
+ingest, read and withdraw, but cannot manage operators or the safelist. Keep
+`.env` out of version control; to rotate the token, replace the value and
+recreate the controller.
+
+The shipped main config also enables enforced operation and
+[leased FlowSpec](../reference/configuration.md#leased-flowspec):
 if prefixd stops while rustbgpd keeps running, rustbgpd withdraws its rules
 within one lease (60 seconds by default). The sample inventory/playbooks are examples: adapt them to
 your network before sending real attack events. A healthy local API or speaker
 is not proof of a BGP session or router enforcement.
+
+## Send one test event
+
+The sample inventory owns `203.0.113.10` and the sample `udp_flood` playbook
+polices it, so one detector event exercises inventory, policy, the database and
+the rustbgpd speaker:
+
+```bash
+TOKEN=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env)
+
+curl --fail-with-body --silent --show-error -X POST http://localhost/v1/events \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "{
+    \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+    \"source\": \"quickstart\",
+    \"victim_ip\": \"203.0.113.10\",
+    \"vector\": \"udp_flood\",
+    \"bps\": 5000000000,
+    \"confidence\": 0.95
+  }"
+```
+
+A `202` with `"status":"accepted"` and a `mitigation_id` means the event created
+guarded intent. Then list it and withdraw it:
+
+```bash
+docker compose exec prefixd-rustbgpd prefixdctl mitigations list --limit 5
+docker compose exec prefixd-rustbgpd prefixdctl mitigations withdraw <mitigation_id> \
+  --reason "quickstart test"
+```
+
+`accepted_no_mitigation` means the destination is not in the loaded inventory;
+`accepted_no_playbook` means no enabled playbook matched the vector. Inspect
+both before assuming a detector or guardrail problem. Host commands reach the
+API through nginx on port 80; inside the controller, use
+`http://127.0.0.1:8080`. Detectors use the same token in the same header.
 
 ## Build from source
 
@@ -181,7 +248,9 @@ docker compose exec prefixd-gobgp prefixdctl operators create \
 ```
 
 The controller shares GoBGP's network namespace; management listens only on
-`127.0.0.1:50051`. Recreate both together if that namespace owner is recreated:
+`127.0.0.1:50051`. The same `.env` token and Compose-provided `PREFIXD_API`
+make `prefixdctl` work in `prefixd-gobgp`. Recreate both together if that
+namespace owner is recreated:
 `docker compose --profile gobgp up -d --force-recreate gobgp prefixd-gobgp`.
 Do not select both profiles. Profile selection does not transfer an existing
 database's speaker ownership binding.
@@ -217,9 +286,10 @@ Adapt the sample policy to your network, then connect a signal source:
    detector.
 4. **Connect a detector.** Use the [FastNetMon](../how-to/detectors/fastnetmon.md)
    notify script, [Alertmanager](../how-to/deployment.md#alertmanager-setup), or a
-   [generic webhook adapter](../how-to/detectors/generic-webhook.md). Detectors
-   usually authenticate with a bearer token; choose a mode in
-   [authentication](../how-to/deployment.md#authentication-setup).
+   [generic webhook adapter](../how-to/detectors/generic-webhook.md). Send the
+   `.env` token as `Authorization: Bearer`; the shipped bearer mode accepts it.
+   See [authentication](../how-to/deployment.md#authentication-setup) to choose
+   another mode.
 5. **Peer with your routers.** Replace the documentation peer in
    `configs/rustbgpd.toml` (or `configs/gobgp.conf`) and configure FlowSpec
    import on the router. See [router configuration](../how-to/deployment.md#router-configuration)

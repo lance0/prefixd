@@ -8,10 +8,17 @@ Profile selection does not change the database's
 [speaker ownership binding](upgrading.md#speaker-ownership-upgrade).
 
 The dashboard and API share `http://localhost` through nginx; the controller's
-port 8080 is not published. Protected curl examples below assume a deployment
-configured for bearer authentication with `PREFIXD_API_TOKEN` set. The shipped
-credentials-mode stack uses a logged-in browser session instead; see
+port 8080 is not published. Protected curl examples below assume the shipped
+bearer authentication, with the token generated into `.env` and sent as
+`Authorization: Bearer`. Controller commands run through `docker compose exec`,
+which already sets `PREFIXD_API` and the token. A deployment switched to
+`credentials` uses a logged-in browser session instead; see
 [authentication setup](deployment.md#authentication-setup).
+
+```bash
+# Host shell examples below read the token Compose uses
+export PREFIXD_API_TOKEN=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env)
+```
 
 ## Quick Diagnostics
 
@@ -19,9 +26,9 @@ credentials-mode stack uses a logged-in browser session instead; see
 # Check health
 curl http://localhost/v1/health | jq
 
-# Check status
-prefixdctl status
-prefixdctl peers
+# Check status (Compose supplies the endpoint and token)
+docker compose exec prefixd-rustbgpd prefixdctl status
+docker compose exec prefixd-rustbgpd prefixdctl peers
 
 # Check logs
 docker compose logs -f prefixd-rustbgpd
@@ -69,7 +76,7 @@ curl --fail-with-body --silent --show-error -X POST http://localhost/v1/events \
 docker compose exec -T prefixd-rustbgpd cat /etc/prefixd/inventory.yaml | grep 203.0.113
 
 # Check safelist
-prefixdctl safelist list
+docker compose exec -T prefixd-rustbgpd prefixdctl safelist list
 ```
 
 ### Guardrail Rejections
@@ -419,6 +426,32 @@ http:
     mode: bearer
     bearer_token_env: "PREFIXD_API_TOKEN"
 ```
+
+### Controller Restarts: Bearer Token Missing
+
+The shipped config uses `bearer`, so the controller refuses to start when
+`PREFIXD_API_TOKEN` is empty and logs:
+
+```text
+auth.mode=bearer but PREFIXD_API_TOKEN is not set or empty
+```
+
+Generate the token into `.env` as the
+[quickstart](../tutorials/quickstart.md#start-and-log-in) does, then recreate
+the controller:
+
+```bash
+token=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env 2>/dev/null | tail -1)
+if [ -z "$token" ] || [ "$token" = "your-secret-token-here" ]; then
+  sed '/^PREFIXD_API_TOKEN=/d' .env > .env.tmp 2>/dev/null || :
+  printf 'PREFIXD_API_TOKEN=%s\n' "$(openssl rand -hex 32)" >> .env.tmp
+  mv .env.tmp .env
+fi
+chmod 600 .env
+docker compose --profile rustbgpd up -d --no-build --force-recreate prefixd-rustbgpd
+```
+
+Changing `.env` alone does not update a running container.
 
 ### CORS Errors (Dashboard)
 

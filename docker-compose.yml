@@ -8,7 +8,11 @@ x-controller: &controller
   user: "999:999"
   environment:
     RUST_LOG: sqlx::postgres::notice=warn,info
+    # The shipped config authenticates with this token for detectors and the
+    # CLI. Generate one into .env before starting the stack; see the quickstart.
     PREFIXD_API_TOKEN: ${PREFIXD_API_TOKEN:-}
+    # prefixdctl talks to the controller's own listener, not the nginx edge.
+    PREFIXD_API: http://127.0.0.1:8080
     DATABASE_URL: postgres://prefixd:${POSTGRES_PASSWORD:-prefixd_secret}@postgres:5432/prefixd
   # Above shutdown.drain_timeout_seconds (30), so stop and restart let the drain finish.
   stop_grace_period: 35s

@@ -129,17 +129,23 @@ arguments:
 
 ```bash
 # Create admin (full access)
-prefixdctl operators create --username admin --role admin
+docker compose exec prefixd-rustbgpd prefixdctl operators create \
+  --username admin --role admin
 
 # Create operator (read + withdraw)
-prefixdctl operators create --username oncall --role operator
+docker compose exec prefixd-rustbgpd prefixdctl operators create \
+  --username oncall --role operator
 
 # Create viewer (read-only)
-prefixdctl operators create --username readonly --role viewer
+docker compose exec prefixd-rustbgpd prefixdctl operators create \
+  --username readonly --role viewer
 
 # List operators
-prefixdctl operators list
+docker compose exec prefixd-rustbgpd prefixdctl operators list
 ```
+
+Outside Compose, run the installed `prefixdctl` with `DATABASE_URL` set. For the
+GoBGP profile, use the `prefixd-gobgp` service instead.
 
 ### Auth Modes
 
@@ -158,6 +164,17 @@ http:
 | `bearer` | Existing session cookies continue to work | Bearer token |
 | `credentials` | Session login | Session cookie |
 | `mtls` | Client-certificate trusted browser/API access | Client certificate |
+
+The names describe the primary credential, not an exclusive one. `bearer` is
+effectively hybrid: it accepts the token and existing dashboard sessions, so
+operator login, roles and audit still apply. It uses one process-wide token,
+however, so detectors and the CLI share the `operator` role; the token cannot
+separate ingestion from manual withdrawals or be revoked per source. Named,
+scoped API tokens replace it when they land. `credentials` accepts sessions
+only and rejects `Authorization: Bearer`.
+
+The shipped Compose configurations use `bearer` with a token generated into the
+repository's `.env`; see the [quickstart](../tutorials/quickstart.md#start-and-log-in).
 
 ---
 
@@ -327,7 +344,8 @@ notify_script_args = -X POST -H "Content-Type: application/json" -H "Authorizati
 
 The webhook and the Community notify script authenticate with a bearer
 token, so the controller must run `http.auth.mode: bearer` (or `mtls`/`none`);
-`credentials` mode rejects `Authorization: Bearer`. The Community script
+`credentials` mode rejects `Authorization: Bearer`. The shipped Compose stack
+already uses `bearer` with the `.env` token. The Community script
 provides additional retry, logging and unban behavior.
 
 The adapter classifies the attack vector from the traffic breakdown (UDP/SYN/ICMP/TCP) and maps `action` to confidence:
@@ -991,19 +1009,20 @@ The public response reports the configured authentication mode.
 ```bash
 # Liveness check (public, lightweight - no database or speaker calls)
 curl http://localhost/v1/health
-# Example: {"status":"ok","version":"<prefixd-version>","auth_mode":"credentials"}
+# Example: {"status":"ok","version":"<prefixd-version>","auth_mode":"bearer"}
 
-# Full health in the default credentials mode (cookies saved by session login)
-curl -b cookies.txt http://localhost/v1/health/detail
-
-# Or, when configured for bearer mode
+# Full health with the Compose stack's bearer token from .env
+TOKEN=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env)
 curl -H "Authorization: Bearer $TOKEN" http://localhost/v1/health/detail
+
+# Credentials mode instead uses cookies saved by session login
+curl -b cookies.txt http://localhost/v1/health/detail
 # Reports database, peer observation, selected speaker/daemon metadata,
 # controller uptime and active mitigations; not router enforcement.
 
-# CLI status in bearer mode, with PREFIXD_API_TOKEN configured
-prefixdctl status
-prefixdctl peers
+# CLI status through the controller, which Compose points at its own listener
+docker compose exec prefixd-rustbgpd prefixdctl status
+docker compose exec prefixd-rustbgpd prefixdctl peers
 ```
 
 ### Request Tracing

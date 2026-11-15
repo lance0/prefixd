@@ -30,8 +30,9 @@ yet. Use their how-to guides until one exists:
 - Commands run from the repository root against the `rustbgpd` profile. For the
   `gobgp` profile, replace the `prefixd-rustbgpd` service with `prefixd-gobgp`
   and use the GoBGP command shown in each recipe.
-- The shipped config uses `credentials` authentication, so API calls carry a
-  session cookie from `POST /v1/auth/login`. In `bearer` mode, send
-  `Authorization: Bearer` instead; see [authentication](../how-to/deployment.md#authentication-setup).
+- The shipped config uses `bearer` authentication with the token from `.env`, so
+  API calls carry `Authorization: Bearer $PREFIXD_API_TOKEN`. Administrator-only
+  operations sign in first and use the session cookie; `credentials` mode
+  accepts sessions only. See [authentication](../how-to/deployment.md#authentication-setup).
 - Response bodies are trimmed with `jq`. Install it, or drop the filter and
   read the full JSON.

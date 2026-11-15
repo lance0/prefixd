@@ -603,7 +603,7 @@ for commands and mode-specific authentication.
 | Mode | Use Case | Configuration |
 |------|----------|---------------|
 | `none` | Development/testing | `http.auth.mode: none` |
-| `bearer` | API/CLI access | `auth.mode: bearer` + `http.auth.bearer_token_env` |
+| `bearer` | API/CLI and detector access; existing sessions keep working | `auth.mode: bearer` + `http.auth.bearer_token_env` |
 | `credentials` | Dashboard login | `auth.mode: credentials` with operators table |
 | `mtls` | Machine-to-machine | `auth.mode: mtls` + TLS client certs |
 

@@ -910,23 +910,26 @@ mod tests {
     }
 
     #[test]
-    fn shipped_speaker_examples_select_the_matching_backend() {
+    fn shipped_examples_select_matching_backend_and_auth_mode() {
         // Only the rustbgpd Compose profile's main config leases FlowSpec.
-        for (yaml, expected, leased) in [
+        for (yaml, expected, leased, auth) in [
             (
                 include_str!("../../configs/prefixd.yaml"),
                 BgpMode::Rustbgpd,
                 true,
+                AuthMode::Bearer,
             ),
             (
                 include_str!("../../configs/prefixd.yaml.example"),
                 BgpMode::Rustbgpd,
                 false,
+                AuthMode::Credentials,
             ),
             (
                 include_str!("../../configs/prefixd-gobgp.yaml"),
                 BgpMode::Gobgp,
                 false,
+                AuthMode::Bearer,
             ),
         ] {
             let settings = load_yaml(yaml).unwrap();
@@ -941,7 +944,7 @@ mod tests {
             );
             // Shipped files pin the backend instead of relying on resolution.
             assert!(yaml.contains("\nbgp:\n") && yaml.contains("\n  backend: "));
-            assert_eq!(settings.http.auth.mode, AuthMode::Credentials);
+            assert_eq!(settings.http.auth.mode, auth);
             assert_eq!(settings.quotas.max_active_per_customer, 20);
             assert_eq!(
                 serde_json::to_value(settings.shutdown).unwrap(),

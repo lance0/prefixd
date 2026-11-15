@@ -10,7 +10,12 @@ use std::process::ExitCode;
 #[command(name = "prefixdctl", about = "Control CLI for prefixd", version)]
 struct Cli {
     /// prefixd API endpoint
-    #[arg(short, long, default_value = "http://127.0.0.1", env = "PREFIXD_API")]
+    #[arg(
+        short,
+        long,
+        default_value = "http://127.0.0.1:8080",
+        env = "PREFIXD_API"
+    )]
     api: String,
 
     /// Bearer token for authentication
@@ -1747,6 +1752,22 @@ async fn cmd_migrations(format: OutputFormat) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn api_default_targets_the_controller_listener() {
+        let command = Cli::command();
+        let api = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "api")
+            .expect("api argument");
+        let default = api
+            .get_default_values()
+            .first()
+            .expect("api default value")
+            .to_string_lossy();
+        assert_eq!(default, "http://127.0.0.1:8080");
+    }
 
     fn diversion_cli_fixture(family: &str) -> (serde_json::Value, serde_json::Value) {
         let (prefix, target) = if family == "ipv4" {

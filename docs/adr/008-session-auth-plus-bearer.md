@@ -55,3 +55,14 @@ let operator = require_auth(&state, &auth_session, headers).await?;
 - Per-client API keys with scopes and rotation
 - LDAP/AD integration for session auth
 - OIDC/SAML for enterprise SSO
+
+## Amendment: auth mode names
+
+`credentials` and `bearer` describe which non-session credential is accepted,
+not whether sessions work. `credentials` accepts session cookies only and
+rejects `Authorization: Bearer`, so the CLI cannot use it. `bearer` accepts the
+token and existing sessions, which makes it the hybrid mode this ADR describes;
+session users keep their own roles. The single `PREFIXD_API_TOKEN` remains an
+operator-level shared secret, so it can ingest, read and withdraw for every
+holder and cannot name a detector source in audit. Named, scoped tokens remain
+future work.

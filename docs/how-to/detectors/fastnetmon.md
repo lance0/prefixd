@@ -183,10 +183,11 @@ WITHDRAW_DELAY_SECONDS="1"
 The script sources `/etc/default/prefixd` when it exists; variables set there
 override the process environment.
 
-The script authenticates with a bearer token only. Set `http.auth.mode: bearer`
-with `bearer_token_env: PREFIXD_API_TOKEN` (or use `mtls`/`none`) before pointing
-FastNetMon at it. `credentials` mode rejects `Authorization: Bearer`, so the
-script cannot log in; the shipped Compose configuration uses `credentials`.
+The script authenticates with a bearer token only. The shipped Compose
+configuration uses `bearer` with the token in `.env`, so no switch is needed;
+for a deployment on `credentials`, set `http.auth.mode: bearer` with
+`bearer_token_env: PREFIXD_API_TOKEN` (or use `mtls`/`none`) first.
+`credentials` mode rejects `Authorization: Bearer`, so the script cannot log in.
 
 
 FastNetMon runs the script once per ban and never repeats it. The script

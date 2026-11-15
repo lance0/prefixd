@@ -52,6 +52,13 @@ http:
 | `credentials` | Username/password login with session cookies |
 | `mtls` | Client certificate auth at TLS layer |
 
+`bearer` is effectively hybrid: sessions and the token are both accepted. It
+uses one process-wide token that carries the `operator` role, so it cannot
+separate detector ingestion from operator mutations or be revoked per source;
+named, scoped API tokens are not implemented yet. `credentials` accepts sessions
+only and rejects `Authorization: Bearer`. The shipped Compose configurations use
+`bearer`.
+
 > Unless explicitly marked "Public", `/v1/*` endpoints require authentication.
 
 ## List Filters

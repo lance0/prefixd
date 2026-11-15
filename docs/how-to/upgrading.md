@@ -34,6 +34,12 @@ the protection; drain affected rules or accept that policy change explicitly.
 - **Upgrade without changing `mode`.** Start the upgraded binary in the mode the
   old one ran, and switch modes only in a later restart; see
   [mitigation origin mode](#mitigation-origin-mode).
+- **Compose auth mode.** The shipped Compose configurations now use `bearer`
+  with a token generated into `.env`, so detectors and `prefixdctl` work
+  without flags. Before recreating a stack that mounts the checkout's
+  `configs/prefixd.yaml` or `configs/prefixd-gobgp.yaml`, set
+  `PREFIXD_API_TOKEN` in `.env` or keep `http.auth.mode: credentials`.
+  `bearer` with an empty token refuses startup.
 - **Always back up the database** before upgrading.
 
 ## rustbgpd v0.83
@@ -2290,7 +2296,8 @@ docker compose logs prefixd | grep -E 'reconciliation (stage )?failed'
 
 The last command should print nothing. `prefixdctl status` reads authenticated
 health detail: it needs `auth.mode: none` or a bearer token in
-`PREFIXD_API_TOKEN`. In `credentials` mode, check health in the dashboard
+`PREFIXD_API_TOKEN`. The shipped Compose stack supplies both through
+`docker compose exec`; in `credentials` mode, check health in the dashboard
 instead. If Prometheus scrapes the controller,
 `prefixd_reconciliation_runs_total{status="success"}` increases. Compare the
 GoBGP RIB with the active mitigations:

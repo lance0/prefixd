@@ -3408,6 +3408,7 @@ mod tests {
                 settings.bgp.mode = BgpMode::Mock;
                 settings.bgp.rustbgpd = None;
                 settings.mode = mode;
+                settings.http.auth.mode = crate::config::AuthMode::None;
                 let repo = Arc::new(MockRepository::new());
                 let speaker = Arc::new(if supported {
                     MockAnnouncer::new()
@@ -3492,6 +3493,7 @@ mod tests {
                 settings.bgp.rustbgpd = None;
                 settings.mode = mode;
                 settings.guardrails.allow_fragment_match = allowed;
+                settings.http.auth.mode = crate::config::AuthMode::None;
                 let repo = Arc::new(MockRepository::new());
                 let speaker = Arc::new(MockAnnouncer::new());
                 let state = AppState::new(
@@ -5101,6 +5103,7 @@ playbooks:
         settings.mode = mode;
         settings.correlation.enabled = false;
         settings.guardrails.allow_fragment_match = true;
+        settings.http.auth.mode = crate::config::AuthMode::None;
         let mut playbooks: Playbooks = crate::config::parse_yaml(PLAYBOOKS).unwrap();
         tweak(&mut settings, &mut playbooks);
         let parsed: Inventory =
