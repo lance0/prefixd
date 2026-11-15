@@ -238,6 +238,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `GET /v1/health` no longer returns `500` when a request carries a session
+  cookie and PostgreSQL is down. `GET /v1/ready`, `/metrics` and
+  `/openapi.json` no longer read the session either, so they answer the same
+  with or without a cookie. Routes that use the session, including
+  `GET /v1/health/detail`, still fail closed.
 - **Rate limiting no longer lets a detector flood block operators.** The single
   global token bucket is replaced by one bucket per request class (`ingest`,
   `signals`, `mutation`, `read`, `auth`) and per client address. Withdrawals

@@ -21,15 +21,22 @@ use crate::AppState;
 use crate::auth::AuthBackend;
 use crate::ws;
 
-/// Public routes (no auth required)
-fn public_routes() -> Router<Arc<AppState>> {
+/// Public routes that never read the session. They sit outside the auth
+/// layer, which loads any session cookie from PostgreSQL before the handler
+/// runs and fails the request when that lookup errors.
+fn sessionless_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/health", get(handlers::health))
-        .route("/v1/health/detail", get(handlers::health_detail))
         .route("/v1/ready", get(handlers::ready))
-        .route("/v1/auth/login", post(handlers::login))
         .route("/metrics", get(handlers::metrics))
         .route("/openapi.json", get(openapi_json))
+}
+
+/// Public routes that read the session (no auth required to reach them)
+fn public_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/v1/health/detail", get(handlers::health_detail))
+        .route("/v1/auth/login", post(handlers::login))
 }
 
 /// Session-only routes (browser only, requires session cookie)
@@ -225,6 +232,7 @@ pub fn create_router(
         .merge(session_routes())
         .merge(api_routes(&state))
         .layer(auth_layer)
+        .merge(sessionless_routes())
         .with_state(state.clone());
 
     common_layers(router, &state).layer(if let Some(origin) = &state.settings.http.cors_origin {
@@ -269,6 +277,7 @@ pub fn create_test_router_with_session_store(
         .merge(session_routes())
         .merge(api_routes(&state))
         .layer(auth_layer)
+        .merge(sessionless_routes())
         .with_state(state.clone());
 
     common_layers(router, &state)
