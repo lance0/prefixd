@@ -701,7 +701,9 @@ sudo chown -R prefixd:prefixd /etc/prefixd
 sudo install -D -m 0644 dist/systemd/prefixd.service.d/gobgp.conf \
   /etc/systemd/system/prefixd.service.d/gobgp.conf
 sudo systemctl daemon-reload
-sudo systemctl enable --now prefixd
+sudo systemctl enable prefixd
+# restart, not start: a running prefixd keeps its old user until restarted.
+sudo systemctl restart prefixd
 ```
 
 #### Restart behavior
