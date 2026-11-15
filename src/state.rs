@@ -55,6 +55,8 @@ pub struct AppState {
     /// FlowSpec uses the same epoch-fenced snapshot contract as blackholes.
     pub flowspec_export_evidence: crate::domain::ExportEvidenceStore,
     pub scrubber: crate::scrubber::ScrubberController,
+    /// Bounded VPN family probes shared by health and admission pre-checks.
+    pub vpn_probes: crate::bgp::VpnProbeCache,
     /// Directory containing config files (for hot-reload)
     pub config_dir: PathBuf,
     shutting_down: AtomicBool,
@@ -141,6 +143,7 @@ impl AppState {
             scrubber,
             db_pool,
             config_dir,
+            vpn_probes: Default::default(),
             shutting_down: AtomicBool::new(false),
             speaker_binding: None,
         }))
@@ -225,6 +228,18 @@ impl AppState {
 
     pub fn is_shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::SeqCst)
+    }
+
+    /// Admission pre-check through the shared probe cache. The writer still
+    /// probes fresh before each VPN mutation, so a cached result never
+    /// authorizes one (ADR 032).
+    pub async fn precheck_scope(
+        &self,
+        scope: Option<&crate::domain::VpnFlowSpecIdentity>,
+    ) -> Result<()> {
+        self.vpn_probes
+            .validate(self.announcer.as_ref(), scope)
+            .await
     }
 
     pub fn is_dry_run(&self) -> bool {

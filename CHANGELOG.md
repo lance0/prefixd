@@ -114,7 +114,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   controller's `environment:` in `docker-compose.override.yml`.
 - `storage` may be omitted when `DATABASE_URL` is set. An empty
   `DATABASE_URL` now counts as unset.
-
 - `GET /v1/audit` accepts exact `target_type` and `target_id` filters, applied
   before pagination, to list one target's history.
 - Completed `withdraw` and `expire` audit entries add `previous_expires_at`, the
@@ -179,6 +178,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reload applies the alerting editor's validation to `alerting.yaml`, so an
   empty webhook URL or missing credential fails the reload instead of
   replacing working alerting.
+- `GET /v1/health/detail` probes each configured VPN family at most once per
+  10 s window instead of on every request, and concurrent requests share one
+  probe. Each `speaker.vpn_families` entry adds `observed_at`, when its probe
+  finished, so a result can be up to 10 s old; an error or 2 s timeout is held
+  for the same window. A probe finishes even if the request that started it
+  disconnects. Admission pre-checks reuse a `supported` result from that
+  window, and the speaker still probes before every VPN mutation. Within 10 s
+  of a cached `supported`, a speaker that has just gone down no longer refuses
+  a VPN mitigation up front: the intent is saved, the speaker's probe fails, and
+  creation reports `"announcement_outcome": "unconfirmed"` with the intent
+  retained; a scoped scrubber diversion is admitted and latched as failed. A
+  failed VPN announcement or diversion clears that family's cached result.
 
 ### Fixed
 
@@ -210,6 +221,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Parse errors for `prefixd.yaml`, `correlation.yaml` and `alerting.yaml` no
+  longer quote the offending value, which could be part of a secret such as
+  `storage.connection_string` or a webhook URL, in the reload log or startup
+  error. They name the file, key path, line and column instead. Inventory and
+  playbook errors keep their full detail.
 - Alert delivery errors no longer include the request URL, which could carry a
   webhook secret or a Telegram bot token, in the controller log or the
   `POST /v1/config/alerting/test` response.
