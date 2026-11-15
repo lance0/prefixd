@@ -122,6 +122,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field reads "Withdrawal reason (optional)", a pending request cannot be
   repeated or dismissed, and focus returns to the opener after Cancel or Escape
   and to the page heading or another stable control after a completed withdrawal.
+- The dashboard's Scrubbers page now uses the shared page header, status pills
+  for readiness, arm state and diversion status, expiry countdowns in the
+  display time zone, a per-peer export table for each leg, FlowSpec rule text
+  instead of raw match JSON, and loading and error states. The diversion form
+  validates each field before preview and offers source ports only for UDP,
+  the only protocol the controller accepts them for. Scrubbers has its own
+  navigation icon.
 - A present `prefixd.yaml` that fails to load now fails `POST
   /v1/config/reload` even when `correlation.yaml` supplies correlation.
 - A failed reload returns 422 for an invalid file and 500 for an unexpected
