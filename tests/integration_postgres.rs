@@ -7734,3 +7734,129 @@ async fn test_event_outcomes_replay_filter_and_write_once_postgres_mock_parity()
         assert!(list(Some(vec![EventOutcome::Safelisted])).await.is_empty());
     }
 }
+
+#[tokio::test]
+async fn pending_withdrawal_reads_the_postgres_ledger() {
+    use prefixd::db::MitigationListParams;
+    use prefixd::domain::{
+        ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
+        WithdrawalRequest,
+    };
+    use uuid::Uuid;
+
+    fn expired_row(pop: &str, victim: &str) -> Mitigation {
+        let mut row = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: pop.into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: format!("{victim}/32"),
+                    ..Default::default()
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams::default(),
+                ttl_seconds: 60,
+                reason: "vector policy".into(),
+            },
+            victim.into(),
+            AttackVector::UdpFlood,
+        );
+        row.activate();
+        row.expires_at = chrono::Utc::now() - chrono::Duration::minutes(3);
+        row
+    }
+
+    let ctx = TestContext::new().await;
+    let pop = ctx.state.settings.pop.clone();
+    let pending = expired_row(&pop, "203.0.113.40");
+    let done = expired_row(&pop, "203.0.113.41");
+    ctx.repo.insert_mitigation(&pending).await.unwrap();
+    ctx.repo.insert_mitigation(&done).await.unwrap();
+
+    let mut request = WithdrawalRequest::new(
+        &pending,
+        true,
+        "operator",
+        "alice",
+        "false positive".into(),
+        true,
+    )
+    .unwrap();
+    request.requested_at = chrono::Utc::now() - chrono::Duration::seconds(92);
+    let request = ctx.repo.begin_withdrawal(&request).await.unwrap();
+
+    let summary = ctx
+        .repo
+        .pending_withdrawal_summary(Some(&pop))
+        .await
+        .unwrap();
+    assert_eq!(summary.pending, 1);
+    assert_eq!(summary.oldest_requested_at, Some(request.requested_at));
+    assert_eq!(summary.oldest_age_seconds(chrono::Utc::now()).unwrap(), 92);
+    assert_eq!(
+        ctx.repo
+            .pending_withdrawal_summary(Some("other-pop"))
+            .await
+            .unwrap()
+            .pending,
+        0
+    );
+
+    let rows = ctx
+        .repo
+        .pending_withdrawals_for(&[pending.mitigation_id])
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].operation_id, request.operation_id);
+    assert!(
+        ctx.repo
+            .pending_withdrawals_for(&[done.mitigation_id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let params = MitigationListParams {
+        limit: 100,
+        withdrawing: true,
+        ..Default::default()
+    };
+    let listed = ctx
+        .repo
+        .list_mitigations(None, None, None, None, &params)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].mitigation_id, pending.mitigation_id);
+    let all = MitigationListParams {
+        limit: 100,
+        ..Default::default()
+    };
+    assert_eq!(
+        ctx.repo
+            .list_mitigations(None, None, None, None, &all)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    ctx.repo.finish_withdrawal(&request).await.unwrap();
+    assert_eq!(
+        ctx.repo
+            .pending_withdrawal_summary(Some(&pop))
+            .await
+            .unwrap(),
+        prefixd::domain::WithdrawalQueueSummary::default()
+    );
+    assert!(
+        ctx.repo
+            .list_mitigations(None, None, None, None, &params)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

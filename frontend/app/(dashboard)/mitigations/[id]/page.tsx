@@ -12,6 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Check, Copy, FileText, AlertTriangle, Terminal, CheckCircle2, Info } from "lucide-react"
 import { DivertedIndicator } from "@/components/dashboard/diverted-indicator"
+import { WithdrawalPendingPill } from "@/components/dashboard/withdrawal-pending"
 import { PageHeader } from "@/components/dashboard/page-header"
 import { OriginTag, StatusPill, Tag } from "@/components/dashboard/status-pill"
 import { Field, FieldList } from "@/components/dashboard/field"
@@ -212,6 +213,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
           meta={
             <>
               <StatusBadge status={mitigation.status} />
+              <WithdrawalPendingPill pending={mitigation.withdrawal_pending} now={now} />
               <OriginTag origin={mitigation.origin_mode} showUnknown />
               <DivertedIndicator host={mitigation.victim_ip} scope={mitigation.vpn_scope?.identity ?? null} pop={mitigation.pop} showUnknown />
               <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} dscp={mitigation.dscp} />
@@ -439,6 +441,31 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
           </div>
 
           <div className="space-y-6">
+            {mitigation.withdrawal_pending && (
+              <Card data-testid="withdrawal-pending-card">
+                <CardHeader>
+                  <CardTitle>Withdrawal retrying</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <p className="text-sm text-muted-foreground text-pretty">
+                    Withdrawal retrying since{" "}
+                    <time dateTime={mitigation.withdrawal_pending.requested_at} className="font-medium text-foreground">
+                      {formatTime(mitigation.withdrawal_pending.requested_at, now)}
+                    </time>
+                    . The controller retries the recorded deletion against the original speaker; this row stays until the deletion is confirmed.
+                  </p>
+                  <FieldList className="sm:grid-cols-1">
+                    <Field label="Requested by"><span className="break-all">{mitigation.withdrawal_pending.actor}</span></Field>
+                    <Field label="Reason"><span className="text-pretty">{mitigation.withdrawal_pending.reason}</span></Field>
+                    <Field label="Operation"><span className="break-all font-mono text-xs">{mitigation.withdrawal_pending.operation_id}</span></Field>
+                    {mitigation.withdrawal_pending.last_error && (
+                      <Field label="Last error"><span className="break-words text-destructive">{mitigation.withdrawal_pending.last_error}</span></Field>
+                    )}
+                  </FieldList>
+                </CardContent>
+              </Card>
+            )}
+
             <Card>
               <CardHeader>
                 <CardTitle>Customer</CardTitle>

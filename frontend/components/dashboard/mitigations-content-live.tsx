@@ -9,6 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 import { OriginTag } from "@/components/dashboard/status-pill"
 import { DivertedIndicator, DiversionsUnknownNotice } from "@/components/dashboard/diverted-indicator"
+import { WithdrawalPendingPill } from "@/components/dashboard/withdrawal-pending"
 import { ActionBadge } from "@/components/dashboard/action-badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -34,7 +35,7 @@ import { formatRelative, formatTimeRemaining } from "@/lib/format"
 import { useTimeFormat } from "@/components/time-zone-provider"
 
 // Escalated is hidden: no code path produces it. Legacy rows still render with a danger pill.
-const STATUS_FILTERS = ["active", "pending", "expired", "withdrawn"] as const
+const STATUS_FILTERS = ["active", "pending", "expired", "withdrawn", "withdrawing"] as const
 
 const PENDING_REASON_NOTE = "Cleanup may still be pending; a pending request retains its original recorded reason."
 
@@ -525,6 +526,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                       <TableCell className="order-2 justify-self-end p-0 md:px-3 md:py-2">
                         <span className="flex flex-wrap items-center justify-end gap-1 md:justify-start">
                           <StatusBadge status={mitigation.status} />
+                          <WithdrawalPendingPill pending={mitigation.withdrawal_pending} now={now} />
                           <OriginTag origin={mitigation.origin_mode} />
                           <DivertedIndicator host={mitigation.victim_ip} scope={mitigation.vpn_scope?.identity ?? null} pop={mitigation.pop} />
                         </span>

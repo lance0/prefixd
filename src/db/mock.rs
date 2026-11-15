@@ -43,6 +43,9 @@ pub struct MockRepository {
     /// Every active-mitigation inventory read fails.
     #[cfg(test)]
     pub fail_active_reads: std::sync::atomic::AtomicBool,
+    /// Every withdrawal-ledger read fails, as an unavailable database does.
+    #[cfg(test)]
+    pub fail_pending_reads: std::sync::atomic::AtomicBool,
     /// Simulate transactional audit failure before committing an expiry change.
     #[cfg(test)]
     pub fail_extension_audit: std::sync::atomic::AtomicBool,
@@ -91,6 +94,20 @@ impl MockRepository {
         u32::try_from(rules).unwrap_or(u32::MAX)
     }
 
+    /// Refuse every ledger read when the test asked for an unavailable one.
+    fn pending_ledger_available(&self) -> Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_pending_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(crate::error::PrefixdError::Internal(
+                "withdrawal ledger unavailable".into(),
+            ));
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn lifecycle_read_counts(&self) -> (usize, usize) {
         use std::sync::atomic::Ordering::Relaxed;
@@ -121,6 +138,8 @@ impl MockRepository {
             fail_creation_rate_reads: Default::default(),
             #[cfg(test)]
             fail_active_reads: Default::default(),
+            #[cfg(test)]
+            fail_pending_reads: Default::default(),
             #[cfg(test)]
             fail_extension_audit: Default::default(),
             #[cfg(test)]
@@ -725,6 +744,7 @@ impl RepositoryTrait for MockRepository {
     }
 
     async fn pending_withdrawals(&self, pop: Option<&str>) -> Result<Vec<WithdrawalRequest>> {
+        self.pending_ledger_available()?;
         #[cfg(test)]
         self.pending_reads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -743,6 +763,7 @@ impl RepositoryTrait for MockRepository {
         operation_id: Uuid,
         pop: &str,
     ) -> Result<Option<WithdrawalRequest>> {
+        self.pending_ledger_available()?;
         Ok(self
             .withdrawals
             .lock()
@@ -750,6 +771,38 @@ impl RepositoryTrait for MockRepository {
             .iter()
             .find(|r| r.operation_id == operation_id && r.completed_at.is_none() && r.pop == pop)
             .cloned())
+    }
+
+    async fn pending_withdrawals_for(
+        &self,
+        mitigation_ids: &[Uuid],
+    ) -> Result<Vec<WithdrawalRequest>> {
+        self.pending_ledger_available()?;
+        Ok(self
+            .withdrawals
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.completed_at.is_none() && mitigation_ids.contains(&r.mitigation_id))
+            .cloned()
+            .collect())
+    }
+
+    async fn pending_withdrawal_summary(
+        &self,
+        pop: Option<&str>,
+    ) -> Result<crate::domain::WithdrawalQueueSummary> {
+        self.pending_ledger_available()?;
+        let withdrawals = self.withdrawals.lock().unwrap();
+        let pending = withdrawals
+            .iter()
+            .filter(|r| r.completed_at.is_none() && pop.is_none_or(|pop| r.pop == pop));
+        let count = pending.clone().count();
+        let oldest_requested_at = pending.map(|r| r.requested_at).min();
+        Ok(crate::domain::WithdrawalQueueSummary {
+            pending: u64::try_from(count).unwrap_or(u64::MAX),
+            oldest_requested_at,
+        })
     }
 
     async fn finish_withdrawal(&self, request: &WithdrawalRequest) -> Result<Option<Mitigation>> {
@@ -1210,6 +1263,7 @@ impl RepositoryTrait for MockRepository {
         params: &MitigationListParams,
     ) -> Result<Vec<Mitigation>> {
         let mitigations = self.mitigations.lock().unwrap();
+        let withdrawals = self.withdrawals.lock().unwrap();
         let mut matching: Vec<_> = mitigations
             .iter()
             .filter(|m| {
@@ -1228,6 +1282,10 @@ impl RepositoryTrait for MockRepository {
                     }
                 });
                 let pop_ok = params.pop.as_deref().is_none_or(|pop| m.pop == pop);
+                let withdrawing_ok = !params.withdrawing
+                    || withdrawals
+                        .iter()
+                        .any(|r| r.completed_at.is_none() && r.mitigation_id == m.mitigation_id);
                 let query_ok = params.query.as_deref().is_none_or(|query| {
                     let query = query.to_lowercase();
                     m.victim_ip.to_lowercase().contains(&query)
@@ -1247,6 +1305,7 @@ impl RepositoryTrait for MockRepository {
                     && ip_ok
                     && ack_ok
                     && pop_ok
+                    && withdrawing_ok
                     && query_ok
                     && cursor_ok
                     && start_ok

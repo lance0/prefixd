@@ -110,6 +110,8 @@ pub struct MitigationListParams {
     pub cursor: Option<MitigationCursor>,
     pub start: Option<DateTime<Utc>>,
     pub end: Option<DateTime<Utc>>,
+    /// Only rows with a still-pending withdrawal request; the API token `withdrawing`.
+    pub withdrawing: bool,
 }
 
 #[async_trait]
@@ -321,6 +323,18 @@ pub trait RepositoryTrait: Send + Sync {
         operation_id: Uuid,
         pop: &str,
     ) -> Result<Option<WithdrawalRequest>>;
+    /// Pending withdrawal requests for these mitigations, for a list page or one
+    /// detail read. A failed read is an error, never an empty queue.
+    async fn pending_withdrawals_for(
+        &self,
+        mitigation_ids: &[Uuid],
+    ) -> Result<Vec<WithdrawalRequest>>;
+    /// Pending count and oldest request time for the withdrawal queue, optionally
+    /// scoped to one POP. Used by health and by the queue gauge.
+    async fn pending_withdrawal_summary(
+        &self,
+        pop: Option<&str>,
+    ) -> Result<crate::domain::WithdrawalQueueSummary>;
     /// Atomically complete this exact operation and its unchanged mitigation revision.
     async fn finish_withdrawal(&self, request: &WithdrawalRequest) -> Result<Option<Mitigation>>;
 

@@ -59,7 +59,7 @@ mod health;
 pub use health::{
     __path_health, __path_health_detail, __path_ready, ComponentHealth, DaemonHealthObservation,
     HealthResponse, PublicHealthResponse, ReadinessResponse, ReadinessStatus, SpeakerHealth,
-    health, health_detail, ready,
+    WithdrawalQueueHealth, health, health_detail, ready,
 };
 
 mod manual_flowspec;
@@ -266,12 +266,47 @@ pub struct CorrelationContext {
     pub explanation: Option<String>,
 }
 
+/// A durable withdrawal request that has not completed yet: the controller keeps
+/// retrying the recorded deletion against the original speaker target.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct WithdrawalPendingResponse {
+    /// When the operator, detector or scheduler first requested the deletion.
+    pub requested_at: String,
+    /// Immutable operation ID; the same ID survives every retry and restart.
+    pub operation_id: Uuid,
+    /// Who requested it (operator ID, detector source or `scheduler`).
+    pub actor: String,
+    /// The reason recorded with the request.
+    pub reason: String,
+    /// No failed-attempt text is persisted for a retry, so this is absent until one is
+    /// recorded. Absence is not evidence that every attempt succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+impl From<&crate::domain::WithdrawalRequest> for WithdrawalPendingResponse {
+    fn from(request: &crate::domain::WithdrawalRequest) -> Self {
+        Self {
+            requested_at: request.requested_at.to_rfc3339(),
+            operation_id: request.operation_id,
+            actor: request.actor.clone(),
+            reason: request.reason.clone(),
+            // The queue persists deletion intent, not attempt text. Absence stays
+            // absent so it is never read as a successful attempt.
+            last_error: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct MitigationResponse {
     /// Present only when this creation request committed intent without a successful speaker reply.
     /// Omission is not evidence of enforcement; this outcome is not persisted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub announcement_outcome: Option<AnnouncementOutcome>,
+    /// A still-pending durable withdrawal. `null` means no request is pending, not that
+    /// the row was withdrawn; a failed ledger read is an error.
+    pub withdrawal_pending: Option<WithdrawalPendingResponse>,
     /// Unique mitigation identifier
     pub mitigation_id: Uuid,
     /// Current status (pending, active, withdrawn, expired)
@@ -388,6 +423,7 @@ impl From<&Mitigation> for MitigationResponse {
     fn from(m: &Mitigation) -> Self {
         Self {
             announcement_outcome: None,
+            withdrawal_pending: None,
             mitigation_id: m.mitigation_id,
             status: m.status.to_string(),
             customer_id: m.customer_id.clone(),
@@ -2292,7 +2328,7 @@ pub async fn list_events(
     path = "/v1/mitigations",
     tag = "mitigations",
     params(
-        ("status" = Option<String>, Query, description = "Comma-separated exact statuses: pending, active, expired, withdrawn, rejected (legacy escalated is still accepted but never produced); every token must be valid and nonempty"),
+        ("status" = Option<String>, Query, description = "Comma-separated exact statuses: pending, active, expired, withdrawn, rejected (legacy escalated is still accepted but never produced), or `withdrawing` for rows with a still-pending durable withdrawal request; every token must be valid and nonempty"),
         ("customer_id" = Option<String>, Query, description = "Filter by customer ID"),
         ("q" = Option<String>, Query, description = "Literal case-insensitive substring of target, vector, customer ID or mitigation UUID; maximum 256 UTF-8 bytes, no NUL. Empty matches every row."),
         ("victim_ip" = Option<String>, Query, description = "Filter by exact stored host IP or canonical manual CIDR; no containment matching"),
@@ -2317,20 +2353,30 @@ pub async fn list_mitigations(
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
+    let mut withdrawing = false;
     let status_filter = match query
         .status
         .as_deref()
-        .map(|value| {
-            value
-                .split(',')
-                .map(str::parse)
-                .collect::<std::result::Result<Vec<MitigationStatus>, _>>()
+        .map(|value| -> std::result::Result<Vec<MitigationStatus>, String> {
+            value.split(',').try_fold(
+                Vec::new(),
+                |mut statuses, token| {
+                    // A pending durable withdrawal is a queue state, not a mitigation status:
+                    // it selects rows whatever their stored status is.
+                    if token == "withdrawing" {
+                        withdrawing = true;
+                    } else {
+                        statuses.push(token.parse::<MitigationStatus>()?);
+                    }
+                    Ok(statuses)
+                },
+            )
         })
         .transpose()
     {
-        Ok(status) => status,
+        Ok(statuses) => statuses.filter(|statuses| !statuses.is_empty()),
         Err(_) => return Ok(AppError(PrefixdError::InvalidRequest(
-            "invalid status filter; expected comma-separated pending, active, escalated, expired, withdrawn or rejected".into(),
+            "invalid status filter; expected comma-separated pending, active, escalated, expired, withdrawn, rejected or withdrawing".into(),
         )).into_response()),
     };
 
@@ -2374,6 +2420,7 @@ pub async fn list_mitigations(
         cursor,
         start,
         end,
+        withdrawing,
     };
 
     let mut mitigations = state
@@ -2399,6 +2446,26 @@ pub async fn list_mitigations(
     };
     let count = mitigations.len();
 
+    // A failed ledger read must not turn an unknown queue into "nothing pending".
+    let page_ids: Vec<Uuid> = mitigations.iter().map(|m| m.mitigation_id).collect();
+    let pending = match state.repo.pending_withdrawals_for(&page_ids).await {
+        Ok(pending) => pending,
+        Err(error) => {
+            tracing::error!(%error, "withdrawal ledger read failed; refusing an empty pending set");
+            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        }
+    };
+    let mut pending_by_mitigation: std::collections::HashMap<Uuid, WithdrawalPendingResponse> =
+        pending
+            .iter()
+            .map(|request| {
+                (
+                    request.mitigation_id,
+                    WithdrawalPendingResponse::from(request),
+                )
+            })
+            .collect();
+
     // Collect signal group IDs and fetch group data for correlation summaries
     let group_ids: Vec<Uuid> = mitigations
         .iter()
@@ -2416,6 +2483,7 @@ pub async fn list_mitigations(
         .iter()
         .map(|m| {
             let mut resp = MitigationResponse::from(m);
+            resp.withdrawal_pending = pending_by_mitigation.remove(&m.mitigation_id);
             // Add lightweight correlation summary for correlated mitigations
             if let Some(group_id) = m.signal_group_id {
                 if let Some(group) = group_map.get(&group_id) {
@@ -2472,6 +2540,20 @@ pub async fn get_mitigation(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let mut response = MitigationResponse::from(&mitigation);
+    // A failed ledger read is an error, not "nothing pending".
+    response.withdrawal_pending = match state
+        .repo
+        .pending_withdrawals_for(&[mitigation.mitigation_id])
+        .await
+    {
+        Ok(mut pending) => pending
+            .pop()
+            .map(|request| WithdrawalPendingResponse::from(&request)),
+        Err(error) => {
+            tracing::error!(%error, mitigation_id = %mitigation.mitigation_id, "withdrawal ledger read failed");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
     if matches!(
         mitigation.status,
         MitigationStatus::Active | MitigationStatus::Escalated
@@ -6049,6 +6131,254 @@ mod wedged_speaker_tests {
             started.elapsed() <= GUARDED_RPC_DEADLINE + Duration::from_millis(10),
             "{:?}",
             started.elapsed()
+        );
+    }
+}
+
+/// Pending durable withdrawals on the mitigation surface, health and filters.
+#[cfg(test)]
+mod pending_withdrawal_tests {
+    use super::{AppState, Arc};
+    use crate::bgp::MockAnnouncer;
+    use crate::config::{AuthMode, BgpMode, Inventory, OperationMode, Playbooks, Settings};
+    use crate::db::{MockRepository, RepositoryTrait};
+    use crate::domain::{
+        ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
+        MitigationStatus, WithdrawalRequest,
+    };
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use serde_json::Value;
+    use std::sync::atomic::Ordering::SeqCst;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    fn state(repo: Arc<MockRepository>) -> Arc<AppState> {
+        let mut settings: Settings =
+            crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+        settings.bgp.mode = BgpMode::Mock;
+        settings.bgp.rustbgpd = None;
+        settings.mode = OperationMode::Enforced;
+        settings.http.auth.mode = AuthMode::None;
+        settings.correlation.enabled = false;
+        AppState::new(
+            settings,
+            Inventory::new(vec![]),
+            Playbooks { playbooks: vec![] },
+            repo,
+            Arc::new(MockAnnouncer::new()),
+            ".".into(),
+        )
+        .unwrap()
+    }
+
+    /// An active row past its `expires_at`: the dashboard calls this "Expired 3m ago".
+    fn expired_row(pop: &str, victim: &str) -> Mitigation {
+        let mut row = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: pop.into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: format!("{victim}/32"),
+                    ..Default::default()
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams::default(),
+                ttl_seconds: 60,
+                reason: "vector policy".into(),
+            },
+            victim.into(),
+            AttackVector::UdpFlood,
+        );
+        row.status = MitigationStatus::Active;
+        row.expires_at = chrono::Utc::now() - chrono::Duration::minutes(3);
+        row
+    }
+
+    async fn pending_request(repo: &MockRepository, row: &Mitigation) -> WithdrawalRequest {
+        let mut request = WithdrawalRequest::new(
+            row,
+            true,
+            "operator",
+            "alice",
+            "false positive".into(),
+            true,
+        )
+        .unwrap();
+        request.requested_at = chrono::Utc::now() - chrono::Duration::seconds(92);
+        repo.begin_withdrawal(&request).await.unwrap()
+    }
+
+    async fn get(app: &axum::Router, path: &str) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    fn by_id<'a>(body: &'a Value, id: &Uuid) -> &'a Value {
+        body["mitigations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["mitigation_id"] == id.to_string())
+            .unwrap_or_else(|| panic!("missing {id} in {body}"))
+    }
+
+    #[tokio::test]
+    async fn a_pending_withdrawal_is_visible_and_filterable() {
+        let repo = Arc::new(MockRepository::new());
+        let state = state(repo.clone());
+        let pending = expired_row(&state.settings.pop, "203.0.113.10");
+        let done = expired_row(&state.settings.pop, "203.0.113.11");
+        repo.insert_mitigation(&pending).await.unwrap();
+        repo.insert_mitigation(&done).await.unwrap();
+        let request = pending_request(&repo, &pending).await;
+        let app = crate::api::create_test_router(state.clone());
+
+        let (status, body) = get(&app, "/v1/mitigations?limit=100").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let row = by_id(&body, &pending.mitigation_id);
+        assert_eq!(row["status"], "active");
+        let shown = &row["withdrawal_pending"];
+        assert_eq!(shown["operation_id"], request.operation_id.to_string());
+        assert_eq!(shown["requested_at"], request.requested_at.to_rfc3339());
+        assert_eq!(shown["actor"], "alice");
+        assert_eq!(shown["reason"], "false positive");
+        assert!(shown.get("last_error").is_none(), "{shown}");
+        assert!(
+            by_id(&body, &done.mitigation_id)["withdrawal_pending"].is_null(),
+            "a row without a request is explicit null, not omitted"
+        );
+
+        let (status, body) = get(&app, "/v1/mitigations?status=withdrawing").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let ids: Vec<_> = body["mitigations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["mitigation_id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(ids, [pending.mitigation_id.to_string()]);
+
+        let (status, body) = get(&app, "/v1/mitigations?status=withdrawing,nonsense").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("rejected or withdrawing")
+        );
+
+        let (status, detail) =
+            get(&app, &format!("/v1/mitigations/{}", pending.mitigation_id)).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(
+            detail["withdrawal_pending"]["operation_id"],
+            request.operation_id.to_string()
+        );
+
+        let (status, health) = get(&app, "/v1/health/detail").await;
+        assert_eq!(status, StatusCode::OK, "{health}");
+        assert_eq!(health["withdrawal_queue"]["status"], "observed");
+        assert_eq!(health["withdrawal_queue"]["pending"], 1);
+        let age = health["withdrawal_queue"]["oldest_age_seconds"]
+            .as_u64()
+            .unwrap();
+        assert!((92..=120).contains(&age), "{age}");
+    }
+
+    #[tokio::test]
+    async fn a_completed_withdrawal_is_not_pending() {
+        let repo = Arc::new(MockRepository::new());
+        let state = state(repo.clone());
+        let row = expired_row(&state.settings.pop, "203.0.113.20");
+        repo.insert_mitigation(&row).await.unwrap();
+        let request = pending_request(&repo, &row).await;
+        repo.finish_withdrawal(&request).await.unwrap();
+        let app = crate::api::create_test_router(state.clone());
+
+        let (status, body) = get(&app, "/v1/mitigations?limit=100").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            by_id(&body, &row.mitigation_id)["withdrawal_pending"].is_null(),
+            "{body}"
+        );
+        let (_, filtered) = get(&app, "/v1/mitigations?status=withdrawing").await;
+        assert_eq!(filtered["mitigations"].as_array().unwrap().len(), 0);
+
+        let (status, detail) = get(&app, &format!("/v1/mitigations/{}", row.mitigation_id)).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert!(detail["withdrawal_pending"].is_null(), "{detail}");
+        assert_eq!(detail["status"], "expired");
+
+        let (_, health) = get(&app, "/v1/health/detail").await;
+        assert_eq!(health["withdrawal_queue"]["status"], "observed");
+        assert_eq!(health["withdrawal_queue"]["pending"], 0);
+        assert!(
+            health["withdrawal_queue"]
+                .get("oldest_age_seconds")
+                .is_none(),
+            "an empty queue has no age: {health}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_ledger_is_an_error_not_an_empty_queue() {
+        let repo = Arc::new(MockRepository::new());
+        let state = state(repo.clone());
+        let row = expired_row(&state.settings.pop, "203.0.113.30");
+        repo.insert_mitigation(&row).await.unwrap();
+        let request = pending_request(&repo, &row).await;
+
+        let (status, body) = get(
+            &crate::api::create_test_router(state.clone()),
+            "/v1/health/detail",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["withdrawal_queue"]["pending"], 1);
+
+        repo.fail_pending_reads.store(true, SeqCst);
+        let app = crate::api::create_test_router(state.clone());
+
+        let (status, body) = get(&app, "/v1/mitigations?limit=100").await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        let (status, body) = get(&app, &format!("/v1/mitigations/{}", row.mitigation_id)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+
+        let (status, health) = get(&app, "/v1/health/detail").await;
+        assert_eq!(status, StatusCode::OK, "{health}");
+        assert_eq!(health["status"], "degraded", "{health}");
+        assert_eq!(health["withdrawal_queue"]["status"], "error", "{health}");
+        assert!(
+            health["withdrawal_queue"].get("pending").is_none(),
+            "unknown is not zero: {health}"
+        );
+        assert!(
+            health["withdrawal_queue"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("unavailable")
+        );
+
+        repo.fail_pending_reads.store(false, SeqCst);
+        let (status, body) = get(&app, "/v1/mitigations?status=withdrawing").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["mitigations"][0]["withdrawal_pending"]["operation_id"],
+            request.operation_id.to_string()
         );
     }
 }

@@ -400,7 +400,10 @@ WHERE completed_at IS NULL
 GROUP BY pop;
 ```
 
-No rows means there are no pending requests. Keep the current controller and
+No rows means there are no pending requests. The same queue is visible without
+SQL: `GET /v1/mitigations?status=withdrawing`, each mitigation's
+`withdrawal_pending` object, `GET /v1/health/detail`'s `withdrawal_queue`, and
+`prefixdctl mitigations list --status withdrawing`. Keep the current controller and
 original target available until cleanup succeeds, then verify that speaker's
 local intent before proceeding. Do not delete queue rows to bypass cleanup.
 An older binary ignores the queue and could reannounce a requested deletion;

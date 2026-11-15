@@ -11,7 +11,7 @@ use super::handlers::{
     IpHistoryResponse, LoginRequest, LoginResponse, MitigationResponse, MitigationsListResponse,
     OperatorInfo, OperatorListResponse, PublicHealthResponse, ReloadResponse,
     SignalGroupDetailResponse, SignalGroupsListResponse, TimeseriesResponse, WebhookEventResult,
-    WebhookResponse,
+    WebhookResponse, WithdrawalPendingResponse, WithdrawalQueueHealth,
 };
 use crate::correlation::config::{CorrelationConfig, SourceConfig};
 use crate::correlation::engine::{
@@ -113,10 +113,12 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
             super::handlers::ExtendMitigationResponse,
             super::handlers::WithdrawRequest,
             MitigationResponse,
+            WithdrawalPendingResponse,
             BlackholeRouteResponse,
             MitigationsListResponse,
             PublicHealthResponse,
             HealthResponse,
+            WithdrawalQueueHealth,
             super::handlers::ReadinessResponse,
             super::handlers::ReadinessStatus,
             super::handlers::SpeakerHealth,
@@ -522,5 +524,59 @@ mod tests {
     #[test]
     fn info_version_comes_from_cargo() {
         assert_eq!(ApiDoc::openapi().info.version, env!("CARGO_PKG_VERSION"));
+    }
+}
+
+#[cfg(test)]
+mod pending_withdrawal_docs {
+    use super::ApiDoc;
+    use utoipa::OpenApi;
+
+    #[test]
+    fn pending_withdrawal_shape_is_additive_and_documented() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let schemas = &doc["components"]["schemas"];
+        let mitigation = &schemas["MitigationResponse"];
+        assert!(mitigation["properties"]["withdrawal_pending"].is_object());
+        assert!(
+            !mitigation["required"]
+                .as_array()
+                .unwrap()
+                .contains(&"withdrawal_pending".into()),
+            "the new field is additive"
+        );
+        let pending = &schemas["WithdrawalPendingResponse"];
+        for field in [
+            "requested_at",
+            "operation_id",
+            "actor",
+            "reason",
+            "last_error",
+        ] {
+            assert!(pending["properties"][field].is_object(), "{field}");
+        }
+        assert!(
+            !pending["required"]
+                .as_array()
+                .unwrap()
+                .contains(&"last_error".into())
+        );
+        let queue = &schemas["WithdrawalQueueHealth"];
+        for field in ["status", "pending", "oldest_age_seconds", "error"] {
+            assert!(queue["properties"][field].is_object(), "{field}");
+        }
+        let params = doc["paths"]["/v1/mitigations"]["get"]["parameters"]
+            .as_array()
+            .unwrap();
+        let status = params
+            .iter()
+            .find(|param| param["name"] == "status")
+            .unwrap();
+        assert!(
+            status["description"]
+                .as_str()
+                .unwrap()
+                .contains("withdrawing")
+        );
     }
 }

@@ -185,7 +185,8 @@ enum MitigationCommands {
 
     /// List mitigations, newest first, in every status unless --status is given
     List {
-        /// Filter by status (pending, active, expired, withdrawn, rejected)
+        /// Filter by status (pending, active, expired, withdrawn, rejected, or
+        /// withdrawing for a still-pending durable withdrawal)
         #[arg(short, long)]
         status: Option<String>,
 
@@ -382,6 +383,20 @@ struct HealthResponse {
     gobgp: ComponentHealth,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     speaker: Option<SpeakerHealth>,
+    /// Absent from controllers that predate the queue read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    withdrawal_queue: Option<WithdrawalQueue>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct WithdrawalQueue {
+    status: String,
+    #[serde(default)]
+    pending: Option<u64>,
+    #[serde(default)]
+    oldest_age_seconds: Option<u64>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -457,6 +472,19 @@ struct MitigationResponse {
     /// Present only for a blackhole, which drops all traffic to the victim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     blackhole: Option<BlackholeRoute>,
+    /// Present while a durable withdrawal is still pending; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    withdrawal_pending: Option<WithdrawalPending>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct WithdrawalPending {
+    requested_at: String,
+    operation_id: String,
+    actor: String,
+    reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -466,6 +494,20 @@ struct PacketLength {
 }
 
 impl MitigationResponse {
+    /// One line for a row whose durable withdrawal is still pending.
+    fn pending_withdrawal_line(&self) -> Option<String> {
+        self.withdrawal_pending.as_ref().map(|pending| {
+            let error = pending
+                .last_error
+                .as_deref()
+                .map_or_else(String::new, |error| format!("; last error: {error}"));
+            format!(
+                "withdrawal retrying since {} ({}): {}{error}",
+                pending.requested_at, pending.actor, pending.reason
+            )
+        })
+    }
+
     fn destination_label(&self) -> &str {
         if self.vpn_scope.is_some() && self.dst_prefix.as_deref() == Some("") {
             "any"
@@ -991,7 +1033,7 @@ async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String>
             } else {
                 "○"
             };
-            if let Some(ref err) = health.gobgp.error {
+            if let Some(err) = &health.gobgp.error {
                 println!(
                     "  {} Peer observation: {} ({})",
                     peer_indicator, health.gobgp.status, err
@@ -1001,6 +1043,24 @@ async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String>
                     "  {} Peer observation: {}",
                     peer_indicator, health.gobgp.status
                 );
+            }
+            if let Some(queue) = &health.withdrawal_queue {
+                if queue.status == "observed" {
+                    let age = queue
+                        .oldest_age_seconds
+                        .map_or_else(|| "none".to_string(), |age| format!("{age}s ago"));
+                    println!(
+                        "  Pending withdrawals: {} (oldest: {})",
+                        queue.pending.unwrap_or(0),
+                        age
+                    );
+                } else {
+                    // An unreadable ledger is unknown, never an empty queue.
+                    println!(
+                        "  Pending withdrawals: unknown ({})",
+                        queue.error.as_deref().unwrap_or(&queue.status)
+                    );
+                }
             }
             println!();
             println!("BGP Sessions:");
@@ -1181,6 +1241,9 @@ async fn cmd_mitigations(
                             expires,
                             m.match_summary()
                         );
+                        if let Some(line) = m.pending_withdrawal_line() {
+                            println!("  {line}");
+                        }
                     }
 
                     println!();
@@ -1233,6 +1296,15 @@ async fn cmd_mitigations(
                     );
                     println!("Created:        {}", m.created_at);
                     println!("Expires:        {}", m.expires_at);
+                    if let Some(pending) = &m.withdrawal_pending {
+                        println!("Withdrawal:     retrying since {}", pending.requested_at);
+                        println!("Requested by:   {}", pending.actor);
+                        println!("Operation:      {}", pending.operation_id);
+                        println!("Reason:         {}", pending.reason);
+                        if let Some(error) = &pending.last_error {
+                            println!("Last error:     {error}");
+                        }
+                    }
                     println!("Scope Hash:     {}", m.scope_hash);
                 }
             }

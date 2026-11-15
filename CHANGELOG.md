@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Mitigations report a durable withdrawal that is still waiting for a retry.
+  `MitigationResponse` carries `withdrawal_pending` with the original
+  `requested_at`, operation ID, actor and reason (null when nothing is
+  pending), the list accepts `status=withdrawing`, and `/v1/health/detail`
+  reports the queue's pending count and oldest age. A failed ledger read is an
+  error, never an empty queue. `prefixdctl status` and mitigation listings show
+  the same state.
+
 ### Fixed
 
 - A speaker that accepts a connection and never answers no longer stalls the

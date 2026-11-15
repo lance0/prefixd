@@ -101,6 +101,24 @@ fn not_flowspec(kind: &str) -> PrefixdError {
     PrefixdError::Internal(format!("{kind} route cannot use a FlowSpec path"))
 }
 
+/// Durable withdrawal queue totals; `None` for `oldest_requested_at` means an empty
+/// queue, never an unreadable one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WithdrawalQueueSummary {
+    pub pending: u64,
+    pub oldest_requested_at: Option<DateTime<Utc>>,
+}
+
+impl WithdrawalQueueSummary {
+    /// Seconds since the oldest still-pending request; `None` when the queue is empty.
+    pub fn oldest_age_seconds(&self, now: DateTime<Utc>) -> Option<u64> {
+        self.oldest_requested_at.map(|oldest| {
+            u64::try_from(now.signed_duration_since(oldest).num_seconds().max(0))
+                .unwrap_or(u64::MAX)
+        })
+    }
+}
+
 /// Immutable deletion intent; an uncertain RPC must never turn it back into an announcement.
 #[derive(Debug, Clone, FromRow)]
 pub struct WithdrawalRequest {

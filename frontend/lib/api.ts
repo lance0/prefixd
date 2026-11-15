@@ -214,6 +214,16 @@ function dispatchAuthExpired() {
 /** A decoded JSON value, for payloads the dashboard displays without interpreting. */
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
 
+/** A durable withdrawal request that has not completed; the controller keeps retrying it. */
+export interface WithdrawalPending {
+  requested_at: string
+  operation_id: string
+  actor: string
+  reason: string
+  /** Absent until a failed attempt is recorded; absence is not proof every attempt succeeded. */
+  last_error?: string | null
+}
+
 export interface CorrelationContext {
   signal_group_id: string
   derived_confidence: number
@@ -297,6 +307,8 @@ export interface TcpFlagsMatch {
 export interface Mitigation {
   /** This creation request had no successful speaker reply; not persisted status. */
   announcement_outcome?: AnnouncementOutcome
+  /** A durable withdrawal still waiting for a retry; null or absent when none is pending. */
+  withdrawal_pending?: WithdrawalPending | null
   mitigation_id: string
   scope_hash: string
   status: "pending" | "active" | "escalated" | "expired" | "withdrawn" | "rejected"

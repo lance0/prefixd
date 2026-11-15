@@ -100,6 +100,7 @@ prefixdctl status
 # Components:
 #   ● Database: connected
 #   ● Peer observation: connected
+#   Pending withdrawals: 1 (oldest: 92s ago)
 #
 # BGP Sessions:
 #   ● 192.0.2.1 - established
@@ -158,6 +159,9 @@ prefixdctl mitigations list
 prefixdctl mitigations list --status active
 prefixdctl mitigations list --status expired
 
+# Rows whose durable withdrawal is still retrying, whatever their stored status
+prefixdctl mitigations list --status withdrawing
+
 # Filter by customer
 prefixdctl mitigations list --customer acme
 
@@ -170,6 +174,15 @@ prefixdctl mitigations list --limit 50
 # JSON output
 prefixdctl -f json mitigations list
 ```
+
+`--status withdrawing` selects rows with a durable withdrawal request that has
+not completed, whatever their stored status; an expired rule that is still
+waiting for cleanup matches. `list` prints an extra line under each such row and
+`get` prints its `Withdrawal:`, `Requested by:`, `Operation:` and `Reason:`
+lines. `-f json` includes the same `withdrawal_pending` object as the
+[API](api.md#list-mitigations); an absent object means no request is pending, and
+a failed ledger read fails the command instead. `prefixdctl status` prints
+`Pending withdrawals: unknown (...)` when the queue cannot be read, never zero.
 
 ### Get Mitigation
 

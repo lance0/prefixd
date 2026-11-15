@@ -44,6 +44,24 @@ pub struct HealthResponse {
     speaker: SpeakerHealth,
     /// Authentication mode (none, bearer, credentials, mtls)
     auth_mode: String,
+    /// Durable withdrawal queue for this controller's POP. An unreadable ledger is
+    /// `error` with no count, never an observed zero.
+    withdrawal_queue: WithdrawalQueueHealth,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct WithdrawalQueueHealth {
+    /// `observed` or `error`.
+    status: String,
+    /// Pending requests in the queue; absent when the ledger read failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending: Option<u64>,
+    /// Seconds since the oldest pending request; absent for an empty queue or an error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oldest_age_seconds: Option<u64>,
+    /// Why the ledger could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -147,6 +165,30 @@ async fn observe_daemon_health(state: &AppState) -> DaemonHealthObservation {
             ready: None,
             observed_at: None,
         },
+    }
+}
+
+async fn observe_withdrawal_queue(state: &AppState) -> WithdrawalQueueHealth {
+    match state
+        .repo
+        .pending_withdrawal_summary(Some(state.settings.pop.as_str()))
+        .await
+    {
+        Ok(summary) => WithdrawalQueueHealth {
+            status: "observed".into(),
+            pending: Some(summary.pending),
+            oldest_age_seconds: summary.oldest_age_seconds(chrono::Utc::now()),
+            error: None,
+        },
+        Err(error) => {
+            tracing::warn!(%error, "withdrawal ledger read failed");
+            WithdrawalQueueHealth {
+                status: "error".into(),
+                pending: None,
+                oldest_age_seconds: None,
+                error: Some(error.to_string()),
+            }
+        }
     }
 }
 
@@ -306,10 +348,16 @@ pub async fn health_detail(
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
-    let ((mut status, bgp_map, active, db_status, gobgp_health), daemon, vpn_families) = tokio::join!(
+    let (
+        (mut status, bgp_map, active, db_status, gobgp_health),
+        daemon,
+        vpn_families,
+        withdrawal_queue,
+    ) = tokio::join!(
         check_health_status(&state),
         observe_daemon_health(&state),
-        observe_vpn_families(&state)
+        observe_vpn_families(&state),
+        observe_withdrawal_queue(&state)
     );
     // Read from the reconciler's snapshot: health never reads export itself.
     let blackhole_exports = state.announcer.export_observer().map(|_| {
@@ -334,7 +382,11 @@ pub async fn health_detail(
                 || exports.no_local_route > 0
                 || !exports.unexported.is_empty()
         });
-    if daemon.status == "error" || daemon.ready == Some(false) || export_degraded {
+    if daemon.status == "error"
+        || daemon.ready == Some(false)
+        || export_degraded
+        || withdrawal_queue.status == "error"
+    {
         status = "degraded".into();
     }
     // Another controller holds this POP's fence; this one mutates nothing.
@@ -370,5 +422,6 @@ pub async fn health_detail(
             },
         },
         auth_mode: resolve_auth_mode(&state),
+        withdrawal_queue,
     }))
 }

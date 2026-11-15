@@ -752,6 +752,40 @@ impl RepositoryTrait for Repository {
         .await?)
     }
 
+    async fn pending_withdrawals_for(
+        &self,
+        mitigation_ids: &[Uuid],
+    ) -> Result<Vec<WithdrawalRequest>> {
+        if mitigation_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut connection = self.bounded_read_connection().await?;
+        Ok(sqlx::query_as::<_, WithdrawalRequest>(
+            "SELECT * FROM withdrawal_requests WHERE completed_at IS NULL AND mitigation_id = ANY($1) ORDER BY requested_at, operation_id",
+        )
+        .bind(mitigation_ids)
+        .fetch_all(&mut *connection)
+        .await?)
+    }
+
+    async fn pending_withdrawal_summary(
+        &self,
+        pop: Option<&str>,
+    ) -> Result<crate::domain::WithdrawalQueueSummary> {
+        let mut connection = self.bounded_read_connection().await?;
+        let (pending, oldest_requested_at): (i64, Option<crate::db::CheckedTimestamp>) =
+            sqlx::query_as(
+                "SELECT COUNT(*), MIN(requested_at) FROM withdrawal_requests WHERE completed_at IS NULL AND ($1::text IS NULL OR pop = $1)",
+            )
+            .bind(pop)
+            .fetch_one(&mut *connection)
+            .await?;
+        Ok(crate::domain::WithdrawalQueueSummary {
+            pending: u64::try_from(pending).unwrap_or(u64::MAX),
+            oldest_requested_at: oldest_requested_at.and_then(|ts| ts.into()),
+        })
+    }
+
     async fn finish_withdrawal(&self, request: &WithdrawalRequest) -> Result<Option<Mitigation>> {
         let mut transaction = self.pool.begin().await?;
         let pending = sqlx::query_as::<_, WithdrawalRequest>(
@@ -1134,6 +1168,9 @@ impl RepositoryTrait for Repository {
               AND ($5::timestamptz IS NULL OR created_at >= $5)
               AND ($6::timestamptz IS NULL OR created_at < $6)
               AND ($7::bool IS NULL OR ($7 = true AND acknowledged_at IS NOT NULL) OR ($7 = false AND acknowledged_at IS NULL))
+              AND (NOT $12::bool OR EXISTS (
+                  SELECT 1 FROM withdrawal_requests w
+                  WHERE w.mitigation_id = mitigations.mitigation_id AND w.completed_at IS NULL))
             ORDER BY created_at DESC, mitigation_id DESC
             LIMIT $8
             "#,
@@ -1149,6 +1186,7 @@ impl RepositoryTrait for Repository {
         .bind(params.cursor.map(|cursor| cursor.mitigation_id)) // $9
         .bind(params.pop.as_deref())       // $10
         .bind(params.query.as_deref())     // $11
+        .bind(params.withdrawing)          // $12
         .fetch_all(&self.pool)
         .await?;
 

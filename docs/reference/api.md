@@ -557,7 +557,7 @@ Authorization: Bearer <token>
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `status` | string | Filter by one or more statuses (comma-separated): `pending`, `active`, `withdrawn`, `expired`, `rejected`. Legacy `escalated` is still accepted for stored rows; no code path produces it |
+| `status` | string | Filter by one or more statuses (comma-separated): `pending`, `active`, `withdrawn`, `expired`, `rejected`. Legacy `escalated` is still accepted for stored rows; no code path produces it. `withdrawing` selects rows with a still-pending durable withdrawal request, whatever their stored status |
 | `customer_id` | string | Filter by customer |
 | `q` | string | Literal case-insensitive substring of target, vector, customer ID or mitigation UUID; at most 256 UTF-8 bytes and no NUL. Empty matches every row; `%`, `_` and backslash have no wildcard meaning |
 | `victim_ip` | string | Filter by exact stored target: host IP or canonical manual CIDR; no containment matching |
@@ -567,6 +567,10 @@ Authorization: Bearer <token>
 | `cursor` | string | Opaque `m1` continuation from the previous `next_cursor` (maximum 128 bytes) |
 | `start` | string | RFC3339 start (inclusive); see [list filters](#list-filters) |
 | `end` | string | RFC3339 end (exclusive); see [list filters](#list-filters) |
+
+`status=active,withdrawing` is the intersection: active rows whose durable
+withdrawal request has not completed. `status=withdrawing` alone matches every
+stored status.
 
 `q` combines with the other filters before ordering, cursor continuation and page limits.
 It searches persisted rows, including customer IDs no longer in the current inventory.
@@ -645,6 +649,7 @@ and no partial CSV. CSV timestamps remain UTC.
       "acknowledged_at": null,
       "acknowledged_by": null,
       "origin_mode": "enforced",
+      "withdrawal_pending": null,
       "correlation": null
     }
   ],
@@ -653,6 +658,28 @@ and no partial CSV. CSV timestamps remain UTC.
   "has_more": false
 }
 ```
+
+`withdrawal_pending` is `null` when no durable withdrawal request is outstanding.
+When it is set, the controller has persisted the original deletion intent and is
+retrying it against the same speaker target:
+
+```json
+"withdrawal_pending": {
+  "requested_at": "2026-01-18T10:31:20Z",
+  "operation_id": "1f8c3d0e-2b4a-4c6d-8e0f-1a2b3c4d5e6f",
+  "actor": "alice",
+  "reason": "false positive"
+}
+```
+
+`requested_at`, `operation_id`, `actor` and `reason` are the immutable values
+recorded on the first request and survive retries and restarts. `last_error` is
+optional; it is absent when no failed attempt has been recorded, which is not
+evidence that every attempt succeeded. A stored row can stay `active` after its
+`expires_at` while this request is pending, so this field distinguishes a rule
+awaiting cleanup from one that is gone. A failure to read the withdrawal ledger
+fails the listing with `500`; it is never reported as `withdrawal_pending: null`.
+The detail endpoint returns the same object.
 
 `action_type` is `discard`, `police`, `mark` (manual VPN destination rules) or
 `blackhole`. Mark rows carry the optional exact `dscp` value (0-63). VPN rows
@@ -1255,7 +1282,8 @@ ordinary repository outside this cancellable read-only preparation.
 GET /v1/mitigations/{id}
 ```
 
-**Response:** Same as list item, including the `correlation` field when present. For correlated mitigations, the correlation object includes:
+**Response:** Same as list item, including the `correlation` field when present and
+`withdrawal_pending` while a durable deletion is waiting for a retry. For correlated mitigations, the correlation object includes:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -2498,6 +2526,11 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
   },
   "active_mitigations": 12,
   "database": "connected",
+  "withdrawal_queue": {
+    "status": "observed",
+    "pending": 1,
+    "oldest_age_seconds": 92
+  },
   "gobgp": {
     "status": "connected"
   },
@@ -2564,8 +2597,15 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
 | Status | Meaning |
 |--------|---------|
 | `healthy` | Database and supported observations succeeded; observed daemon is ready |
-| `degraded` | Database or supported observation failed, observed daemon is not ready, active export evidence is historical, an active route is committed to no Established peer, or FlowSpec export observation fails or finds no local rule |
+| `degraded` | Database or supported observation failed, the withdrawal queue could not be read, observed daemon is not ready, active export evidence is historical, an active route is committed to no Established peer, or FlowSpec export observation fails or finds no local rule |
 | `standby` | Another controller holds this POP's fence; this one mutates nothing (overrides the other values) |
+
+`withdrawal_queue` reports this controller's POP: `status` is `observed` or
+`error`, `pending` counts durable deletion requests still waiting for a retry,
+and `oldest_age_seconds` is the age of the oldest one. An unreadable ledger
+reports `status: error` with `error` and omits `pending`; it is never an observed
+zero, and makes the overall status `degraded`. An empty queue is `pending: 0`
+with no `oldest_age_seconds`.
 
 `speaker` is additive metadata: backend identity plus observation availability.
 Older daemons may omit it. Capabilities do not report recent read success or
