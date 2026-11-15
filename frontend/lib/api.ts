@@ -1128,7 +1128,17 @@ export interface AuditEntry {
 }
 
 /** Action-specific audit context. Fields the dashboard reads are typed; the rest render as JSON. */
-export type AuditDetails = { victim_ip?: string; reason?: string; operation_id?: string } & { [key: string]: JsonValue }
+export type AuditDetails = {
+  victim_ip?: string
+  reason?: string
+  operation_id?: string
+  /** Expiry before an extend, withdraw or expire. */
+  previous_expires_at?: string
+  /** Expiry after a create or extend. */
+  expires_at?: string
+  /** When a withdraw or expire ended the lifetime. */
+  ended_at?: string | null
+} & { [key: string]: JsonValue }
 
 export interface AuditResponse {
   entries: AuditEntry[]
@@ -1142,10 +1152,17 @@ export async function getAuditLog(params?: {
   cursor?: string
   start?: string
   end?: string
+  /** Exact target filters, e.g. one mitigation's history. */
+  target_type?: string
+  target_id?: string
 }): Promise<AuditResponse> {
   const searchParams = new URLSearchParams()
 
   if (params?.limit) searchParams.set("limit", params.limit.toString())
+
+  if (params?.target_type) searchParams.set("target_type", params.target_type)
+
+  if (params?.target_id) searchParams.set("target_id", params.target_id)
 
   if (params?.cursor) searchParams.set("cursor", params.cursor)
 

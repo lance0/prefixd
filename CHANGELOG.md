@@ -88,6 +88,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while `guardrails.allow_detector_prefix` is false or the destination bounds
   admit hosts only.
 
+- `GET /v1/audit` accepts exact `target_type` and `target_id` filters, applied
+  before pagination, to list one target's history.
+- Completed `withdraw` and `expire` audit entries add `previous_expires_at`, the
+  scheduled expiry the operation cut short, and `ended_at`. Existing fields are
+  unchanged, and earlier entries omit both.
+- The mitigation detail timeline lists that mitigation's audit entries with
+  actor, action, reason, operation ID and old and new expiry. It replaces the
+  "Updated: Rule set to" line, which misdescribed lifetime extensions. If the
+  audit can't load, the timeline keeps the mitigation's own timestamps and
+  shows the error with a retry. Viewers, who can't read the audit, see the
+  timestamps only.
+
 ### Changed
 
 - **Breaking:** `playbooks.yaml`, `PUT /v1/config/playbooks` and the

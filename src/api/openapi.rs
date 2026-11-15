@@ -431,6 +431,22 @@ mod tests {
     }
 
     #[test]
+    fn audit_target_filters_are_documented() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let params = doc["paths"]["/v1/audit"]["get"]["parameters"]
+            .as_array()
+            .unwrap();
+        for name in ["target_type", "target_id"] {
+            assert!(
+                params
+                    .iter()
+                    .any(|p| p["name"] == name && p["in"] == "query"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn manual_amplification_match_is_documented() {
         let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
         let schemas = &doc["components"]["schemas"];

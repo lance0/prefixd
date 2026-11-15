@@ -10809,6 +10809,111 @@ async fn test_list_audit_empty() {
     assert_eq!(json["entries"].as_array().unwrap().len(), 0);
 }
 
+#[tokio::test]
+async fn test_list_audit_filters_by_target() {
+    let app = setup_app().await;
+    async fn get(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+    let mut ids = Vec::new();
+    for port in [53, 123] {
+        let body = serde_json::json!({
+            "operator_id": "test_operator",
+            "reason": format!("manual mitigation {port}"),
+            "victim_ip": "203.0.113.10",
+            "protocol": "udp",
+            "dst_ports": [port],
+            "action": "discard",
+            "ttl_seconds": 120
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/mitigations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        ids.push(json["mitigation_id"].as_str().unwrap().to_string());
+    }
+
+    // Negative control: the unfiltered listing holds both mitigations' entries.
+    let (status, all) = get(&app, "/v1/audit").await;
+    assert_eq!(status, StatusCode::OK);
+    for id in &ids {
+        assert!(
+            all["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["target_id"] == id.as_str())
+        );
+    }
+
+    let (status, scoped) = get(
+        &app,
+        &format!("/v1/audit?target_type=mitigation&target_id={}", ids[0]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = scoped["entries"].as_array().unwrap();
+    assert_eq!(scoped["count"], entries.len());
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["action"], "create");
+    assert_eq!(entries[0]["target_type"], "mitigation");
+    assert_eq!(entries[0]["target_id"], ids[0].as_str());
+    // The authenticated principal, not the request's legacy operator_id field.
+    assert_eq!(entries[0]["actor_type"], "operator");
+    assert_eq!(entries[0]["actor_id"], "anonymous");
+    assert_eq!(entries[0]["details"]["reason"], "manual mitigation 53");
+    assert!(entries[0]["details"]["expires_at"].is_string());
+
+    // Each filter applies on its own, and matching is exact.
+    let (_, by_type) = get(&app, "/v1/audit?target_type=mitigation").await;
+    assert_eq!(by_type["count"], 2);
+    let (_, by_other_type) = get(
+        &app,
+        &format!("/v1/audit?target_type=event&target_id={}", ids[0]),
+    )
+    .await;
+    assert_eq!(by_other_type["count"], 0);
+    let (_, by_prefix) = get(&app, &format!("/v1/audit?target_id={}", &ids[0][..8])).await;
+    assert_eq!(by_prefix["count"], 0);
+
+    let oversized = "a".repeat(257);
+    for query in [
+        "target_type=".to_string(),
+        "target_id=".to_string(),
+        "target_id=a%00b".to_string(),
+        format!("target_id={oversized}"),
+    ] {
+        let (status, body) = get(&app, &format!("/v1/audit?{query}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+        assert!(
+            body["error"].as_str().unwrap().contains("filter"),
+            "{query}"
+        );
+    }
+}
+
 // ─── Stats ─────────────────────────────────────────────────────────────
 
 #[tokio::test]

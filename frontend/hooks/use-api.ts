@@ -127,10 +127,11 @@ export function useEvents(params?: Parameters<typeof api.getEvents>[0]) {
   })
 }
 
-export function useAuditLog(params?: Parameters<typeof api.getAuditLog>[0]) {
-  const key = params ? ["audit", JSON.stringify(params)] : "audit"
-  
-  const fetcher = () => api.getAuditLog(params)
+/** `null` skips the request, e.g. for a role that cannot read the audit. */
+export function useAuditLog(params?: Parameters<typeof api.getAuditLog>[0] | null) {
+  const key = params === null ? null : params ? ["audit", JSON.stringify(params)] : "audit"
+
+  const fetcher = () => api.getAuditLog(params ?? undefined)
 
   return useSWR(key, fetcher, {
     refreshInterval: REFRESH_INTERVAL,
