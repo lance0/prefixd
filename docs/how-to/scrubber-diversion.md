@@ -281,6 +281,14 @@ its source host, ports, flags, peers and community. Editing a field invalidates
 that preview. Withdrawal returns traffic to ordinary routing, potentially exposing
 the victim to attack again; there is no automatic discard, blackhole or fallback.
 
+Viewers and Operators can open **Scrubbers** read-only to see profiles,
+diversions and per-peer export evidence; re-arm, preview, creation and
+withdrawal require an Administrator, and the controller refuses them for other
+roles. Mitigations rows, the mitigation detail page and IP history show
+**Diverted**, **Diversion pending** or **Diversion withdrawing** for a victim
+host with outstanding diversion intent at this controller's POP, linked to its
+row on **Scrubbers**. This is local intent, not proof of router forwarding.
+
 The CLI offers the same workflow. Administrative requests use a cookie from an
 authenticated administrator session through `--session-cookie` or
 `PREFIXD_SESSION_COOKIE`. Obtain one by signing in with

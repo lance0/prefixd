@@ -1,4 +1,5 @@
 import { parseDestination } from "./destination"
+import { recordApiResponse } from "./freshness"
 
 // Use relative URL to proxy through Next.js API route
 // This allows the dashboard to work on any host without hardcoded URLs
@@ -115,7 +116,7 @@ export interface DiversionRule {
 
 export interface DiversionExportObservation {
   observed_at: string
-  peers: { peer_address: string; disposition: string; reason: string }[]
+  peers: PeerExport[]
   error?: string | null
 }
 
@@ -129,6 +130,8 @@ export interface DiversionRequest {
 
 export interface ScrubberDiversion {
   id: string
+  /** The controller POP that owns this diversion. */
+  pop: string
   profile: { id: string; revision: string; scope?: string; return_leg?: ScrubberReturnLeg }
   rule: DiversionRule
   expires_at: string
@@ -194,7 +197,7 @@ export async function createDiversion(request: DiversionRequest, expectedScope =
 }
 
 export const armScrubber = (id: string, revision: string) => fetchApi<null>(`/v1/scrubbers/${encodeURIComponent(id)}/arm`, { method: "POST", body: JSON.stringify({ revision }) })
-export const withdrawDiversion = (id: string, reason?: string) => fetchApi<ScrubberDiversion>(`/v1/diversions/${encodeURIComponent(id)}/withdraw`, { method: "POST", body: JSON.stringify(reason?.trim() ? { reason: reason.trim() } : {}) })
+export const withdrawDiversion = (id: string, reason: string) => fetchApi<ScrubberDiversion>(`/v1/diversions/${encodeURIComponent(id)}/withdraw`, { method: "POST", body: JSON.stringify({ reason }) })
 
 // Cache for deduplicating in-flight requests (client-swr-dedup pattern)
 const requestCache = new Map<string, Promise<unknown>>()
@@ -486,7 +489,10 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
       return cached as Promise<T>
     }
     
-    const promise = doFetch<T>(url, { ...options, headers }).finally(() => {
+    const request = doFetch<T>(url, { ...options, headers })
+    request.then(() => recordApiResponse(true), () => recordApiResponse(false))
+
+    const promise = request.finally(() => {
       requestCache.delete(cacheKey)
     })
 
@@ -1141,7 +1147,17 @@ export interface AuditEntry {
 }
 
 /** Action-specific audit context. Fields the dashboard reads are typed; the rest render as JSON. */
-export type AuditDetails = { victim_ip?: string; reason?: string; operation_id?: string } & { [key: string]: JsonValue }
+export type AuditDetails = {
+  victim_ip?: string
+  reason?: string
+  operation_id?: string
+  /** Expiry before an extend, withdraw or expire. */
+  previous_expires_at?: string
+  /** Expiry after a create or extend. */
+  expires_at?: string
+  /** When a withdraw or expire ended the lifetime. */
+  ended_at?: string | null
+} & { [key: string]: JsonValue }
 
 export interface AuditResponse {
   entries: AuditEntry[]
@@ -1155,10 +1171,17 @@ export async function getAuditLog(params?: {
   cursor?: string
   start?: string
   end?: string
+  /** Exact target filters, e.g. one mitigation's history. */
+  target_type?: string
+  target_id?: string
 }): Promise<AuditResponse> {
   const searchParams = new URLSearchParams()
 
   if (params?.limit) searchParams.set("limit", params.limit.toString())
+
+  if (params?.target_type) searchParams.set("target_type", params.target_type)
+
+  if (params?.target_id) searchParams.set("target_id", params.target_id)
 
   if (params?.cursor) searchParams.set("cursor", params.cursor)
 

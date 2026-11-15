@@ -153,7 +153,7 @@ async function run() {
   await withdraw.click()
   const dialog = page.getByRole("alertdialog", { name: "Withdraw mitigation", exact: true })
   await dialog.waitFor()
-  await dialog.getByLabel("Withdrawal reason (optional)", { exact: true }).fill(reason)
+  await dialog.getByLabel("Withdrawal reason", { exact: true }).fill(reason)
   await activeFixture()
 
   // Forward the real request once. Hold its real response until the pending UI

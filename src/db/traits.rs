@@ -82,6 +82,16 @@ pub struct EventListParams {
     pub outcomes: Option<Vec<crate::domain::EventOutcome>>,
 }
 
+/// Audit-only filters, applied before tuple pagination.
+#[derive(Debug, Clone, Default)]
+pub struct AuditListParams {
+    pub pagination: ListParams,
+    /// Exact case-sensitive target type, e.g. `mitigation`.
+    pub target_type: Option<String>,
+    /// Exact case-sensitive target identifier.
+    pub target_id: Option<String>,
+}
+
 /// Stable continuation position for public mitigation listings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MitigationCursor {
@@ -217,7 +227,14 @@ pub trait RepositoryTrait: Send + Sync {
 
     // Audit Log
     async fn insert_audit(&self, entry: &AuditEntry) -> Result<()>;
-    async fn list_audit(&self, params: &ListParams) -> Result<Vec<AuditEntry>>;
+    async fn list_audit(&self, params: &ListParams) -> Result<Vec<AuditEntry>> {
+        self.list_audit_filtered(&AuditListParams {
+            pagination: params.clone(),
+            ..Default::default()
+        })
+        .await
+    }
+    async fn list_audit_filtered(&self, params: &AuditListParams) -> Result<Vec<AuditEntry>>;
 
     // Mitigations
     /// Raw persistence for fixtures/imports; bypasses quota admission and audit.

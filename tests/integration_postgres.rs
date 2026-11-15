@@ -422,11 +422,19 @@ async fn test_authenticated_withdrawal_audit_success_and_failure_boundaries() {
     }
 
     async fn audits(app: &axum::Router, cookie: &str) -> Vec<serde_json::Value> {
+        audit_page(app, cookie, "")
+            .await
+            .into_iter()
+            .filter(|entry| entry["action"] == "withdraw")
+            .collect()
+    }
+
+    async fn audit_page(app: &axum::Router, cookie: &str, query: &str) -> Vec<serde_json::Value> {
         let response = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/v1/audit")
+                    .uri(format!("/v1/audit{query}"))
                     .header("cookie", cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -441,11 +449,7 @@ async fn test_authenticated_withdrawal_audit_success_and_failure_boundaries() {
         assert_eq!(json["has_more"], false);
         let entries = json["entries"].as_array().unwrap();
         assert_eq!(json["count"], entries.len());
-        entries
-            .iter()
-            .filter(|entry| entry["action"] == "withdraw")
-            .cloned()
-            .collect()
+        entries.clone()
     }
 
     let context = TestContext::new().await;
@@ -703,15 +707,44 @@ async fn test_authenticated_withdrawal_audit_success_and_failure_boundaries() {
         let (operation_id,): (uuid::Uuid,) = sqlx::query_as("SELECT operation_id FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NOT NULL")
             .bind(target.mitigation_id).fetch_one(&context.pool).await.unwrap();
         assert_eq!(entry["details"]["operation_id"], operation_id.to_string());
+        let finished = context
+            .repo
+            .get_mitigation(target.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(finished.status, MitigationStatus::Withdrawn);
+        // The entry records the expiry it cut short and when the lifetime ended.
         assert_eq!(
-            context
-                .repo
-                .get_mitigation(target.mitigation_id)
+            entry["details"]["previous_expires_at"],
+            serde_json::to_value(finished.expires_at).unwrap()
+        );
+        assert_eq!(
+            entry["details"]["ended_at"],
+            serde_json::to_value(finished.withdrawn_at.unwrap()).unwrap()
+        );
+        // The target filter returns this mitigation's entries and nothing else.
+        let id = target.mitigation_id;
+        let scoped = audit_page(
+            &app,
+            &cookie,
+            &format!("?target_type=mitigation&target_id={id}"),
+        )
+        .await;
+        assert!(!scoped.is_empty());
+        assert!(scoped.iter().all(|e| e["target_id"] == id.to_string()));
+        assert_eq!(
+            scoped
+                .iter()
+                .filter(|e| e["action"] == "withdraw")
+                .collect::<Vec<_>>(),
+            entries
+        );
+        // Negative control: the type is matched too, so the same ID under another type is empty.
+        assert!(
+            audit_page(&app, &cookie, &format!("?target_type=event&target_id={id}"))
                 .await
-                .unwrap()
-                .unwrap()
-                .status,
-            MitigationStatus::Withdrawn
+                .is_empty()
         );
     }
     for request in [ambiguous, failed_audit] {
