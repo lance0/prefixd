@@ -252,10 +252,16 @@ pub async fn extend_flowspec_lifetime(
     }).await.map_err(|_| PrefixdError::Internal(
         "lifetime read-only preparation timed out; refresh mitigation and audit before retrying".into(),
     ))??;
-    state
+    let outcome = state
         .repo
         .extend_flowspec_lifetime(&request, &state.fence)
-        .await
+        .await?;
+    if outcome.extended
+        && let Some(lease) = state.lease.as_deref()
+    {
+        lease.observe_leased_write(&outcome.mitigation);
+    }
+    Ok(outcome)
 }
 
 pub(crate) fn extension_safelisted(target: &str) -> PrefixdError {

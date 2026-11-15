@@ -860,6 +860,9 @@ async fn persist_new_mitigation(
             tracing::warn!(error = %error, pop = %mitigation.pop, reason,
                 "admission rejected new mitigation");
         })?;
+    if let Some(lease) = state.lease.as_deref() {
+        lease.observe_leased_write(mitigation);
+    }
     if state.is_dry_run() {
         return Ok(None);
     }
@@ -1869,6 +1872,9 @@ async fn admit_ban(
                     }
                 }
                 state.repo.update_mitigation(&existing).await?;
+                if let Some(lease) = state.lease.as_deref() {
+                    lease.observe_leased_write(&existing);
+                }
                 let _ = state
                     .ws_broadcast
                     .send(crate::ws::WsMessage::MitigationUpdated {
@@ -4783,6 +4789,21 @@ mod tests {
             assert_eq!(stored.action_params.injection_owner, owner);
             assert_eq!(speaker.inner.list_active().await.unwrap()[0].owner, owner);
             assert!(lease.generation().is_some());
+            // The committed row bounds renewal at once, and so does a
+            // detector re-send that extends it.
+            assert_eq!(lease.health().renew_until, Some(stored.expires_at));
+            let (status, body) = send(
+                &app,
+                "/v1/events",
+                None,
+                fastnetmon_ban("fastnetmon", "203.0.113.10"),
+            )
+            .await;
+            assert!(status.is_success(), "{body}");
+            let extended = repo.get_mitigation(id).await.unwrap().unwrap();
+            assert!(extended.expires_at > stored.expires_at);
+            assert_eq!(lease.health().renew_until, Some(extended.expires_at));
+            assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 1);
 
             speaker.fail_adds.store(true, SeqCst);
             let (status, body) = send(

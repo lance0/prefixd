@@ -2581,20 +2581,28 @@ when enforced detector blackholes run without the injection lease
 (`blackhole.enabled`, a nonempty `blackhole.detector_sources` and
 `blackhole_lease` false): if prefixd stops while the speaker runs, they stay
 announced until prefixd returns or an operator withdraws them. `lease` is
-present only with `blackhole.leased`: `state` is `none` (no generation held
-yet), `live`, `renewal_failing` (the last renewal failed but the lease may
-still be live), `expired` (the speaker refused the generation, or no
-renewal succeeded for a whole lease) or `not_renewing` (dry-run, which never
-renews). `generation` is held in memory and
-changes after a speaker restart. `last_renewal_result` is `success`,
-`not_live` or `error`. `renew_until` is the latest `expires_at` among the
-routes this owner holds, from the last successful read of active intent; an
-empty leased set sets it to the read itself and it is null before the first
-successful read. Renewal is unfenced but stops one lease after `renew_until`,
-so a database outage cannot renew leased routes past every TTL; `renewal_stopped`
-is then `ttl_bound`, which is a bound, not a failed renewal. `renewal_stopped`
-is omitted while renewal continues and in dry-run. Health performs no rule
-inventory probe.
+present with `blackhole.leased` or `bgp.rustbgpd.leased_flowspec`: `state` is
+`none` (no generation held yet), `live`, `renewal_failing` (the last renewal
+failed but the lease may still be live), `expired` (the speaker refused the
+generation, no renewal succeeded for a whole lease, or renewal stopped at the
+TTL bound and one more lease has passed, so the speaker holds none of the
+leased routes), `not_renewing` (dry-run, which never renews) or `standby`
+(this controller is standby and stopped renewing at its TTL bound because it
+cannot read leased intent; the active controller may still keep the lease
+live). `generation` is held in memory and changes after a speaker restart.
+`last_renewal_result` is `success`, `not_live` or `error`. `renew_until` is the
+latest `expires_at` among the leased routes this owner holds: the read at the
+start of each reconciliation pass (on a timer in standby) sets it, and every
+leased admission or TTL extension raises it. An empty leased set sets it to
+the read itself, and it is null before the first read or leased write.
+Renewal is unfenced but stops one margin after `renew_until`, the larger of
+`blackhole.lease_seconds` and `timers.reconciliation_interval_seconds` plus a
+third of the lease, so a database outage cannot renew leased routes past the
+owner's latest leased TTL; `renewal_stopped` is then `ttl_bound`, which is a
+bound, not a failed renewal. The bound is owner-wide, so a leased route can
+outlive its own TTL while a later leased TTL keeps the lease live.
+`renewal_stopped` is omitted while renewal continues, while no generation is
+held and in dry-run. Health performs no rule inventory probe.
 
 `blackhole_exports` is present when `blackhole_export` is true (rustbgpd). It
 summarizes the last reconciliation pass's
@@ -3431,10 +3439,10 @@ re-add) and `error`. A renewal that stops at the
 sends no RPC and increments none of them; health detail reports
 `renewal_stopped: "ttl_bound"` instead. `prefixd_injection_lease_state{state}`
 is `1` for the
-current state (`none`, `live`, `renewal_failing`, `expired` or
-`not_renewing`) and `0` for
+current state (`none`, `live`, `renewal_failing`, `expired`, `not_renewing`
+or `standby`) and `0` for
 the others, matching health detail's `speaker.lease.state` after each
-renewal. Both series exist with zero values in every deployment.
+renewal tick and state change. Both series exist with zero values in every deployment.
 
 Series labelled `action_type` (`prefixd_mitigations_active`,
 `prefixd_mitigations_created_total`, `prefixd_mitigations_expired_total` and

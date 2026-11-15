@@ -56,9 +56,9 @@ pub struct SpeakerHealth {
     /// Enforced detector blackholes run without the rustbgpd injection lease, so
     /// they stay announced if prefixd stops while the speaker runs.
     detector_unleased: bool,
-    /// The controller's injection lease, present while `blackhole.leased` is in use:
-    /// live, renewal_failing or expired, the last renewal, and the TTL bound
-    /// that stops renewal during a database outage.
+    /// The controller's injection lease, present with `blackhole.leased` or
+    /// `bgp.rustbgpd.leased_flowspec`: its state, the last renewal, and the TTL
+    /// bound that stops renewal during a database outage.
     #[serde(skip_serializing_if = "Option::is_none")]
     lease: Option<crate::domain::LeaseHealth>,
     /// Export evidence of active enforced blackholes from the last

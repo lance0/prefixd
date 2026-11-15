@@ -51,9 +51,10 @@ renews, so switching an enforced leased controller to dry-run lets its leased
 routes lapse within one lease.
 
 Status note 2026-11-15 (TTL bound): unfenced renewal is bounded by the leased
-routes' TTLs, so an outage cannot renew them past every TTL. The keeper stops
-renewing one lease after the latest leased `expires_at` from its last
-successful read; see
+routes' TTLs, so an outage cannot renew them past the owner's latest leased
+TTL. The keeper stops renewing one margin after the latest leased `expires_at`
+from its last successful read or leased write, and a standby reads leased
+intent so its renewal follows the same bound; see
 [ADR 003](003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls).
 
 Status note 2026-10-20 (unicast injection contract): rustbgpd 0.79.0 also
@@ -483,8 +484,8 @@ blackholes. The owner identity also keys the
   or from `ListInjectionLeases(owner)`.
 - **Renewal task.** A dedicated task calls `RenewLease(owner, generation,
   lease_seconds)` about every `lease_seconds / 3` with its own deadline, while
-  it holds a generation and one lease after the latest leased `expires_at`
-  from the last successful read. It never takes the lifecycle mutex, touches
+  it holds a generation, until one margin after the latest leased
+  `expires_at` from the last successful read or leased write. It never takes the lifecycle mutex, touches
   the database or waits for reconciliation. Renewal never resurrects a lease. A
   generation that is not live returns `FAILED_PRECONDITION` (ADR-0141 §2). A
   controller stall longer than the lease removes rustbgpd's routes. Whether

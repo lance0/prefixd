@@ -69,35 +69,61 @@ fence so that a database outage shorter than the leased routes' TTLs does not
 drop them. That independence cannot be unbounded, or the TTL guarantee in this
 ADR would be suspended for the length of the outage.
 
-The lease keeper therefore remembers `renew_until`: the latest `expires_at`
-among the routes this owner holds, taken from its last successful read of
-active intent. A leased FlowSpec rule and a leased blackhole
-(`blackhole.leased`) count alike, because one lease covers both. Once
-`now > renew_until + blackhole.lease_seconds` without a successful read,
-renewal stops. rustbgpd then removes the owner's leased routes within one more
-lease, so no leased intent outlives its TTL by more than two leases of
-outage. A read that succeeds again refreshes `renew_until` and renewal
-resumes, including for a rule still inside its TTL.
+The lease keeper therefore keeps `renew_until`: the latest `expires_at` among
+the leased routes this owner holds. Leased FlowSpec rules and leased
+blackholes (`blackhole.leased`) count alike, because one lease covers both.
+Two things refresh it:
+
+- **Reads.** A successful read of active intent at the start of every
+  reconciliation pass, before expiry runs, replaces it. A failed read leaves
+  the previous bound standing (fail-closed), and an empty leased set bounds
+  renewal to the read itself.
+- **Writes.** Every committed leased admission and TTL extension (a detector
+  re-send, `POST /v1/mitigations/{id}/extend` and a blackhole extension)
+  raises it to that row's `expires_at` at once. A later read never lowers it
+  below a leased write committed since the previous read, so a row added after
+  a read cannot lapse inside its TTL while the next read is late.
+
+Renewal stops once `now > renew_until + margin`, where the margin is
+`max(blackhole.lease_seconds, timers.reconciliation_interval_seconds +
+blackhole.lease_seconds / 3)`. rustbgpd then removes the owner's leased routes
+within one more lease. A read or write that refreshes the bound after a stop
+renews at once, including for a rule still inside its TTL.
+
+The lease is owner-wide, so the bound is too. During an outage, every leased
+route of this owner is renewed until the latest leased `expires_at` among them,
+plus the margin, and lapses within one more lease. A route is therefore bounded
+by the latest leased TTL among the owner's routes, not by its own: a 60-second
+rule next to an 1800-second rule can stay installed for about 1800 seconds
+plus the margin and one lease of outage. Once the database returns, expiry
+withdraws the shorter rule as usual.
 
 Details:
 
-- **Reads, not attempts.** Only a successful read of active intent refreshes
-  the bound; a failed read leaves the previous one standing. An empty leased
-  set bounds renewal to the read itself.
-- **Startup.** Before any read has succeeded, renewal is bounded to one lease
-  after startup. A standby or freshly started controller that cannot read the
-  database lets the adopted lease lapse; it never renews it indefinitely
-  without evidence of the TTLs.
-- **Both processes.** A standby renews without the fence but follows the same
-  bound, so two controllers sharing an owner cannot hold routes past every
-  TTL.
+- **Margin.** One lease would be enough for an outage, but with
+  `lease_seconds` shorter than the reconciliation interval a healthy
+  controller could stop renewing between passes. The margin covers one
+  interval plus a third of a lease, so a healthy controller always reads, and
+  withdraws an expired row, before renewal would stop. It lengthens the outage
+  tail by at most one reconciliation interval.
+- **Startup.** Before any read or write, renewal is bounded to one margin
+  after startup. A freshly started controller that cannot read the database
+  lets the adopted lease lapse; it never renews it indefinitely without
+  evidence of the TTLs.
+- **Standby.** A standby mutates nothing, but it reads active intent on the
+  reconciliation interval, so its unfenced renewal follows the same bound as
+  the active controller and a live lease stays live through a failover. A
+  standby that cannot read stops at its own bound and reports the lease as
+  `standby`, not `expired`, because the active controller may still keep it
+  live.
 - **Not a failure.** A stop at the bound is reported as a lease TTL bound
   (`renewal_stopped: "ttl_bound"` in health), not as a failed renewal. The
-  lease state reports `expired` once one more lease has passed, since by then
-  the speaker holds none of the routes.
-- **No resurrection.** The bound only stops renewal. It never adds, re-adds or
-  resurrects a route; adds stay fenced and database-gated, and dry-run still
-  never renews.
+  lease state reports `expired` once one more lease has passed after the stop,
+  since by then the speaker holds none of the routes.
+- **No resurrection.** The bound only stops and resumes renewal. It never
+  adds, re-adds or resurrects a route: adds stay fenced and database-gated,
+  expiry withdraws an expired row before any re-add, and dry-run still never
+  renews.
 
 ## Consequences
 

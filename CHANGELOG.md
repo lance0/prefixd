@@ -7,16 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- Alerts on `prefixd_injection_lease_state{state="expired"}` keep working. A
+  standby controller that cannot read the database now reports the new state
+  `standby` instead of `live` or `expired`, because the active controller may
+  still keep the lease live. Add it to dashboards that show the lease per
+  controller.
+
+### Known limitations
+
+- The TTL bound on lease renewal is owner-wide, because the rustbgpd lease is.
+  During a PostgreSQL outage every leased FlowSpec rule and leased blackhole of
+  a controller is renewed until the latest leased `expires_at` among them,
+  plus the margin, and lapses within one more lease. A 60-second rule next to
+  an 1800-second rule can stay installed for about 1800 seconds plus the
+  margin and one lease. Expiry withdraws it once the database returns.
+- The margin is `max(blackhole.lease_seconds,
+  timers.reconciliation_interval_seconds + blackhole.lease_seconds / 3)`, so a
+  reconciliation interval longer than the lease lengthens that tail by up to
+  one interval.
+
+### Changed
+
+- Health detail `speaker.lease` adds `renew_until` and `renewal_stopped`, and
+  its `state`, like `prefixd_injection_lease_state`, adds `standby`. `expired`
+  also covers a renewal that stopped at the TTL bound one lease ago.
+
 ### Fixed
 
-- Leased FlowSpec rules and leased blackholes no longer outlive their TTL
-  during a PostgreSQL outage. Renewal stays independent of the database and
-  the fence, but the lease keeper now remembers the latest leased `expires_at`
-  from its last successful read and stops renewing one lease after it, so
-  rustbgpd removes the routes within one more lease instead of renewing them
-  indefinitely. A standby follows the same bound, a successful read refreshes
-  it, and health reports `renew_until` plus `renewal_stopped: "ttl_bound"`
-  rather than a renewal failure.
+- Leased FlowSpec rules and leased blackholes are no longer renewed
+  indefinitely during a PostgreSQL outage. Renewal stays independent of the
+  database and the fence, but it now stops one margin after the latest leased
+  `expires_at`, and rustbgpd removes the routes within one more lease. The
+  read at the start of every reconciliation pass sets that bound, and each
+  leased admission and TTL extension raises it at once, so a row added after
+  the last read keeps renewing until its own expiry. A refreshed bound renews
+  at once and never re-adds an expired row. A standby reads leased intent on
+  the reconciliation interval, so its renewal follows the same bound and a
+  failover keeps live leased routes live. A stop at the bound is reported as
+  `renewal_stopped: "ttl_bound"`, not as a failed renewal.
 - The release workflow stages its assets in `release-assets/` instead of
   `dist/`. The checkout tracks `dist/systemd/`, so the v0.27.0 run tagged the
   release and pushed both images but failed to create the GitHub Release when
