@@ -185,7 +185,7 @@ enum MitigationCommands {
 
     /// List mitigations, newest first, in every status unless --status is given
     List {
-        /// Filter by status (pending, active, expired, withdrawn, rejected)
+        /// Filter by status (active, expired or withdrawn)
         #[arg(short, long)]
         status: Option<String>,
 

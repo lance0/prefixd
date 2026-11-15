@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { fireEvent, screen, waitFor } from "@testing-library/react"
+import { fireEvent, screen, waitFor, within } from "@testing-library/react"
 import type { AuditEntry, Event, Mitigation } from "@/lib/api"
 import { formatTimestamp } from "@/lib/format"
 import { MitigationsContentLive } from "@/components/dashboard/mitigations-content-live"
@@ -65,6 +65,19 @@ describe("list states", () => {
     fireEvent.click(active)
     expect(active).toHaveAttribute("aria-pressed", "false")
     expect(screen.getByRole("button", { name: "expired" })).toHaveAttribute("aria-pressed", "false")
+  })
+
+  it("offers only the statuses this version writes", async () => {
+    serveMitigations(loaded([]))
+    renderApp(<MitigationsContentLive />)
+    await screen.findByRole("button", { name: "active" })
+
+    const group = screen.getByRole("group", { name: "Status" })
+    expect(within(group).getAllByRole("button").map((button) => button.textContent?.trim().toLowerCase()))
+      .toEqual(["active", "expired", "withdrawn"])
+    expect(within(group).queryByRole("button", { name: "pending" })).not.toBeInTheDocument()
+    expect(within(group).queryByRole("button", { name: "rejected" })).not.toBeInTheDocument()
+    expect(within(group).queryByRole("button", { name: "escalated" })).not.toBeInTheDocument()
   })
 
   it("shows the expiry countdown with its absolute UTC deadline as visible text", async () => {

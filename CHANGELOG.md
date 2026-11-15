@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `GET /v1/mitigations` documents `status` as the statuses this version writes
+  (`active`, `expired` and `withdrawn`), and the CLI help lists the same set.
+  Legacy `pending`, `escalated` and `rejected` are still accepted and still match
+  a stored row written by an older version or another writer: `pending` is only
+  the controller's pre-admission state, so the live-intent predicates keep
+  covering it rather than a stored row slipping past quota, conflict and
+  withdrawal checks. The dashboard status filter no longer offers `pending`, and
+  rows are no longer styled as live on that status.
+- The architecture and upgrade documents describe `flowspec_announcements` as a
+  legacy table this version never writes, rather than a live announcement
+  schema.
+
+### Removed
+
+- The WebSocket feed no longer defines an `event_ingested` frame. No sender
+  existed, so the frame was never broadcast; event lists keep their API refresh.
+  The dashboard message type union and alert-event mapping drop it.
+- `Mitigation::reject()` is removed. It had no caller, so `rejected` was never
+  produced; the status still deserializes for stored rows and old filters, and
+  the acknowledgment guard keeps excluding such rows.
+
 ### Fixed
 
 - The release workflow stages its assets in `release-assets/` instead of

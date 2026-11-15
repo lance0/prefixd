@@ -11,6 +11,11 @@ use crate::error::{PrefixdError, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MitigationStatus {
+    /// Pre-admission state inside the controller: `Mitigation::from_intent`
+    /// starts here and `activate()` runs before `admit_mitigation` stores the
+    /// row, so no stored row, filter match or API response carries it. Kept
+    /// because `is_active()` and the live-intent storage predicates agree on
+    /// it, and because a stored `pending` row must still parse.
     Pending,
     Active,
     // Legacy state: no code path produces it. Kept so stored rows and old
@@ -18,6 +23,9 @@ pub enum MitigationStatus {
     Escalated,
     Expired,
     Withdrawn,
+    /// Legacy state: no code path produces it, since `Mitigation::reject()` had
+    /// no caller and was removed. Kept so stored rows and old API filters still
+    /// parse.
     Rejected,
 }
 
@@ -483,6 +491,8 @@ pub struct Mitigation {
     pub last_event_id: Uuid,
     pub escalated_from_id: Option<Uuid>,
     pub reason: String,
+    /// Legacy column and response field: nothing sets it since
+    /// `Mitigation::reject()` was removed, so current rows leave it null.
     pub rejection_reason: Option<String>,
     pub acknowledged_at: Option<DateTime<Utc>>,
     pub acknowledged_by: Option<String>,
@@ -667,12 +677,6 @@ impl Mitigation {
 
     pub fn activate(&mut self) {
         self.status = MitigationStatus::Active;
-        self.updated_at = Utc::now();
-    }
-
-    pub fn reject(&mut self, reason: String) {
-        self.status = MitigationStatus::Rejected;
-        self.rejection_reason = Some(reason);
         self.updated_at = Utc::now();
     }
 }

@@ -474,7 +474,7 @@ ORDER BY pg_total_relation_size(relid) DESC;
 **Clean old data:**
 
 This keeps active mitigations, pending withdrawals, recent history and audit logs.
-Old terminal mitigations referenced by the announcement ledger remain for review.
+Old terminal mitigations referenced by legacy announcement rows remain for review.
 Events referenced by retained mitigations or signal groups remain available for
 correlation, detector unbans and incident history.
 

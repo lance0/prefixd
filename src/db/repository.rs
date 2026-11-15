@@ -279,6 +279,12 @@ impl Repository {
     }
 }
 
+// Live-intent predicates in this file name `pending` and `escalated` besides
+// `active`. This version produces neither: `pending` is the controller's
+// pre-admission state, and `escalated` is a legacy status. Both stay in the
+// predicates, matching `MitigationStatus::is_active()`, so a row written by an
+// older version or another writer still counts for quotas, conflicts,
+// ownership and withdrawals.
 /// Active detector-created non-host FlowSpec rows for one customer. Detector
 /// rows reference their persisted event; manual CIDRs do not. `NULLIF` keeps
 /// the cast safe whatever order the planner evaluates the predicates in.

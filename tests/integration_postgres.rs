@@ -262,6 +262,65 @@ async fn test_full_event_to_mitigation_flow() {
 }
 
 #[tokio::test]
+async fn legacy_pending_status_still_counts_as_live_intent() {
+    // `pending` is the controller's pre-admission state: `activate()` runs before
+    // `admit_mitigation` stores the row, so this version never writes it. A stored
+    // row that carries it anyway (an older version, another writer or a manual
+    // insert) must still count as live intent, so quota, conflict and withdrawal
+    // predicates cannot be bypassed by changing only the status column.
+    let ctx = TestContext::new().await;
+    let app = ctx.router().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "timestamp": "2026-01-17T10:00:00Z",
+                        "source": "integration_test",
+                        "victim_ip": "203.0.113.10",
+                        "vector": "udp_flood",
+                        "bps": 500000000,
+                        "pps": 100000,
+                        "top_dst_ports": [53, 123],
+                        "confidence": 0.95
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    sqlx::query("UPDATE mitigations SET status = 'pending'")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+
+    let inventory = ctx.repo.active_mitigation_inventory(None).await.unwrap();
+    assert_eq!(inventory.len(), 1);
+    assert_eq!(inventory[0].status, MitigationStatus::Pending);
+    assert_eq!(ctx.repo.count_active_global().await.unwrap(), 1);
+
+    // Negative control: a terminal status leaves the same predicates empty.
+    sqlx::query("UPDATE mitigations SET status = 'withdrawn'")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    assert!(
+        ctx.repo
+            .active_mitigation_inventory(None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(ctx.repo.count_active_global().await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn test_mitigation_withdrawal() {
     let ctx = TestContext::new().await;
     let app = ctx.router().await;

@@ -274,7 +274,9 @@ pub struct MitigationResponse {
     pub announcement_outcome: Option<AnnouncementOutcome>,
     /// Unique mitigation identifier
     pub mitigation_id: Uuid,
-    /// Current status (pending, active, withdrawn, expired)
+    /// Current status: active, expired or withdrawn for rows this version
+    /// writes. A legacy stored row may still read escalated; no code path
+    /// produces pending or rejected.
     pub status: String,
     /// Customer ID from inventory
     pub customer_id: Option<String>,
@@ -2281,7 +2283,7 @@ pub async fn list_events(
     path = "/v1/mitigations",
     tag = "mitigations",
     params(
-        ("status" = Option<String>, Query, description = "Comma-separated exact statuses: pending, active, expired, withdrawn, rejected (legacy escalated is still accepted but never produced); every token must be valid and nonempty"),
+        ("status" = Option<String>, Query, description = "Comma-separated exact statuses: active, expired or withdrawn, the statuses this version stores. Legacy pending, escalated and rejected are accepted for rows written by an older version or another writer, but no code path produces them; every token must be valid and nonempty"),
         ("customer_id" = Option<String>, Query, description = "Filter by customer ID"),
         ("q" = Option<String>, Query, description = "Literal case-insensitive substring of target, vector, customer ID or mitigation UUID; maximum 256 UTF-8 bytes, no NUL. Empty matches every row."),
         ("victim_ip" = Option<String>, Query, description = "Filter by exact stored host IP or canonical manual CIDR; no containment matching"),
@@ -2319,7 +2321,7 @@ pub async fn list_mitigations(
     {
         Ok(status) => status,
         Err(_) => return Ok(AppError(PrefixdError::InvalidRequest(
-            "invalid status filter; expected comma-separated pending, active, escalated, expired, withdrawn or rejected".into(),
+            "invalid status filter; expected comma-separated active, expired or withdrawn (legacy pending, escalated and rejected are accepted)".into(),
         )).into_response()),
     };
 

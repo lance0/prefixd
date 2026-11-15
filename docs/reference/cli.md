@@ -171,6 +171,11 @@ prefixdctl mitigations list --limit 50
 prefixdctl -f json mitigations list
 ```
 
+`--status` names the statuses this version writes: `active`, `expired` and
+`withdrawn`. Legacy `pending`, `escalated` and `rejected` are still accepted and
+match only a stored row written by an older or external writer; no code path
+produces them.
+
 ### Get Mitigation
 
 ```bash

@@ -1,8 +1,12 @@
 use serde::Serialize;
 
-use crate::api::handlers::{EventResponse, MitigationResponse};
+use crate::api::handlers::MitigationResponse;
 
-/// WebSocket message types for real-time updates
+/// WebSocket message types for real-time updates.
+///
+/// Event ingestion is deliberately not a frame type: the feed carries
+/// mitigation and scrubber lifecycle changes, while event lists keep their API
+/// refresh. Add a frame type only together with a sender.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsMessage {
@@ -17,9 +21,6 @@ pub enum WsMessage {
 
     /// A mitigation was manually withdrawn
     MitigationWithdrawn { mitigation_id: String },
-
-    /// A new event was ingested
-    EventIngested { event: EventResponse },
 
     /// A durable diversion admission or lifecycle transition.
     DiversionUpdated {

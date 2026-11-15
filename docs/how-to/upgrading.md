@@ -221,7 +221,8 @@ Use `gobgp` for either GoBGP mode spelling and an explicit HTTP(S) URL with the
 trailing `/` for an endpoint without a path. Use the same address in the new
 configuration. The block is one transaction and takes the same registration lock
 as startup. It rejects active/pending mitigations, pending cleanup, unadopted
-legacy requests, unresolved announcements and another POP's assigned target.
+legacy requests, legacy announcement rows that are not withdrawn and another
+POP's assigned target.
 
 <!-- speaker-transfer-sql -->
 ```sql

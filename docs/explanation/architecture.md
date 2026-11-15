@@ -197,7 +197,7 @@ The [migrations](../../migrations/) are the schema authority:
 | `mitigations` | Desired match, action, expiry, POP and lifecycle status |
 | `withdrawal_requests` | Immutable pending and completed deletion operations |
 | `speaker_targets`, `speaker_pop_bindings` | Registered target identity and exclusive POP assignment |
-| `flowspec_announcements` | Existing announcement schema; not a complete runtime acknowledgement ledger |
+| `flowspec_announcements` | Legacy table: this version writes no rows and keeps it for schema compatibility and legacy-data checks |
 | Signal groups and their event links | Correlation history and contributing sources |
 | `audit_log` | Attributed operation history |
 | Safelist, operators, sessions and preferences | Protection and operator access/state |

@@ -299,6 +299,8 @@ export interface Mitigation {
   announcement_outcome?: AnnouncementOutcome
   mitigation_id: string
   scope_hash: string
+  // Response vocabulary: `pending` and `rejected` are never produced by this
+  // version and `escalated` only parses legacy rows. Never offer them as filters.
   status: "pending" | "active" | "escalated" | "expired" | "withdrawn" | "rejected"
   customer_id: string | null
   service_id: string | null
