@@ -26,12 +26,13 @@ to announce a FlowSpec rule with a mandatory TTL. No detector speaks BGP.
 **Status:** pre-1.0. The `/v1/` API is stable within 0.x: a breaking change is
 called out in its release's upgrade notes
 ([API versioning](docs/reference/api-versioning.md)). The latest release,
-[v0.26.0](https://github.com/lance0/prefixd/releases/tag/v0.26.0), adds an
-opt-in TCP flags match for manual FlowSpec rules and an optional symmetric
-return leg for scrubber diversion. Both stay off until configured. It needs
-rustbgpd v0.81.0 or later (v0.82.0 for VPN; Compose pins v0.82.0), applies no
-new migration, and keeps migration 019 as the latest; follow the
-[upgrade guide](docs/how-to/upgrading.md#v0250--0260).
+[v0.27.0](https://github.com/lance0/prefixd/releases/tag/v0.27.0), focuses
+on safety and correctness. It requires rustbgpd v0.83.0 or later (Compose pins
+v0.83.0), a reason on every withdrawal, and https alert destinations on public
+hosts, and refuses `${...}` placeholders at startup. The shipped rustbgpd
+configuration now leases FlowSpec rules, so rustbgpd withdraws them if prefixd
+stays down longer than one lease. Migration 020 records event outcomes; follow
+the [upgrade guide](docs/how-to/upgrading.md#v0260--0270).
 
 ## Choose your path
 

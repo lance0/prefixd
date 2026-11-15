@@ -1,8 +1,9 @@
 # Upgrade Guide
 
-Upgrading a v0.25.0 deployment? Follow
-[v0.25.0 → 0.26.0](#v0250--0260). From v0.24.0, follow
-[v0.24.0 → 0.25.0](#v0240--0250) first; from v0.23.1,
+Upgrading a v0.26.0 deployment? Follow
+[v0.26.0 → 0.27.0](#v0260--0270); it gives the order of the steps from the
+sections below. From v0.25.0, follow [v0.25.0 → 0.26.0](#v0250--0260) first;
+from v0.24.0, [v0.24.0 → 0.25.0](#v0240--0250) before that; from v0.23.1,
 [v0.23.1 → 0.24.0](#v0231--0240) before that.
 From v0.23.0, follow [v0.23.0 → 0.23.1](#v0230--0231) first; from v0.22.1,
 [v0.22.1 → 0.23.0](#v0221--0230) before that; from v0.22.0,
@@ -51,21 +52,31 @@ set it. If your speaker config does, follow the
 delete `access_mode = "read_write"` and keep any `max_tier`, and run
 `rustbgpd --check` on the new config before restarting.
 
-With Compose, recreate the speaker first, then the controller:
+With Compose, recreate only the speaker while the old controller keeps
+running. This pulls only the digest-pinned speaker image; the controller and
+dashboard are replaced afterward, with pinned images, as in
+[v0.26.0 → 0.27.0](#v0260--0270):
 
 ```bash
-git pull origin main
-docker compose --profile rustbgpd pull rustbgpd prefixd-rustbgpd
-docker compose --profile rustbgpd up -d --no-build rustbgpd
+docker compose --profile rustbgpd pull rustbgpd
+docker compose --profile rustbgpd up -d --no-deps --no-build rustbgpd
 docker compose exec rustbgpd rbgp --addr unix:///run/rustbgpd/grpc.sock health
-docker compose --profile rustbgpd up -d --no-build prefixd-rustbgpd
 ```
 
-`rbgp health` prints the running daemon's `Version:`; confirm it reads 0.83.0
-before recreating the controller. A pinned `PREFIXD_RUSTBGPD_IMAGE` override
-must name a v0.83.0 image. The speaker restart drops its process-local
-injections, and reconciliation restores them on its next poll; verify exact
-rules, lease state and receiving routers afterward.
+`rbgp health` prints the running daemon's `Version:`; confirm it reads 0.83.0.
+A pinned `PREFIXD_RUSTBGPD_IMAGE` override must name a v0.83.0 image. The
+speaker restart drops its process-local injections, so rustbgpd announces none
+of prefixd's FlowSpec rules until the running controller's next reconciliation
+re-adds them, up to `timers.reconciliation_interval_seconds` (30 by default)
+later. Wait for a `repairing local announcement` log line for each active
+rule, and check that the speaker lists them, before replacing the controller:
+
+```bash
+docker compose logs --since 5m prefixd-rustbgpd | grep 'repairing local announcement'
+docker compose exec rustbgpd rbgp --addr unix:///run/rustbgpd/grpc.sock flowspec -a ipv4_flowspec
+```
+
+Verify lease state and receiving routers afterward as well.
 
 ## rustbgpd v0.81
 
@@ -679,7 +690,18 @@ written. Startup fails, reload keeps the running
 configuration, and `PUT /v1/config/alerting` returns `400`; each names the key
 but not the value.
 
-Before upgrading, search both files for `${`:
+Before upgrading, search both files for `${`. Only uncommented values matter:
+v0.26.0's shipped `configs/prefixd.yaml` has four in commented alerting
+examples, and comments are not loaded. With Compose, `alerting.yaml` lives in
+the controller's configuration volume; the second command reports a missing
+file if there is none:
+
+```bash
+grep -n '^[^#]*\${' configs/prefixd.yaml
+docker compose exec prefixd-rustbgpd grep -n '^[^#]*\${' /etc/prefixd/alerting.yaml
+```
+
+No output means nothing to change. Otherwise:
 
 - For an alert secret, replace it with its `*_env` key, for example
   `routing_key_env: PAGERDUTY_ROUTING_KEY`, and set that variable in the
@@ -1016,6 +1038,188 @@ prefixdctl migrations
 ---
 
 ## Version-Specific Notes
+
+### v0.26.0 → 0.27.0
+
+0.27.0 tightens configuration loading, withdrawals and alerting, and requires
+rustbgpd v0.83.0. It applies migration 020, which adds outcome columns to
+`events`; events stored before it report `not_recorded`. No adoption step
+runs. The shipped `configs/prefixd.yaml`, which the rustbgpd profile
+bind-mounts from the checkout, now turns on
+[leased FlowSpec](../reference/configuration.md#leased-flowspec).
+
+Upgrade the speaker first while the 0.26.0 controller keeps running, then
+replace the controller and dashboard. The commands below are the whole
+sequence for this upgrade: they replace the general
+[Docker Compose Upgrade](#docker-compose-upgrade) commands and the Compose
+block in [rustbgpd v0.83](#rustbgpd-v083), whose checks they include.
+
+#### Before you start
+
+Startup refuses several configurations that 0.26.0 accepted. The controller
+checks its configuration files before it connects to PostgreSQL or the speaker,
+so a refused 0.27.0 controller applies no migration and changes no rule. By
+then the 0.26.0 controller has stopped, though, and TTL expiry waits until the
+new one starts, so make these checks while 0.26.0 still runs:
+
+- Back up PostgreSQL and keep the 0.26.0 images, configuration and
+  `prefixdctl`.
+- Remove `${...}` placeholders from the uncommented values of `prefixd.yaml`
+  and `alerting.yaml`; see
+  [configuration placeholders](#configuration-placeholders).
+- Check every alerting destination. Each Slack, Discord or Teams
+  `webhook_url`, PagerDuty `events_url` and generic `url`, including one that
+  a `*_env` variable supplies, must use `https://` and a public host, not
+  `localhost` or a literal private, loopback or link-local address. 0.26.0
+  started with such a destination; 0.27.0 refuses it at startup and reload,
+  naming the file and key but not the URL. Read `alerting.yaml` in the volume,
+  or without it the `alerting` section of `configs/prefixd.yaml`:
+
+  ```bash
+  docker compose exec prefixd-rustbgpd cat /etc/prefixd/alerting.yaml
+  ```
+
+  Publish an internal receiver under a public https name, or remove the
+  destination; see
+  [alert destination URLs](../reference/configuration.md#alert-destination-urls).
+- Clean `/etc/prefixd/playbooks.yaml` of unknown keys; see
+  [unknown playbook keys](#unknown-playbook-keys).
+- Split scoped scrubber profiles that mix address families, draining their
+  diversions with 0.26.0 first; see
+  [scoped scrubber profiles use one family](#scoped-scrubber-profiles-use-one-family).
+- Update every script, detector integration or client that calls a withdraw
+  endpoint to send a nonblank reason; see
+  [withdrawal reasons are required](#withdrawal-reasons-are-required).
+  Detector unban events and the bundled FastNetMon script are unaffected.
+- Re-evaluate a low `http.rate_limit` cap; see
+  [per-class rate limits](#per-class-rate-limits).
+- If your `configs/rustbgpd.toml` sets the gRPC listener `access_mode`, remove
+  it as described in [rustbgpd v0.83](#rustbgpd-v083).
+- If browsers reach the dashboard over plain HTTP, keep
+  `http.secure_cookies: false`, which the shipped Compose configurations set;
+  see [secure session cookies](#secure-session-cookies).
+- Decide on leased FlowSpec. With the checkout's
+  `bgp.rustbgpd.leased_flowspec: true`, rules that 0.27.0 adds are leased: a
+  controller outage longer than the remaining lease, as little as 40 of the
+  default 60 seconds, withdraws those active mitigations from rustbgpd by
+  design while the database still holds them, and the restarted controller
+  re-adds them. Rules that 0.26.0 added stay unleased until they are withdrawn
+  or expire. To keep every rule announced through a controller outage, set
+  `leased_flowspec: false` in `configs/prefixd.yaml` after step 2 and before
+  step 5. Once a leased rule exists, startup refuses `false` until the leased
+  rules are drained; see
+  [leased FlowSpec](../reference/configuration.md#leased-flowspec) for the
+  procedure. The GoBGP profile is unleased.
+
+#### Compose
+
+Run these in the deployment's checkout:
+
+```bash
+# 1. Back up the database
+docker compose exec -T postgres pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+
+# 2. Update the checkout; it pins rustbgpd 0.83.0 and sets leased_flowspec: true
+git fetch --tags && git checkout v0.27.0
+
+# 3. Upgrade and recreate only the speaker; the 0.26.0 controller keeps running
+docker compose --profile rustbgpd pull rustbgpd
+docker compose --profile rustbgpd up -d --no-deps --no-build rustbgpd
+docker compose exec rustbgpd rbgp --addr unix:///run/rustbgpd/grpc.sock health
+```
+
+`Version:` must read 0.83.0. The new speaker process starts with no FlowSpec
+rules, so rustbgpd announces none of prefixd's rules until the 0.26.0
+controller's next reconciliation, up to
+`timers.reconciliation_interval_seconds` (30 by default) later. Before step 4,
+wait for a `repairing local announcement` line for each active rule and check
+that the speaker lists them:
+
+```bash
+docker compose logs --since 5m prefixd-rustbgpd | grep 'repairing local announcement'
+docker compose exec rustbgpd rbgp --addr unix:///run/rustbgpd/grpc.sock flowspec -a ipv4_flowspec
+```
+
+```bash
+# 4. Pin and pull the 0.27.0 controller and dashboard
+export PREFIXD_IMAGE=ghcr.io/lance0/prefixd:0.27.0
+export PREFIXD_DASHBOARD_IMAGE=ghcr.io/lance0/prefixd-dashboard:0.27.0
+docker compose --profile rustbgpd pull prefixd-rustbgpd dashboard
+
+# 5. Replace the controller and dashboard; rustbgpd keeps its routes
+docker compose --profile rustbgpd up -d --no-deps --no-build prefixd-rustbgpd dashboard
+
+# 6. Bring the rest of the stack in line with the checkout
+docker compose --profile rustbgpd up -d --no-build
+```
+
+The 0.26.0 controller container was created without a stop grace period, so
+step 5 stops it after Docker's default 10 seconds, before its 30-second
+shutdown drain ends. That is harmless here: shutdown withdraws nothing, and
+the rules 0.26.0 added are unleased, so rustbgpd keeps announcing them while
+the controller is replaced. The new container gets the checkout's
+`stop_grace_period: 35s`, so later restarts let the drain finish. If you had
+already set `leased_flowspec: true` under 0.26.0, the new controller must start
+within the remaining lease; see [controller restart](#controller-restart).
+
+Step 6 reruns the one-shot `init`, which only seeds missing configuration
+files, and reports every other service as running; it recreates nothing that
+step 3 or 5 started.
+
+Keep both variables set for later Compose commands, or put them in `.env`;
+without them Compose falls back to the moving `main` tags. For a source build,
+replace step 4 with the local image overrides in
+[Docker Compose Upgrade](#docker-compose-upgrade); `pull prefixd-rustbgpd` fails
+for a local tag. For GoBGP, skip step 3 and use profile `gobgp` and service
+`prefixd-gobgp`.
+
+#### Bare metal
+
+Upgrade rustbgpd to 0.83.0 first: run `rustbgpd --check` on its config, restart
+it, and wait for the running 0.26.0 controller to repair its rules as above.
+Then:
+
+```bash
+pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+git fetch --tags && git checkout v0.27.0
+cargo build --release --locked
+sudo systemctl stop prefixd
+sudo cp target/release/prefixd target/release/prefixdctl /usr/local/bin/
+sudo systemctl start prefixd
+```
+
+`leased_flowspec` defaults to `false`, so `/etc/prefixd/prefixd.yaml` stays
+unleased unless you set it. The release ships a systemd unit for prefixd with
+rustbgpd; to adopt it, see [Systemd Service](deployment.md#systemd-service).
+
+#### Check the 0.27.0 upgrade
+
+- `prefixdctl migrations` lists rows 1 through 20, with `020 event_outcomes`
+  new. No adoption or `tag_origin_mode` entry appears in the log or audit.
+- Authenticated `GET /v1/health/detail` is healthy and reports version 0.27.0
+  and rustbgpd 0.83.0; with the shipped placeholder neighbor and no
+  established session it reports `degraded` with `no_established_peer`. The
+  first reconciliation succeeds without repairs, and the same mitigation IDs
+  stay active or withdrawn. The speaker's local FlowSpec rules are unchanged,
+  and the rules 0.26.0 added stay unleased.
+- With `leased_flowspec: true`, a new mitigation is added under the
+  controller's injection owner. `prefixdctl speaker list-routes`, which needs
+  an administrator session, shows that owner in its `OWNER` column, and `-`
+  for the unleased rules 0.26.0 added. Authenticated health reports the lease
+  `state` as `live` once the first leased rule exists.
+- Events stored before the upgrade report `not_recorded`, and a withdrawal
+  with a blank reason returns `400`.
+
+#### Downgrading to 0.26.0
+
+Keep rustbgpd at 0.83.0, which 0.26.0 runs against during this upgrade, and
+keep `leased_flowspec` as it is: 0.26.0 reads the same setting, adopts the
+live injection lease and renews the leased rules. Migration 020 only adds columns, which 0.26.0 ignores; events it
+stores report `not_recorded` after the next upgrade. Before switching, restore
+literal alert secrets and `storage.connection_string` if you moved them to
+`*_env` keys or `DATABASE_URL`; see
+[configuration placeholders](#configuration-placeholders). Then follow
+[rollback](#rollback).
 
 ### v0.25.0 → 0.26.0
 

@@ -7,8 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-11-15
+
+prefixd 0.27.0 is a safety and correctness release. Withdrawals require a
+reason; startup refuses `${...}` placeholders, unknown playbook keys and alert
+destinations that are not https on a public host; and rate limits apply per
+request class and client, so a detector flood cannot block withdrawals. The
+shipped rustbgpd configuration now leases FlowSpec rules, so rustbgpd withdraws
+them when prefixd stays down longer than one lease. Detector events can create
+guarded prefix mitigations behind an opt-in, each stored event records its
+outcome, and the dashboard adds a per-mitigation audit timeline, a
+data-freshness indicator and read-only scrubber views. It requires rustbgpd
+v0.83.0 and applies migration 020.
+
 ### Upgrade notes
 
+- Follow [v0.26.0 → 0.27.0](docs/how-to/upgrading.md#v0260--0270) for the
+  order: check the configuration first, upgrade rustbgpd while the 0.26.0
+  controller runs, wait for it to restore the speaker's rules, then replace
+  the controller and dashboard.
 - The shipped `configs/prefixd.yaml`, which the rustbgpd Compose profile
   bind-mounts from the checkout, now sets `bgp.rustbgpd.leased_flowspec: true`.
   After `git pull`, new enforced FlowSpec rules are added under the
@@ -66,9 +83,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `default_playbook` and any other key not in the configuration reference.
   Otherwise startup fails and reload is refused, naming the key. See
   [unknown playbook keys](docs/how-to/upgrading.md#unknown-playbook-keys).
-- Before upgrading, search `prefixd.yaml` and `alerting.yaml` for `${`.
-  prefixd never expanded these placeholders, which earlier examples showed, and
-  now refuses them at startup and reload, naming the key. Replace an alert
+- Before upgrading, search the uncommented values of `prefixd.yaml` and
+  `alerting.yaml` for `${`; v0.26.0's shipped `prefixd.yaml` has some only in
+  commented examples. prefixd never expanded these placeholders, which earlier
+  examples showed, and now refuses them at startup and reload, naming the key. Replace an alert
   secret with its `*_env` key, and delete
   `storage.connection_string: "${DATABASE_URL}"` while keeping `DATABASE_URL`
   set. See
@@ -103,6 +121,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returning 429 to withdrawals in that topology.
 - 429 responses keep the `retry_after_seconds` body field and send no
   `Retry-After` header.
+
+### Security
+
+- Parse errors for `prefixd.yaml`, `correlation.yaml` and `alerting.yaml` no
+  longer quote the offending value, which could be part of a secret such as
+  `storage.connection_string` or a webhook URL, in the reload log or startup
+  error. They name the file, key path, line and column instead. Inventory and
+  playbook errors keep their full detail.
+- Alert delivery errors no longer include the request URL, which could carry a
+  webhook secret or a Telegram bot token, in the controller log or the
+  `POST /v1/config/alerting/test` response.
+- Session cookies are now `Secure` by default unless `auth.mode` is `none`,
+  including behind a TLS-terminating proxy. Previously only native `http.tls`
+  set the flag. A deployment that browsers reach over plain HTTP must set
+  `http.secure_cookies: false`; the shipped Compose configurations do. See
+  [Secure session cookies](docs/how-to/upgrading.md#secure-session-cookies).
+- **quinn-proto, quinn-udp** — Updated quinn-proto 0.11.18 → 0.11.19 and
+  quinn-udp 0.5.14 → 0.5.16 in both lockfiles, which fixes a `MAX_STREAM_DATA`
+  frame opening streams beyond the stream limit (RUSTSEC-2026-0523), a long
+  Retry token panicking or exhausting memory in a QUIC client
+  (RUSTSEC-2026-0524) and a receive loop spinning after a truncated datagram
+  (RUSTSEC-2026-0538). The crates are locked only through reqwest's optional
+  `http3` support, which prefixd does not enable, so no build compiles them.
+  No advisory exception is added.
 
 ### Added
 
@@ -340,30 +382,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it from viewers. The Administration page lists operator accounts only for an
   admin, and the Correlation cache tab tells non-admins it needs the admin
   role. The controller's authorization is unchanged.
-
-### Security
-
-- Parse errors for `prefixd.yaml`, `correlation.yaml` and `alerting.yaml` no
-  longer quote the offending value, which could be part of a secret such as
-  `storage.connection_string` or a webhook URL, in the reload log or startup
-  error. They name the file, key path, line and column instead. Inventory and
-  playbook errors keep their full detail.
-- Alert delivery errors no longer include the request URL, which could carry a
-  webhook secret or a Telegram bot token, in the controller log or the
-  `POST /v1/config/alerting/test` response.
-- Session cookies are now `Secure` by default unless `auth.mode` is `none`,
-  including behind a TLS-terminating proxy. Previously only native `http.tls`
-  set the flag. A deployment that browsers reach over plain HTTP must set
-  `http.secure_cookies: false`; the shipped Compose configurations do. See
-  [Secure session cookies](docs/how-to/upgrading.md#secure-session-cookies).
-- **quinn-proto, quinn-udp** — Updated quinn-proto 0.11.18 → 0.11.19 and
-  quinn-udp 0.5.14 → 0.5.16 in both lockfiles, which fixes a `MAX_STREAM_DATA`
-  frame opening streams beyond the stream limit (RUSTSEC-2026-0523), a long
-  Retry token panicking or exhausting memory in a QUIC client
-  (RUSTSEC-2026-0524) and a receive loop spinning after a truncated datagram
-  (RUSTSEC-2026-0538). The crates are locked only through reqwest's optional
-  `http3` support, which prefixd does not enable, so no build compiles them.
-  No advisory exception is added.
 
 ## [0.26.0] - 2026-11-12
 
@@ -3334,7 +3352,8 @@ Startup now refuses the configuration keys removed in 0.20.0, and requires
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.27.0...HEAD
+[0.27.0]: https://github.com/lance0/prefixd/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/lance0/prefixd/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/lance0/prefixd/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/lance0/prefixd/compare/v0.23.1...v0.24.0
