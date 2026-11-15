@@ -41,9 +41,11 @@ FastNetMon, Prometheus Alertmanager or any JSON webhook sends attack events.
 prefixd groups signals per target, weighs corroborating sources and applies the
 matching playbook. Controller integration tests cover these adapters; the dated
 profile qualification covers manual mitigation, not detector traffic.
+prefixd can post each new, withdrawn or expired mitigation to Slack, Discord,
+Teams, Telegram, PagerDuty, Opsgenie or a webhook.
 
 [FastNetMon](docs/how-to/detectors/fastnetmon.md) · [Generic webhook](docs/how-to/detectors/generic-webhook.md) ·
-[Corroborating signals](docs/how-to/detectors/corroborating-signals.md)
+[Corroborating signals](docs/how-to/detectors/corroborating-signals.md) · [Alerting](docs/how-to/alerting.md)
 
 ### Operator during an attack
 
@@ -224,6 +226,7 @@ Start with the [documentation index](docs/README.md), or go to your task:
 |------|-------|
 | Run it for the first time | [Quickstart](docs/tutorials/quickstart.md) · [Cookbook](docs/cookbook/README.md) |
 | Connect a detector | [FastNetMon](docs/how-to/detectors/fastnetmon.md) · [Generic webhook](docs/how-to/detectors/generic-webhook.md) · [Correlation](docs/reference/configuration.md#correlation) |
+| Send alerts to chat or paging | [Alerting](docs/how-to/alerting.md) |
 | Configure, deploy or upgrade | [Configuration](docs/reference/configuration.md) · [Deployment](docs/how-to/deployment.md) · [Upgrading](docs/how-to/upgrading.md) |
 | Automate | [HTTP API](docs/reference/api.md) · [CLI](docs/reference/cli.md) · [API versioning](docs/reference/api-versioning.md) |
 | Choose or operate a speaker | [Speaker backends](docs/reference/speaker-backends.md) · [Vendors](docs/reference/vendors.md) · [Troubleshooting](docs/how-to/troubleshooting.md) |

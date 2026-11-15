@@ -2959,8 +2959,10 @@ POST /v1/config/alerting/test
 Authorization: Bearer <token>
 ```
 
-Sends a test alert to all configured destinations. Returns per-destination results.  
-Requires admin role.
+Sends a test `mitigation.created` alert, titled `Test Alert`, to each destination
+whose event filter includes `mitigation.created`, and returns one result per
+destination it sent to, in configuration order. Requires admin role. See
+[send a test alert](../how-to/alerting.md#send-a-test-alert).
 
 **Response:**
 
