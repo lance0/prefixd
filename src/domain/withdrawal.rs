@@ -688,6 +688,84 @@ mod tests {
         assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
     }
 
+    /// A simulation with its own pending withdrawal is left to the scheduler;
+    /// another simulation's pending request does not hide it.
+    #[tokio::test]
+    async fn dry_run_intent_skips_only_its_own_pending_withdrawal() {
+        let repo = MockRepository::new();
+        let simulation = |prefix| {
+            let mut mitigation = mitigation(prefix);
+            mitigation.origin_mode = Some(crate::config::OperationMode::DryRun);
+            mitigation
+        };
+        let (pending, live) = (simulation("192.0.2.1/32"), simulation("192.0.2.2/32"));
+        repo.insert_mitigation(&pending).await.unwrap();
+        repo.insert_mitigation(&live).await.unwrap();
+        request_withdrawal(
+            &repo,
+            &pending,
+            false,
+            "operator",
+            "a",
+            "why".into(),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let ids: Vec<_> = dry_run_intent(&repo, "test")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.mitigation_id)
+            .collect();
+        assert_eq!(ids, [live.mitigation_id]);
+    }
+
+    /// Without a verified binding, a request that names a speaker target fails
+    /// closed before any RPC, on both the speaker and the local path.
+    #[tokio::test]
+    async fn unbound_completion_refuses_a_request_naming_a_target() {
+        let repo = MockRepository::new();
+        let speaker = MockAnnouncer::new();
+        let current = mitigation("192.0.2.1/32");
+        repo.insert_mitigation(&current).await.unwrap();
+        speaker
+            .announce(&mitigation_rule(&current).unwrap())
+            .await
+            .unwrap();
+        let request = request_withdrawal(
+            &repo,
+            &current,
+            false,
+            "operator",
+            "a",
+            "why".into(),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut targeted = request.clone();
+        targeted.target_id = Some(Uuid::new_v4());
+        let binding = |result: Result<Mitigation>| {
+            matches!(result, Err(PrefixdError::Conflict(message))
+                if message == "speaker target ownership is missing or mismatched")
+        };
+        assert!(binding(
+            execute_withdrawal(&repo, &speaker, false, &targeted, None).await
+        ));
+        assert!(binding(
+            complete_local_withdrawal(&repo, &targeted, None).await
+        ));
+        assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+        assert_eq!(repo.pending_withdrawals(None).await.unwrap().len(), 1);
+        execute_withdrawal(&repo, &speaker, false, &request, None)
+            .await
+            .unwrap();
+        assert!(speaker.list_active().await.unwrap().is_empty());
+    }
+
     /// Any one drifted field of the frozen intent refuses the withdrawal.
     #[tokio::test]
     async fn withdrawal_owner_check_refuses_each_drifted_field_alone() {
