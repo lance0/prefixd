@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `default_playbook` and any other key not in the configuration reference.
   Otherwise startup fails and reload is refused, naming the key. See
   [unknown playbook keys](docs/how-to/upgrading.md#unknown-playbook-keys).
+- Before upgrading, search `prefixd.yaml` and `alerting.yaml` for `${`.
+  prefixd never expanded these placeholders, which earlier examples showed, and
+  now refuses them at startup and reload, naming the key. Replace an alert
+  secret with its `*_env` key, and delete
+  `storage.connection_string: "${DATABASE_URL}"` while keeping `DATABASE_URL`
+  set. See
+  [configuration placeholders](docs/how-to/upgrading.md#configuration-placeholders).
 
 ### Known limitations
 
@@ -90,6 +97,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Startup and playbook reload warn when a `scope: prefix` playbook is loaded
   while `guardrails.allow_detector_prefix` is false or the destination bounds
   admit hosts only.
+- Alert destinations accept `webhook_url_env`, `bot_token_env`,
+  `routing_key_env`, `api_key_env`, `url_env` and `secret_env`, naming an
+  environment variable read when an alert is sent. Its value is never written
+  to `alerting.yaml` or returned; `GET /v1/config/alerting` returns the
+  variable name. An unset or empty variable fails startup and reload, naming
+  the key and the variable. Set `*_env` keys in `alerting.yaml`; the alerting
+  editor keeps existing ones for an unchanged destination but cannot add or
+  retarget one. On the shipped Compose stack, add the variable to the
+  controller's `environment:` in `docker-compose.override.yml`.
+- `storage` may be omitted when `DATABASE_URL` is set. An empty
+  `DATABASE_URL` now counts as unset.
 
 - `GET /v1/audit` accepts exact `target_type` and `target_id` filters, applied
   before pagination, to list one target's history.
@@ -181,6 +199,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Alert delivery errors no longer include the request URL, which could carry a
+  webhook secret or a Telegram bot token, in the controller log or the
+  `POST /v1/config/alerting/test` response.
 - Session cookies are now `Secure` by default unless `auth.mode` is `none`,
   including behind a TLS-terminating proxy. Previously only native `http.tls`
   set the flag. A deployment that browsers reach over plain HTTP must set

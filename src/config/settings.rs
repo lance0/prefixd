@@ -15,6 +15,7 @@ pub struct Settings {
     pub guardrails: GuardrailsConfig,
     pub quotas: QuotasConfig,
     pub timers: TimersConfig,
+    #[serde(default)]
     pub storage: StorageConfig,
     pub observability: ObservabilityConfig,
     #[serde(default)]
@@ -463,9 +464,11 @@ fn default_quiet_period() -> u32 {
     120
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StorageConfig {
-    /// PostgreSQL connection string (e.g., "postgres://user:pass@localhost/prefixd")
+    /// PostgreSQL connection string (e.g., "postgres://user:pass@localhost/prefixd").
+    /// Optional when `DATABASE_URL` is set, which takes precedence.
+    #[serde(default)]
     pub connection_string: String,
 }
 
@@ -807,6 +810,20 @@ impl Settings {
         let content = std::fs::read_to_string(path)?;
         reject_removed_keys(&content)?;
         let settings: Settings = crate::config::parse_yaml(&content)?;
+        // Alerting reports in the alerting editor's form, under its section.
+        let mut document = serde_json::to_value(&settings)?;
+        if let Some(object) = document.as_object_mut() {
+            object.remove("alerting");
+        }
+        let mut errors = crate::config::env_placeholder_errors(&document);
+        errors.extend(
+            settings
+                .alerting
+                .load_errors()
+                .into_iter()
+                .map(|error| format!("alerting: {error}")),
+        );
+        anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
         settings.bgp.validate_vpn_scopes()?;
         settings.http.validate_auth_transport()?;
         settings.blackhole.validate()?;
@@ -1019,6 +1036,51 @@ observability:
             assert!(error.contains(key), "{key}: {error}");
             assert!(!error.contains(secret), "{key}: configuration value leaked");
         }
+    }
+
+    #[test]
+    fn settings_refuse_placeholders_and_unset_alert_env_and_allow_omitted_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("prefixd.yaml");
+        let storage = "storage:\n  connection_string: \"postgres://user:pass@localhost/prefixd\"\n";
+        assert!(MINIMAL_SETTINGS_YAML.contains(storage));
+        let without_storage = MINIMAL_SETTINGS_YAML.replace(storage, "");
+        std::fs::write(&path, &without_storage).unwrap();
+        assert!(
+            Settings::load(&path)
+                .unwrap()
+                .storage
+                .connection_string
+                .is_empty(),
+            "DATABASE_URL alone may supply the connection"
+        );
+
+        let placeholder = MINIMAL_SETTINGS_YAML.replace(
+            "\"postgres://user:pass@localhost/prefixd\"",
+            "\"${DATABASE_URL}\"",
+        );
+        // Negative control: the parser alone accepts the literal placeholder.
+        crate::config::parse_yaml::<Settings>(&placeholder).unwrap();
+        std::fs::write(&path, &placeholder).unwrap();
+        let error = Settings::load(&path).unwrap_err().to_string();
+        assert!(
+            error.starts_with("storage.connection_string looks like ${VAR} substitution"),
+            "{error}"
+        );
+
+        std::fs::write(
+            &path,
+            format!(
+                "{without_storage}alerting:\n  destinations:\n    - type: pagerduty\n      \
+                 routing_key_env: PREFIXD_TEST_UNSET_ALERT_SECRET\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            Settings::load(&path).unwrap_err().to_string(),
+            "alerting: destination[0] (pagerduty): routing_key_env names environment variable \
+             'PREFIXD_TEST_UNSET_ALERT_SECRET', which is not set or empty"
+        );
     }
 
     #[test]
