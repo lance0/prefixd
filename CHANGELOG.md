@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Fixed
+
+- The release workflow stages its assets in `release-assets/` instead of
+  `dist/`. The checkout tracks `dist/systemd/`, so the v0.27.0 run tagged the
+  release and pushed both images but failed to create the GitHub Release when
+  it tried to upload that directory as an asset. A new step, which also runs in
+  dispatch dry runs, checks the exact asset set, requires each asset to be a
+  regular file and verifies `SHA256SUMS` before publishing.
+- Release notes link to repository files at the release tag. CHANGELOG.md
+  keeps relative links such as `docs/how-to/upgrading.md`, which broke on the
+  GitHub Release page; the release body now points them at
+  `https://github.com/<repo>/blob/vX.Y.Z/<path>`.
+
+### Compatibility surfaces
 
 - `GET /v1/mitigations` documents `status` as the statuses this version writes
   (`active`, `expired` and `withdrawn`), and the CLI help lists the same set.
@@ -21,27 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   legacy table this version never writes, rather than a live announcement
   schema.
 
-### Removed
-
 - The WebSocket feed no longer defines an `event_ingested` frame. No sender
   existed, so the frame was never broadcast; event lists keep their API refresh.
   The dashboard message type union and alert-event mapping drop it.
 - `Mitigation::reject()` is removed. It had no caller, so `rejected` was never
   produced; the status still deserializes for stored rows and old filters, and
   the acknowledgment guard keeps excluding such rows.
-
-### Fixed
-
-- The release workflow stages its assets in `release-assets/` instead of
-  `dist/`. The checkout tracks `dist/systemd/`, so the v0.27.0 run tagged the
-  release and pushed both images but failed to create the GitHub Release when
-  it tried to upload that directory as an asset. A new step, which also runs in
-  dispatch dry runs, checks the exact asset set, requires each asset to be a
-  regular file and verifies `SHA256SUMS` before publishing.
-- Release notes link to repository files at the release tag. CHANGELOG.md
-  keeps relative links such as `docs/how-to/upgrading.md`, which broke on the
-  GitHub Release page; the release body now points them at
-  `https://github.com/<repo>/blob/vX.Y.Z/<path>`.
 
 ## [0.27.0] - 2026-11-15
 
