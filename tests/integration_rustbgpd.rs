@@ -2370,7 +2370,8 @@ async fn live_marking_release_matrix_preserves_dscp_in_both_vpn_families() {
 }
 
 /// A detector prefix event admitted under an automatic VPN scope must keep that
-/// exact scope through speaker restart repair and withdrawal.
+/// exact scope through repair after the speaker loses the rule, and through
+/// withdrawal.
 #[tokio::test]
 #[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
 async fn live_vpn_detector_prefix_scope_snapshot_survives_repair_and_withdrawal() {
@@ -2553,6 +2554,10 @@ async fn live_vpn_detector_prefix_scope_snapshot_survives_repair_and_withdrawal(
     // The daemon loses the rule; a fresh controller whose automatic default now
     // names another IPv4 scope repairs the saved payload, not a NEW4 rule.
     speaker.withdraw(&expected).await.unwrap();
+    assert!(
+        speaker.list_active().await.unwrap().is_empty(),
+        "the speaker lost the rule before repair"
+    );
     let mut changed = settings;
     changed.bgp.default_scope = "NEXT4".into();
     let restarted = AppState::new(

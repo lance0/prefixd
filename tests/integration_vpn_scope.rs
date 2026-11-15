@@ -589,7 +589,10 @@ async fn ipv6_detector_prefix_under_ipv4_default_scope_is_refused_without_global
     };
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(
-        body["error"].as_str().unwrap().contains("address family"),
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("automatic default_scope family does not match"),
         "{body}"
     );
     assert!(
