@@ -19,7 +19,7 @@ pub async fn send(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| format!("opsgenie request failed: {}", e))?;
+        .map_err(|e| format!("opsgenie request failed: {}", e.without_url()))?;
 
     if !response.status().is_success() {
         let status = response.status();

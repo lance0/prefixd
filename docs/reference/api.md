@@ -2879,6 +2879,7 @@ Returns configured alert destinations with secrets redacted.
     {
       "type": "pagerduty",
       "routing_key": "***",
+      "routing_key_env": "PAGERDUTY_ROUTING_KEY",
       "events_url": "https://events.pagerduty.com/v2/enqueue",
       "events": ["mitigation.created"]
     }
@@ -2886,6 +2887,11 @@ Returns configured alert destinations with secrets redacted.
   "events": ["mitigation.created", "mitigation.expired"]
 }
 ```
+
+A secret read from the environment keeps its `***` value and adds the
+variable name in its `*_env` key, such as `routing_key_env`. Variable names are
+not secret; their values are never returned. See
+[alert destination secrets](configuration.md#alert-destination-secrets).
 
 **Per-destination events:** Each destination may include an optional `events` array to override the global event filter. If present, only those event types are sent to that destination. If absent or empty, the destination inherits the global `events` list. See ADR 017.
 
@@ -2910,7 +2916,7 @@ Content-Type: application/json
 
 **Admin only.** Validates, merges redacted secrets (`***`) with existing values, writes to `alerting.yaml` (with `.bak` backup), and hot-reloads the alerting service. Returns the updated config with secrets redacted.
 
-**Secret merge:** If a secret field (e.g. `webhook_url`, `bot_token`, `routing_key`, `api_key`, `secret`) equals `"***"`, the server carries forward the real secret from the matching existing destination. New destinations must provide actual secrets.
+**Secret merge:** If a secret field (e.g. `webhook_url`, `bot_token`, `routing_key`, `api_key`, `secret`) equals `"***"`, the server carries forward the real secret from the matching existing destination. New destinations must provide actual secrets. A destination may keep an existing `*_env` key, with `"***"` beside it, only when its type, variable name and `events_url`, `url`, `chat_id` or `region` match a running destination. A new or changed `*_env` key returns 400 before any variable is read; set `*_env` keys in `alerting.yaml` on the controller host. Setting both a literal secret and its `*_env` key is rejected. Inherited `"***"` secrets come only from destinations with inline secrets. A generic destination's redacted `url`, `secret` and header values all come from one uniquely matching running generic destination, matched by `url_env`, by `url`, or, when the URL is also redacted, by being the only inline-URL generic destination. An unresolved or ambiguous match returns 400, so `"***"` is never saved.
 
 **Validation rules:**
 - Slack/Discord/Teams: `webhook_url` required, max 1024 UTF-8 bytes, must be valid `https://` URL
@@ -2919,6 +2925,8 @@ Content-Type: application/json
 - OpsGenie: `api_key` required, `region` must be `us` or `eu`
 - Generic: `url` required, max 1024 UTF-8 bytes, must be valid `https://` URL
 - URL host protections: `localhost`, `.localhost`, and literal private/local IPs (including `169.254.169.254`) are rejected
+- A `*_env` key must name a set, nonempty variable; URL checks apply to its value
+- A string value written entirely as `${...}` is rejected, naming its key; prefixd does not expand placeholders
 
 **Error response (400):**
 
@@ -3098,8 +3106,9 @@ a section, such as a map entry, reports the section's path.
 **Response (422 Unprocessable Entity):** a present file failed to load or
 validate. The error names the file. It includes the loader detail only for
 `inventory.yaml` and `playbooks.yaml`; for `prefixd.yaml`, `correlation.yaml`
-and `alerting.yaml` it points to the controller log, because loader errors can
-quote secret values.
+and `alerting.yaml` it points to the controller log. For a YAML parse error,
+that log entry names the key path, line and column but never the value, because
+these files hold secrets.
 
 ```json
 {

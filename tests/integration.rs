@@ -2706,6 +2706,90 @@ async fn alert_destination_url_rejections_preserve_running_and_saved_config() {
 }
 
 #[tokio::test]
+async fn alerting_editor_keeps_env_backed_secrets_out_of_saved_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alerting.yaml");
+    // PATH is set in every test environment, so no test mutates the environment.
+    let path_value = std::env::var("PATH").unwrap();
+    let mut settings = test_settings();
+    settings.alerting = serde_json::from_value(serde_json::json!({
+        "destinations": [{ "type": "pagerduty", "routing_key_env": "PATH" }],
+    }))
+    .unwrap();
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        Arc::new(MockRepository::new()),
+        Arc::new(MockAnnouncer::new()),
+        dir.path().to_path_buf(),
+    )
+    .unwrap();
+    let app = create_test_router(state.clone());
+    let send = |method: &str, body: Option<serde_json::Value>| {
+        let request = Request::builder()
+            .method(method)
+            .uri("/v1/config/alerting")
+            .header("content-type", "application/json");
+        let body = body.map_or_else(Body::empty, |body| {
+            Body::from(serde_json::to_vec(&body).unwrap())
+        });
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request.body(body).unwrap()).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        }
+    };
+
+    // The dashboard round-trips GET output, including the `***` sentinel.
+    let (status, current) = send("GET", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(current["destinations"][0]["routing_key"], "***");
+    assert_eq!(current["destinations"][0]["routing_key_env"], "PATH");
+    let (status, body) = send("PUT", Some(current.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("routing_key_env: PATH"), "{saved}");
+    assert!(!saved.contains(&path_value));
+
+    let refused = "destination[0] (pagerduty): set *_env keys in alerting.yaml on the controller \
+                   host; the editor keeps one only for an unchanged destination";
+    let mut retargeted = current.clone();
+    retargeted["destinations"][0]["events_url"] = "https://attacker.example/x".into();
+    for (destination, error) in [
+        (retargeted["destinations"][0].clone(), refused),
+        (
+            serde_json::json!({ "type": "pagerduty", "routing_key_env": "DATABASE_URL" }),
+            refused,
+        ),
+        (
+            serde_json::json!({ "type": "pagerduty", "routing_key": "${PAGERDUTY_ROUTING_KEY}" }),
+            "destination[0] (pagerduty): routing_key looks like ${VAR} substitution, which \
+             prefixd does not perform; set the value, or use the matching *_env key where one \
+             exists",
+        ),
+    ] {
+        let (status, body) = send(
+            "PUT",
+            Some(serde_json::json!({ "destinations": [destination] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, serde_json::json!({ "errors": [error] }));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        let (_, running) = send("GET", None).await;
+        assert_eq!(running, current);
+    }
+}
+
+#[tokio::test]
 async fn test_reload_config_reloads_alerting_yaml() {
     let dir = tempfile::tempdir().unwrap();
     let config_dir = dir.path().to_path_buf();
@@ -6912,6 +6996,132 @@ async fn test_reload_error_names_file_without_echoing_settings() {
                     .len(),
         "{error}"
     );
+}
+
+/// Loader errors for secret-bearing files reach the reload log as key path,
+/// line and column only. Inventory and playbook errors keep full detail.
+#[tokio::test]
+async fn reload_log_redacts_secret_file_loader_errors() {
+    #[derive(Clone, Default)]
+    struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    const CANARY: &str = "hunter2-canary";
+    let capture = Capture::default();
+    let writer = capture.clone();
+    // As in `TraceOutput::subscriber`: a second live dispatcher keeps callsite
+    // interest per dispatcher, so a parallel test that registered the reload
+    // callsite first cannot hide it from this capture.
+    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
+    tracing::callsite::rebuild_interest_cache();
+    let directory = tempfile::tempdir().unwrap();
+    let app = setup_app_with_config_dir(directory.path().to_path_buf()).await;
+    let settings = format!("pop: iad1\nmode: {CANARY}\n");
+    let alerting = format!("destinations: [{{type: {CANARY}}}]\n");
+    let correlation = format!("webhook_adapters: [{{name: a, auth: {{type: {CANARY}}}}}]\n");
+    // Password-like strings where a map belongs, which the old loader text
+    // quoted (`SerdeInvalidType`), and where a count belongs, which this
+    // parser reports as `invalid u32` without the value either way.
+    let headers = format!(
+        "pop: iad1\nalerting: {{destinations: [{{type: generic, url: \"https://example.com/hook\", \
+         headers: \"postgres://a:{CANARY}@db\"}}]}}\n"
+    );
+    let count =
+        format!("pop: iad1\nquotas: {{max_active_per_customer: \"postgres://a:{CANARY}@db\"}}\n");
+    // Negative control: the loader text these files produced before quotes the value.
+    for raw in [
+        serde_saphyr::from_str::<prefixd::config::Settings>(&settings)
+            .unwrap_err()
+            .to_string(),
+        serde_saphyr::from_str::<prefixd::alerting::AlertingConfig>(&alerting)
+            .unwrap_err()
+            .to_string(),
+        serde_saphyr::from_str::<prefixd::correlation::CorrelationConfig>(&correlation)
+            .unwrap_err()
+            .to_string(),
+        serde_saphyr::from_str::<prefixd::config::Settings>(&headers)
+            .unwrap_err()
+            .to_string(),
+    ] {
+        assert!(raw.contains(CANARY), "control lost its canary: {raw}");
+    }
+
+    for (file, content, logged) in [
+        (
+            "prefixd.yaml",
+            settings,
+            "prefixd.yaml: mode: unknown variant, expected one of dry-run, enforced at line 2 column 7",
+        ),
+        (
+            "alerting.yaml",
+            alerting,
+            "alerting.yaml: destinations[0].type: unknown variant, expected one of slack, discord, \
+             teams, telegram, pagerduty, opsgenie, generic at line 1 column 17",
+        ),
+        (
+            "prefixd.yaml",
+            headers,
+            "prefixd.yaml: alerting.destinations[0]: invalid type, expected a map at line 2 \
+             column 27",
+        ),
+        (
+            "prefixd.yaml",
+            count,
+            "prefixd.yaml: quotas.max_active_per_customer: invalid u32 at line 2 column 35",
+        ),
+        (
+            "correlation.yaml",
+            correlation,
+            "correlation.yaml: webhook_adapters[0].auth.type: unknown variant, expected one of \
+             hmac, bearer, none at line 1 column 37",
+        ),
+    ] {
+        capture.0.lock().unwrap().clear();
+        let path = directory.path().join(file);
+        std::fs::write(&path, content).unwrap();
+        let (status, rejection) =
+            correlation_config_request(&app, "POST", "/v1/config/reload", "").await;
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{file}");
+        assert!(
+            !rejection.to_string().contains(CANARY),
+            "{file}: {rejection}"
+        );
+        let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(!output.contains(CANARY), "{file}: {output}");
+        let errors: Vec<_> = output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|event| event["fields"]["message"] == "reload_config failed")
+            .map(|event| event["fields"]["error"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(errors, vec![logged.to_string()], "{file}");
+    }
+
+    capture.0.lock().unwrap().clear();
+    std::fs::write(
+        directory.path().join("playbooks.yaml"),
+        "playbooks: [{name: x, match: {vector: visible-playbook-detail}, steps: []}]\n",
+    )
+    .unwrap();
+    let (status, _) = correlation_config_request(&app, "POST", "/v1/config/reload", "").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(output.contains("visible-playbook-detail"), "{output}");
 }
 
 /// VAL-ADAPT-016: POST /v1/config/reload refreshes correlation config from YAML
@@ -15936,7 +16146,9 @@ mod manual_destination_cidr {
         Arc::get_mut(&mut state).unwrap().config_dir = dir.path().into();
         let error = state.reload_config().await.unwrap_err();
         assert!(
-            error.to_string().contains("webhook_url is required"),
+            error
+                .to_string()
+                .contains("webhook_url or webhook_url_env is required"),
             "{error}"
         );
         assert!(state.alerting.read().await.config().destinations.is_empty());

@@ -49,6 +49,7 @@ prost-types = "0.14"
 # Logging & Tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+serde_path_to_error = "0.1"
 
 # Metrics
 prometheus = "0.14"

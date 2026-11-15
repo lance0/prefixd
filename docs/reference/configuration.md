@@ -230,7 +230,9 @@ storage:
   connection_string: "postgres://prefixd:password@postgres:5432/prefixd"
 ```
 
-`DATABASE_URL` overrides this value. The controller also opens one dedicated
+`DATABASE_URL` overrides this value. With `DATABASE_URL` set, you can omit
+`storage` entirely; startup fails if neither supplies a connection string. The
+controller also opens one dedicated
 fence connection from it, which holds a session advisory lock, so it must be a
 direct or session-mode connection; PgBouncer transaction pooling breaks the
 lock. See [controller fence connection](../how-to/deployment.md#controller-fence-connection).
@@ -1399,6 +1401,55 @@ playbooks:
 
 ---
 
+## Alert destination secrets
+
+Each alert secret is given inline or through its `*_env` key, which names an
+environment variable. Set one or the other, not both.
+
+| Destination | Secret | Environment key |
+|-------------|--------|-----------------|
+| `slack`, `discord`, `teams` | `webhook_url` | `webhook_url_env` |
+| `telegram` | `bot_token` | `bot_token_env` |
+| `pagerduty` | `routing_key` | `routing_key_env` |
+| `opsgenie` | `api_key` | `api_key_env` |
+| `generic` | `url`, `secret` | `url_env`, `secret_env` |
+
+```yaml
+destinations:
+  - type: pagerduty
+    routing_key_env: PAGERDUTY_ROUTING_KEY
+  - type: generic
+    url: "https://example.com/webhook"
+    secret_env: WEBHOOK_SECRET
+```
+
+The variable must be in the controller's own environment. The shipped Compose
+stack forwards only `RUST_LOG`, `PREFIXD_API_TOKEN` and `DATABASE_URL` to the
+controller, not other `.env` entries, so add each variable to the controller
+service in `docker-compose.override.yml`:
+
+```yaml
+services:
+  prefixd-rustbgpd:  # or prefixd-gobgp
+    environment:
+      PAGERDUTY_ROUTING_KEY: ${PAGERDUTY_ROUTING_KEY}
+```
+
+prefixd reads the variable each time it sends an alert and never writes its
+value to `alerting.yaml`. Adding or changing a variable needs a controller
+restart, not a reload, because the process environment is fixed at start.
+Startup and reload refuse a destination whose variable is unset or empty, or
+that has neither the secret nor its `*_env` key, naming the key and the variable
+but not the value. `GET /v1/config/alerting` shows the variable name beside the
+redacted `***` value. Generic `headers` values have no `*_env` form.
+
+Set `*_env` keys in `alerting.yaml` on the controller host. The alerting editor
+keeps an existing `*_env` key only for an unchanged destination: same type,
+same variable and the same `events_url`, `url`, `chat_id` or `region`. It
+refuses a new or changed variable name, or a changed destination, before
+reading any variable. Otherwise an administrator could send any variable in the
+controller's environment, such as `DATABASE_URL`, to a URL of their choosing.
+
 ## Alert destination URLs
 
 The alerting configuration editor requires HTTPS for Slack, Discord, Teams,
@@ -1427,14 +1478,21 @@ to alert destinations as needed.
 
 ### Using Environment Variables in Config
 
+prefixd does not expand `${VAR}` placeholders. Keys ending in `_env` name an
+environment variable instead, such as `http.auth.bearer_token_env`,
+`bgp.rustbgpd.bearer_token_env` and the
+[alert destination secrets](#alert-destination-secrets). `DATABASE_URL`
+overrides `storage.connection_string`.
+
 ```yaml
 http:
   auth:
     bearer_token_env: "PREFIXD_API_TOKEN"
-
-storage:
-  connection_string: "${DATABASE_URL}"
 ```
+
+Startup and reload refuse any `prefixd.yaml` or `alerting.yaml` string value
+written entirely as `${...}`, naming its key, because it would otherwise be used
+literally. A value that only contains `${`, such as `pa${ss`, loads as written.
 
 ---
 
@@ -1464,7 +1522,13 @@ differ from the running settings.
 
 A file that fails to load or validate returns 422 with an error naming it. Loader
 detail is included for `inventory.yaml` and `playbooks.yaml` only; for other
-files, which can hold secrets, see the controller log.
+files, which can hold secrets, see the controller log. For `prefixd.yaml`,
+`correlation.yaml` and `alerting.yaml`, a YAML parse error in the log or at
+startup gives the key path, line, column and what was expected, never the value,
+for example `prefixd.yaml: mode: unknown variant, expected one of dry-run,
+enforced at line 2 column 7`. Key text stops at its first `:`. Validation that
+runs after parsing has no line or column; its messages name the keys they check
+and may name non-secret identifiers, such as a VPN scope or adapter name.
 
 ```bash
 # CLI
