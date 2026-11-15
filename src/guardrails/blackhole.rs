@@ -198,7 +198,7 @@ pub async fn check_lease_startup(
     let lease = speaker.capabilities().blackhole_lease;
     if leased_flowspec && !lease {
         return Err(PrefixdError::Config(format!(
-            "bgp.rustbgpd.leased_flowspec requires the rustbgpd injection lease (0.79.0 or later), \
+            "bgp.rustbgpd.leased_flowspec requires the rustbgpd injection lease (0.83.0 or later), \
              which the {} speaker does not provide",
             speaker.backend()
         )));
@@ -1846,7 +1846,7 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("0.79.0"), "{error}");
+        assert!(error.contains("0.83.0"), "{error}");
         speaker.inner.live_lease(OWNER).await.unwrap();
         check_lease_startup(&settings, &speaker, &repo, OWNER)
             .await
