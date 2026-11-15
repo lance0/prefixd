@@ -126,6 +126,16 @@ pub enum PrefixdError {
     )]
     MigrationInProgress,
 
+    /// A migration failed and rolled back; the next start retries it.
+    #[error("database migration {version} ({name}) failed and rolled back: {source}{hint}")]
+    MigrationFailed {
+        version: i32,
+        name: &'static str,
+        hint: &'static str,
+        #[source]
+        source: sqlx::Error,
+    },
+
     // Config errors
     #[error("configuration error: {0}")]
     Config(String),

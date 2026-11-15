@@ -24,8 +24,8 @@ speaker deadline. An older controller ignores this setting, so downgrading remov
 the protection; drain affected rules or accept that policy change explicitly.
 
 - **Database migrations run automatically** on startup, and only the versions
-  the database has not recorded. A database migrated by a newer release refuses
-  this one; see
+  the database has not recorded. Upgrade every controller that shares the
+  database together; a release that adds a migration is one-way. See
   [database schema version and downgrade](#database-schema-version-and-downgrade).
   Legacy speaker state also requires the explicit ownership adoption below
   before the upgraded daemon starts.
@@ -1024,17 +1024,40 @@ knows up to 20; start a release that includes that migration, or restore the
 pre-upgrade database backup
 ```
 
-That refusal is the supported downgrade boundary. Do not rename, delete or
-rewrite `schema_migrations` rows to get past it. An older binary reads the newer
-schema as its own: it ignores cleanup state it does not understand and can
-reannounce a requested deletion, as
+Do not rename, delete or rewrite `schema_migrations` rows to get past it. An
+older binary reads the newer schema as its own: it ignores cleanup state it does
+not understand and can reannounce a requested deletion, as
 [pending withdrawals and rollback](#pending-withdrawals-and-rollback) describes.
 
+The refusal only protects binaries that carry it. A 0.27.0 or older controller
+has no check and runs against whatever schema it finds, so it is not a downgrade
+boundary for those releases:
+
+- Upgrade every controller that shares a database together. Stop the older
+  controllers, including standbys, before the first upgraded one starts, and do
+  not start an older one again against the migrated database.
+- A release that adds a migration is one-way. Rolling it back means restoring
+  the pre-upgrade backup, below, not starting the previous binary.
+
+A migration waits at most 2 seconds per attempt for its table locks, so queries
+queued behind its `ACCESS EXCLUSIVE` request wait a bounded time. After 5
+attempts with backoff, about 20 seconds, it rolls back and the start fails with
+the migration's version and name. A long transaction holding a lock on the
+altered table is the usual cause; while a start is retrying,
+
+```sql
+SELECT pid, pg_blocking_pids(pid), state, query
+FROM pg_stat_activity
+WHERE wait_event_type = 'Lock';
+```
+
+names the blocking sessions. Let them finish or end them, then start again.
+
 A database whose `schema_migrations` is absent or empty predates version
-tracking. The controller adopts it instead of replaying it: versions 1-3 are
-recorded only when their tables and columns are present, later versions are
-applied, and stored events, mitigations, pending withdrawals and audit history
-are left alone.
+tracking. The controller replays migrations 1-3, whose statements are all
+`IF NOT EXISTS` and leave existing tables, indexes and rows alone, then applies
+and records the rest. Stored events, mitigations, pending withdrawals and audit
+history are not rewritten.
 
 A controlled downgrade is a restore, not an in-place rollback:
 

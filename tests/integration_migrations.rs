@@ -1,7 +1,7 @@
-//! Startup migration bootstrap: what a start applies, what it adopts, and what
-//! it refuses. These tests use disposable PostgreSQL containers.
+//! Startup migration bootstrap: what a start applies, what it replays, what it
+//! retries and what it refuses. These tests use disposable PostgreSQL containers.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use prefixd::db::migrate::{LATEST_VERSION, MIGRATIONS};
 use prefixd::error::PrefixdError;
@@ -320,7 +320,6 @@ async fn newer_database_schema_refuses_the_older_binary() {
 /// creates the empty table, as a start interrupted right after 004 leaves it.
 async fn seed_pre_tracking(fixture: &Fixture, tracking_table: bool) {
     let pool = connect(fixture).await;
-    install_ddl_probe(&pool).await;
     for sql in [
         include_str!("../migrations/001_initial.sql"),
         include_str!("../migrations/002_operators_sessions.sql"),
@@ -351,16 +350,12 @@ async fn seed_pre_tracking(fixture: &Fixture, tracking_table: bool) {
     .execute(&pool)
     .await
     .expect("seed operator state");
-    sqlx::query("DELETE FROM ddl_probe")
-        .execute(&pool)
-        .await
-        .expect("clear the seed DDL");
 }
 
-async fn assert_adopted(fixture: &Fixture) {
+async fn assert_replayed(fixture: &Fixture) {
     let pool = prefixd::db::init_postgres_pool(&fixture.url)
         .await
-        .expect("adopt a database that predates version tracking");
+        .expect("migrate a database that predates version tracking");
 
     let rows = recorded(&pool).await;
     assert_eq!(
@@ -368,38 +363,14 @@ async fn assert_adopted(fixture: &Fixture) {
             .map(|(version, name, _)| (*version, name.clone()))
             .collect::<Vec<_>>(),
         embedded(),
-        "adoption records the pre-tracking versions without skipping later ones"
-    );
-
-    let statements: Vec<String> = ddl_statements(&pool)
-        .await
-        .into_iter()
-        .map(|(statement, _)| statement)
-        .collect();
-    for replayed in [
-        "CREATE TABLE IF NOT EXISTS events",
-        "CREATE TABLE IF NOT EXISTS operators",
-        "ADD COLUMN IF NOT EXISTS raw_details",
-    ] {
-        assert!(
-            !statements
-                .iter()
-                .any(|statement| statement.contains(replayed)),
-            "the runner replayed a pre-tracking migration: {replayed}"
-        );
-    }
-    assert!(
-        statements
-            .iter()
-            .any(|statement| statement.contains("CREATE TABLE IF NOT EXISTS schema_migrations")),
-        "the runner never created the tracking table"
+        "every version is recorded, including the replayed pre-tracking ones"
     );
 
     let victims: Vec<String> = sqlx::query_scalar("SELECT victim_ip FROM events")
         .fetch_all(&pool)
         .await
         .expect("read the seeded event");
-    assert_eq!(victims, ["203.0.113.9"], "adoption dropped stored events");
+    assert_eq!(victims, ["203.0.113.9"], "the replay dropped stored events");
     let audits: Vec<String> = sqlx::query_scalar("SELECT action FROM audit_log")
         .fetch_all(&pool)
         .await
@@ -407,20 +378,163 @@ async fn assert_adopted(fixture: &Fixture) {
     assert_eq!(
         audits,
         ["withdrawal_requested"],
-        "adoption dropped audit history"
+        "the replay dropped audit history"
     );
 }
 
 #[tokio::test]
-async fn pre_tracking_database_is_adopted_without_replay() {
+async fn pre_tracking_database_replays_idempotent_history() {
     let fixture = start_postgres().await;
     seed_pre_tracking(&fixture, false).await;
-    assert_adopted(&fixture).await;
+    assert_replayed(&fixture).await;
 }
 
 #[tokio::test]
-async fn empty_tracking_table_is_adopted_without_replay() {
+async fn empty_tracking_table_replays_idempotent_history() {
     let fixture = start_postgres().await;
     seed_pre_tracking(&fixture, true).await;
-    assert_adopted(&fixture).await;
+    assert_replayed(&fixture).await;
+}
+
+/// The newest migration, made pending again: its columns dropped and its row
+/// removed, as on a database one release behind.
+const PENDING: i32 = 20;
+
+async fn make_latest_pending(pool: &PgPool) {
+    sqlx::raw_sql(
+        "ALTER TABLE events DROP COLUMN outcome, DROP COLUMN outcome_reason,
+             DROP COLUMN outcome_mitigation_ids;
+         DELETE FROM schema_migrations WHERE version = 20;",
+    )
+    .execute(pool)
+    .await
+    .expect("make the newest migration pending");
+}
+
+async fn pending_state(pool: &PgPool) -> (bool, bool) {
+    sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1),
+                EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'events' AND column_name = 'outcome')",
+    )
+    .bind(PENDING)
+    .fetch_one(pool)
+    .await
+    .expect("read the pending migration's state")
+}
+
+async fn advisory_locks(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'")
+        .fetch_one(pool)
+        .await
+        .expect("count advisory locks")
+}
+
+/// Every attempt waits `LOCK_TIMEOUT`; the backoff between them adds at most
+/// twice the base per gap. Allow generous headroom for a loaded CI host.
+fn retry_bound() -> Duration {
+    prefixd::db::migrate::LOCK_TIMEOUT * prefixd::db::migrate::LOCK_ATTEMPTS
+        + Duration::from_secs(30)
+}
+
+#[tokio::test]
+async fn blocked_migration_rolls_back_and_releases_the_bootstrap_lock() {
+    use prefixd::db::migrate::{LOCK_ATTEMPTS, LOCK_TIMEOUT};
+
+    let fixture = start_postgres().await;
+    let setup = connect(&fixture).await;
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("bring the database to this binary's schema");
+    make_latest_pending(&setup).await;
+
+    // A long reader: ACCESS SHARE conflicts with the ACCESS EXCLUSIVE that
+    // ALTER TABLE needs, for as long as this transaction stays open.
+    let mut reader = setup.begin().await.expect("open the reader");
+    sqlx::query("LOCK TABLE events IN ACCESS SHARE MODE")
+        .execute(&mut *reader)
+        .await
+        .expect("hold ACCESS SHARE on events");
+
+    let started = Instant::now();
+    let error = tokio::time::timeout(retry_bound(), prefixd::db::init_postgres_pool(&fixture.url))
+        .await
+        .expect("a blocked start fails within its retry bound")
+        .expect_err("a migration blocked on every attempt fails the start");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= LOCK_TIMEOUT * LOCK_ATTEMPTS,
+        "the start gave up before retrying: {elapsed:?}"
+    );
+    match &error {
+        PrefixdError::MigrationFailed { version, name, .. } => {
+            assert_eq!(*version, PENDING);
+            assert_eq!(*name, "event_outcomes");
+        }
+        other => panic!("expected a migration failure, got {other}"),
+    }
+    let message = error.to_string();
+    assert!(
+        message.contains("migration 20 (event_outcomes)"),
+        "{message}"
+    );
+    assert!(message.contains("pg_blocking_pids"), "{message}");
+
+    assert_eq!(
+        pending_state(&setup).await,
+        (false, false),
+        "the failed migration left its row or its columns behind"
+    );
+    assert_eq!(
+        advisory_locks(&setup).await,
+        0,
+        "the failed start leaked the bootstrap lock"
+    );
+
+    reader.rollback().await.expect("release the reader");
+    // A leaked bootstrap lock would park this start for minutes.
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        prefixd::db::init_postgres_pool(&fixture.url),
+    )
+    .await
+    .expect("the next start does not wait on a leaked bootstrap lock")
+    .expect("the next start applies the migration");
+    assert_eq!(pending_state(&setup).await, (true, true));
+}
+
+#[tokio::test]
+async fn transient_blocker_released_mid_retry_lets_the_start_succeed() {
+    use prefixd::db::migrate::LOCK_TIMEOUT;
+
+    let fixture = start_postgres().await;
+    let setup = connect(&fixture).await;
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("bring the database to this binary's schema");
+    make_latest_pending(&setup).await;
+
+    let mut reader = setup.begin().await.expect("open the reader");
+    sqlx::query("LOCK TABLE events IN ACCESS SHARE MODE")
+        .execute(&mut *reader)
+        .await
+        .expect("hold ACCESS SHARE on events");
+
+    let started = Instant::now();
+    // Past the first attempt's lock_timeout, so only a retry can succeed.
+    let hold = LOCK_TIMEOUT + Duration::from_millis(500);
+    let (result, ()) = tokio::time::timeout(retry_bound(), async {
+        tokio::join!(prefixd::db::init_postgres_pool(&fixture.url), async {
+            tokio::time::sleep(hold).await;
+            reader.rollback().await.expect("release the reader");
+        })
+    })
+    .await
+    .expect("the start finishes within its retry bound");
+    result.expect("a retry after the blocker ends applies the migration");
+    assert!(
+        started.elapsed() >= hold,
+        "the start finished while the blocker was held"
+    );
+    assert_eq!(pending_state(&setup).await, (true, true));
 }

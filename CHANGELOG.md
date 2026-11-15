@@ -7,17 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- Upgrade every controller that shares a database together. The newer-schema
+  check starts with this release: a 0.27.0 or older controller has none and
+  runs against whatever schema it finds, so stop older controllers before the
+  first upgraded one starts. A release that adds a migration is one-way; roll
+  back by restoring the pre-upgrade backup, as
+  [database schema version and downgrade](docs/how-to/upgrading.md#database-schema-version-and-downgrade)
+  describes.
+
 ### Changed
 
 - Startup applies only the migrations the database has not recorded, each in
-  its own transaction under a PostgreSQL advisory lock with a short
-  `lock_timeout`. A second controller waits instead of racing the first through
-  the same DDL, an up-to-date database runs no DDL at all, and a migration that
-  cannot take its `ACCESS EXCLUSIVE` locks rolls back for the next start
-  instead of parking them behind live traffic. A database that predates version
-  tracking is adopted from its catalog state instead of replayed. A database
-  migrated by a newer release refuses to start rather than running an older
-  binary against a newer schema.
+  its own transaction under a PostgreSQL advisory lock. A second controller
+  waits instead of racing the first through the same DDL, and an up-to-date
+  database runs no DDL at all. Each attempt waits at most 2 seconds for its
+  table locks, so queries queued behind its `ACCESS EXCLUSIVE` request wait a
+  bounded time; a migration still blocked after 5 attempts with backoff, about
+  20 seconds, rolls back and fails the start with its version, name and a
+  `pg_blocking_pids` query to find the blocker. A database that predates
+  version tracking replays migrations 1-3, whose statements are all
+  `IF NOT EXISTS`. A database migrated by a newer release refuses to start
+  rather than running an older binary against a newer schema.
 
 ### Fixed
 

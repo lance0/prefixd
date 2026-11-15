@@ -1446,6 +1446,10 @@ async fn withdrawal_rule_kind_replay_keeps_every_request_flowspec() {
         .execute(&ctx.pool)
         .await
         .unwrap();
+    sqlx::query("DELETE FROM schema_migrations WHERE version = 16")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
     let snapshot = || {
         let pool = ctx.pool.clone();
         async move {
@@ -1509,6 +1513,10 @@ async fn event_top_src_ports_replay_leaves_existing_events_null() {
         .unwrap();
     // Simulate a database from before migration 017, with populated events.
     sqlx::query("ALTER TABLE events DROP COLUMN top_src_ports_json")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM schema_migrations WHERE version = 17")
         .execute(&ctx.pool)
         .await
         .unwrap();

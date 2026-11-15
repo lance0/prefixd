@@ -582,22 +582,23 @@ restart never re-runs a recorded backfill.
   nothing to do. A start that waits more than 5 minutes fails instead of
   hanging, and reports that another instance is migrating.
 - Each missing version runs in its own transaction together with its tracking
-  row, with `lock_timeout` set to 5 seconds. A migration that cannot take its
-  `ACCESS EXCLUSIVE` locks inside that window rolls back and is retried by the
-  next start, instead of queueing DDL, and every query behind it, while live
-  traffic drains.
+  row, with `lock_timeout` set to 2 seconds per attempt, so queries queued
+  behind its `ACCESS EXCLUSIVE` request wait a bounded time. A migration still
+  blocked after 5 attempts with backoff, about 20 seconds, rolls back and fails
+  the start with its version and name; see
+  [database schema version and downgrade](upgrading.md#database-schema-version-and-downgrade)
+  for finding the blocking session.
 - A database recording a version newer than the binary knows refuses to start.
-  An older binary can reannounce a requested deletion against a newer schema;
-  see [database schema version and downgrade](upgrading.md#database-schema-version-and-downgrade).
+  An older binary can reannounce a requested deletion against a newer schema.
+  Releases up to 0.27.0 have no such check, so upgrade every controller that
+  shares a database together.
 - A database created before version tracking existed, whose
-  `schema_migrations` is absent or empty, is adopted rather than replayed:
-  versions 1-3 are recorded only when their tables and columns are present in
-  the catalog. Anything unproven is applied, because those files are idempotent.
-  Stored events, mitigations, pending withdrawals and audit history are not
-  rewritten.
+  `schema_migrations` is absent or empty, replays migrations 1-3, whose
+  statements are all `IF NOT EXISTS`, and then applies the rest. Stored
+  events, mitigations, pending withdrawals and audit history are not rewritten.
 
-Migration files keep their `IF NOT EXISTS` guards so adoption and recovery stay
-safe, but a recorded version is not run again.
+Migration files keep their `IF NOT EXISTS` guards so a retried or replayed
+version stays safe, but a recorded version is not run again.
 
 Applied migrations are tracked in the `schema_migrations` table:
 
@@ -636,8 +637,9 @@ because databases have already recorded it.
 
 ### Rollback
 
-Migrations are forward-only, and a database that recorded a newer version
-refuses an older binary. To roll back:
+Migrations are forward-only. A database that recorded a newer version refuses
+an older binary that carries the check, but releases up to 0.27.0 do not, so
+never start the previous binary against a migrated database. To roll back:
 
 1. Stop prefixd
 2. Restore from a database backup taken before the upgrade
