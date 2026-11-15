@@ -1500,7 +1500,7 @@ async fn draining_another_controllers_admission_waits_the_server_window_cap() {
 #[test]
 fn source_only_inventory_blocks_diversion_across_rds() {
     let source_only = FlowSpecNlri {
-        scope: Some(VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "44407:41").unwrap()),
+        scope: Some(VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "64500:41").unwrap()),
         src_prefix: Some("198.51.100.0/24".into()),
         ..Default::default()
     };
@@ -1523,7 +1523,7 @@ async fn configured_vpn_profile_freezes_rd_and_rt_in_guarded_admission() {
     let (mut state, _, _) = fixture(OperationMode::DryRun).await;
     let configured = Arc::get_mut(&mut state).unwrap();
     let scope: crate::config::VpnScopeConfig =
-        crate::config::parse_yaml("family: ipv4\nrd: '44407:40'\nroute_targets: ['44407:777']")
+        crate::config::parse_yaml("family: ipv4\nrd: '64500:40'\nroute_targets: ['64500:777']")
             .unwrap();
     configured
         .settings
@@ -1536,11 +1536,11 @@ async fn configured_vpn_profile_freezes_rd_and_rt_in_guarded_admission() {
         .prepare(&state, &request("a", 20), "admin")
         .await
         .unwrap();
-    assert_eq!(row.rule.nlri.scope.as_ref().unwrap().rd(), "44407:40");
-    assert_eq!(row.rule.route_targets, ["44407:777"]);
+    assert_eq!(row.rule.nlri.scope.as_ref().unwrap().rd(), "64500:40");
+    assert_eq!(row.rule.route_targets, ["64500:777"]);
     let original_confirmation = ScrubberController::confirmation(&row).unwrap();
     let mut changed_targets = row.clone();
-    changed_targets.rule.route_targets = vec!["44407:778".into()];
+    changed_targets.rule.route_targets = vec!["64500:778".into()];
     assert_ne!(
         original_confirmation,
         ScrubberController::confirmation(&changed_targets).unwrap()
@@ -1550,14 +1550,14 @@ async fn configured_vpn_profile_freezes_rd_and_rt_in_guarded_admission() {
             .unwrap()
     );
     let mut saved = row.rule.clone();
-    saved.route_targets = vec!["44407:778".into()];
+    saved.route_targets = vec!["64500:778".into()];
     assert!(
         !ScrubberController::scope_agrees(&state, &state.settings.scrubber.profiles[0], &saved)
             .unwrap()
     );
     let mut wrong = request("a", 20);
     wrong.scope.scope =
-        Some(VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "44407:41").unwrap());
+        Some(VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "64500:41").unwrap());
     assert!(
         state
             .scrubber
@@ -1616,7 +1616,7 @@ async fn vpn_diversion_routes_authenticate_before_scope_lookup_and_refuse_mismat
     let inner = Arc::get_mut(&mut state).unwrap();
     inner.settings.bgp.vpn_scopes.insert(
         "TRANSIT".into(),
-        crate::config::parse_yaml("family: ipv4\nrd: '44407:40'\nroute_targets: ['44407:777']")
+        crate::config::parse_yaml("family: ipv4\nrd: '64500:40'\nroute_targets: ['64500:777']")
             .unwrap(),
     );
     inner.settings.scrubber.profiles[0].scope = "TRANSIT".into();
@@ -1633,7 +1633,7 @@ async fn vpn_diversion_routes_authenticate_before_scope_lookup_and_refuse_mismat
                 "profile" => body["diversion"]["profile"] = "b".into(),
                 "rd" => {
                     body["diversion"]["scope"]["scope"] =
-                        serde_json::json!({"family":"ipv4","rd":"44407:41"})
+                        serde_json::json!({"family":"ipv4","rd":"64500:41"})
                 }
                 "extra" => body["fallback"] = true.into(),
                 _ => unreachable!(),
@@ -1685,7 +1685,7 @@ async fn vpn_diversion_routes_acknowledge_both_families_and_keep_confirmation() 
         inner.settings.bgp.vpn_scopes.insert(
             name.into(),
             crate::config::parse_yaml(&format!(
-                "family: {family}\nrd: '44407:40'\nroute_targets: ['44407:777']"
+                "family: {family}\nrd: '64500:40'\nroute_targets: ['64500:777']"
             ))
             .unwrap(),
         );
@@ -1724,11 +1724,11 @@ async fn vpn_diversion_routes_acknowledge_both_families_and_keep_confirmation() 
         assert_eq!(preview["candidate"]["profile"]["scope"], name);
         assert_eq!(
             preview["candidate"]["rule"]["nlri"]["scope"],
-            serde_json::json!({"family":family,"rd":"44407:40"})
+            serde_json::json!({"family":family,"rd":"64500:40"})
         );
         assert_eq!(
             preview["candidate"]["rule"]["route_targets"],
-            serde_json::json!(["44407:777"])
+            serde_json::json!(["64500:777"])
         );
         assert!(
             repo.list_diversions(&state.settings.pop)
@@ -1754,8 +1754,8 @@ async fn vpn_diversion_routes_acknowledge_both_families_and_keep_confirmation() 
         let saved = repo.get_diversion(created.id).await.unwrap().unwrap();
         assert_eq!(saved.status, DiversionStatus::Simulated);
         assert_eq!(saved.profile.scope, name);
-        assert_eq!(saved.rule.nlri.scope.as_ref().unwrap().rd(), "44407:40");
-        assert_eq!(saved.rule.route_targets, ["44407:777"]);
+        assert_eq!(saved.rule.nlri.scope.as_ref().unwrap().rd(), "64500:40");
+        assert_eq!(saved.rule.route_targets, ["64500:777"]);
         assert_eq!(saved.reason, "operator scope confirmation");
         assert_eq!(saved.actor, "anonymous");
         assert!(
@@ -1830,14 +1830,14 @@ fn vpn_profiles_resolve_their_scope_family_and_action_rt_at_startup() {
 
     bgp.vpn_scopes.insert(
         "TRANSIT".into(),
-        crate::config::parse_yaml("family: ipv4\nrd: '44407:40'\nroute_targets: ['44407:777']")
+        crate::config::parse_yaml("family: ipv4\nrd: '64500:40'\nroute_targets: ['64500:777']")
             .unwrap(),
     );
     config.validate_with(&blackhole, &bgp).unwrap();
 
     bgp.vpn_scopes.insert(
         "TRANSIT6".into(),
-        crate::config::parse_yaml("family: ipv6\nrd: '44407:41'\nroute_targets: ['44407:778']")
+        crate::config::parse_yaml("family: ipv6\nrd: '64500:41'\nroute_targets: ['64500:778']")
             .unwrap(),
     );
     let mut ipv6 = config.clone();
@@ -1900,10 +1900,10 @@ fn vpn_profiles_resolve_their_scope_family_and_action_rt_at_startup() {
 
     let profile = &mut config.profiles[0];
     profile.ipv4_target = None;
-    profile.redirect_route_target = Some("44407:777".into());
+    profile.redirect_route_target = Some("64500:777".into());
     config.validate().unwrap();
     assert!(check(&config, &bgp).contains("redirect_route_target must differ"));
-    config.profiles[0].redirect_route_target = Some("44407:888".into());
+    config.profiles[0].redirect_route_target = Some("64500:888".into());
     config.validate_with(&blackhole, &bgp).unwrap();
 }
 
@@ -1913,20 +1913,20 @@ async fn vrf_diversion_keeps_action_target_in_confirmation_audit_and_readiness_d
     let configured = Arc::get_mut(&mut state).unwrap();
     configured.settings.bgp.vpn_scopes.insert(
         "TRANSIT".into(),
-        crate::config::parse_yaml("family: ipv4\nrd: '44407:40'\nroute_targets: ['44407:777']")
+        crate::config::parse_yaml("family: ipv4\nrd: '64500:40'\nroute_targets: ['64500:777']")
             .unwrap(),
     );
     let profile = &mut configured.settings.scrubber.profiles[0];
     profile.scope = "TRANSIT".into();
     profile.ipv4_target = None;
-    profile.redirect_route_target = Some("44407:888".into());
+    profile.redirect_route_target = Some("64500:888".into());
     ready(&state).await;
     let req = confirmed(&state, "a", 20).await;
     assert!(
         req.confirmation
             .as_deref()
             .unwrap()
-            .contains("VRF RT 44407:888")
+            .contains("VRF RT 64500:888")
     );
     let mut row = state
         .scrubber
@@ -1935,13 +1935,13 @@ async fn vrf_diversion_keeps_action_target_in_confirmation_audit_and_readiness_d
         .unwrap();
     assert_eq!(row.status, DiversionStatus::Active);
     assert_eq!(row.rule.target, None);
-    assert_eq!(row.rule.redirect_route_target.as_deref(), Some("44407:888"));
-    assert_eq!(row.rule.route_targets, ["44407:777"]);
+    assert_eq!(row.rule.redirect_route_target.as_deref(), Some("64500:888"));
+    assert_eq!(row.rule.route_targets, ["64500:777"]);
     let audit = serde_json::to_value(row.audit("scrubber_admit")).unwrap();
     assert!(audit.to_string().contains("redirect_route_target"));
-    assert!(audit.to_string().contains("44407:888"));
+    assert!(audit.to_string().contains("64500:888"));
     let mut changed = row.clone();
-    changed.rule.redirect_route_target = Some("44407:889".into());
+    changed.rule.redirect_route_target = Some("64500:889".into());
     assert!(
         repo.save_diversion(&changed, "invalid_action_retarget")
             .await
@@ -1959,7 +1959,7 @@ async fn vrf_diversion_keeps_action_target_in_confirmation_audit_and_readiness_d
         .await
         .unwrap();
     assert_eq!(row.status, DiversionStatus::Withdrawing);
-    assert_eq!(row.rule.redirect_route_target.as_deref(), Some("44407:888"));
+    assert_eq!(row.rule.redirect_route_target.as_deref(), Some("64500:888"));
     tokio::time::advance(Duration::from_secs(WINDOW_SECONDS.into())).await;
     state
         .scrubber

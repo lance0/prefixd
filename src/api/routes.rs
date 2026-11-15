@@ -259,9 +259,9 @@ pub fn create_test_router(state: Arc<AppState>) -> Router {
 }
 
 /// Create a test router with a shared store for session and mode-transition checks.
-pub fn create_test_router_with_session_store(
+pub fn create_test_router_with_session_store<S: tower_sessions::SessionStore + Clone>(
     state: Arc<AppState>,
-    session_store: tower_sessions::MemoryStore,
+    session_store: S,
 ) -> Router {
     let session_layer =
         crate::auth::session_layer(session_store, state.settings.http.secure_cookies());

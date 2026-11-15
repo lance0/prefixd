@@ -8,9 +8,9 @@ import { json, renderApp, settle, useFakeController } from "./support/fake-contr
 const controller = useFakeController()
 const pointerApis = ["hasPointerCapture", "releasePointerCapture", "scrollIntoView"] as const
 const originals = new Map(pointerApis.map((name) => [name, Object.getOwnPropertyDescriptor(Element.prototype, name)]))
-const scope: VpnScopeSnapshot = { name: "TRANSIT", identity: { family: "ipv4", rd: "44407:40" }, route_targets: ["44407:777"] }
+const scope: VpnScopeSnapshot = { name: "TRANSIT", identity: { family: "ipv4", rd: "64500:40" }, route_targets: ["64500:777"] }
 const rule = { victim_ip: "203.0.113.10", protocol: "udp", action: "discard" as const, ttl_seconds: 30, reason: "pilot attack" }
-const policy = { family: "ipv4" as const, rd: "44407:40", route_targets: ["44407:777"], allow_source_only: true, min_source_prefix_length: 24, max_source_only_ttl_seconds: 60, max_source_only_active: 10 }
+const policy = { family: "ipv4" as const, rd: "64500:40", route_targets: ["64500:777"], allow_source_only: true, min_source_prefix_length: 24, max_source_only_ttl_seconds: 60, max_source_only_active: 10 }
 
 function preview(vpnScope = scope, sourceOnly = false): JsonValue {
   const ipv6 = vpnScope.identity.family === "ipv6"

@@ -551,8 +551,8 @@ async fn released_vpn_http_rules_reach_only_negotiated_peers_with_exact_scope() 
     settings.bgp.rustbgpd = Some(pair.rust.config.clone());
     settings.guardrails.allow_src_prefix_match = true;
     settings.bgp.vpn_scopes = serde_json::from_value(json!({
-        "TRANSIT": {"family":"ipv4","rd":"44407:40","route_targets":["44407:777"],"allow_source_only":true},
-        "TRANSIT6": {"family":"ipv6","rd":"44407:41","route_targets":["44407:778"],"allow_source_only":true}
+        "TRANSIT": {"family":"ipv4","rd":"64500:40","route_targets":["64500:777"],"allow_source_only":true},
+        "TRANSIT6": {"family":"ipv6","rd":"64500:41","route_targets":["64500:778"],"allow_source_only":true}
     })).unwrap();
     for (name, scope) in &settings.bgp.vpn_scopes {
         speaker
@@ -658,16 +658,16 @@ async fn released_vpn_http_rules_reach_only_negotiated_peers_with_exact_scope() 
         (
             "TRANSIT",
             VpnFlowSpecFamily::Ipv4,
-            "44407:40",
-            "44407:777",
+            "64500:40",
+            "64500:777",
             ["203.0.113.10", "203.0.113.11"],
             ["198.51.100.0/24", "198.51.101.0/24"],
         ),
         (
             "TRANSIT6",
             VpnFlowSpecFamily::Ipv6,
-            "44407:41",
-            "44407:778",
+            "64500:41",
+            "64500:778",
             ["2001:db8:100::10", "2001:db8:100::11"],
             ["2001:db9::/64", "2001:db9:1::/64"],
         ),
@@ -924,8 +924,8 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
     settings.bgp.rustbgpd = Some(pair.rust.config.clone());
     settings.guardrails.allow_src_prefix_match = true;
     settings.bgp.vpn_scopes = serde_json::from_value(json!({
-        "TRANSIT":{"family":"ipv4","rd":"44407:40","route_targets":["44407:777"]},
-        "TRANSIT6":{"family":"ipv6","rd":"44407:41","route_targets":["44407:778"]}
+        "TRANSIT":{"family":"ipv4","rd":"64500:40","route_targets":["64500:777"]},
+        "TRANSIT6":{"family":"ipv6","rd":"64500:41","route_targets":["64500:778"]}
     }))
     .unwrap();
     // A scoped profile carries only its scope's address family.
@@ -951,7 +951,7 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
             "TRANSIT",
             None,
             None,
-            Some("44407:888"),
+            Some("64500:888"),
             "203.0.113.0/24",
         ),
         (
@@ -959,7 +959,7 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
             "TRANSIT6",
             None,
             None,
-            Some("44407:888"),
+            Some("64500:888"),
             "2001:db8:100::/48",
         ),
     ];
@@ -1133,9 +1133,9 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
         (
             "TRANSIT",
             VpnFlowSpecFamily::Ipv4,
-            "44407:40",
-            "44407:777",
-            0x0002_ad77_0000_0309u64,
+            "64500:40",
+            "64500:777",
+            0x0002_fbf4_0000_0309u64,
             [
                 "203.0.113.20",
                 "203.0.113.21",
@@ -1150,9 +1150,9 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
         (
             "TRANSIT6",
             VpnFlowSpecFamily::Ipv6,
-            "44407:41",
-            "44407:778",
-            0x0002_ad77_0000_030au64,
+            "64500:41",
+            "64500:778",
+            0x0002_fbf4_0000_030au64,
             [
                 "2001:db8:100::20",
                 "2001:db8:100::21",
@@ -1260,8 +1260,8 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
                     "persisted admission payload is frozen"
                 );
                 if index == 4 {
-                    assert_eq!(saved["rule"]["redirect_route_target"], "44407:888");
-                    communities.push(0x8008_ad77_0000_0378);
+                    assert_eq!(saved["rule"]["redirect_route_target"], "64500:888");
+                    communities.push(0x8008_fbf4_0000_0378);
                 } else if family == VpnFlowSpecFamily::Ipv4 {
                     communities.push(0x010c_c000_0263_0000);
                 } else {

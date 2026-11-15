@@ -42,8 +42,10 @@ pub fn session_layer<S: tower_sessions::SessionStore>(
 /// token was ever checked, and turned unknown paths into 500 instead of 404.
 ///
 /// A failed load cannot authenticate anyone: the request continues as
-/// anonymous, so callers still need a valid bearer token or session, and
-/// deny-by-default checks are unchanged.
+/// anonymous. In bearer mode, an independently valid token can then authenticate
+/// with the token's Operator role. This may differ from the role of a session
+/// that would have loaded successfully (healthy sessions take precedence).
+/// Credentials mode still requires a session; store writes still fail normally.
 #[derive(Debug, Clone)]
 pub struct AnonymousOnLoadError<S> {
     inner: S,
@@ -121,4 +123,74 @@ pub async fn create_auth_layer(
 
     // Build the auth manager layer
     AuthManagerLayerBuilder::new(backend, session_layer).build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower_sessions::MemoryStore;
+
+    fn record() -> Record {
+        Record {
+            id: Id::default(),
+            data: Default::default(),
+            expiry_date: tower_sessions::cookie::time::OffsetDateTime::now_utc()
+                + tower_sessions::cookie::time::Duration::hours(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn wrapper_preserves_session_store_round_trip() {
+        let store = AnonymousOnLoadError::new(MemoryStore::default());
+        let mut record = record();
+        assert!(store.load(&record.id).await.unwrap().is_none());
+        store.create(&mut record).await.unwrap();
+        assert_eq!(store.load(&record.id).await.unwrap().unwrap(), record);
+        record
+            .data
+            .insert("marker".into(), serde_json::json!("saved"));
+        store.save(&record).await.unwrap();
+        assert_eq!(store.load(&record.id).await.unwrap().unwrap(), record);
+        store.delete(&record.id).await.unwrap();
+        assert!(store.load(&record.id).await.unwrap().is_none());
+    }
+
+    #[derive(Debug)]
+    struct BrokenStore;
+
+    #[async_trait]
+    impl SessionStore for BrokenStore {
+        async fn create(&self, record: &mut Record) -> session_store::Result<()> {
+            // Stores may change the ID when resolving a collision.
+            record.id = Id::default();
+            Err(session_store::Error::Backend("create failed".into()))
+        }
+        async fn save(&self, _: &Record) -> session_store::Result<()> {
+            Err(session_store::Error::Backend("save failed".into()))
+        }
+        async fn load(&self, _: &Id) -> session_store::Result<Option<Record>> {
+            Err(session_store::Error::Backend("load failed".into()))
+        }
+        async fn delete(&self, _: &Id) -> session_store::Result<()> {
+            Err(session_store::Error::Backend("delete failed".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn wrapper_suppresses_only_load_errors() {
+        let store = AnonymousOnLoadError::new(BrokenStore);
+        let mut record = record();
+        let initial_id = record.id;
+        assert!(store.load(&record.id).await.unwrap().is_none());
+        for (result, expected) in [
+            (store.create(&mut record).await, "create failed"),
+            (store.save(&record).await, "save failed"),
+            (store.delete(&record.id).await, "delete failed"),
+        ] {
+            assert!(
+                matches!(result, Err(session_store::Error::Backend(message)) if message == expected)
+            );
+        }
+        assert_ne!(record.id, initial_id);
+    }
 }

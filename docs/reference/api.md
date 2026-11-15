@@ -1348,7 +1348,9 @@ or overlong reason returns `400` with
 ```
 
 Withdrawal intent is saved before calling the speaker. An uncertain speaker
-reply or database completion failure leaves cleanup pending; reconciliation
+reply, including no answer within the three-second
+[interactive deadline](speaker-backends.md#interactive-speaker-deadline), or a
+database completion failure leaves cleanup pending; reconciliation
 retries it, including after a controller restart. The mitigation keeps its
 previous status until deletion and the terminal-state/audit transaction succeed.
 A `500` can also come before intent is saved, when the mitigation lookup or the
@@ -2484,10 +2486,14 @@ Full operational health using the configured authentication mode. The request
 and response below illustrate bearer mode. In credentials mode, send a session
 cookie; native mTLS requires a client certificate. `none` requires no credentials.
 
-A bearer token is checked independently of stored sessions: while PostgreSQL is
-down, a browser's stale session cookie cannot block the request, and `database`
-reports the failed health check. A session that cannot be loaded is treated as
-anonymous, so such requests still need a valid session or bearer token.
+In bearer mode, a failed session-store load falls back to independently checking
+the bearer token, so a stale cookie does not block outage diagnostics and
+`database` reports the failed health check. Healthy sessions still take precedence
+over tokens. If a session cannot load, a valid token authenticates with its
+Operator role, which can differ from the session's role (for example, Viewer).
+Without a valid token the request is denied; credentials mode requires a session
+and does not enable bearer fallback. Session create, save and delete failures
+still propagate as errors.
 
 **Illustrative response with rustbgpd:**
 
@@ -2534,7 +2540,8 @@ anonymous, so such requests still need a valid session or bearer token.
       "state": "live",
       "generation": {"incarnation": 1311768467294899695, "sequence": 4},
       "last_renewal_at": "2026-10-18T12:00:00Z",
-      "last_renewal_result": "success"
+      "last_renewal_result": "success",
+      "renew_until": "2026-10-18T12:30:00Z"
     },
     "blackhole_exports": {
       "historical": false,
@@ -2585,13 +2592,33 @@ when enforced detector blackholes run without the injection lease
 (`blackhole.enabled`, a nonempty `blackhole.detector_sources` and
 `blackhole_lease` false): if prefixd stops while the speaker runs, they stay
 announced until prefixd returns or an operator withdraws them. `lease` is
-present only with `blackhole.leased`: `state` is `none` (no generation held
-yet), `live`, `renewal_failing` (the last renewal failed but the lease may
-still be live), `expired` (the speaker refused the generation, or no
-renewal succeeded for a whole lease) or `not_renewing` (dry-run, which never
-renews). `generation` is held in memory and
-changes after a speaker restart. `last_renewal_result` is `success`,
-`not_live` or `error`. Health performs no rule inventory probe.
+present with `blackhole.leased` or `bgp.rustbgpd.leased_flowspec`: `state` is
+`none` (no generation held yet), `live`, `renewal_failing` (the last renewal
+failed but the lease may still be live), `expired` (the speaker refused the
+generation, no renewal succeeded for a whole lease, or renewal stopped at the
+TTL bound while this controller still held the fence and one more lease has
+passed, so the speaker holds none of the leased routes), `not_renewing`
+(dry-run, which never renews) or `standby` (this controller does not hold the
+fence and stopped renewing at its TTL bound because it cannot read leased
+intent; another controller may still keep the lease live). During a
+PostgreSQL outage the active controller loses its fence within seconds, so it
+reports `standby` with `renewal_stopped: "ttl_bound"`, not `expired`, even
+after rustbgpd has removed the routes; detect that from `renewal_stopped`
+together with `prefixd_controller_fence_active`. `generation` is held in memory and changes after a speaker restart.
+`last_renewal_result` is `success`, `not_live` or `error`. `renew_until` is the
+latest `expires_at` among the leased routes this owner holds: the read at the
+start of each reconciliation pass (on a timer in standby) sets it, and every
+leased admission or TTL extension raises it. An empty leased set sets it to
+the read itself, and it is null before the first read or leased write.
+Renewal is unfenced but stops one margin after `renew_until`, the larger of
+`blackhole.lease_seconds` and `timers.reconciliation_interval_seconds` plus a
+third of the lease: the last renewal is sent only if its deadline ends by then.
+A database outage therefore cannot renew leased routes past the owner's latest
+leased TTL; `renewal_stopped` is then `ttl_bound`, which is a
+bound, not a failed renewal. The bound is owner-wide, so a leased route can
+outlive its own TTL while a later leased TTL keeps the lease live.
+`renewal_stopped` is omitted while renewal continues, while no generation is
+held and in dry-run. Health performs no rule inventory probe.
 
 `blackhole_exports` is present when `blackhole_export` is true (rustbgpd). It
 summarizes the last reconciliation pass's
@@ -2750,7 +2777,7 @@ Returns the running daemon configuration with sensitive fields redacted (allowli
     "pop": "iad1",
     "mode": "enforced",
     "http": { "listen": "0.0.0.0:8080", "auth": { "mode": "bearer" }, "rate_limit": { "events_per_second": 100, "burst": 500 } },
-    "bgp": { "mode": "sidecar", "local_asn": 65010, "default_scope": "global", "vpn_scopes": { "TRANSIT": { "family": "ipv4", "rd": "44407:40", "route_targets": ["44407:777"], "allow_source_only": false } }, "neighbors": [{ "name": "172.30.30.3", "address": "172.30.30.3", "peer_asn": 65001, "afi_safi": ["ipv4-flowspec"] }] },
+    "bgp": { "mode": "sidecar", "local_asn": 65010, "default_scope": "global", "vpn_scopes": { "TRANSIT": { "family": "ipv4", "rd": "64500:40", "route_targets": ["64500:777"], "allow_source_only": false } }, "neighbors": [{ "name": "172.30.30.3", "address": "172.30.30.3", "peer_asn": 65001, "afi_safi": ["ipv4-flowspec"] }] },
     "guardrails": { "require_ttl": true, "dst_prefix_minlen": 32, "dst_prefix_maxlen": 32, "max_ports": 5 },
     "quotas": { "max_active_per_customer": 20, "max_active_global": 500 },
     "timers": { "default_ttl_seconds": 120, "reconciliation_interval_seconds": 30 },
@@ -2819,8 +2846,7 @@ Returns playbook definitions from `playbooks.yaml`.
       "name": "udp_flood_police_first",
       "match": { "vector": "udp_flood", "require_top_ports": false },
       "steps": [
-        { "action": "police", "rate_bps": 5000000, "ttl_seconds": 120 },
-        { "action": "discard", "rate_bps": null, "ttl_seconds": 300, "require_confidence_at_least": 0.7, "require_persistence_seconds": 120 }
+        { "action": "police", "rate_bps": 5000000, "ttl_seconds": 120 }
       ]
     }
   ],
@@ -2842,8 +2868,7 @@ Content-Type: application/json
       "name": "udp_flood_police_first",
       "match": { "vector": "udp_flood", "require_top_ports": false },
       "steps": [
-        { "action": "police", "rate_bps": 5000000, "ttl_seconds": 120 },
-        { "action": "discard", "ttl_seconds": 300, "require_confidence_at_least": 0.7, "require_persistence_seconds": 120 }
+        { "action": "police", "rate_bps": 5000000, "ttl_seconds": 120 }
       ]
     }
   ]
@@ -2865,6 +2890,13 @@ Content-Type: application/json
 - `ttl_seconds` must be 1-86400
 - `require_confidence_at_least` must be 0.0-1.0
 - First step must not have escalation requirements
+
+A playbook may carry more than one step. These rules accept that shape, but the
+controller executes only the first step. After a successful update it logs the
+same warnings as startup and reload: one for each playbook with more than one
+step, and one when a `scope: prefix` playbook is unreachable under the current
+guardrails. Warnings do not change the response; see
+[step selection](configuration.md#step-selection).
 
 **Error response (400):**
 
@@ -3423,11 +3455,15 @@ the last replacement. Audit and error logs identify the affected prefix.
 With [leased blackholes](configuration.md#leased-blackholes),
 `prefixd_injection_lease_renewals_total{result}` counts renewals by `success`,
 `not_live` (the speaker refused the generation, which triggers a full
-re-add) and `error`. `prefixd_injection_lease_state{state}` is `1` for the
-current state (`none`, `live`, `renewal_failing`, `expired` or
-`not_renewing`) and `0` for
+re-add) and `error`. A renewal that stops at the
+[TTL bound](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls)
+sends no RPC and increments none of them; health detail reports
+`renewal_stopped: "ttl_bound"` instead. `prefixd_injection_lease_state{state}`
+is `1` for the
+current state (`none`, `live`, `renewal_failing`, `expired`, `not_renewing`
+or `standby`) and `0` for
 the others, matching health detail's `speaker.lease.state` after each
-renewal. Both series exist with zero values in every deployment.
+renewal tick and state change. Both series exist with zero values in every deployment.
 
 Series labelled `action_type` (`prefixd_mitigations_active`,
 `prefixd_mitigations_created_total`, `prefixd_mitigations_expired_total` and

@@ -30,7 +30,7 @@ credentials. `configs/vpn-scopes.yaml.example` contains the same BGP example.
 ```yaml
 bgp:
   backend: rustbgpd
-  local_asn: 44407
+  local_asn: 64500
   router_id: 192.0.2.1
   rustbgpd:
     endpoint: "unix:///run/rustbgpd/grpc.sock"
@@ -41,13 +41,13 @@ bgp:
   vpn_scopes:
     TRANSIT:
       family: ipv4
-      rd: "44407:40"
-      route_targets: ["44407:777"]
+      rd: "64500:40"
+      route_targets: ["64500:777"]
       allow_source_only: false
     TRANSIT6:
       family: ipv6
-      rd: "44407:40"
-      route_targets: ["44407:777"]
+      rd: "64500:40"
+      route_targets: ["64500:777"]
       allow_source_only: false
 ```
 
@@ -72,7 +72,7 @@ Changing the automatic default affects new admissions only. A VPN default
 refuses blackhole playbooks rather than injecting global RTBH.
 
 The receiving peer must enable `l3vpn_ipv4_flowspec` and/or
-`l3vpn_ipv6_flowspec` and import `44407:777` into TRANSIT. Configure that policy
+`l3vpn_ipv6_flowspec` and import `64500:777` into TRANSIT. Configure that policy
 outside prefixd. Different RDs or RTs do not prove separate traffic domains;
 guarded diversion retains cross-scope victim exclusion.
 

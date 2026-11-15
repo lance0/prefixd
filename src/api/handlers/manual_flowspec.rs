@@ -1498,8 +1498,8 @@ mod tests {
         let mut settings = Fixture::settings();
         settings.guardrails.min_ttl_seconds = Some(1);
         settings.bgp.vpn_scopes = serde_json::from_value(json!({
-            "TRANSIT": {"family":"ipv4", "rd":"44407:40", "route_targets":["44407:777"], "allow_source_only":true},
-            "TRANSIT6": {"family":"ipv6", "rd":"44407:60", "route_targets":["44407:777"], "allow_source_only":true}
+            "TRANSIT": {"family":"ipv4", "rd":"64500:40", "route_targets":["64500:777"], "allow_source_only":true},
+            "TRANSIT6": {"family":"ipv6", "rd":"64500:60", "route_targets":["64500:777"], "allow_source_only":true}
         })).unwrap();
         settings
     }
@@ -1530,7 +1530,7 @@ mod tests {
             assert_eq!(preview["candidate"]["scope"]["scope"]["family"], family);
             assert_eq!(
                 preview["candidate"]["vpn_scope"]["route_targets"],
-                json!(["44407:777"])
+                json!(["64500:777"])
             );
             fixture.assert_no_mutations().await;
             let (status, created) = fixture.post("/v1/vpn/source-rules", &body).await;
@@ -1630,7 +1630,7 @@ mod tests {
             .unwrap()
             .max_source_only_active = 1;
         let mut other = settings.bgp.vpn_scopes["TRANSIT"].clone();
-        other.rd = "44407:41".into();
+        other.rd = "64500:41".into();
         settings.bgp.vpn_scopes.insert("OTHER".into(), other);
         let fixture = Fixture::new(settings, FlowSpecMatchSupport::ALL);
         let (status, first) = fixture
