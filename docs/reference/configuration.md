@@ -1588,48 +1588,77 @@ curl -X POST http://localhost/v1/config/reload
 
 ## Validation
 
-`prefixd --check-config` loads and validates the configuration directory and
+`prefixd --check` loads and validates the configuration directory and
 exits without connecting to PostgreSQL or the speaker:
 
 ```bash
-prefixd --check-config --config /etc/prefixd
+prefixd --check --config /etc/prefixd
 ```
 
 It reads `prefixd.yaml`, `inventory.yaml` and `playbooks.yaml`, plus
-`correlation.yaml` and `alerting.yaml` when present, and runs every startup
-check that needs no live counterpart: YAML parsing, removed keys, `${VAR}`
-placeholders, alerting destinations and secrets, VPN scopes, auth transport,
-blackhole and amplification limits, scrubber profiles, guardrails, quotas and
-correlation settings. It also requires a database URL, from
-`storage.connection_string` or `DATABASE_URL`, as startup does. Each error is
-printed to stderr on its own line with the file it came from, and the exit code
-is 1. A clean run prints a one-line summary and exits 0. Errors use startup's
-redacted text, so a secret is never echoed.
+`correlation.yaml` and `alerting.yaml` when present, through the loader startup
+uses. It then runs the checks startup makes before it opens the database, which
+startup also runs at that point:
 
-Checks that need a speaker or database are skipped and named in the output:
-playbook checks against speaker FlowSpec match and blackhole-lease
-capabilities, blackhole, VPN scope and injection-lease support, scrubber
-readiness and outstanding diversions, and database registration, fencing and
-migrations. Startup and this check share one loader, so anything the check
-accepts the controller accepts up to those checks.
+- YAML parsing, removed keys, `${VAR}` placeholders, alerting destinations and
+  secrets, VPN scopes, auth transport, blackhole and amplification limits,
+  scrubber profiles, guardrails, quotas and correlation settings.
+- The database URL, from `DATABASE_URL` or `storage.connection_string`: present
+  and a valid PostgreSQL URL. The error never repeats the URL.
+- The API bearer token variable when `http.auth.mode` is `bearer`, and the
+  `http.tls` certificate, key and (for mTLS) CA files: readable, parseable and
+  matching.
+- The speaker endpoint: the `bgp.rustbgpd` section for the rustbgpd backend, a
+  nonempty `bgp.gobgp_grpc` without userinfo or a path for GoBGP, and the
+  rustbgpd transport rules (plaintext only to a literal loopback address, a set
+  `bearer_token_env`, no TLS options on a Unix socket, a client certificate only
+  with its key, readable TLS files).
+- Scrubber readiness credentials (`readiness_token_env`) and the readiness CA
+  file.
+- The playbook checks against settings: match opt-ins, `max_ports`, blackhole
+  enablement and TTL cap, and VPN default scope. They assume a speaker that
+  supports every FlowSpec match component and the injection lease.
+
+Each error is printed to stderr on its own line with the full path of the file
+it came from, and the exit code is 1. A clean run prints a one-line summary and
+exits 0. Errors use startup's redacted text, so a secret is never echoed. A
+command-line usage error, such as `--check` combined with
+`--adopt-legacy-speaker`, exits 2.
+
+Checks that need a speaker, database or listener are skipped and named in the
+output:
+
+- the speaker connection, daemon version and rustbgpd Unix socket ownership;
+- the playbook checks against the speaker's actual FlowSpec match and
+  blackhole-lease capabilities;
+- blackhole, VPN scope and injection-lease support checks against the speaker;
+- scrubber readiness probes and outstanding diversions;
+- the database connection, registration, fencing and migrations;
+- binding the HTTP listen address.
+
+A passing check therefore does not promise that startup succeeds, only that it
+gets past every configuration check it can make without those counterparts.
 
 A refused configuration is not a slow failure. Leased FlowSpec is on in the
 shipped rustbgpd configuration, so a controller that refuses to start leaves the
 speaker to withdraw the rules when the last lease lapses, about
 `blackhole.lease_seconds` (60 by default) after the restart began. With Compose,
 check the new image against the deployment's config volume before replacing the
-controller:
+controller. Export the image once so the check and the restart use the same one:
 
 ```bash
-PREFIXD_IMAGE=ghcr.io/lance0/prefixd:0.28.0 \
-  docker compose --profile rustbgpd run --rm --no-deps prefixd-rustbgpd --check-config
+export PREFIXD_IMAGE=ghcr.io/lance0/prefixd:0.28.0
+docker compose --profile rustbgpd run --rm --no-deps prefixd-rustbgpd --check
 docker compose --profile rustbgpd up -d --no-build
 ```
 
-The `gobgp` profile uses `prefixd-gobgp` in the same commands. `--no-deps` keeps
-the check from starting PostgreSQL, the speaker or the config-volume init step,
-and `docker compose run` supplies the service environment, so `DATABASE_URL` is
-present when `storage.connection_string` is empty.
+The `gobgp` profile uses `prefixd-gobgp` in the same commands. That service
+shares the `gobgp` container's network (`network_mode: service:gobgp`), so the
+`gobgp` container must be running for the check, though the check does not
+connect to it. `--no-deps` keeps the check from starting PostgreSQL, the speaker
+or the config-volume init step, and `docker compose run` supplies the service
+environment, so `DATABASE_URL` and the token variables are the ones the
+controller sees.
 
 Errors name the file and the key they refuse, for example:
 
@@ -1637,27 +1666,37 @@ Errors name the file and the key they refuse, for example:
 - `failed to load /etc/prefixd/prefixd.yaml: configuration error: amplification.reflector_ports: port 53 is listed twice`
 - `failed to load /etc/prefixd/inventory.yaml: configuration error: inventory customer acme: invalid prefix "203.0.113.0/33"`
 - `failed to load /etc/prefixd/prefixd.yaml: mode: unknown variant, expected one of dry-run, enforced at line 2 column 7`
+- `/etc/prefixd/prefixd.yaml: auth.mode=bearer but PREFIXD_API_TOKEN is not set or empty`
+- `/etc/prefixd/playbooks.yaml: configuration error: playbook "bh" has a blackhole step, but blackhole.enabled is false`
 
 ### Unknown keys
 
-A key the loader does not recognise, such as `guardrails.max_port` or a key
+A key the loader does not recognize, such as `guardrails.max_port` or a key
 from another release, is reported with its full path and ignored by this
-release. Startup logs each one and `--check-config` prints the same lines:
+release. `--check` prints one line per key:
 
 ```text
-prefixd.yaml: unknown key `guardrails.max_port`; ignored in this release, refused in the next
+/etc/prefixd/prefixd.yaml: unknown key `guardrails.max_port`; ignored in this release, refused in the next
 ```
+
+Startup and [reload](#hot-reload) log a warning for each, `unknown
+configuration key ignored; the next release refuses it`, with the file's full
+path in the `file` field and the key path in the `key` field.
 
 The next release refuses these keys instead. Remove every key a check reports
 before upgrading. Alert destination keys are reported under
 `alerting.destinations[N]`, from `alerting.yaml` or the inline `alerting`
-section, so a `chanel:` typo cannot be mistaken for configuration.
+section, so a `chanel:` typo cannot be mistaken for configuration. This covers
+`prefixd.yaml`, `correlation.yaml` and `alerting.yaml`; `inventory.yaml` is not
+checked for unknown keys yet.
 
-Keys inside sections that already reject them stop startup instead of warning:
-`bgp`, `observability`, `blackhole`, `amplification`, `shutdown`, `scrubber`
-and each `scrubber.profiles` entry, each `bgp.vpn_scopes` entry, each
-`correlation.webhook_adapters` entry and `playbooks.yaml`. Only key paths are
-reported, never values.
+These sections already reject unknown keys, which stops startup instead of
+warning: the keys directly under `bgp` (not those inside `bgp.rustbgpd` or a
+`bgp.neighbors` entry, which warn), each `bgp.vpn_scopes` entry, a
+`bgp.default_scope` written as per-family names, `observability`, `blackhole`,
+`amplification` and each `amplification.reflector_ports` entry, `shutdown`,
+`scrubber`, each `scrubber.profiles` entry and its `return_leg`, and
+`playbooks.yaml`. Only key paths are reported, never values.
 
 Configuration API edits count UTF-8 bytes: playbook names allow up to 128 bytes;
 Slack, Discord and Teams `webhook_url`, PagerDuty `events_url` and generic `url`
@@ -1665,10 +1704,10 @@ allow up to 1,024 bytes; Telegram `chat_id` allows up to 64 bytes. Playbook edit
 TTLs must be 1–86,400 seconds.
 
 A startup failure names the file, such as `failed to load
-/etc/prefixd/inventory.yaml`, followed by the reason. YAML parse errors give the
-key path, line and column, as described under [Hot Reload](#hot-reload).
-Checks that run after parsing name the key they refuse, as in the examples
-above.
+/etc/prefixd/inventory.yaml`, followed by the reason, one line per error. YAML
+parse errors give the key path, line and column, as described under
+[Hot Reload](#hot-reload). Checks that run after parsing name the key they
+refuse, as in the examples above.
 
 ## Scrubber profiles
 

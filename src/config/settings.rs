@@ -85,6 +85,52 @@ pub struct TlsConfig {
     pub ca_path: Option<String>,
 }
 
+impl TlsConfig {
+    /// The HTTPS listener's rustls configuration, read from the configured
+    /// files. Startup serves it; `prefixd --check` builds it to prove the files
+    /// are readable and the key matches the certificate. Errors name the file,
+    /// never key material.
+    pub fn server_config(&self, require_client_cert: bool) -> Result<rustls::ServerConfig> {
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let certificates = |field: &str, path: &str| -> Result<Vec<CertificateDer<'static>>> {
+            CertificateDer::pem_file_iter(path)
+                .and_then(|certificates| certificates.collect::<Result<Vec<_>, _>>())
+                .map_err(|_| anyhow::anyhow!("cannot read http.tls.{field} {path}"))
+        };
+        let certs = certificates("cert_path", &self.cert_path)?;
+        let key = PrivateKeyDer::from_pem_file(&self.key_path).map_err(|_| {
+            anyhow::anyhow!(
+                "cannot read a private key from http.tls.key_path {}",
+                self.key_path
+            )
+        })?;
+        let builder = rustls::ServerConfig::builder();
+        if !require_client_cert {
+            let mut config = builder.with_no_client_auth().with_single_cert(certs, key)?;
+            // As axum-server's `RustlsConfig::from_pem_file`, which served this before.
+            config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            return Ok(config);
+        }
+        let ca_path = self
+            .ca_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("mTLS requires ca_path to be set"))?;
+        let mut root_store = rustls::RootCertStore::empty();
+        for cert in certificates("ca_path", ca_path)? {
+            root_store.add(cert)?;
+        }
+        let client_verifier =
+            rustls::server::WebPkiClientVerifier::builder(std::sync::Arc::new(root_store))
+                .build()
+                .map_err(|e| anyhow::anyhow!("failed to build client verifier: {}", e))?;
+        Ok(builder
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(certs, key)?)
+    }
+}
+
 impl HttpConfig {
     /// Browsers usually reach prefixd through a TLS-terminating proxy, which the
     /// controller cannot see, so session cookies are `Secure` unless explicitly
@@ -122,6 +168,30 @@ pub struct AuthConfig {
     pub mode: AuthMode,
     #[serde(default)]
     pub bearer_token_env: Option<String>,
+}
+
+impl AuthConfig {
+    /// The environment variable that holds the API bearer token.
+    pub fn bearer_token_env(&self) -> &str {
+        self.bearer_token_env
+            .as_deref()
+            .unwrap_or("PREFIXD_API_TOKEN")
+    }
+
+    /// The API bearer token when `mode` is `bearer`, which then must be set and
+    /// nonempty. Startup reads it once; the error names the variable, never a value.
+    pub fn bearer_token(&self) -> crate::error::Result<Option<String>> {
+        if self.mode != AuthMode::Bearer {
+            return Ok(None);
+        }
+        match std::env::var(self.bearer_token_env()) {
+            Ok(token) if !token.is_empty() => Ok(Some(token)),
+            _ => Err(crate::error::PrefixdError::Config(format!(
+                "auth.mode=bearer but {} is not set or empty",
+                self.bearer_token_env()
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -470,6 +540,28 @@ pub struct StorageConfig {
     /// Optional when `DATABASE_URL` is set, which takes precedence.
     #[serde(default)]
     pub connection_string: String,
+}
+
+impl StorageConfig {
+    /// `DATABASE_URL` when set and nonempty, else `connection_string`. Refuses
+    /// a missing or malformed URL without repeating it, since it can hold a
+    /// password.
+    pub fn database_url(&self) -> Result<String> {
+        let url = std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| self.connection_string.clone());
+        anyhow::ensure!(
+            !url.is_empty(),
+            "set DATABASE_URL or storage.connection_string"
+        );
+        <sqlx::postgres::PgConnectOptions as std::str::FromStr>::from_str(&url).map_err(|_| {
+            anyhow::anyhow!(
+                "the database URL from DATABASE_URL or storage.connection_string is not a valid PostgreSQL URL"
+            )
+        })?;
+        Ok(url)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -821,7 +913,7 @@ impl Settings {
 
     /// Parse a `prefixd.yaml` document and collect its unknown keys. The
     /// cross-checks are separate ([`Settings::validate_errors`]) so
-    /// `--check-config` can report every error instead of the first.
+    /// `--check` can report every error instead of the first.
     pub fn from_yaml(content: &str) -> Result<(Self, Vec<String>)> {
         reject_removed_keys(content)?;
         let (settings, mut unknown_keys) = crate::config::parse_secret_yaml(content)?;

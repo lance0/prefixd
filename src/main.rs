@@ -47,7 +47,7 @@ struct Cli {
         long,
         conflicts_with_all = ["adopt_legacy_speaker", "retire_dry_run_intent"]
     )]
-    check_config: bool,
+    check: bool,
 }
 
 #[tokio::main]
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let cli = Cli::parse();
 
-    if cli.check_config {
+    if cli.check {
         let check = prefixd::config::AppConfig::check(&cli.config);
         for key in &check.unknown_keys {
             eprintln!("{key}");
@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         }
         if check.is_ok() {
             println!("{}", check.summary());
-            for skipped in prefixd::config::CHECK_CONFIG_SKIPPED {
+            for skipped in prefixd::config::CHECK_SKIPPED {
                 println!("skipped: {skipped}");
             }
             return Ok(());
@@ -94,20 +94,24 @@ async fn main() -> anyhow::Result<()> {
     // This release ignores unknown keys after naming them; the next refuses
     // them, so a typo such as `guardrails.max_port` is not silent meanwhile.
     for unknown in &config.unknown_keys {
-        tracing::warn!("{unknown}");
+        tracing::warn!(
+            file = %unknown.file,
+            key = %unknown.key,
+            "unknown configuration key ignored; the next release refuses it"
+        );
     }
     prefixd::observability::init_metrics(&config.settings.pop);
+    // Refuse what `--check` refuses before opening the database, so a bad edit
+    // fails fast instead of after a speaker connection. Maintenance commands
+    // neither serve nor connect to the speaker, so they skip it.
+    if !cli.adopt_legacy_speaker && !cli.retire_dry_run_intent {
+        let errors = config.preflight_errors(&cli.config);
+        anyhow::ensure!(errors.is_empty(), "{}", errors.join("\n"));
+    }
 
     // Init database
     // DATABASE_URL env var takes precedence over config file
-    let connection_string = std::env::var("DATABASE_URL")
-        .ok()
-        .filter(|url| !url.is_empty())
-        .unwrap_or_else(|| config.settings.storage.connection_string.clone());
-    anyhow::ensure!(
-        !connection_string.is_empty(),
-        "set DATABASE_URL or storage.connection_string"
-    );
+    let connection_string = config.settings.storage.database_url()?;
     tracing::info!("initializing PostgreSQL database");
 
     let pool = db::init_postgres_pool(&connection_string).await?;
@@ -386,45 +390,9 @@ async fn start_tls_server(
     state: Arc<AppState>,
 ) -> anyhow::Result<()> {
     use axum_server::tls_rustls::RustlsConfig;
-    use rustls::RootCertStore;
-    use rustls::pki_types::pem::PemObject;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    use rustls::server::WebPkiClientVerifier;
 
-    let rustls_config = if require_client_cert {
-        let ca_path = tls_config
-            .ca_path
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("mTLS requires ca_path to be set"))?;
-
-        let mut root_store = RootCertStore::empty();
-        for cert in CertificateDer::pem_file_iter(ca_path)? {
-            root_store.add(cert?)?;
-        }
-
-        let client_verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
-            .build()
-            .map_err(|e| anyhow::anyhow!("failed to build client verifier: {}", e))?;
-
-        let certs: Vec<_> =
-            CertificateDer::pem_file_iter(&tls_config.cert_path)?.collect::<Result<Vec<_>, _>>()?;
-
-        let key = PrivateKeyDer::from_pem_file(&tls_config.key_path).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to read private key from {}: {}",
-                tls_config.key_path,
-                e
-            )
-        })?;
-
-        let config = rustls::ServerConfig::builder()
-            .with_client_cert_verifier(client_verifier)
-            .with_single_cert(certs, key)?;
-
-        RustlsConfig::from_config(Arc::new(config))
-    } else {
-        RustlsConfig::from_pem_file(&tls_config.cert_path, &tls_config.key_path).await?
-    };
+    let rustls_config =
+        RustlsConfig::from_config(Arc::new(tls_config.server_config(require_client_cert)?));
 
     tracing::info!(
         listen = %listen,

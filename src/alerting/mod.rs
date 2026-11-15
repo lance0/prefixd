@@ -644,7 +644,7 @@ impl AlertingConfig {
 
     /// Parse an alerting document and collect its unknown keys. The secret and
     /// placeholder checks stay separate ([`AlertingConfig::load_errors`]) so
-    /// `--check-config` can report every error.
+    /// `--check` can report every error.
     pub fn from_yaml(content: &str) -> Result<(Self, Vec<String>)> {
         let (config, mut unknown_keys) = crate::config::parse_secret_yaml(content)?;
         if let Ok(document) = crate::config::parse_yaml::<serde_json::Value>(content) {
@@ -1537,8 +1537,38 @@ mod tests {
                 events: events.clone(),
             },
         ];
-        assert_eq!(destinations.len(), DESTINATION_KEYS.len());
+        // Exhaustive, with no wildcard: a new variant fails to compile here
+        // until it has a tag, and the lists below fail until it has a sample
+        // and a `DESTINATION_KEYS` entry.
+        let tag = |destination: &DestinationConfig| match destination {
+            DestinationConfig::Slack { .. } => "slack",
+            DestinationConfig::Discord { .. } => "discord",
+            DestinationConfig::Teams { .. } => "teams",
+            DestinationConfig::Telegram { .. } => "telegram",
+            DestinationConfig::Pagerduty { .. } => "pagerduty",
+            DestinationConfig::Opsgenie { .. } => "opsgenie",
+            DestinationConfig::Generic { .. } => "generic",
+        };
+        // serde's own variant list, from the error an unknown tag produces.
+        let error = serde_json::from_value::<DestinationConfig>(serde_json::json!({"type": "-"}))
+            .unwrap_err()
+            .to_string();
+        let mut variants: Vec<&str> = error
+            .split("expected one of ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{error}"))
+            .split(", ")
+            .map(|variant| variant.trim_matches('`'))
+            .collect();
+        variants.sort_unstable();
+        let mut sampled: Vec<&str> = destinations.iter().map(tag).collect();
+        sampled.sort_unstable();
+        let mut tabled: Vec<&str> = DESTINATION_KEYS.iter().map(|(name, _)| *name).collect();
+        tabled.sort_unstable();
+        assert_eq!(sampled, variants);
+        assert_eq!(tabled, variants);
         for destination in destinations {
+            assert_eq!(tag(&destination), destination.destination_type());
             let value = serde_json::to_value(&destination).unwrap();
             let mut serialized: Vec<&str> = value
                 .as_object()

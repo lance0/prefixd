@@ -7,23 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- Unknown configuration keys in `prefixd.yaml`, `correlation.yaml` and
+  `alerting.yaml` are ignored in this release with a warning, and the next
+  release refuses them at startup and on reload. Run `prefixd --check` against
+  your configuration and remove every key it reports before that upgrade. See
+  [unknown configuration keys](docs/how-to/upgrading.md#unknown-configuration-keys).
+- Startup now runs its configuration-only checks before it opens the database:
+  the database URL, the API bearer token, the `http.tls` files, the speaker
+  endpoint and its credentials, scrubber readiness credentials and the playbook
+  checks against settings. A configuration startup refused after connecting is
+  now refused earlier, with every error on its own line.
+
+### Known limitations
+
+- `prefixd --check` cannot run checks that need a live speaker, database or
+  listener: the speaker connection and version, the playbook checks against the
+  speaker's actual capabilities, blackhole, VPN scope and lease support,
+  scrubber readiness probes, database registration, fencing and migrations, and
+  binding the listen address. It names them on every run.
+- `inventory.yaml` is not checked for unknown keys yet.
+
 ### Added
 
-- `prefixd --check-config` validates the configuration directory and exits
-  before connecting to PostgreSQL or the speaker. It runs the same checks as
-  startup, prints every error on its own line with the file it came from, and
-  exits 1 on any error. Checks that need a live speaker or database are skipped
-  and named in the output. With leased FlowSpec on by default, a refused
-  restart no longer has to be diagnosed while active mitigations lapse.
-- `prefixd --check-config` names each unknown configuration key, with its full
-  key path, for `prefixd.yaml`, `correlation.yaml` and `alerting.yaml`.
+- `prefixd --check` validates the configuration directory and exits before
+  connecting to PostgreSQL or the speaker. It shares startup's loader and its
+  pre-database checks, prints every error on its own line with the full path
+  of the file it came from, and exits 1 on any error. With leased FlowSpec on
+  by default, a refused restart no longer has to be diagnosed while active
+  mitigations lapse.
+- `prefixd --check` names each unknown configuration key, with its full key
+  path, for `prefixd.yaml`, `correlation.yaml` and `alerting.yaml`.
 
 ### Changed
 
 - Unknown configuration keys are reported with their full key path, including
   alert destination keys such as `alerting.destinations[0].chanel`, and ignored
-  in this release; the next release refuses them. Only key paths are reported,
-  never values.
+  in this release; the next release refuses them. Startup and reload log an
+  `unknown configuration key ignored; the next release refuses it` warning with
+  `file` and `key` fields. Only key paths are reported, never values.
+- A startup refused while loading configuration reports every load error, one
+  per line, instead of the first.
 
 ### Fixed
 

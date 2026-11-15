@@ -8,7 +8,7 @@ pub use playbooks::*;
 pub use settings::*;
 pub use vpn_scope::*;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 
 /// Fixed parsing policy for operator-owned configuration. No includes or interpolation.
@@ -158,9 +158,8 @@ pub(crate) fn env_placeholder_errors(value: &serde_json::Value) -> Vec<String> {
 /// nothing secret can reach a warning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownKey {
-    /// The file it appeared in: `prefixd.yaml`, `correlation.yaml` or
-    /// `alerting.yaml`.
-    pub file: &'static str,
+    /// The full path of the file it appeared in.
+    pub file: String,
     /// The full key path, such as `guardrails.max_port`.
     pub key: String,
 }
@@ -175,20 +174,23 @@ impl std::fmt::Display for UnknownKey {
     }
 }
 
-/// Startup checks `--check-config` cannot run because each needs a live
-/// speaker or database. Printed on every check so a clean exit is not read as
-/// coverage of them.
-pub const CHECK_CONFIG_SKIPPED: &[&str] = &[
-    "playbook checks against the speaker's FlowSpec match and blackhole-lease capabilities",
-    "blackhole, VPN scope and injection-lease support checks",
-    "scrubber readiness and outstanding-diversion checks",
-    "database registration, fencing and migrations",
+/// Startup checks `prefixd --check` cannot run because each needs a live
+/// speaker, database or listener. Printed on every check so a clean exit is
+/// not read as coverage of them.
+pub const CHECK_SKIPPED: &[&str] = &[
+    "speaker connection, daemon version and rustbgpd Unix socket ownership",
+    "playbook checks against the speaker's FlowSpec match and blackhole-lease capabilities \
+     (checked as if the speaker supports every match component and the lease)",
+    "blackhole, VPN scope and injection-lease support checks against the speaker",
+    "scrubber readiness probes and outstanding-diversion checks",
+    "database connection, registration, fencing and migrations",
+    "binding the HTTP listen address",
 ];
 
 /// Validation of a configuration directory without PostgreSQL or a speaker.
 #[derive(Debug, Default)]
 pub struct ConfigCheck {
-    /// Every error, each already naming its file, in startup's redacted text.
+    /// Every error, each naming its file by full path, in startup's redacted text.
     pub errors: Vec<String>,
     /// Keys the loader ignores, which startup warns about.
     pub unknown_keys: Vec<UnknownKey>,
@@ -203,13 +205,29 @@ impl ConfigCheck {
         self.errors.is_empty()
     }
 
-    /// The one-line success summary; `--check-config` prints it and exits 0.
+    /// The one-line success summary; `prefixd --check` prints it and exits 0.
     pub fn summary(&self) -> String {
         format!(
             "configuration OK: {} validated, {} unknown key(s) ignored",
             self.validated.join(", "),
             self.unknown_keys.len()
         )
+    }
+
+    /// Record a load error once, in startup's `failed to load <path>` form.
+    fn fail(&mut self, path: &Path, error: impl std::fmt::Display) {
+        let line = format!("failed to load {}: {error}", path.display());
+        if !self.errors.contains(&line) {
+            self.errors.push(line);
+        }
+    }
+
+    fn unknown(&mut self, path: &Path, keys: Vec<String>) {
+        self.unknown_keys
+            .extend(keys.into_iter().map(|key| UnknownKey {
+                file: path.display().to_string(),
+                key,
+            }));
     }
 }
 
@@ -226,232 +244,220 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    /// Load and validate every file startup reads. Fails with every load
+    /// error, one per line.
     pub fn load(config_dir: &Path) -> Result<Self> {
-        let path = |name: &str| config_dir.join(name);
-        let failed = |name: &str| format!("failed to load {}", path(name).display());
-        let (mut settings, unknown_keys) = Settings::load_with_unknown_keys(path("prefixd.yaml"))
-            .with_context(|| failed("prefixd.yaml"))?;
-        let mut unknown_keys: Vec<UnknownKey> = unknown_keys
-            .into_iter()
-            .map(|key| UnknownKey {
-                file: "prefixd.yaml",
-                key,
-            })
-            .collect();
-        match crate::correlation::CorrelationConfig::load_with_unknown_keys(path(
-            "correlation.yaml",
-        )) {
-            Ok((correlation, keys)) => {
-                settings.correlation = correlation;
-                unknown_keys.extend(keys.into_iter().map(|key| UnknownKey {
-                    file: "correlation.yaml",
-                    key,
-                }));
-            }
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
-            Err(error) => return Err(error.context(failed("correlation.yaml"))),
+        match Self::load_all(config_dir) {
+            (Some(config), check) if check.is_ok() => Ok(config),
+            (_, check) => anyhow::bail!("{}", check.errors.join("\n")),
         }
-        // A present alerting.yaml replaces inline alerting. Either one gets the
-        // destination checks reload and the alerting editor apply.
-        let mut alerting_source = "prefixd.yaml";
-        match crate::alerting::AlertingConfig::load_with_unknown_keys(path("alerting.yaml")) {
-            Ok((alerting, keys)) => {
-                settings.alerting = alerting;
-                alerting_source = "alerting.yaml";
-                unknown_keys.extend(keys.into_iter().map(|key| UnknownKey {
-                    file: "alerting.yaml",
-                    key,
-                }));
-            }
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
-            Err(error) => return Err(error.context(failed("alerting.yaml"))),
-        }
-        let errors = settings.alerting.validate();
-        if !errors.is_empty() {
-            anyhow::bail!(
-                "{}: alerting: {}",
-                failed(alerting_source),
-                errors.join("; ")
-            );
-        }
-        let inventory =
-            Inventory::load(path("inventory.yaml")).with_context(|| failed("inventory.yaml"))?;
-        let playbooks =
-            Playbooks::load(path("playbooks.yaml")).with_context(|| failed("playbooks.yaml"))?;
-
-        Ok(Self {
-            settings,
-            inventory,
-            playbooks,
-            alerting_source,
-            unknown_keys,
-        })
     }
 
-    /// Validate every file startup loads and report all errors, without
-    /// connecting to PostgreSQL or the speaker. Checks that need a live
-    /// speaker are listed in [`CHECK_CONFIG_SKIPPED`] instead of being faked.
+    /// Validate every file startup loads, then run [`AppConfig::preflight_errors`],
+    /// reporting all errors without connecting to PostgreSQL or the speaker.
+    /// Checks that need a live speaker or database are listed in
+    /// [`CHECK_SKIPPED`] instead of being faked.
     pub fn check(config_dir: &Path) -> ConfigCheck {
+        let (config, mut check) = Self::load_all(config_dir);
+        if let Some(config) = config {
+            check.errors.extend(config.preflight_errors(config_dir));
+            let playbooks = config_dir.join("playbooks.yaml");
+            check.warnings.extend(
+                config
+                    .playbooks
+                    .prefix_scope_warnings(&config.settings.guardrails)
+                    .into_iter()
+                    .map(|warning| format!("{}: {warning}", playbooks.display())),
+            );
+        }
+        check
+    }
+
+    /// The configuration-only checks startup runs after loading and before it
+    /// opens the database, each of which startup would otherwise reach only
+    /// after connecting: the database URL, the API bearer token and TLS files,
+    /// the speaker endpoint, credentials and TLS files, scrubber readiness
+    /// credentials, and the playbook checks against settings. The playbook
+    /// checks assume a speaker that supports every FlowSpec match component
+    /// and the injection lease; startup repeats them against the real speaker.
+    pub fn preflight_errors(&self, config_dir: &Path) -> Vec<String> {
+        let settings = &self.settings;
+        let prefixd = config_dir.join("prefixd.yaml");
+        let mut errors = Vec::new();
+        let mut push = |error: String| errors.push(format!("{}: {error}", prefixd.display()));
+        if let Err(error) = settings.storage.database_url() {
+            push(error.to_string());
+        }
+        if let Err(error) = settings.http.auth.bearer_token() {
+            push(error.to_string());
+        }
+        if let Some(tls) = &settings.http.tls
+            && let Err(error) = tls.server_config(settings.http.auth.mode == AuthMode::Mtls)
+        {
+            push(format!("{error:#}"));
+        }
+        if let Err(error) = crate::bgp::check_speaker_config(&settings.bgp) {
+            push(format!("{error:#}"));
+        }
+        if let Err(error) = crate::scrubber::ScrubberController::new(settings) {
+            push(error.to_string());
+        }
+        let permissive = crate::bgp::SpeakerCapabilities {
+            rule_reader: false,
+            peer_observer: false,
+            daemon_health: false,
+            blackhole: false,
+            blackhole_lease: true,
+            blackhole_export: false,
+            flowspec_export: false,
+            flowspec_match: crate::bgp::FlowSpecMatchSupport::ALL,
+        };
+        let playbooks = config_dir.join("playbooks.yaml");
+        errors.extend(
+            self.playbooks
+                .check_settings(settings, permissive)
+                .into_iter()
+                .map(|error| format!("{}: {error}", playbooks.display())),
+        );
+        errors
+    }
+
+    /// Parse and validate every file, collecting all errors and unknown keys.
+    /// The configuration is returned whenever each file parsed, even if a
+    /// cross-check failed, so [`AppConfig::check`] can report later errors too.
+    fn load_all(config_dir: &Path) -> (Option<Self>, ConfigCheck) {
         let path = |name: &str| config_dir.join(name);
-        let failed = |name: &str| format!("failed to load {}", path(name).display());
         let mut check = ConfigCheck::default();
+        let read =
+            |check: &mut ConfigCheck, name: &str, optional: bool| match std::fs::read_to_string(
+                path(name),
+            ) {
+                Ok(content) => Some(content),
+                Err(error) if optional && error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    check.fail(&path(name), error);
+                    None
+                }
+            };
 
         let mut settings = None;
-        match std::fs::read_to_string(path("prefixd.yaml")) {
-            Err(error) => check
-                .errors
-                .push(format!("{}: {error}", failed("prefixd.yaml"))),
-            Ok(content) => match Settings::from_yaml(&content) {
+        if let Some(content) = read(&mut check, "prefixd.yaml", false) {
+            match Settings::from_yaml(&content) {
                 Ok((loaded, keys)) => {
                     check.validated.push("prefixd.yaml");
-                    check
-                        .unknown_keys
-                        .extend(keys.into_iter().map(|key| UnknownKey {
-                            file: "prefixd.yaml",
-                            key,
-                        }));
+                    check.unknown(&path("prefixd.yaml"), keys);
                     for error in loaded.validate_errors() {
-                        check
-                            .errors
-                            .push(format!("{}: {error}", failed("prefixd.yaml")));
+                        check.fail(&path("prefixd.yaml"), error);
                     }
                     settings = Some(loaded);
                 }
-                Err(error) => check
-                    .errors
-                    .push(format!("{}: {error:#}", failed("prefixd.yaml"))),
-            },
-        }
-        // Startup refuses before connecting when neither source names a
-        // database; that gate reads the same environment override.
-        if let Some(loaded) = &settings
-            && loaded.storage.connection_string.is_empty()
-            && std::env::var("DATABASE_URL")
-                .ok()
-                .filter(|url| !url.is_empty())
-                .is_none()
-        {
-            check
-                .errors
-                .push("set DATABASE_URL or storage.connection_string".to_string());
+                Err(error) => check.fail(&path("prefixd.yaml"), format!("{error:#}")),
+            }
         }
 
-        match std::fs::read_to_string(path("correlation.yaml")) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => check
-                .errors
-                .push(format!("{}: {error}", failed("correlation.yaml"))),
-            Ok(content) => match crate::correlation::CorrelationConfig::from_yaml(&content) {
+        if let Some(content) = read(&mut check, "correlation.yaml", true) {
+            match crate::correlation::CorrelationConfig::from_yaml(&content) {
                 Ok((correlation, keys)) => {
                     check.validated.push("correlation.yaml");
-                    check
-                        .unknown_keys
-                        .extend(keys.into_iter().map(|key| UnknownKey {
-                            file: "correlation.yaml",
-                            key,
-                        }));
+                    check.unknown(&path("correlation.yaml"), keys);
                     let errors = correlation.validate();
                     if !errors.is_empty() {
-                        check.errors.push(format!(
-                            "{}: invalid correlation config: {}",
-                            failed("correlation.yaml"),
-                            errors.join("; ")
-                        ));
+                        check.fail(
+                            &path("correlation.yaml"),
+                            format!("invalid correlation config: {}", errors.join("; ")),
+                        );
+                    }
+                    if let Some(settings) = settings.as_mut() {
+                        settings.correlation = correlation;
                     }
                 }
-                Err(error) => check
-                    .errors
-                    .push(format!("{}: {error:#}", failed("correlation.yaml"))),
-            },
+                Err(error) => check.fail(&path("correlation.yaml"), format!("{error:#}")),
+            }
         }
 
-        // A present alerting.yaml replaces inline alerting, exactly as startup
-        // resolves it before validating the effective destinations.
+        // A present alerting.yaml replaces inline alerting. Either one gets the
+        // destination checks reload and the alerting editor apply.
         let mut alerting_source = "prefixd.yaml";
-        match std::fs::read_to_string(path("alerting.yaml")) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => check
-                .errors
-                .push(format!("{}: {error}", failed("alerting.yaml"))),
-            Ok(content) => match crate::alerting::AlertingConfig::from_yaml(&content) {
+        if let Some(content) = read(&mut check, "alerting.yaml", true) {
+            match crate::alerting::AlertingConfig::from_yaml(&content) {
                 Ok((alerting, keys)) => {
                     check.validated.push("alerting.yaml");
                     alerting_source = "alerting.yaml";
-                    check
-                        .unknown_keys
-                        .extend(keys.into_iter().map(|key| UnknownKey {
-                            file: "alerting.yaml",
-                            key,
-                        }));
-                    let errors = alerting.load_errors();
-                    if !errors.is_empty() {
-                        check.errors.push(format!(
-                            "{}: {}",
-                            failed("alerting.yaml"),
-                            errors.join("; ")
-                        ));
+                    check.unknown(&path("alerting.yaml"), keys);
+                    for error in alerting.load_errors() {
+                        check.fail(&path("alerting.yaml"), format!("alerting: {error}"));
                     }
                     if let Some(settings) = settings.as_mut() {
                         settings.alerting = alerting;
-                    }
-                }
-                Err(error) => check
-                    .errors
-                    .push(format!("{}: {error:#}", failed("alerting.yaml"))),
-            },
-        }
-        if let Some(settings) = &settings {
-            let errors = settings.alerting.validate();
-            if !errors.is_empty() {
-                check.errors.push(format!(
-                    "{}: alerting: {}",
-                    failed(alerting_source),
-                    errors.join("; ")
-                ));
-            }
-        }
-
-        for name in ["inventory.yaml", "playbooks.yaml"] {
-            match std::fs::read_to_string(path(name)) {
-                Err(error) => check.errors.push(format!("{}: {error}", failed(name))),
-                Ok(content) if name == "inventory.yaml" => match Inventory::from_yaml(&content) {
-                    Ok(_) => check.validated.push("inventory.yaml"),
-                    Err(error) => check
-                        .errors
-                        .push(format!("{}: {error:#}", failed("inventory.yaml"))),
-                },
-                Ok(content) => match Playbooks::from_yaml(&content) {
-                    Ok(playbooks) => {
-                        check.validated.push("playbooks.yaml");
-                        if let Some(settings) = &settings {
-                            check.warnings.extend(
-                                playbooks
-                                    .prefix_scope_warnings(&settings.guardrails)
-                                    .into_iter()
-                                    .map(|warning| format!("playbooks.yaml: {warning}")),
-                            );
+                    } else {
+                        for error in alerting.validate() {
+                            check.fail(&path("alerting.yaml"), format!("alerting: {error}"));
                         }
                     }
-                    Err(error) => check
-                        .errors
-                        .push(format!("{}: {error:#}", failed("playbooks.yaml"))),
-                },
+                }
+                Err(error) => check.fail(&path("alerting.yaml"), format!("{error:#}")),
+            }
+        }
+        // The effective destinations; `fail` drops the placeholder errors the
+        // load checks above already reported.
+        if let Some(settings) = &settings {
+            for error in settings.alerting.validate() {
+                check.fail(&path(alerting_source), format!("alerting: {error}"));
             }
         }
 
-        check
+        let inventory =
+            read(&mut check, "inventory.yaml", false).and_then(
+                |content| match Inventory::from_yaml(&content) {
+                    Ok(inventory) => {
+                        check.validated.push("inventory.yaml");
+                        Some(inventory)
+                    }
+                    Err(error) => {
+                        check.fail(&path("inventory.yaml"), format!("{error:#}"));
+                        None
+                    }
+                },
+            );
+        let playbooks =
+            read(&mut check, "playbooks.yaml", false).and_then(
+                |content| match Playbooks::from_yaml(&content) {
+                    Ok(playbooks) => {
+                        check.validated.push("playbooks.yaml");
+                        Some(playbooks)
+                    }
+                    Err(error) => {
+                        check.fail(&path("playbooks.yaml"), format!("{error:#}"));
+                        None
+                    }
+                },
+            );
+
+        let config = match (settings, inventory, playbooks) {
+            (Some(settings), Some(inventory), Some(playbooks)) => Some(Self {
+                settings,
+                inventory,
+                playbooks,
+                alerting_source,
+                unknown_keys: check.unknown_keys.clone(),
+            }),
+            _ => None,
+        };
+        (config, check)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shipped configuration this build can run: rustbgpd, or GoBGP when
+    /// the rustbgpd backend is compiled out.
+    const SHIPPED: &str = if cfg!(feature = "bgp-rustbgpd") {
+        include_str!("../../configs/prefixd.yaml")
+    } else {
+        include_str!("../../configs/prefixd-gobgp.yaml")
+    };
 
     /// Sections `Settings` requires, with values that pass every cross-check.
     const REQUIRED: &[(&str, &str)] = &[
@@ -553,6 +559,21 @@ mod tests {
                 "correlation",
                 "correlation: {windows: 30}",
                 "correlation.windows",
+            ),
+            // Non-strict sections nested in a strict one warn too.
+            (
+                "rustbgpd",
+                "bgp",
+                "bgp: {local_asn: 65010, router_id: 192.0.2.1, \
+                 rustbgpd: {endpoint: 'unix:///run/rustbgpd/grpc.sock', leased_flowspc: true}}",
+                "bgp.rustbgpd.leased_flowspc",
+            ),
+            (
+                "neighbors",
+                "bgp",
+                "bgp: {local_asn: 65010, router_id: 192.0.2.1, \
+                 neighbors: [{name: r1, address: 192.0.2.2, peer_asn: 65001, afi_safi: [], typo: 1}]}",
+                "bgp.neighbors[0].typo",
             ),
         ];
         for (section, name, text, expected) in cases {
@@ -708,8 +729,7 @@ mod tests {
     #[test]
     fn check_reports_all_errors_and_unknown_keys() {
         let directory = fixture();
-        let mut settings: Settings =
-            parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+        let mut settings: Settings = parse_yaml(SHIPPED).unwrap();
         settings.correlation.confidence_threshold = 0.5;
         settings.quotas.max_active_prefix_per_customer = 0;
         settings.blackhole.lease_seconds = 2;
@@ -732,8 +752,14 @@ mod tests {
         assert_eq!(
             keys,
             vec![
-                "prefixd.yaml: unknown key `guardrailsx`; ignored in this release, refused in the next",
-                "correlation.yaml: unknown key `close_after`; ignored in this release, refused in the next",
+                format!(
+                    "{}: unknown key `guardrailsx`; ignored in this release, refused in the next",
+                    directory.path().join("prefixd.yaml").display()
+                ),
+                format!(
+                    "{}: unknown key `close_after`; ignored in this release, refused in the next",
+                    directory.path().join("correlation.yaml").display()
+                ),
             ]
         );
         assert_eq!(check.errors.len(), 2, "{:?}", check.errors);
@@ -775,9 +801,10 @@ mod tests {
                 .iter()
                 .map(|key| key.to_string())
                 .collect::<Vec<_>>(),
-            vec![
-                "alerting.yaml: unknown key `destinations[0].chanel`; ignored in this release, refused in the next"
-            ]
+            vec![format!(
+                "{}: unknown key `destinations[0].chanel`; ignored in this release, refused in the next",
+                directory.path().join("alerting.yaml").display()
+            )]
         );
         assert_eq!(check.errors.len(), 1, "{:?}", check.errors);
         assert!(
@@ -792,10 +819,82 @@ mod tests {
         );
     }
 
+    /// Inline and standalone alerting are checked by the loader and again as
+    /// the effective destinations; a placeholder error is reported once.
+    #[test]
+    fn check_reports_each_alerting_error_once() {
+        let directory = fixture();
+        std::fs::write(
+            directory.path().join("alerting.yaml"),
+            "destinations:\n  - type: generic\n    url: \"${HOOK_URL}\"\n",
+        )
+        .unwrap();
+        let check = AppConfig::check(directory.path());
+        let placeholder: Vec<_> = check
+            .errors
+            .iter()
+            .filter(|error| error.contains("${VAR} substitution"))
+            .collect();
+        assert_eq!(placeholder.len(), 1, "{:?}", check.errors);
+        assert!(
+            placeholder[0].starts_with(&format!(
+                "failed to load {}: alerting: ",
+                directory.path().join("alerting.yaml").display()
+            )),
+            "{placeholder:?}"
+        );
+    }
+
+    /// The scrubber's readiness credential is read before the database opens,
+    /// so the check refuses a missing one as startup does.
+    #[test]
+    #[cfg(feature = "bgp-rustbgpd")]
+    fn preflight_refuses_a_missing_scrubber_readiness_credential() {
+        let directory = fixture();
+        let mut config = AppConfig::load(directory.path()).unwrap();
+        assert!(
+            config.preflight_errors(directory.path()).is_empty(),
+            "the shipped configuration passes"
+        );
+        let profile = |token_env: &str| crate::scrubber::ScrubberProfile {
+            id: "a".into(),
+            revision: "fixture-v1".into(),
+            scope: "global".into(),
+            ipv4_target: Some("192.0.2.99".parse().unwrap()),
+            ipv6_target: None,
+            redirect_route_target: None,
+            destinations: vec!["203.0.113.0/24".parse().unwrap()],
+            router_peers: vec!["192.0.2.2".into()],
+            policy_binding: "fixture-policy-v1".into(),
+            qualification_receipt: "isolated fixture".into(),
+            readiness_url: "https://127.0.0.1:1/readiness".into(),
+            readiness_token_env: token_env.into(),
+            max_ttl_seconds: 3600,
+            max_active: 10,
+            max_new_per_minute: 20,
+            reserved_targets: vec![],
+            return_leg: None,
+        };
+        config.settings.mode = OperationMode::Enforced;
+        config.settings.scrubber = crate::scrubber::ScrubberConfig {
+            enabled: true,
+            profiles: vec![profile("PREFIXD_TEST_UNSET_SCRUBBER_TOKEN")],
+            readiness_ca_cert: None,
+        };
+        let errors = config.preflight_errors(directory.path());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("scrubber readiness credential is missing or invalid"),
+            "{errors:?}"
+        );
+        // Control: a set variable passes.
+        config.settings.scrubber.profiles = vec![profile("PATH")];
+        assert!(config.preflight_errors(directory.path()).is_empty());
+    }
+
     fn fixture() -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
-        let mut settings: Settings =
-            crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+        let mut settings: Settings = crate::config::parse_yaml(SHIPPED).unwrap();
         settings.correlation.confidence_threshold = 0.5;
         std::fs::write(
             directory.path().join("prefixd.yaml"),

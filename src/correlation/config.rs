@@ -277,7 +277,7 @@ impl CorrelationConfig {
 
     /// Parse a `correlation.yaml` document and collect its unknown keys.
     /// Validation stays separate ([`CorrelationConfig::validate`]) so
-    /// `--check-config` can report every error.
+    /// `--check` can report every error.
     pub fn from_yaml(content: &str) -> Result<(Self, Vec<String>)> {
         crate::config::parse_secret_yaml(content)
     }

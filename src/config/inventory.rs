@@ -92,7 +92,7 @@ impl Inventory {
     }
 
     /// [`Inventory::load`] for an already-read document, so validation can run
-    /// without a file, as `--check-config` does.
+    /// without a file, as `--check` does.
     pub fn from_yaml(content: &str) -> Result<Self> {
         let mut inventory: Inventory = crate::config::parse_yaml(content)?;
         inventory.validate()?;
