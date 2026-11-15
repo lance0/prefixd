@@ -24,8 +24,8 @@ speaker deadline. An older controller ignores this setting, so downgrading remov
 the protection; drain affected rules or accept that policy change explicitly.
 
 - **Database migrations run automatically** on startup, and only the versions
-  the database has not recorded. Upgrade every controller that shares the
-  database together; a release that adds a migration is one-way. See
+  the database has not recorded. A release that adds a migration is one-way,
+  and its notes state whether a rolling replacement is safe. See
   [database schema version and downgrade](#database-schema-version-and-downgrade).
   Legacy speaker state also requires the explicit ownership adoption below
   before the upgraded daemon starts.
@@ -354,7 +354,9 @@ connecting to the speaker.
   `GET /v1/ready` returns `503` with `"draining"` from the moment the shutdown
   signal arrives. A replacement started while the old process runs waits in
   standby, takes over within one poll interval of the old process exiting, and
-  reconciles at once.
+  reconciles at once. A release that adds a database migration can rule this
+  out; see
+  [database schema version and downgrade](#database-schema-version-and-downgrade).
 - **Lock loss.** The holder checks its fence session every 2 seconds with a
   2-second timeout. After a failed check or a PostgreSQL restart it stops
   starting speaker mutations, enters standby and reacquires on a new
@@ -1053,19 +1055,41 @@ not understand and can reannounce a requested deletion, as
 
 The refusal only protects binaries that carry it. A 0.27.0 or older controller
 has no check and runs against whatever schema it finds, so it is not a downgrade
-boundary for those releases:
+boundary for those releases.
 
-- Upgrade every controller that shares a database together. Stop the older
-  controllers, including standbys, before the first upgraded one starts, and do
-  not start an older one again against the migrated database.
-- A release that adds a migration is one-way. Rolling it back means restoring
-  the pre-upgrade backup, below, not starting the previous binary.
+Version skew matters only across a release that adds a migration. No release
+after 0.27.0 has added one yet: migration 020 is still the latest, so a
+[rolling replacement](#controller-fence-and-rolling-deploys) from 0.27.0, with
+the new controller waiting in standby, is unaffected. For a release that adds a
+migration:
+
+- The first upgraded controller to start migrates the database, even in
+  standby, and older controllers on that database, including the active one,
+  then run against a schema they do not know. That release's upgrade notes
+  state whether a rolling replacement is still safe; if they do not say it is,
+  stop every older controller first, and keep the stop short when leased
+  FlowSpec is on, because nothing renews the lease while no controller runs.
+- The release is one-way. Rolling it back means restoring the pre-upgrade
+  backup, below, not starting the previous binary against the migrated
+  database.
 
 A migration waits at most 2 seconds per attempt for its table locks, so queries
 queued behind its `ACCESS EXCLUSIVE` request wait a bounded time. After 5
 attempts with backoff, about 20 seconds, it rolls back and the start fails with
-the migration's version and name. A long transaction holding a lock on the
-altered table is the usual cause; while a start is retrying,
+the migration's version and name. A long transaction holding a lock on a table
+that the migration's file under `migrations/` alters is the usual cause. This
+query lists the sessions holding table locks, oldest transaction first, and
+works after the start has failed:
+
+```sql
+SELECT a.pid, a.xact_start, a.state, l.relation::regclass, l.mode, a.query
+FROM pg_locks l
+JOIN pg_stat_activity a USING (pid)
+WHERE l.locktype = 'relation' AND l.granted
+ORDER BY a.xact_start;
+```
+
+While a start is still retrying, `pg_blocking_pids` names the blocker directly:
 
 ```sql
 SELECT pid, pg_blocking_pids(pid), state, query
@@ -1073,7 +1097,7 @@ FROM pg_stat_activity
 WHERE wait_event_type = 'Lock';
 ```
 
-names the blocking sessions. Let them finish or end them, then start again.
+Let the blocking transaction finish or end it, then start again.
 
 A database whose `schema_migrations` is absent or empty predates version
 tracking. The controller replays migrations 1-3, whose statements are all

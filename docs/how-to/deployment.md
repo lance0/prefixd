@@ -590,8 +590,8 @@ restart never re-runs a recorded backfill.
   for finding the blocking session.
 - A database recording a version newer than the binary knows refuses to start.
   An older binary can reannounce a requested deletion against a newer schema.
-  Releases up to 0.27.0 have no such check, so upgrade every controller that
-  shares a database together.
+  Releases up to 0.27.0 have no such check; a release that adds a migration
+  states in its upgrade notes whether a rolling replacement is safe.
 - A database created before version tracking existed, whose
   `schema_migrations` is absent or empty, replays migrations 1-3, whose
   statements are all `IF NOT EXISTS`, and then applies the rest. Stored
@@ -639,7 +639,8 @@ because databases have already recorded it.
 
 Migrations are forward-only. A database that recorded a newer version refuses
 an older binary that carries the check, but releases up to 0.27.0 do not, so
-never start the previous binary against a migrated database. To roll back:
+after a release that added a migration, do not start the previous binary
+against the migrated database. To roll back:
 
 1. Stop prefixd
 2. Restore from a database backup taken before the upgrade

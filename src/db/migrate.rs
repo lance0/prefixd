@@ -156,7 +156,7 @@ const RETRY_BASE: Duration = Duration::from_millis(250);
 
 /// SQLSTATE `lock_not_available`, raised when `lock_timeout` expires.
 const LOCK_NOT_AVAILABLE: &str = "55P03";
-const LOCK_NOT_AVAILABLE_HINT: &str = "; another session held a conflicting lock on a table this migration alters on every attempt. While a start is retrying, `SELECT pid, pg_blocking_pids(pid), state, query FROM pg_stat_activity WHERE wait_event_type = 'Lock'` names the blocking sessions; let them finish or end them, then start again";
+const LOCK_NOT_AVAILABLE_HINT: &str = ": another session held a conflicting lock, on every attempt, on a table the migration's file under migrations/ alters. `SELECT a.pid, a.xact_start, a.state, l.relation::regclass, l.mode, a.query FROM pg_locks l JOIN pg_stat_activity a USING (pid) WHERE l.locktype = 'relation' AND l.granted ORDER BY a.xact_start` lists the sessions holding table locks, oldest transaction first; while a start is retrying, `pg_blocking_pids(pid)` in pg_stat_activity names the blocker directly. Let it finish or end it, then start again";
 
 /// Apply every embedded migration this database has not recorded yet.
 pub async fn run(pool: &PgPool) -> Result<()> {
@@ -336,14 +336,20 @@ async fn apply(
                 } else {
                     ""
                 };
-                let error = PrefixdError::MigrationFailed {
+                tracing::error!(
+                    version,
+                    name,
+                    attempt,
+                    error = %source,
+                    hint,
+                    "database migration failed and rolled back"
+                );
+                return Err(PrefixdError::MigrationFailed {
                     version,
                     name,
                     hint,
                     source,
-                };
-                tracing::error!(version, name, attempt, error = %error, "database migration failed");
-                return Err(error);
+                });
             }
         }
     }

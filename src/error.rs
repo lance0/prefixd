@@ -127,7 +127,7 @@ pub enum PrefixdError {
     MigrationInProgress,
 
     /// A migration failed and rolled back; the next start retries it.
-    #[error("database migration {version} ({name}) failed and rolled back: {source}{hint}")]
+    #[error("database migration {version} ({name}) failed and rolled back{hint}")]
     MigrationFailed {
         version: i32,
         name: &'static str,

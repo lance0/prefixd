@@ -479,6 +479,16 @@ async fn blocked_migration_rolls_back_and_releases_the_bootstrap_lock() {
         "{message}"
     );
     assert!(message.contains("pg_blocking_pids"), "{message}");
+    assert!(message.contains("pg_locks"), "{message}");
+    // The PostgreSQL error is the source, not repeated in the message.
+    assert!(!message.contains("lock timeout"), "{message}");
+    let source = std::error::Error::source(&error).map(ToString::to_string);
+    assert!(
+        source
+            .as_deref()
+            .is_some_and(|cause| cause.contains("lock timeout")),
+        "{source:?}"
+    );
 
     assert_eq!(
         pending_state(&setup).await,
