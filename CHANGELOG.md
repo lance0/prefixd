@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Startup applies only the migrations the database has not recorded, each in
+  its own transaction under a PostgreSQL advisory lock with a short
+  `lock_timeout`. A second controller waits instead of racing the first through
+  the same DDL, an up-to-date database runs no DDL at all, and a migration that
+  cannot take its `ACCESS EXCLUSIVE` locks rolls back for the next start
+  instead of parking them behind live traffic. A database that predates version
+  tracking is adopted from its catalog state instead of replayed. A database
+  migrated by a newer release refuses to start rather than running an older
+  binary against a newer schema.
+
 ### Fixed
 
 - The release workflow stages its assets in `release-assets/` instead of

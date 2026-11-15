@@ -23,8 +23,12 @@ detector TTLs before enabling it. This does not cap blackholes or add a remote
 speaker deadline. An older controller ignores this setting, so downgrading removes
 the protection; drain affected rules or accept that policy change explicitly.
 
-- **Database migrations run automatically** on startup. Legacy speaker state also
-  requires the explicit ownership adoption below before the upgraded daemon starts.
+- **Database migrations run automatically** on startup, and only the versions
+  the database has not recorded. A database migrated by a newer release refuses
+  this one; see
+  [database schema version and downgrade](#database-schema-version-and-downgrade).
+  Legacy speaker state also requires the explicit ownership adoption below
+  before the upgraded daemon starts.
 - Review configuration and ownership changes before upgrading; new defaults do
   not establish downgrade compatibility.
 - PostgreSQL retains mitigation intent. Reconciliation checks eligible intent
@@ -1002,6 +1006,48 @@ sudo systemctl start prefixd
 prefixdctl status
 prefixdctl migrations
 ```
+
+---
+
+## Database schema version and downgrade
+
+A start applies only the migrations the database has not recorded, each in its
+own transaction under a PostgreSQL advisory lock, so a second controller waits
+instead of racing the first through the same DDL. `schema_migrations` is
+therefore a positive statement of the schema version, and the controller acts on
+it: when the database records a migration newer than the binary knows, startup
+refuses with
+
+```text
+database schema is newer than this binary: it records migration 21, this binary
+knows up to 20; start a release that includes that migration, or restore the
+pre-upgrade database backup
+```
+
+That refusal is the supported downgrade boundary. Do not rename, delete or
+rewrite `schema_migrations` rows to get past it. An older binary reads the newer
+schema as its own: it ignores cleanup state it does not understand and can
+reannounce a requested deletion, as
+[pending withdrawals and rollback](#pending-withdrawals-and-rollback) describes.
+
+A database whose `schema_migrations` is absent or empty predates version
+tracking. The controller adopts it instead of replaying it: versions 1-3 are
+recorded only when their tables and columns are present, later versions are
+applied, and stored events, mitigations, pending withdrawals and audit history
+are left alone.
+
+A controlled downgrade is a restore, not an in-place rollback:
+
+1. With the newer release still running, pause inputs and drain pending cleanup
+   on the original target, following the sections above for the parts of the
+   schema that changed.
+2. Stop the controller.
+3. Restore the database backup taken immediately before the upgrade.
+4. Start the older binary against the restored copy, and verify that speaker
+   state matches the restored intent before connecting it.
+
+Keep the backup and the newer binary until the downgrade is verified. A restore
+does not undo speaker mutations.
 
 ---
 
