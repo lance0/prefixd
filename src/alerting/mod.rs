@@ -409,19 +409,18 @@ impl DestinationConfig {
         }
     }
 
-    /// Errors for `*_env` keys at `path`, such as `alerting.destinations[0]`,
-    /// naming the key and variable but never a value.
-    fn env_errors(&self, path: &str) -> Vec<String> {
+    /// Errors for `*_env` keys, naming the key and variable but never a value.
+    fn env_errors(&self, ctx: &str) -> Vec<String> {
         let mut errors = Vec::new();
         for (field, value, env) in self.secrets() {
             let Some(env) = env else { continue };
             if value.is_some_and(|value| !value.is_empty()) {
                 errors.push(format!(
-                    "{path}: set {field} or {field}_env, not both; edit alerting.yaml"
+                    "{ctx}: set {field} or {field}_env, not both; edit alerting.yaml"
                 ));
             } else if std::env::var(env).unwrap_or_default().is_empty() {
                 errors.push(format!(
-                    "{path}.{field}_env names environment variable '{env}', which is not set or empty"
+                    "{ctx}: {field}_env names environment variable '{env}', which is not set or empty"
                 ));
             }
         }
@@ -451,6 +450,19 @@ impl DestinationConfig {
             _ => "",
         };
         Some(serde_json::json!([self.destination_type(), envs, target]))
+    }
+
+    /// Whether this running destination has `binding`. A redacted inline
+    /// generic URL stands for this destination's own URL, which the redacted
+    /// merge then restores, so the variable still goes where it went before.
+    fn binds(&self, binding: &serde_json::Value) -> bool {
+        let Some(mut own) = self.env_binding() else {
+            return false;
+        };
+        if binding[2] == REDACTED && matches!(self, Self::Generic { url_env: None, .. }) {
+            own[2] = REDACTED.into();
+        }
+        own == *binding
     }
 
     /// A redacted `***` beside a `*_env` key stands for the variable, so it is
@@ -602,24 +614,31 @@ impl AlertingConfig {
     }
 
     fn placeholder_errors(&self) -> Vec<String> {
-        serde_json::to_value(self)
-            .map(|value| {
-                crate::config::env_placeholder_errors(&serde_json::json!({ "alerting": value }))
+        self.destinations
+            .iter()
+            .enumerate()
+            .flat_map(|(i, dest)| {
+                let ctx = destination_ctx(i, dest);
+                serde_json::to_value(dest)
+                    .map(|value| crate::config::env_placeholder_errors(&value))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(move |error| format!("{ctx}: {error}"))
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     /// Missing secrets and unusable `*_env` keys only. Generic `secret` is optional.
-    pub fn secret_errors(&self) -> Vec<String> {
+    fn secret_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
         for (i, dest) in self.destinations.iter().enumerate() {
-            let path = format!("alerting.destinations[{i}]");
+            let ctx = destination_ctx(i, dest);
             for (field, value, env) in dest.secrets() {
                 if env.is_none() && field != "secret" && value.is_none_or(str::is_empty) {
-                    errors.push(format!("{path}: {field} or {field}_env is required"));
+                    errors.push(format!("{ctx}: {field} or {field}_env is required"));
                 }
             }
-            errors.extend(dest.env_errors(&path));
+            errors.extend(dest.env_errors(&ctx));
         }
         errors
     }
@@ -684,8 +703,8 @@ impl AlertingConfig {
         let mut errors = self.placeholder_errors();
 
         for (i, dest) in self.destinations.iter().enumerate() {
-            let ctx = format!("destination[{}] ({})", i, dest.destination_type());
-            let env_errors = dest.env_errors(&format!("alerting.destinations[{i}]"));
+            let ctx = destination_ctx(i, dest);
+            let env_errors = dest.env_errors(&ctx);
             if !env_errors.is_empty() {
                 errors.extend(env_errors);
                 continue;
@@ -788,6 +807,7 @@ impl AlertingConfig {
 
         for (i, dest) in self.destinations.iter_mut().enumerate() {
             dest.clear_env_sentinels();
+            let ctx = destination_ctx(i, dest);
             // The editor may keep an existing `*_env` key, never add or retarget
             // one: a new variable name or destination would send that variable,
             // such as DATABASE_URL, wherever the request says. This runs before
@@ -796,15 +816,14 @@ impl AlertingConfig {
                 && !current
                     .destinations
                     .iter()
-                    .any(|existing| existing.env_binding().as_ref() == Some(&binding))
+                    .any(|existing| existing.binds(&binding))
             {
                 errors.push(format!(
-                    "alerting.destinations[{i}]: set *_env keys in alerting.yaml on the controller \
-                     host; the editor keeps one only for an unchanged destination"
+                    "{ctx}: set *_env keys in alerting.yaml on the controller host; the editor \
+                     keeps one only for an unchanged destination"
                 ));
                 continue;
             }
-            let ctx = format!("destination[{}] ({})", i, dest.destination_type());
             match dest {
                 DestinationConfig::Slack {
                     webhook_url,
@@ -1024,7 +1043,11 @@ impl AlertingConfig {
                         .filter(|(_, value)| value.as_str() == REDACTED)
                         .map(|(key, _)| key.clone())
                         .collect();
-                    if secret.as_deref() != Some(REDACTED) && redacted_headers.is_empty() {
+                    let redacted_url = url_env.is_none() && url == REDACTED;
+                    if !redacted_url
+                        && secret.as_deref() != Some(REDACTED)
+                        && redacted_headers.is_empty()
+                    {
                         continue;
                     }
                     // One running destination supplies every redacted value, so
@@ -1048,6 +1071,7 @@ impl AlertingConfig {
                         .collect();
                     let [
                         DestinationConfig::Generic {
+                            url: existing_url,
                             secret: existing_secret,
                             secret_env: existing_secret_env,
                             headers: existing_headers,
@@ -1057,15 +1081,18 @@ impl AlertingConfig {
                     else {
                         errors.push(if matches.is_empty() {
                             format!(
-                                "{ctx}: cannot resolve redacted secret or headers — no matching existing Generic destination"
+                                "{ctx}: cannot resolve redacted url, secret or headers — no matching existing Generic destination"
                             )
                         } else {
                             format!(
-                                "{ctx}: ambiguous redacted secret or headers — multiple matching Generic destinations"
+                                "{ctx}: ambiguous redacted url, secret or headers — multiple matching Generic destinations"
                             )
                         });
                         continue;
                     };
+                    if redacted_url {
+                        *url = existing_url.clone();
+                    }
                     if secret.as_deref() == Some(REDACTED) {
                         if existing_secret_env.is_some() {
                             errors.push(format!(
@@ -1092,6 +1119,10 @@ impl AlertingConfig {
 
         errors
     }
+}
+
+fn destination_ctx(i: usize, dest: &DestinationConfig) -> String {
+    format!("destination[{i}] ({})", dest.destination_type())
 }
 
 /// The secret's value: the named environment variable when `env` is set,
@@ -1906,7 +1937,7 @@ mod tests {
             (
                 format!("destinations:\n  - type: opsgenie\n    api_key_env: {MISSING_ENV}\n"),
                 format!(
-                    "alerting.destinations[0].api_key_env names environment variable \
+                    "destination[0] (opsgenie): api_key_env names environment variable \
                      '{MISSING_ENV}', which is not set or empty"
                 ),
             ),
@@ -1915,7 +1946,7 @@ mod tests {
                     "destinations:\n  - type: telegram\n    chat_id: '1'\n    \
                      bot_token: inline-secret-canary\n    bot_token_env: {PRESENT_ENV}\n"
                 ),
-                "alerting.destinations[0]: set bot_token or bot_token_env, not both; edit \
+                "destination[0] (telegram): set bot_token or bot_token_env, not both; edit \
                  alerting.yaml"
                     .into(),
             ),
@@ -1932,7 +1963,7 @@ mod tests {
         std::fs::write(&path, "destinations:\n  - type: pagerduty\n").unwrap();
         assert_eq!(
             format!("{:#}", AlertingConfig::load(&path).unwrap_err()),
-            "alerting.destinations[0]: routing_key or routing_key_env is required"
+            "destination[0] (pagerduty): routing_key or routing_key_env is required"
         );
         std::fs::write(
             &path,
@@ -1952,7 +1983,7 @@ mod tests {
         // Negative control: the parser alone accepts the literal placeholder,
         // which earlier releases then sent as the routing key.
         let config: AlertingConfig = crate::config::parse_yaml(yaml).unwrap();
-        let expected = "alerting.destinations[0].routing_key looks like ${VAR} substitution, which \
+        let expected = "destination[0] (pagerduty): routing_key looks like ${VAR} substitution, which \
                         prefixd does not perform; set the value, or use the matching *_env key \
                         where one exists";
         assert_eq!(config.validate(), vec![expected.to_string()]);
@@ -2003,7 +2034,7 @@ mod tests {
             "destinations": [{ "type": "pagerduty", "routing_key_env": PRESENT_ENV }],
         }))
         .unwrap();
-        let refused = "alerting.destinations[0]: set *_env keys in alerting.yaml on the \
+        let refused = "destination[0] (pagerduty): set *_env keys in alerting.yaml on the \
                        controller host; the editor keeps one only for an unchanged destination";
         let retargeted = serde_json::json!({
             "destinations": [{
@@ -2133,7 +2164,7 @@ mod tests {
         assert_eq!(
             editor_merge(&twice, redacted),
             [
-                "destination[0] (generic): ambiguous redacted secret or headers — multiple \
+                "destination[0] (generic): ambiguous redacted url, secret or headers — multiple \
               matching Generic destinations"
             ]
         );
@@ -2165,5 +2196,52 @@ mod tests {
                 serde_json::to_value(&current).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn generic_inline_url_with_secret_env_round_trips() {
+        let current: AlertingConfig = serde_json::from_value(serde_json::json!({
+            "destinations": [{
+                "type": "generic", "url": "https://example.com/hook", "secret_env": PRESENT_ENV,
+            }],
+        }))
+        .unwrap();
+        let redacted = current.destinations[0].redacted();
+        assert_eq!(redacted["url"], REDACTED);
+        let incoming: AlertingConfig =
+            serde_json::from_value(serde_json::json!({ "destinations": [redacted.clone()] }))
+                .unwrap();
+        // Negative control: the redacted URL does not equal the running one, so
+        // exact binding alone refused this unchanged destination.
+        assert_ne!(
+            incoming.destinations[0].env_binding(),
+            current.destinations[0].env_binding()
+        );
+        assert!(
+            editor_merge(&current, serde_json::json!({ "destinations": [redacted] })).is_empty()
+        );
+        let mut merged = incoming;
+        assert!(merged.merge_secrets(&current).is_empty());
+        assert_eq!(
+            serde_json::to_value(&merged).unwrap(),
+            serde_json::to_value(&current).unwrap()
+        );
+
+        // With two inline-URL generic destinations the redacted URL is ambiguous.
+        let mut two = current.clone();
+        two.destinations.push(
+            serde_json::from_value(serde_json::json!({
+                "type": "generic", "url": "https://example.net/other",
+            }))
+            .unwrap(),
+        );
+        let redacted = serde_json::json!({ "destinations": [two.destinations[0].redacted()] });
+        assert_eq!(
+            editor_merge(&two, redacted),
+            [
+                "destination[0] (generic): ambiguous redacted url, secret or headers — multiple \
+              matching Generic destinations"
+            ]
+        );
     }
 }

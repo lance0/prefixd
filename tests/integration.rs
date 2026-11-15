@@ -2759,7 +2759,7 @@ async fn alerting_editor_keeps_env_backed_secrets_out_of_saved_config() {
     assert!(saved.contains("routing_key_env: PATH"), "{saved}");
     assert!(!saved.contains(&path_value));
 
-    let refused = "alerting.destinations[0]: set *_env keys in alerting.yaml on the controller \
+    let refused = "destination[0] (pagerduty): set *_env keys in alerting.yaml on the controller \
                    host; the editor keeps one only for an unchanged destination";
     let mut retargeted = current.clone();
     retargeted["destinations"][0]["events_url"] = "https://attacker.example/x".into();
@@ -2771,7 +2771,7 @@ async fn alerting_editor_keeps_env_backed_secrets_out_of_saved_config() {
         ),
         (
             serde_json::json!({ "type": "pagerduty", "routing_key": "${PAGERDUTY_ROUTING_KEY}" }),
-            "alerting.destinations[0].routing_key looks like ${VAR} substitution, which \
+            "destination[0] (pagerduty): routing_key looks like ${VAR} substitution, which \
              prefixd does not perform; set the value, or use the matching *_env key where one \
              exists",
         ),
