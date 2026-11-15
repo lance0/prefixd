@@ -45,6 +45,21 @@ pub struct VpnProbeCache {
     in_flight: [tokio::sync::Mutex<()>; 2],
 }
 
+/// Records an error for a health probe whose request was dropped mid-probe.
+struct Abandoned<'a> {
+    cache: &'a VpnProbeCache,
+    slot: usize,
+    armed: bool,
+}
+
+impl Drop for Abandoned<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cache.store(self.slot, "error");
+        }
+    }
+}
+
 fn slot(family: VpnFlowSpecFamily) -> usize {
     match family {
         VpnFlowSpecFamily::Ipv4 => 0,
@@ -59,11 +74,18 @@ impl VpnProbeCache {
     }
 
     fn record(&self, slot: usize, result: &Result<()>) -> VpnProbe {
-        let probe = VpnProbe::new(match result {
-            Ok(()) => "supported",
-            Err(PrefixdError::UnsupportedFlowSpecScope { .. }) => "unsupported",
-            Err(_) => "error",
-        });
+        self.store(
+            slot,
+            match result {
+                Ok(()) => "supported",
+                Err(PrefixdError::UnsupportedFlowSpecScope { .. }) => "unsupported",
+                Err(_) => "error",
+            },
+        )
+    }
+
+    fn store(&self, slot: usize, status: &'static str) -> VpnProbe {
+        let probe = VpnProbe::new(status);
         self.last.lock().unwrap_or_else(|e| e.into_inner())[slot] = Some(probe);
         probe
     }
@@ -84,6 +106,13 @@ impl VpnProbeCache {
         if let Some(probe) = self.fresh(slot) {
             return probe;
         }
+        // Declared after the lock guard so it drops first: a request canceled
+        // mid-probe records an error before releasing waiters, which then reuse it.
+        let mut abandoned = Abandoned {
+            cache: self,
+            slot,
+            armed: true,
+        };
         let result =
             tokio::time::timeout(VPN_PROBE_TIMEOUT, speaker.validate_scope(Some(identity)))
                 .await
@@ -92,6 +121,7 @@ impl VpnProbeCache {
                         "VPN capability probe timed out".into(),
                     ))
                 });
+        abandoned.armed = false;
         self.record(slot, &result)
     }
 
@@ -244,6 +274,27 @@ mod tests {
             assert!(probes.iter().all(|probe| *probe == probes[0]));
             assert!(started.elapsed() <= VPN_PROBE_TIMEOUT);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_canceled_leading_probe_is_held_as_an_error_for_waiters() {
+        let speaker = Speaker::new("stuck");
+        let cache = VpnProbeCache::default();
+        let identity = v4();
+        let started = Instant::now();
+        let (leader, waiter) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(1), cache.observe(&speaker, &identity)),
+            async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                cache.observe(&speaker, &identity).await
+            }
+        );
+        assert!(leader.is_err(), "leading request canceled");
+        assert_eq!(waiter.status, "error");
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+        assert_eq!(speaker.probes(), 1, "waiter reused the abandoned probe");
+        assert_eq!(cache.observe(&speaker, &identity).await.status, "error");
+        assert_eq!(speaker.probes(), 1);
     }
 
     #[tokio::test(start_paused = true)]
