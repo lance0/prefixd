@@ -2860,8 +2860,10 @@ Content-Type: application/json
 - First step must not have escalation requirements
 
 A playbook may carry more than one step. These rules accept that shape, but the
-controller executes only the first step and logs a startup warning for each
-playbook with more than one; see
+controller executes only the first step. After a successful update it logs the
+same warnings as startup and reload: one for each playbook with more than one
+step, and one when a `scope: prefix` playbook is unreachable under the current
+guardrails. Warnings do not change the response; see
 [step selection](configuration.md#step-selection).
 
 **Error response (400):**

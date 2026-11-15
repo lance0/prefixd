@@ -438,12 +438,23 @@ impl Playbooks {
             .filter(|playbook| playbook.steps.len() > 1)
             .map(|playbook| {
                 format!(
-                    "playbook {:?} has {} steps; only the first step runs, later steps are not executed",
+                    "playbook {:?} has {} steps; only the first step runs, later steps are not executed; remove the later steps from playbooks.yaml to clear this warning",
                     playbook.name,
                     playbook.steps.len()
                 )
             })
             .collect()
+    }
+
+    /// Log the non-fatal warnings once playbooks take effect, at startup,
+    /// reload and `PUT /v1/config/playbooks`.
+    pub fn log_warnings(&self, guardrails: &GuardrailsConfig) {
+        for warning in self.prefix_scope_warnings(guardrails) {
+            tracing::warn!(%warning, "prefix playbook is unreachable");
+        }
+        for warning in self.unexecuted_steps_warnings() {
+            tracing::warn!(%warning, "playbook steps are not executed");
+        }
     }
 
     /// Validate all playbook rules, returning a list of errors (empty = valid).
@@ -811,6 +822,39 @@ mod tests {
         assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
         assert_eq!(loaded.playbooks[0].steps.len(), 2);
         assert_eq!(loaded.unexecuted_steps_warnings().len(), 1);
+    }
+
+    /// Compose volumes keep the playbooks.yaml an earlier release installed, so
+    /// the 0.27.0 file must keep loading and warn once per multi-step playbook.
+    #[test]
+    fn shipped_0_27_0_playbooks_still_validate_and_warn_three_times() {
+        let playbooks: Playbooks = crate::config::parse_yaml(include_str!(
+            "../../tests/fixtures/playbooks/shipped-0.27.0.yaml"
+        ))
+        .unwrap();
+        assert!(
+            playbooks.validate().is_empty(),
+            "{:?}",
+            playbooks.validate()
+        );
+        let warnings = playbooks.unexecuted_steps_warnings();
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        for name in [
+            "udp_flood_police_first",
+            "syn_flood_police",
+            "ack_flood_police",
+        ] {
+            assert!(
+                warnings.iter().any(|w| w.contains(&format!("{name:?}"))),
+                "{name}: {warnings:?}"
+            );
+        }
+        assert!(
+            warnings
+                .iter()
+                .all(|w| w.contains("remove the later steps from playbooks.yaml")),
+            "{warnings:?}"
+        );
     }
 
     #[test]

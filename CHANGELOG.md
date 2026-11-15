@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- Mitigation behavior is unchanged, but Compose installs keep the
+  `playbooks.yaml` an earlier release copied into the `prefixd-config` volume,
+  so startup and reload now warn that `udp_flood_police_first`,
+  `syn_flood_police` and `ack_flood_police` have steps that are not executed.
+  To clear the warnings, delete step 2 of each in the dashboard playbook editor
+  or in `/etc/prefixd/playbooks.yaml`; see
+  [multi-step playbooks](docs/how-to/upgrading.md#multi-step-playbooks).
+
 ### Changed
 
 - The shipped `configs/playbooks.yaml` gives every playbook one step. The three
@@ -14,11 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thresholds that the controller accepted and validated but never ran, so
   `udp_flood_police_first` read as "discard after 120 s" while it policed at the
   same rate for the whole attack. Each now has the single police step that
-  actually ran, with the same `rate_bps` and `ttl_seconds`. Startup and playbook
-  reload log a warning for every playbook with more than one step, naming the
-  playbook and stating that later steps are not executed, and the dashboard
-  playbook editor marks steps after the first as not executed. Existing files
-  with extra steps still load unchanged; validation rules are unchanged.
+  actually ran, with the same `rate_bps` and `ttl_seconds`. Startup, playbook
+  reload and `PUT /v1/config/playbooks` log a warning for every playbook with
+  more than one step, naming the playbook and stating that later steps are not
+  executed, and the dashboard playbook editor marks steps after the first as
+  not executed. Existing files with extra steps still load unchanged;
+  validation rules are unchanged.
+- `PUT /v1/config/playbooks` logs the unreachable `scope: prefix` playbook
+  warning that startup and reload already logged.
 
 ### Fixed
 

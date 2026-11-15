@@ -82,6 +82,14 @@ describe("unexecuted steps", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit playbook udp_flood_police_first" }))
     expect(screen.getAllByText("Not executed:")).toHaveLength(1)
     expect(screen.getByText(/prefixd runs only the first step of a playbook today/)).toBeInTheDocument()
+
+    // The thresholds belong to the step that never runs, so their inputs point
+    // assistive technology at the explanation.
+    for (const label of ["Min confidence", "Min persist (s)"]) {
+      expect(screen.getByLabelText(label)).toHaveAccessibleDescription(
+        /prefixd runs only the first step of a playbook today/,
+      )
+    }
   })
 })
 

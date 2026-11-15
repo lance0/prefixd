@@ -328,6 +328,7 @@ function StepEditor({
               max={1}
               step={0.1}
               value={step.require_confidence_at_least ?? ""}
+              aria-describedby={`${id}-not-executed`}
               onChange={(e) => onChange({ ...step, require_confidence_at_least: e.target.value ? Number(e.target.value) : undefined })}
               className="w-24 h-8 text-xs"
               placeholder="optional"
@@ -341,6 +342,7 @@ function StepEditor({
               type="number"
               min={0}
               value={step.require_persistence_seconds ?? ""}
+              aria-describedby={`${id}-not-executed`}
               onChange={(e) => onChange({ ...step, require_persistence_seconds: e.target.value ? Number(e.target.value) : undefined })}
               className="w-24 h-8 text-xs"
               placeholder="optional"
@@ -356,7 +358,7 @@ function StepEditor({
       </div>
 
       {!isFirst ? (
-        <p className="basis-full text-xs text-muted-foreground">
+        <p id={`${id}-not-executed`} className="basis-full text-xs text-muted-foreground">
           <span className="font-medium text-warning">Not executed:</span> prefixd runs only the first step of a
           playbook today, so this step is saved and validated but never selected.
         </p>

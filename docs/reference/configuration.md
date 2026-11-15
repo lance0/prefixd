@@ -399,8 +399,9 @@ safelist checks as a manual CIDR. A prefix event selects only a
 `udp_flood` prefix police step may match protocol only. Detector events cannot
 select a source prefix, VPN scope or action target; `bgp.default_scope` still
 applies. A customer prefix sub-allocated inside another customer's configured
-aggregate has conflicting ownership and cannot be prefix-mitigated. Startup and
-playbook reload log a warning when a `scope: prefix` playbook is loaded while
+aggregate has conflicting ownership and cannot be prefix-mitigated. Startup,
+playbook reload and `PUT /v1/config/playbooks` log a warning when a
+`scope: prefix` playbook is loaded while
 `allow_detector_prefix` is false or the destination bounds admit hosts only.
 See [detector prefix events](api.md#detector-prefix-events) and
 [ADR 033](../adr/033-detector-prefix-mitigations.md).
@@ -1320,10 +1321,11 @@ The controller uses the first step of the matching playbook and never runs
 later ones. Later steps and `require_confidence_at_least` /
 `require_persistence_seconds` remain accepted in the playbook schema, so an
 existing file with more than one step still loads and validates unchanged, but
-automatic progression to later steps is unavailable. Startup and playbook
-reload log one warning per playbook with more than one step, naming it and
-stating that later steps are not executed. The dashboard playbook editor marks
-steps after the first as not executed.
+automatic progression to later steps is unavailable. Startup, playbook reload
+and `PUT /v1/config/playbooks` log one warning per playbook with more than one
+step, naming it, stating that later steps are not executed and saying to remove
+them from `playbooks.yaml`. The dashboard playbook editor marks steps after the
+first as not executed.
 
 The shipped `configs/playbooks.yaml` gives every playbook exactly one step, so
 what it says is what runs. The two-step shape below is accepted configuration,
