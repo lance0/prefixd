@@ -11,6 +11,7 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::api::auth::require_auth;
 use crate::auth::AuthSession;
+use crate::domain::LeaseState;
 
 #[derive(Serialize, ToSchema)]
 pub struct PublicHealthResponse {
@@ -28,6 +29,8 @@ pub struct HealthResponse {
     status: String,
     /// Controller (prefixd) version
     version: String,
+    /// Runtime mode (dry-run, enforced)
+    mode: String,
     /// POP identifier
     pop: String,
     /// Seconds since the controller (prefixd) started
@@ -56,8 +59,9 @@ pub struct SpeakerHealth {
     /// Enforced detector blackholes run without the rustbgpd injection lease, so
     /// they stay announced if prefixd stops while the speaker runs.
     detector_unleased: bool,
-    /// The controller's injection lease, present while `blackhole.leased` is in use:
-    /// live, renewal_failing or expired, the last renewal, and the TTL bound
+    /// The controller's injection lease, present when either leased blackholes
+    /// or leased FlowSpec run against the speaker: live, renewal_failing,
+    /// expired or not_renewing (dry-run), the last renewal, and the TTL bound
     /// that stops renewal during a database outage.
     #[serde(skip_serializing_if = "Option::is_none")]
     lease: Option<crate::domain::LeaseHealth>,
@@ -227,6 +231,32 @@ async fn check_health_status(
     (status.to_string(), bgp_map, active, db_status, gobgp_health)
 }
 
+/// Fold component observations into the operator-facing status.
+///
+/// A lease that is failing or expired means the speaker drops every leased
+/// mitigation within one lease, so it degrades health even while the daemon
+/// answers. `not_renewing` is dry-run and `none` is nothing leased yet; neither
+/// is a fault. Standby wins: when another controller holds the fence this
+/// controller's component state no longer describes the POP.
+fn fold_health_status(
+    base: &str,
+    components_degraded: bool,
+    lease: Option<LeaseState>,
+    standby: bool,
+) -> String {
+    if standby {
+        return "standby".into();
+    }
+    let lease_degraded = matches!(
+        lease,
+        Some(LeaseState::RenewalFailing | LeaseState::Expired)
+    );
+    if components_degraded || lease_degraded {
+        return "degraded".into();
+    }
+    base.into()
+}
+
 /// Public health endpoint: minimal info safe for unauthenticated access
 #[utoipa::path(
     get,
@@ -307,7 +337,7 @@ pub async fn health_detail(
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
-    let ((mut status, bgp_map, active, db_status, gobgp_health), daemon, vpn_families) = tokio::join!(
+    let ((status, bgp_map, active, db_status, gobgp_health), daemon, vpn_families) = tokio::join!(
         check_health_status(&state),
         observe_daemon_health(&state),
         observe_vpn_families(&state)
@@ -335,17 +365,22 @@ pub async fn health_detail(
                 || exports.no_local_route > 0
                 || !exports.unexported.is_empty()
         });
-    if daemon.status == "error" || daemon.ready == Some(false) || export_degraded {
-        status = "degraded".into();
-    }
-    // Another controller holds this POP's fence; this one mutates nothing.
-    if !state.fence.is_active() {
-        status = "standby".into();
-    }
+    let lease = state.lease.as_ref().map(|lease| lease.health());
+    // Without renewal the speaker drops every leased mitigation within one
+    // lease, so a failing or expired lease is degraded, not merely reported.
+    let status = fold_health_status(
+        &status,
+        daemon.status == "error" || daemon.ready == Some(false) || export_degraded,
+        lease.as_ref().map(|lease| lease.state),
+        // Another controller holds this POP's fence; this one mutates nothing,
+        // and standby explains the state better than degraded.
+        !state.fence.is_active(),
+    );
 
     Ok(Json(HealthResponse {
         status,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        mode: state.settings.mode.as_str().to_string(),
         pop: state.settings.pop.clone(),
         uptime_seconds: state.start_time.elapsed().as_secs(),
         bgp_sessions: bgp_map,
@@ -360,7 +395,7 @@ pub async fn health_detail(
                 &state.settings,
                 state.announcer.capabilities().blackhole_lease,
             ),
-            lease: state.lease.as_ref().map(|lease| lease.health()),
+            lease,
             blackhole_exports,
             flowspec_exports,
             daemon,
@@ -372,4 +407,69 @@ pub async fn health_detail(
         },
         auth_mode: resolve_auth_mode(&state),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fold_health_status;
+    use crate::domain::LeaseState;
+
+    #[test]
+    fn healthy_base_stays_healthy_for_non_failing_lease_states() {
+        for lease in [
+            None,
+            Some(LeaseState::None),
+            Some(LeaseState::Live),
+            Some(LeaseState::NotRenewing),
+        ] {
+            assert_eq!(
+                fold_health_status("healthy", false, lease, false),
+                "healthy",
+                "{lease:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn failing_or_expired_lease_degrades_health() {
+        for lease in [Some(LeaseState::RenewalFailing), Some(LeaseState::Expired)] {
+            assert_eq!(
+                fold_health_status("healthy", false, lease, false),
+                "degraded",
+                "{lease:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn component_degradation_persists_regardless_of_lease() {
+        assert_eq!(
+            fold_health_status("healthy", true, Some(LeaseState::Live), false),
+            "degraded"
+        );
+        assert_eq!(
+            fold_health_status("degraded", false, None, false),
+            "degraded"
+        );
+    }
+
+    #[test]
+    fn standby_wins_over_every_degradation_and_lease_state() {
+        for lease in [
+            None,
+            Some(LeaseState::RenewalFailing),
+            Some(LeaseState::Expired),
+        ] {
+            assert_eq!(
+                fold_health_status("healthy", true, lease, true),
+                "standby",
+                "{lease:?}"
+            );
+            assert_eq!(
+                fold_health_status("degraded", false, lease, true),
+                "standby",
+                "{lease:?}"
+            );
+        }
+    }
 }

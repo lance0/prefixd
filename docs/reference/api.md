@@ -2490,6 +2490,7 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
 {
   "status": "healthy",
   "version": "<prefixd-version>",
+  "mode": "enforced",
   "pop": "iad1",
   "uptime_seconds": 86400,
   "bgp_sessions": {
@@ -2565,8 +2566,15 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
 | Status | Meaning |
 |--------|---------|
 | `healthy` | Database and supported observations succeeded; observed daemon is ready |
-| `degraded` | Database or supported observation failed, observed daemon is not ready, active export evidence is historical, an active route is committed to no Established peer, or FlowSpec export observation fails or finds no local rule |
+| `degraded` | Database or supported observation failed, observed daemon is not ready, active export evidence is historical, an active route is committed to no Established peer, FlowSpec export observation fails or finds no local rule, or the injection lease is `renewal_failing` or `expired` |
 | `standby` | Another controller holds this POP's fence; this one mutates nothing (overrides the other values) |
+
+Top-level `mode` reports the runtime mode, `enforced` or `dry-run`. A lease in
+`renewal_failing` or `expired` degrades health because the speaker removes every
+leased mitigation within one lease unless renewal recovers; `not_renewing`
+(dry-run) and `none` are not faults. `standby` still overrides `degraded` because
+the component state of a controller that mutates nothing no longer describes
+the POP.
 
 `speaker` is additive metadata: backend identity plus observation availability.
 Older daemons may omit it. Capabilities do not report recent read success or
@@ -2581,11 +2589,12 @@ when enforced detector blackholes run without the injection lease
 (`blackhole.enabled`, a nonempty `blackhole.detector_sources` and
 `blackhole_lease` false): if prefixd stops while the speaker runs, they stay
 announced until prefixd returns or an operator withdraws them. `lease` is
-present only with `blackhole.leased`: `state` is `none` (no generation held
-yet), `live`, `renewal_failing` (the last renewal failed but the lease may
-still be live), `expired` (the speaker refused the generation, or no
-renewal succeeded for a whole lease) or `not_renewing` (dry-run, which never
-renews). `generation` is held in memory and
+present when the controller runs an injection lease: leased blackholes
+(`blackhole.leased`) or leased FlowSpec (`bgp.rustbgpd.leased_flowspec`).
+`state` is `none` (no generation held yet), `live`, `renewal_failing` (the last
+renewal failed but the lease may still be live), `expired` (the speaker refused
+the generation, or no renewal succeeded for a whole lease) or `not_renewing`
+(dry-run, which never renews). `generation` is held in memory and
 changes after a speaker restart. `last_renewal_result` is `success`,
 `not_live` or `error`. `renew_until` is the latest `expires_at` among the
 routes this owner holds, from the last successful read of active intent; an

@@ -4744,6 +4744,77 @@ mod tests {
             assert!(reported["generation"]["sequence"].is_u64());
         }
 
+        /// A renewed generation whose renewal then fails drops health to
+        /// degraded, while the lease fields still say what is at stake.
+        #[tokio::test]
+        async fn failing_lease_renewal_degrades_health() {
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let owner = "prefixd.test1.0123456789abcdef";
+            let lease = Arc::new(crate::domain::LeaseKeeper::new(owner.into(), 60));
+            lease.observe_add(crate::bgp::LeaseGeneration {
+                incarnation: 1,
+                sequence: 7,
+            });
+            speaker.fail_renewals.store(true, SeqCst);
+            lease.renew_once(speaker.as_ref()).await;
+            assert_eq!(
+                lease.health().state,
+                crate::domain::LeaseState::RenewalFailing
+            );
+            let state = flowspec_state(repo, speaker.clone(), Some(lease.clone())).await;
+            let app = crate::api::create_test_router(state);
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(health["status"], "degraded", "{health}");
+            assert_eq!(health["mode"], "enforced");
+            assert_eq!(health["speaker"]["lease"]["state"], "renewal_failing");
+            assert_eq!(health["speaker"]["lease"]["lease_seconds"], 60);
+            assert!(health["speaker"]["lease"]["last_renewal_at"].is_string());
+        }
+
+        /// A renewal the daemon refuses expires the lease and degrades health.
+        #[tokio::test]
+        async fn expired_lease_degrades_health() {
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let owner = "prefixd.test1.0123456789abcdef";
+            let lease = Arc::new(crate::domain::LeaseKeeper::new(owner.into(), 60));
+            lease.observe_add(crate::bgp::LeaseGeneration {
+                incarnation: 1,
+                sequence: 8,
+            });
+            // The mock holds no live lease for this generation: renewal is refused.
+            lease.renew_once(speaker.as_ref()).await;
+            assert_eq!(lease.health().state, crate::domain::LeaseState::Expired);
+            let state = flowspec_state(repo, speaker.clone(), Some(lease.clone())).await;
+            let app = crate::api::create_test_router(state);
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(health["status"], "degraded", "{health}");
+            assert_eq!(health["speaker"]["lease"]["state"], "expired");
+        }
+
+        /// Dry-run reports its mode and a never-renewed lease without turning
+        /// health degraded: nothing was ever announced under the lease.
+        #[tokio::test]
+        async fn dry_run_reports_mode_and_a_not_renewing_lease() {
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let owner = "prefixd.test1.0123456789abcdef";
+            let lease =
+                Arc::new(crate::domain::LeaseKeeper::new(owner.into(), 60).without_renewal());
+            let mut state = detector_state(OperationMode::DryRun, repo, speaker.clone()).await;
+            Arc::get_mut(&mut state).unwrap().settings.blackhole.leased = true;
+            let state = state.with_lease(lease).unwrap();
+            let app = crate::api::create_test_router(state);
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(health["mode"], "dry-run");
+            assert_eq!(health["speaker"]["lease"]["state"], "not_renewing");
+            assert_ne!(health["status"], "degraded", "{health}");
+        }
+
         /// With leased FlowSpec, a detector rule is recorded under the
         /// controller's owner and added only through `AddLeasedFlowSpec`; a
         /// failed leased add stays unconfirmed and never becomes `AddFlowSpec`.

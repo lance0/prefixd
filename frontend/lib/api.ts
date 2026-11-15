@@ -401,9 +401,24 @@ export interface PublicHealthResponse {
   auth_mode: string
 }
 
+export interface LeaseHealth {
+  owner: string
+  lease_seconds: number
+  state: "none" | "live" | "renewal_failing" | "expired" | "not_renewing"
+  generation: { incarnation: number; sequence: number } | null
+  last_renewal_at: string | null
+  last_renewal_result: "success" | "not_live" | "error" | null
+  /** Latest leased route expiry from the last successful read. */
+  renew_until: string | null
+  /** `ttl_bound` once renewal stopped at `renew_until` plus one lease. */
+  renewal_stopped?: "ttl_bound"
+}
+
 export interface HealthResponse {
   status: string
   version: string
+  /** Runtime mode; absent from controllers older than the banner. */
+  mode?: "dry-run" | "enforced"
   pop: string
   uptime_seconds: number
   bgp_sessions: Record<string, string>
@@ -416,6 +431,8 @@ export interface HealthResponse {
   auth_mode: string
   speaker?: {
     backend: string
+    /** Present when the controller runs an injection lease. */
+    lease?: LeaseHealth
     daemon?: {
       status: "observed" | "error" | "unsupported"
       version: string | null
