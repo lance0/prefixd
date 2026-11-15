@@ -8,6 +8,7 @@ use prefixd::{
     AppState,
     bgp::{
         FlowSpecAnnouncer, FlowSpecReader, FlowSpecWriter, MockAnnouncer, PeerObserver, PeerStatus,
+        RetryPolicy,
     },
     config::{BgpMode, OperationMode, Settings},
     db::{RepositoryTrait, init_postgres_pool},
@@ -316,6 +317,7 @@ async fn legacy_adoption_preserves_requests_and_survives_repeated_migrations() {
         true,
         &completed,
         None,
+        RetryPolicy::Durable,
     )
     .await
     .unwrap();
@@ -862,19 +864,40 @@ async fn fresh_queue_target_is_checked_before_rpc_and_finalization_even_during_a
     let before = queue_snapshot(&ctx.pool, "a").await;
     let speaker = CountingSpeaker::default();
     assert!(
-        execute_withdrawal(ctx.repo.as_ref(), &speaker, false, &request, Some(&a))
-            .await
-            .is_err()
+        execute_withdrawal(
+            ctx.repo.as_ref(),
+            &speaker,
+            false,
+            &request,
+            Some(&a),
+            RetryPolicy::Durable,
+        )
+        .await
+        .is_err()
     );
     assert!(
-        execute_withdrawal(ctx.repo.as_ref(), &speaker, false, &request, None)
-            .await
-            .is_err()
+        execute_withdrawal(
+            ctx.repo.as_ref(),
+            &speaker,
+            false,
+            &request,
+            None,
+            RetryPolicy::Durable,
+        )
+        .await
+        .is_err()
     );
     assert!(
-        execute_withdrawal(ctx.repo.as_ref(), &speaker, false, &request, Some(&b))
-            .await
-            .is_err()
+        execute_withdrawal(
+            ctx.repo.as_ref(),
+            &speaker,
+            false,
+            &request,
+            Some(&b),
+            RetryPolicy::Durable,
+        )
+        .await
+        .is_err()
     );
     assert!(
         execute_withdrawal(
@@ -882,7 +905,8 @@ async fn fresh_queue_target_is_checked_before_rpc_and_finalization_even_during_a
             &MockAnnouncer::new(),
             false,
             &request,
-            Some(&a)
+            Some(&a),
+            RetryPolicy::Durable,
         )
         .await
         .is_err()
@@ -983,6 +1007,7 @@ async fn documented_drained_transfer_preserves_completed_history_and_allows_rest
         false,
         &request,
         Some(&binding),
+        RetryPolicy::Durable,
     )
     .await
     .unwrap();
@@ -1404,9 +1429,16 @@ async fn unknown_origin_tagging_is_audited_once_and_survives_migration_replay() 
         .announce(&prefixd::domain::mitigation_rule(&legacy).unwrap())
         .await
         .unwrap();
-    let done = execute_withdrawal(ctx.repo.as_ref(), &speaker, false, &pending, None)
-        .await
-        .unwrap();
+    let done = execute_withdrawal(
+        ctx.repo.as_ref(),
+        &speaker,
+        false,
+        &pending,
+        None,
+        RetryPolicy::Durable,
+    )
+    .await
+    .unwrap();
     assert_eq!(done.status, MitigationStatus::Withdrawn);
 }
 
@@ -1438,11 +1470,22 @@ async fn withdrawal_rule_kind_replay_keeps_every_request_flowspec() {
             .unwrap(),
         );
     }
-    execute_withdrawal(ctx.repo.as_ref(), &speaker, false, &requests[1], None)
-        .await
-        .unwrap();
+    execute_withdrawal(
+        ctx.repo.as_ref(),
+        &speaker,
+        false,
+        &requests[1],
+        None,
+        RetryPolicy::Durable,
+    )
+    .await
+    .unwrap();
     // Simulate a database from before migration 016.
     sqlx::query("ALTER TABLE withdrawal_requests DROP COLUMN rule_kind")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM schema_migrations WHERE version = 16")
         .execute(&ctx.pool)
         .await
         .unwrap();
@@ -1490,9 +1533,16 @@ async fn withdrawal_rule_kind_replay_keeps_every_request_flowspec() {
     assert_eq!(pending_after.len(), 1);
     assert_eq!(pending_after[0].operation_id, requests[0].operation_id);
     assert_eq!(pending_after[0].rule_kind, "flowspec");
-    let done = execute_withdrawal(ctx.repo.as_ref(), &speaker, false, &pending_after[0], None)
-        .await
-        .unwrap();
+    let done = execute_withdrawal(
+        ctx.repo.as_ref(),
+        &speaker,
+        false,
+        &pending_after[0],
+        None,
+        RetryPolicy::Durable,
+    )
+    .await
+    .unwrap();
     assert_eq!(done.status, MitigationStatus::Withdrawn);
     assert_eq!(speaker.announced_count().await, 0);
 }
@@ -1509,6 +1559,10 @@ async fn event_top_src_ports_replay_leaves_existing_events_null() {
         .unwrap();
     // Simulate a database from before migration 017, with populated events.
     sqlx::query("ALTER TABLE events DROP COLUMN top_src_ports_json")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM schema_migrations WHERE version = 17")
         .execute(&ctx.pool)
         .await
         .unwrap();

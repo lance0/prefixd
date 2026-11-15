@@ -572,7 +572,33 @@ a controller that refuses them with `503`.
 
 ### How Migrations Work
 
-prefixd runs database migrations automatically on startup. Each migration file in `migrations/` uses `IF NOT EXISTS` guards so they are idempotent and safe to re-run.
+prefixd applies database migrations automatically on startup. A start reads the
+versions recorded in `schema_migrations` and applies only the ones the database
+is missing, so startup cost does not grow with the migration history and a
+restart never re-runs a recorded backfill.
+
+- The check-and-apply sequence holds a PostgreSQL advisory lock. Two controllers
+  starting at once migrate once; the second waits for the first and then finds
+  nothing to do. A start that waits more than 5 minutes fails instead of
+  hanging, and reports that another instance is migrating.
+- Each missing version runs in its own transaction together with its tracking
+  row, with `lock_timeout` set to 2 seconds per attempt, so queries queued
+  behind its `ACCESS EXCLUSIVE` request wait a bounded time. A migration still
+  blocked after 5 attempts with backoff, about 20 seconds, rolls back and fails
+  the start with its version and name; see
+  [database schema version and downgrade](upgrading.md#database-schema-version-and-downgrade)
+  for finding the blocking session.
+- A database recording a version newer than the binary knows refuses to start.
+  An older binary can reannounce a requested deletion against a newer schema.
+  Releases up to 0.27.0 have no such check; a release that adds a migration
+  states in its upgrade notes whether a rolling replacement is safe.
+- A database created before version tracking existed, whose
+  `schema_migrations` is absent or empty, replays migrations 1-3, whose
+  statements are all `IF NOT EXISTS`, and then applies the rest. Stored
+  events, mitigations, pending withdrawals and audit history are not rewritten.
+
+Migration files keep their `IF NOT EXISTS` guards so a retried or replayed
+version stays safe, but a recorded version is not run again.
 
 Applied migrations are tracked in the `schema_migrations` table:
 
@@ -603,12 +629,18 @@ docker compose exec postgres psql -U prefixd -c \
 ### Adding New Migrations
 
 1. Create `migrations/NNN_description.sql` with `IF NOT EXISTS` guards
-2. Add it to the migrations list in `src/db/mod.rs`
+2. Add it, with its version and name, to the list in `src/db/migrate.rs`
 3. The next prefixd startup will apply and record it
+
+Keep the list append-only: a released entry keeps its version and SQL text,
+because databases have already recorded it.
 
 ### Rollback
 
-Migrations are forward-only. To roll back:
+Migrations are forward-only. A database that recorded a newer version refuses
+an older binary that carries the check, but releases up to 0.27.0 do not, so
+after a release that added a migration, do not start the previous binary
+against the migrated database. To roll back:
 
 1. Stop prefixd
 2. Restore from a database backup taken before the upgrade

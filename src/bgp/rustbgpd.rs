@@ -1,8 +1,9 @@
 use super::{
     AddOutcome, BlackholeInventory, BlackholeRoute, BlackholeSpeaker, DaemonHealth,
     DaemonHealthObserver, ExportDisposition, ExportObserver, FlowSpecAnnouncer,
-    FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, InjectionLeases, LeaseGeneration,
-    PeerExport, PeerObserver, PeerStatus, SessionState, UnrecognizedRoute, rustbgpd_pb as pb,
+    FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, GUARDED_RPC_DEADLINE, InjectionLeases,
+    LeaseGeneration, PeerExport, PeerObserver, PeerStatus, RetryPolicy, SessionState,
+    UnrecognizedRoute, rustbgpd_pb as pb,
 };
 use crate::{
     config::RustBgpdConfig,
@@ -33,9 +34,6 @@ enum ScopedRpcError {
     Probe(PrefixdError),
     Mutation(tonic::Status),
 }
-
-/// Capability reads cannot outlive a guarded operation's complete RPC budget.
-const GUARDED_RPC_DEADLINE: Duration = Duration::from_secs(3);
 
 /// The oldest daemon prefixd runs against: 0.79.0 adds the injection lease
 /// (rustbgpd ADR-0141); 0.80.0 scopes link-local export rows by interface and
@@ -214,36 +212,64 @@ impl RustBgpdAnnouncer {
         acknowledge_local_intent(&response)
     }
 
-    /// Each scoped retry probes again before dispatch; reconnects may change capability.
+    /// Each durable retry probes again before dispatch; reconnects may change
+    /// capability. A bounded policy makes one attempt whose probes and mutation
+    /// share one deadline, so a caller holding the lifecycle mutex waits once.
     async fn call_with_probes<T, F, Fut>(
         &self,
         operation: &str,
         families: &[i32],
+        policy: RetryPolicy,
         mut call: F,
     ) -> std::result::Result<T, ScopedRpcError>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
     {
+        if policy.is_bounded() {
+            // Probes and the mutation share the caller's single interactive wait.
+            let deadline = tokio::time::Instant::now() + policy.attempt_deadline();
+            for family in families {
+                match tokio::time::timeout_at(deadline, self.probe_vpn_family(*family)).await {
+                    Ok(result) => result.map_err(ScopedRpcError::Probe)?,
+                    Err(_) => {
+                        return Err(ScopedRpcError::Probe(invalid(
+                            "capability probe deadline elapsed",
+                        )));
+                    }
+                }
+            }
+            let result = tokio::time::timeout_at(deadline, call())
+                .await
+                .unwrap_or_else(|_| {
+                    Err(tonic::Status::deadline_exceeded(
+                        "interactive mutation deadline elapsed",
+                    ))
+                });
+            return match result {
+                Ok(response) => Ok(response.into_inner()),
+                Err(status) => Err(ScopedRpcError::Mutation(status)),
+            };
+        }
         if families.is_empty() {
             return self
-                .call(operation, call)
+                .call_with_policy(operation, policy, call)
                 .await
                 .map_err(ScopedRpcError::Mutation);
         }
-        for attempt in 0..3 {
+        for attempt in 0..policy.attempts() {
             for family in families {
                 self.probe_vpn_family(*family)
                     .await
                     .map_err(ScopedRpcError::Probe)?;
             }
-            let result = tokio::time::timeout(Duration::from_secs(30), call())
+            let result = tokio::time::timeout(policy.attempt_deadline(), call())
                 .await
                 .unwrap_or_else(|_| Err(tonic::Status::deadline_exceeded("RPC deadline elapsed")));
             match result {
                 Ok(response) => return Ok(response.into_inner()),
                 Err(status)
-                    if attempt < 2
+                    if attempt + 1 < policy.attempts()
                         && matches!(status.code(), Code::Unavailable | Code::DeadlineExceeded) =>
                 {
                     tracing::warn!(operation, attempt = attempt + 1, code = ?status.code(), "retrying rustbgpd RPC");
@@ -259,13 +285,14 @@ impl RustBgpdAnnouncer {
         &self,
         operation: &str,
         families: &[i32],
+        policy: RetryPolicy,
         call: F,
     ) -> Result<T>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
     {
-        self.call_with_probes(operation, families, call)
+        self.call_with_probes(operation, families, policy, call)
             .await
             .map_err(|error| match error {
                 ScopedRpcError::Probe(error) => error,
@@ -298,8 +325,14 @@ impl RustBgpdAnnouncer {
     }
 
     fn request<T>(&self, value: T) -> Request<T> {
+        self.request_within(value, RetryPolicy::Durable.attempt_deadline())
+    }
+
+    /// The client deadline matches the attempt budget, so the daemon and this
+    /// call agree on when an outcome became unconfirmed.
+    fn request_within<T>(&self, value: T, deadline: Duration) -> Request<T> {
         let mut request = Request::new(value);
-        request.set_timeout(Duration::from_secs(30));
+        request.set_timeout(deadline);
         if let Some(token) = &self.token {
             request
                 .metadata_mut()
@@ -323,20 +356,36 @@ impl RustBgpdAnnouncer {
     async fn call<T, F, Fut>(
         &self,
         operation: &str,
+        call: F,
+    ) -> std::result::Result<T, tonic::Status>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
+    {
+        self.call_with_policy(operation, RetryPolicy::Durable, call)
+            .await
+    }
+
+    /// Spends `policy` on one logical operation: `attempts` dispatches, each
+    /// bounded by `policy.attempt_deadline()`.
+    async fn call_with_policy<T, F, Fut>(
+        &self,
+        operation: &str,
+        policy: RetryPolicy,
         mut call: F,
     ) -> std::result::Result<T, tonic::Status>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
     {
-        for attempt in 0..3 {
-            let result = tokio::time::timeout(Duration::from_secs(30), call())
+        for attempt in 0..policy.attempts() {
+            let result = tokio::time::timeout(policy.attempt_deadline(), call())
                 .await
                 .unwrap_or_else(|_| Err(tonic::Status::deadline_exceeded("RPC deadline elapsed")));
             match result {
                 Ok(value) => return Ok(value.into_inner()),
                 Err(status)
-                    if attempt < 2
+                    if attempt + 1 < policy.attempts()
                         && matches!(status.code(), Code::Unavailable | Code::DeadlineExceeded) =>
                 {
                     tracing::warn!(operation, attempt = attempt + 1, code = ?status.code(), "retrying rustbgpd RPC");
@@ -1116,6 +1165,150 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
     }
 }
 
+impl RustBgpdAnnouncer {
+    /// One logical FlowSpec add under `policy`: the reconciler retries durable
+    /// intent, a caller holding the lifecycle mutex spends one bounded attempt.
+    async fn add_flowspec(&self, rule: &FlowSpecRule, policy: RetryPolicy) -> Result<()> {
+        if !rule.owner.is_empty() {
+            return Err(invalid("a leased rule needs AddLeasedFlowSpec"));
+        }
+        let payload = encode(rule)?;
+        let response = self
+            .mutation_call(
+                "AddFlowSpec",
+                rule.nlri
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.family.afi_safi())
+                    .as_slice(),
+                policy,
+                || async {
+                    pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                        .add_flow_spec(
+                            self.request_within(payload.clone(), policy.attempt_deadline()),
+                        )
+                        .await
+                },
+            )
+            .await?;
+        match pb::FlowSpecInjectOutcome::try_from(response.outcome) {
+            Ok(
+                pb::FlowSpecInjectOutcome::Created
+                | pb::FlowSpecInjectOutcome::Replaced
+                | pb::FlowSpecInjectOutcome::Unchanged,
+            ) => {
+                tracing::debug!(outcome = response.outcome, dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd injection accepted");
+                Ok(())
+            }
+            _ => Err(invalid("unsupported rustbgpd injection outcome")),
+        }
+    }
+
+    async fn add_leased_flowspec(
+        &self,
+        rule: &FlowSpecRule,
+        lease_seconds: u32,
+        policy: RetryPolicy,
+    ) -> Result<LeaseGeneration> {
+        // Never AddFlowSpec: a rejected leased add creates nothing and never falls back.
+        if rule.owner.is_empty() {
+            return Err(invalid("a leased add needs an injection owner"));
+        }
+        let encoded = encode(rule)?;
+        let payload = pb::AddLeasedFlowSpecRequest {
+            rule: Some(encoded),
+            lease: Some(pb::InjectionLease {
+                owner: rule.owner.clone(),
+                lease_seconds,
+            }),
+        };
+        let response = self
+            .mutation_call(
+                "AddLeasedFlowSpec",
+                rule.nlri
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.family.afi_safi())
+                    .as_slice(),
+                policy,
+                || async {
+                    pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
+                        .add_leased_flow_spec(
+                            self.request_within(payload.clone(), policy.attempt_deadline()),
+                        )
+                        .await
+                },
+            )
+            .await?;
+        match response
+            .result
+            .map(|result| pb::FlowSpecInjectOutcome::try_from(result.outcome))
+        {
+            Some(Ok(
+                pb::FlowSpecInjectOutcome::Created
+                | pb::FlowSpecInjectOutcome::Replaced
+                | pb::FlowSpecInjectOutcome::Unchanged,
+            )) => {
+                let generation = generation(response.generation)?;
+                tracing::debug!(dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd leased injection accepted");
+                Ok(generation)
+            }
+            _ => Err(invalid("unsupported rustbgpd leased injection outcome")),
+        }
+    }
+
+    async fn delete_flowspec(&self, rule: &FlowSpecRule, policy: RetryPolicy) -> Result<()> {
+        let (afi_safi, components) = encode_match(&rule.nlri)?;
+        // The recorded owner and never override_owner: a mismatch is FAILED_PRECONDITION.
+        let payload = pb::DeleteFlowSpecRequest {
+            afi_safi,
+            components,
+            allow_missing: true,
+            owner: rule.owner.clone(),
+            rd: rule
+                .nlri
+                .scope
+                .as_ref()
+                .map_or_else(String::new, |scope| scope.rd().to_owned()),
+            ..Default::default()
+        };
+        let response = self
+            .mutation_call(
+                "DeleteFlowSpec",
+                rule.nlri
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.family.afi_safi())
+                    .as_slice(),
+                policy,
+                || {
+                    let mut client = pb::injection_service_client::InjectionServiceClient::new(
+                        self.channel.clone(),
+                    );
+                    let request = self.request_within(payload.clone(), policy.attempt_deadline());
+                    async move {
+                        match client.delete_flow_spec(request).await {
+                            Err(status) if status.code() == Code::NotFound => {
+                                Ok(tonic::Response::new(pb::DeleteFlowSpecResponse {
+                                    outcome: 2,
+                                }))
+                            }
+                            result => result,
+                        }
+                    }
+                },
+            )
+            .await?;
+        match pb::FlowSpecDeleteOutcome::try_from(response.outcome) {
+            Ok(pb::FlowSpecDeleteOutcome::Deleted | pb::FlowSpecDeleteOutcome::NotPresent) => {
+                tracing::debug!(outcome = response.outcome, dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd withdrawal accepted");
+                Ok(())
+            }
+            _ => Err(invalid("unsupported rustbgpd deletion outcome")),
+        }
+    }
+}
+
 #[async_trait]
 impl FlowSpecWriter for RustBgpdAnnouncer {
     fn register_scope(&self, scope: Option<&VpnFlowSpecIdentity>) -> Result<()> {
@@ -1143,36 +1336,11 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
     }
 
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
-        if !rule.owner.is_empty() {
-            return Err(invalid("a leased rule needs AddLeasedFlowSpec"));
-        }
-        let payload = encode(rule)?;
-        let response = self
-            .mutation_call(
-                "AddFlowSpec",
-                rule.nlri
-                    .scope
-                    .as_ref()
-                    .map(|scope| scope.family.afi_safi())
-                    .as_slice(),
-                || async {
-                    pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                        .add_flow_spec(self.request(payload.clone()))
-                        .await
-                },
-            )
-            .await?;
-        match pb::FlowSpecInjectOutcome::try_from(response.outcome) {
-            Ok(
-                pb::FlowSpecInjectOutcome::Created
-                | pb::FlowSpecInjectOutcome::Replaced
-                | pb::FlowSpecInjectOutcome::Unchanged,
-            ) => {
-                tracing::debug!(outcome = response.outcome, dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd injection accepted");
-                Ok(())
-            }
-            _ => Err(invalid("unsupported rustbgpd injection outcome")),
-        }
+        self.add_flowspec(rule, RetryPolicy::Durable).await
+    }
+
+    async fn announce_bounded(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.add_flowspec(rule, RetryPolicy::Bounded).await
     }
 
     async fn announce_leased(
@@ -1180,98 +1348,25 @@ impl FlowSpecWriter for RustBgpdAnnouncer {
         rule: &FlowSpecRule,
         lease_seconds: u32,
     ) -> Result<LeaseGeneration> {
-        // Never AddFlowSpec: a rejected leased add creates nothing and never falls back.
-        if rule.owner.is_empty() {
-            return Err(invalid("a leased add needs an injection owner"));
-        }
-        let encoded = encode(rule)?;
-        let payload = pb::AddLeasedFlowSpecRequest {
-            rule: Some(encoded),
-            lease: Some(pb::InjectionLease {
-                owner: rule.owner.clone(),
-                lease_seconds,
-            }),
-        };
-        let response = self
-            .mutation_call(
-                "AddLeasedFlowSpec",
-                rule.nlri
-                    .scope
-                    .as_ref()
-                    .map(|scope| scope.family.afi_safi())
-                    .as_slice(),
-                || async {
-                    pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                        .add_leased_flow_spec(self.request(payload.clone()))
-                        .await
-                },
-            )
-            .await?;
-        match response
-            .result
-            .map(|result| pb::FlowSpecInjectOutcome::try_from(result.outcome))
-        {
-            Some(Ok(
-                pb::FlowSpecInjectOutcome::Created
-                | pb::FlowSpecInjectOutcome::Replaced
-                | pb::FlowSpecInjectOutcome::Unchanged,
-            )) => {
-                let generation = generation(response.generation)?;
-                tracing::debug!(dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd leased injection accepted");
-                Ok(generation)
-            }
-            _ => Err(invalid("unsupported rustbgpd leased injection outcome")),
-        }
+        self.add_leased_flowspec(rule, lease_seconds, RetryPolicy::Durable)
+            .await
+    }
+
+    async fn announce_leased_bounded(
+        &self,
+        rule: &FlowSpecRule,
+        lease_seconds: u32,
+    ) -> Result<LeaseGeneration> {
+        self.add_leased_flowspec(rule, lease_seconds, RetryPolicy::Bounded)
+            .await
     }
 
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
-        let (afi_safi, components) = encode_match(&rule.nlri)?;
-        // The recorded owner and never override_owner: a mismatch is FAILED_PRECONDITION.
-        let payload = pb::DeleteFlowSpecRequest {
-            afi_safi,
-            components,
-            allow_missing: true,
-            owner: rule.owner.clone(),
-            rd: rule
-                .nlri
-                .scope
-                .as_ref()
-                .map_or_else(String::new, |scope| scope.rd().to_owned()),
-            ..Default::default()
-        };
-        let response = self
-            .mutation_call(
-                "DeleteFlowSpec",
-                rule.nlri
-                    .scope
-                    .as_ref()
-                    .map(|scope| scope.family.afi_safi())
-                    .as_slice(),
-                || {
-                    let mut client = pb::injection_service_client::InjectionServiceClient::new(
-                        self.channel.clone(),
-                    );
-                    let request = self.request(payload.clone());
-                    async move {
-                        match client.delete_flow_spec(request).await {
-                            Err(status) if status.code() == Code::NotFound => {
-                                Ok(tonic::Response::new(pb::DeleteFlowSpecResponse {
-                                    outcome: 2,
-                                }))
-                            }
-                            result => result,
-                        }
-                    }
-                },
-            )
-            .await?;
-        match pb::FlowSpecDeleteOutcome::try_from(response.outcome) {
-            Ok(pb::FlowSpecDeleteOutcome::Deleted | pb::FlowSpecDeleteOutcome::NotPresent) => {
-                tracing::debug!(outcome = response.outcome, dst_prefix = %rule.nlri.dst_prefix, routing_scope = ?rule.nlri.scope, route_targets = ?rule.route_targets, "rustbgpd withdrawal accepted");
-                Ok(())
-            }
-            _ => Err(invalid("unsupported rustbgpd deletion outcome")),
-        }
+        self.delete_flowspec(rule, RetryPolicy::Durable).await
+    }
+
+    async fn withdraw_bounded(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.delete_flowspec(rule, RetryPolicy::Bounded).await
     }
 }
 #[async_trait]
@@ -1318,18 +1413,21 @@ impl FlowSpecReader for RustBgpdAnnouncer {
         Ok(rules)
     }
 }
-#[async_trait]
-impl BlackholeSpeaker for RustBgpdAnnouncer {
-    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<AddOutcome> {
+impl RustBgpdAnnouncer {
+    async fn add_blackhole(
+        &self,
+        route: &BlackholeRoute,
+        policy: RetryPolicy,
+    ) -> Result<AddOutcome> {
         if !route.owner().is_empty() {
             return Err(invalid("a leased route needs AddLeasedPath"));
         }
         let payload = encode_blackhole(route);
         // OK is local Adj-RIB-In acceptance only.
         let response = self
-            .call("AddPath", || async {
+            .call_with_policy("AddPath", policy, || async {
                 pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                    .add_path(self.request(payload.clone()))
+                    .add_path(self.request_within(payload.clone(), policy.attempt_deadline()))
                     .await
             })
             .await
@@ -1337,10 +1435,11 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
         path_add_outcome("AddPath", Some(response))
     }
 
-    async fn announce_leased_blackhole(
+    async fn add_leased_blackhole(
         &self,
         route: &BlackholeRoute,
         lease_seconds: u32,
+        policy: RetryPolicy,
     ) -> Result<(LeaseGeneration, AddOutcome)> {
         // Never AddPath: a rejected leased add creates nothing and never falls back.
         if route.owner().is_empty() {
@@ -1354,9 +1453,11 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
             }),
         };
         let response = self
-            .call("AddLeasedPath", || async {
+            .call_with_policy("AddLeasedPath", policy, || async {
                 pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                    .add_leased_path(self.request(payload.clone()))
+                    .add_leased_path(
+                        self.request_within(payload.clone(), policy.attempt_deadline()),
+                    )
                     .await
             })
             .await
@@ -1365,7 +1466,12 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
         Ok((generation(response.generation)?, outcome))
     }
 
-    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()> {
+    async fn delete_blackhole(
+        &self,
+        prefix: &ipnet::IpNet,
+        owner: &str,
+        policy: RetryPolicy,
+    ) -> Result<()> {
         super::require_host_route(prefix)?;
         // The recorded owner and never override_owner: a mismatch is FAILED_PRECONDITION.
         let payload = pb::DeletePathRequest {
@@ -1377,9 +1483,9 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
             ..Default::default()
         };
         let response = self
-            .call("DeletePath", || async {
+            .call_with_policy("DeletePath", policy, || async {
                 pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
-                    .delete_path(self.request(payload.clone()))
+                    .delete_path(self.request_within(payload.clone(), policy.attempt_deadline()))
                     .await
             })
             .await
@@ -1394,6 +1500,45 @@ impl BlackholeSpeaker for RustBgpdAnnouncer {
             }
             _ => Err(invalid("unsupported rustbgpd deletion outcome")),
         }
+    }
+}
+
+#[async_trait]
+impl BlackholeSpeaker for RustBgpdAnnouncer {
+    async fn announce_blackhole(&self, route: &BlackholeRoute) -> Result<AddOutcome> {
+        self.add_blackhole(route, RetryPolicy::Durable).await
+    }
+
+    async fn announce_blackhole_bounded(&self, route: &BlackholeRoute) -> Result<AddOutcome> {
+        self.add_blackhole(route, RetryPolicy::Bounded).await
+    }
+
+    async fn announce_leased_blackhole(
+        &self,
+        route: &BlackholeRoute,
+        lease_seconds: u32,
+    ) -> Result<(LeaseGeneration, AddOutcome)> {
+        self.add_leased_blackhole(route, lease_seconds, RetryPolicy::Durable)
+            .await
+    }
+
+    async fn announce_leased_blackhole_bounded(
+        &self,
+        route: &BlackholeRoute,
+        lease_seconds: u32,
+    ) -> Result<(LeaseGeneration, AddOutcome)> {
+        self.add_leased_blackhole(route, lease_seconds, RetryPolicy::Bounded)
+            .await
+    }
+
+    async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()> {
+        self.delete_blackhole(prefix, owner, RetryPolicy::Durable)
+            .await
+    }
+
+    async fn withdraw_blackhole_bounded(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()> {
+        self.delete_blackhole(prefix, owner, RetryPolicy::Bounded)
+            .await
     }
 
     async fn list_blackholes(&self) -> Result<BlackholeInventory> {
@@ -1509,7 +1654,7 @@ impl InjectionLeases for RustBgpdAnnouncer {
             .filter(|family| *family > 4)
             .collect();
         match self
-            .call_with_probes("RenewLease", &families, || async {
+            .call_with_probes("RenewLease", &families, RetryPolicy::Durable, || async {
                 pb::injection_service_client::InjectionServiceClient::new(self.channel.clone())
                     .renew_lease(self.request(request.clone()))
                     .await

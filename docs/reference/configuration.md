@@ -171,6 +171,12 @@ Existing YAML may omit the client identity fields. Rust callers constructing
 `RustBgpdConfig` literals must add the optional fields, including
 `leased_flowspec`, or use `..Default::default()` for omitted options.
 
+Speaker mutation budgets are fixed and have no configuration key. Requests that
+hold the lifecycle mutex, such as admission, manual creation, withdrawal, unban
+and safelist additions, make one attempt bounded by three seconds; the
+scheduler keeps three 30-second attempts. See the
+[interactive speaker deadline](speaker-backends.md#interactive-speaker-deadline).
+
 #### Leased FlowSpec
 
 ```yaml
@@ -247,6 +253,14 @@ key back to `true` to recover. To turn the lease off:
 - **Lost lease.** A refused renewal, a changed lease generation or a speaker
   restart re-adds every active leased FlowSpec rule and leased blackhole at
   once. Lease expiry is never recorded as a withdrawal.
+- **Database outages.** Renewal is unfenced and needs no database, but it is
+  bounded by leased TTLs: it continues until one margin after the latest
+  `expires_at` among the rows this owner holds, then stops and rustbgpd
+  removes the rules within one more lease. Leased FlowSpec and leased
+  blackholes share the owner-wide bound, so a short rule can outlive its own
+  TTL while a longer leased rule keeps the lease live. See
+  [leased blackholes](#leased-blackholes) and
+  [ADR 003](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls).
 - **Unknown rules.** Another owner's rule at a desired match is reported in
   `prefixd_unknown_local_routes{kind="flowspec"}` as a repair error and never
   touched.
@@ -1044,10 +1058,33 @@ routes the network holds can still apply.
   [upgrade guide](../how-to/upgrading.md#mitigation-origin-mode) already asks.
 - **Database outages.** Renewal needs no database and no controller fence, so
   a PostgreSQL outage that puts the controller in standby does not drop leased
-  blackholes. New adds and withdrawals wait for the fence.
+  blackholes while the leased routes are inside their TTL. Renewal is bounded
+  rather than unbounded. The bound is the latest `expires_at` among the rows
+  this owner holds: the read at the start of each reconciliation pass sets it,
+  and every leased admission or TTL extension raises it at once. Renewal stops
+  one margin after it, `max(lease_seconds,
+  timers.reconciliation_interval_seconds + lease_seconds / 3)`, and rustbgpd
+  removes the routes within one more lease. The bound is owner-wide: leased
+  FlowSpec rules and leased blackholes share it, so every leased route lasts
+  as long as the latest leased TTL during an outage. Unleased routes, pending
+  rows and dry-run rows do not extend it. A read that succeeds again refreshes
+  it and renewal resumes at once; expiry still withdraws a row whose TTL
+  passed, and nothing is re-added for it. Before the first read or leased
+  write, renewal is bounded to one margin after startup, so a controller that
+  starts while the database is unreachable lets the adopted lease lapse. New
+  adds and withdrawals wait for the fence. Health reports
+  `renewal_stopped: "ttl_bound"` and `renew_until`; a stop at the bound is not
+  a renewal failure. See
+  [leased TTLs](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls).
+- **Standby.** A standby controller reads active intent on the reconciliation
+  interval, without mutating anything, so its unfenced renewal follows the
+  same bound and a live lease stays live through a failover. A standby that
+  cannot read stops renewing at its own bound and reports the lease state as
+  `standby`, not `expired`.
 - **Visibility.** Health detail reports `speaker.lease` (owner, state,
-  generation and the last renewal), and
+  generation, the last renewal, `renew_until` and `renewal_stopped`), and
   [metrics](api.md#metrics) count renewals and report the lease state.
+
 ### Amplification
 
 UDP reflection handling for the `udp_amplification` vector
