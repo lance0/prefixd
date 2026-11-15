@@ -120,9 +120,15 @@ Details:
   `standby`, not `expired`, because the active controller may still keep it
   live.
 - **Not a failure.** A stop at the bound is reported as a lease TTL bound
-  (`renewal_stopped: "ttl_bound"` in health), not as a failed renewal. The
-  lease state reports `expired` once one more lease has passed after the stop,
-  since by then the speaker holds none of the routes.
+  (`renewal_stopped: "ttl_bound"` in health), not as a failed renewal. In a
+  real database outage the active controller loses its fence within a few
+  seconds, so it is standby when it reaches the bound and reports the lease as
+  `standby` with `renewal_stopped: "ttl_bound"`, even after rustbgpd has
+  removed the routes, because another controller could still be renewing the
+  owner. The lease state reports `expired` at the bound only when reads fail
+  while this controller still holds the fence, once one more lease has passed
+  after the stop. Operators detect an outage stop from `renewal_stopped`
+  together with `prefixd_controller_fence_active`.
 - **No resurrection.** The bound only stops and resumes renewal. It never
   adds, re-adds or resurrects a route: adds stay fenced and database-gated,
   expiry withdraws an expired row before any re-add, and dry-run still never

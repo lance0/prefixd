@@ -9,11 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
-- Alerts on `prefixd_injection_lease_state{state="expired"}` keep working. A
-  standby controller that cannot read the database now reports the new state
-  `standby` instead of `live` or `expired`, because the active controller may
-  still keep the lease live. Add it to dashboards that show the lease per
-  controller.
+- The lease state adds `standby`. During a PostgreSQL outage the active
+  controller loses its fence within seconds, so once renewal stops at the TTL
+  bound it reports `standby` with `renewal_stopped: "ttl_bound"`, not
+  `expired`, even after rustbgpd has removed the routes, because another
+  controller could still be renewing the owner. `expired` at the bound appears
+  only when reads fail while the fence is still held. To detect an outage
+  stop, alert on `renewal_stopped` in health detail together with
+  `prefixd_controller_fence_active`, not on
+  `prefixd_injection_lease_state{state="expired"}` alone.
 - Mitigation behavior is unchanged, but Compose installs keep the
   `playbooks.yaml` an earlier release copied into the `prefixd-config` volume,
   so startup and reload now warn that `udp_flood_police_first`,

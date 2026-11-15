@@ -2587,11 +2587,15 @@ present with `blackhole.leased` or `bgp.rustbgpd.leased_flowspec`: `state` is
 `none` (no generation held yet), `live`, `renewal_failing` (the last renewal
 failed but the lease may still be live), `expired` (the speaker refused the
 generation, no renewal succeeded for a whole lease, or renewal stopped at the
-TTL bound and one more lease has passed, so the speaker holds none of the
-leased routes), `not_renewing` (dry-run, which never renews) or `standby`
-(this controller is standby and stopped renewing at its TTL bound because it
-cannot read leased intent; the active controller may still keep the lease
-live). `generation` is held in memory and changes after a speaker restart.
+TTL bound while this controller still held the fence and one more lease has
+passed, so the speaker holds none of the leased routes), `not_renewing`
+(dry-run, which never renews) or `standby` (this controller does not hold the
+fence and stopped renewing at its TTL bound because it cannot read leased
+intent; another controller may still keep the lease live). During a
+PostgreSQL outage the active controller loses its fence within seconds, so it
+reports `standby` with `renewal_stopped: "ttl_bound"`, not `expired`, even
+after rustbgpd has removed the routes; detect that from `renewal_stopped`
+together with `prefixd_controller_fence_active`. `generation` is held in memory and changes after a speaker restart.
 `last_renewal_result` is `success`, `not_live` or `error`. `renew_until` is the
 latest `expires_at` among the leased routes this owner holds: the read at the
 start of each reconciliation pass (on a timer in standby) sets it, and every

@@ -862,6 +862,9 @@ async fn persist_new_mitigation(
             tracing::warn!(error = %error, pop = %mitigation.pop, reason,
                 "admission rejected new mitigation");
         })?;
+    // A post-commit refusal (InjectionOwnerMismatch) leaves this raised bound in
+    // the keeper until the next read; it is bounded by this row's TTL and never
+    // re-adds anything.
     if let Some(lease) = state.lease.as_deref() {
         lease.observe_leased_write(mitigation);
     }
