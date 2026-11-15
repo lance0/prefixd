@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `storage.connection_string: "${DATABASE_URL}"` while keeping `DATABASE_URL`
   set. See
   [configuration placeholders](docs/how-to/upgrading.md#configuration-placeholders).
+- **Breaking:** prefixd now requires rustbgpd v0.83.0 or later and refuses to
+  start against v0.82.x or older with `rustbgpd 0.82.0 is older than the
+  minimum 0.83.0; upgrade the speaker first`. Upgrade rustbgpd before prefixd.
+  rustbgpd v0.83.0 refuses a config that sets the gRPC listener `access_mode`
+  key; the shipped `configs/rustbgpd.toml` does not set it. See
+  [rustbgpd v0.83](docs/how-to/upgrading.md#rustbgpd-v083).
 
 ### Known limitations
 
@@ -155,6 +161,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Compose pins rustbgpd v0.83.0, and the vendored `proto/rustbgpd.proto`
+  follows the v0.83.0 release. Blackhole read-back takes a route's MED only
+  from `med_attr`, since v0.83.0 removes the bare `Route.med` field; a route
+  with any MED is still not prefixd's. CI and `just speakers` run the speaker
+  suite against v0.83.0 only, and the startup refusal check uses v0.82.0.
 - The dashboard connection status now combines the realtime feed with the age
   of the last successful API response: **Live**, **Polling (Ns ago)**,
   **Stale** and **Offline**. After 15 seconds without a response it shows

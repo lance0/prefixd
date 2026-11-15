@@ -1,15 +1,15 @@
 //! Generated rustbgpd client stubs (ADR 023).
 //!
 //! `proto/rustbgpd.proto` (package `rustbgpd.v1`) is the unmodified
-//! `rustbgpd.proto` asset of the rustbgpd v0.82.0 release,
-//! <https://github.com/lance0/rustbgpd/releases/download/v0.82.0/rustbgpd.proto>,
-//! sha256 `8746bd8d17528c34c96e11fa769ab09dc4340cba55fe5ed014ac18400e8e5008`
+//! `rustbgpd.proto` asset of the rustbgpd v0.83.0 release,
+//! <https://github.com/lance0/rustbgpd/releases/download/v0.83.0/rustbgpd.proto>,
+//! sha256 `1efd20a6e30c8b2ba8e5821dce74bba9868e8f4c289e539c2d37281eda3aadd9`
 //! `proto/rustbgpd.proto.sha256` is that release's checksum asset, and
 //! `just proto` checks the file against it offline. To move the pin, download
 //! both assets of the new release, run `sha256sum --check --strict` on them, copy
 //! both here and update this comment.
 //!
-//! The generated stubs follow the pinned release. v0.81.0 is the minimum
+//! The generated stubs follow the pinned release. v0.83.0 is the minimum
 //! daemon, and `RustBgpdAnnouncer::connect` refuses anything older. Peer
 //! identity fields are decoded; new optional read-back and replay RPCs remain
 //! unused until a change adopts them. The stubs are compiled only when the

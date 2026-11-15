@@ -299,8 +299,7 @@ FastNetMon Community ban, into a blackhole for the victim
 
 An Admin can divert one owned host's traffic to a configured scrubber with a
 guarded FlowSpec redirect ([ADR 030](docs/adr/030-scrubber-diversion.md)). It
-is disabled by default and needs rustbgpd v0.81.0 or later (v0.82.0 for
-redirect-to-VRF):
+is disabled by default and needs rustbgpd v0.83.0 or later:
 
 - **Configured profiles only.** A request names a profile, never a target. Each
   profile freezes its targets, router peers, policy binding and revision into
@@ -327,7 +326,7 @@ Opt-in VPNv4 and VPNv6 FlowSpec scopes
 targets for a mitigation. Global FlowSpec stays the default until
 `bgp.vpn_scopes` is configured:
 
-- **rustbgpd 0.82.0 or later only.** Each configured scope needs a successful
+- **rustbgpd 0.83.0 or later only.** Each configured scope needs a successful
   read-only probe of its family (13 or 14). GoBGP refuses VPN requests before
   any RPC, and no refused VPN operation falls back to global FlowSpec.
 - **Frozen scope identity.** Admission snapshots the scope name, family, exact

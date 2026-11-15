@@ -131,7 +131,7 @@ services:
     restart: unless-stopped
 
   rustbgpd:
-    image: ${PREFIXD_RUSTBGPD_IMAGE:-ghcr.io/lance0/rustbgpd:0.82.0@sha256:807dcb90c8d0234d5c0c39bdde62f8a2ee24a9525bcd60ca4c95c2773e56f609}
+    image: ${PREFIXD_RUSTBGPD_IMAGE:-ghcr.io/lance0/rustbgpd:0.83.0@sha256:79a6a584b59dae0574a8f5240a4e8f68454fdfede1b7fe31ed446fcf92a30979}
     profiles: [rustbgpd]
     container_name: prefixd-rustbgpd
     user: "999:999"

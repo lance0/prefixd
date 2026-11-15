@@ -76,7 +76,7 @@ class Profiles(unittest.TestCase):
                     self.assertEqual(ports[0]["target"], target)
                     self.assertEqual(ports[0]["published"], published)
                 if profile == "rustbgpd":
-                    expected = RUSTBGPD_IMAGE or releases["0.82.0"]["image"]
+                    expected = RUSTBGPD_IMAGE or releases["0.83.0"]["image"]
                     self.assertEqual(services[profile]["image"], expected)
                     self.assertEqual(services[profile]["user"], "999:999")
                     self.assertIn("prefixd", services[selected]["networks"]["default"]["aliases"])

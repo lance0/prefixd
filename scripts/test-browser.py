@@ -157,7 +157,7 @@ def run(binary_dir, output):
         assert all(path.is_file() and os.access(path, os.X_OK) for path in binaries)
         assert (ROOT / "frontend/.next/BUILD_ID").is_file(), "run just frontend first"
         revision = command("git", "rev-parse", "HEAD", cwd=ROOT)
-        release = json.loads((ROOT / "tests/fixtures/rustbgpd/releases.json").read_text())["0.81.0"]
+        release = json.loads((ROOT / "tests/fixtures/rustbgpd/releases.json").read_text())["0.83.0"]
         receipt.update(
             candidate_revision=revision,
             binary_sha256={
@@ -228,7 +228,7 @@ log_format = "text"
 enabled = false
 [global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
-access_mode = "read_write"
+max_tier = "operator_only"
 token_file = "/fixture/token"
 principal = "prefixd-browser"
 [security.grpc.roles]

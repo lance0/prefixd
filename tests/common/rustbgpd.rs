@@ -25,11 +25,11 @@ pub const EXPORT_DENIED: &str = "203.0.113.99/32";
 pub const UNREACHABLE_PEER: &str = "192.0.2.250";
 /// Missing interface in the dedicated v0.80 observation fixture's own namespace.
 pub const UNBOUND_INTERFACE: &str = "pd-unbound";
-/// rustbgpd v0.80.1: released, immutable and older than prefixd's minimum.
+/// rustbgpd v0.82.0: released, immutable and older than prefixd's minimum.
 pub const REFUSED_RELEASE: (&str, &str, &str) = (
-    "0.80.1",
-    "ghcr.io/lance0/rustbgpd:0.80.1@sha256:a7a6c4533ba0976f73525ef4d932ad04ef1b034115dc684511fd2679c02513f1",
-    "2fb2cbf276eaa6a2eb6005e956ce47b23a377dc3",
+    "0.82.0",
+    "ghcr.io/lance0/rustbgpd:0.82.0@sha256:807dcb90c8d0234d5c0c39bdde62f8a2ee24a9525bcd60ca4c95c2773e56f609",
+    "608dcaea0902272474bd2a25bcf30bff3dd3153b",
 );
 
 pub struct Speaker {
@@ -71,10 +71,6 @@ impl Speaker {
         global_only_peer: &str,
     ) -> Self {
         let fixture = Self::start_peered(network, peer, peer_asn).await;
-        assert_eq!(
-            fixture.version, "0.82.0",
-            "VPN wire receipt needs released v0.82.0"
-        );
         let path = fixture._files.path().join("config.toml");
         let config = std::fs::read_to_string(&path).unwrap();
         let global = "families = [\"ipv4_flowspec\", \"ipv6_flowspec\"]";
@@ -164,7 +160,7 @@ action = "permit"
         unicast: bool,
         observation_neighbors: bool,
     ) -> Self {
-        let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
+        let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.83.0".into());
         let releases: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/rustbgpd/releases.json")).unwrap();
         let release = &releases[&version];
@@ -374,10 +370,10 @@ log_format = "text"
 [global.telemetry.grpc_uds]
 enabled = {}
 mode = 0o600
-access_mode = "read_write"
+max_tier = "operator_only"
 [global.telemetry.grpc_tcp]
 address = "{listen_address}:{}"
-access_mode = "read_write"
+max_tier = "operator_only"
 {}
 [security.grpc.roles]
 prefixd-test = "operator"

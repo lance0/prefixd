@@ -319,19 +319,13 @@ async fn guarded_vpn_scope_keeps_rd_targets_and_held_revision() {
     use prefixd::domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity};
     let fixture = fixture::Speaker::start().await;
     let speaker = fixture.connect().await;
-    let supported = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").as_deref() == Ok("0.82.0");
     let window = speaker
         .issue_window("prefixd.scrub.vpnfixture", 30)
         .await
         .unwrap();
-    for (family, global_family, prefix, target) in [
-        (VpnFlowSpecFamily::Ipv4, 3, "192.0.2.21/32", "192.0.2.99"),
-        (
-            VpnFlowSpecFamily::Ipv6,
-            4,
-            "2001:db8::21/128",
-            "2001:db8::99",
-        ),
+    for (family, prefix, target) in [
+        (VpnFlowSpecFamily::Ipv4, "192.0.2.21/32", "192.0.2.99"),
+        (VpnFlowSpecFamily::Ipv6, "2001:db8::21/128", "2001:db8::99"),
     ] {
         let global = rule(prefix, target, "prefixd.scrub.vpnfixture", 1);
         speaker
@@ -343,24 +337,6 @@ async fn guarded_vpn_scope_keeps_rd_targets_and_held_revision() {
         a.route_targets = vec!["44407:777".into()];
         let mut b = a.clone();
         b.nlri.scope = Some(VpnFlowSpecIdentity::new(family, "44407:41").unwrap());
-        if !supported {
-            for error in [
-                speaker.add_guarded(&a, window.stamp, 30).await.unwrap_err(),
-                speaker.delete_guarded(&a).await.unwrap_err(),
-            ] {
-                assert!(
-                    matches!(error, prefixd::error::PrefixdError::UnsupportedFlowSpecScope { backend: "rustbgpd", family: observed } if observed == family.afi_safi())
-                );
-            }
-            assert!(speaker.guarded_inventory().await.is_err());
-            let rows = fixture.received_flow_spec(global_family, "0.0.0.0").await;
-            assert_eq!(rows.received_routes.len(), 1);
-            let held = rows.received_routes[0].route.as_ref().unwrap();
-            assert!(held.rd.is_empty());
-            assert!(held.route_targets.is_empty());
-            speaker.delete_guarded(&global).await.unwrap();
-            continue;
-        }
         speaker.add_guarded(&a, window.stamp, 30).await.unwrap();
         speaker.add_guarded(&b, window.stamp, 30).await.unwrap();
         let inventory = speaker.guarded_inventory().await.unwrap();
@@ -418,14 +394,13 @@ async fn guarded_vpn_vrf_redirects_keep_action_and_scope_targets_separate() {
     use prefixd::domain::{VpnFlowSpecFamily, VpnFlowSpecIdentity};
     let fixture = fixture::Speaker::start().await;
     let speaker = fixture.connect().await;
-    let supported = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").as_deref() == Ok("0.82.0");
     let window = speaker
         .issue_window("prefixd.scrub.vrffixture", 30)
         .await
         .unwrap();
-    for (family, global_family, prefix) in [
-        (VpnFlowSpecFamily::Ipv4, 3, "192.0.2.22/32"),
-        (VpnFlowSpecFamily::Ipv6, 4, "2001:db8::22/128"),
+    for (family, prefix) in [
+        (VpnFlowSpecFamily::Ipv4, "192.0.2.22/32"),
+        (VpnFlowSpecFamily::Ipv6, "2001:db8::22/128"),
     ] {
         for (index, (target, expected_action)) in [
             ("44407:888", 0x8008_ad77_0000_0378u64),
@@ -441,22 +416,6 @@ async fn guarded_vpn_vrf_redirects_keep_action_and_scope_targets_separate() {
             scoped.redirect_route_target = Some(target.into());
             scoped.nlri.scope = Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap());
             scoped.route_targets = vec!["44407:777".into()];
-            if !supported {
-                assert!(
-                    speaker
-                        .add_guarded(&scoped, window.stamp, 30)
-                        .await
-                        .is_err()
-                );
-                assert!(
-                    fixture
-                        .received_flow_spec(global_family, "0.0.0.0")
-                        .await
-                        .received_routes
-                        .is_empty()
-                );
-                continue;
-            }
             speaker
                 .add_guarded(&scoped, window.stamp, 30)
                 .await

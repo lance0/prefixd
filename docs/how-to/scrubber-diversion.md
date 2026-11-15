@@ -1,8 +1,8 @@
 # Manual scrubber diversion
 
 Scrubber diversion is disabled by default. Global IP-target diversion uses
-guarded FlowSpec methods available in rustbgpd 0.81.0 or later. VPN diversion
-requires rustbgpd 0.82.0 or later, a named VPN scope and a successful family 13/14
+guarded FlowSpec methods of rustbgpd 0.83.0 or later, prefixd's minimum. VPN
+diversion also requires a named VPN scope and a successful family 13/14
 probe. It redirects selected traffic for one owned host to a configured,
 same-family IP target or scrubbing VRF route target. It does not configure the
 scrubber, VRFs or the clean return path. The first workflow is manual and requires an administrator; detector and
@@ -45,7 +45,7 @@ scrubber:
 ```
 
 For redirect-to-VRF, replace both IP targets with one action route target.
-This VPN-only action requires rustbgpd 0.82.0 and a successful family 13 or 14
+This VPN-only action requires a successful family 13 or 14
 probe for the [configured VPN scope](vpn-flowspec.md#configure-scope). A
 scoped profile carries only its scope's address family, so keep only that
 family's destinations; startup refuses a mixed-family scoped profile. Use a
@@ -151,7 +151,7 @@ Bind `inbound-only` with `export_policy_chain` on router A and `return-only` on
 router B. Both peer lists may name the same router when it carries both legs on
 different interfaces; prefixd cannot observe interface scope, so the receipt
 must cover that topology. The released fixtures prove this export isolation on
-rustbgpd 0.81.0 and 0.82.0 and the exact return-leg bytes received by a peer.
+rustbgpd 0.83.0 and the exact return-leg bytes received by a peer.
 They do not prove that router B installs a rule without a destination: RFC 8955
 §6 and RFC 9117 validation differ by receiver. Qualify router B's acceptance,
 installed rules and counters, and precedence against an overlapping

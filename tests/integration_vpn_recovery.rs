@@ -13,11 +13,10 @@ use axum::{
 use prefixd::{
     AppState,
     api::create_test_router,
-    bgp::{DaemonHealthObserver, FlowSpecReader, FlowSpecWriter, check_vpn_startup},
+    bgp::{DaemonHealthObserver, FlowSpecReader, check_vpn_startup},
     config::{BgpMode, Customer, Inventory, OperationMode, Playbooks, PolicyProfile, Settings},
     db::{Repository, RepositoryTrait},
     domain::{FlowSpecRule, Mitigation, MitigationStatus, SpeakerTarget, mitigation_rule},
-    error::PrefixdError,
     scheduler::ReconciliationLoop,
 };
 use serde_json::{Value, json};
@@ -105,7 +104,7 @@ async fn released_vpn_postgres_fresh_controller_recovers_saved_scopes_and_withdr
     let speaker = Arc::new(fixture.connect().await);
     let version = speaker.daemon_health().await.unwrap().version.unwrap();
     assert!(
-        matches!(version.as_str(), "0.81.0" | "0.82.0"),
+        matches!(version.as_str(), "0.83.0"),
         "unqualified release {version}"
     );
     let mut configured = settings(&fixture);
@@ -115,20 +114,16 @@ async fn released_vpn_postgres_fresh_controller_recovers_saved_scopes_and_withdr
         .register_speaker_target(&configured.pop, &target, false)
         .await
         .unwrap();
-    let mut initial = configured.clone();
-    if version == "0.81.0" {
-        // Global-only deployment is supported; separately prove that enabling VPN fails closed.
-        initial.bgp.vpn_scopes.clear();
-    } else {
-        check_vpn_startup(
-            &initial.bgp,
-            &initial.pop,
-            speaker.as_ref(),
-            database.repo.as_ref(),
-        )
-        .await
-        .unwrap();
-    }
+    let initial = configured.clone();
+    check_vpn_startup(
+        &initial.bgp,
+        &initial.pop,
+        speaker.as_ref(),
+        database.repo.as_ref(),
+    )
+    .await
+    .unwrap();
+
     let state = AppState::new(
         initial,
         inventory(),
@@ -146,68 +141,19 @@ async fn released_vpn_postgres_fresh_controller_recovers_saved_scopes_and_withdr
     for (suffix, victim) in [("4", "203.0.113.10"), ("6", "2001:db8:100::10")] {
         let base = json!({"victim_ip":victim,"protocol":"udp","dst_ports":[53],"action":"discard","ttl_seconds":300,"reason":"persisted global control"});
         post(&app, "/v1/mitigations", base.clone()).await;
-        if version == "0.82.0" {
-            for scope in [format!("A{suffix}"), format!("B{suffix}")] {
-                let mut rule = base.clone();
-                if scope.starts_with('A') {
-                    rule["action"] = json!("police");
-                    rule["rate_bps"] = json!(8_000_000);
-                }
-                post(
-                    &app,
-                    "/v1/vpn/mitigations",
-                    json!({"scope":scope,"rule":rule}),
-                )
-                .await;
+        for scope in [format!("A{suffix}"), format!("B{suffix}")] {
+            let mut rule = base.clone();
+            if scope.starts_with('A') {
+                rule["action"] = json!("police");
+                rule["rate_bps"] = json!(8_000_000);
             }
-        }
-    }
-    if version == "0.81.0" {
-        let before = [
-            fixture.received_flow_spec(3, "0.0.0.0").await,
-            fixture.received_flow_spec(4, "0.0.0.0").await,
-        ];
-        for name in ["A4", "A6"] {
-            let scope = configured.bgp.resolve_scope(name).unwrap().unwrap();
-            let error = speaker
-                .validate_scope(Some(&scope.identity))
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(error, PrefixdError::UnsupportedFlowSpecScope { family, .. } if family == scope.identity.family.afi_safi()),
-                "{error}"
-            );
-            assert_eq!(fixture.received_flow_spec(3, "0.0.0.0").await, before[0]);
-            assert_eq!(fixture.received_flow_spec(4, "0.0.0.0").await, before[1]);
-        }
-        assert!(matches!(
-            check_vpn_startup(
-                &configured.bgp,
-                &configured.pop,
-                speaker.as_ref(),
-                database.repo.as_ref()
+            post(
+                &app,
+                "/v1/vpn/mitigations",
+                json!({"scope":scope,"rule":rule}),
             )
-            .await,
-            Err(PrefixdError::UnsupportedFlowSpecScope { .. })
-        ));
-        assert_eq!(fixture.received_flow_spec(3, "0.0.0.0").await, before[0]);
-        assert_eq!(fixture.received_flow_spec(4, "0.0.0.0").await, before[1]);
-        let saved = database
-            .repo
-            .active_mitigations_for_pop(&configured.pop)
-            .await
-            .unwrap();
-        assert_eq!(saved.len(), 2);
-        assert!(saved.iter().all(|row| row.match_criteria.scope.is_none()));
-        drop(app);
-        drop(state);
-        drop(speaker);
-        assert!(old_state.upgrade().is_none() && old_speaker.upgrade().is_none());
-        fixture.container.rm().await.unwrap();
-        eprintln!(
-            "0.81.0: VPN startup/family refusals preserve both PostgreSQL/global speaker controls"
-        );
-        return;
+            .await;
+        }
     }
     let saved = database
         .repo
@@ -362,6 +308,6 @@ async fn released_vpn_postgres_fresh_controller_recovers_saved_scopes_and_withdr
     drop(fresh_speaker);
     fixture.container.rm().await.unwrap();
     eprintln!(
-        "0.82.0: fresh controller/PostgreSQL recovery restores exact global/A/B payloads in both AFIs; saved A withdrawal preserves global/B"
+        "{version}: fresh controller/PostgreSQL recovery restores exact global/A/B payloads in both AFIs; saved A withdrawal preserves global/B"
     );
 }

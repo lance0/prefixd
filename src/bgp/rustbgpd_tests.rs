@@ -92,9 +92,9 @@ impl pb::control_service_server::ControlService for Fake {
             _ => {}
         }
         let daemon_version = match self.mode.load(SeqCst) {
-            23 => "0.80.1",
-            24 => "0.81.0",
-            25 => "0.82.0-dev",
+            23 => "0.82.0",
+            24 => "0.83.0",
+            25 => "0.84.0-dev",
             _ => "observed-daemon-version",
         };
         Ok(Response::new(pb::HealthResponse {
@@ -151,7 +151,7 @@ async fn startup_refuses_a_daemon_older_than_the_minimum_contract() {
         .to_string();
     assert_eq!(
         error,
-        "rustbgpd 0.80.1 is older than the minimum 0.81.0; upgrade the speaker first"
+        "rustbgpd 0.82.0 is older than the minimum 0.83.0; upgrade the speaker first"
     );
     // No version, an unreadable one or a failed read refuses too, without upstream detail.
     for (mode, expected) in [
@@ -1292,7 +1292,7 @@ fn mutate_row(route: &mut pb::Route, case: usize) {
         101 => route.as_path = vec![64512],
         102 => route.local_pref_attr = Some(100),
         103 => route.med_attr = Some(0),
-        104 => route.med = 10,
+        104 => route.med_attr = Some(10),
         105 => route.extended_communities = vec![1],
         106 => {
             route.aggregator = Some(pb::RouteAggregator {
