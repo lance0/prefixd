@@ -1423,11 +1423,32 @@ destinations:
     secret_env: WEBHOOK_SECRET
 ```
 
+The variable must be in the controller's own environment. The shipped Compose
+stack forwards only `RUST_LOG`, `PREFIXD_API_TOKEN` and `DATABASE_URL` to the
+controller, not other `.env` entries, so add each variable to the controller
+service in `docker-compose.override.yml`:
+
+```yaml
+services:
+  prefixd-rustbgpd:  # or prefixd-gobgp
+    environment:
+      PAGERDUTY_ROUTING_KEY: ${PAGERDUTY_ROUTING_KEY}
+```
+
 prefixd reads the variable each time it sends an alert and never writes its
-value to `alerting.yaml`. Startup, reload and the alerting editor refuse a
-destination whose variable is unset or empty, naming the key and the variable
+value to `alerting.yaml`. Adding or changing a variable needs a controller
+restart, not a reload, because the process environment is fixed at start.
+Startup and reload refuse a destination whose variable is unset or empty, or
+that has neither the secret nor its `*_env` key, naming the key and the variable
 but not the value. `GET /v1/config/alerting` shows the variable name beside the
 redacted `***` value. Generic `headers` values have no `*_env` form.
+
+Set `*_env` keys in `alerting.yaml` on the controller host. The alerting editor
+keeps an existing `*_env` key only for an unchanged destination: same type,
+same variable and the same `events_url`, `url`, `chat_id` or `region`. It
+refuses a new or changed variable name, or a changed destination, before
+reading any variable. Otherwise an administrator could send any variable in the
+controller's environment, such as `DATABASE_URL`, to a URL of their choosing.
 
 ## Alert destination URLs
 
@@ -1470,8 +1491,8 @@ http:
 ```
 
 Startup and reload refuse any `prefixd.yaml` or `alerting.yaml` string value
-written as `${...}`, naming its key, because it would otherwise be used
-literally.
+written entirely as `${...}`, naming its key, because it would otherwise be used
+literally. A value that only contains `${`, such as `pa${ss`, loads as written.
 
 ---
 

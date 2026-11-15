@@ -643,7 +643,8 @@ prefixd has never expanded `${VAR}` placeholders, although earlier shipped
 examples showed them. A placeholder was used literally: an alert secret such as
 `routing_key: "${PAGERDUTY_ROUTING_KEY}"` was sent to the destination as that
 text. Releases after 0.26.0 refuse any `prefixd.yaml` or `alerting.yaml` string
-value written as `${...}`. Startup fails, reload keeps the running
+value written entirely as `${...}`; a value that only contains `${` loads as
+written. Startup fails, reload keeps the running
 configuration, and `PUT /v1/config/alerting` returns `400`; each names the key
 but not the value.
 
@@ -651,7 +652,11 @@ Before upgrading, search both files for `${`:
 
 - For an alert secret, replace it with its `*_env` key, for example
   `routing_key_env: PAGERDUTY_ROUTING_KEY`, and set that variable in the
-  controller's environment. See
+  controller's environment. The shipped Compose stack does not forward other
+  `.env` entries to the controller; add the variable to the controller service's
+  `environment:` in `docker-compose.override.yml`. A new or changed variable
+  takes effect on restart, not reload. The alerting editor cannot add `*_env`
+  keys; edit `alerting.yaml` on the controller host. See
   [alert destination secrets](../reference/configuration.md#alert-destination-secrets).
 - For `storage.connection_string: "${DATABASE_URL}"`, delete the key and keep
   `DATABASE_URL` set. `DATABASE_URL` already took precedence, so the

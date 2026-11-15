@@ -88,9 +88,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `routing_key_env`, `api_key_env`, `url_env` and `secret_env`, naming an
   environment variable read when an alert is sent. Its value is never written
   to `alerting.yaml` or returned; `GET /v1/config/alerting` returns the
-  variable name. An unset or empty variable fails startup, reload and the
-  editor, naming the key and the variable.
-- `storage` may be omitted when `DATABASE_URL` is set.
+  variable name. An unset or empty variable fails startup and reload, naming
+  the key and the variable. Set `*_env` keys in `alerting.yaml`; the alerting
+  editor keeps existing ones for an unchanged destination but cannot add or
+  retarget one. On the shipped Compose stack, add the variable to the
+  controller's `environment:` in `docker-compose.override.yml`.
+- `storage` may be omitted when `DATABASE_URL` is set. An empty
+  `DATABASE_URL` now counts as unset.
 
 ### Changed
 
@@ -151,6 +155,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Alert delivery errors no longer include the request URL, which could carry a
+  webhook secret or a Telegram bot token, in the controller log or the
+  `POST /v1/config/alerting/test` response.
 - Session cookies are now `Secure` by default unless `auth.mode` is `none`,
   including behind a TLS-terminating proxy. Previously only native `http.tls`
   set the flag. A deployment that browsers reach over plain HTTP must set
