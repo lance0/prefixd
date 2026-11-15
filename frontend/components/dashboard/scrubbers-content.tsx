@@ -18,7 +18,7 @@ import { StatusPill, Tag, type StatusTone } from "@/components/dashboard/status-
 import { WithdrawConfirmDialog } from "@/components/dashboard/withdraw-confirm-dialog"
 import { useTimeFormat } from "@/components/time-zone-provider"
 import { usePermissions } from "@/hooks/use-permissions"
-import { armScrubber, createDiversion, getDiversions, getScrubbers, previewDiversion, withdrawDiversion, type DiversionExportObservation, type DiversionMatch, type DiversionPreview, type DiversionRequest, type DiversionRule, type ExportDisposition, type ScrubberDiversion, type ScrubberProfiles, type ScrubberReturnLeg, type ScrubberState } from "@/lib/api"
+import { armScrubber, createDiversion, getDiversions, getScrubbers, previewDiversion, withdrawDiversion, type DiversionExportObservation, type DiversionMatch, type DiversionPreview, type DiversionRequest, type DiversionRule, type ScrubberDiversion, type ScrubberProfiles, type ScrubberReturnLeg, type ScrubberState } from "@/lib/api"
 import { parseDestination } from "@/lib/destination"
 import { formatTimeRemaining } from "@/lib/format"
 
@@ -44,7 +44,7 @@ function validateDiversion(form: DiversionForm, profile?: ScrubberProfiles["conf
   if (!form.profile) errors.profile = "Select a scrubber profile."
 
   if (!victim) errors.victim = "Enter a host CIDR, for example 203.0.113.10/32 or 2001:db8::10/128."
-  else if (!victim.isCidr || victim.prefixLength !== victim.maxLength) errors.victim = `Diversion needs one host. Use ${victim.prefix.split("/")[0]}/${victim.maxLength}.`
+  else if (!victim.isCidr || victim.prefixLength !== victim.maxLength) errors.victim = `Diversion needs one host. Use ${form.victim.trim().split("/")[0]}/${victim.maxLength}.`
 
   if (form.source.trim()) {
     const source = parseDestination(form.source)
@@ -61,7 +61,7 @@ function validateDiversion(form: DiversionForm, profile?: ScrubberProfiles["conf
 
   if (form.protocol === "17" && parsePorts(form.sourcePorts) === null) errors.sourcePorts = "Comma-separated ports, 0-65535."
 
-  if (!/^\d+$/.test(form.ttl.trim()) || Number(form.ttl) < 5 || Number(form.ttl) > 3600) errors.ttl = "Lifetime must be a whole number from 5 to 3600 seconds. The profile may allow less."
+  if (!/^\d+$/.test(form.ttl.trim()) || Number(form.ttl) < 1 || Number(form.ttl) > 3600) errors.ttl = "Lifetime must be a whole number from 1 to 3600 seconds. The profile may allow less."
 
   if (!form.reason.trim()) errors.reason = "A reason is required for the audit log."
   else if (new TextEncoder().encode(form.reason).length > 1024) errors.reason = "Reason must be at most 1024 UTF-8 bytes."
@@ -81,6 +81,9 @@ function toRequest(form: DiversionForm): DiversionRequest {
 
   return { profile: form.profile, scope, ttl_seconds: Number(form.ttl), reason: form.reason }
 }
+
+// Form order, so an invalid submit focuses the first field with an error.
+const FIELD_ORDER: (keyof DiversionForm)[] = ["profile", "victim", "source", "protocol", "ports", "sourcePorts", "ttl", "reason"]
 
 const EMPTY_FORM: DiversionForm = { profile: "", victim: "", source: "", protocol: "6", ports: "", sourcePorts: "", ttl: "60", reason: "" }
 
@@ -117,8 +120,10 @@ export function ScrubbersContent() {
   const update = (field: keyof DiversionForm, value: string) => {
     invalidate()
     setForm(previous => ({ ...previous, [field]: value }))
-    setTouched(previous => new Set(previous).add(field))
   }
+
+  // Text fields show errors after blur, not on the first keystroke.
+  const touch = (field: keyof DiversionForm) => setTouched(previous => new Set(previous).add(field))
 
   async function action(work: () => Promise<void>) {
     setBusy(true); setError(""); setMessage("")
@@ -198,8 +203,14 @@ export function ScrubbersContent() {
       <form noValidate className="grid gap-4 sm:grid-cols-2" onSubmit={event => {
         event.preventDefault()
         setSubmitted(true)
+        const invalid = FIELD_ORDER.find(field => errors[field])
 
-        if (Object.keys(errors).length) return
+        if (invalid) {
+          document.getElementById(`scrub-${invalid}`)?.focus()
+
+          return
+        }
+
         action(async () => {
           const next = toRequest(form)
           const expectedScope = selectedProfile?.scope ?? "global"
@@ -212,7 +223,7 @@ export function ScrubbersContent() {
       }}>
         <div className="space-y-1.5">
           <Label htmlFor="scrub-profile">Profile</Label>
-          <Select value={form.profile} onValueChange={value => update("profile", value)}>
+          <Select value={form.profile} onValueChange={value => { update("profile", value); touch("profile") }}>
             <SelectTrigger id="scrub-profile" className="w-full" aria-required="true" aria-invalid={Boolean(shown("profile"))} aria-describedby={describedBy("profile")}><SelectValue placeholder="Select profile" /></SelectTrigger>
             <SelectContent>{profiles.data.configuration.map(config => <SelectItem key={config.id} value={config.id}>{config.id}</SelectItem>)}</SelectContent>
           </Select>
@@ -220,20 +231,20 @@ export function ScrubbersContent() {
           {selectedProfile?.scope && selectedProfile.scope !== "global" ? <p className="text-xs text-muted-foreground">Requested routing scope: {selectedProfile.scope}</p> : null}
           {selectedProfile?.return_leg ? <p className="text-xs text-muted-foreground">A TCP diversion through this profile adds a return leg. Any-protocol and source-selected TCP requests are refused.</p> : null}
         </div>
-        <TextField id="victim" label="Victim host CIDR" required placeholder="203.0.113.10/32" form={form} update={update} shown={shown} describedBy={describedBy} fieldError={fieldError} />
-        <TextField id="source" label="Source prefix (optional)" form={form} update={update} shown={shown} describedBy={describedBy} fieldError={fieldError} />
+        <TextField id="victim" label="Victim host CIDR" required placeholder="203.0.113.10/32" form={form} update={update} touch={touch} shown={shown} describedBy={describedBy} fieldError={fieldError} />
+        <TextField id="source" label="Source prefix (optional)" form={form} update={update} touch={touch} shown={shown} describedBy={describedBy} fieldError={fieldError} />
         <div className="space-y-1.5">
           <Label htmlFor="scrub-protocol">Protocol</Label>
-          <Select value={form.protocol} onValueChange={value => update("protocol", value)}>
+          <Select value={form.protocol} onValueChange={value => { update("protocol", value); touch("protocol") }}>
             <SelectTrigger id="scrub-protocol" className="w-full" aria-invalid={Boolean(shown("protocol"))} aria-describedby={describedBy("protocol")}><SelectValue /></SelectTrigger>
             <SelectContent><SelectItem value="6">TCP</SelectItem><SelectItem value="17">UDP</SelectItem><SelectItem value="any">Any</SelectItem></SelectContent>
           </Select>
           {fieldError("protocol")}
         </div>
-        <TextField id="ports" label="Destination ports (optional)" placeholder="80, 443" form={form} update={update} shown={shown} describedBy={describedBy} fieldError={fieldError} />
-        {form.protocol === "17" && <TextField id="sourcePorts" label="Source ports (optional)" placeholder="53, 123" form={form} update={update} shown={shown} describedBy={describedBy} fieldError={fieldError} />}
-        <TextField id="ttl" label="Lifetime in seconds" required inputMode="numeric" form={form} update={update} shown={shown} describedBy={describedBy} fieldError={fieldError} />
-        <TextField id="reason" label="Reason" required form={form} update={update} shown={shown} describedBy={describedBy} fieldError={fieldError} />
+        <TextField id="ports" label="Destination ports (optional)" placeholder="80, 443" form={form} update={update} touch={touch} shown={shown} describedBy={describedBy} fieldError={fieldError} />
+        {form.protocol === "17" && <TextField id="sourcePorts" label="Source ports (optional)" placeholder="53, 123" form={form} update={update} touch={touch} shown={shown} describedBy={describedBy} fieldError={fieldError} />}
+        <TextField id="ttl" label="Lifetime in seconds" required inputMode="numeric" form={form} update={update} touch={touch} shown={shown} describedBy={describedBy} fieldError={fieldError} />
+        <TextField id="reason" label="Reason" required form={form} update={update} touch={touch} shown={shown} describedBy={describedBy} fieldError={fieldError} />
         <div className="sm:col-span-2"><Button type="submit" disabled={busy}>Preview diversion</Button></div>
       </form>
       {preview && <div className="mt-4 space-y-3 rounded-md border p-4 text-sm">
@@ -270,19 +281,19 @@ export function ScrubbersContent() {
           return <div key={row.id} className="space-y-3 rounded-md border p-3 text-sm">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <p className="min-w-0 break-words font-mono">{describeRow(row)}</p>
-              <DiversionStatusPill row={row} />
+              <DiversionStatusPill row={row} stale={Boolean(diversions.error)} />
             </div>
             {row.return_rule && <p>Return leg: {describeNlri(row.return_rule.nlri)} → {describeTarget(row.return_rule)} · community {row.return_rule.export_community}</p>}
             <p className="text-muted-foreground tabular-nums">
-              {row.status === "active" ? row.return_rule ? "Both legs observed locally" : "Local intent observed" : null}
+              {row.status === "active" ? `${diversions.error ? "At the last read: " : ""}${row.return_rule ? "Both legs observed locally" : "Local intent observed"}` : null}
               {row.status === "active" ? " · " : null}
               {expired
                 ? <>Expired <time dateTime={row.expires_at}>{formatTime(row.expires_at, now)}</time></>
                 : <>Expires in <span className="font-medium text-foreground">{formatTimeRemaining(row.expires_at, now)}</span> · <time dateTime={row.expires_at}>{formatTime(row.expires_at, now)}</time></>}
             </p>
             {row.status === "withdrawing" && <p>Withdrawal stays pending until outstanding authorization has expired and local absence is confirmed{row.return_rule ? " for both legs" : ""}.</p>}
-            <ExportEvidence label={row.return_rule ? "Inbound leg peer export" : "Peer export"} observation={row.export_observation} now={now} />
-            {row.return_rule && <ExportEvidence label="Return leg peer export" observation={row.return_export_observation} now={now} />}
+            <ExportEvidence label={row.return_rule ? "Inbound leg peer export" : "Peer export"} observation={row.export_observation} now={now} refreshFailed={Boolean(diversions.error)} />
+            {row.return_rule && <ExportEvidence label="Return leg peer export" observation={row.return_export_observation} now={now} refreshFailed={Boolean(diversions.error)} />}
             {(row.withdrawal_reason || row.last_error) && <p>{row.withdrawal_reason || row.last_error}</p>}
             <Button variant="outline" size="sm" disabled={busy || row.status === "withdrawing"} onClick={event => { withdrawTrigger.current = event.currentTarget; setWithdrawError(""); setWithdrawTarget(row) }}>Withdraw {row.rule.nlri.dst_prefix}</Button>
           </div>
@@ -316,15 +327,16 @@ interface TextFieldProps {
   inputMode?: "numeric"
   form: DiversionForm
   update: (field: keyof DiversionForm, value: string) => void
+  touch: (field: keyof DiversionForm) => void
   shown: (field: keyof DiversionForm) => string | undefined
   describedBy: (field: keyof DiversionForm) => string | undefined
   fieldError: (field: keyof DiversionForm) => ReactNode
 }
 
-function TextField({ id, label, required, placeholder, inputMode, form, update, shown, describedBy, fieldError }: TextFieldProps) {
+function TextField({ id, label, required, placeholder, inputMode, form, update, touch, shown, describedBy, fieldError }: TextFieldProps) {
   return <div className="space-y-1.5">
     <Label htmlFor={`scrub-${id}`}>{label}</Label>
-    <Input id={`scrub-${id}`} required={required} placeholder={placeholder} inputMode={inputMode} value={form[id]} onChange={event => update(id, event.target.value)} aria-invalid={Boolean(shown(id))} aria-describedby={describedBy(id)} className={id === "reason" ? undefined : "font-mono"} />
+    <Input id={`scrub-${id}`} required={required} placeholder={placeholder} inputMode={inputMode} value={form[id]} onChange={event => update(id, event.target.value)} onBlur={() => touch(id)} aria-invalid={Boolean(shown(id))} aria-describedby={describedBy(id)} className={id === "reason" ? undefined : "font-mono"} />
     {fieldError(id)}
   </div>
 }
@@ -351,10 +363,11 @@ const DIVERSION_STATUS: Record<ScrubberDiversion["status"], { label: string; ton
   simulated: { label: "Simulation", tone: "neutral" },
 }
 
-function DiversionStatusPill({ row }: { row: ScrubberDiversion }) {
+/** A row retained after a failed refresh keeps its last label but loses its status color. */
+function DiversionStatusPill({ row, stale }: { row: ScrubberDiversion; stale: boolean }) {
   const status = DIVERSION_STATUS[row.status] ?? { label: row.status, tone: "neutral" }
 
-  return <StatusPill tone={status.tone}>{status.label}</StatusPill>
+  return <StatusPill tone={stale ? "neutral" : status.tone}>{status.label}</StatusPill>
 }
 
 /** One FlowSpec rule, rendered as the speaker-neutral rule text used elsewhere in the dashboard. */
@@ -409,31 +422,30 @@ function describeReturnLeg(leg: ScrubberReturnLeg) {
   return `peers ${leg.router_peers.join(", ")} · community ${leg.export_community} · ${leg.tcp_flags === "syn_ack" ? "SYN+ACK only" : "all TCP from the mirrored ports"}`
 }
 
-// Each leg keeps its own evidence; a failed read is historical, never empty.
-function ExportEvidence({ label, observation, now }: { label: string; observation?: DiversionExportObservation | null; now: number }) {
+// Each leg keeps its own evidence; a failed read, or a failed refresh of the rows, is historical, never empty or current.
+function ExportEvidence({ label, observation, now, refreshFailed }: { label: string; observation?: DiversionExportObservation | null; now: number; refreshFailed: boolean }) {
   const { formatTime } = useTimeFormat()
 
   if (!observation) return <div className="space-y-1"><p className="font-medium">{label}</p><p className="text-muted-foreground">Not observed yet.</p></div>
-  const historical = Boolean(observation.error)
+  const historical = Boolean(observation.error) || refreshFailed
   const observed = <time dateTime={observation.observed_at}>{formatTime(observation.observed_at, now)}</time>
 
   return <div className="space-y-2">
     <div className="flex flex-wrap items-center gap-2">
       <p className="font-medium">{label}</p>
-      {historical ? <StatusPill tone="danger">Export unknown</StatusPill> : null}
+      {historical ? <StatusPill tone="warning">Export unknown</StatusPill> : null}
     </div>
     {historical
-      ? <p role="status" className="text-muted-foreground">Historical observation from {observed}. Current export is unknown: {observation.error}</p>
+      ? <p role="status" className="text-muted-foreground">Historical observation from {observed}. Current export is unknown: {observation.error || "the diversions refresh failed"}</p>
       : <p className="text-muted-foreground">Observed since {observed}</p>}
     {observation.peers.length === 0
-      ? <p className="text-muted-foreground">{historical ? "The retained observation listed no peers." : "The last complete observation listed no peers."}</p>
+      ? <p className="text-muted-foreground">{observation.error ? "No peers from a successful export observation are retained." : historical ? "The retained observation listed no peers." : "The last complete observation listed no peers."}</p>
       : <div className="overflow-x-auto rounded-md border">
         <Table aria-label={label}>
           <TableHeader><TableRow className="hover:bg-transparent"><TableHead>Peer</TableHead><TableHead>{historical ? "Export at observation" : "Export"}</TableHead><TableHead>Reason</TableHead></TableRow></TableHeader>
           <TableBody>
             {observation.peers.map(peer => {
-              // SAFETY: an unrecognized disposition indexes to undefined and falls back to a neutral label.
-              const disposition = DISPOSITION_LABEL[peer.disposition as ExportDisposition] ?? { label: peer.disposition, tone: "neutral" as const }
+              const disposition = DISPOSITION_LABEL[peer.disposition] ?? { label: peer.disposition, tone: "neutral" as const }
 
               return <TableRow key={peer.peer_address}>
                 <TableCell className="font-mono">{peer.peer_address}</TableCell>
