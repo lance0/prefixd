@@ -192,14 +192,17 @@ pub async fn check_lease_startup(
     if leased_rules > 0 && !leased_flowspec {
         return Err(PrefixdError::Config(format!(
             "{leased_rules} leased FlowSpec rule(s) at POP {pop} are active or awaiting withdrawal; \
-             keep bgp.rustbgpd.leased_flowspec until they are withdrawn or expire"
+             set bgp.rustbgpd.leased_flowspec back to true and keep it until they are withdrawn \
+             or expire. While startup is refused nothing renews the lease, so rustbgpd withdraws \
+             them within one lease"
         )));
     }
     let lease = speaker.capabilities().blackhole_lease;
     if leased_flowspec && !lease {
         return Err(PrefixdError::Config(format!(
             "bgp.rustbgpd.leased_flowspec requires the rustbgpd injection lease (0.83.0 or later), \
-             which the {} speaker does not provide",
+             which the {} speaker does not provide, or the lease probe failed (see the preceding \
+             warning)",
             speaker.backend()
         )));
     }
@@ -1847,6 +1850,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("0.83.0"), "{error}");
+        assert!(error.contains("lease probe failed"), "{error}");
         speaker.inner.live_lease(OWNER).await.unwrap();
         check_lease_startup(&settings, &speaker, &repo, OWNER)
             .await
@@ -1878,7 +1882,8 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("leased_flowspec"), "{error}");
+        assert!(error.contains("leased_flowspec back to true"), "{error}");
+        assert!(error.contains("withdraws them within one lease"), "{error}");
         // An owned rule no row desires or withdraws: a second controller.
         let mut stray = rule.clone();
         stray.nlri.dst_prefix = "203.0.113.20/32".into();

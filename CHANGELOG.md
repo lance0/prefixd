@@ -19,8 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replacement must finish before the old controller's lease runs out, which
   can be as little as two thirds of a lease after it stops, since renewal runs
   about every `lease_seconds / 3`. To keep rules announced through a controller
-  outage, set `leased_flowspec: false` before the first leased rule is added:
-  afterwards startup refuses `false` until the leased rules end. Rules added
+  outage, set `leased_flowspec: false` before the first leased rule is added.
+  Afterwards, startup refuses `false` while any leased rule is active or
+  awaiting withdrawal. A refused controller renews nothing, so rustbgpd
+  withdraws those rules within one lease while the database still holds them.
+  To opt out later, withdraw or let expire every leased FlowSpec mitigation,
+  confirm no withdrawal is pending, then set `false`. Rules added
   before the change stay unleased until they are withdrawn or expire, and
   startup accepts the mix. With the setting on, startup also refuses when the
   lease probe or the speaker's FlowSpec read fails, and when rustbgpd holds

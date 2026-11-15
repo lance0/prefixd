@@ -770,11 +770,12 @@ configuration while PostgreSQL and the original speaker remain running.
 prefixd reads `mode` only at startup. `POST /v1/config/reload` doesn't change
 it, so every mode switch passes through this check.
 
-With [leased blackholes](../reference/configuration.md#leased-blackholes), a
+With [leased FlowSpec](../reference/configuration.md#leased-flowspec) or
+[leased blackholes](../reference/configuration.md#leased-blackholes), a
 dry-run controller never renews the injection lease, because renewal is a
 speaker mutation. Switching an enforced leased controller to dry-run
-therefore lets its leased blackholes lapse at the speaker within
-`blackhole.lease_seconds`, while the enforced rows stay in the database.
+therefore lets its leased FlowSpec rules and blackholes lapse at the speaker
+within `blackhole.lease_seconds`, while the enforced rows stay in the database.
 Withdraw them first, then switch the mode.
 
 Downgrading below this release removes the protection: an older binary ignores

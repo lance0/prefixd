@@ -197,8 +197,33 @@ rustbgpd Compose profile mounts, sets it to `true`, so a controller outage
 longer than one lease removes active FlowSpec mitigations from rustbgpd while
 the database still desires them. When prefixd returns, startup re-adds the
 rules that are still active. Set `false` to keep rules announced through a
-controller outage; startup refuses that while leased rules are active or
-awaiting withdrawal.
+controller outage.
+
+Startup refuses `false` while leased FlowSpec rules are active or awaiting
+withdrawal. A refused controller renews nothing, and Compose's
+`restart: unless-stopped` only repeats the refusal, so rustbgpd withdraws
+those rules within one lease while the database still desires them. Set the
+key back to `true` to recover. To turn the lease off:
+
+1. Withdraw, or let expire, every FlowSpec mitigation added under the lease.
+   This query must return no rows:
+
+   ```sql
+   SELECT mitigation_id FROM mitigations
+   WHERE status IN ('pending', 'active', 'escalated')
+     AND action_type <> 'blackhole'
+     AND action_params_json::jsonb ->> 'injection_owner' <> '';
+   ```
+
+2. Confirm that no leased withdrawal is pending. This query must return no
+   rows:
+
+   ```sql
+   SELECT operation_id FROM withdrawal_requests
+   WHERE completed_at IS NULL AND rule_json::jsonb ->> 'owner' <> '';
+   ```
+
+3. Set `leased_flowspec: false` and restart prefixd.
 
 - **Startup.** Refused unless the speaker answers the injection lease probe,
   which every supported rustbgpd does. Refused when the speaker holds live FlowSpec
@@ -1013,8 +1038,8 @@ routes the network holds can still apply.
 - **Dry-run.** `RenewLease` is a speaker mutation, so a dry-run controller
   probes and reports the lease but never renews it; health reports
   `not_renewing`. Switching an enforced leased controller to dry-run lets its
-  leased routes lapse within `lease_seconds`. Withdraw live blackholes before
-  changing the mode, as the
+  leased FlowSpec rules and blackholes lapse within `lease_seconds`. Withdraw
+  them before changing the mode, as the
   [upgrade guide](../how-to/upgrading.md#mitigation-origin-mode) already asks.
 - **Database outages.** Renewal needs no database and no controller fence, so
   a PostgreSQL outage that puts the controller in standby does not drop leased
