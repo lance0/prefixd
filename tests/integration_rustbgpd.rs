@@ -2370,3 +2370,227 @@ async fn live_marking_release_matrix_preserves_dscp_in_both_vpn_families() {
     }
     fixture.container.rm().await.unwrap();
 }
+
+/// A detector prefix event admitted under an automatic VPN scope must keep that
+/// exact scope through repair after the speaker loses the rule, and through
+/// withdrawal.
+#[tokio::test]
+#[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
+async fn live_vpn_detector_prefix_scope_snapshot_survives_repair_and_withdrawal() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use prefixd::{
+        AppState,
+        api::create_test_router,
+        bgp::{FlowSpecReader, check_vpn_startup},
+        config::{
+            Customer, EventScope, Inventory, OperationMode, Playbook, PlaybookAction,
+            PlaybookMatch, PlaybookStep, PolicyProfile, Settings,
+        },
+        db::{MockRepository, RepositoryTrait},
+        domain::{ActionType, AttackVector, mitigation_rule},
+        scheduler::ReconciliationLoop,
+    };
+    use serde_json::{Value, json};
+    use std::{sync::Arc, time::Duration};
+    use tower::ServiceExt;
+
+    async fn post_event(app: &axum::Router, body: Value) -> (StatusCode, Value) {
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            app.clone().oneshot(
+                Request::post("/v1/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("bounded HTTP lifecycle request")
+        .unwrap();
+        let status = response.status();
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        (status, body)
+    }
+
+    let fixture = fixture::Speaker::start().await;
+    let speaker = Arc::new(fixture.connect().await);
+    let version = speaker.daemon_health().await.unwrap().version.unwrap();
+    assert!(matches!(version.as_str(), "0.83.0"), "{version}");
+    let repo = Arc::new(MockRepository::new());
+    let mut settings: Settings = fixture_settings(&fixture, "vpn-prefix");
+    settings.guardrails.allow_detector_prefix = true;
+    settings.guardrails.detector_prefix_sources = vec!["vpn-detector".into()];
+    settings.guardrails.dst_prefix_minlen = 24;
+    settings.guardrails.dst_prefix_maxlen = 32;
+    settings.bgp.vpn_scopes = serde_json::from_value(json!({
+        "TRANSIT": {"family":"ipv4","rd":"44407:40","route_targets":["44407:777"]},
+        "NEXT4": {"family":"ipv4","rd":"44407:41","route_targets":["44407:778"]}
+    }))
+    .unwrap();
+    settings.bgp.default_scope = "TRANSIT".into();
+    let inventory = Inventory::new(vec![Customer {
+        customer_id: "prefix-owner".into(),
+        name: "Prefix owner".into(),
+        prefixes: vec!["203.0.113.0/24".into()],
+        policy_profile: PolicyProfile::Normal,
+        services: vec![],
+    }]);
+    let mut playbooks = common::test_playbooks();
+    playbooks.playbooks.push(Playbook {
+        name: "carpet_udp".into(),
+        match_criteria: PlaybookMatch {
+            vector: AttackVector::UdpFlood,
+            require_top_ports: true,
+            scope: EventScope::Prefix,
+        },
+        correlation: None,
+        steps: vec![PlaybookStep {
+            action: Some(PlaybookAction::Discard),
+            rate_bps: None,
+            ttl_seconds: 120,
+            require_confidence_at_least: None,
+            require_persistence_seconds: None,
+            rules: Vec::new(),
+        }],
+    });
+    let binding = repo
+        .register_speaker_target(
+            &settings.pop,
+            &prefixd::domain::SpeakerTarget::from_config(&settings.bgp).unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+    check_vpn_startup(
+        &settings.bgp,
+        &settings.pop,
+        speaker.as_ref(),
+        repo.as_ref(),
+    )
+    .await
+    .unwrap();
+    let state = AppState::new(
+        settings.clone(),
+        inventory.clone(),
+        playbooks.clone(),
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap()
+    .with_speaker_binding(binding.clone())
+    .unwrap();
+    let app = create_test_router(state.clone());
+
+    let event = |id: &str, action: &str| {
+        json!({"event_id":id,"timestamp":chrono::Utc::now(),"source":"vpn-detector",
+            "victim_ip":"203.0.113.0/24","vector":"udp_flood","action":action,
+            "confidence":0.99,"top_dst_ports":[53]})
+    };
+    let (status, body) = post_event(&app, event("carpet", "ban")).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+    let saved = repo.get_mitigation(id).await.unwrap().unwrap();
+    assert_eq!(saved.origin_mode, Some(OperationMode::Enforced));
+    let snapshot = saved.match_criteria.scope.as_ref().unwrap();
+    assert_eq!(snapshot.name, "TRANSIT");
+    assert_eq!(snapshot.identity.rd(), "44407:40");
+    assert_eq!(snapshot.route_targets, vec!["44407:777"]);
+    assert_eq!(saved.match_criteria.dst_prefix, "203.0.113.0/24");
+    assert_eq!(saved.match_criteria.protocol, Some(17));
+    assert_eq!(saved.match_criteria.dst_ports, vec![53]);
+
+    let expected = mitigation_rule(&saved).unwrap();
+    let wait_for_expected = {
+        let speaker = speaker.clone();
+        move |expected: FlowSpecRule| {
+            let speaker = speaker.clone();
+            async move {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    let rows = speaker.list_active().await.unwrap();
+                    let matching: Vec<_> = rows
+                        .iter()
+                        .filter(|row| {
+                            speaker.matches_nlri(&row.nlri, &expected.nlri).unwrap()
+                                && row.route_targets == expected.route_targets
+                        })
+                        .collect();
+                    if matching.len() == 1 {
+                        return (*matching[0]).clone();
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "exact scoped prefix rule in local inventory"
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        }
+    };
+    let admitted = wait_for_expected(expected.clone()).await;
+    let scope = admitted.nlri.scope.as_ref().unwrap();
+    assert_eq!(scope.family.afi_safi(), 13);
+    assert_eq!(scope.rd(), "44407:40");
+    assert_eq!(admitted.actions[0].action_type, ActionType::Discard);
+
+    let receipt = fixture.received_flow_spec(13, "0.0.0.0").await;
+    assert!(receipt.received_view && !receipt.advertised_view);
+    let raw: Vec<_> = receipt
+        .received_routes
+        .iter()
+        .filter_map(|row| row.route.as_ref())
+        .filter(|row| row.rd == "44407:40")
+        .collect();
+    assert_eq!(raw.len(), 1);
+    assert_eq!(raw[0].route_targets, vec!["44407:777"]);
+
+    // The daemon loses the rule; a fresh controller whose automatic default now
+    // names another IPv4 scope repairs the saved payload, not a NEW4 rule.
+    speaker.withdraw(&expected).await.unwrap();
+    assert!(
+        speaker.list_active().await.unwrap().is_empty(),
+        "the speaker lost the rule before repair"
+    );
+    let mut changed = settings;
+    changed.bgp.default_scope = "NEXT4".into();
+    let restarted = AppState::new(
+        changed,
+        inventory,
+        playbooks,
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap()
+    .with_speaker_binding(binding)
+    .unwrap();
+    let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+        .with_app_state(restarted.clone());
+    reconciler.reconcile().await.unwrap();
+    let repaired = wait_for_expected(expected).await;
+    assert_eq!(
+        repaired.nlri.scope.as_ref().unwrap().rd(),
+        "44407:40",
+        "repair uses the saved snapshot, not the new default scope"
+    );
+    assert_eq!(repaired.route_targets, vec!["44407:777"]);
+
+    let app = create_test_router(restarted);
+    let (status, body) = post_event(&app, event("carpet", "unban")).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert!(
+        speaker.list_active().await.unwrap().is_empty(),
+        "withdrawal uses the saved VPN scope snapshot"
+    );
+    assert!(!repo.get_mitigation(id).await.unwrap().unwrap().is_active());
+    fixture.container.rm().await.unwrap();
+}
