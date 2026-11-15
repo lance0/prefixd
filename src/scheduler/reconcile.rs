@@ -3917,6 +3917,121 @@ mod tests {
             .status
     }
 
+    /// A TTL extended after the expired read, but before the lifecycle lock
+    /// is free, is seen on the fresh row: nothing is withdrawn.
+    #[tokio::test]
+    async fn expiry_rechecks_an_extension_under_the_lifecycle_lock() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(MockAnnouncer::new());
+        let mut extended = expired_mitigation("192.0.2.71");
+        repo.insert_mitigation(&extended).await.unwrap();
+        speaker
+            .announce(&crate::domain::mitigation_rule(&extended).unwrap())
+            .await
+            .unwrap();
+        let state = action_state(repo.clone(), speaker.clone());
+        let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+            .with_app_state(state.clone());
+        let guard = state.mitigation_lock.lock().await;
+        let mut expiry = Box::pin(reconciler.expire_mitigations());
+        assert!(futures_util::poll!(&mut expiry).is_pending());
+        extended.expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+        repo.update_mitigation(&extended).await.unwrap();
+        drop(guard);
+        expiry.await.unwrap();
+        assert_eq!(status(&repo, &extended).await, MitigationStatus::Active);
+        assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+    }
+
+    /// A pending request whose row has left the active set is skipped: no
+    /// speaker deletion, no error, and the immutable intent stays pending.
+    #[tokio::test]
+    async fn expiry_skips_a_pending_request_whose_row_is_no_longer_active() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(MockAnnouncer::new());
+        let mitigation = action_mitigation("192.0.2.72/32", FlowSpecAction::discard());
+        repo.insert_mitigation(&mitigation).await.unwrap();
+        speaker
+            .announce(&crate::domain::mitigation_rule(&mitigation).unwrap())
+            .await
+            .unwrap();
+        let request = request_withdrawal(
+            repo.as_ref(),
+            &mitigation,
+            false,
+            "operator",
+            "alice",
+            "test".into(),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut left = mitigation.clone();
+        left.status = MitigationStatus::Withdrawn;
+        repo.update_mitigation(&left).await.unwrap();
+        let state = action_state(repo.clone(), speaker.clone());
+        ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+            .with_app_state(state)
+            .expire_mitigations()
+            .await
+            .unwrap();
+        assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+        let pending = repo.pending_withdrawals(None).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].operation_id, request.operation_id);
+    }
+
+    /// A retried withdrawal counts under its requester: detector unban or operator.
+    #[tokio::test]
+    async fn retried_withdrawals_count_under_their_requester() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let counter = |reason| {
+            crate::observability::metrics::MITIGATIONS_WITHDRAWN
+                .with_label_values(&["discard", "test", reason])
+                .get()
+        };
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(MockAnnouncer::new());
+        let state = action_state(repo.clone(), speaker.clone());
+        let reconciler =
+            ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false).with_app_state(state);
+        for (prefix, actor_type, reason, other) in [
+            ("192.0.2.73/32", "detector", "detector_unban", "operator"),
+            ("192.0.2.74/32", "operator", "operator", "detector_unban"),
+        ] {
+            let mitigation = action_mitigation(prefix, FlowSpecAction::discard());
+            repo.insert_mitigation(&mitigation).await.unwrap();
+            speaker
+                .announce(&crate::domain::mitigation_rule(&mitigation).unwrap())
+                .await
+                .unwrap();
+            request_withdrawal(
+                repo.as_ref(),
+                &mitigation,
+                false,
+                actor_type,
+                "a",
+                "test".into(),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            let (before, untouched) = (counter(reason), counter(other));
+            reconciler.expire_mitigations().await.unwrap();
+            assert_eq!(
+                status(&repo, &mitigation).await,
+                MitigationStatus::Withdrawn
+            );
+            assert_eq!(counter(reason), before + 1.0, "{actor_type}");
+            assert_eq!(counter(other), untouched, "{actor_type}");
+        }
+    }
+
     #[tokio::test]
     async fn blackhole_ambiguous_delete_stays_pending_and_is_never_reannounced() {
         let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
