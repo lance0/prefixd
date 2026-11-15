@@ -654,10 +654,10 @@ mod tests {
                 "TRANSIT",
                 super::super::VpnFlowSpecIdentity::new(
                     super::super::VpnFlowSpecFamily::Ipv4,
-                    "44407:40",
+                    "64500:40",
                 )
                 .unwrap(),
-                &["44407:777".into()],
+                &["64500:777".into()],
             )
             .unwrap(),
         );
@@ -666,13 +666,13 @@ mod tests {
             WithdrawalRequest::new(&mitigation, false, "operator", "test", "test".into(), true)
                 .unwrap();
         let before = request.flowspec_rule().unwrap();
-        assert_eq!(before.nlri.scope.as_ref().unwrap().rd(), "44407:40");
-        assert_eq!(before.route_targets, ["44407:777"]);
+        assert_eq!(before.nlri.scope.as_ref().unwrap().rd(), "64500:40");
+        assert_eq!(before.route_targets, ["64500:777"]);
         assert_eq!(request.ownership_key().unwrap(), before.nlri_hash());
         mitigation.match_criteria.scope.as_mut().unwrap().identity =
             super::super::VpnFlowSpecIdentity::new(
                 super::super::VpnFlowSpecFamily::Ipv4,
-                "44407:41",
+                "64500:41",
             )
             .unwrap();
         mitigation
@@ -680,7 +680,7 @@ mod tests {
             .scope
             .as_mut()
             .unwrap()
-            .route_targets = vec!["44407:888".into()];
+            .route_targets = vec!["64500:888".into()];
         let after = MitigationRoute::of(&mitigation).into_flowspec().unwrap();
         assert_ne!(before.nlri_hash(), after.nlri_hash());
         let restored = request.flowspec_rule().unwrap();

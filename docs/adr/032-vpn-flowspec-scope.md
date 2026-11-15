@@ -13,7 +13,7 @@ Extends [ADR 025](025-pluggable-speaker-backends.md),
 ## Context
 
 An operator needs prefixd to inject mitigation rules into one receiver VRF,
-TRANSIT, using RD `44407:40` and scope RT `44407:777`. prefixd currently
+TRANSIT, using RD `64500:40` and scope RT `64500:777`. prefixd currently
 originates global FlowSpec. Its match hashes, inventory readers and guarded
 occupancy checks do not distinguish VPN identities. Adding RD/RT fields to
 an RPC alone would leave cross-scope deduplication and withdrawal hazards.
@@ -43,8 +43,8 @@ bgp:
     TRANSIT:
       family: ipv4
       allow_source_only: false
-      rd: "44407:40"
-      route_targets: ["44407:777"]
+      rd: "64500:40"
+      route_targets: ["64500:777"]
 ```
 
 Reserve `global` as the existing default. Manual creation and preview accept

@@ -30,10 +30,10 @@ fn settings(speaker: &fixture::Speaker) -> Settings {
     value.bgp.rustbgpd = Some(speaker.config.clone());
     value.bgp.rustbgpd.as_mut().unwrap().leased_flowspec = false;
     value.bgp.vpn_scopes = serde_json::from_value(json!({
-        "A4": {"family":"ipv4","rd":"44407:40","route_targets":["44407:777"]},
-        "B4": {"family":"ipv4","rd":"44407:41","route_targets":["44407:778"]},
-        "A6": {"family":"ipv6","rd":"44407:40","route_targets":["44407:777"]},
-        "B6": {"family":"ipv6","rd":"44407:41","route_targets":["44407:778"]}
+        "A4": {"family":"ipv4","rd":"64500:40","route_targets":["64500:777"]},
+        "B4": {"family":"ipv4","rd":"64500:41","route_targets":["64500:778"]},
+        "A6": {"family":"ipv6","rd":"64500:40","route_targets":["64500:777"]},
+        "B6": {"family":"ipv6","rd":"64500:41","route_targets":["64500:778"]}
     }))
     .unwrap();
     value

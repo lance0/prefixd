@@ -2264,7 +2264,7 @@ mod tests {
         for family in [VpnFlowSpecFamily::Ipv4, VpnFlowSpecFamily::Ipv6] {
             let rule = FlowSpecRule::new(
                 FlowSpecNlri {
-                    scope: Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap()),
+                    scope: Some(VpnFlowSpecIdentity::new(family, "64500:40").unwrap()),
                     dst_prefix: if family == VpnFlowSpecFamily::Ipv4 {
                         "192.0.2.1/32"
                     } else {
@@ -2275,7 +2275,7 @@ mod tests {
                 },
                 FlowSpecAction::discard(),
             )
-            .with_route_targets(vec!["44407:777".into()]);
+            .with_route_targets(vec!["64500:777".into()]);
             service.mode.store(0, SeqCst);
             let before = service.probes.load(SeqCst);
             speaker.announce(&rule).await.unwrap();
@@ -2334,17 +2334,17 @@ mod tests {
             for destination in [destination, ""] {
                 let rule = FlowSpecRule::new(
                     FlowSpecNlri {
-                        scope: Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap()),
+                        scope: Some(VpnFlowSpecIdentity::new(family, "64500:40").unwrap()),
                         dst_prefix: destination.into(),
                         src_prefix: Some(source.into()),
                         ..Default::default()
                     },
                     FlowSpecAction::discard(),
                 )
-                .with_route_targets(vec!["44407:777".into(), "0.44407:777".into()]);
+                .with_route_targets(vec!["64500:777".into(), "0.64500:777".into()]);
                 let encoded = encode(&rule).unwrap();
                 assert_eq!(encoded.afi_safi, family.afi_safi());
-                assert_eq!(encoded.rd, "44407:40");
+                assert_eq!(encoded.rd, "64500:40");
                 assert!(encoded.extended_communities.is_empty());
                 assert_eq!(encoded.route_targets, rule.route_targets);
                 assert_eq!(
@@ -2393,7 +2393,7 @@ mod tests {
 
     #[test]
     fn raw_duplicate_scope_targets_replay_without_typed_twins() {
-        let scope = VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "44407:40").unwrap();
+        let scope = VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "64500:40").unwrap();
         let mut rule = FlowSpecRule::new(
             FlowSpecNlri {
                 scope: Some(scope),
@@ -2402,12 +2402,12 @@ mod tests {
             },
             FlowSpecAction::discard(),
         )
-        .with_route_targets(vec!["44407:777".into(); 2]);
+        .with_route_targets(vec!["64500:777".into(); 2]);
         let encoded = encode(&rule).unwrap();
         assert!(encoded.route_targets.is_empty());
         assert_eq!(
             encoded.extended_communities,
-            vec![route_target_bytes("44407:777").unwrap(); 2]
+            vec![route_target_bytes("64500:777").unwrap(); 2]
         );
         rule.nlri.scope = None;
         assert!(encode(&rule).is_err());
@@ -2447,8 +2447,8 @@ mod tests {
                             },
                         ));
                     }
-                    5 => bad.rd = "44407:40".into(),
-                    6 => bad.route_targets = vec!["44407:777".into()],
+                    5 => bad.rd = "64500:40".into(),
+                    6 => bad.route_targets = vec!["64500:777".into()],
                     _ => unreachable!(),
                 }
                 assert!(decode(bad, original.afi_safi).is_err(), "case {case}");
@@ -2804,13 +2804,13 @@ mod tests {
             for dscp in [0, 63] {
                 let rule = FlowSpecRule::new(
                     FlowSpecNlri {
-                        scope: Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap()),
+                        scope: Some(VpnFlowSpecIdentity::new(family, "64500:40").unwrap()),
                         dst_prefix: prefix.into(),
                         ..Default::default()
                     },
                     FlowSpecAction::mark(dscp),
                 )
-                .with_route_targets(vec!["44407:777".into()]);
+                .with_route_targets(vec!["64500:777".into()]);
                 let encoded = encode(&rule).unwrap();
                 assert!(
                     matches!(encoded.actions[0].action,Some(pb::flow_spec_action::Action::TrafficMarking(ref mark)) if mark.dscp==u32::from(dscp))
@@ -2830,7 +2830,7 @@ mod tests {
                     peer_address: "0.0.0.0".into(),
                     extended_communities: vec![
                         (0x8009_u64 << 48) | u64::from(dscp),
-                        crate::domain::route_target_bytes("44407:777").unwrap(),
+                        crate::domain::route_target_bytes("64500:777").unwrap(),
                     ],
                     ..Default::default()
                 };

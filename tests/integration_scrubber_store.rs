@@ -554,8 +554,8 @@ async fn exercise_source_only_diversion_exclusion(
     source.match_criteria.scope = Some(
         VpnScopeSnapshot::new(
             "TRANSIT6",
-            VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv6, "44407:60").unwrap(),
-            &["44407:777".into()],
+            VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv6, "64500:60").unwrap(),
+            &["64500:777".into()],
         )
         .unwrap(),
     );
@@ -587,8 +587,8 @@ async fn exercise_source_only_diversion_exclusion(
     v4_source.match_criteria.scope = Some(
         VpnScopeSnapshot::new(
             "TRANSIT",
-            VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "44407:40").unwrap(),
-            &["44407:777".into()],
+            VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, "64500:40").unwrap(),
+            &["64500:777".into()],
         )
         .unwrap(),
     );

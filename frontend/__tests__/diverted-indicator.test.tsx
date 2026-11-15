@@ -29,7 +29,7 @@ const mitigation: Mitigation = {
 }
 
 describe("findDiversion", () => {
-  const vpn = { family: "ipv4" as const, rd: "44407:40" }
+  const vpn = { family: "ipv4" as const, rd: "64500:40" }
 
   it.each([
     ["a bare address", "203.0.113.20", [diversion()], "operation-1"],
@@ -57,7 +57,7 @@ describe("findDiversion", () => {
     scoped.rule.nlri.scope = vpn
     expect(findDiversion([scoped], "203.0.113.20", null)).toBeUndefined()
     expect(findDiversion([scoped], "203.0.113.20", vpn)?.id).toBe("operation-1")
-    expect(findDiversion([scoped], "203.0.113.20", { ...vpn, rd: "44407:41" })).toBeUndefined()
+    expect(findDiversion([scoped], "203.0.113.20", { ...vpn, rd: "64500:41" })).toBeUndefined()
     expect(findDiversion([scoped], "203.0.113.20")?.id).toBe("operation-1")
     expect(findDiversion([diversion()], "203.0.113.20", vpn)).toBeUndefined()
   })
@@ -140,9 +140,9 @@ describe("Diverted indicator", () => {
   it("names the VPN routing table of a scoped diversion on IP history", async () => {
     const scoped = diversion()
 
-    scoped.rule.nlri.scope = { family: "ipv4", rd: "44407:40" }
+    scoped.rule.nlri.scope = { family: "ipv4", rd: "64500:40" }
     await renderHistory([scoped])
-    expect(screen.getByRole("link", { name: "Diverted · VPNv4 RD 44407:40 through scrubber profile scrubber-a: open Scrubbers" })).toHaveTextContent("Diverted · VPNv4 RD 44407:40")
+    expect(screen.getByRole("link", { name: "Diverted · VPNv4 RD 64500:40 through scrubber profile scrubber-a: open Scrubbers" })).toHaveTextContent("Diverted · VPNv4 RD 64500:40")
   })
 
   it("shows unknown diversion state on IP history when the read fails", async () => {

@@ -482,7 +482,7 @@ mod tests {
             "TRANSIT",
             super::super::VpnFlowSpecIdentity::new(super::super::VpnFlowSpecFamily::Ipv4, rd)
                 .unwrap(),
-            &["44407:777".into()],
+            &["64500:777".into()],
         )
         .unwrap()
     }
@@ -508,8 +508,8 @@ mod tests {
         let decoded: MatchCriteria = serde_json::from_value(json).unwrap();
         assert!(decoded.scope.is_none());
         for (rd, expected) in [
-            ("44407:40", "17ac3694a05ab63f96b63d1043f2fa4b"),
-            ("44407:41", "628c89a4b18f3bd1c27599cd3445f732"),
+            ("64500:40", "ae3ef312f8e1b4b074f5e4e237a9fed0"),
+            ("64500:41", "1aa801ca8839a98050147d1089d0a4a9"),
         ] {
             let mut criteria = global.clone();
             criteria.scope = Some(vpn_scope(rd));
@@ -520,7 +520,7 @@ mod tests {
             assert_eq!(saved.compute_scope_hash(), expected);
             let scope = criteria.scope.as_mut().unwrap();
             scope.name = "renamed".into();
-            scope.route_targets = vec!["44407:888".into()];
+            scope.route_targets = vec!["64500:888".into()];
             assert_eq!(criteria.compute_scope_hash(), expected);
         }
     }
@@ -528,7 +528,7 @@ mod tests {
     #[test]
     fn source_only_requires_vpn_scope_and_is_distinct_from_explicit_default() {
         let source_only = FlowSpecNlri {
-            scope: Some(vpn_scope("44407:40").identity),
+            scope: Some(vpn_scope("64500:40").identity),
             src_prefix: Some("198.51.100.0/24".into()),
             ..Default::default()
         };

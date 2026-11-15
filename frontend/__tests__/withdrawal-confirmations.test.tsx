@@ -55,8 +55,8 @@ const sourceOnly: Mitigation = {
   src_prefix: "198.51.100.0/24",
   vpn_scope: {
     name: "TRANSIT",
-    identity: { family: "ipv4", rd: "44407:40" },
-    route_targets: ["44407:777"],
+    identity: { family: "ipv4", rd: "64500:40" },
+    route_targets: ["64500:777"],
   },
 }
 
@@ -291,7 +291,7 @@ describe.each(["list", "detail"] as const)("source-only %s confirmation", { time
     await renderView(view)
     const { dialog } = await openSingle(view)
 
-    expect(within(dialog).getByText("TRANSIT · VPNv4 · RD 44407:40 · RT 44407:777")).toBeVisible()
+    expect(within(dialog).getByText("TRANSIT · VPNv4 · RD 64500:40 · RT 64500:777")).toBeVisible()
     expect(within(dialog).getByText("198.51.100.0/24")).toBeVisible()
     expect(dialog).toHaveTextContent("(discard).")
 
