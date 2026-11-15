@@ -7212,6 +7212,92 @@ async fn reload_log_redacts_secret_file_loader_errors() {
     assert!(output.contains("visible-playbook-detail"), "{output}");
 }
 
+/// Reload ignores unknown keys as startup does and warns about each with
+/// structured file and key fields, never the value beside it.
+#[tokio::test]
+async fn reload_warns_about_unknown_keys() {
+    #[derive(Clone, Default)]
+    struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    const CANARY: &str = "hunter2-canary";
+    let capture = Capture::default();
+    let writer = capture.clone();
+    // As in `reload_log_redacts_secret_file_loader_errors`.
+    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
+    tracing::callsite::rebuild_interest_cache();
+    let directory = tempfile::tempdir().unwrap();
+    let app = setup_app_with_config_dir(directory.path().to_path_buf()).await;
+    let warnings = |capture: &Capture| -> Vec<(String, String)> {
+        String::from_utf8(capture.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|event| {
+                event["fields"]["message"]
+                    == "unknown configuration key ignored; the next release refuses it"
+            })
+            .map(|event| {
+                (
+                    event["fields"]["file"].as_str().unwrap().to_string(),
+                    event["fields"]["key"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let alerting = directory.path().join("alerting.yaml");
+    let correlation = directory.path().join("correlation.yaml");
+    std::fs::write(
+        &alerting,
+        format!("destinations:\n  - type: generic\n    url: https://example.invalid/hook\n    chanel: {CANARY}\n"),
+    )
+    .unwrap();
+    std::fs::write(&correlation, format!("close_after: {CANARY}\n")).unwrap();
+    let (status, body) = correlation_config_request(&app, "POST", "/v1/config/reload", "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        warnings(&capture),
+        vec![
+            (correlation.display().to_string(), "close_after".to_string()),
+            (
+                alerting.display().to_string(),
+                "destinations[0].chanel".to_string()
+            ),
+        ]
+    );
+    assert!(
+        !String::from_utf8(capture.0.lock().unwrap().clone())
+            .unwrap()
+            .contains(CANARY)
+    );
+
+    // Control: without the unknown keys, reload warns about nothing.
+    capture.0.lock().unwrap().clear();
+    std::fs::write(
+        &alerting,
+        "destinations:\n  - type: generic\n    url: https://example.invalid/hook\n",
+    )
+    .unwrap();
+    std::fs::write(&correlation, "enabled: true\n").unwrap();
+    let (status, body) = correlation_config_request(&app, "POST", "/v1/config/reload", "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(warnings(&capture).is_empty());
+}
+
 /// VAL-ADAPT-016: POST /v1/config/reload refreshes correlation config from YAML
 #[tokio::test]
 async fn test_reload_picks_up_correlation_config() {

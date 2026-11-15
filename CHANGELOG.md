@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Unknown configuration keys in `prefixd.yaml`, `correlation.yaml` and
+  `alerting.yaml` are ignored in this release with a warning, and the next
+  release refuses them at startup and on reload. Run `prefixd --check` against
+  your configuration and remove every key it reports before that upgrade. See
+  [unknown configuration keys](docs/how-to/upgrading.md#unknown-configuration-keys).
+- Startup now runs its configuration-only checks before it opens the database:
+  the database URL, the API bearer token, the `http.tls` files, the speaker
+  endpoint and its credentials, scrubber readiness credentials and the playbook
+  checks against settings. A configuration startup refused after connecting is
+  now refused earlier, with every error on its own line.
 - This release adds no migration: migration 020 is still the latest, as in
   0.27.0, so a rolling replacement from 0.27.0, with the new controller started
   in standby, is unaffected. From this release on, a controller refuses a
@@ -36,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limitations
 
+- `prefixd --check` cannot run checks that need a live speaker, database or
+  listener: the speaker connection and version, the playbook checks against the
+  speaker's actual capabilities, blackhole, VPN scope and lease support,
+  scrubber readiness probes, database registration, fencing and migrations, and
+  binding the listen address. It names them on every run.
+- `inventory.yaml` is not checked for unknown keys yet.
 - The TTL bound on lease renewal is owner-wide, because the rustbgpd lease is.
   During a PostgreSQL outage every leased FlowSpec rule and leased blackhole of
   a controller is renewed until the latest leased `expires_at` among them,
@@ -64,8 +80,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and still makes one bounded attempt per rule, so a wedged speaker can hold
   the lifecycle mutex for up to N × 3 seconds for an event with N rules.
 
+### Added
+
+- `prefixd --check` validates the configuration directory and exits before
+  connecting to PostgreSQL or the speaker. It shares startup's loader and its
+  pre-database checks, prints every error on its own line with the full path
+  of the file it came from, and exits 1 on any error. With leased FlowSpec on
+  by default, a refused restart no longer has to be diagnosed while active
+  mitigations lapse.
+- `prefixd --check` names each unknown configuration key, with its full key
+  path, for `prefixd.yaml`, `correlation.yaml` and `alerting.yaml`.
+
 ### Changed
 
+- Unknown configuration keys are reported with their full key path, including
+  alert destination keys such as `alerting.destinations[0].chanel` and webhook
+  adapter `auth` and `transforms` keys, and ignored
+  in this release; the next release refuses them. Startup and reload log an
+  `unknown configuration key ignored; the next release refuses it` warning with
+  `file` and `key` fields. Only key paths are reported, never values.
+- A startup refused while loading configuration reports every load error, one
+  per line, instead of the first.
 - Startup applies only the migrations the database has not recorded, each in
   its own transaction under a PostgreSQL advisory lock. A second controller
   waits instead of racing the first through the same DDL, and an up-to-date

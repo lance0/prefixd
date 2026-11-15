@@ -34,12 +34,11 @@ pub async fn speaker_factory(
     config: &crate::config::BgpConfig,
 ) -> anyhow::Result<std::sync::Arc<dyn FlowSpecAnnouncer>> {
     use crate::config::BgpMode;
-    config.validate_vpn_scopes()?;
+    check_speaker_config(config)?;
     tracing::info!(mode = ?config.mode, "selecting BGP speaker");
     Ok(match config.mode {
         BgpMode::Mock => std::sync::Arc::new(MockAnnouncer::new()),
         BgpMode::Sidecar | BgpMode::Gobgp => {
-            anyhow::ensure!(!config.gobgp_grpc.is_empty(), "bgp.gobgp_grpc is required");
             let target = crate::domain::SpeakerTarget::from_config(config)?;
             let mut speaker = GoBgpAnnouncer::new(target.endpoint().to_owned());
             speaker.connect().await?;
@@ -48,14 +47,7 @@ pub async fn speaker_factory(
         BgpMode::Rustbgpd => {
             #[cfg(feature = "bgp-rustbgpd")]
             {
-                let mut settings = config
-                    .rustbgpd
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("bgp.rustbgpd is required"))?;
-                settings.endpoint = crate::domain::SpeakerTarget::from_config(config)?
-                    .endpoint()
-                    .to_owned();
-                std::sync::Arc::new(RustBgpdAnnouncer::connect(&settings).await?)
+                std::sync::Arc::new(RustBgpdAnnouncer::connect(&rustbgpd_settings(config)?).await?)
             }
             #[cfg(not(feature = "bgp-rustbgpd"))]
             {
@@ -63,6 +55,43 @@ pub async fn speaker_factory(
             }
         }
     })
+}
+
+/// Every check [`speaker_factory`] makes before it contacts the speaker.
+/// Startup runs it before opening the database, and `prefixd --check` runs it
+/// instead of connecting.
+pub fn check_speaker_config(config: &crate::config::BgpConfig) -> anyhow::Result<()> {
+    use crate::config::BgpMode;
+    config.validate_vpn_scopes()?;
+    match config.mode {
+        BgpMode::Mock => {}
+        BgpMode::Sidecar | BgpMode::Gobgp => {
+            anyhow::ensure!(!config.gobgp_grpc.is_empty(), "bgp.gobgp_grpc is required");
+            crate::domain::SpeakerTarget::from_config(config)?;
+        }
+        BgpMode::Rustbgpd => {
+            #[cfg(feature = "bgp-rustbgpd")]
+            RustBgpdAnnouncer::check_config(&rustbgpd_settings(config)?)?;
+            #[cfg(not(feature = "bgp-rustbgpd"))]
+            anyhow::bail!("rustbgpd backend requires the bgp-rustbgpd feature");
+        }
+    }
+    Ok(())
+}
+
+/// The rustbgpd section with its endpoint normalized as the speaker target.
+#[cfg(feature = "bgp-rustbgpd")]
+fn rustbgpd_settings(
+    config: &crate::config::BgpConfig,
+) -> anyhow::Result<crate::config::RustBgpdConfig> {
+    let mut settings = config
+        .rustbgpd
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("bgp.rustbgpd is required"))?;
+    settings.endpoint = crate::domain::SpeakerTarget::from_config(config)?
+        .endpoint()
+        .to_owned();
+    Ok(settings)
 }
 
 #[cfg(test)]

@@ -182,6 +182,63 @@ pub enum WebhookAuth {
     None,
 }
 
+/// Keys each [`WebhookAuth`] variant declares; see
+/// [`crate::config::unknown_tagged_keys`].
+const AUTH_KEYS: [(&str, &[&str]); 3] = [
+    ("hmac", &["secret_env", "header", "algorithm"]),
+    ("bearer", &[]),
+    ("none", &[]),
+];
+
+/// Keys each [`WebhookTransform`] variant declares.
+const TRANSFORM_KEYS: [(&str, &[&str]); 3] = [
+    ("unit_conversion", &["multiplier"]),
+    ("regex_extract", &["pattern", "group"]),
+    ("computed", &["paths", "scale"]),
+];
+
+/// The keys of each adapter's internally tagged `auth` and `transforms`
+/// entries, read without values. Keys this release ignores there, such as
+/// `webhook_adapters[0].auth.heder`, are reported by path; the rest of an
+/// adapter is reported by the loader itself.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct AdapterKeys {
+    #[serde(default)]
+    webhook_adapters: Vec<AdapterProbe>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AdapterProbe {
+    #[serde(default)]
+    auth: Option<crate::config::TaggedKeys>,
+    #[serde(default)]
+    transforms: std::collections::BTreeMap<String, crate::config::TaggedKeys>,
+}
+
+impl AdapterKeys {
+    pub(crate) fn unknown(&self) -> Vec<String> {
+        let mut unknown = Vec::new();
+        for (index, adapter) in self.webhook_adapters.iter().enumerate() {
+            let path = format!("webhook_adapters[{index}]");
+            if let Some(auth) = &adapter.auth {
+                unknown.extend(crate::config::unknown_tagged_keys(
+                    auth,
+                    &format!("{path}.auth"),
+                    &AUTH_KEYS,
+                ));
+            }
+            for (field, transform) in &adapter.transforms {
+                unknown.extend(crate::config::unknown_tagged_keys(
+                    transform,
+                    &format!("{path}.transforms.{}", crate::config::redacted_key(field)),
+                    &TRANSFORM_KEYS,
+                ));
+            }
+        }
+        unknown
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1574,5 +1631,128 @@ mod tests {
             WebhookTransform::UnitConversion { multiplier } => assert_eq!(*multiplier, 1e6),
             _ => panic!("expected UnitConversion"),
         }
+    }
+
+    /// `samples` covers every variant serde knows, and `table` lists exactly
+    /// the keys each serializes.
+    fn assert_tagged_table<T: Serialize + serde::de::DeserializeOwned>(
+        samples: &[T],
+        tag: impl Fn(&T) -> &'static str,
+        table: &[(&str, &[&str])],
+    ) {
+        let error = serde_json::from_value::<T>(serde_json::json!({"type": "-"}))
+            .err()
+            .unwrap()
+            .to_string();
+        let mut variants: Vec<&str> = error
+            .split("expected one of ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{error}"))
+            .split(", ")
+            .map(|variant| variant.trim_matches('`'))
+            .collect();
+        variants.sort_unstable();
+        let mut sampled: Vec<&str> = samples.iter().map(&tag).collect();
+        sampled.sort_unstable();
+        let mut tabled: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
+        tabled.sort_unstable();
+        assert_eq!(sampled, variants);
+        assert_eq!(tabled, variants);
+        for sample in samples {
+            let value = serde_json::to_value(sample).unwrap();
+            let mut serialized: Vec<&str> = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .filter(|key| *key != "type")
+                .collect();
+            serialized.sort_unstable();
+            let (_, known) = table.iter().find(|(name, _)| *name == tag(sample)).unwrap();
+            let mut known = known.to_vec();
+            known.sort_unstable();
+            assert_eq!(serialized, known, "{}", tag(sample));
+        }
+    }
+
+    /// The adapter key tables track the tagged enums. Each `match` is
+    /// exhaustive, so a new variant fails to compile until it has a tag, and
+    /// the table checks fail until it has a sample and an entry.
+    #[test]
+    fn adapter_key_tables_track_the_variants() {
+        assert_tagged_table(
+            &[
+                WebhookAuth::Hmac {
+                    secret_env: "HMAC_SECRET".into(),
+                    header: "X-Signature".into(),
+                    algorithm: "sha256".into(),
+                },
+                WebhookAuth::Bearer,
+                WebhookAuth::None,
+            ],
+            |auth| match auth {
+                WebhookAuth::Hmac { .. } => "hmac",
+                WebhookAuth::Bearer => "bearer",
+                WebhookAuth::None => "none",
+            },
+            &AUTH_KEYS,
+        );
+        assert_tagged_table(
+            &[
+                WebhookTransform::UnitConversion { multiplier: 8.0 },
+                WebhookTransform::RegexExtract {
+                    pattern: "x".into(),
+                    group: 0,
+                },
+                WebhookTransform::Computed {
+                    paths: vec!["$.a".into()],
+                    scale: 1.0,
+                },
+            ],
+            |transform| match transform {
+                WebhookTransform::UnitConversion { .. } => "unit_conversion",
+                WebhookTransform::RegexExtract { .. } => "regex_extract",
+                WebhookTransform::Computed { .. } => "computed",
+            },
+            &TRANSFORM_KEYS,
+        );
+    }
+
+    /// Typos inside tagged adapter fields are reported in `correlation.yaml`
+    /// and inline in `prefixd.yaml`, by path and never by value.
+    #[test]
+    fn adapter_tagged_typos_are_reported_with_their_path() {
+        const CANARY: &str = "hunter2-canary";
+        let adapter = format!(
+            "webhook_adapters:\n  - name: a\n    auth: {{type: hmac, secret_env: S, heder: {CANARY}}}\n    \
+             fields: {{victim_ip: $.ip}}\n    transforms:\n      bps: {{type: computed, paths: [$.a], sclae: 8}}\n"
+        );
+        let (_, keys) = crate::correlation::CorrelationConfig::from_yaml(&adapter).unwrap();
+        assert_eq!(
+            keys,
+            vec![
+                "webhook_adapters[0].auth.heder",
+                "webhook_adapters[0].transforms.bps.sclae"
+            ]
+        );
+        assert!(!keys.join(" ").contains(CANARY));
+        let inline = format!(
+            "pop: iad1\nhttp: {{listen: '127.0.0.1:8080', auth: {{mode: none}}}}\n\
+             bgp: {{local_asn: 65010, router_id: 192.0.2.1}}\nguardrails: {{require_ttl: true}}\n\
+             quotas: {{max_active_per_customer: 20}}\ntimers: {{default_ttl_seconds: 120}}\n\
+             observability: {{log_level: info}}\ncorrelation:\n{}",
+            adapter
+                .lines()
+                .map(|line| format!("  {line}\n"))
+                .collect::<String>()
+        );
+        let (_, keys) = crate::config::Settings::from_yaml(&inline).unwrap();
+        assert_eq!(
+            keys,
+            vec![
+                "correlation.webhook_adapters[0].auth.heder",
+                "correlation.webhook_adapters[0].transforms.bps.sclae"
+            ]
+        );
     }
 }
