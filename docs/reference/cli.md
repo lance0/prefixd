@@ -268,7 +268,9 @@ prefixdctl mitigations withdraw <id> --reason "false positive"
 ```
 
 `--reason` is required and must contain text of at most 1,024 UTF-8 bytes.
-The CLI refuses a blank reason before sending the request.
+The CLI refuses a blank reason before sending the request. The authenticated
+API identity supplies the actor. `--operator` is optional, accepted for older
+scripts and ignored; the CLI does not send it.
 
 ---
 
@@ -324,6 +326,9 @@ prefixdctl safelist list
 ```bash
 prefixdctl safelist add 10.0.0.1/32 --reason "router loopback"
 ```
+
+The authenticated API identity is recorded as `added_by`. `--operator` is
+optional, accepted for older scripts and ignored.
 
 ### Remove from Safelist
 
@@ -432,7 +437,9 @@ prefixdctl -f json mitigations list
 | 2 | Invalid command-line usage, such as an unknown command or missing argument |
 
 Scripts that need the failure kind should read the stderr message, which
-includes the HTTP status for API errors.
+includes the HTTP status for API errors. When a 401 or 403 response carries no
+error message, stderr names it as an authentication failure or a permission
+denial.
 
 ---
 
