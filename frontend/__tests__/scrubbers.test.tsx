@@ -300,6 +300,7 @@ describe("diversion withdrawal", () => {
     controller.route("GET", "/v1/diversions", () => json([]))
     const dialog = await openWithdraw()
 
+    fireEvent.change(within(dialog).getByLabelText("Withdrawal reason"), { target: { value: "Attack subsided" } })
     fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" }))
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
     await waitFor(() => expect(screen.getByText("Outstanding diversions")).toHaveFocus())
