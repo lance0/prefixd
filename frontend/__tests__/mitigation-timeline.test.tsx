@@ -119,15 +119,18 @@ describe("Mitigation timeline", () => {
 
   it("shows the operation ID and ended lifetime of a withdrawal", async () => {
     const withdrawnAt = new Date(Date.now() - 60_000).toISOString()
+
     const withdrawal = entry("withdraw", withdrawnAt, { actor_type: "system", actor_id: "safelist" }, {
       reason: "safelisted after admission",
       operation_id: "op-1234-5678",
       previous_expires_at: expiry,
       ended_at: withdrawnAt,
     })
+
     signIn(controller, "none", null)
     controller.route("GET", "/v1/config/inventory", () => json({ customers: [], total_customers: 0, total_services: 0, total_assets: 0, loaded_at: new Date().toISOString() }))
     controller.route("GET", mitigationPath, () => json({ ...mitigation, status: "withdrawn", withdrawn_at: withdrawnAt }))
+
     controller.route("GET", "/v1/audit", () => json({ entries: [withdrawal, ...entries], count: 3, next_cursor: null, has_more: false }))
     const timeline = await renderPage()
 

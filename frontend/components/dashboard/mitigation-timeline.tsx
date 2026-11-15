@@ -10,19 +10,19 @@ import { useAuditLog } from "@/hooks/use-api"
 import { usePermissions } from "@/hooks/use-permissions"
 import type { AuditEntry, Mitigation } from "@/lib/api"
 
-const ACTION_LABELS: Record<string, string> = {
-  create: "Created",
-  extend: "Lifetime extended",
-  withdraw: "Withdrawn",
-  expire: "Expired",
-  announce: "Announced",
-  escalate: "Escalated",
-}
+const ACTION_LABELS = new Map([
+  ["create", "Created"],
+  ["extend", "Lifetime extended"],
+  ["withdraw", "Withdrawn"],
+  ["expire", "Expired"],
+  ["announce", "Announced"],
+  ["escalate", "Escalated"],
+])
 
 const AUDIT_LIMIT = 100
 
 function actionLabel(action: string) {
-  return ACTION_LABELS[action] ?? action.replace(/_/g, " ")
+  return ACTION_LABELS.get(action) ?? action.replace(/_/g, " ")
 }
 
 function Step({ label, time, now, hollow = false, children }: {
@@ -107,9 +107,11 @@ export function MitigationTimeline({ mitigation, now }: { mitigation: Mitigation
   const { formatTime } = useTimeFormat()
   const permissions = usePermissions()
   const canReadAudit = permissions.settled && permissions.isOperator
+
   const { data, error, isLoading, mutate } = useAuditLog(
     canReadAudit ? { target_type: "mitigation", target_id: mitigation.mitigation_id, limit: AUDIT_LIMIT } : null,
   )
+
   const entries = [...(data?.entries ?? [])].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp) || a.audit_id.localeCompare(b.audit_id))
   const expired = Date.parse(mitigation.expires_at) <= now
   const ended = mitigation.status === "expired" ? "Expired" : "Withdrawn"
