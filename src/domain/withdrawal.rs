@@ -587,6 +587,35 @@ mod tests {
         mitigation
     }
 
+    /// The audit entry keeps the request's actor kind, verb, reason and operation ID.
+    #[test]
+    fn withdrawal_audit_entry_preserves_actor_kind_and_operation() {
+        use crate::observability::ActorType;
+        let mitigation = mitigation("192.0.2.1/32");
+        for (actor_type, expired, kind, action) in [
+            ("operator", false, ActorType::Operator, "withdraw"),
+            ("detector", false, ActorType::Detector, "withdraw"),
+            ("system", true, ActorType::System, "expire"),
+        ] {
+            let request =
+                WithdrawalRequest::new(&mitigation, expired, actor_type, "a", "why".into(), true)
+                    .unwrap();
+            let entry = request.audit_entry();
+            assert_eq!(
+                std::mem::discriminant(&entry.actor_type),
+                std::mem::discriminant(&kind),
+                "{actor_type}"
+            );
+            assert_eq!(entry.actor_id.as_deref(), Some("a"));
+            assert_eq!(entry.action, action);
+            assert_eq!(entry.target_id, Some(mitigation.mitigation_id.to_string()));
+            assert_eq!(
+                entry.details,
+                serde_json::json!({"reason": "why", "operation_id": request.operation_id})
+            );
+        }
+    }
+
     #[test]
     fn vpn_withdrawal_freezes_scope_and_rt_snapshot() {
         let mut mitigation = mitigation("192.0.2.1/32");
@@ -654,9 +683,74 @@ mod tests {
                 None
             )
             .await,
-            Err(PrefixdError::Conflict(_))
+            Err(PrefixdError::Conflict(message)) if message == "FlowSpec rule has another active owner"
         ));
         assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+    }
+
+    /// Any one drifted field of the frozen intent refuses the withdrawal.
+    #[tokio::test]
+    async fn withdrawal_owner_check_refuses_each_drifted_field_alone() {
+        let repo = MockRepository::new();
+        let current = mitigation("192.0.2.1/32");
+        repo.insert_mitigation(&current).await.unwrap();
+        let request =
+            WithdrawalRequest::new(&current, false, "operator", "a", "why".into(), true).unwrap();
+        check_withdrawal_owner(&repo, &request).await.unwrap();
+        let drifts: [fn(&mut WithdrawalRequest); 4] = [
+            |r| r.pop = "other".into(),
+            |r| r.mitigation_updated_at += chrono::Duration::seconds(1),
+            |r| r.rule_kind = BLACKHOLE_KIND.into(),
+            |r| r.nlri_hash = "drifted".into(),
+        ];
+        for (case, drift) in drifts.into_iter().enumerate() {
+            let mut drifted = request.clone();
+            drift(&mut drifted);
+            assert!(
+                matches!(
+                    check_withdrawal_owner(&repo, &drifted).await,
+                    Err(PrefixdError::Conflict(message))
+                        if message == "withdrawal intent no longer matches mitigation"
+                ),
+                "case {case}"
+            );
+        }
+    }
+
+    /// Each owner match stands alone: a persisted scope hash, a recomputed
+    /// scope hash or the route's ownership key.
+    #[tokio::test]
+    async fn owner_lookup_matches_on_each_identity_alone() {
+        let repo = MockRepository::new();
+        let mut persisted = mitigation("192.0.2.1/32");
+        persisted.scope_hash = "persisted-before-recompute".into();
+        repo.insert_mitigation(&persisted).await.unwrap();
+        let other = MitigationRoute::of(&mitigation("192.0.2.2/32"));
+        let found = |scope_hash: String, route: MitigationRoute| {
+            let repo = &repo;
+            async move {
+                find_mitigation_owner(repo, "test", &route, &scope_hash)
+                    .await
+                    .unwrap()
+                    .map(|owner| owner.mitigation_id)
+            }
+        };
+        assert_eq!(
+            found("persisted-before-recompute".into(), other.clone()).await,
+            Some(persisted.mitigation_id)
+        );
+        let recomputed = persisted
+            .match_criteria
+            .scope_hash_for(persisted.action_type);
+        assert_eq!(
+            found(recomputed, other.clone()).await,
+            Some(persisted.mitigation_id)
+        );
+        assert_eq!(
+            found("unrelated".into(), MitigationRoute::of(&persisted)).await,
+            Some(persisted.mitigation_id)
+        );
+        assert_eq!(found("unrelated".into(), other).await, None);
     }
 
     #[tokio::test]
@@ -692,7 +786,7 @@ mod tests {
                 &candidate.scope_hash
             )
             .await,
-            Err(PrefixdError::Conflict(_))
+            Err(PrefixdError::Conflict(message)) if message == "FlowSpec rule has a pending withdrawal"
         ));
     }
 
@@ -1305,6 +1399,19 @@ mod tests {
             .unwrap()
             .is_none()
         );
+        // Two blackhole rows on one host are ambiguous owners, named by route kind.
+        let twin = blackhole("192.0.2.1/32");
+        repo.insert_mitigation(&twin).await.unwrap();
+        assert!(matches!(
+            find_mitigation_owner(
+                &repo,
+                "test",
+                &MitigationRoute::of(&twin),
+                &twin.scope_hash
+            )
+            .await,
+            Err(PrefixdError::Conflict(message)) if message == "blackhole route has multiple active owners"
+        ));
     }
 
     #[tokio::test]
