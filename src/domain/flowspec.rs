@@ -717,8 +717,24 @@ mod tests {
                 },
                 FlowSpecActionError::NotFlowSpec,
             ),
+            // Only mark carries DSCP; a rate action with it is refused, never encoded.
+            (
+                FlowSpecAction {
+                    dscp: Some(46),
+                    ..FlowSpecAction::discard()
+                },
+                FlowSpecActionError::UnexpectedDscp,
+            ),
+            (
+                FlowSpecAction {
+                    dscp: Some(46),
+                    ..FlowSpecAction::police(8_000)
+                },
+                FlowSpecActionError::UnexpectedDscp,
+            ),
         ] {
-            assert_eq!(action.traffic_rate_bytes_per_second(), Err(error));
+            assert_eq!(action.traffic_rate_bytes_per_second(), Err(error.clone()));
+            assert_eq!(action.validate(), Err(error));
         }
     }
 
