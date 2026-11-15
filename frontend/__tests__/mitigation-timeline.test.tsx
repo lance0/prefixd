@@ -71,8 +71,13 @@ function serve(audit: () => Response, auth: "none" | "viewer" = "none") {
 }
 
 async function renderPage() {
+  return (await renderPageWithApp()).timeline
+}
+
+async function renderPageWithApp() {
+  let app!: ReturnType<typeof renderApp>
   await act(async () => {
-    renderApp(
+    app = renderApp(
       <Suspense fallback={<div>Loading suspense...</div>}>
         <MitigationDetailPage params={Promise.resolve({ id })} />
       </Suspense>,
@@ -83,8 +88,10 @@ async function renderPage() {
   await settle()
   await settle()
 
-  return screen.getByTestId("mitigation-timeline")
+  return { app, timeline: screen.getByTestId("mitigation-timeline") }
 }
+
+const steps = (timeline: HTMLElement) => within(timeline).getAllByRole("listitem").map((step) => step.querySelector("p")?.textContent)
 
 describe("Mitigation timeline", () => {
   it("lists this mitigation's audit entries with actor, reason and old and new expiry", async () => {
@@ -158,6 +165,51 @@ describe("Mitigation timeline", () => {
     await act(async () => { fireEvent.click(within(alert).getByRole("button", { name: "Retry" })) })
     await waitFor(() => expect(within(timeline).getByText("Lifetime extended")).toBeInTheDocument())
     expect(within(timeline).queryByRole("alert")).not.toBeInTheDocument()
+  })
+
+  it("keeps the API's full-precision order instead of re-sorting truncated timestamps", async () => {
+    // Same millisecond, different microseconds; the API returns the later entry first.
+    const later = { ...entry("extend", "2026-11-15T10:00:00.123900Z", { actor_type: "operator", actor_id: "bob" }, { reason: "second" }), audit_id: "a-later" }
+    const earlier = { ...entry("extend", "2026-11-15T10:00:00.123100Z", { actor_type: "operator", actor_id: "alice" }, { reason: "first" }), audit_id: "z-earlier" }
+
+    serve(() => json({ entries: [later, earlier], count: 2, next_cursor: null, has_more: false }))
+    const timeline = await renderPage()
+
+    await waitFor(() => expect(within(timeline).getByText("second")).toBeInTheDocument())
+    const reasons = within(timeline).getAllByText(/^(first|second)$/).map((node) => node.textContent)
+    expect(reasons).toEqual(["first", "second"])
+  })
+
+  it("does not let an orphan cleanup entry stand in for the lifetime's end", async () => {
+    const withdrawnAt = new Date(Date.now() - 120_000).toISOString()
+    // A reconciler cleanup after the fact carries no operation ID and does not end the lifetime.
+    const cleanup = entry("withdraw", new Date(Date.now() - 30_000).toISOString(), { actor_type: "system", actor_id: "reconciler" }, { reason: "orphaned after downtime" })
+
+    signIn(controller, "none", null)
+    controller.route("GET", "/v1/config/inventory", () => json({ customers: [], total_customers: 0, total_services: 0, total_assets: 0, loaded_at: new Date().toISOString() }))
+    controller.route("GET", mitigationPath, () => json({ ...mitigation, status: "expired", withdrawn_at: withdrawnAt }))
+    controller.route("GET", "/v1/audit", () => json({ entries: [cleanup], count: 1, next_cursor: null, has_more: false }))
+    const timeline = await renderPage()
+
+    await waitFor(() => expect(within(timeline).getByText("orphaned after downtime")).toBeInTheDocument())
+    expect(steps(timeline)).toEqual(["Created", "Withdrawn", "Expired"])
+    const expiredStep = within(timeline).getAllByRole("listitem")[2]
+    expect(expiredStep.querySelector("time")?.getAttribute("dateTime")).toBe(withdrawnAt)
+  })
+
+  it("shows a refresh failure after a successful load and keeps the loaded entries", async () => {
+    let fail = false
+    serve(() => fail ? failure(500, "audit unavailable") : json({ entries, count: entries.length, next_cursor: null, has_more: false }))
+    const { app, timeline } = await renderPageWithApp()
+
+    await waitFor(() => expect(within(timeline).getByText("Lifetime extended")).toBeInTheDocument())
+    fail = true
+    await act(async () => { await app.mutate()((key) => Array.isArray(key) && key[0] === "audit") })
+    await settle()
+
+    const alert = await within(timeline).findByRole("alert")
+    expect(alert).toHaveTextContent("last successful load")
+    expect(within(timeline).getByText("Lifetime extended")).toBeInTheDocument()
   })
 
   it("does not request the audit for a viewer and keeps the record's timeline", async () => {

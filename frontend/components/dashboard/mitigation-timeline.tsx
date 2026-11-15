@@ -19,7 +19,8 @@ const ACTION_LABELS = new Map([
   ["escalate", "Escalated"],
 ])
 
-const AUDIT_LIMIT = 100
+// ponytail: one page at the API maximum; a mitigation with more history shows its latest entries and says so.
+const AUDIT_LIMIT = 1000
 
 function actionLabel(action: string) {
   return ACTION_LABELS.get(action) ?? action.replace(/_/g, " ")
@@ -112,13 +113,15 @@ export function MitigationTimeline({ mitigation, now }: { mitigation: Mitigation
     canReadAudit ? { target_type: "mitigation", target_id: mitigation.mitigation_id, limit: AUDIT_LIMIT } : null,
   )
 
-  const entries = [...(data?.entries ?? [])].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp) || a.audit_id.localeCompare(b.audit_id))
+  // The API orders by the full-precision (timestamp, audit_id) tuple, newest first; Date.parse would drop microseconds.
+  const entries = [...(data?.entries ?? [])].reverse()
   const expired = Date.parse(mitigation.expires_at) <= now
   const ended = mitigation.status === "expired" ? "Expired" : "Withdrawn"
 
   // The record's own steps fill in whatever the audit does not cover, including entries older than the page.
   const hasCreate = entries.some((entry) => entry.action === "create")
-  const hasEnd = entries.some((entry) => entry.action === "withdraw" || entry.action === "expire")
+  // Only a completed withdrawal operation carries an operation ID; a later orphan cleanup does not end the lifetime.
+  const hasEnd = entries.some((entry) => (entry.action === "withdraw" || entry.action === "expire") && Boolean(entry.details.operation_id))
 
   return (
     <Card data-testid="mitigation-timeline">
@@ -126,11 +129,13 @@ export function MitigationTimeline({ mitigation, now }: { mitigation: Mitigation
         <CardTitle>Timeline</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        {error && !data ? (
+        {error ? (
           <div className="rounded-md border">
             <ErrorState
               title="Unable to load audit entries"
-              detail={`${error.message}. The timestamps below come from the mitigation record; retry, or open the audit log.`}
+              detail={data
+                ? `${error.message}. The entries below are from the last successful load and may be missing recent changes; retry.`
+                : `${error.message}. The timestamps below come from the mitigation record; retry.`}
               onRetry={() => { void mutate() }}
             />
           </div>
@@ -160,10 +165,7 @@ export function MitigationTimeline({ mitigation, now }: { mitigation: Mitigation
         </ol>
 
         {data?.has_more ? (
-          <p className="text-xs text-muted-foreground">
-            Showing the latest {AUDIT_LIMIT} entries. Older entries are in the{" "}
-            <Link href="/audit-log" className="rounded-sm text-foreground hover:underline">audit log</Link>.
-          </p>
+          <p className="text-xs text-muted-foreground">Showing the latest {AUDIT_LIMIT} audit entries; older entries are not shown.</p>
         ) : null}
         {mitigation.updated_at !== mitigation.created_at ? (
           <p className="text-xs text-muted-foreground">
