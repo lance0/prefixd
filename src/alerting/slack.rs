@@ -36,6 +36,13 @@ pub fn build_payload(alert: &Alert, channel: Option<&str>) -> serde_json::Value 
         }),
     ];
 
+    if alert.dry_run {
+        fields.push(serde_json::json!({
+            "type": "mrkdwn",
+            "text": "*Mode:* dry run, not announced"
+        }));
+    }
+
     if let Some(ref ip) = alert.victim_ip {
         fields.push(serde_json::json!({
             "type": "mrkdwn",

@@ -188,8 +188,9 @@ destinations:
 ```
 
 An app's webhook always posts to the channel chosen when it was created. Slack
-documents that the payload cannot override it, so prefixd's optional `channel`
-key does not move app webhook messages. Create one webhook per channel instead.
+documents that the payload cannot override it, so the optional `channel` key is
+legacy-only: prefixd still sends it for older custom integrations, but it does
+not move app webhook messages. Create one webhook per channel instead.
 Slack revokes webhook URLs it finds published, so keep the URL out of
 repositories.
 
@@ -313,11 +314,12 @@ destinations:
 ```
 
 `region: eu` sends to `api.eu.opsgenie.com`; anything else is refused. prefixd
-creates an alert whose alias is the mitigation ID and never closes it. A later
-`mitigation.withdrawn` or `mitigation.expired` alert reuses the alias. Opsgenie
-folds it into the alert while that is open and raises its count, or opens a new
-alert if it was closed. Close alerts in Opsgenie, and send only
-`mitigation.created` there to avoid the follow-up alerts.
+creates an alert whose alias is the mitigation ID. A later
+`mitigation.withdrawn` or `mitigation.expired` closes that alert through
+Opsgenie's close API, using the same alias, instead of creating another alert.
+A close for an alias with nothing open counts as success, so a withheld or
+already-closed alert does not fail delivery. To alert only on new mitigations,
+send only `mitigation.created` there.
 
 ### Generic webhook
 
@@ -393,9 +395,10 @@ prefixd sends these events:
 | `mitigation.withdrawn` | An operator withdraws a mitigation, a detector sends an unban, a safelist addition withdraws one, or the controller completes a pending withdrawal. |
 | `mitigation.expired` | A mitigation's TTL expires and the controller withdraws it. Expiry needs the running controller. |
 
-Filters also accept `config.reloaded` and `guardrail.rejected`, and the editor
-offers them, but prefixd sends no alert for either today. `mitigation.escalated`
-is accepted so older files still load; it is never sent.
+Filters still accept `config.reloaded`, `guardrail.rejected` and
+`mitigation.escalated` so configuration files written by older releases keep
+loading, but prefixd sends no alert for any of them and the editor does not
+offer them.
 
 A destination with a nonempty `events` list receives only those events. A
 destination whose list is absent or empty, including `events: []`, uses the
@@ -436,22 +439,27 @@ of the cookie. `prefixdctl` has no test command.
 ```json
 {
   "results": [
-    {"destination": "slack", "status": "ok", "error": null},
-    {"destination": "pagerduty", "status": "error", "error": "pagerduty returned 400 Bad Request — ..."}
+    {"index": 0, "destination": "slack", "status": "ok", "error": null},
+    {"index": 1, "destination": "pagerduty", "status": "error", "error": "pagerduty returned 400 Bad Request — ..."}
   ]
 }
 ```
 
-The test is a `mitigation.created` alert titled **Test Alert** at `info`
-severity, for `203.0.113.1`, `udp_flood`, `discard`, customer `test_customer`
-and POP `test`. It goes only to destinations whose filter includes
-`mitigation.created`, and `results` lists only those, in configuration order. A
-destination missing from the list did not receive it. The request waits for
-every delivery, including [retries](#current-limits), so a failing destination
-can hold it for up to about 36 seconds.
+The test is sent as a `test` event titled **Test Alert** at `info` severity, for
+`203.0.113.1`, `udp_flood`, `discard`, customer `test_customer` and POP `test`.
+It reaches every configured destination, whatever its event filter, and
+`results` lists one entry per destination: `index` is the destination's position
+in the running configuration, counted from 0, which identifies its card in the
+editor. The dashboard keys each result by `index`, not by the entry's position
+in the `results` array. The request waits for every delivery,
+including [retries](#current-limits), so a failing destination can hold it for
+up to about 36 seconds.
 
 A test opens a real PagerDuty incident and a real Opsgenie alert, keyed by the
-title `Test Alert`. No later event resolves them; close them by hand.
+title `Test Alert`. prefixd resolves the PagerDuty incident and closes the
+Opsgenie alert immediately after creating it, so a successful test leaves
+nothing open. The result is an error if either the create or the follow-up
+resolve fails.
 
 ## What alerts look like
 
@@ -474,9 +482,13 @@ details.
 | Opsgenie | Alert with priority P3 for warning and P5 for info, tags `prefixd` and the event, and the details |
 | Generic | The JSON [shown above](#generic-webhook) |
 
-Customer and POP appear only when the mitigation has them. Alerts do not say who
-acted, whether the controller is in dry-run, or whether a router enforced the
-rule.
+Customer and POP appear only when the mitigation has them. A dry-run
+mitigation's alerts say so: the title starts with `Dry Run: `, the message ends
+with `— dry run, not announced`, and the generic webhook JSON adds
+`"dry_run": true`. Chat, incident and webhook payloads carry the same marker in
+their details, and Opsgenie adds a `dry-run` tag, so an operator cannot mistake
+a simulation for an announced rule. Alerts do not say who acted or whether a
+router enforced the rule.
 
 ## Rules prefixd enforces
 
@@ -566,8 +578,8 @@ so the platform's own error text is in it.
 
 ### Nothing arrives
 
-- Run a test alert. If `results` is empty, no destination accepts
-  `mitigation.created`; check the event filters.
+- Run a test alert. It reaches every configured destination, so an empty
+  `results` list means no destination is configured.
 - Check the event filters for the event you expected. Withdrawal and expiry go
   only to destinations that list them, or to all when no filter applies.
 - Search the controller log for `alert delivery failed`, which names the
@@ -604,7 +616,5 @@ busy chat channels, or point busy events at a generic webhook that aggregates.
 - **No actor in the payload.** Alerts do not say which operator, detector or
   controller task caused the change. Use the audit log; naming the origin and
   actor in alerts is planned.
-- **No dry-run marker.** Dry-run mitigations send the same alerts as enforced
-  ones.
 - **No router evidence.** An alert reports the controller's decision, not that
   a router installed or enforced the rule.

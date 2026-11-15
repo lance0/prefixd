@@ -7,8 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Alert destinations and the editor offer only the events prefixd sends:
+  `mitigation.created`, `mitigation.withdrawn` and `mitigation.expired`.
+  `config.reloaded` and `guardrail.rejected` remain accepted in stored filters
+  and notification mutes, but neither is offered any more and the unused
+  configuration-reload alert constructor is gone. A `config.reloaded` mute
+  still suppresses the dashboard's websocket resync toast.
+- A test alert is sent as event type `test` to every configured destination,
+  whatever its event filter, and each test result gains `index`, the
+  destination's position in the running configuration. A generic webhook
+  consumer that identified the test payload by `mitigation.created` should
+  match `test` instead. The dashboard keys results by `index`, so a filtered
+  destination no longer shifts a result onto the wrong card.
+- Slack `channel` is legacy-only. An app's incoming webhook always posts to the
+  channel it was created for; the editor labels the field accordingly. The
+  payload still carries the key for older custom integrations.
+
 ### Fixed
 
+- Opsgenie withdrawn and expired alerts close the mitigation's alert by alias
+  through Opsgenie's close API instead of creating a second alert, and a close
+  for an alias with nothing open counts as success.
+- PagerDuty and Opsgenie test alerts no longer leave an incident open: prefixd
+  resolves the PagerDuty incident and closes the Opsgenie alert immediately
+  after creating it.
+- Alerts for dry-run mitigations are marked as simulations. The title starts
+  with `Dry Run: `, the message ends with `— dry run, not announced`, generic
+  webhook JSON and PagerDuty custom details add `dry_run: true`, Slack, Discord,
+  Teams and Telegram payloads carry a mode field, and Opsgenie tags the alert
+  `dry-run`.
 - The release workflow stages its assets in `release-assets/` instead of
   `dist/`. The checkout tracks `dist/systemd/`, so the v0.27.0 run tagged the
   release and pushed both images but failed to create the GitHub Release when

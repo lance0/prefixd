@@ -44,13 +44,22 @@ pub enum AlertEventType {
     MitigationWithdrawn,
     #[serde(rename = "mitigation.expired")]
     MitigationExpired,
+    // Never emitted: prefixd sends no configuration-reload or guardrail alert.
+    // Kept so stored destination filters and notification mutes that list them
+    // still parse; the editor and preferences no longer offer them.
     #[serde(rename = "config.reloaded")]
     ConfigReloaded,
     #[serde(rename = "guardrail.rejected")]
     GuardrailRejected,
+    // The dashboard's test alert. It bypasses every event filter and is never
+    // offered as a filter value, so a test reaches each configured destination.
+    #[serde(rename = "test")]
+    Test,
 }
 
 impl AlertEventType {
+    /// Values a destination filter or notification mute may hold. Test is
+    /// absent: it is not an event an operator routes.
     pub const ALL: &[AlertEventType] = &[
         Self::MitigationCreated,
         Self::MitigationEscalated,
@@ -81,6 +90,7 @@ impl std::fmt::Display for AlertEventType {
             Self::MitigationExpired => write!(f, "mitigation.expired"),
             Self::ConfigReloaded => write!(f, "config.reloaded"),
             Self::GuardrailRejected => write!(f, "guardrail.rejected"),
+            Self::Test => write!(f, "test"),
         }
     }
 }
@@ -141,6 +151,14 @@ pub struct Alert {
     pub action_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pop: Option<String>,
+    /// True for a mitigation that recorded a dry-run origin and was never
+    /// announced, so every consumer can tell simulation from enforcement.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Alert {
@@ -161,7 +179,9 @@ impl Alert {
             vector: Some(m.vector.to_string()),
             action_type: Some(m.action_type.to_string()),
             pop: Some(m.pop.clone()),
+            dry_run: false,
         }
+        .mark_dry_run(m.is_dry_run_origin())
     }
 
     pub fn mitigation_escalated(m: &Mitigation) -> Self {
@@ -181,6 +201,7 @@ impl Alert {
             vector: Some(m.vector.to_string()),
             action_type: Some(m.action_type.to_string()),
             pop: Some(m.pop.clone()),
+            dry_run: false,
         }
     }
 
@@ -198,7 +219,9 @@ impl Alert {
             vector: Some(m.vector.to_string()),
             action_type: Some(m.action_type.to_string()),
             pop: Some(m.pop.clone()),
+            dry_run: false,
         }
+        .mark_dry_run(m.is_dry_run_origin())
     }
 
     pub fn mitigation_expired(m: &Mitigation) -> Self {
@@ -215,29 +238,26 @@ impl Alert {
             vector: Some(m.vector.to_string()),
             action_type: Some(m.action_type.to_string()),
             pop: Some(m.pop.clone()),
+            dry_run: false,
         }
+        .mark_dry_run(m.is_dry_run_origin())
     }
 
-    pub fn config_reloaded(items: &[String]) -> Self {
-        Self {
-            event_type: AlertEventType::ConfigReloaded,
-            severity: AlertSeverity::Info,
-            title: "Config Reloaded".into(),
-            message: format!("Reloaded: {}", items.join(", ")),
-            source: "prefixd".into(),
-            timestamp: chrono::Utc::now(),
-            mitigation_id: None,
-            victim_ip: None,
-            customer_id: None,
-            vector: None,
-            action_type: None,
-            pop: None,
+    /// Marks a simulated mitigation in the title and text as well as the
+    /// structured field, so an operator reading chat, a page or a webhook
+    /// cannot mistake it for an announced rule.
+    fn mark_dry_run(mut self, dry_run: bool) -> Self {
+        if dry_run {
+            self.dry_run = true;
+            self.title = format!("Dry Run: {}", self.title);
+            self.message = format!("{} — dry run, not announced", self.message);
         }
+        self
     }
 
     pub fn test_alert() -> Self {
         Self {
-            event_type: AlertEventType::MitigationCreated,
+            event_type: AlertEventType::Test,
             severity: AlertSeverity::Info,
             title: "Test Alert".into(),
             message: "This is a test alert from prefixd".into(),
@@ -249,6 +269,7 @@ impl Alert {
             vector: Some("udp_flood".into()),
             action_type: Some("discard".into()),
             pop: Some("test".into()),
+            dry_run: false,
         }
     }
 }
@@ -264,6 +285,9 @@ pub enum DestinationConfig {
         webhook_url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         webhook_url_env: Option<String>,
+        /// Legacy only: an app's incoming webhook always posts to the channel
+        /// it was created for and ignores this. Kept in the payload for older
+        /// custom integrations that still read it.
         #[serde(default)]
         channel: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1247,6 +1271,11 @@ impl AlertingService {
     }
 
     fn should_send(&self, dest: &DestinationConfig, event_type: &AlertEventType) -> bool {
+        // A test alert is an explicit operator request: it reaches every
+        // destination whatever its filter, so the editor can check them all.
+        if matches!(event_type, AlertEventType::Test) {
+            return true;
+        }
         let dest_events = dest.events();
         if !dest_events.is_empty() {
             return dest_events.contains(event_type);
@@ -1261,10 +1290,13 @@ impl AlertingService {
             .any(|d| self.should_send(d, event_type))
     }
 
-    /// Send to all destinations, collecting results
-    pub async fn dispatch(&self, alert: &Alert) -> Vec<(String, Result<(), String>)> {
+    /// Send to all destinations, collecting each result with the destination's
+    /// position in the running configuration, which identifies its card in the
+    /// editor. The position travels with the result because filters can skip
+    /// destinations, so a result's array index does not name a destination.
+    pub async fn dispatch(&self, alert: &Alert) -> Vec<(usize, String, Result<(), String>)> {
         let mut results = Vec::new();
-        for dest in &self.config.destinations {
+        for (index, dest) in self.config.destinations.iter().enumerate() {
             if !self.should_send(dest, &alert.event_type) {
                 continue;
             }
@@ -1274,10 +1306,10 @@ impl AlertingService {
             ALERTS_SENT
                 .with_label_values(&[dest_type.as_str(), status])
                 .inc();
-            if let Err(ref e) = result {
+            if let Err(e) = &result {
                 tracing::warn!(destination = %dest_type, error = %e, "alert delivery failed");
             }
-            results.push((dest_type, result));
+            results.push((index, dest_type, result));
         }
         results
     }
@@ -1402,6 +1434,22 @@ mod tests {
             AlertEventType::MitigationExpired.to_string(),
             "mitigation.expired"
         );
+        assert_eq!(AlertEventType::Test.to_string(), "test");
+    }
+
+    #[test]
+    fn legacy_events_stay_accepted_and_test_is_not_filterable() {
+        // Stored filters and mutes written by older releases must keep loading.
+        for legacy in [
+            "config.reloaded",
+            "guardrail.rejected",
+            "mitigation.escalated",
+        ] {
+            assert!(AlertEventType::ALL_STRINGS.contains(&legacy), "{legacy}");
+        }
+        // The test alert is an operator request, not a routable event.
+        assert!(!AlertEventType::ALL_STRINGS.contains(&"test"));
+        assert!(!AlertEventType::ALL.contains(&AlertEventType::Test));
     }
 
     #[test]
@@ -1510,8 +1558,98 @@ mod tests {
     fn test_alert_serialization() {
         let alert = Alert::test_alert();
         let json = serde_json::to_string(&alert).unwrap();
-        assert!(json.contains("mitigation.created"));
+        assert!(json.contains(r#""event_type":"test""#));
         assert!(json.contains("203.0.113.1"));
+        // An enforced alert has no dry-run key, so consumers read it as real.
+        assert!(!json.contains("dry_run"));
+    }
+
+    #[test]
+    fn test_alert_reaches_destinations_whose_filter_excludes_mitigation_created() {
+        let config = AlertingConfig {
+            destinations: vec![],
+            events: vec![AlertEventType::MitigationCreated],
+        };
+        let svc = AlertingService::new(config);
+        // Negative control: before test alerts had their own event type, a
+        // destination filtered to withdrawals never received one.
+        let dest = DestinationConfig::Slack {
+            webhook_url: "https://hooks.slack.com/test".into(),
+            webhook_url_env: None,
+            channel: None,
+            events: vec![AlertEventType::MitigationWithdrawn],
+        };
+        assert!(!svc.should_send(&dest, &AlertEventType::MitigationCreated));
+        assert!(svc.should_send(&dest, &AlertEventType::Test));
+    }
+
+    fn dry_run_mitigation() -> Mitigation {
+        use crate::config::OperationMode;
+        use crate::domain::{
+            ActionParams, ActionType, AttackVector, MatchCriteria, MitigationIntent,
+        };
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: Some("cust_example".into()),
+                service_id: None,
+                pop: "iad1".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: "203.0.113.10/32".into(),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                    ..Default::default()
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams::default(),
+                ttl_seconds: 60,
+                reason: "test".into(),
+            },
+            "203.0.113.10".into(),
+            AttackVector::UdpFlood,
+        );
+        mitigation.origin_mode = Some(OperationMode::DryRun);
+        mitigation
+    }
+
+    #[test]
+    fn dry_run_mitigation_alerts_are_marked_in_every_field() {
+        let mut mitigation = dry_run_mitigation();
+        for alert in [
+            Alert::mitigation_created(&mitigation),
+            Alert::mitigation_withdrawn(&mitigation),
+            Alert::mitigation_expired(&mitigation),
+        ] {
+            assert!(alert.dry_run);
+            assert!(alert.title.starts_with("Dry Run: "), "{}", alert.title);
+            assert!(alert.message.ends_with("dry run, not announced"));
+            let json = serde_json::to_value(&alert).unwrap();
+            assert_eq!(json["dry_run"], serde_json::json!(true));
+        }
+
+        // An enforced mitigation keeps the unchanged title, text and payload.
+        mitigation.origin_mode = None;
+        let alert = Alert::mitigation_created(&mitigation);
+        assert!(!alert.dry_run);
+        assert_eq!(alert.title, "Mitigation Created");
+        assert!(
+            serde_json::to_value(&alert)
+                .unwrap()
+                .get("dry_run")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn slack_payload_annotates_dry_run_alerts() {
+        let alert = Alert::mitigation_created(&dry_run_mitigation());
+        let payload = slack::build_payload(&alert, None);
+        let fields = payload["blocks"][2]["fields"].as_array().unwrap();
+        assert!(
+            fields
+                .iter()
+                .any(|field| field["text"] == "*Mode:* dry run, not announced")
+        );
     }
 
     #[test]
@@ -2355,5 +2493,125 @@ mod tests {
               matching Generic destinations"
             ]
         );
+    }
+
+    #[derive(Debug)]
+    struct Recorded {
+        path: String,
+        body: serde_json::Value,
+    }
+
+    #[derive(Clone, Default)]
+    struct Captures(Arc<tokio::sync::Mutex<Vec<Recorded>>>);
+
+    async fn record(
+        axum::extract::State(captures): axum::extract::State<Captures>,
+        uri: axum::http::Uri,
+        body: String,
+    ) -> axum::http::StatusCode {
+        captures.0.lock().await.push(Recorded {
+            path: uri.path().to_string(),
+            body: serde_json::from_str(&body).unwrap_or(serde_json::Value::Null),
+        });
+        axum::http::StatusCode::OK
+    }
+
+    /// A local webhook sink. Destinations in these tests skip `validate`, which
+    /// would refuse a loopback URL, so the sender path itself is under test.
+    async fn capture_server() -> (String, Arc<tokio::sync::Mutex<Vec<Recorded>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let recorded: Arc<tokio::sync::Mutex<Vec<Recorded>>> = Default::default();
+        let app = axum::Router::new()
+            .fallback(record)
+            .with_state(Captures(Arc::clone(&recorded)));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{address}"), recorded)
+    }
+
+    fn generic_dest(url: String, events: Vec<AlertEventType>) -> DestinationConfig {
+        DestinationConfig::Generic {
+            url,
+            url_env: None,
+            secret: None,
+            secret_env: None,
+            headers: HashMap::new(),
+            events,
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_reports_the_configuration_index_of_each_destination() {
+        let (base, recorded) = capture_server().await;
+        let service = AlertingService::new(AlertingConfig {
+            destinations: vec![
+                generic_dest(
+                    format!("{base}/created"),
+                    vec![AlertEventType::MitigationCreated],
+                ),
+                generic_dest(
+                    format!("{base}/expired"),
+                    vec![AlertEventType::MitigationExpired],
+                ),
+            ],
+            events: vec![],
+        });
+        let mut alert = Alert::test_alert();
+        alert.event_type = AlertEventType::MitigationExpired;
+
+        let results = service.dispatch(&alert).await;
+
+        // The first destination is filtered out, so the only result's array
+        // position is 0 but its identity is configuration position 1.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 1);
+        assert_eq!(results[0].1, "generic");
+        assert!(results[0].2.is_ok(), "{:?}", results[0].2);
+        let recorded = recorded.lock().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].path, "/expired");
+    }
+
+    #[tokio::test]
+    async fn test_alert_reaches_every_destination_and_closes_the_pagerduty_incident() {
+        let (base, recorded) = capture_server().await;
+        let service = AlertingService::new(AlertingConfig {
+            destinations: vec![
+                DestinationConfig::Pagerduty {
+                    routing_key: "routing-key".into(),
+                    routing_key_env: None,
+                    events_url: format!("{base}/pagerduty"),
+                    // Neither destination lists `test`, and both list an event
+                    // the test alert is not: the explicit request still arrives.
+                    events: vec![AlertEventType::MitigationWithdrawn],
+                },
+                generic_dest(
+                    format!("{base}/generic"),
+                    vec![AlertEventType::MitigationCreated],
+                ),
+            ],
+            events: vec![AlertEventType::MitigationWithdrawn],
+        });
+
+        let results = service.dispatch(&Alert::test_alert()).await;
+
+        assert_eq!(results.len(), 2);
+        assert!(
+            results.iter().all(|(_, _, result)| result.is_ok()),
+            "{results:?}"
+        );
+        assert_eq!(results[0].0, 0);
+        assert_eq!(results[1].0, 1);
+        let recorded = recorded.lock().await;
+        assert_eq!(recorded.len(), 3);
+        assert_eq!(recorded[0].path, "/pagerduty");
+        assert_eq!(recorded[0].body["event_action"], "trigger");
+        assert_eq!(recorded[1].path, "/pagerduty");
+        assert_eq!(recorded[1].body["event_action"], "resolve");
+        assert_eq!(recorded[1].body["dedup_key"], recorded[0].body["dedup_key"]);
+        assert_eq!(recorded[2].path, "/generic");
+        assert_eq!(recorded[2].body["event_type"], "test");
     }
 }

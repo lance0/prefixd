@@ -12,14 +12,15 @@ import { useNotificationPreferences } from "@/hooks/use-api"
 import { updateNotificationPreferences } from "@/lib/api"
 import { toast } from "sonner"
 
-// mitigation.escalated is never emitted, so it is not offered. A saved mute that
-// still lists it is kept on save; the backend still accepts it.
+// mitigation.escalated and guardrail.rejected are never emitted, so they are
+// not offered; a saved mute that lists them is kept on save and the backend
+// still accepts it. config.reloaded matches the WebSocket resync the dashboard
+// asks for when it falls behind, not a controller configuration reload.
 const EVENT_TYPES = [
   { value: "mitigation.created", label: "Mitigation created or extended", critical: true },
   { value: "mitigation.withdrawn", label: "Mitigation withdrawn", critical: false },
   { value: "mitigation.expired", label: "Mitigation expired", critical: false },
-  { value: "config.reloaded", label: "Configuration reloaded", critical: false },
-  { value: "guardrail.rejected", label: "Guardrail rejected", critical: false },
+  { value: "config.reloaded", label: "Connection resync (missed updates)", critical: false },
 ] as const
 
 const HOURS = Array.from({ length: 24 }, (_, i) => i)

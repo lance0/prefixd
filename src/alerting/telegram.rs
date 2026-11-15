@@ -46,6 +46,9 @@ pub fn build_message(alert: &Alert) -> String {
         String::new(),
     ];
 
+    if alert.dry_run {
+        lines.push("<b>Mode:</b> dry run, not announced".to_string());
+    }
     if let Some(ref ip) = alert.victim_ip {
         lines.push(format!(
             "<b>Victim IP:</b> <code>{}</code>",

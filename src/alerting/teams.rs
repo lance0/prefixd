@@ -30,6 +30,9 @@ pub fn build_payload(alert: &Alert) -> serde_json::Value {
         serde_json::json!({"title": "Event", "value": alert.event_type.to_string()}),
     ];
 
+    if alert.dry_run {
+        facts.push(serde_json::json!({"title": "Mode", "value": "dry run, not announced"}));
+    }
     if let Some(ref ip) = alert.victim_ip {
         facts.push(serde_json::json!({"title": "Victim IP", "value": ip}));
     }

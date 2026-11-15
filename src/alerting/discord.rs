@@ -26,6 +26,11 @@ pub async fn send(
 pub fn build_payload(alert: &Alert) -> serde_json::Value {
     let mut fields = Vec::new();
 
+    if alert.dry_run {
+        fields.push(
+            serde_json::json!({"name": "Mode", "value": "dry run, not announced", "inline": true}),
+        );
+    }
     if let Some(ref ip) = alert.victim_ip {
         fields.push(
             serde_json::json!({"name": "Victim IP", "value": format!("`{}`", ip), "inline": true}),

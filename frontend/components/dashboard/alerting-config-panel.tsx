@@ -21,14 +21,13 @@ const DEST_TYPES = ["slack", "discord", "teams", "telegram", "pagerduty", "opsge
 
 type DestType = (typeof DEST_TYPES)[number]
 
-// mitigation.escalated is never emitted, so it is not offered. A stored filter
-// that still lists it is kept on save and shown as a badge.
+// mitigation.escalated, config.reloaded and guardrail.rejected are never sent
+// as alerts, so they are not offered. Stored filters that still list them are
+// kept on save and shown as badges.
 const EVENT_TYPES = [
   "mitigation.created",
   "mitigation.withdrawn",
   "mitigation.expired",
-  "config.reloaded",
-  "guardrail.rejected",
 ] as const
 
 const DEST_LABELS: Record<DestType, string> = {
@@ -150,8 +149,11 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
             />
           </div>
           <div className="space-y-1">
-            <Label htmlFor={`${id}-channel`} className="text-muted-foreground">Channel (optional)</Label>
-            <Input id={`${id}-channel`} value={dest.channel ?? ""} onChange={(e) => update("channel", e.target.value)} placeholder="#ddos-alerts" className="h-8 text-xs font-mono" />
+            <Label htmlFor={`${id}-channel`} className="text-muted-foreground">Channel (legacy only)</Label>
+            <Input id={`${id}-channel`} value={dest.channel ?? ""} onChange={(e) => update("channel", e.target.value)} placeholder="#ddos-alerts" aria-describedby={`${id}-channel-help`} className="h-8 text-xs font-mono" />
+            <p id={`${id}-channel-help`} className="text-xs text-muted-foreground">
+              Kept for legacy Slack integrations. An app&apos;s incoming webhook always posts to the channel it was created for and ignores this.
+            </p>
           </div>
         </>
       )}
@@ -352,6 +354,8 @@ export function AlertingConfigPanel() {
         events: draftEvents,
       })
       await mutateAlerting()
+      // Results name positions in the configuration that was just replaced.
+      setTestResults(null)
       discardDraft()
       toast.success("Alerting config saved and reloaded")
     } catch (e) {
@@ -466,8 +470,9 @@ export function AlertingConfigPanel() {
             />
           ) : (
             <CardContent className="space-y-2">
+              {/* Results are keyed by configuration position, not result order. */}
               {data.destinations.map((dest, i) => (
-                <ReadOnlyDestCard key={`${dest.type}-${i}`} dest={dest} testResult={testResults?.[i]} />
+                <ReadOnlyDestCard key={`${dest.type}-${i}`} dest={dest} testResult={testResults?.find((result) => result.index === i)} />
               ))}
             </CardContent>
           )}
@@ -571,6 +576,9 @@ export function AlertingConfigPanel() {
           ) : (
             destinations.map((dest, i) => {
               const isEditingThis = isEditing && editingIndex === i
+              // Key by configuration position: filter skips shift the results
+              // array, so its position does not name this card.
+              const result = testResults?.find((entry) => entry.index === i)
 
               if (isEditingThis) {
                 return (
@@ -611,15 +619,15 @@ export function AlertingConfigPanel() {
                       </Button>
                     </div>
                   ) : (
-                    testResults?.[i] && (
-                      testResults[i]!.status === "ok" ? (
+                    result && (
+                      result.status === "ok" ? (
                         <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
                       ) : (
                         <div className="flex items-center gap-1 shrink-0">
                           <XCircle className="h-4 w-4 text-destructive" />
-                          {testResults[i]!.error ? (
+                          {result.error ? (
                             <span className="text-xs text-destructive max-w-[150px] truncate">
-                              {testResults[i]!.error}
+                              {result.error}
                             </span>
                           ) : null}
                         </div>
