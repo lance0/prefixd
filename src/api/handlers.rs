@@ -918,6 +918,29 @@ async fn persist_new_mitigation(
     Ok(None)
 }
 
+/// Every admitted new mitigation, detector or manual, counts toward the creation
+/// metric, broadcasts `MitigationCreated` and sends the `mitigation.created`
+/// alert, in dry-run too. Extensions and refused admissions do not call this.
+async fn publish_mitigation_created(
+    state: &AppState,
+    mitigation: &Mitigation,
+    response: MitigationResponse,
+) {
+    crate::observability::metrics::MITIGATIONS_CREATED
+        .with_label_values(&[&mitigation.action_type.to_string(), &state.settings.pop])
+        .inc();
+    let _ = state
+        .ws_broadcast
+        .send(crate::ws::WsMessage::MitigationCreated {
+            mitigation: response,
+        });
+    state
+        .alerting
+        .read()
+        .await
+        .notify(crate::alerting::Alert::mitigation_created(mitigation));
+}
+
 async fn withdraw_and_notify(
     state: &AppState,
     mitigation: &Mitigation,
@@ -1896,23 +1919,10 @@ async fn admit_ban(
                 (mitigation, announcement_outcome)
             };
 
-            crate::observability::metrics::MITIGATIONS_CREATED
-                .with_label_values(&[&mitigation.action_type.to_string(), &state.settings.pop])
-                .inc();
-
             // Build response with optional correlation context
             let mut mit_response = MitigationResponse::from(&mitigation);
             mit_response.correlation = correlation_context.clone();
-            let _ = state
-                .ws_broadcast
-                .send(crate::ws::WsMessage::MitigationCreated {
-                    mitigation: mit_response,
-                });
-            state
-                .alerting
-                .read()
-                .await
-                .notify(crate::alerting::Alert::mitigation_created(&mitigation));
+            publish_mitigation_created(&state, &mitigation, mit_response).await;
             tracing::info!(
                 mitigation_id = %mitigation.mitigation_id,
                 victim_ip = %mitigation.victim_ip,
@@ -2650,11 +2660,8 @@ pub async fn create_mitigation(
         Err(error) => return Ok(AppError(error).into_response()),
     };
 
-    crate::observability::metrics::MITIGATIONS_CREATED
-        .with_label_values(&[&mitigation.action_type.to_string(), &state.settings.pop])
-        .inc();
-
     let mut response = MitigationResponse::from(&mitigation);
+    publish_mitigation_created(&state, &mitigation, response.clone()).await;
     response.announcement_outcome = announcement_outcome;
     let status = if announcement_outcome.is_some() {
         StatusCode::ACCEPTED
@@ -2794,15 +2801,8 @@ async fn create_blackhole(
     };
 
     let mitigation = admission.mitigation;
-    crate::observability::metrics::MITIGATIONS_CREATED
-        .with_label_values(&[&mitigation.action_type.to_string(), &state.settings.pop])
-        .inc();
     let mut response = MitigationResponse::from(&mitigation);
-    let _ = state
-        .ws_broadcast
-        .send(crate::ws::WsMessage::MitigationCreated {
-            mitigation: response.clone(),
-        });
+    publish_mitigation_created(state, &mitigation, response.clone()).await;
     tracing::info!(mitigation_id = %mitigation.mitigation_id, victim_ip = %mitigation.victim_ip,
         unconfirmed = admission.unconfirmed, "created manual blackhole");
     let status = if admission.unconfirmed {

@@ -1398,7 +1398,7 @@ Content-Type: application/json
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `mitigation_ids` | array of UUIDs | yes | Up to 100 mitigation IDs to withdraw |
-| `operator_id` | string | yes | Operator performing the withdrawal |
+| `operator_id` | string | no | Legacy field, ignored; authenticated operator identity is authoritative |
 | `reason` | string | yes | Non-whitespace reason for withdrawal, at most 1,024 UTF-8 bytes; blank returns `400` |
 
 **Response (200 OK):**
@@ -1439,7 +1439,7 @@ Content-Type: application/json
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `mitigation_ids` | array of UUIDs | yes | Up to 100 mitigation IDs to acknowledge |
-| `operator_id` | string | yes | Operator acknowledging the mitigations |
+| `operator_id` | string | no | Legacy field, ignored; authenticated operator identity is authoritative |
 
 **Response (200 OK):**
 
@@ -3162,7 +3162,8 @@ Requires session authentication (send session cookie).
 **ResyncRequired:** Sent when server detects client may have missed messages. Client should refresh data.
 
 `mitigation` uses the [mitigation response](#get-mitigation) shape, including
-the `blackhole` object for blackholes. A manual blackhole broadcasts
+the `blackhole` object for blackholes. Every new mitigation, from a detector
+or from `POST /v1/mitigations` (including a manual blackhole), broadcasts
 `mitigation_created`.
 
 `diversion_updated` carries a [diversion](#manual-scrubber-diversion) after
