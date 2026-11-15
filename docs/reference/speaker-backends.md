@@ -531,8 +531,18 @@ rustbgpd, which does not retry an attempt that ran out its own deadline.
 A small window remains when an operator withdraws a rule within seconds of its
 timed-out add. If the delete reaches the speaker first and answers not found,
 the withdrawal completes; an add that the speaker applies afterward leaves a
-local rule with no live owner. Reconciliation reports it as unknown and never
-removes it, so remove it at the speaker after checking it is prefixd's.
+local route with no live owner. What happens next depends on the route kind:
+
+- A FlowSpec rule is reported as unknown and never removed. A leased FlowSpec
+  rule under this controller's owner is extended by its own lease renewal, so it
+  also stays while the controller runs and lapses only after renewal stops.
+  Remove it at the speaker after checking it is prefixd's.
+- A blackhole route, unleased or leased under this controller's owner, is
+  withdrawn by the next reconciliation pass and audited as orphaned when it
+  exactly matches the frozen route of a withdrawn or expired, enforced-origin
+  blackhole row of this POP, and no live row or pending withdrawal holds its
+  prefix. The match is searched among the newest 100 rows for that victim. Any
+  other blackhole route is reported as unknown and left in place.
 
 Health still reports the daemon's own state, so an unconfirmed add is never
 presented as a successful install.

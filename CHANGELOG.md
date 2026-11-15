@@ -16,9 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   90 seconds with GoBGP and about 30 seconds with rustbgpd. See the
   [interactive speaker deadline](docs/reference/speaker-backends.md#interactive-speaker-deadline).
 - If an operator withdraws a rule within seconds of its timed-out add, the
-  delete can complete as not found before the speaker applies the late add.
-  That local rule then has no live owner; reconciliation reports it as unknown
-  and never removes it.
+  delete can complete as not found before the speaker applies the late add,
+  leaving a local route with no live owner. A FlowSpec rule is reported as
+  unknown and never removed; a leased one is kept by this controller's own lease
+  renewal until renewal stops. A blackhole route that exactly matches the frozen
+  route of a withdrawn or expired enforced-origin row of this POP, with no live
+  row or pending withdrawal at its prefix, is withdrawn by the next
+  reconciliation pass; any other is reported as unknown.
+- A detector event that creates several rules admits them under one lock hold
+  and still makes one bounded attempt per rule, so a wedged speaker can hold
+  the lifecycle mutex for up to N × 3 seconds for an event with N rules.
 
 ### Changed
 
