@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the controller's pre-admission state, so the live-intent predicates keep
   covering it rather than a stored row slipping past quota, conflict and
   withdrawal checks. The dashboard status filter no longer offers `pending`, and
-  rows are no longer styled as live on that status.
+  legacy rows retain live expiry treatment and withdrawal controls on that status.
 - The architecture and upgrade documents describe `flowspec_announcements` as a
   legacy table this version never writes, rather than a live announcement
   schema.

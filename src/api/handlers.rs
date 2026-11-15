@@ -275,8 +275,7 @@ pub struct MitigationResponse {
     /// Unique mitigation identifier
     pub mitigation_id: Uuid,
     /// Current status: active, expired or withdrawn for rows this version
-    /// writes. A legacy stored row may still read escalated; no code path
-    /// produces pending or rejected.
+    /// creates. Legacy stored rows may still return pending, escalated or rejected.
     pub status: String,
     /// Customer ID from inventory
     pub customer_id: Option<String>,

@@ -33,9 +33,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { formatRelative, formatTimeRemaining } from "@/lib/format"
 import { useTimeFormat } from "@/components/time-zone-provider"
 
-// Escalated, pending and rejected are hidden: no code path produces them, so a
-// filter for them can never match. Legacy stored rows still render with their
-// status pill.
+// Offer only statuses new admissions produce. Legacy rows can still be returned
+// by the API; pending and escalated retain live controls and expiry treatment.
 const STATUS_FILTERS = ["active", "expired", "withdrawn"] as const
 
 const PENDING_REASON_NOTE = "Cleanup may still be pending; a pending request retains its original recorded reason."
@@ -156,7 +155,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   const selectableIds = useMemo(() => {
     return new Set(
       (mitigations ?? [])
-        .filter((m) => m.status === "active" || m.status === "escalated")
+        .filter((m) => m.status === "active" || m.status === "escalated" || m.status === "pending")
         .map((m) => m.mitigation_id)
     )
   }, [mitigations])
@@ -487,11 +486,11 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
               </TableHeader>
               <TableBody>
                 {mitigations.map((mitigation) => {
-                  const live = mitigation.status === "active" || mitigation.status === "escalated"
+                  const live = mitigation.status === "active" || mitigation.status === "escalated" || mitigation.status === "pending"
                   const remaining = Date.parse(mitigation.expires_at) - now
                   const vector = mitigation.vector.replace(/_/g, " ")
                   const match = describeMatch(mitigation)
-                  const isSelectable = mitigation.status === "active" || mitigation.status === "escalated"
+                  const isSelectable = live
 
                   return (
                     <TableRow

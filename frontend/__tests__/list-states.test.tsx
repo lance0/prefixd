@@ -80,13 +80,13 @@ describe("list states", () => {
     expect(within(group).queryByRole("button", { name: "escalated" })).not.toBeInTheDocument()
   })
 
-  it("shows the expiry countdown with its absolute UTC deadline as visible text", async () => {
+  it.each(["active", "pending", "escalated"] as const)("keeps %s rows live with expiry and withdrawal controls", async (status) => {
     const expiresAt = new Date(Date.now() + 26 * 60_000 + 30_000).toISOString()
 
     const now = new Date().toISOString()
 
     const mitigation: Mitigation = {
-      mitigation_id: "m-1", scope_hash: "scope-1", status: "active", customer_id: null, service_id: null, pop: "iad1",
+      mitigation_id: "m-1", scope_hash: "scope-1", status, customer_id: null, service_id: null, pop: "iad1",
       victim_ip: "203.0.113.10", vector: "udp_flood", action_type: "police", rate_bps: 5_000_000,
       dst_prefix: "203.0.113.10/32", protocol: 17, dst_ports: [53], created_at: now, updated_at: now,
       expires_at: expiresAt, withdrawn_at: null, triggering_event_id: "e-1", last_event_id: "e-1",
@@ -99,6 +99,10 @@ describe("list states", () => {
     expect(deadline).toBeVisible()
     expect(deadline.closest("td")).toHaveTextContent(/26m/)
     expect(deadline.closest("td")?.querySelector("time")).toHaveAttribute("dateTime", expiresAt)
+    expect(screen.getByRole("button", { name: "Withdraw mitigation" })).toBeEnabled()
+    const checkbox = screen.getByRole("checkbox", { name: "Select mitigation 203.0.113.10" })
+    fireEvent.click(checkbox)
+    expect(checkbox).toBeChecked()
   })
 
   it("tags only dry-run-origin rows as simulations", async () => {

@@ -13,9 +13,10 @@ use crate::error::{PrefixdError, Result};
 pub enum MitigationStatus {
     /// Pre-admission state inside the controller: `Mitigation::from_intent`
     /// starts here and `activate()` runs before `admit_mitigation` stores the
-    /// row, so no stored row, filter match or API response carries it. Kept
-    /// because `is_active()` and the live-intent storage predicates agree on
-    /// it, and because a stored `pending` row must still parse.
+    /// row. New admissions therefore never persist it. Legacy stored rows can
+    /// still appear in API responses and exact status filters, and remain live
+    /// for quotas, conflicts, ownership and withdrawal. Keep `is_active()` and
+    /// the live-intent storage predicates aligned until a migration retires it.
     Pending,
     Active,
     // Legacy state: no code path produces it. Kept so stored rows and old
