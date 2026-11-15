@@ -53,6 +53,14 @@ pub enum PrefixdError {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    /// `/v1/events` and `/v1/events/batch` read `source` from the body, so an
+    /// allowlisted detector name there is a claim on the binding a detector
+    /// adapter route owns (ADR 019, ADR 027 §2). Only an Admin may make it.
+    #[error(
+        "source {source_name:?} is bound by a detector adapter route; post it to its adapter endpoint or authenticate as an admin"
+    )]
+    SourceBindingRequired { source_name: String },
+
     #[error("not found: {0}")]
     NotFound(String),
 
@@ -215,7 +223,7 @@ impl PrefixdError {
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
-            Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::Forbidden(_) | Self::SourceBindingRequired { .. } => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MitigationNotFound(_) => StatusCode::NOT_FOUND,
             Self::ShuttingDown | Self::Standby => StatusCode::SERVICE_UNAVAILABLE,
             Self::DuplicateEvent { .. }

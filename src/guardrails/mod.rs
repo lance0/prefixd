@@ -11,7 +11,7 @@ pub use blackhole::{
 
 use std::net::IpAddr;
 
-use crate::config::{GuardrailsConfig, QuotasConfig, TimersConfig};
+use crate::config::{GuardrailsConfig, QuotasConfig, Settings, TimersConfig};
 use crate::db::RepositoryTrait;
 use crate::domain::{ActionType, FlowSpecAction, FlowSpecNlri, MatchCriteria, MitigationIntent};
 use crate::error::{GuardrailError, PrefixdError, Result};
@@ -36,6 +36,21 @@ pub fn check_detector_prefix(config: &GuardrailsConfig, source: &str) -> Result<
         ));
     }
     Ok(())
+}
+
+/// A detector adapter route binds the event `source` itself: FastNetMon,
+/// Alertmanager and each generic webhook adapter overwrite the field with their
+/// configured name. `/v1/events` and `/v1/events/batch` instead take `source`
+/// from the body, so a name the guardrails would grant detector privileges to
+/// is a claim on the binding an adapter owns and needs an Admin caller.
+///
+/// The check reuses the guardrails themselves, so it cannot drift from the
+/// privilege it protects: a source that may reach a detector blackhole step, or
+/// one allowed for detector prefix events. A name outside both allowlists
+/// grants nothing and keeps the unchanged Operator path.
+pub fn source_claims_detector_binding(settings: &Settings, source: &str) -> bool {
+    check_detector_source(&settings.blackhole, source).is_ok()
+        || check_detector_prefix(&settings.guardrails, source).is_ok()
 }
 
 /// A detector prefix rule needs a destination port unless it polices UDP
@@ -847,6 +862,34 @@ mod tests {
                 GuardrailError::DetectorPrefixSourceNotAllowed { .. }
             ))
         ));
+    }
+
+    #[test]
+    fn only_allowlisted_sources_claim_a_detector_binding() {
+        let mut settings: Settings =
+            crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+        for source in ["fastnetmon", "alertmanager", "dashboard", ""] {
+            assert!(
+                !source_claims_detector_binding(&settings, source),
+                "{source}"
+            );
+        }
+
+        settings.blackhole.detector_sources = vec!["fastnetmon".into()];
+        assert!(source_claims_detector_binding(&settings, "fastnetmon"));
+        // The allowlist is an exact match: no case folding and no prefix.
+        for source in ["FastNetMon", "fastnetmon-2", "fast"] {
+            assert!(
+                !source_claims_detector_binding(&settings, source),
+                "{source}"
+            );
+        }
+
+        // The prefix allowlist needs its opt-in flag, as `check_detector_prefix` does.
+        settings.guardrails.detector_prefix_sources = vec!["radware".into()];
+        assert!(!source_claims_detector_binding(&settings, "radware"));
+        settings.guardrails.allow_detector_prefix = true;
+        assert!(source_claims_detector_binding(&settings, "radware"));
     }
 
     #[test]

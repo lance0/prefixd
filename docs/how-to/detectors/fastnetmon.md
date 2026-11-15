@@ -17,8 +17,9 @@ map a hostgroup payload. Do not point a hostgroup action at this adapter yet.
 prefixd's `/v1/events` endpoint can accept a canonical CIDR when
 `guardrails.allow_detector_prefix` is true and the event's `source` label is in
 `detector_prefix_sources`. That list filters the label the caller supplies; it
-does not authenticate FastNetMon, so any caller holding event-ingestion
-credentials can use an allowlisted label. A hostgroup with one network can be
+does not authenticate FastNetMon. A `ban` through `/v1/events` needs an Admin
+session for an allowlisted label, so a prefix shim needs one; the native
+adapter does not map CIDR destinations. A hostgroup with one network can be
 mapped to that event by an external shim. The published total-hostgroup
 payload carries no port list, so a prefix discard playbook is not usable and
 only a portless `udp_flood` prefix police playbook applies. TCP prefix police
@@ -254,6 +255,31 @@ instead of `SUCCESS (<code>, status=...)`. Read the response body:
 | 422 | `error` | guardrail or VPN scope refused; the event may still be recorded | error text: safelist, quota, `l3vpn` capability |
 | 429 | `error` | event rate limit | `http.rate_limit`; wait |
 | 409 | `error` | duplicate event, speaker binding or owner conflict | event ID; a `503`-then-`409` retry may have stored an event without a mitigation |
+| 403 | `error` | a `ban` names a detector-bound `source` and the caller is not an Admin | [detector source binding](#detector-source-binding) |
+
+### Detector source binding
+
+`/v1/events` and `/v1/events/batch` take `source` from the request body, while
+`blackhole.detector_sources` and `guardrails.detector_prefix_sources` grant
+detector privileges by that name. A `ban` naming either allowlisted source
+through those endpoints needs an **Admin** session: an Operator session or the
+shared bearer token gets `403` with an error naming the bound source, and the
+event is not stored.
+
+The script posts `source: "fastnetmon"` to `/v1/events` and authenticates with a
+bearer token. Once either allowlist names `fastnetmon`, its bans get `403`;
+withdrawals keep working, because an `unban` only removes intent. Migrate
+before upgrading:
+
+- Point FastNetMon at the native JSON notification
+  (`POST /v1/signals/fastnetmon`, [below](#native-json-endpoint)) instead of the
+  script. That route binds `source` itself and keeps the bearer token.
+- Or run the script against a controller whose `http.auth.mode` is `none` or
+  `mtls`; both synthesize an Admin principal.
+
+See [detector source binding](../../reference/api.md#detector-source-binding)
+and the
+[upgrade notes](../upgrading.md#detector-source-binding-on-v1events).
 
 `SUCCESS` means prefixd committed mitigation intent (created or extended) and
 returned its ID; it does not prove the speaker exported the rule or a router

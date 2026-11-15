@@ -52,6 +52,12 @@ request a prefix, not who sends them. This decision does not bind an
 authenticated caller to a source label; deployments that need that separation
 must restrict who holds event-ingestion credentials.
 
+*Amended 2026-11-15:* `/v1/events` and `/v1/events/batch` read `source` from the
+request body, so a `ban` there that names an allowlisted source now requires an
+Admin session; the detector adapter routes bind the field themselves and keep
+accepting an Operator credential. See
+[detector source binding](../reference/api.md#detector-source-binding).
+
 A prefix event cannot select an action, rate, owner,
 community, VPN scope or speaker. The detector supplies the destination and
 traffic attributes only. The controller's automatic `bgp.default_scope` (VPN)

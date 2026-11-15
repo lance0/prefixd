@@ -389,10 +389,12 @@ and the [downgrade procedure](../how-to/upgrading.md#source-prefix-matches-and-d
 not a host. It defaults to `false`; `detector_prefix_sources` must also list
 the exact event `source` label, and an empty list refuses every prefix event.
 `detector_prefix_sources` filters the event's `source` label; it does not
-authenticate a detector. The event endpoint authenticates the caller, and the
-caller supplies `source`, so every caller authorized to ingest events is trusted
-to supply that label and can send a prefix event under an allowlisted `source`.
-Restrict who holds event-ingestion credentials if that matters. The
+authenticate a detector. On `/v1/events` and `/v1/events/batch` a `ban` naming
+an allowlisted `source` needs an Admin session, so an Operator or the shared
+bearer token is refused with `403`; detector adapter routes set `source`
+themselves and keep the caller's Operator token. An Admin caller still supplies
+the label, so restrict who holds an Admin session as well. See
+[detector source binding](api.md#detector-source-binding). The
 destination still passes the same prefix bounds, whole-prefix ownership and
 safelist checks as a manual CIDR. A prefix event selects only a
 `scope: prefix` playbook; a prefix discard needs a destination port, while a
@@ -965,7 +967,12 @@ playbooks:
   `prefixd_guardrail_rejections_total{reason="BlackholeSourceNotAllowed"}`.
   The dashboard's mitigate-now dialog posts `source: "dashboard"`, so it stays
   off this path unless listed. `source` is asserted by the caller: this is a
-  routing guard alongside detector credentials, not authorization.
+  routing guard alongside detector credentials, not authentication of a
+  detector. Because `/v1/events` reads it from the body, a `ban` that names an
+  allowlisted source there needs an Admin session; a bearer token gets `403`.
+  The detector adapter routes set `source` themselves and keep working with a
+  bearer token. See
+  [detector source binding](api.md#detector-source-binding).
 - **Not with rules.** A blackhole drops all traffic to the victim, so it never
   combines with the narrowed rules of [ADR 028](../adr/028-amplification-matches.md).
   A blackhole step carries no `rules`, a rule cannot use `action: blackhole`,

@@ -8,14 +8,16 @@ use crate::error::PrefixdError;
 use crate::auth::AuthSession;
 
 /// Ingest endpoints are mutations even when they carry detector metadata.
-/// Viewers may read, but may not create or withdraw mitigations.
+/// Viewers may read, but may not create or withdraw mitigations. The caller
+/// receives the authenticated operator so it can check a stricter role for a
+/// narrower decision, such as a body-claimed detector `source`.
 pub fn require_operator(
     state: &AppState,
     auth_session: &AuthSession,
     auth_header: Option<&str>,
-) -> Result<(), PrefixdError> {
+) -> Result<Operator, PrefixdError> {
     match require_role(state, auth_session, auth_header, OperatorRole::Operator) {
-        Ok(_) => Ok(()),
+        Ok(operator) => Ok(operator),
         Err(StatusCode::FORBIDDEN) => Err(PrefixdError::Forbidden("operator role required".into())),
         Err(_) => Err(PrefixdError::Unauthorized("authentication required".into())),
     }

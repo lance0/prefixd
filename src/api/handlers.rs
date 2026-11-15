@@ -91,13 +91,14 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::config::EventScope;
+use crate::config::{EventScope, Settings};
 use crate::db::{ListCursor, ListParams, MitigationCursor, MitigationListParams};
 use crate::domain::{
     ActionParams, ActionType, AttackEvent, AttackEventInput, EventOutcome, EventOutcomeRecord,
     FlowSpecAction, FragmentMatch, MatchCriteria, Mitigation, MitigationIntent, MitigationRoute,
-    MitigationStatus, PacketLengthRange, TcpFlagsMatch, execute_withdrawal, find_mitigation_owner,
-    mitigation_rule, request_withdrawal, validate_confidence, validate_top_src_ports,
+    MitigationStatus, Operator, OperatorRole, PacketLengthRange, TcpFlagsMatch, execute_withdrawal,
+    find_mitigation_owner, mitigation_rule, request_withdrawal, validate_confidence,
+    validate_top_src_ports,
 };
 use crate::error::{GuardrailError, PrefixdError};
 use crate::guardrails::Guardrails;
@@ -742,6 +743,28 @@ pub struct WithdrawRequest {
 }
 // Handlers
 
+/// A `ban` posted through the generic event API names its own `source`, so a
+/// name the guardrails would grant detector privileges to is a claim on the
+/// binding a detector adapter route owns (ADR 019, ADR 027 §2). Only an Admin
+/// may make it. An `unban` never reaches here: it grants no detector privilege
+/// and only withdraws, which stays available to Operator.
+fn check_body_source_claim(
+    operator: &Operator,
+    settings: &Settings,
+    source: &str,
+) -> Result<(), AppError> {
+    if operator.role.has_permission(&OperatorRole::Admin)
+        || !crate::guardrails::source_claims_detector_binding(settings, source)
+    {
+        return Ok(());
+    }
+    tracing::warn!(source = %source, role = %operator.role,
+        "refused a body-claimed detector source; an admin session is required");
+    Err(AppError(PrefixdError::SourceBindingRequired {
+        source_name: source.into(),
+    }))
+}
+
 /// Ingest an attack event from a detector
 #[utoipa::path(
     post,
@@ -751,6 +774,7 @@ pub struct WithdrawRequest {
     responses(
         (status = 202, description = "Event accepted", body = EventResponse),
         (status = 400, description = "Invalid input, including non-finite or out-of-range confidence"),
+        (status = 403, description = "The body `source` names a detector-bound source and the caller is not an admin"),
         (status = 409, description = "Duplicate event"),
         (status = 422, description = "Guardrail rejection"),
     )
@@ -763,7 +787,8 @@ pub async fn ingest_event(
 ) -> impl IntoResponse {
     let input = input.0;
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    crate::api::auth::require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
+    let operator =
+        crate::api::auth::require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
 
     // Validate input
     validate_event_destination(&input.victim_ip).map_err(AppError)?;
@@ -779,7 +804,10 @@ pub async fn ingest_event(
     // Branch on action type
     match input.action.as_str() {
         "unban" => handle_unban(state, input).await,
-        "ban" => handle_ban(state, input).await,
+        "ban" => {
+            check_body_source_claim(&operator, &state.settings, &input.source)?;
+            handle_ban(state, input).await
+        }
         unknown => {
             tracing::warn!(action = %unknown, "unknown action type");
             Err(AppError(PrefixdError::InvalidRequest(format!(
@@ -3199,6 +3227,7 @@ pub struct BatchEventResponse {
         (status = 207, description = "Batch results (partial success)", body = BatchEventResponse),
         (status = 202, description = "All events accepted", body = BatchEventResponse),
         (status = 400, description = "Empty batch or exceeds limit"),
+        (status = 403, description = "The caller lacks the Operator role; a `ban` item whose body `source` names a detector-bound source is rejected per item instead"),
     )
 )]
 pub async fn ingest_events_batch(
@@ -3208,7 +3237,8 @@ pub async fn ingest_events_batch(
     Json(req): Json<BatchEventRequest>,
 ) -> impl IntoResponse {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    crate::api::auth::require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
+    let operator =
+        crate::api::auth::require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
 
     if req.events.is_empty() || req.events.len() > MAX_BATCH_EVENTS {
         return Err(AppError(PrefixdError::InvalidRequest(format!(
@@ -3269,7 +3299,10 @@ pub async fn ingest_events_batch(
         let action = input.action.clone();
         let result = match action.as_str() {
             "unban" => handle_unban(state.clone(), input).await,
-            "ban" => handle_ban(state.clone(), input).await,
+            "ban" => match check_body_source_claim(&operator, &state.settings, &input.source) {
+                Ok(()) => handle_ban(state.clone(), input).await,
+                Err(error) => Err(error),
+            },
             unknown => Err(AppError(PrefixdError::InvalidRequest(format!(
                 "unknown action: '{}', expected 'ban' or 'unban'",
                 unknown
@@ -3726,6 +3759,14 @@ mod tests {
             .await
             .unwrap()
             .len()
+        }
+
+        /// Every stored event: `ListParams::default()` has a zero limit.
+        fn all_events() -> ListParams {
+            ListParams {
+                limit: 100,
+                ..Default::default()
+            }
         }
 
         /// Operator sessions and bearer tokens get 403, a confirmation mismatch gets
@@ -4226,8 +4267,9 @@ mod tests {
             mode: OperationMode,
             repo: Arc<MockRepository>,
             speaker: Arc<FaultyBlackholes>,
+            auth: AuthMode,
         ) -> Arc<AppState> {
-            let mut state = state(mode, repo, speaker, AuthMode::None);
+            let mut state = state(mode, repo, speaker, auth);
             Arc::get_mut(&mut state)
                 .unwrap()
                 .settings
@@ -4530,7 +4572,13 @@ mod tests {
             let _metrics = METRICS_TEST_LOCK.lock().await;
             let repo = Arc::new(MockRepository::new());
             let speaker = Arc::new(FaultyBlackholes::default());
-            let state = detector_state(OperationMode::DryRun, repo.clone(), speaker.clone()).await;
+            let state = detector_state(
+                OperationMode::DryRun,
+                repo.clone(),
+                speaker.clone(),
+                AuthMode::None,
+            )
+            .await;
             let app = crate::api::create_test_router(state.clone());
             let victim = "203.0.113.10";
             let refused = || {
@@ -4662,6 +4710,244 @@ mod tests {
             assert_eq!(speaker.deletes.load(SeqCst), 0);
         }
 
+        /// `/v1/events` reads `source` from the body, so an Operator session or
+        /// the shared bearer token naming an allowlisted detector source is a
+        /// claim on that detector's privileges and is refused. The Admin session
+        /// may claim it, the adapter route binds `source` itself, and an unknown
+        /// source keeps the unchanged Operator path.
+        #[tokio::test]
+        async fn body_source_cannot_claim_an_allowlisted_detector() {
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let state = detector_state(
+                OperationMode::DryRun,
+                repo.clone(),
+                speaker,
+                AuthMode::Bearer,
+            )
+            .await;
+            let app = crate::api::create_test_router(state.clone());
+            let admin = login(&app, &repo, "source-admin", OperatorRole::Admin).await;
+            let operator = login(&app, &repo, "source-operator", OperatorRole::Operator).await;
+            let bearer = ("authorization", "Bearer operator-bearer-token");
+            let victim = "203.0.113.10";
+            let ban = fastnetmon_ban("fastnetmon", victim);
+            let event_id = ban["event_id"].as_str().unwrap().to_owned();
+
+            for auth in [bearer, ("cookie", operator.as_str())] {
+                let (status, body) = send(&app, "/v1/events", Some(auth), ban.clone()).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{auth:?}: {body}");
+                let error = body["error"].as_str().expect("named error");
+                assert!(
+                    error.contains("bound by a detector adapter route"),
+                    "{body}"
+                );
+                assert!(error.contains("fastnetmon"), "{body}");
+                // The named error carries the source, never the rest of the request.
+                assert!(!error.contains("udp_flood"), "{body}");
+                assert!(!error.contains("raw_details"), "{body}");
+            }
+            assert_eq!(repo.count_active_global().await.unwrap(), 0);
+            assert!(
+                repo.list_events(&all_events()).await.unwrap().is_empty(),
+                "a refused claim stores no event"
+            );
+
+            // A source outside every allowlist keeps the unchanged Operator path:
+            // the blackhole guardrail answers, not this authorization gate.
+            let (status, body) = send(
+                &app,
+                "/v1/events",
+                Some(("cookie", &operator)),
+                fastnetmon_ban("dashboard", victim),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert!(body["error"].as_str().unwrap().contains("detector_sources"));
+
+            // Admin may claim the detector identity through the body.
+            let (status, created) =
+                send(&app, "/v1/events", Some(("cookie", &admin)), ban.clone()).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{created}");
+            assert_eq!(repo.count_active_global().await.unwrap(), 1);
+            assert_eq!(created["external_event_id"], event_id.as_str(), "{created}");
+            let mitigation_id = created["mitigation_id"].as_str().unwrap().to_owned();
+
+            // A ban is the only action that exercises the detector privilege, so an
+            // Operator's unban keeps withdrawing; blocking it would strand a live
+            // detector blackhole during the migration.
+            let mut unban = ban;
+            unban["action"] = "unban".into();
+            let (status, body) = send(&app, "/v1/events", Some(("cookie", &operator)), unban).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(body["status"], "withdrawn", "{body}");
+            assert_eq!(body["mitigation_id"], mitigation_id.as_str(), "{body}");
+            assert_eq!(repo.count_active_global().await.unwrap(), 0);
+
+            // The adapter route binds `source` itself, so the same Operator bearer
+            // token reaches the detector blackhole there.
+            let (status, body) = send(
+                &app,
+                "/v1/signals/fastnetmon",
+                Some(bearer),
+                json!({
+                    "action": "ban",
+                    "ip": "203.0.113.12",
+                    "alert_scope": "host",
+                    "attack_details": {
+                        "attack_uuid": uuid::Uuid::new_v4().to_string(),
+                        "attack_start": "2026-11-15T00:00:00Z",
+                        "incoming_udp_pps": 9_000,
+                        "total_incoming_pps": 9_000,
+                        "total_incoming_traffic_bits": 100_000_000u64,
+                    },
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(body["status"], "accepted");
+            let id = body["mitigation_id"].as_str().unwrap();
+            let stored = repo
+                .get_mitigation(id.parse().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.action_type, crate::domain::ActionType::Blackhole);
+            assert_eq!(repo.count_active_global().await.unwrap(), 1);
+            // The adapter, not the caller, determined the recorded detector identity.
+            let events = repo.list_events(&all_events()).await.unwrap();
+            let triggering = events
+                .iter()
+                .find(|event| event.event_id == stored.triggering_event_id)
+                .unwrap_or_else(|| panic!("{events:?}"));
+            assert_eq!(triggering.source, "fastnetmon");
+        }
+
+        /// The prefix allowlist is the second source-keyed privilege. An Operator
+        /// naming a prefix-allowed source through the event body is refused before
+        /// prefix admission, while an Admin reaches the ordinary prefix guardrails.
+        #[tokio::test]
+        async fn body_source_cannot_claim_a_prefix_allowed_detector() {
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let mut state = detector_state(
+                OperationMode::DryRun,
+                repo.clone(),
+                Arc::new(FaultyBlackholes::default()),
+                AuthMode::Bearer,
+            )
+            .await;
+            {
+                let settings = &mut Arc::get_mut(&mut state).unwrap().settings;
+                settings.guardrails.allow_detector_prefix = true;
+                settings.guardrails.detector_prefix_sources = vec!["fastnetmon".into()];
+            }
+            let app = crate::api::create_test_router(state);
+            let admin = login(&app, &repo, "prefix-admin", OperatorRole::Admin).await;
+            let operator = login(&app, &repo, "prefix-operator", OperatorRole::Operator).await;
+            let bearer = ("authorization", "Bearer operator-bearer-token");
+            let carpet_bomb = json!({
+                "event_id": uuid::Uuid::new_v4().to_string(),
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "source": "fastnetmon",
+                "victim_ip": "203.0.113.0/24",
+                "vector": "udp_flood",
+                "pps": 4_200_000,
+                "confidence": 0.9,
+                "action": "ban",
+            });
+
+            for auth in [bearer, ("cookie", operator.as_str())] {
+                let (status, body) =
+                    send(&app, "/v1/events", Some(auth), carpet_bomb.clone()).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{auth:?}: {body}");
+                assert!(
+                    body["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("bound by a detector adapter route"),
+                    "{body}"
+                );
+            }
+            assert!(repo.list_events(&all_events()).await.unwrap().is_empty());
+
+            // Admin passes this gate; the ordinary prefix path then answers, and
+            // with no `scope: prefix` playbook it produces no mitigation.
+            let (status, body) =
+                send(&app, "/v1/events", Some(("cookie", &admin)), carpet_bomb).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(body["status"], "accepted_no_playbook", "{body}");
+            assert_eq!(repo.count_active_global().await.unwrap(), 0);
+        }
+
+        /// `/v1/events/batch` reads each item's `source` from the body too. A
+        /// claimed item is rejected on its own, and the batch still answers for
+        /// every other item.
+        #[tokio::test]
+        async fn batch_rejects_a_claimed_detector_source_per_item() {
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let state = detector_state(
+                OperationMode::DryRun,
+                repo.clone(),
+                Arc::new(FaultyBlackholes::default()),
+                AuthMode::Bearer,
+            )
+            .await;
+            let app = crate::api::create_test_router(state);
+            let admin = login(&app, &repo, "batch-admin", OperatorRole::Admin).await;
+            let operator = login(&app, &repo, "batch-operator", OperatorRole::Operator).await;
+            let batch = |first: &str| {
+                json!({"events": [
+                    fastnetmon_ban(first, "203.0.113.10"),
+                    fastnetmon_ban("dashboard", "203.0.113.11"),
+                ]})
+            };
+
+            for auth in [
+                ("authorization", "Bearer operator-bearer-token"),
+                ("cookie", operator.as_str()),
+            ] {
+                let (status, body) =
+                    send(&app, "/v1/events/batch", Some(auth), batch("fastnetmon")).await;
+                assert_eq!(status, StatusCode::MULTI_STATUS, "{auth:?}: {body}");
+                assert_eq!(body["accepted"], 0);
+                assert_eq!(body["rejected"], 2);
+                let results = body["results"].as_array().unwrap();
+                assert!(
+                    results[0]["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("bound by a detector adapter route"),
+                    "{body}"
+                );
+                // The second item was still processed on its own unchanged path.
+                assert!(
+                    results[1]["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("detector_sources"),
+                    "{body}"
+                );
+            }
+            assert!(repo.list_events(&all_events()).await.unwrap().is_empty());
+
+            // Admin claims the identity for the first item, which is then admitted.
+            let (status, body) = send(
+                &app,
+                "/v1/events/batch",
+                Some(("cookie", &admin)),
+                batch("fastnetmon"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::MULTI_STATUS, "{body}");
+            assert_eq!(body["accepted"], 1);
+            assert_eq!(body["rejected"], 1);
+            assert_eq!(body["results"][0]["status"], "accepted");
+            assert_eq!(repo.count_active_global().await.unwrap(), 1);
+        }
+
         /// The unleased opt-in: an enforced detector blackhole adds the frozen route,
         /// health reports it unleased, and the unban deletes it.
         #[tokio::test]
@@ -4669,8 +4955,13 @@ mod tests {
             let _metrics = METRICS_TEST_LOCK.lock().await;
             let repo = Arc::new(MockRepository::new());
             let speaker = Arc::new(FaultyBlackholes::default());
-            let state =
-                detector_state(OperationMode::Enforced, repo.clone(), speaker.clone()).await;
+            let state = detector_state(
+                OperationMode::Enforced,
+                repo.clone(),
+                speaker.clone(),
+                AuthMode::None,
+            )
+            .await;
             let app = crate::api::create_test_router(state);
             let (status, health) = get(&app, "/v1/health/detail").await;
             assert_eq!(status, StatusCode::OK, "{health}");
@@ -4712,8 +5003,13 @@ mod tests {
             let owner = "prefixd.test1.0123456789abcdef";
             // The startup probe confirms the capability.
             speaker.live_lease(owner).await.unwrap();
-            let mut state =
-                detector_state(OperationMode::Enforced, repo.clone(), speaker.clone()).await;
+            let mut state = detector_state(
+                OperationMode::Enforced,
+                repo.clone(),
+                speaker.clone(),
+                AuthMode::None,
+            )
+            .await;
             Arc::get_mut(&mut state).unwrap().settings.blackhole.leased = true;
             let lease = Arc::new(crate::domain::LeaseKeeper::new(owner.into(), 60));
             let state = state.with_lease(lease.clone()).unwrap();
@@ -4754,8 +5050,13 @@ mod tests {
             let repo = Arc::new(MockRepository::new());
             let speaker = Arc::new(FaultyBlackholes::default());
             let owner = "prefixd.test1.0123456789abcdef";
-            let mut state =
-                detector_state(OperationMode::Enforced, repo.clone(), speaker.clone()).await;
+            let mut state = detector_state(
+                OperationMode::Enforced,
+                repo.clone(),
+                speaker.clone(),
+                AuthMode::None,
+            )
+            .await;
             Arc::get_mut(&mut state).unwrap().settings.bgp.rustbgpd =
                 Some(crate::config::RustBgpdConfig {
                     leased_flowspec: true,
@@ -4813,7 +5114,8 @@ mod tests {
             speaker: Arc<FaultyBlackholes>,
             leased: Option<Arc<crate::domain::LeaseKeeper>>,
         ) -> Arc<AppState> {
-            let mut state = detector_state(OperationMode::Enforced, repo, speaker).await;
+            let mut state =
+                detector_state(OperationMode::Enforced, repo, speaker, AuthMode::None).await;
             Arc::get_mut(&mut state).unwrap().settings.bgp.rustbgpd =
                 Some(crate::config::RustBgpdConfig {
                     leased_flowspec: leased.is_some(),

@@ -809,6 +809,63 @@ This queue covers withdrawals. Durable create/replace intent and target/process
 generation fencing remain separate work; it is not a complete announcement
 ledger or an active-active controller protocol.
 
+## Detector source binding on `/v1/events`
+
+`POST /v1/events` and `POST /v1/events/batch` read `source` from the request
+body, while `blackhole.detector_sources` and
+`guardrails.detector_prefix_sources` grant detector privileges by that name. A
+`ban` naming either allowlisted source now needs an Admin session. An Operator
+session and the shared bearer token get `403` with an `error` naming the bound
+source, before any event is stored; no guardrail counter moves and no
+mitigation or withdrawal state changes.
+
+Only an adapter route may bind `source` under an Operator credential. Their
+behavior is unchanged, because each overwrites the field with its configured
+adapter or detector name:
+
+- `POST /v1/signals/fastnetmon` sets `source: "fastnetmon"`.
+- `POST /v1/signals/alertmanager` sets `source: "alertmanager"`.
+- `POST /v1/signals/webhook/{name}` sets `source` to the adapter `name`.
+
+Before upgrading, find detectors that post to `/v1/events` with an allowlisted
+`source` and a bearer token:
+
+```bash
+grep -n -A12 '^blackhole:' /etc/prefixd/prefixd.yaml | grep -n detector_sources
+grep -n 'detector_prefix_sources' /etc/prefixd/prefixd.yaml
+```
+
+`scripts/prefixd-fastnetmon.sh` is one of them: it posts `source: "fastnetmon"`
+to `/v1/events` with `PREFIXD_TOKEN`. After the upgrade, its ban gets `403`
+whenever `blackhole.detector_sources` or `detector_prefix_sources` lists
+`fastnetmon`. Choose one migration per detector:
+
+- Point FastNetMon at its native JSON notification,
+  `POST /v1/signals/fastnetmon`, instead of the notify script; see the
+  [FastNetMon guide](detectors/fastnetmon.md#how-it-works). That route binds the
+  source itself and needs no Admin session.
+- Keep the notify script against a controller whose `http.auth.mode` is `none`
+  or `mtls`. Both synthesize an Admin principal, so the check passes.
+- Post with an Admin session cookie (browser login), not the shared bearer
+  token. A prefix-event shim that must keep using `/v1/events` needs this: the
+  FastNetMon adapter maps host bans only.
+
+Do not shorten `blackhole.detector_sources` or `detector_prefix_sources` to get
+past the check: that turns off the detector path instead of moving it. Sources
+outside both lists are unaffected and still need only Operator. An `unban` is
+unaffected too, so a live detector blackhole can still be withdrawn with the
+old script until the ban path is migrated.
+
+Audit entries from detector events record `actor_type: "detector"` and the
+event `source` as `actor_id`, so a body-claimed source is indistinguishable
+from a bound one after the fact. If an Operator credential was shared with a
+detector host, review the `create` entries whose `actor_id` is an allowlisted
+source, and withdraw any mitigation whose triggering event you cannot account
+for.
+
+No database migration is required. Downgrading to a controller without this
+check restores acceptance of the body-supplied source for non-admin callers.
+
 ## Secure session cookies
 
 Session cookies are now `Secure` by default unless `auth.mode` is `none`,

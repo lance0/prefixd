@@ -20,6 +20,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GitHub Release page; the release body now points them at
   `https://github.com/<repo>/blob/vX.Y.Z/<path>`.
 
+### Security
+
+- `/v1/events` and `/v1/events/batch` no longer accept an allowlisted detector
+  `source` from an Operator credential. Both endpoints read `source` from the
+  request body, and the guardrails grant detector privileges by that name, so a
+  shared bearer token could claim `fastnetmon` and reach a detector blackhole
+  step or a detector prefix rule that otherwise needs Administrator rights. A
+  `ban` naming a source in `blackhole.detector_sources` or
+  `guardrails.detector_prefix_sources` now requires an Admin session and
+  otherwise returns `403` with an error naming the bound source, before the
+  event is stored. The detector adapter routes (`/v1/signals/fastnetmon`,
+  `/v1/signals/alertmanager`, `/v1/signals/webhook/{name}`) bind `source` from
+  their configured adapter and are unchanged; sources outside both allowlists
+  still need only Operator, and an `unban` stays available to Operator so live
+  detector intent can still be withdrawn. Detectors that post to `/v1/events`
+  with an allowlisted source and a bearer token, including
+  `scripts/prefixd-fastnetmon.sh`, must move to their adapter route or an Admin
+  session; see
+  [upgrading](docs/how-to/upgrading.md#detector-source-binding-on-v1events).
+
 ## [0.27.0] - 2026-11-15
 
 prefixd 0.27.0 is a safety and correctness release. Withdrawals require a

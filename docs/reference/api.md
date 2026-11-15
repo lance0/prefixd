@@ -125,9 +125,10 @@ retries can use the same ID. Batch ingestion keeps per-item rejection results.
 
 When `guardrails.allow_detector_prefix` is true and the event `source` appears
 in `guardrails.detector_prefix_sources`, `victim_ip` may be a canonical CIDR.
-The allowlist filters the `source` label the caller supplies; it does not
-authenticate a detector, so every caller authorized to ingest events is trusted
-to supply that label.
+Through `/v1/events` and `/v1/events/batch`, only an Admin session may claim an
+allowlisted `source` for a `ban` ([detector source binding](#detector-source-binding));
+detector adapter routes bind the label themselves. Beyond that role check the
+allowlist does not authenticate a detector: an Admin caller supplies the label.
 Host bits are rejected rather than cleared. The prefix must fit the configured
 `dst_prefix_minlen`/`dst_prefix_maxlen` (the default remains host-only), belong
 entirely to one inventory customer, and have no safelist overlap. A prefix
@@ -333,6 +334,7 @@ add reports `"announcement_outcome": "unconfirmed"` as above.
 |--------|--------|
 | 400 | Invalid request body, or a VPN default scope refuses a blackhole |
 | 401 | Authentication required |
+| 403 | A `ban` names a detector-bound `source` and the caller is not an Admin (see [detector source binding](#detector-source-binding)) |
 | 409 | Duplicate event, or in enforced mode the rule is owned by a dry-run mitigation (when every rule is refused before admission, the event is not stored); for a blackhole, a pending withdrawal or an untracked local route at the prefix; for a FlowSpec rule, another injection owner, or none, holding its match at the speaker |
 | 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length, blackhole source allowlist, VPN scope capability and victim checks, etc.) |
 | 429 | Rate limited |
@@ -341,6 +343,26 @@ A refused event that was stored records its [outcome](#event-outcomes). A
 guardrail or conflict refusal of a valid event, stored or not, also writes a
 [`reject` audit entry](#event-refusal-audit). Duplicates, invalid requests and
 a speaker target mismatch write neither.
+
+### Detector source binding
+
+`/v1/events` and `/v1/events/batch` read `source` from the request body. The
+guardrails grant detector privileges by that name:
+`blackhole.detector_sources` admits a playbook blackhole step, and
+`guardrails.detector_prefix_sources` admits one canonical CIDR. A `ban` naming
+either allowlisted source needs an **Admin** session. An Operator session, the
+shared bearer token and every other non-admin caller get `403` with an
+`error` naming the bound source; no event is stored and no guardrail counter
+moves.
+
+Detector adapter routes bind the field themselves and are unaffected: a bearer
+token keeps working on `/v1/signals/fastnetmon`, `/v1/signals/alertmanager` and
+`/v1/signals/webhook/{name}`, each of which overwrites `source` with its
+configured adapter or detector name. A source outside both allowlists is
+unchanged — it still needs only Operator, and it gains no detector privilege.
+An `unban` is not gated: it grants no detector privilege and only withdraws, so
+an Operator can still withdraw a live detector mitigation with the same
+`source` and `event_id`. A missing or unknown source never widens access.
 
 ### Batch Ingest Events
 
@@ -409,6 +431,7 @@ success: if some events fail, the rest are still processed. Each result's
 | 207 | Partial success (some rejected) |
 | 400 | Empty batch or exceeds 100 event limit |
 | 401 | Authentication required |
+| 403 | The caller lacks the Operator role. A `ban` item naming a detector-bound `source` is rejected on its own row instead, and the batch still answers for the rest |
 
 A result whose event created or extended several rules also lists them in
 `mitigation_ids` (omitted when empty).

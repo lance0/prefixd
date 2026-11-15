@@ -238,7 +238,13 @@ new mitigations, never live routes.
   rejected as guardrail violations. This keeps dashboard events and other
   adapters off the blackhole path. `source` is asserted by the caller, so this
   is a routing guard that works alongside detector credentials, not
-  authorization. Escalation from FlowSpec to blackhole
+  authorization.
+  *Amended 2026-11-15:* `/v1/events` and `/v1/events/batch` take `source` from
+  the request body, so a `ban` there that names an allowlisted source now needs
+  an Admin session; the detector adapter routes bind the field themselves and
+  keep accepting an Operator credential. See
+  [detector source binding](../reference/api.md#detector-source-binding).
+  Escalation from FlowSpec to blackhole
   needs its own ADR once escalation exists. The unused `escalated_from_id`
   column stays available for it.
   *Alternative:* allowing blackhole only as an escalation step (rejected: there
