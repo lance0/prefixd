@@ -21,7 +21,7 @@ async function renderAs(role: OperatorRole, ui: ReactElement, url = "/") {
   signIn(controller, "credentials", operatorResponse(role))
   controller.route("GET", "/v1/events", () => json({ events: [], count: 0, next_cursor: null, has_more: false }))
   controller.route("GET", AUDIT, () => json(emptyAudit))
-  controller.route("GET", OPERATORS, () => json([]))
+  controller.route("GET", OPERATORS, () => json({ operators: [], count: 0 }))
   controller.route("GET", CACHE, () => json({ total: 0, by_source: [], signals: [] }))
   renderApp(ui, { url })
   await waitFor(() => expect(controller.calls("GET", "/v1/auth/me")).toHaveLength(1))
@@ -76,9 +76,10 @@ describe("administration page", () => {
   })
 
   it("lists operator accounts for an admin", async () => {
-    await renderAs("admin", <AdminPage />, "/admin")
+    await renderAs("admin", <AdminPage />, "/admin?tab=users")
 
     await waitFor(() => expect(controller.calls("GET", OPERATORS)).toHaveLength(1))
+    expect(await screen.findByText("No operators configured")).toBeInTheDocument()
   })
 })
 
