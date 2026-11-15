@@ -20,8 +20,10 @@ docker compose exec prefixd-rustbgpd prefixdctl operators create \
 open http://localhost
 ```
 
-Log in with that account. The shipped main config enables credentials and
-enforced operation. The sample inventory/playbooks are examples: adapt them to
+Log in with that account. The shipped main config enables credentials,
+enforced operation and [leased FlowSpec](../reference/configuration.md#leased-flowspec):
+if prefixd stops while rustbgpd keeps running, rustbgpd withdraws its rules
+within one lease (60 seconds by default). The sample inventory/playbooks are examples: adapt them to
 your network before sending real attack events. A healthy local API or speaker
 is not proof of a BGP session or router enforcement.
 

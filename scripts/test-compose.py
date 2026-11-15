@@ -47,6 +47,8 @@ class Profiles(unittest.TestCase):
                 self.assertNotIn(f"prefixd-{other}", services)
                 self.assertNotIn(other, services)
                 self.assertEqual(services[selected]["user"], "999:999")
+                # Outlasts the shipped shutdown.drain_timeout_seconds of 30.
+                self.assertEqual(services[selected]["stop_grace_period"], "35s")
                 self.assertEqual(services[selected]["image"], CONTROLLER_IMAGE)
                 self.assertEqual(services["init"]["image"], CONTROLLER_IMAGE)
                 self.assertEqual(services["dashboard"]["image"], DASHBOARD_IMAGE)

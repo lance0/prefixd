@@ -248,7 +248,7 @@ pub struct RustBgpdConfig {
     #[serde(default)]
     pub client_key_path: Option<String>,
     /// Add new enforced FlowSpec rules under the controller's injection lease
-    /// (rustbgpd 0.79.0 or later), with `blackhole.lease_seconds`.
+    /// (rustbgpd 0.83.0 or later), with `blackhole.lease_seconds`.
     #[serde(default)]
     pub leased_flowspec: bool,
 }
@@ -525,7 +525,7 @@ pub struct BlackholeConfig {
     /// refuses every detector; a routing guard, not authorization.
     pub detector_sources: Vec<String>,
     /// Inject new enforced blackholes through the owner-scoped rustbgpd
-    /// injection lease (rustbgpd 0.79.0 or later); startup refuses it otherwise.
+    /// injection lease (rustbgpd 0.83.0 or later); startup refuses it otherwise.
     pub leased: bool,
     /// Owner lease length in seconds, 5..=3600 (rustbgpd ADR-0141).
     pub lease_seconds: u32,
@@ -911,22 +911,34 @@ mod tests {
 
     #[test]
     fn shipped_speaker_examples_select_the_matching_backend() {
-        for (yaml, expected) in [
+        // Only the rustbgpd Compose profile's main config leases FlowSpec.
+        for (yaml, expected, leased) in [
             (
                 include_str!("../../configs/prefixd.yaml"),
                 BgpMode::Rustbgpd,
+                true,
             ),
             (
                 include_str!("../../configs/prefixd.yaml.example"),
                 BgpMode::Rustbgpd,
+                false,
             ),
             (
                 include_str!("../../configs/prefixd-gobgp.yaml"),
                 BgpMode::Gobgp,
+                false,
             ),
         ] {
             let settings = load_yaml(yaml).unwrap();
             assert_eq!(settings.bgp.mode, expected);
+            assert_eq!(
+                settings
+                    .bgp
+                    .rustbgpd
+                    .as_ref()
+                    .is_some_and(|rustbgpd| rustbgpd.leased_flowspec),
+                leased
+            );
             // Shipped files pin the backend instead of relying on resolution.
             assert!(yaml.contains("\nbgp:\n") && yaml.contains("\n  backend: "));
             assert_eq!(settings.http.auth.mode, AuthMode::Credentials);

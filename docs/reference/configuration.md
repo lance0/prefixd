@@ -178,7 +178,8 @@ bgp:
   backend: rustbgpd
   rustbgpd:
     endpoint: "unix:///run/rustbgpd/grpc.sock"
-    # Off by default. Every supported rustbgpd (0.83.0 or later) has the lease.
+    # Off by default; on in the shipped configs/prefixd.yaml. Every supported
+    # rustbgpd (0.83.0 or later) has the lease.
     leased_flowspec: true
 ```
 
@@ -190,6 +191,39 @@ lease instead of keeping them until prefixd returns. They share the owner,
 `blackhole.lease_seconds`, the renewal task and the generation with
 [leased blackholes](#leased-blackholes), because any leased add moves the
 owner's whole deadline. `blackhole.leased` is not required.
+
+The code default is `false`. The shipped `configs/prefixd.yaml`, which the
+rustbgpd Compose profile mounts, sets it to `true`, so a controller outage
+longer than one lease removes active FlowSpec mitigations from rustbgpd while
+the database still desires them. When prefixd returns, startup re-adds the
+rules that are still active. Set `false` to keep rules announced through a
+controller outage.
+
+Startup refuses `false` while leased FlowSpec rules are active or awaiting
+withdrawal. A refused controller renews nothing, and Compose's
+`restart: unless-stopped` only repeats the refusal, so rustbgpd withdraws
+those rules within one lease while the database still desires them. Set the
+key back to `true` to recover. To turn the lease off:
+
+1. Withdraw, or let expire, every FlowSpec mitigation added under the lease.
+   This query must return no rows:
+
+   ```sql
+   SELECT mitigation_id FROM mitigations
+   WHERE status IN ('pending', 'active', 'escalated')
+     AND action_type <> 'blackhole'
+     AND action_params_json::jsonb ->> 'injection_owner' <> '';
+   ```
+
+2. Confirm that no leased withdrawal is pending. This query must return no
+   rows:
+
+   ```sql
+   SELECT operation_id FROM withdrawal_requests
+   WHERE completed_at IS NULL AND rule_json::jsonb ->> 'owner' <> '';
+   ```
+
+3. Set `leased_flowspec: false` and restart prefixd.
 
 - **Startup.** Refused unless the speaker answers the injection lease probe,
   which every supported rustbgpd does. Refused when the speaker holds live FlowSpec
@@ -806,7 +840,13 @@ Shutdown signals reconciliation to stop and waits for the configured drain
 period before continuing server shutdown. This wait does not prove that in-flight
 requests or reconciliation have completed. Shutdown does not withdraw rules from
 the independent speaker. Controller-driven TTL cleanup requires the controller
-to run; rules can remain while prefixd is stopped.
+to run; unleased rules can remain while prefixd is stopped.
+
+The service manager must wait longer than the drain before it kills prefixd.
+The Compose controller services set `stop_grace_period: 35s` for the shipped
+30 seconds, and systemd's default `TimeoutStopSec` is 90 seconds. Raise them
+with `drain_timeout_seconds`. Lease renewal continues during the drain, so the
+drain does not shorten the time leased rules survive after prefixd exits.
 
 Only `drain_timeout_seconds` is accepted in `shutdown`; unknown fields cause a
 configuration error. The removed `preserve_announcements` key below fails
@@ -998,8 +1038,8 @@ routes the network holds can still apply.
 - **Dry-run.** `RenewLease` is a speaker mutation, so a dry-run controller
   probes and reports the lease but never renews it; health reports
   `not_renewing`. Switching an enforced leased controller to dry-run lets its
-  leased routes lapse within `lease_seconds`. Withdraw live blackholes before
-  changing the mode, as the
+  leased FlowSpec rules and blackholes lapse within `lease_seconds`. Withdraw
+  them before changing the mode, as the
   [upgrade guide](../how-to/upgrading.md#mitigation-origin-mode) already asks.
 - **Database outages.** Renewal needs no database and no controller fence, so
   a PostgreSQL outage that puts the controller in standby does not drop leased

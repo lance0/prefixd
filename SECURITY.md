@@ -64,7 +64,10 @@ enabling announcements.
 
 Expiry requires a running controller and reconciliation. The separate BGP
 speaker can retain advertisements after prefixd stops; a TTL is not a speaker
-lease. See [controller and speaker failures](docs/adr/003-fail-open-ttl.md).
+lease. The shipped rustbgpd config adds FlowSpec rules under the rustbgpd
+injection lease, so rustbgpd withdraws them within one lease after prefixd
+stops; GoBGP and unleased rules have no such cleanup. See
+[controller and speaker failures](docs/adr/003-fail-open-ttl.md).
 
 ### Authentication Modes
 

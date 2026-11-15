@@ -651,6 +651,7 @@ mod tests {
                 crate::config::parse_yaml(include_str!("../../../configs/prefixd.yaml")).unwrap();
             settings.http.auth.mode = AuthMode::None;
             settings.bgp.mode = BgpMode::Mock;
+            settings.bgp.rustbgpd = None;
             settings.mode = OperationMode::DryRun;
             settings.guardrails.dst_prefix_minlen = 22;
             settings.guardrails.dst_prefix_minlen_v6 = Some(48);

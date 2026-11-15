@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- The shipped `configs/prefixd.yaml`, which the rustbgpd Compose profile
+  bind-mounts from the checkout, now sets `bgp.rustbgpd.leased_flowspec: true`.
+  After `git pull`, new enforced FlowSpec rules are added under the
+  controller's rustbgpd injection lease. A controller outage longer than one
+  lease (`blackhole.lease_seconds`, 60 by default) now removes active
+  mitigations from rustbgpd, by design, while the database still holds them;
+  the restarted controller re-adds the ones still active. A controller
+  replacement must finish before the old controller's lease runs out, which
+  can be as little as two thirds of a lease after it stops, since renewal runs
+  about every `lease_seconds / 3`. To keep rules announced through a controller
+  outage, set `leased_flowspec: false` before the first leased rule is added.
+  Afterwards, startup refuses `false` while any leased rule is active or
+  awaiting withdrawal. A refused controller renews nothing, so rustbgpd
+  withdraws those rules within one lease while the database still holds them.
+  To opt out later, withdraw or let expire every leased FlowSpec mitigation,
+  confirm no withdrawal is pending, then set `false`. Rules added
+  before the change stay unleased until they are withdrawn or expire, and
+  startup accepts the mix. With the setting on, startup also refuses when the
+  lease probe or the speaker's FlowSpec read fails, and when rustbgpd holds
+  rules under this controller's owner that the database cannot explain. The
+  code default, the GoBGP profile and configurations that omit the key stay
+  unleased. See [leased FlowSpec](docs/reference/configuration.md#leased-flowspec).
 - Withdrawals now require a reason. `POST /v1/mitigations/{id}/withdraw` and
   `POST /v1/mitigations/withdraw` return `400` for an empty or whitespace-only
   `reason`. `POST /v1/diversions/{id}/withdraw` requires a JSON body with a
@@ -179,6 +201,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The shipped rustbgpd configuration turns on leased FlowSpec, so if prefixd
+  stops while rustbgpd keeps running, rustbgpd withdraws the controller's
+  FlowSpec rules within one lease instead of keeping them until prefixd
+  returns ([ADR 003](docs/adr/003-fail-open-ttl.md)).
 - Compose pins rustbgpd v0.83.0, and the vendored `proto/rustbgpd.proto`
   follows the v0.83.0 release. Blackhole read-back takes a route's MED only
   from `med_attr`, since v0.83.0 removes the bare `Route.med` field; a route
@@ -244,6 +270,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Compose gives both controller services `stop_grace_period: 35s`. Docker's
+  default of 10 seconds killed prefixd partway through the 30-second
+  `shutdown.drain_timeout_seconds` drain on `docker compose stop`, `restart`
+  and controller replacement. Raise it if you raise the drain timeout.
 - `GET /v1/health` no longer returns `500` when a request carries a session
   cookie and PostgreSQL is down. `GET /v1/ready`, `/metrics` and
   `/openapi.json` no longer read the session either, so they answer the same

@@ -770,11 +770,12 @@ configuration while PostgreSQL and the original speaker remain running.
 prefixd reads `mode` only at startup. `POST /v1/config/reload` doesn't change
 it, so every mode switch passes through this check.
 
-With [leased blackholes](../reference/configuration.md#leased-blackholes), a
+With [leased FlowSpec](../reference/configuration.md#leased-flowspec) or
+[leased blackholes](../reference/configuration.md#leased-blackholes), a
 dry-run controller never renews the injection lease, because renewal is a
 speaker mutation. Switching an enforced leased controller to dry-run
-therefore lets its leased blackholes lapse at the speaker within
-`blackhole.lease_seconds`, while the enforced rows stay in the database.
+therefore lets its leased FlowSpec rules and blackholes lapse at the speaker
+within `blackhole.lease_seconds`, while the enforced rows stay in the database.
 Withdraw them first, then switch the mode.
 
 Downgrading below this release removes the protection: an older binary ignores
@@ -935,13 +936,23 @@ Replacing only the controller can preserve the independent speaker's sessions:
    `prefixd-gobgp`. If GoBGP itself is recreated, recreate both the namespace
    owner and controller together:
    `docker compose --profile gobgp up -d --no-build --force-recreate gobgp prefixd-gobgp`.
+   The old controller drains for `shutdown.drain_timeout_seconds` (30) before
+   it exits; the Compose `stop_grace_period` of 35 seconds lets the drain
+   finish.
 3. Verify API availability, ownership, speaker observation and reconciliation
    after startup; no fixed recovery time is guaranteed.
 4. The speaker may retain announcements while prefixd restarts. Application TTL
    expiry pauses during controller downtime and resumes with reconciliation.
+   With the shipped rustbgpd config's
+   [leased FlowSpec](../reference/configuration.md#leased-flowspec), rustbgpd
+   keeps leased rules only until the old controller's lease runs out. It
+   renews about every `blackhole.lease_seconds / 3`, so as little as two
+   thirds of a lease (about 40 of the default 60 seconds) can remain when it
+   stops. Start the new controller before then, or the leased rules are
+   withdrawn until it re-adds them at startup.
 
-The API is unavailable during replacement and rules can outlive their deadlines
-until cleanup resumes. This is not a zero-downtime or automatic fail-open promise.
+The API is unavailable during replacement and unleased rules can outlive their
+deadlines until cleanup resumes. This is not a zero-downtime promise.
 
 ---
 

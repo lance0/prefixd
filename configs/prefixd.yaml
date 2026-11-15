@@ -17,6 +17,11 @@ bgp:
   backend: rustbgpd
   rustbgpd:
     endpoint: "unix:///run/rustbgpd/grpc.sock"
+    # New FlowSpec rules are added under the controller's injection lease. If
+    # prefixd stops while rustbgpd keeps running, rustbgpd withdraws them within
+    # blackhole.lease_seconds (60 by default). Set false to keep rules announced
+    # through a controller outage.
+    leased_flowspec: true
   local_asn: 65010
   router_id: "10.10.0.10"
   neighbors: []

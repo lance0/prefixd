@@ -54,15 +54,14 @@ exports. [Verified remote mTLS](../reference/speaker-backends.md#remote-mtls)
 is available when controller and speaker cannot share a private local socket.
 
 The running controller enforces TTLs. Stopping prefixd alone does not terminate
-the speaker's BGP sessions. With the defaults, injected rules carry no
-application expiry lease. With
-[`bgp.rustbgpd.leased_flowspec`](../reference/configuration.md#leased-flowspec)
-or [`blackhole.leased`](../reference/configuration.md#leased-blackholes) on,
-rustbgpd removes the rules added under the lease within one lease after renewal
-stops. Rules added before the lease was turned on stay unleased, and GoBGP has
-no lease. Restore reconciliation or explicitly withdraw rules after
-controller failure; monitor controller availability independently from BGP
-session health.
+the speaker's BGP sessions. The shipped rustbgpd config sets
+[`bgp.rustbgpd.leased_flowspec`](../reference/configuration.md#leased-flowspec),
+so rustbgpd removes the FlowSpec rules added under the lease within one lease
+after renewal stops; [`blackhole.leased`](../reference/configuration.md#leased-blackholes)
+does the same for blackholes. The code default is unleased, rules added before
+the lease was turned on stay unleased, and GoBGP has no lease. Restore
+reconciliation or explicitly withdraw unleased rules after controller failure;
+monitor controller availability independently from BGP session health.
 
 For isolated released-container lifecycle, TTL and restart validation, run
 `scripts/test-rustbgpd.sh`; the [backend runbook](../reference/speaker-backends.md#released-controller-qualification)

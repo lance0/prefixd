@@ -169,7 +169,11 @@ Two more rules protect routing state:
 
 A `201` means prefixd saved intent and the speaker accepted the local request.
 It doesn't prove that a router installed the rule. The running controller
-enforces TTLs: if prefixd stops while the speaker stays up, rules stay announced.
+enforces TTLs. With the shipped rustbgpd config, rules are
+[leased](docs/reference/configuration.md#leased-flowspec): if prefixd stops
+while rustbgpd stays up, rustbgpd withdraws them within one lease (60 seconds),
+and prefixd re-adds the ones still desired when it returns. With GoBGP, or
+`leased_flowspec: false`, rules stay announced until prefixd returns.
 
 [Guardrail settings](docs/reference/configuration.md#guardrails) ·
 [Withdrawal recovery](docs/reference/speaker-backends.md#withdrawal-recovery) ·
