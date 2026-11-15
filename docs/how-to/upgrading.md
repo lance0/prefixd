@@ -903,6 +903,22 @@ blank `--reason`, and `diversions withdraw` now requires one. An older
 unbans withdraw inside the controller and are unaffected, and the bundled
 FastNetMon script already sends a reason.
 
+## Multi-step playbooks
+
+The controller runs only the first step of a playbook. Releases after 0.27.0
+ship `configs/playbooks.yaml` with one step per playbook, and startup, reload
+and `PUT /v1/config/playbooks` log a warning for each playbook with more than
+one step. Mitigation behavior is unchanged: a later step never ran.
+
+Compose installs copy the shipped playbooks into the `prefixd-config` volume
+only when the file is missing, so an existing volume keeps the file an earlier
+release installed. Its `udp_flood_police_first`, `syn_flood_police` and
+`ack_flood_police` playbooks each carry a second `discard` step, and the
+upgraded controller logs three warnings on every start and reload. To clear
+them, delete step 2 of each playbook in the dashboard playbook editor, or in
+`/etc/prefixd/playbooks.yaml` followed by a reload. Keep the first step as it
+is; it is the one that runs.
+
 ---
 
 ## Docker Compose Upgrade

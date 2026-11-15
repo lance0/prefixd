@@ -434,6 +434,34 @@ impl Playbooks {
         warnings
     }
 
+    /// Playbooks whose later steps the controller never runs. Startup and
+    /// reload log these; the steps stay accepted so existing files keep
+    /// loading and keep their written order.
+    pub fn unexecuted_steps_warnings(&self) -> Vec<String> {
+        self.playbooks
+            .iter()
+            .filter(|playbook| playbook.steps.len() > 1)
+            .map(|playbook| {
+                format!(
+                    "playbook {:?} has {} steps; only the first step runs, later steps are not executed; remove the later steps from playbooks.yaml to clear this warning",
+                    playbook.name,
+                    playbook.steps.len()
+                )
+            })
+            .collect()
+    }
+
+    /// Log the non-fatal warnings once playbooks take effect, at startup,
+    /// reload and `PUT /v1/config/playbooks`.
+    pub fn log_warnings(&self, guardrails: &GuardrailsConfig) {
+        for warning in self.prefix_scope_warnings(guardrails) {
+            tracing::warn!(%warning, "prefix playbook is unreachable");
+        }
+        for warning in self.unexecuted_steps_warnings() {
+            tracing::warn!(%warning, "playbook steps are not executed");
+        }
+    }
+
     /// Validate all playbook rules, returning a list of errors (empty = valid).
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
@@ -751,6 +779,98 @@ mod tests {
     }
 
     #[test]
+    fn multi_step_playbooks_warn_that_later_steps_are_not_executed() {
+        let mut two_step = valid_playbook();
+        two_step.name = "two_step".to_string();
+        two_step.steps.push(PlaybookStep {
+            action: Some(PlaybookAction::Discard),
+            rate_bps: None,
+            ttl_seconds: 300,
+            rules: Vec::new(),
+            require_confidence_at_least: Some(0.7),
+            require_persistence_seconds: Some(120),
+        });
+        let playbooks = Playbooks {
+            playbooks: vec![valid_playbook(), two_step],
+        };
+        let warnings = playbooks.unexecuted_steps_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("two_step"), "{warnings:?}");
+        assert!(
+            warnings[0].contains("later steps are not executed"),
+            "{warnings:?}"
+        );
+    }
+
+    /// Multi-step playbooks remain valid configuration: they load, validate and
+    /// keep their steps, and the warning is the only new surface.
+    #[test]
+    fn multi_step_playbooks_still_load_with_a_warning() {
+        let mut two_step = valid_playbook();
+        two_step.name = "two_step".to_string();
+        two_step.steps.push(PlaybookStep {
+            action: Some(PlaybookAction::Discard),
+            rate_bps: None,
+            ttl_seconds: 300,
+            rules: Vec::new(),
+            require_confidence_at_least: Some(0.7),
+            require_persistence_seconds: Some(120),
+        });
+        let playbooks = Playbooks {
+            playbooks: vec![two_step],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("playbooks.yaml");
+        std::fs::write(&path, serde_saphyr::to_string(&playbooks).unwrap()).unwrap();
+
+        let loaded = Playbooks::load(&path).unwrap();
+        assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
+        assert_eq!(loaded.playbooks[0].steps.len(), 2);
+        assert_eq!(loaded.unexecuted_steps_warnings().len(), 1);
+    }
+
+    /// Compose volumes keep the playbooks.yaml an earlier release installed, so
+    /// the 0.27.0 file must keep loading and warn once per multi-step playbook.
+    #[test]
+    fn shipped_0_27_0_playbooks_still_validate_and_warn_three_times() {
+        let playbooks: Playbooks = crate::config::parse_yaml(include_str!(
+            "../../tests/fixtures/playbooks/shipped-0.27.0.yaml"
+        ))
+        .unwrap();
+        assert!(
+            playbooks.validate().is_empty(),
+            "{:?}",
+            playbooks.validate()
+        );
+        let warnings = playbooks.unexecuted_steps_warnings();
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        for name in [
+            "udp_flood_police_first",
+            "syn_flood_police",
+            "ack_flood_police",
+        ] {
+            assert!(
+                warnings.iter().any(|w| w.contains(&format!("{name:?}"))),
+                "{name}: {warnings:?}"
+            );
+        }
+        assert!(
+            warnings
+                .iter()
+                .all(|w| w.contains("remove the later steps from playbooks.yaml")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn single_step_playbooks_do_not_warn_about_unexecuted_steps() {
+        let playbooks = Playbooks {
+            playbooks: vec![valid_playbook()],
+        };
+        assert!(playbooks.unexecuted_steps_warnings().is_empty());
+    }
+
+    #[test]
     fn test_validate_valid_playbooks() {
         let pb = Playbooks {
             playbooks: vec![valid_playbook()],
@@ -763,6 +883,13 @@ mod tests {
         let playbooks: Playbooks =
             crate::config::parse_yaml(include_str!("../../configs/playbooks.yaml")).unwrap();
         assert!(playbooks.validate().is_empty());
+        // Every shipped playbook is one step, so startup has nothing to warn
+        // about and no default install carries steps that never run.
+        assert!(
+            playbooks.unexecuted_steps_warnings().is_empty(),
+            "{:?}",
+            playbooks.unexecuted_steps_warnings()
+        );
         // The notify script sends no top_dst_ports, so a vector without a
         // port-independent playbook would silently stop at accepted_no_playbook.
         for vector in [

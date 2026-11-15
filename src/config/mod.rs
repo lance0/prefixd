@@ -267,6 +267,7 @@ impl AppConfig {
                     .playbooks
                     .prefix_scope_warnings(&config.settings.guardrails)
                     .into_iter()
+                    .chain(config.playbooks.unexecuted_steps_warnings())
                     .map(|warning| format!("{}: {warning}", playbooks.display())),
             );
         }
@@ -816,6 +817,32 @@ mod tests {
             check.errors[0].contains("url must use https"),
             "{:?}",
             check.errors
+        );
+    }
+
+    /// The check prints the playbook warnings startup logs, under the
+    /// playbooks file; a one-step playbook set prints none.
+    #[test]
+    fn check_reports_unexecuted_playbook_steps() {
+        let directory = fixture();
+        assert!(AppConfig::check(directory.path()).warnings.is_empty());
+        std::fs::write(
+            directory.path().join("playbooks.yaml"),
+            "playbooks:\n  - name: two_steps\n    match: {vector: udp_flood}\n    steps:\n      \
+             - {action: police, rate_bps: 5000000, ttl_seconds: 120}\n      \
+             - {action: discard, ttl_seconds: 300}\n",
+        )
+        .unwrap();
+        let check = AppConfig::check(directory.path());
+        assert!(check.is_ok(), "{:?}", check.errors);
+        assert_eq!(check.warnings.len(), 1, "{:?}", check.warnings);
+        assert!(
+            check.warnings[0].starts_with(&format!(
+                "{}: playbook \"two_steps\" has 2 steps; only the first step runs",
+                directory.path().join("playbooks.yaml").display()
+            )),
+            "{:?}",
+            check.warnings
         );
     }
 
