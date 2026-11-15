@@ -1,7 +1,10 @@
-# FastNetMon Community Integration
+# FastNetMon Integration
 
-This guide covers integrating FastNetMon Community Edition with prefixd for
-automated FlowSpec or guarded host-blackhole mitigation.
+This guide covers integrating FastNetMon with prefixd for automated FlowSpec or
+guarded host-blackhole mitigation. The bundled notify script follows the
+Community Edition notify interface. FastNetMon Advanced can also post its JSON
+callback to the [native JSON endpoint](#native-json-endpoint); its hostgroup
+alerts are not mapped yet (see below).
 
 ## Carpet bombing and prefix events
 
@@ -134,7 +137,7 @@ rustbgpd `v0.80.1`; it does not qualify a shared-target deployment:
 
 ## Prerequisites
 
-- FastNetMon Community Edition installed and configured
+- FastNetMon Community or Advanced installed and configured
 - prefixd running with API accessible
 - `curl` installed (`jq` and/or `python3` are recommended for richer JSON handling)
 - Network connectivity from FastNetMon to prefixd API
@@ -332,8 +335,8 @@ creates and audits the blackhole, shows it in the dashboard and API, and sends
 nothing to the speaker.
 
 **Enforced mode and the injection lease.** The rustbgpd injection lease lets
-the speaker remove a dead controller's routes on its own. With rustbgpd 0.79.0
-or later, set `blackhole.leased: true`: enforced detector blackholes are then
+the speaker remove a dead controller's routes on its own. With rustbgpd, set
+`blackhole.leased: true`: enforced detector blackholes are then
 added under the controller's lease, and if prefixd stops, rustbgpd removes
 them within `blackhole.lease_seconds` (60 by default). See
 [leased blackholes](../../reference/configuration.md#leased-blackholes).

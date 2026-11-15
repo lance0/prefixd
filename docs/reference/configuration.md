@@ -178,7 +178,7 @@ bgp:
   backend: rustbgpd
   rustbgpd:
     endpoint: "unix:///run/rustbgpd/grpc.sock"
-    # Off by default. Needs rustbgpd 0.79.0 or later.
+    # Off by default. Every supported rustbgpd (0.83.0 or later) has the lease.
     leased_flowspec: true
 ```
 
@@ -191,8 +191,8 @@ lease instead of keeping them until prefixd returns. They share the owner,
 [leased blackholes](#leased-blackholes), because any leased add moves the
 owner's whole deadline. `blackhole.leased` is not required.
 
-- **Startup.** Refused unless the speaker answers the injection lease probe
-  (rustbgpd 0.79.0 or later). Refused when the speaker holds live FlowSpec
+- **Startup.** Refused unless the speaker answers the injection lease probe,
+  which every supported rustbgpd does. Refused when the speaker holds live FlowSpec
   rules under this owner that the database neither desires nor is
   withdrawing. rustbgpd caps one injection owner at 16,384 keys, unicast and
   FlowSpec together (rustbgpd ADR-0141 §7), so startup also refuses when
@@ -849,7 +849,7 @@ blackhole:
   detector_sources: [fastnetmon]
 
   # Add new enforced blackholes under the owner-scoped rustbgpd injection
-  # lease (rustbgpd 0.79.0 or later). If prefixd stops while the speaker runs,
+  # lease (any supported rustbgpd). If prefixd stops while the speaker runs,
   # the speaker removes them within one lease.
   leased: false
   lease_seconds: 60
@@ -866,7 +866,7 @@ blackhole:
 | `max_active_per_pop` | `10` | Counted at the configured `pop` |
 | `max_active_global` | `50` | Counted across every POP sharing the database |
 | `detector_sources` | `[]` | Nonempty strings, matched exactly against an event's `source` |
-| `leased` | `false` | Startup refuses `true` unless the speaker answers the rustbgpd injection lease probe (rustbgpd 0.79.0 or later), and refuses `false` while leased blackholes are active or awaiting withdrawal |
+| `leased` | `false` | Startup refuses `true` unless the speaker answers the rustbgpd injection lease probe, which every supported rustbgpd answers, and refuses `false` while leased blackholes are active or awaiting withdrawal |
 | `lease_seconds` | `60` | `5..=3600`, validated even while `leased` is false. Every leased add and renewal uses it |
 
 prefixd validates every key at load, even when `enabled` is false, and
@@ -968,10 +968,9 @@ lease plus its RIB queue lag. That removes rustbgpd's local route only; other
 routes the network holds can still apply.
 
 - **Startup.** prefixd asks the speaker for its lease with
-  `ListInjectionLeases`. A speaker without the RPC (rustbgpd before 0.79.0)
-  refuses startup. A live lease is adopted, and every active leased blackhole
-  is re-added under its recorded owner, with the safelist recheck. Startup
-  also refuses when the speaker holds live routes under this owner that the
+  `ListInjectionLeases`. A speaker without the RPC refuses startup. A live
+  lease is adopted, and every active leased blackhole is re-added under its
+  recorded owner, with the safelist recheck. Startup also refuses when the speaker holds live routes under this owner that the
   database neither desires nor is withdrawing: another controller with the
   same POP is using this speaker.
 - **No fallback.** A failed leased add leaves the blackhole unconfirmed and is
@@ -1556,12 +1555,14 @@ Slack, Discord and Teams `webhook_url`, PagerDuty `events_url` and generic `url`
 allow up to 1,024 bytes; Telegram `chat_id` allows up to 64 bytes. Playbook edit
 TTLs must be 1–86,400 seconds.
 
-Common validation errors:
+A startup failure names the file, such as `failed to load
+/etc/prefixd/inventory.yaml`, followed by the reason. YAML parse errors give the
+key path, line and column, as described under [Hot Reload](#hot-reload).
+Checks that run after parsing name the key they refuse, for example:
 
-- `Invalid prefix length` - Check guardrails.dst_prefix_maxlen
-- `Invalid TTL` - TTL outside min/max bounds
-- `Missing required field` - Check YAML structure
-- `Invalid customer_id` - Must be unique
+- `configuration error: blackhole.lease_seconds must be 5..=3600, got 2`
+- `configuration error: amplification.reflector_ports: port 53 is listed twice`
+- `configuration error: inventory customer acme: invalid prefix "203.0.113.0/33"`
 
 ## Scrubber profiles
 

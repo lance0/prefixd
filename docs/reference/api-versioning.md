@@ -8,9 +8,11 @@ All prefixd API endpoints are versioned under a `/v1/` prefix. This document des
 
 API versions use a simple integer prefix: `/v1/`, `/v2/`, etc.
 
-The current stable version is **v1**.
-
-Before prefixd 1.0.0, a minor release can still make a breaking change under `/v1/` and lists it under the release's Upgrade notes; see the [v1.0 release gates](../project/v1-gates.md#api-stability-conflict).
+The current version is **v1**. It is stable within 0.x: before prefixd 1.0.0,
+`/v1/` is the URL version, not a freeze, and a minor release can still make a
+breaking change under it. Each such change is called out in that release's
+CHANGELOG Upgrade notes and the [upgrade guide](../how-to/upgrading.md); see the
+[v1.0 release gates](../project/v1-gates.md#api-stability-conflict).
 
 ## Backward Compatibility
 
@@ -23,7 +25,7 @@ Within a major version (e.g., v1), the following changes are considered **non-br
 - Relaxing validation constraints (e.g., accepting a wider range of values)
 - Adding new HTTP headers
 
-The following changes are **breaking** and require a new major version:
+The following changes are **breaking**. From prefixd 1.0.0 they require a new major version; before 1.0.0 they are listed in upgrade notes:
 
 - Removing or renaming endpoints
 - Removing or renaming response fields
@@ -52,7 +54,7 @@ Deprecation: true
 
 | Version | Status | Notes |
 |---------|--------|-------|
-| v1 | **Stable** | Current and only version |
+| v1 | **Stable within 0.x** | Current and only version; before 1.0.0, breaking changes are listed in upgrade notes |
 
 No endpoints are currently deprecated.
 

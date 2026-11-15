@@ -54,9 +54,15 @@ exports. [Verified remote mTLS](../reference/speaker-backends.md#remote-mtls)
 is available when controller and speaker cannot share a private local socket.
 
 The running controller enforces TTLs. Stopping prefixd alone does not terminate
-the speaker's BGP sessions, and injected rules carry no application expiry
-lease. Restore reconciliation or explicitly withdraw rules after controller
-failure; monitor controller availability independently from BGP session health.
+the speaker's BGP sessions. With the defaults, injected rules carry no
+application expiry lease. With
+[`bgp.rustbgpd.leased_flowspec`](../reference/configuration.md#leased-flowspec)
+or [`blackhole.leased`](../reference/configuration.md#leased-blackholes) on,
+rustbgpd removes the rules added under the lease within one lease after renewal
+stops. Rules added before the lease was turned on stay unleased, and GoBGP has
+no lease. Restore reconciliation or explicitly withdraw rules after
+controller failure; monitor controller availability independently from BGP
+session health.
 
 For isolated released-container lifecycle, TTL and restart validation, run
 `scripts/test-rustbgpd.sh`; the [backend runbook](../reference/speaker-backends.md#released-controller-qualification)
@@ -83,7 +89,7 @@ revision.
 Compose uses the prebuilt `main` tags by default. `PREFIXD_IMAGE` overrides both
 the controller and its initializer; `PREFIXD_DASHBOARD_IMAGE` overrides the
 frontend. `PREFIXD_RUSTBGPD_IMAGE` overrides the pinned speaker image; leave it
-unset to use the tested rustbgpd 0.82.0 digest. Supply already-published matching
+unset to use the tested rustbgpd 0.83.0 digest. Supply already-published matching
 references when pinning a deployment.
 No new release tag or immutable controller digest is implied by this guide.
 The quickstart uses `--pull always --no-build`; the explicit
@@ -269,13 +275,15 @@ through nginx at `http://localhost` (port 80).
 
 ## Signal Adapters (Detector Integration)
 
-prefixd accepts events three ways:
+prefixd accepts signals five ways:
 
-1. **Generic API** (`POST /v1/events`) — any detector that can POST JSON
+1. **Generic API** (`POST /v1/events`, or `POST /v1/events/batch`) — any detector that can POST JSON
 2. **Alertmanager webhook** (`POST /v1/signals/alertmanager`) — native Alertmanager v4 payload
 3. **FastNetMon webhook** (`POST /v1/signals/fastnetmon`) — native FastNetMon JSON payload
+4. **Named webhook adapters** (`POST /v1/signals/webhook/{name}`) — arbitrary JSON mapped by a `webhook_adapters` entry in `correlation.yaml`; see [generic webhooks](detectors/generic-webhook.md)
+5. **Corroborating signals** (`POST /v1/signals/corroborator`) — sources without a victim IP that only corroborate open signal groups; see [corroborating signals](detectors/corroborating-signals.md)
 
-The signal adapters translate detector-native payloads into prefixd events and feed them through the full pipeline (correlation → policy → guardrails → announce).
+The detector adapters translate detector-native payloads into prefixd events and feed them through the full pipeline (correlation → policy → guardrails → announce). Corroborating signals create no event; they only add confidence to open signal groups.
 
 ### Alertmanager Setup
 

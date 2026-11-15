@@ -23,7 +23,9 @@ to announce a FlowSpec rule with a mandatory TTL. No detector speaks BGP.
 > is the default path. GoBGP stays maintained and selectable.
 > [Why rustbgpd](#pairs-with-rustbgpd)
 
-**Status:** pre-1.0, and the API can change before 1.0. The latest release,
+**Status:** pre-1.0. The `/v1/` API is stable within 0.x: a breaking change is
+called out in its release's upgrade notes
+([API versioning](docs/reference/api-versioning.md)). The latest release,
 [v0.26.0](https://github.com/lance0/prefixd/releases/tag/v0.26.0), adds an
 opt-in TCP flags match for manual FlowSpec rules and an optional symmetric
 return leg for scrubber diversion. Both stay off until configured. It needs

@@ -82,7 +82,11 @@ rolled-back daemon clears it. It is false for GoBGP. The legacy `gobgp`
 component reports `unsupported` without an error when peer observation is absent,
 `error` when it fails, and `connected` when it succeeds (even with zero peers).
 `bgp_sessions` remains the same peer-name/state map. Missing optional observation
-alone does not make overall health degraded. Health does not probe the RIB.
+alone does not make overall health degraded. Health does not read the global
+RIB. With VPN scopes configured, health detail runs each configured family's
+read-only capability probe (`ListFlowSpecRoutes` for family 13 or 14) at most
+once per 10 s and reports it under
+[`speaker.vpn_families`](api.md#vpn-flowspec-admission).
 Rust's authenticated `GetHealth` supplies `speaker.daemon` version, process
 uptime, readiness and successful observation time. Missing version remains null;
 zero uptime is valid. Unsupported GoBGP process metadata and failed probes have

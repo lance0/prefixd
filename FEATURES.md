@@ -167,7 +167,7 @@ Safety limits that prevent accidental broad impact.
 
 ### Port Limits
 
-- **Max ports per rule** - Default 8 per port list (router memory protection)
+- **Max ports per rule** - `guardrails.max_ports`, default 5 per port list (router memory protection; FRR accepts at most 5)
 - **Port matching** - Lists of discrete destination- and source-port equalities, not ranges
 
 ### Example Configuration
@@ -233,7 +233,7 @@ drops all traffic to the victim. Current limits:
   blackhole stays on the speaker if prefixd stops, until prefixd returns and
   expires it or an Admin deletes it on the speaker. With
   [leased blackholes](docs/reference/configuration.md#leased-blackholes) on
-  rustbgpd 0.79.0 or later, the speaker removes it within one lease.
+  rustbgpd, the speaker removes it within one lease.
 - **rustbgpd only.** GoBGP has no blackhole capability, and startup refuses
   `blackhole.enabled` without it or with an empty safelist.
 - **Admin and typed confirmation.** Operators and bearer tokens get `403`; the
@@ -265,7 +265,7 @@ FastNetMon Community ban, into a blackhole for the victim
   `blackhole.max_ttl_seconds` from now, and the FastNetMon unban withdraws it.
 - **Dry-run first.** In dry-run mode a detector blackhole is recorded and
   audited and sends nothing.
-- **Leased.** With `blackhole.leased` on rustbgpd 0.79.0 or later, enforced
+- **Leased.** With `blackhole.leased` on rustbgpd, enforced
   detector blackholes are added under the controller's owner-scoped injection
   lease and renewed by a separate task. If prefixd stops while rustbgpd keeps
   running, the speaker removes them within one lease (60 s by default). A
@@ -555,6 +555,7 @@ Real-time visibility into mitigation state:
 - **Rule** - Operator form for one manual FlowSpec rule, including source prefix, source ports, non-first fragments and packet length, with client checks that name the guardrail
 - **Events** - Attack event history with CSV export
 - **IP History** - Unified timeline per IP (events + mitigations + customer context), with incident report generation
+- **Scrubbers** - Profile readiness and arm state, re-arm, manual diversion preview, creation and withdrawal with a required reason (Admin for changes)
 - **Audit Log** - Recorded operation history with actor attribution, CSV export
 - **Incident Reports** - Generate markdown reports from mitigation detail or IP history pages (`GET /v1/reports/incident`). Summary, timeline, peak traffic, audit trail. Copy to clipboard or download .md
 - **Config** - Settings viewer, playbook editor (form + YAML), alerting editor, hot-reload controls. The YAML view edits `rules` steps losslessly; the form shows them read-only and keeps them unchanged
@@ -585,9 +586,12 @@ Real-time visibility into mitigation state:
 
 ### prefixdctl
 
-The CLI reads status/peers, lists and withdraws mitigations, manages the safelist
-and reloads configuration. JSON and table output are available. Initial operator
-setup uses direct database access. See the [CLI reference](docs/reference/cli.md)
+The CLI reads status, peers and the speaker's local FlowSpec routes; previews,
+creates, lists, inspects, extends and withdraws mitigations, including manual VPN
+rules; manages the safelist; inspects and re-arms scrubber profiles and manages
+manual diversions; reloads configuration; lists applied migrations; and sends
+corroborating signals. JSON and table output are available. The operator and
+migration commands use direct database access. See the [CLI reference](docs/reference/cli.md)
 for commands and mode-specific authentication.
 
 ---

@@ -14,8 +14,12 @@ cargo build --release
 Or use the Docker image:
 
 ```bash
-docker run --rm ghcr.io/lance0/prefixd:latest prefixdctl --help
+docker run --rm ghcr.io/lance0/prefixd:0.26.0 prefixdctl --help
 ```
+
+Use the release tag that matches your controller. `latest` and `main` follow
+the main branch, not a release; see
+[image publication](../how-to/deployment.md#image-publication-and-selection).
 
 For a short interactive command, add this alias to your Bash or Zsh configuration:
 
@@ -424,11 +428,11 @@ prefixdctl -f json mitigations list
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | General error |
-| 2 | Connection failed |
-| 3 | Authentication failed |
-| 4 | Not found |
-| 5 | Validation error |
+| 1 | Any command failure, including connection, authentication, not-found, validation and safety refusals; stderr carries the error |
+| 2 | Invalid command-line usage, such as an unknown command or missing argument |
+
+Scripts that need the failure kind should read the stderr message, which
+includes the HTTP status for API errors.
 
 ---
 
