@@ -741,7 +741,9 @@ spelling is retained. `ttl_seconds` is the requested lifetime, not a reserved
 expiry; the optional `expires_at_cap` remains an absolute ceiling. `mode` is the
 configured controller mode. A global preview never saves an event, mitigation, audit
 entry or withdrawal, and never sends a speaker RPC or updates mutation counters.
-A scoped VPN preview performs one read-only family capability probe.
+A scoped VPN preview runs at most one read-only family capability probe, and
+none when the family has a `supported` result from the last 10 s (see
+[VPN FlowSpec admission](#vpn-flowspec-admission)).
 It neither consumes nor reserves a quota/rate slot. Ordinary HTTP request
 metrics and rate limiting still apply.
 
@@ -3654,7 +3656,8 @@ Rejections increment `prefixd_http_rate_limited_total{class}`.
 ## Manual scrubber diversion
 
 All reads require authentication; manual mutations and preview require Admin.
-The feature is disabled by default and needs rustbgpd v0.81.0. Detector and
+The feature is disabled by default and needs the rustbgpd backend; every
+supported rustbgpd (0.83.0 or later) has the guarded methods. Detector and
 playbook requests cannot choose a scrubber target.
 
 | Method and path | Meaning |

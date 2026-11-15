@@ -234,6 +234,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are exempt. 429 rejections log the class and client.
 - The API reference no longer documents `X-RateLimit-*` headers, which were
   never sent, and shows the actual `"rate_limited"` error string.
+- Documentation now matches the code on high-traffic pages. The CLI reference
+  lists the exit codes `prefixdctl` returns (0, 1 for any command failure and 2
+  for invalid usage) instead of six that were never implemented, and its image
+  example uses a release tag instead of `latest`, which follows main. The
+  configuration reference shows real validation messages. FEATURES gives the
+  default port limit of 5, not 8, and lists the Scrubbers page and the full CLI.
+  The deployment guide lists all five signal endpoints and says when injected
+  rules carry an expiry lease. The vendor matrix no longer says redirect actions
+  are unimplemented. The API versioning policy describes `/v1/` as stable within
+  0.x, matching the README. The preview OpenAPI description and the backend
+  reference say when preview and health run a VPN capability probe. Pages that
+  said leases need rustbgpd 0.79.0 now say any supported rustbgpd, and the
+  rustbgpd image references name the 0.83.0 pin.
 - `/openapi.json` now documents `POST /v1/mitigations/{id}/withdraw`,
   `GET /v1/safelist` and `POST /v1/config/reload`, so a generated client can
   withdraw a single mitigation. A test now fails when a `/v1` route is missing

@@ -56,7 +56,7 @@ The Nokia column is SR OS, which is untested. SR Linux does not support FlowSpec
 - **Expected** — Vendor documentation indicates support; not yet tested with prefixd
 - **Not working** — Tested but not functioning; investigation ongoing
 - **Not supported** — Vendor/platform does not support this feature
-- **Supported (untested)** — Vendor supports it, but prefixd does not implement this action yet
+- **Supported (untested)** — Vendor documentation indicates support. prefixd sends redirect-to-IP and redirect-to-VRF only for [manual scrubber diversion](../how-to/scrubber-diversion.md) ([ADR 030](../adr/030-scrubber-diversion.md)), and no router in this matrix has been tested with them. A GoBGP software peer has received both from prefixd ([VPN action receipt](qualification/vpn-flowspec-actions-2026-11-08.md))
 
 ## Tested Environments
 
@@ -215,7 +215,9 @@ SR Linux 25.10.1 has no BGP FlowSpec address family. This was probed on
 2026-10-18 with [`lab/interop/srlinux-probe.clab.yml`](../../lab/interop/srlinux-probe.clab.yml):
 SR Linux `ghcr.io/nokia/srlinux:25.10.1` (7220 IXR-D2L) peered over eBGP with
 released rustbgpd 0.77.0. rustbgpd offered `ipv4_unicast`, `ipv4_flowspec` and
-`ipv6_flowspec`.
+`ipv6_flowspec`. The topology file now pins rustbgpd 0.83.0 and the probe has
+not been rerun; the result rests on SR Linux's address families, not the
+speaker version.
 
 - The CLI rejects FlowSpec families at the BGP and group level:
 

@@ -178,7 +178,8 @@ records the results.
 
 **SR Linux.** `interop/srlinux-probe.clab.yml` peers SR Linux 25.10.1 with
 the digest-pinned rustbgpd 0.83.0 image. It is a manual probe, not a CI leg. SR Linux does not support
-BGP FlowSpec. The [vendor matrix](../docs/reference/vendors.md#nokia-sr-linux--not-supported)
+BGP FlowSpec. The dated 2026-10-18 result used rustbgpd 0.77.0 and has not been
+rerun on the current pin. The [vendor matrix](../docs/reference/vendors.md#nokia-sr-linux--not-supported)
 records the commands and output.
 
 **SR OS.** No lab is provided. The containerised SR OS (SR-SIM) needs an image

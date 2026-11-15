@@ -450,7 +450,7 @@ async fn validate_manual_flowspec_on(
     post,
     path = "/v1/mitigations/preview",
     tag = "mitigations",
-    description = "Side-effect-free manual discard/police admission snapshot. Requires Operator. Uses creation's preparation and safety checks. No capacity reservation, saved intent, audit, event, or speaker RPC. Creation rechecks. This is not speaker acceptance, export or router enforcement. Like creation, requires the active controller.",
+    description = "Side-effect-free manual discard/police admission snapshot. Requires Operator. Uses creation's preparation and safety checks. No capacity reservation, saved intent, audit or event. A global preview sends no speaker RPC; a VPN-scoped preview runs at most one read-only family capability probe, skipped while a supported result from the last 10 s is cached. Creation rechecks. This is not speaker acceptance, export or router enforcement. Like creation, requires the active controller.",
     request_body = CreateMitigationRequest,
     responses(
         (status = 200, description = "Controller-side checks passed at checked_at; nothing was saved", body = FlowSpecAdmissionPreview),
