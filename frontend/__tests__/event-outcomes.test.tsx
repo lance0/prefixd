@@ -34,7 +34,9 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.stubGlobal("matchMedia", vi.fn((media: string) => ({ media, matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })))
+
   for (const name of pointerApis) Object.defineProperty(Element.prototype, name, { configurable: true, value: vi.fn(() => false) })
+
   controller.route("GET", "/v1/events", ({ query }) => {
     const outcomes = query.get("outcome")?.split(",")
     const page = rows.filter((row) => !outcomes || outcomes.includes(row.outcome ?? "not_recorded"))

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react"
 import { cn } from "@/lib/utils"
-import type { EventOutcome, Mitigation, SignalGroup } from "@/lib/api"
+import { EVENT_OUTCOMES, type EventOutcome, type Mitigation, type SignalGroup } from "@/lib/api"
 
 /**
  * Status colour is reserved for state. Every pill pairs a dot (or icon) and a
@@ -112,7 +112,7 @@ export function eventOutcomeTone(outcome: string): StatusTone {
 
 /** An event's outcome; missing or unknown values read as not recorded. */
 export function EventOutcomePill({ outcome }: { outcome?: string | null }) {
-  const known = outcome && outcome in EVENT_OUTCOME_LABELS ? (outcome as EventOutcome) : "not_recorded"
+  const known = EVENT_OUTCOMES.find((value) => value === outcome) ?? "not_recorded"
 
   return <StatusPill tone={eventOutcomeTone(known)}>{EVENT_OUTCOME_LABELS[known]}</StatusPill>
 }

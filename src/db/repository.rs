@@ -589,7 +589,8 @@ impl RepositoryTrait for Repository {
               AND ($7::text IS NULL OR vector = $7)
               AND ($8::text IS NULL OR strpos(lower(victim_ip), lower($8)) > 0
                    OR strpos(event_id::text, lower($8)) > 0)
-              AND ($9::text[] IS NULL OR COALESCE(outcome, 'not_recorded') = ANY($9))
+              AND ($9::text[] IS NULL OR CASE WHEN outcome = ANY($10) THEN outcome
+                   ELSE 'not_recorded' END = ANY($9))
             ORDER BY ingested_at DESC, event_id DESC LIMIT $1
             "#,
         )
@@ -607,6 +608,8 @@ impl RepositoryTrait for Repository {
                 .map(|outcome| outcome.as_str())
                 .collect::<Vec<_>>()
         }))
+        // NULL and values this version does not know read as not_recorded.
+        .bind(crate::domain::EventOutcome::ALL.map(crate::domain::EventOutcome::as_str).to_vec())
         .fetch_all(&self.pool)
         .await?;
         Ok(events)

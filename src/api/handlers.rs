@@ -1092,6 +1092,7 @@ async fn handle_unban(
         record_event_outcome(&state, unban_event.event_id, &record).await;
     }
     if let Some(error) = failure {
+        audit_refusal(&state, &unban_event, &error, None, stored).await;
         return Err(AppError(error));
     }
 
@@ -1164,30 +1165,45 @@ async fn handle_ban(
     }
     // A refusal before storage leaves no event row, so the detector may retry
     // the same event ID (ADR 033); the audit entry is its only record.
-    if let Some(error) = error
-        && let Some(outcome) = EventOutcome::of_refusal(error).or(trace
-            .refusal
-            .is_some()
-            .then_some(EventOutcome::GuardrailRejected))
-    {
-        let guardrail = trace.refusal.clone().unwrap_or_else(|| match error {
+    if let Some(error) = error {
+        audit_refusal(&state, event, error, trace.refusal.as_deref(), trace.stored).await;
+    }
+    result
+}
+
+/// Audit a guardrail or conflict refusal of a detector event; other errors are
+/// not refusals. `label` is a detector prefix refusal's guardrail reason.
+async fn audit_refusal(
+    state: &AppState,
+    event: &AttackEvent,
+    error: &PrefixdError,
+    label: Option<&str>,
+    stored: bool,
+) {
+    let Some(outcome) = EventOutcome::of_refusal(error)
+        .or(label.is_some().then_some(EventOutcome::GuardrailRejected))
+    else {
+        return;
+    };
+    let guardrail = label.map_or_else(
+        || match error {
             PrefixdError::GuardrailViolation(_) => guardrail_reason(error),
             PrefixdError::UnsupportedFlowSpecScope { .. } => "UnsupportedFlowSpecScope".into(),
             _ => "Conflict".into(),
-        });
-        let entry = crate::observability::AuditEntry::guardrail_rejected(
-            event,
-            outcome.as_str(),
-            &guardrail,
-            &error.to_string(),
-            trace.stored,
-        );
-        if let Err(audit_error) = state.repo.insert_audit(&entry).await {
-            tracing::error!(event_id = %event.event_id, error = %audit_error,
-                "failed to audit refused event");
-        }
+        },
+        str::to_string,
+    );
+    let entry = crate::observability::AuditEntry::guardrail_rejected(
+        event,
+        outcome.as_str(),
+        &guardrail,
+        &error.to_string(),
+        stored,
+    );
+    if let Err(audit_error) = state.repo.insert_audit(&entry).await {
+        tracing::error!(event_id = %event.event_id, error = %audit_error,
+            "failed to audit refused event");
     }
-    result
 }
 
 async fn record_event_outcome(state: &AppState, event_id: Uuid, record: &EventOutcomeRecord) {

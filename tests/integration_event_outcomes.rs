@@ -371,3 +371,30 @@ async fn batch_items_record_their_own_outcomes() {
     assert_eq!(listed(&state, "batch-safe").await["outcome"], "safelisted");
     assert_eq!(rejections(&repo).await.len(), 1);
 }
+
+#[tokio::test]
+async fn refused_unban_records_a_conflict_and_is_audited() {
+    let (state, repo) = state(OperationMode::Enforced);
+    let (_, ban) = post(&state, event("foreign", "203.0.113.10", "udp_flood")).await;
+    let id = ban["mitigation_id"].as_str().unwrap().parse().unwrap();
+    // The mitigation now belongs to another POP, so this controller refuses it.
+    let mut mitigation = repo.get_mitigation(id).await.unwrap().unwrap();
+    mitigation.pop = "other-pop".into();
+    repo.update_mitigation(&mitigation).await.unwrap();
+
+    let mut unban = event("foreign", "203.0.113.10", "udp_flood");
+    unban["action"] = "unban".into();
+    let (status, body) = post(&state, unban).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (_, list) = send(&state, "GET", "/v1/events?outcome=conflict", None).await;
+    assert_eq!(list["count"], 1, "{list}");
+    let row = &list["events"][0];
+    assert_eq!(row["action"], "unban");
+    assert_eq!(row["outcome_reason"], body["error"]);
+    let audit = rejections(&repo).await;
+    assert_eq!(audit.len(), 1, "{audit:?}");
+    assert_eq!(audit[0]["target_id"], row["event_id"]);
+    assert_eq!(audit[0]["details"]["outcome"], "conflict");
+    assert_eq!(audit[0]["details"]["guardrail"], "Conflict");
+    assert_eq!(audit[0]["details"]["stored"], true);
+}

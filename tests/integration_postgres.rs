@@ -7589,19 +7589,31 @@ async fn test_event_outcomes_replay_filter_and_write_once_postgres_mock_parity()
             .await
             .unwrap();
     assert_eq!(raw, [(None, None, Vec::new())]);
+    // A value a newer controller wrote reads, and filters, as not_recorded.
+    sqlx::raw_sql(
+        "INSERT INTO events (event_id, external_event_id, source, event_timestamp, ingested_at,
+             victim_ip, vector, top_dst_ports_json, action, outcome)
+         VALUES (gen_random_uuid(), 'future', 'replay', now(), now() - interval '2 minutes',
+             '203.0.113.30', 'udp_flood', '[]', 'ban', 'future_outcome');",
+    )
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
 
     let mock = Arc::new(MockRepository::new());
-    let legacy = ctx
+    let older = ctx
         .repo
         .list_events(&ListParams {
             limit: 10,
             ..Default::default()
         })
         .await
-        .unwrap()
-        .remove(0);
-    assert_eq!(legacy.outcome, EventOutcomeRecord::default());
-    mock.insert_event(&legacy).await.unwrap();
+        .unwrap();
+    assert_eq!(older.len(), 2);
+    for event in &older {
+        assert_eq!(event.outcome, EventOutcomeRecord::default());
+        mock.insert_event(event).await.unwrap();
+    }
 
     let repositories: [Arc<dyn RepositoryTrait>; 2] = [ctx.repo.clone(), mock];
     for repo in repositories {
@@ -7653,12 +7665,15 @@ async fn test_event_outcomes_replay_filter_and_write_once_postgres_mock_parity()
             }
         };
         let all = list(None).await;
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 4);
         assert!(all.contains(&("mitigated".into(), record.clone())));
         assert!(all.contains(&("refused".into(), refusal.clone())));
         assert_eq!(
             list(Some(vec![EventOutcome::NotRecorded])).await,
-            [("legacy".into(), EventOutcomeRecord::default())]
+            [
+                ("legacy".into(), EventOutcomeRecord::default()),
+                ("future".into(), EventOutcomeRecord::default())
+            ]
         );
         let mut refused_or_legacy = list(Some(vec![
             EventOutcome::GuardrailRejected,
@@ -7669,7 +7684,7 @@ async fn test_event_outcomes_replay_filter_and_write_once_postgres_mock_parity()
         .map(|(external, _)| external)
         .collect::<Vec<_>>();
         refused_or_legacy.sort();
-        assert_eq!(refused_or_legacy, ["legacy", "refused"]);
+        assert_eq!(refused_or_legacy, ["future", "legacy", "refused"]);
         assert!(list(Some(vec![EventOutcome::Safelisted])).await.is_empty());
     }
 }
