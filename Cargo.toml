@@ -50,6 +50,8 @@ prost-types = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 serde_path_to_error = "0.1"
+# Unknown-key reporting: warn now, refuse in the next release.
+serde_ignored = "0.1"
 
 # Metrics
 prometheus = "0.14"

@@ -40,6 +40,31 @@ the protection; drain affected rules or accept that policy change explicitly.
   [mitigation origin mode](#mitigation-origin-mode).
 - **Always back up the database** before upgrading.
 
+## Unknown configuration keys
+
+The release that introduces this check ignores keys it does not recognize after
+naming them; **the following release refuses them at startup and on reload**.
+Run the check against your configuration before restarting and remove every key
+it reports:
+
+```bash
+prefixd --check --config /etc/prefixd
+```
+
+Each line names the file and the full key path:
+
+```text
+/etc/prefixd/prefixd.yaml: unknown key `guardrails.max_port`; ignored in this release, refused in the next
+```
+
+Startup and reload log the same keys as warnings. Only key paths are reported,
+never values. Sections that already reject unknown keys, such as the keys
+directly under `bgp`, `blackhole` and `playbooks.yaml`, stop startup in this
+release, so a deployment that starts today has none there. See
+[unknown keys](../reference/configuration.md#unknown-keys) for the exact list,
+and [configuration validation](../reference/configuration.md#validation) for the
+Compose one-liner and what the check skips.
+
 ## rustbgpd v0.83
 
 prefixd requires rustbgpd v0.83.0 or later, for global and VPN FlowSpec

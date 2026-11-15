@@ -22,6 +22,16 @@ fn mtls_settings() -> Settings {
     settings
 }
 
+/// The local-only test certificate, serving as its own client CA.
+fn fixture_tls() -> TlsConfig {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bgp/testdata");
+    TlsConfig {
+        cert_path: fixture.join("server-cert.pem").to_string_lossy().into(),
+        key_path: fixture.join("server-key.pem").to_string_lossy().into(),
+        ca_path: Some(fixture.join("server-cert.pem").to_string_lossy().into()),
+    }
+}
+
 fn invalid_settings() -> Vec<(&'static str, Settings)> {
     let mut cases = Vec::new();
     let mut missing_tls = mtls_settings();
@@ -213,9 +223,12 @@ async fn invalid_mtls_daemon_exits_before_database_speaker_or_listener_startup()
             }
         }
     }
-    // Positive control: complete mTLS configuration permits dependency startup,
-    // so the connection probe detects the same binary when validation succeeds.
-    write_settings(directory.path(), &mtls_settings());
+    // Positive control: complete mTLS configuration with readable files
+    // permits dependency startup, so the connection probe detects the same
+    // binary when validation succeeds.
+    let mut settings = mtls_settings();
+    settings.http.tls = Some(fixture_tls());
+    write_settings(directory.path(), &settings);
     let mut child = daemon(directory.path(), &database_url)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -239,12 +252,7 @@ async fn valid_native_mtls_requires_a_client_certificate_and_retains_admin_acces
     let address = reservation.local_addr().unwrap();
     let mut settings = mtls_settings();
     settings.http.listen = address.to_string();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bgp/testdata");
-    settings.http.tls = Some(TlsConfig {
-        cert_path: fixture.join("server-cert.pem").to_string_lossy().into(),
-        key_path: fixture.join("server-key.pem").to_string_lossy().into(),
-        ca_path: Some(fixture.join("server-cert.pem").to_string_lossy().into()),
-    });
+    settings.http.tls = Some(fixture_tls());
     write_settings(directory.path(), &settings);
     // The existing local-only certificate has no restricted EKU; trust it directly
     // for this server/client control without adding another certificate fixture.
