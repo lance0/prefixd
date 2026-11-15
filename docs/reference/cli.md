@@ -263,6 +263,9 @@ prefixdctl mitigations withdraw <id> --reason "false positive"
 # Withdrawn mitigation 7f72a903-63d1-4a4a-a5db-0517e0a7df1d
 ```
 
+`--reason` is required and must contain text of at most 1,024 UTF-8 bytes.
+The CLI refuses a blank reason before sending the request.
+
 ---
 
 ## Operators
@@ -477,7 +480,7 @@ REVISION` explicitly re-arms a profile after a completed drain. `diversions
 preview --file REQUEST.json` returns the complete match/target confirmation;
 `diversions create --file REQUEST.json --confirmation VALUE` records that manual
 intent. `diversions list`, `diversions get ID` and `diversions withdraw ID
-[--reason TEXT]` inspect and drain it; the reason is recorded in the audit log.
+--reason TEXT` inspect and drain it; the reason is recorded in the audit log.
 These commands print JSON. For a profile with a
 [return leg](../how-to/scrubber-diversion.md#add-a-symmetric-return-leg),
 `scrubbers list` includes each profile's `return_leg`, and a pair's preview and

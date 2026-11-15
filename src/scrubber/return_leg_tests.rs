@@ -225,7 +225,7 @@ async fn refused_or_unknown_add_of_either_leg_drains_both_legs() {
         );
         let row = state
             .scrubber
-            .withdraw(&state, row.id, "admin", None)
+            .withdraw(&state, row.id, "admin", "operator withdrawal".into())
             .await
             .unwrap();
         assert_eq!(row.status, DiversionStatus::Withdrawing, "{case}");
@@ -236,7 +236,7 @@ async fn refused_or_unknown_add_of_either_leg_drains_both_legs() {
         tokio::time::advance(Duration::from_secs(u64::from(WINDOW_SECONDS) + 1)).await;
         let row = state
             .scrubber
-            .withdraw(&state, row.id, "admin", None)
+            .withdraw(&state, row.id, "admin", "operator withdrawal".into())
             .await
             .unwrap();
         assert_eq!(row.status, DiversionStatus::Withdrawn, "{case}");
@@ -272,7 +272,7 @@ async fn ambiguous_delete_of_either_leg_retries_the_exact_rule_and_keeps_intent(
         fake.fail_delete.lock().unwrap().insert(ambiguous.clone());
         let row = state
             .scrubber
-            .withdraw(&state, row.id, "first-admin", Some("investigated".into()))
+            .withdraw(&state, row.id, "first-admin", "investigated".into())
             .await
             .unwrap();
         assert_eq!(row.status, DiversionStatus::Withdrawing);
@@ -285,7 +285,7 @@ async fn ambiguous_delete_of_either_leg_retries_the_exact_rule_and_keeps_intent(
         // The repeated delete of the absent leg is NOT_PRESENT, so success.
         let row = state
             .scrubber
-            .withdraw(&state, row.id, "second-admin", Some("rewritten".into()))
+            .withdraw(&state, row.id, "second-admin", "rewritten".into())
             .await
             .unwrap();
         assert_eq!(row.status, DiversionStatus::Withdrawn);
@@ -389,7 +389,7 @@ async fn foreign_rule_at_the_return_key_refuses_admission_and_is_never_deleted()
         tokio::time::advance(Duration::from_secs(u64::from(WINDOW_SECONDS) + 1)).await;
         let row = state
             .scrubber
-            .withdraw(&state, row.id, "admin", None)
+            .withdraw(&state, row.id, "admin", "operator withdrawal".into())
             .await
             .unwrap();
         assert_eq!(

@@ -637,6 +637,40 @@ Withdrawn rows stay in the table for audit. An older controller's
 outstanding-row queries skip them, but its detail endpoint cannot decode a
 withdrawn row that has `return_rule` or `profile.return_leg`.
 
+## Configuration placeholders
+
+prefixd has never expanded `${VAR}` placeholders, although earlier shipped
+examples showed them. A placeholder was used literally: an alert secret such as
+`routing_key: "${PAGERDUTY_ROUTING_KEY}"` was sent to the destination as that
+text. Releases after 0.26.0 refuse any `prefixd.yaml` or `alerting.yaml` string
+value written entirely as `${...}`; a value that only contains `${` loads as
+written. Startup fails, reload keeps the running
+configuration, and `PUT /v1/config/alerting` returns `400`; each names the key
+but not the value.
+
+Before upgrading, search both files for `${`:
+
+- For an alert secret, replace it with its `*_env` key, for example
+  `routing_key_env: PAGERDUTY_ROUTING_KEY`, and set that variable in the
+  controller's environment. The shipped Compose stack does not forward other
+  `.env` entries to the controller; add the variable to the controller service's
+  `environment:` in `docker-compose.override.yml`. A new or changed variable
+  takes effect on restart, not reload. The alerting editor cannot add `*_env`
+  keys; edit `alerting.yaml` on the controller host. See
+  [alert destination secrets](../reference/configuration.md#alert-destination-secrets).
+- For `storage.connection_string: "${DATABASE_URL}"`, delete the key and keep
+  `DATABASE_URL` set. `DATABASE_URL` already took precedence, so the
+  connection does not change.
+- For any other key, write the value itself.
+
+A destination whose `*_env` variable is unset or empty also stops startup and
+reload, naming the key and the variable.
+
+Older binaries do not read `*_env` keys or accept a missing `storage` section.
+They refuse a destination without its inline secret, and they ignore
+`secret_env`, sending generic webhooks unsigned. Before a downgrade, restore
+literal secrets and `storage.connection_string`.
+
 ## Unknown playbook keys
 
 Releases after 0.26.0 refuse unknown keys at every level of `playbooks.yaml`
@@ -754,6 +788,41 @@ The client is the TCP peer address. In the default Compose stack every detector
 and CLI request arrives from nginx and every browser session from the dashboard
 container, so those groups each share one bucket per class; see the
 [configuration note](../reference/configuration.md#rate-limiting).
+
+## Withdrawal reasons are required
+
+Releases after 0.26.0 require a reason on every operator withdrawal, so the
+audit trail records why the operator acted. This applies to
+`POST /v1/mitigations/{id}/withdraw`, `POST /v1/mitigations/withdraw` and
+`POST /v1/diversions/{id}/withdraw`. Diversion withdrawal no longer records
+`operator withdrawal by <user>` when the reason is missing. Each endpoint
+responds:
+
+| Request | Status |
+| --- | --- |
+| `reason` is empty or whitespace only, or over 1,024 UTF-8 bytes | `400`, JSON `{"error": "invalid request: reason must contain text and be at most 1024 UTF-8 bytes"}` |
+| JSON body without `reason`, such as `{}` | `422` |
+| No body and no `Content-Type: application/json` | `415` |
+| Empty body with `Content-Type: application/json` | `400` |
+
+Update scripts and clients to send the header and a nonblank reason. Diversion
+withdrawal needs an administrator session cookie, as in
+[scrubber diversion](scrubber-diversion.md#preview-confirm-and-withdraw); the
+mitigation endpoints take the same body with an Operator bearer token:
+
+```bash
+curl -X POST "$PREFIXD_API/v1/diversions/$ID/withdraw" \
+  -H "Cookie: $PREFIXD_SESSION_COOKIE" \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"Attack ended; verified at the edge"}'
+```
+
+`prefixdctl mitigations withdraw` and `prefixdctl diversions withdraw` refuse a
+blank `--reason`, and `diversions withdraw` now requires one. An older
+`prefixdctl diversions withdraw ID` run without `--reason` sends `{}` and gets
+`422` from an upgraded controller; upgrade the CLI or pass `--reason`. Detector
+unbans withdraw inside the controller and are unaffected, and the bundled
+FastNetMon script already sends a reason.
 
 ---
 

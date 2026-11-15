@@ -2706,6 +2706,90 @@ async fn alert_destination_url_rejections_preserve_running_and_saved_config() {
 }
 
 #[tokio::test]
+async fn alerting_editor_keeps_env_backed_secrets_out_of_saved_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alerting.yaml");
+    // PATH is set in every test environment, so no test mutates the environment.
+    let path_value = std::env::var("PATH").unwrap();
+    let mut settings = test_settings();
+    settings.alerting = serde_json::from_value(serde_json::json!({
+        "destinations": [{ "type": "pagerduty", "routing_key_env": "PATH" }],
+    }))
+    .unwrap();
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        Arc::new(MockRepository::new()),
+        Arc::new(MockAnnouncer::new()),
+        dir.path().to_path_buf(),
+    )
+    .unwrap();
+    let app = create_test_router(state.clone());
+    let send = |method: &str, body: Option<serde_json::Value>| {
+        let request = Request::builder()
+            .method(method)
+            .uri("/v1/config/alerting")
+            .header("content-type", "application/json");
+        let body = body.map_or_else(Body::empty, |body| {
+            Body::from(serde_json::to_vec(&body).unwrap())
+        });
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request.body(body).unwrap()).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        }
+    };
+
+    // The dashboard round-trips GET output, including the `***` sentinel.
+    let (status, current) = send("GET", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(current["destinations"][0]["routing_key"], "***");
+    assert_eq!(current["destinations"][0]["routing_key_env"], "PATH");
+    let (status, body) = send("PUT", Some(current.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("routing_key_env: PATH"), "{saved}");
+    assert!(!saved.contains(&path_value));
+
+    let refused = "destination[0] (pagerduty): set *_env keys in alerting.yaml on the controller \
+                   host; the editor keeps one only for an unchanged destination";
+    let mut retargeted = current.clone();
+    retargeted["destinations"][0]["events_url"] = "https://attacker.example/x".into();
+    for (destination, error) in [
+        (retargeted["destinations"][0].clone(), refused),
+        (
+            serde_json::json!({ "type": "pagerduty", "routing_key_env": "DATABASE_URL" }),
+            refused,
+        ),
+        (
+            serde_json::json!({ "type": "pagerduty", "routing_key": "${PAGERDUTY_ROUTING_KEY}" }),
+            "destination[0] (pagerduty): routing_key looks like ${VAR} substitution, which \
+             prefixd does not perform; set the value, or use the matching *_env key where one \
+             exists",
+        ),
+    ] {
+        let (status, body) = send(
+            "PUT",
+            Some(serde_json::json!({ "destinations": [destination] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, serde_json::json!({ "errors": [error] }));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        let (_, running) = send("GET", None).await;
+        assert_eq!(running, current);
+    }
+}
+
+#[tokio::test]
 async fn test_reload_config_reloads_alerting_yaml() {
     let dir = tempfile::tempdir().unwrap();
     let config_dir = dir.path().to_path_buf();
@@ -10809,6 +10893,111 @@ async fn test_list_audit_empty() {
     assert_eq!(json["entries"].as_array().unwrap().len(), 0);
 }
 
+#[tokio::test]
+async fn test_list_audit_filters_by_target() {
+    let app = setup_app().await;
+    async fn get(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+    let mut ids = Vec::new();
+    for port in [53, 123] {
+        let body = serde_json::json!({
+            "operator_id": "test_operator",
+            "reason": format!("manual mitigation {port}"),
+            "victim_ip": "203.0.113.10",
+            "protocol": "udp",
+            "dst_ports": [port],
+            "action": "discard",
+            "ttl_seconds": 120
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/mitigations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        ids.push(json["mitigation_id"].as_str().unwrap().to_string());
+    }
+
+    // Negative control: the unfiltered listing holds both mitigations' entries.
+    let (status, all) = get(&app, "/v1/audit").await;
+    assert_eq!(status, StatusCode::OK);
+    for id in &ids {
+        assert!(
+            all["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["target_id"] == id.as_str())
+        );
+    }
+
+    let (status, scoped) = get(
+        &app,
+        &format!("/v1/audit?target_type=mitigation&target_id={}", ids[0]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = scoped["entries"].as_array().unwrap();
+    assert_eq!(scoped["count"], entries.len());
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["action"], "create");
+    assert_eq!(entries[0]["target_type"], "mitigation");
+    assert_eq!(entries[0]["target_id"], ids[0].as_str());
+    // The authenticated principal, not the request's legacy operator_id field.
+    assert_eq!(entries[0]["actor_type"], "operator");
+    assert_eq!(entries[0]["actor_id"], "anonymous");
+    assert_eq!(entries[0]["details"]["reason"], "manual mitigation 53");
+    assert!(entries[0]["details"]["expires_at"].is_string());
+
+    // Each filter applies on its own, and matching is exact.
+    let (_, by_type) = get(&app, "/v1/audit?target_type=mitigation").await;
+    assert_eq!(by_type["count"], 2);
+    let (_, by_other_type) = get(
+        &app,
+        &format!("/v1/audit?target_type=event&target_id={}", ids[0]),
+    )
+    .await;
+    assert_eq!(by_other_type["count"], 0);
+    let (_, by_prefix) = get(&app, &format!("/v1/audit?target_id={}", &ids[0][..8])).await;
+    assert_eq!(by_prefix["count"], 0);
+
+    let oversized = "a".repeat(257);
+    for query in [
+        "target_type=".to_string(),
+        "target_id=".to_string(),
+        "target_id=a%00b".to_string(),
+        format!("target_id={oversized}"),
+    ] {
+        let (status, body) = get(&app, &format!("/v1/audit?{query}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+        assert!(
+            body["error"].as_str().unwrap().contains("filter"),
+            "{query}"
+        );
+    }
+}
+
 // ─── Stats ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -12284,6 +12473,91 @@ mod anonymous_auth {
         );
     }
 
+    /// Scrubber role matrix: every role reads diversions, and only Admin reaches a
+    /// mutation handler. The Admin row is the control that 403 comes from the role.
+    #[tokio::test]
+    async fn scrubber_reads_allow_every_role_and_mutations_require_admin() {
+        let diversion = serde_json::json!({
+            "profile": "scrubber-a",
+            "scope": {"dst_prefix": "203.0.113.20/32", "protocol": 6, "dst_ports": [443]},
+            "ttl_seconds": 60,
+            "reason": "role matrix"
+        });
+        let scoped = serde_json::json!({"scope": "TRANSIT", "diversion": diversion});
+        let id = uuid::Uuid::new_v4();
+        let withdraw = format!("/v1/diversions/{id}/withdraw");
+        let mutations = [
+            (
+                "/v1/scrubbers/scrubber-a/arm",
+                serde_json::json!({"revision": "v1"}),
+            ),
+            ("/v1/diversions/preview", diversion.clone()),
+            ("/v1/diversions", diversion.clone()),
+            ("/v1/vpn/diversions/preview", scoped.clone()),
+            ("/v1/vpn/diversions", scoped),
+            (
+                withdraw.as_str(),
+                serde_json::json!({"reason": "role matrix"}),
+            ),
+        ];
+        for role in [
+            OperatorRole::Viewer,
+            OperatorRole::Operator,
+            OperatorRole::Admin,
+        ] {
+            let repo = Arc::new(MockRepository::new());
+            let username = format!("scrubber-{role:?}").to_lowercase();
+            let hash = Argon2::default()
+                .hash_password_with_salt(PASSWORD.as_bytes(), b"anonymous-auth-test")
+                .unwrap()
+                .to_string();
+            repo.create_operator(&username, &hash, role.clone(), None)
+                .await
+                .unwrap();
+            let app = router(AuthMode::Credentials, repo.clone(), MemoryStore::default());
+            let cookie = login(&app, &username).await;
+            for path in ["/v1/scrubbers", "/v1/diversions"] {
+                let response = request(&app, "GET", path, Some(&cookie), None).await;
+                assert_eq!(response.status(), StatusCode::OK, "{role:?} reads {path}");
+            }
+            let response = request(
+                &app,
+                "GET",
+                &format!("/v1/diversions/{id}"),
+                Some(&cookie),
+                None,
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{role:?} reads one"
+            );
+            for (path, body) in &mutations {
+                let status = request(&app, "POST", path, Some(&cookie), Some(body.clone()))
+                    .await
+                    .status();
+                if role == OperatorRole::Admin {
+                    assert!(
+                        status != StatusCode::FORBIDDEN && status != StatusCode::UNAUTHORIZED,
+                        "Admin reaches {path}: {status}"
+                    );
+                } else {
+                    assert_eq!(status, StatusCode::FORBIDDEN, "{role:?} {path}");
+                }
+            }
+            for (path, body) in &mutations {
+                let status = request(&app, "POST", path, None, Some(body.clone()))
+                    .await
+                    .status();
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "anonymous {path}");
+            }
+            // Scrubbers are disabled in this fixture, so even Admin persists nothing;
+            // the 403s above, not this check, prove the role boundary.
+            assert!(repo.list_diversions("test1").await.unwrap().is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn bearer_operator_cannot_create_whole_vrf_rule() {
         let app = router(
@@ -13311,6 +13585,7 @@ mod reason_and_bulk_validation {
     async fn reason_byte_boundaries_preserve_data_and_reject_without_mutation() {
         let reasons = [
             (String::new(), 0, true),
+            (" \t\n".into(), 3, true),
             ("a".repeat(1023), 1023, true),
             ("a".repeat(1024), 1024, true),
             (format!("{}a", "é".repeat(511)), 1023, true),
@@ -13337,9 +13612,17 @@ mod reason_and_bulk_validation {
                     "{operation}, {bytes} UTF-8 bytes, {} Unicode scalars",
                     reason.chars().count()
                 );
-                if !valid {
+                // A withdrawal must say why; creation and safelist reasons may be blank.
+                let withdrawal = matches!(operation, "single" | "bulk");
+                if !valid || (withdrawal && reason.trim().is_empty()) {
                     assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{context}");
-                    if operation == "manual" {
+                    if withdrawal {
+                        assert_eq!(
+                            body(response).await["error"],
+                            "invalid request: reason must contain text and be at most 1024 UTF-8 bytes",
+                            "{context}"
+                        );
+                    } else if operation == "manual" {
                         assert_eq!(
                             body(response).await["error"],
                             "invalid request: reason exceeds maximum length of 1024 bytes",
@@ -15732,7 +16015,9 @@ mod manual_destination_cidr {
         Arc::get_mut(&mut state).unwrap().config_dir = dir.path().into();
         let error = state.reload_config().await.unwrap_err();
         assert!(
-            error.to_string().contains("webhook_url is required"),
+            error
+                .to_string()
+                .contains("webhook_url or webhook_url_env is required"),
             "{error}"
         );
         assert!(state.alerting.read().await.config().destinations.is_empty());

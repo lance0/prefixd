@@ -35,7 +35,7 @@ pub async fn send(
         .body(body)
         .send()
         .await
-        .map_err(|e| format!("webhook request failed: {}", e))?;
+        .map_err(|e| format!("webhook request failed: {}", e.without_url()))?;
 
     if !response.status().is_success() {
         let status = response.status();
