@@ -80,6 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The dashboard connection status now combines the realtime feed with the age
+  of the last successful API response: **Live**, **Polling (Ns ago)**,
+  **Stale** and **Offline**. After 15 seconds without a response it shows
+  **Stale** or **Offline**, even with the feed connected, and every page shows
+  a notice with the last update time. Previously **Polling** stayed on screen
+  while every request failed. See
+  [realtime and polling](docs/how-to/deployment.md#realtime-and-polling).
 - **Breaking:** `playbooks.yaml`, `PUT /v1/config/playbooks` and the
   dashboard YAML editor refuse unknown keys at every level and name the key.
   The unimplemented `match.source`, `match.protocol` and `default_playbook`

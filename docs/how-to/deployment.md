@@ -177,9 +177,22 @@ Next.js by itself cannot upgrade this connection: this includes `bun run dev`,
 `PREFIXD_API` configures the server-side HTTP API proxy, not a browser WebSocket
 destination. Setting it does not add a feed upgrade route to Next.js.
 
-The top bar shows **Live** when the feed is connected and **Polling** while
-connecting or when it is unavailable. Focus or hover the status for the feed
-requirements and fallback details. Failed handshakes, including ones pending
+The top bar combines the feed with the age of the last successful API
+response, measured from browser receipt:
+
+| Status | Meaning |
+| --- | --- |
+| **Connecting** | No API response yet, for up to 15 seconds after the page opens. |
+| **Live** | The feed is connected and an API response arrived within 15 seconds. |
+| **Polling (Ns ago)** | The feed is unavailable and an API response arrived within 15 seconds. |
+| **Stale (Ns ago)** | No API response for more than 15 seconds, for example while requests hang. |
+| **Offline (Ns ago)** | No API response for more than 15 seconds and the latest request failed. |
+
+While the status is **Stale** or **Offline**, every dashboard page also shows
+a notice with the time of the last update, because lists, counts and expiry
+times on screen have not refreshed. A connected feed never shows **Live** over
+failing requests. Focus or hover the status for the feed requirements and
+fallback details. Failed handshakes, including ones pending
 for 10 seconds, switch to polling while the feed retries up to ten times with
 backoff. Returning to the tab starts another attempt. Network and authentication
 failures can also interrupt a correctly proxied feed; browsers do not expose
@@ -191,8 +204,8 @@ groups (including loaded paginated groups) refresh every 5 seconds. POPs,
 time series and signal sources refresh every 30 seconds; configuration and
 operator pages refresh on focus or explicit actions. Hidden or offline tabs
 pause periodic refresh, and failed API requests retain their page's error state.
-**Polling** names the update mode, not a successful API response. Neither mode
-proves router enforcement. Live event toasts are unavailable without the feed, and
+A fresh status reflects only the dashboard's API responses; it does not prove
+router enforcement. Live event toasts are unavailable without the feed, and
 polling does not replay missed notifications.
 
 ### Docker Compose
