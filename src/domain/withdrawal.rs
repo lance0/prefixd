@@ -607,7 +607,7 @@ mod tests {
             let request =
                 WithdrawalRequest::new(&mitigation, expired, actor_type, "a", "why".into(), true)
                     .unwrap();
-            let entry = request.audit_entry();
+            let entry = request.audit_entry(&mitigation);
             assert_eq!(
                 std::mem::discriminant(&entry.actor_type),
                 std::mem::discriminant(&kind),
@@ -618,7 +618,12 @@ mod tests {
             assert_eq!(entry.target_id, Some(mitigation.mitigation_id.to_string()));
             assert_eq!(
                 entry.details,
-                serde_json::json!({"reason": "why", "operation_id": request.operation_id})
+                serde_json::json!({
+                    "reason": "why",
+                    "operation_id": request.operation_id,
+                    "previous_expires_at": mitigation.expires_at,
+                    "ended_at": mitigation.withdrawn_at,
+                })
             );
         }
     }
