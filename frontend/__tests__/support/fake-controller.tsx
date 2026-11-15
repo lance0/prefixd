@@ -6,6 +6,7 @@ import { Toaster, toast } from "sonner"
 import { SWRConfig, useSWRConfig, type ScopedMutator } from "swr"
 import { afterEach, beforeEach, vi } from "vitest"
 import { AuthProvider } from "@/hooks/use-auth"
+import { resetApiReceipt } from "@/lib/freshness"
 import type { Operator, OperatorResponse } from "@/lib/auth"
 
 /** One request the dashboard sent to the controller, relative to the `/api/prefixd` proxy. */
@@ -85,6 +86,8 @@ export function useFakeController(): FakeController {
     routes = new Map()
     aborted = new AbortController()
     controller.requests = []
+    // API receipt is module-wide like the request cache; each test starts with no response.
+    resetApiReceipt()
     // A plain function, not a spy, so a test file resetting its own mocks cannot strip the fake.
     vi.stubGlobal("fetch", fakeFetch)
   })

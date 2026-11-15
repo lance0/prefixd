@@ -156,6 +156,7 @@ describe("complete mitigation navigation", () => {
       await act(() => vi.advanceTimersByTimeAsync(5000))
       expect(screen.getByRole("alertdialog")).toHaveTextContent("1 FlowSpec rule")
       expect(screen.getByText("Page 2")).toBeInTheDocument()
+      fireEvent.change(screen.getByLabelText("Withdrawal reason"), { target: { value: "incident resolved" } })
       fireEvent.click(screen.getByRole("button", { name: "Withdraw 1" }))
       await act(() => vi.advanceTimersByTimeAsync(0))
       expect(JSON.parse(controller.calls("POST", "/v1/mitigations/withdraw")[0].body!)).toMatchObject({ mitigation_ids: ["mitigation-21"] })

@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Check, Copy, FileText, AlertTriangle, Terminal, CheckCircle2, Info } from "lucide-react"
+import { DivertedIndicator } from "@/components/dashboard/diverted-indicator"
 import { PageHeader } from "@/components/dashboard/page-header"
 import { OriginTag, StatusPill, Tag } from "@/components/dashboard/status-pill"
 import { Field, FieldList } from "@/components/dashboard/field"
@@ -28,6 +29,7 @@ import { usePermissions } from "@/hooks/use-permissions"
 import { formatConfidence } from "@/lib/confidence"
 import { ConfidenceBar } from "@/components/dashboard/confidence-bar"
 import { ExportEvidenceCard } from "@/components/dashboard/export-evidence"
+import { MitigationTimeline } from "@/components/dashboard/mitigation-timeline"
 
 function protocolName(proto: number | null): string {
   if (proto === null) return "any"
@@ -120,7 +122,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
     setWithdrawError(null)
 
     try {
-      await withdrawMitigation(mitigation.mitigation_id, reason || "Manual withdrawal", "dashboard")
+      await withdrawMitigation(mitigation.mitigation_id, reason, "dashboard")
       mutate()
 
       return true
@@ -205,6 +207,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
             <>
               <StatusBadge status={mitigation.status} />
               <OriginTag origin={mitigation.origin_mode} showUnknown />
+              <DivertedIndicator host={mitigation.victim_ip} scope={mitigation.vpn_scope?.identity ?? null} pop={mitigation.pop} showUnknown />
               <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} dscp={mitigation.dscp} />
               <Tag>{mitigation.vector.replace(/_/g, " ")}</Tag>
               <span className="text-muted-foreground">POP <span className="font-mono text-foreground">{mitigation.pop}</span></span>
@@ -337,54 +340,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
               </Card>
             )}
 
-            <Card>
-              <CardHeader>
-                <CardTitle>Timeline</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <ol className="relative space-y-5 border-l pl-4">
-                  <li className="relative">
-                    <span aria-hidden="true" className="absolute -left-[21px] top-1.5 size-2.5 rounded-full bg-muted-foreground" />
-                    <p className="text-sm font-medium">Created</p>
-                    <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">{formatTime(mitigation.created_at, now)}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Triggered by event{" "}
-                      <Link
-                        href={`/events?id=${encodeURIComponent(String(mitigation.triggering_event_id))}`}
-                        className="rounded-sm font-mono text-foreground hover:underline"
-                      >
-                        {mitigation.triggering_event_id.slice(0, 8)}
-                      </Link>
-                    </p>
-                  </li>
-
-                  {mitigation.updated_at !== mitigation.created_at && (
-                    <li className="relative">
-                      <span aria-hidden="true" className="absolute -left-[21px] top-1.5 size-2.5 rounded-full bg-muted-foreground" />
-                      <p className="text-sm font-medium">Updated</p>
-                      <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">{formatTime(mitigation.updated_at, now)}</p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Rule set to {mitigation.action_type}{mitigation.rate_bps ? ` (${formatBps(mitigation.rate_bps)})` : ""}
-                      </p>
-                    </li>
-                  )}
-
-                  {mitigation.withdrawn_at ? (
-                    <li className="relative">
-                      <span aria-hidden="true" className="absolute -left-[21px] top-1.5 size-2.5 rounded-full bg-muted-foreground" />
-                      <p className="text-sm font-medium">Withdrawn</p>
-                      <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">{formatTime(mitigation.withdrawn_at, now)}</p>
-                    </li>
-                  ) : (
-                    <li className="relative">
-                      <span aria-hidden="true" className={expired ? "absolute -left-[21px] top-1.5 size-2.5 rounded-full bg-muted-foreground" : "absolute -left-[21px] top-1.5 size-2.5 rounded-full border-2 border-muted-foreground bg-card"} />
-                      <p className="text-sm font-medium">{expired ? "Expired" : "Expires"}</p>
-                      <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">{formatTime(mitigation.expires_at, now)}</p>
-                    </li>
-                  )}
-                </ol>
-              </CardContent>
-            </Card>
+            <MitigationTimeline mitigation={mitigation} now={now} />
 
             {mitigation.correlation ? (
               <Card data-testid="correlation-card">

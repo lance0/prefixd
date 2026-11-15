@@ -798,11 +798,13 @@ instead submits an attack event through `POST /v1/events`, which applies playboo
 | `expires_at_cap` | RFC 3339 timestamp | no | Initial creation's absolute expiry ceiling, for maintenance recreation |
 
 Reasons on manual creation, single/bulk withdrawal and safelist additions accept
-up to 1,024 UTF-8 bytes, including an empty string. Manual creation and withdrawal
-require a string `reason`; safelist additions also accept an omitted or `null`
-reason. Authorized requests with an overlong reason return `400`; a missing or
-non-string required reason returns `422`. Withdrawal records add the authenticated
-actor prefix after checking the submitted reason's byte length.
+up to 1,024 UTF-8 bytes. Manual creation and safelist additions accept an empty
+string; a withdrawal reason must contain non-whitespace text. Manual creation and
+withdrawal require a string `reason`; safelist additions also accept an omitted
+or `null` reason. Authorized requests with an overlong reason, or a withdrawal
+with a blank one, return `400`; a missing or non-string required reason returns
+`422`. Withdrawal records add the authenticated actor prefix after checking the
+submitted reason.
 
 Policing rates must round-trip exactly through the speaker's `f32` bytes/second
 encoding. Rates of 1, 7, 8 and 9 bits/second are supported, including fractional
@@ -1274,6 +1276,10 @@ Content-Type: application/json
 }
 ```
 
+`reason` is required: non-whitespace text of at most 1,024 UTF-8 bytes. A blank
+or overlong reason returns `400` with
+`{"error": "invalid request: reason must contain text and be at most 1024 UTF-8 bytes"}`.
+
 **Response (200 OK):**
 
 ```json
@@ -1336,7 +1342,7 @@ Content-Type: application/json
 |---|---|---|---|
 | `mitigation_ids` | array of UUIDs | yes | Up to 100 mitigation IDs to withdraw |
 | `operator_id` | string | yes | Operator performing the withdrawal |
-| `reason` | string | yes | Reason for withdrawal |
+| `reason` | string | yes | Non-whitespace reason for withdrawal, at most 1,024 UTF-8 bytes; blank returns `400` |
 
 **Response (200 OK):**
 
@@ -3125,6 +3131,13 @@ Authorization: Bearer <token>
 | `cursor` | string | Opaque `a1` continuation from the previous `next_cursor` (maximum 128 bytes) |
 | `start` | string | RFC3339 start (inclusive); see [list filters](#list-filters) |
 | `end` | string | RFC3339 end (exclusive); see [list filters](#list-filters) |
+| `target_type` | string | Exact, case-sensitive target type such as `mitigation`, `event` or `safelist`; 1-256 UTF-8 bytes without NUL |
+| `target_id` | string | Exact, case-sensitive target identifier such as a mitigation UUID; 1-256 UTF-8 bytes without NUL |
+
+`target_type` and `target_id` apply independently; pass both to list one
+target's history, for example
+`GET /v1/audit?target_type=mitigation&target_id=7f72a903-63d1-4a4a-a5db-0517e0a7df1d`.
+An empty, oversized or NUL-containing value returns `400`.
 
 Results order by `(timestamp, audit_id)` descending, including tied timestamps.
 Copy `next_cursor` unchanged with the same filters; omit `cursor` to start a fresh
@@ -3187,6 +3200,30 @@ as `actor_id` (the adapter name for a generic webhook) and the triggering
     "origin_mode": "enforced",
     "reason": "udp_flood to DNS (playbook: udp_flood_police)",
     "event_id": "0b6a5d4e-8f0e-4d55-9a3c-6f1d2e7b9c10"
+  }
+}
+```
+
+A completed withdrawal writes one `withdraw` entry, or `expire` for a TTL
+expiry, in the transaction that records the terminal status. This covers
+operator, bulk, safelist and scheduler-completed withdrawals. `details` holds the
+retained `reason` and `operation_id`, `previous_expires_at` (the scheduled
+expiry the operation cut short) and `ended_at` (when the lifetime ended, equal
+to the mitigation's `withdrawn_at`). Entries written before
+`previous_expires_at` and `ended_at` were added omit them.
+
+```json
+{
+  "actor_type": "operator",
+  "actor_id": "jsmith",
+  "action": "withdraw",
+  "target_type": "mitigation",
+  "target_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d",
+  "details": {
+    "reason": "jsmith: false positive",
+    "operation_id": "3c2d9a51-0f7e-4b8e-9a6d-2f1c0b7e4d93",
+    "previous_expires_at": "2026-01-18T10:33:00Z",
+    "ended_at": "2026-01-18T10:31:00Z"
   }
 }
 ```
@@ -3558,7 +3595,7 @@ playbook requests cannot choose a scrubber target.
 | `POST /v1/diversions` | Persist manual intent before guarded mutation; returns `202` |
 | `GET /v1/diversions` | Outstanding intent, including pending withdrawals |
 | `GET /v1/diversions/{id}` | Saved match/action/profile, revision and timestamped export observation |
-| `POST /v1/diversions/{id}/withdraw` | Retain withdrawal until authorization expiry and confirmed local absence; optional `reason` |
+| `POST /v1/diversions/{id}/withdraw` | Retain withdrawal until authorization expiry and confirmed local absence; required `reason` |
 
 Creation takes `profile`, `scope` (a complete host FlowSpec match), bounded
 `ttl_seconds`, `reason` and the exact `confirmation` returned by preview.
@@ -3596,10 +3633,13 @@ also refused with `409` while any live or pending rule has a source containing
 its victim, and such a mitigation or diversion is refused while the pair is
 outstanding. Audit details add `return_match` and `export_community`.
 
-Withdrawal accepts an optional JSON body `{"reason": "..."}` of 1 to 1,024
-UTF-8 bytes of text. An omitted body or reason records `operator withdrawal by
-<user>`. The first withdrawal reason and requester are immutable; a later
-request, or a controller latch that already recorded a reason, keeps them.
+Withdrawal requires a JSON body `{"reason": "..."}` with non-whitespace text of
+at most 1,024 UTF-8 bytes, sent with `Content-Type: application/json`. A blank
+or overlong reason returns `400` with a JSON error and an omitted reason (`{}`)
+`422`. A request with no body and no JSON content type returns `415`, and an
+empty body with that content type `400`, both with plain-text bodies. The first withdrawal reason and requester are immutable; a
+later request, or a controller latch that already recorded a reason, keeps
+them. A later request still needs a valid reason, which is not recorded.
 
 | Status | Meaning |
 | --- | --- |

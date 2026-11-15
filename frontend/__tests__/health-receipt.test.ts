@@ -14,12 +14,15 @@ it("records each browser receipt even when API JSON is identical", async () => {
 
   const { bgp_session_up: _derived, ...wire } = response
   controller.route("GET", "/v1/health/detail", () => json(wire))
-  vi.spyOn(performance, "now").mockReturnValueOnce(1000).mockReturnValueOnce(2000)
+  // The API client also reads the clock to record data freshness, so the clock only advances.
+  let clock = 0
+  vi.spyOn(performance, "now").mockImplementation(() => clock += 1000)
   const first = await fetchHealthDetailSnapshot()
   const second = await fetchHealthDetailSnapshot()
   expect(controller.calls("GET", "/v1/health/detail")).toHaveLength(2)
-  expect(first).toEqual({ ...response, receivedAt: 1000 })
-  expect(second).toEqual({ ...first, receivedAt: 2000 })
+  expect(first).toEqual({ ...response, receivedAt: expect.any(Number) })
+  expect(second).toEqual({ ...first, receivedAt: expect.any(Number) })
+  expect(second.receivedAt).toBeGreaterThan(first.receivedAt)
   // Receipt time belongs to the client snapshot, never to the API response.
   expect(await getHealthDetail()).not.toHaveProperty("receivedAt")
 })
