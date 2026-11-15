@@ -313,9 +313,36 @@ mod deadlines {
         global_present: Arc<AtomicBool>,
         /// Local intent rows returned by family.
         routes: Arc<std::sync::Mutex<Vec<(i32, pb::FlowSpecRouteEntry)>>>,
+        /// Alters each local intent view before it is returned.
+        list_tamper: Arc<std::sync::Mutex<Option<ListTamper>>>,
+        /// Replies that replace the default success, and the requests received.
+        replies: Arc<std::sync::Mutex<Replies>>,
+        requests: Arc<std::sync::Mutex<Vec<Received>>>,
+    }
+
+    type ListTamper = fn(&mut pb::ListFlowSpecResponse);
+
+    #[derive(Default)]
+    struct Replies {
+        issue: Option<pb::IssueMutationWindowResponse>,
+        add: Option<pb::AddGuardedFlowSpecResponse>,
+        renew: Option<pb::RenewGuardedLeaseResponse>,
+        delete: Option<pb::DeleteGuardedFlowSpecResponse>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Received {
+        Issue(pb::IssueMutationWindowRequest),
+        Add(pb::AddGuardedFlowSpecRequest),
+        Renew(pb::RenewGuardedLeaseRequest),
+        Delete(pb::DeleteGuardedFlowSpecRequest),
     }
 
     impl Service {
+        fn received(&self, request: Received) {
+            self.requests.lock().unwrap().push(request);
+        }
+
         async fn mutate(&self) {
             self.guarded_mutations.fetch_add(1, SeqCst);
             self.mutation_entered.notify_one();
@@ -345,7 +372,7 @@ mod deadlines {
                 5 => return Err(tonic::Status::unavailable("private diagnostic")),
                 _ => {}
             }
-            Ok(tonic::Response::new(pb::ListFlowSpecResponse {
+            let mut response = pb::ListFlowSpecResponse {
                 received_view: true,
                 received_routes: self
                     .routes
@@ -360,7 +387,11 @@ mod deadlines {
                     })
                     .collect(),
                 ..Default::default()
-            }))
+            };
+            if let Some(tamper) = *self.list_tamper.lock().unwrap() {
+                tamper(&mut response);
+            }
+            Ok(tonic::Response::new(response))
         }
     }
 
@@ -368,46 +399,60 @@ mod deadlines {
     impl pb::injection_service_server::InjectionService for Service {
         async fn issue_mutation_window(
             &self,
-            _: Request<pb::IssueMutationWindowRequest>,
+            request: Request<pb::IssueMutationWindowRequest>,
         ) -> std::result::Result<tonic::Response<pb::IssueMutationWindowResponse>, tonic::Status>
         {
+            self.received(Received::Issue(request.into_inner()));
             self.mutate().await;
-            Ok(tonic::Response::new(pb::IssueMutationWindowResponse {
-                window: Some(stamp().into()),
-                window_remaining_ms: 30_000,
-            }))
+            let reply = self.replies.lock().unwrap().issue;
+            Ok(tonic::Response::new(reply.unwrap_or(
+                pb::IssueMutationWindowResponse {
+                    window: Some(stamp().into()),
+                    window_remaining_ms: 30_000,
+                },
+            )))
         }
         async fn add_guarded_flow_spec(
             &self,
-            _: Request<pb::AddGuardedFlowSpecRequest>,
+            request: Request<pb::AddGuardedFlowSpecRequest>,
         ) -> std::result::Result<tonic::Response<pb::AddGuardedFlowSpecResponse>, tonic::Status>
         {
+            self.received(Received::Add(request.into_inner()));
             self.mutate().await;
-            Ok(tonic::Response::new(pb::AddGuardedFlowSpecResponse {
-                result: Some(pb::AddFlowSpecResponse { outcome: 1 }),
-                generation: Some(stamp().into()),
-            }))
+            let reply = self.replies.lock().unwrap().add;
+            Ok(tonic::Response::new(reply.unwrap_or(
+                pb::AddGuardedFlowSpecResponse {
+                    result: Some(pb::AddFlowSpecResponse { outcome: 1 }),
+                    generation: Some(stamp().into()),
+                },
+            )))
         }
         async fn renew_guarded_lease(
             &self,
-            _: Request<pb::RenewGuardedLeaseRequest>,
+            request: Request<pb::RenewGuardedLeaseRequest>,
         ) -> std::result::Result<tonic::Response<pb::RenewGuardedLeaseResponse>, tonic::Status>
         {
+            self.received(Received::Renew(request.into_inner()));
             self.mutate().await;
-            Ok(tonic::Response::new(pb::RenewGuardedLeaseResponse {
-                generation: Some(stamp().into()),
-                lease_remaining_ms: 30_000,
-            }))
+            let reply = self.replies.lock().unwrap().renew;
+            Ok(tonic::Response::new(reply.unwrap_or(
+                pb::RenewGuardedLeaseResponse {
+                    generation: Some(stamp().into()),
+                    lease_remaining_ms: 30_000,
+                },
+            )))
         }
         async fn delete_guarded_flow_spec(
             &self,
-            _: Request<pb::DeleteGuardedFlowSpecRequest>,
+            request: Request<pb::DeleteGuardedFlowSpecRequest>,
         ) -> std::result::Result<tonic::Response<pb::DeleteGuardedFlowSpecResponse>, tonic::Status>
         {
+            self.received(Received::Delete(request.into_inner()));
             self.mutate().await;
-            Ok(tonic::Response::new(pb::DeleteGuardedFlowSpecResponse {
-                outcome: 1,
-            }))
+            let reply = self.replies.lock().unwrap().delete;
+            Ok(tonic::Response::new(reply.unwrap_or(
+                pb::DeleteGuardedFlowSpecResponse { outcome: 1 },
+            )))
         }
         async fn delete_flow_spec(
             &self,
@@ -481,6 +526,201 @@ mod deadlines {
             4 => speaker.delete_guarded(rule).await,
             _ => unreachable!(),
         }
+    }
+
+    fn window(incarnation: u64, sequence: u64, remaining: u32) -> pb::IssueMutationWindowResponse {
+        pb::IssueMutationWindowResponse {
+            window: Some(pb::MutationWindow {
+                incarnation,
+                sequence,
+            }),
+            window_remaining_ms: remaining,
+        }
+    }
+
+    /// Arguments are refused before any RPC; a reply must carry a whole
+    /// window and a lifetime within the requested seconds.
+    #[tokio::test]
+    async fn issue_window_checks_arguments_before_rpc_and_reply_after() {
+        let (speaker, service, server) = fixture().await;
+        let issued = speaker.issue_window("prefixd.scrub.a", 30).await.unwrap();
+        assert_eq!((issued.stamp, issued.remaining_ms), (stamp(), 30_000));
+        assert_eq!(
+            service.requests.lock().unwrap().pop(),
+            Some(Received::Issue(pb::IssueMutationWindowRequest {
+                owner: "prefixd.scrub.a".into(),
+                window_seconds: 30,
+            }))
+        );
+        // Boundary arguments, with a reply lifetime inside the shortest window.
+        service.replies.lock().unwrap().issue = Some(window(1, 1, 1_000));
+        for (owner, seconds) in [(&*"a".repeat(64), 1), ("a", 120)] {
+            speaker.issue_window(owner, seconds).await.unwrap();
+        }
+        service.replies.lock().unwrap().issue = None;
+        let sent = service.guarded_mutations.load(SeqCst);
+        for (owner, seconds) in [
+            ("a", 0),
+            ("a", 121),
+            ("", 30),
+            (&*"a".repeat(65), 30),
+            ("prefixd/scrub", 30),
+        ] {
+            assert!(
+                speaker.issue_window(owner, seconds).await.is_err(),
+                "{owner:?} {seconds}"
+            );
+        }
+        assert_eq!(service.guarded_mutations.load(SeqCst), sent, "no RPC");
+        for reply in [
+            window(0, 1, 30_000),
+            window(1, 0, 30_000),
+            window(1, 1, 0),
+            window(1, 1, 30_001),
+            pb::IssueMutationWindowResponse {
+                window: None,
+                window_remaining_ms: 30_000,
+            },
+        ] {
+            service.replies.lock().unwrap().issue = Some(reply);
+            assert!(
+                speaker.issue_window("prefixd.scrub.a", 30).await.is_err(),
+                "{reply:?}"
+            );
+        }
+        server.abort();
+    }
+
+    /// Add, renew and delete send the exact fenced payload and accept only
+    /// definite outcomes and in-range lease replies.
+    #[tokio::test]
+    async fn guarded_mutations_send_fenced_payloads_and_check_replies() {
+        let (speaker, service, server) = fixture().await;
+        let rule = decode_guarded(route(), 3).unwrap().rule;
+        let window = GuardedStamp {
+            incarnation: 4,
+            sequence: 5,
+        };
+        let generation = GuardedStamp {
+            incarnation: 6,
+            sequence: 7,
+        };
+        speaker.add_guarded(&rule, window, 30).await.unwrap();
+        assert_eq!(
+            service.requests.lock().unwrap().pop(),
+            Some(Received::Add(pb::AddGuardedFlowSpecRequest {
+                rule: Some(encode_guarded(&rule).unwrap()),
+                lease: Some(pb::InjectionLease {
+                    owner: rule.owner.clone(),
+                    lease_seconds: 30,
+                }),
+                window: Some(window.into()),
+                revision: rule.revision,
+            }))
+        );
+        // Created and unchanged are definite; a replacement is not this admission.
+        for (outcome, accepted) in [(0, false), (1, true), (2, false), (3, true), (99, false)] {
+            service.replies.lock().unwrap().add = Some(pb::AddGuardedFlowSpecResponse {
+                result: Some(pb::AddFlowSpecResponse { outcome }),
+                generation: Some(generation.into()),
+            });
+            let result = speaker.add_guarded(&rule, window, 30).await;
+            assert_eq!(result.ok(), accepted.then_some(generation), "{outcome}");
+        }
+        service.replies.lock().unwrap().add = Some(pb::AddGuardedFlowSpecResponse {
+            result: None,
+            generation: Some(generation.into()),
+        });
+        assert!(speaker.add_guarded(&rule, window, 30).await.is_err());
+
+        assert_eq!(
+            speaker
+                .renew_guarded(&rule.owner, stamp(), window, 30)
+                .await
+                .unwrap(),
+            30_000
+        );
+        assert_eq!(
+            service.requests.lock().unwrap().pop(),
+            Some(Received::Renew(pb::RenewGuardedLeaseRequest {
+                owner: rule.owner.clone(),
+                generation: Some(stamp().into()),
+                lease_seconds: 30,
+                window: Some(window.into()),
+            }))
+        );
+        for (held, remaining, accepted) in [
+            (stamp(), 120_000, true),
+            (stamp(), 0, false),
+            (stamp(), 120_001, false),
+            (generation, 30_000, false),
+        ] {
+            service.replies.lock().unwrap().renew = Some(pb::RenewGuardedLeaseResponse {
+                generation: Some(held.into()),
+                lease_remaining_ms: remaining,
+            });
+            let result = speaker
+                .renew_guarded(&rule.owner, stamp(), window, 30)
+                .await;
+            assert_eq!(
+                result.ok(),
+                accepted.then_some(remaining),
+                "{held:?} {remaining}"
+            );
+        }
+
+        speaker.delete_guarded(&rule).await.unwrap();
+        let payload = encode_guarded(&rule).unwrap();
+        assert_eq!(
+            service.requests.lock().unwrap().pop(),
+            Some(Received::Delete(pb::DeleteGuardedFlowSpecRequest {
+                afi_safi: payload.afi_safi,
+                components: payload.components,
+                rd: payload.rd,
+                owner: rule.owner.clone(),
+                revision: rule.revision,
+            }))
+        );
+        for (outcome, accepted) in [(0, false), (1, true), (2, true), (99, false)] {
+            service.replies.lock().unwrap().delete =
+                Some(pb::DeleteGuardedFlowSpecResponse { outcome });
+            assert_eq!(
+                speaker.delete_guarded(&rule).await.is_ok(),
+                accepted,
+                "{outcome}"
+            );
+        }
+        server.abort();
+    }
+
+    /// A malformed local intent view or row fails the whole read; it is
+    /// never treated as an empty or partial guarded inventory.
+    #[tokio::test]
+    async fn guarded_inventory_fails_closed_on_malformed_views_and_rows() {
+        let (speaker, service, server) = fixture().await;
+        let mut ours = route();
+        ours.injection_owner = "guarded:prefixd.scrub.a".into();
+        *service.routes.lock().unwrap() = vec![(3, ours.clone())];
+        assert_eq!(speaker.guarded_inventory().await.unwrap().len(), 1);
+        let mut revision_only = ours;
+        revision_only.injection_owner.clear();
+        let tampers: [ListTamper; 6] = [
+            |r| r.received_view = false,
+            |r| r.advertised_view = true,
+            |r| r.routes = vec![Default::default()],
+            |r| r.received_routes[0].validation = 2,
+            |r| r.received_routes[0].path_id = 1,
+            |r| r.received_routes[0].reason = "stale".into(),
+        ];
+        for (case, tamper) in tampers.into_iter().enumerate() {
+            *service.list_tamper.lock().unwrap() = Some(tamper);
+            assert!(speaker.guarded_inventory().await.is_err(), "case {case}");
+        }
+        *service.list_tamper.lock().unwrap() = None;
+        // An admission revision without a guarded owner is decoded strictly.
+        *service.routes.lock().unwrap() = vec![(3, revision_only)];
+        assert!(speaker.guarded_inventory().await.is_err());
+        server.abort();
     }
 
     /// ADR 030 R5: a destination-less rule that is not prefixd's return leg,
@@ -862,7 +1102,10 @@ fn return_leg_encodes_and_reads_back_exact_components_and_community() {
     peer.peer_address = "192.0.2.254".into();
     let mut rd = return_route();
     rd.rd = "44407:40".into();
+    let mut family = return_route();
+    family.afi_safi = 4;
     for (name, bad) in [
+        ("family", family),
         ("scope route target", scoped),
         ("AS path", as_path),
         ("peer", peer),
