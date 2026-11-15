@@ -920,21 +920,22 @@ impl Settings {
         // Alert destinations and webhook adapter `auth` and `transforms` are
         // internally tagged, so serde_ignored cannot see inside them; their
         // modules check them.
-        if let Ok(document) = crate::config::parse_yaml::<serde_json::Value>(content) {
-            if let Some(alerting) = document.get("alerting") {
-                unknown_keys.extend(
-                    crate::alerting::AlertingConfig::unknown_destination_keys(alerting)
-                        .into_iter()
-                        .map(|key| format!("alerting.{key}")),
-                );
-            }
-            if let Some(correlation) = document.get("correlation") {
-                unknown_keys.extend(
-                    crate::correlation::webhook::unknown_adapter_keys(correlation)
-                        .into_iter()
-                        .map(|key| format!("correlation.{key}")),
-                );
-            }
+        #[derive(Deserialize)]
+        struct TaggedSections {
+            #[serde(default)]
+            alerting: Option<crate::alerting::DestinationKeys>,
+            #[serde(default)]
+            correlation: Option<crate::correlation::webhook::AdapterKeys>,
+        }
+        if let Ok(probe) = crate::config::parse_yaml::<TaggedSections>(content) {
+            let alerting = probe.alerting.unwrap_or_default().unknown();
+            let correlation = probe.correlation.unwrap_or_default().unknown();
+            unknown_keys.extend(alerting.into_iter().map(|key| format!("alerting.{key}")));
+            unknown_keys.extend(
+                correlation
+                    .into_iter()
+                    .map(|key| format!("correlation.{key}")),
+            );
         }
         Ok((settings, unknown_keys))
     }

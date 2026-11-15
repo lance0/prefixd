@@ -109,29 +109,123 @@ pub(crate) fn redacted_key(key: &str) -> &str {
     if end == 0 { "<redacted>" } else { &key[..end] }
 }
 
+/// The keys of one mapping and its `type` tag, read without their values,
+/// for internally tagged sections serde_ignored cannot see inside. Values are
+/// skipped unread and non-scalar keys are dropped, so any document the typed
+/// loader accepted can be read this way.
+#[derive(Debug, Default)]
+pub(crate) struct TaggedKeys {
+    kind: Option<String>,
+    keys: Vec<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for TaggedKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = TaggedKeys;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a mapping")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<TaggedKeys, A::Error> {
+                let mut tagged = TaggedKeys::default();
+                while let Some(ScalarKey(key)) = map.next_key()? {
+                    match key {
+                        Some(key) if key == "type" => {
+                            tagged.kind = map.next_value::<ScalarKey>()?.0
+                        }
+                        Some(key) => {
+                            tagged.keys.push(key);
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                        None => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(tagged)
+            }
+        }
+        deserializer.deserialize_map(Visitor)
+    }
+}
+
+/// A scalar as text, or `None` for a sequence or mapping, which is skipped.
+struct ScalarKey(Option<String>);
+
+impl<'de> serde::Deserialize<'de> for ScalarKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = ScalarKey;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("any value")
+            }
+            fn visit_str<E>(self, value: &str) -> Result<ScalarKey, E> {
+                Ok(ScalarKey(Some(value.to_string())))
+            }
+            fn visit_bool<E>(self, value: bool) -> Result<ScalarKey, E> {
+                Ok(ScalarKey(Some(value.to_string())))
+            }
+            fn visit_i64<E>(self, value: i64) -> Result<ScalarKey, E> {
+                Ok(ScalarKey(Some(value.to_string())))
+            }
+            fn visit_u64<E>(self, value: u64) -> Result<ScalarKey, E> {
+                Ok(ScalarKey(Some(value.to_string())))
+            }
+            fn visit_f64<E>(self, value: f64) -> Result<ScalarKey, E> {
+                Ok(ScalarKey(Some(value.to_string())))
+            }
+            fn visit_unit<E>(self) -> Result<ScalarKey, E> {
+                Ok(ScalarKey(None))
+            }
+            fn visit_none<E>(self) -> Result<ScalarKey, E> {
+                Ok(ScalarKey(None))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<ScalarKey, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(ScalarKey(None))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<ScalarKey, A::Error> {
+                while map
+                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(ScalarKey(None))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 /// Keys of an internally tagged object that its variant does not declare, as
-/// `{path}.{key}`. serde_ignored cannot see inside internally tagged enums, so
-/// each variant's keys come from a table that a drift test holds equal to
-/// serde. Only key names are read, never values; an unknown `type` is left to
-/// parsing to refuse.
+/// `{path}.{key}`. Each variant's keys come from a table that a drift test
+/// holds equal to serde. An unknown `type` is left to parsing to refuse.
 pub(crate) fn unknown_tagged_keys(
-    value: &serde_json::Value,
+    tagged: &TaggedKeys,
     path: &str,
     variants: &[(&str, &[&str])],
 ) -> Vec<String> {
-    let Some(object) = value.as_object() else {
-        return Vec::new();
-    };
-    let Some((_, known)) = object
-        .get("type")
-        .and_then(|kind| kind.as_str())
+    let Some((_, known)) = tagged
+        .kind
+        .as_deref()
         .and_then(|kind| variants.iter().find(|(name, _)| *name == kind))
     else {
         return Vec::new();
     };
-    object
-        .keys()
-        .filter(|key| *key != "type" && !known.contains(&key.as_str()))
+    tagged
+        .keys
+        .iter()
+        .filter(|key| !known.contains(&key.as_str()))
         .map(|key| format!("{path}.{}", redacted_key(key)))
         .collect()
 }
@@ -308,9 +402,21 @@ impl AppConfig {
     /// Load and validate every file startup reads. Fails with every load
     /// error, one per line.
     pub fn load(config_dir: &Path) -> Result<Self> {
-        match Self::load_all(config_dir) {
-            (Some(config), check) if check.is_ok() => Ok(config),
-            (_, check) => anyhow::bail!("{}", check.errors.join("\n")),
+        let (loaded, check) = Self::load_all(config_dir);
+        match loaded {
+            Loaded {
+                settings: Some(settings),
+                inventory: Some(inventory),
+                playbooks: Some(playbooks),
+                alerting_source,
+            } if check.is_ok() => Ok(Self {
+                settings,
+                inventory,
+                playbooks,
+                alerting_source,
+                unknown_keys: check.unknown_keys,
+            }),
+            _ => anyhow::bail!("{}", check.errors.join("\n")),
         }
     }
 
@@ -319,17 +425,25 @@ impl AppConfig {
     /// Checks that need a live speaker or database are listed in
     /// [`CHECK_SKIPPED`] instead of being faked.
     pub fn check(config_dir: &Path) -> ConfigCheck {
-        let (config, mut check) = Self::load_all(config_dir);
-        if let Some(config) = config {
-            check.errors.extend(config.preflight_errors(config_dir));
-            let playbooks = config_dir.join("playbooks.yaml");
+        let (loaded, mut check) = Self::load_all(config_dir);
+        // Settings checks run even when another file failed to load, so one
+        // run reports every error it can.
+        let Some(settings) = &loaded.settings else {
+            return check;
+        };
+        check.errors.extend(Self::preflight(
+            settings,
+            loaded.playbooks.as_ref(),
+            config_dir,
+        ));
+        if let Some(playbooks) = &loaded.playbooks {
+            let path = config_dir.join("playbooks.yaml");
             check.warnings.extend(
-                config
-                    .playbooks
-                    .prefix_scope_warnings(&config.settings.guardrails)
+                playbooks
+                    .prefix_scope_warnings(&settings.guardrails)
                     .into_iter()
-                    .chain(config.playbooks.unexecuted_steps_warnings())
-                    .map(|warning| format!("{}: {warning}", playbooks.display())),
+                    .chain(playbooks.unexecuted_steps_warnings())
+                    .map(|warning| format!("{}: {warning}", path.display())),
             );
         }
         check
@@ -343,7 +457,16 @@ impl AppConfig {
     /// checks assume a speaker that supports every FlowSpec match component
     /// and the injection lease; startup repeats them against the real speaker.
     pub fn preflight_errors(&self, config_dir: &Path) -> Vec<String> {
-        let settings = &self.settings;
+        Self::preflight(&self.settings, Some(&self.playbooks), config_dir)
+    }
+
+    /// [`AppConfig::preflight_errors`] for whichever files loaded; the
+    /// playbook checks need `playbooks.yaml`.
+    fn preflight(
+        settings: &Settings,
+        playbooks: Option<&Playbooks>,
+        config_dir: &Path,
+    ) -> Vec<String> {
         let prefixd = config_dir.join("prefixd.yaml");
         let mut errors = Vec::new();
         let mut push = |error: String| errors.push(format!("{}: {error}", prefixd.display()));
@@ -374,20 +497,22 @@ impl AppConfig {
             flowspec_export: false,
             flowspec_match: crate::bgp::FlowSpecMatchSupport::ALL,
         };
-        let playbooks = config_dir.join("playbooks.yaml");
-        errors.extend(
-            self.playbooks
-                .check_settings(settings, permissive)
-                .into_iter()
-                .map(|error| format!("{}: {error}", playbooks.display())),
-        );
+        if let Some(playbooks) = playbooks {
+            let path = config_dir.join("playbooks.yaml");
+            errors.extend(
+                playbooks
+                    .check_settings(settings, permissive)
+                    .into_iter()
+                    .map(|error| format!("{}: {error}", path.display())),
+            );
+        }
         errors
     }
 
     /// Parse and validate every file, collecting all errors and unknown keys.
-    /// The configuration is returned whenever each file parsed, even if a
-    /// cross-check failed, so [`AppConfig::check`] can report later errors too.
-    fn load_all(config_dir: &Path) -> (Option<Self>, ConfigCheck) {
+    /// Each file that parsed is returned, even if a cross-check failed, so
+    /// [`AppConfig::check`] can report later errors too.
+    fn load_all(config_dir: &Path) -> (Loaded, ConfigCheck) {
         let path = |name: &str| config_dir.join(name);
         let mut check = ConfigCheck::default();
         let read =
@@ -495,18 +620,22 @@ impl AppConfig {
                 },
             );
 
-        let config = match (settings, inventory, playbooks) {
-            (Some(settings), Some(inventory), Some(playbooks)) => Some(Self {
-                settings,
-                inventory,
-                playbooks,
-                alerting_source,
-                unknown_keys: check.unknown_keys.clone(),
-            }),
-            _ => None,
+        let loaded = Loaded {
+            settings,
+            inventory,
+            playbooks,
+            alerting_source,
         };
-        (config, check)
+        (loaded, check)
     }
+}
+
+/// The files [`AppConfig::load_all`] parsed.
+struct Loaded {
+    settings: Option<Settings>,
+    inventory: Option<Inventory>,
+    playbooks: Option<Playbooks>,
+    alerting_source: &'static str,
 }
 
 #[cfg(test)]
@@ -910,6 +1039,48 @@ mod tests {
             check.errors[0].contains("url must use https"),
             "{:?}",
             check.errors
+        );
+    }
+
+    /// A file that fails to load does not hide the settings checks: an
+    /// invalid inventory and an unset API token are both reported.
+    #[test]
+    fn check_runs_settings_checks_when_another_file_fails() {
+        let directory = fixture();
+        let mut settings: Settings = parse_yaml(SHIPPED).unwrap();
+        settings.http.auth.mode = AuthMode::Bearer;
+        settings.http.auth.bearer_token_env = Some("PREFIXD_TEST_UNSET_API_TOKEN".into());
+        std::fs::write(
+            directory.path().join("prefixd.yaml"),
+            serde_saphyr::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("inventory.yaml"),
+            "customers: [{customer_id: a, name: A, prefixes: [198.51.100.0/33]}]\n",
+        )
+        .unwrap();
+        let errors = AppConfig::check(directory.path()).errors.join("\n");
+        assert!(errors.contains("inventory.yaml"), "{errors}");
+        assert!(
+            errors.contains("auth.mode=bearer but PREFIXD_TEST_UNSET_API_TOKEN is not set"),
+            "{errors}"
+        );
+    }
+
+    /// Tagged-key inspection does not depend on the whole document converting
+    /// to JSON: a complex key elsewhere does not hide a destination typo.
+    #[test]
+    fn tagged_typos_survive_complex_keys_elsewhere() {
+        let document = settings_document(&[(
+            "alerting",
+            "alerting:\n  destinations:\n    - type: slack\n      \
+             webhook_url: https://example.invalid/hook\n      chanel: ops\nextra: {[a, b]: 1}",
+        )]);
+        let keys = settings_unknown_keys(&document);
+        assert!(
+            keys.contains(&"alerting.destinations[0].chanel".to_string()),
+            "{keys:?}"
         );
     }
 

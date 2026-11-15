@@ -197,28 +197,37 @@ const TRANSFORM_KEYS: [(&str, &[&str]); 3] = [
     ("computed", &["paths", "scale"]),
 ];
 
-/// Keys this release ignores inside adapters' internally tagged `auth` and
-/// `transforms` entries, such as `webhook_adapters[0].auth.heder`. The rest
-/// of an adapter is reported by the loader itself. Only key names are read.
-pub(crate) fn unknown_adapter_keys(document: &serde_json::Value) -> Vec<String> {
-    let Some(adapters) = document
-        .get("webhook_adapters")
-        .and_then(|list| list.as_array())
-    else {
-        return Vec::new();
-    };
-    let mut unknown = Vec::new();
-    for (index, adapter) in adapters.iter().enumerate() {
-        let path = format!("webhook_adapters[{index}]");
-        if let Some(auth) = adapter.get("auth") {
-            unknown.extend(crate::config::unknown_tagged_keys(
-                auth,
-                &format!("{path}.auth"),
-                &AUTH_KEYS,
-            ));
-        }
-        if let Some(transforms) = adapter.get("transforms").and_then(|map| map.as_object()) {
-            for (field, transform) in transforms {
+/// The keys of each adapter's internally tagged `auth` and `transforms`
+/// entries, read without values. Keys this release ignores there, such as
+/// `webhook_adapters[0].auth.heder`, are reported by path; the rest of an
+/// adapter is reported by the loader itself.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct AdapterKeys {
+    #[serde(default)]
+    webhook_adapters: Vec<AdapterProbe>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AdapterProbe {
+    #[serde(default)]
+    auth: Option<crate::config::TaggedKeys>,
+    #[serde(default)]
+    transforms: std::collections::BTreeMap<String, crate::config::TaggedKeys>,
+}
+
+impl AdapterKeys {
+    pub(crate) fn unknown(&self) -> Vec<String> {
+        let mut unknown = Vec::new();
+        for (index, adapter) in self.webhook_adapters.iter().enumerate() {
+            let path = format!("webhook_adapters[{index}]");
+            if let Some(auth) = &adapter.auth {
+                unknown.extend(crate::config::unknown_tagged_keys(
+                    auth,
+                    &format!("{path}.auth"),
+                    &AUTH_KEYS,
+                ));
+            }
+            for (field, transform) in &adapter.transforms {
                 unknown.extend(crate::config::unknown_tagged_keys(
                     transform,
                     &format!("{path}.transforms.{}", crate::config::redacted_key(field)),
@@ -226,8 +235,8 @@ pub(crate) fn unknown_adapter_keys(document: &serde_json::Value) -> Vec<String> 
                 ));
             }
         }
+        unknown
     }
-    unknown
 }
 
 fn default_true() -> bool {

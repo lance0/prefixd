@@ -282,8 +282,8 @@ impl CorrelationConfig {
         let (config, mut unknown_keys) = crate::config::parse_secret_yaml(content)?;
         // Adapter `auth` and `transforms` are internally tagged, which
         // serde_ignored cannot see inside; the webhook module checks them.
-        if let Ok(document) = crate::config::parse_yaml::<serde_json::Value>(content) {
-            unknown_keys.extend(super::webhook::unknown_adapter_keys(&document));
+        if let Ok(probe) = crate::config::parse_yaml::<super::webhook::AdapterKeys>(content) {
+            unknown_keys.extend(probe.unknown());
         }
         Ok((config, unknown_keys))
     }

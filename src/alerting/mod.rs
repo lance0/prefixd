@@ -362,6 +362,32 @@ const DESTINATION_KEYS: [(&str, &[&str]); 7] = [
     ),
 ];
 
+/// The keys of each alert destination, read without values. Keys this release
+/// ignores, such as `destinations[0].chanel`, are reported by path:
+/// `DestinationConfig` is internally tagged, so serde_ignored cannot see its
+/// variant fields, and the known keys come from [`DESTINATION_KEYS`].
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct DestinationKeys {
+    #[serde(default)]
+    destinations: Vec<crate::config::TaggedKeys>,
+}
+
+impl DestinationKeys {
+    pub(crate) fn unknown(&self) -> Vec<String> {
+        self.destinations
+            .iter()
+            .enumerate()
+            .flat_map(|(index, destination)| {
+                crate::config::unknown_tagged_keys(
+                    destination,
+                    &format!("destinations[{index}]"),
+                    &DESTINATION_KEYS,
+                )
+            })
+            .collect()
+    }
+}
+
 fn default_pagerduty_url() -> String {
     "https://events.pagerduty.com/v2/enqueue".into()
 }
@@ -647,36 +673,10 @@ impl AlertingConfig {
     /// `--check` can report every error.
     pub fn from_yaml(content: &str) -> Result<(Self, Vec<String>)> {
         let (config, mut unknown_keys) = crate::config::parse_secret_yaml(content)?;
-        if let Ok(document) = crate::config::parse_yaml::<serde_json::Value>(content) {
-            unknown_keys.extend(Self::unknown_destination_keys(&document));
+        if let Ok(probe) = crate::config::parse_yaml::<DestinationKeys>(content) {
+            unknown_keys.extend(probe.unknown());
         }
         Ok((config, unknown_keys))
-    }
-
-    /// Keys this release ignores inside `destinations`, as paths such as
-    /// `destinations[0].chanel`. `DestinationConfig` is internally tagged, so
-    /// serde_ignored cannot see its variant fields; the known keys come from
-    /// [`DESTINATION_KEYS`], which
-    /// `unknown_destination_keys_track_the_variants` keeps in step. Only key
-    /// names are read, never values.
-    pub(crate) fn unknown_destination_keys(document: &serde_json::Value) -> Vec<String> {
-        let Some(destinations) = document
-            .get("destinations")
-            .and_then(|list| list.as_array())
-        else {
-            return Vec::new();
-        };
-        destinations
-            .iter()
-            .enumerate()
-            .flat_map(|(index, destination)| {
-                crate::config::unknown_tagged_keys(
-                    destination,
-                    &format!("destinations[{index}]"),
-                    &DESTINATION_KEYS,
-                )
-            })
-            .collect()
     }
 
     /// `${VAR}` placeholders, missing secrets and unusable `*_env` keys, which
@@ -1586,14 +1586,11 @@ mod tests {
     #[test]
     fn unknown_destination_keys_name_the_path_only() {
         const CANARY: &str = "hunter2-canary";
-        let document: serde_json::Value = crate::config::parse_yaml(&format!(
+        let probe: DestinationKeys = crate::config::parse_yaml(&format!(
             "destinations:\n  - type: slack\n    webhook_url: https://example.invalid/{CANARY}\n    chanel: ops\n"
         ))
         .unwrap();
-        assert_eq!(
-            AlertingConfig::unknown_destination_keys(&document),
-            vec!["destinations[0].chanel"]
-        );
+        assert_eq!(probe.unknown(), vec!["destinations[0].chanel"]);
         let (_, unknown_keys) = AlertingConfig::from_yaml(&format!(
             "destinations:\n  - type: slack\n    webhook_url: https://example.invalid/{CANARY}\n    chanel: ops\n"
         ))
