@@ -933,6 +933,17 @@ mod tests {
                 },
                 FlowSpecMatchError::ConflictingTcpFlags,
             ),
+            // Identical masks conflict; they are not an empty match.
+            (
+                FlowSpecNlri {
+                    tcp_flags: Some(TcpFlagsMatch {
+                        set: [TcpFlag::Syn].into(),
+                        not_set: [TcpFlag::Syn].into(),
+                    }),
+                    ..tcp.clone()
+                },
+                FlowSpecMatchError::ConflictingTcpFlags,
+            ),
             (
                 FlowSpecNlri {
                     dst_prefix: "192.0.2.1/24".into(),
