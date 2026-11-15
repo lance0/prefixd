@@ -314,6 +314,13 @@ pub trait RepositoryTrait: Send + Sync {
 
     async fn begin_withdrawal(&self, request: &WithdrawalRequest) -> Result<WithdrawalRequest>;
     async fn pending_withdrawals(&self, pop: Option<&str>) -> Result<Vec<WithdrawalRequest>>;
+    /// One pending withdrawal by operation ID within `pop`, so completing a
+    /// request reads that row instead of every pending request.
+    async fn pending_withdrawal(
+        &self,
+        operation_id: Uuid,
+        pop: &str,
+    ) -> Result<Option<WithdrawalRequest>>;
     /// Atomically complete this exact operation and its unchanged mitigation revision.
     async fn finish_withdrawal(&self, request: &WithdrawalRequest) -> Result<Option<Mitigation>>;
 

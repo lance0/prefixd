@@ -1614,6 +1614,7 @@ async fn live_rustbgpd_leased_blackhole_renewal_restart_and_expiry() {
             false,
             &request,
             Some(&harness.binding),
+            prefixd::bgp::RetryPolicy::Durable,
         )
         .await
         .unwrap();
@@ -1865,6 +1866,7 @@ async fn live_rustbgpd_leased_flowspec_renewal_restart_and_expiry() {
             false,
             &request,
             Some(&harness.binding),
+            prefixd::bgp::RetryPolicy::Durable,
         )
         .await
         .unwrap();

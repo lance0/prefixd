@@ -17,6 +17,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or in `/etc/prefixd/playbooks.yaml`; see
   [multi-step playbooks](docs/how-to/upgrading.md#multi-step-playbooks).
 
+### Known limitations
+
+- TTL expiry, reconciliation repair, the safety rechecks and the lease re-add
+  keep the durable speaker retry budget and hold the lifecycle mutex for one
+  rule at a time. Against a speaker that never answers, an interactive request
+  queued behind one of them can still wait for that rule's whole budget: about
+  90 seconds with GoBGP and about 30 seconds with rustbgpd. See the
+  [interactive speaker deadline](docs/reference/speaker-backends.md#interactive-speaker-deadline).
+- If an operator withdraws a rule within seconds of its timed-out add, the
+  delete can complete as not found before the speaker applies the late add,
+  leaving a local route with no live owner. A FlowSpec rule is reported as
+  unknown and never removed; a leased one is kept by this controller's own lease
+  renewal until renewal stops. A blackhole route that exactly matches the frozen
+  route of a withdrawn or expired enforced-origin row of this POP, with no live
+  row or pending withdrawal at its prefix, is withdrawn by the next
+  reconciliation pass; any other is reported as unknown.
+- A detector event that creates several rules admits them under one lock hold
+  and still makes one bounded attempt per rule, so a wedged speaker can hold
+  the lifecycle mutex for up to N × 3 seconds for an event with N rules.
+
 ### Changed
 
 - The shipped `configs/playbooks.yaml` gives every playbook one step. The three
@@ -32,9 +52,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validation rules are unchanged.
 - `PUT /v1/config/playbooks` logs the unreachable `scope: prefix` playbook
   warning that startup and reload already logged.
+- Requests that hold the lifecycle mutex make one speaker attempt bounded by a
+  fixed three-second deadline. A speaker that needs longer per mutation now gets
+  `202` with `"announcement_outcome": "unconfirmed"` on create, and withdrawal
+  returns the documented `500` while the delete stays pending. Reconciliation
+  completes both. See
+  [troubleshooting](docs/how-to/troubleshooting.md#create-returns-announcement_outcome-unconfirmed).
 
 ### Fixed
 
+- A speaker that accepts a connection and never answers no longer stalls the
+  controller for minutes. Admission, manual creation, operator withdrawal,
+  detector unban and safelist withdrawal hold the lifecycle mutex and now make
+  one bounded speaker attempt, including through the controller fence that
+  wraps every backend; reconciliation keeps the three-attempt, 30-second budget
+  and repairs the durable intent. A timed-out add returns an unconfirmed outcome
+  and a timed-out delete stays pending with its recorded actor, reason and
+  operation ID. The unleased blackhole admission pre-read shares the deadline
+  and refuses the admission when the read fails or does not answer. After one
+  failed delete, a safelist addition records the remaining withdrawals for
+  reconciliation instead of calling the speaker again.
+- A safelist withdrawal that reconciliation completes now counts in
+  `prefixd_mitigations_withdrawn_total` under `reason="safelisted"`, as an
+  immediate one does, instead of `operator`.
+- Completing a withdrawal reads its own pending request by operation ID instead
+  of loading every pending request to find one.
 - The release workflow stages its assets in `release-assets/` instead of
   `dist/`. The checkout tracks `dist/systemd/`, so the v0.27.0 run tagged the
   release and pushed both images but failed to create the GitHub Release when

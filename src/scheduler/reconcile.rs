@@ -3,7 +3,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 use crate::alerting::AlertingService;
-use crate::bgp::FlowSpecAnnouncer;
+use crate::bgp::{FlowSpecAnnouncer, RetryPolicy};
 use crate::correlation::{CorrelationEngine, SignalGroupStatus};
 use crate::db::RepositoryTrait;
 use crate::domain::{
@@ -408,6 +408,7 @@ impl ReconciliationLoop {
                 self.dry_run,
                 &request,
                 binding,
+                RetryPolicy::Durable,
             )
             .await
             {
@@ -430,11 +431,7 @@ impl ReconciliationLoop {
                     .with_label_values(&[
                         mitigation.action_type.to_string().as_str(),
                         mitigation.pop.as_str(),
-                        if request.actor_type == "detector" {
-                            "detector_unban"
-                        } else {
-                            "operator"
-                        },
+                        request.withdrawn_metric_reason(),
                     ])
                     .inc();
                 WsMessage::MitigationWithdrawn {
@@ -971,6 +968,7 @@ impl ReconciliationLoop {
                                 false,
                                 &request,
                                 binding,
+                                RetryPolicy::Durable,
                             )
                             .await
                         }
@@ -1028,6 +1026,7 @@ impl ReconciliationLoop {
                             false,
                             &mitigation,
                             binding,
+                            RetryPolicy::Durable,
                         )
                         .await
                     } else {
@@ -1050,6 +1049,7 @@ impl ReconciliationLoop {
                                     false,
                                     &request,
                                     binding,
+                                    RetryPolicy::Durable,
                                 )
                                 .await
                             }
@@ -1103,6 +1103,7 @@ impl ReconciliationLoop {
                                 self.announcer.as_ref(),
                                 &rule,
                                 self.lease(),
+                                RetryPolicy::Durable,
                             )
                             .await
                         }
@@ -1401,6 +1402,7 @@ impl ReconciliationLoop {
                     false,
                     &mitigation,
                     binding,
+                    RetryPolicy::Durable,
                 )
                 .await
                 {
@@ -1440,6 +1442,7 @@ impl ReconciliationLoop {
                 &mitigation,
                 binding,
                 lease,
+                RetryPolicy::Durable,
             )
             .await
             {
@@ -1938,6 +1941,107 @@ mod tests {
         mitigation.activate();
         mitigation.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
         mitigation
+    }
+
+    /// A timed-out delete leaves its withdrawal pending, so the repair pass must
+    /// not re-announce that key: the intent is durable and reconciliation owns it.
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_withdrawal_stays_pending_and_blocks_re_announcement() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(crate::bgp::MuteFlowSpec::default());
+        let mut mitigation = expired_mitigation("192.0.2.9");
+        mitigation.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+        repo.insert_mitigation(&mitigation).await.unwrap();
+        let request = request_withdrawal(
+            repo.as_ref(),
+            &mitigation,
+            false,
+            "operator",
+            "alice",
+            "investigated".into(),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let error = execute_withdrawal(
+            repo.as_ref(),
+            speaker.as_ref(),
+            false,
+            &request,
+            None,
+            RetryPolicy::Bounded,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, PrefixdError::BgpWithdrawalFailed(_)));
+        assert_eq!(speaker.deletes.load(SeqCst), 1, "one bounded attempt");
+        let pending = repo
+            .pending_withdrawal(request.operation_id, "test")
+            .await
+            .unwrap()
+            .expect("a timed-out delete stays pending");
+        assert_eq!(pending.actor, "alice");
+        assert_eq!(pending.reason, "investigated");
+        assert_eq!(pending.mitigation_updated_at, request.mitigation_updated_at);
+
+        let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+        reconciler.sync_announcements().await.unwrap();
+        assert_eq!(
+            speaker.adds.load(SeqCst),
+            0,
+            "a pending withdrawal blocks re-announcement"
+        );
+        assert!(
+            repo.get_mitigation(mitigation.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active()
+        );
+
+        // The speaker answers again: reconciliation completes the original
+        // operation, never a fresh one.
+        let answering = Arc::new(MockAnnouncer::new());
+        ReconciliationLoop::new(repo.clone(), answering.clone(), 30, false)
+            .expire_mitigations()
+            .await
+            .unwrap();
+        let finished = repo
+            .get_mitigation(mitigation.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(finished.status, MitigationStatus::Withdrawn);
+        assert_eq!(finished.reason, "investigated");
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+        let audit = repo
+            .list_audit(&crate::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let [entry] = audit
+            .iter()
+            .filter(|entry| {
+                entry.target_id.as_deref() == Some(&mitigation.mitigation_id.to_string())
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("one completion audit");
+        assert_eq!(entry.action, "withdraw");
+        assert!(matches!(
+            entry.actor_type,
+            crate::observability::ActorType::Operator
+        ));
+        assert_eq!(entry.actor_id.as_deref(), Some("alice"));
+        assert_eq!(entry.details["reason"], "investigated");
+        assert_eq!(
+            entry.details["operation_id"],
+            request.operation_id.to_string()
+        );
     }
 
     // Deliberately implements no observation traits: writing alone is sufficient.
@@ -3191,9 +3295,16 @@ mod tests {
             .await
             .unwrap();
             assert!(
-                execute_withdrawal(repo.as_ref(), speaker.as_ref(), false, &request, None)
-                    .await
-                    .is_err()
+                execute_withdrawal(
+                    repo.as_ref(),
+                    speaker.as_ref(),
+                    false,
+                    &request,
+                    None,
+                    RetryPolicy::Durable,
+                )
+                .await
+                .is_err()
             );
             for _ in 0..2 {
                 assert!(reconciler.reconcile().await.is_err());
@@ -3229,9 +3340,16 @@ mod tests {
                 }));
             }
             speaker.mode.store(0, SeqCst);
-            execute_withdrawal(repo.as_ref(), speaker.as_ref(), false, &request, None)
-                .await
-                .unwrap();
+            execute_withdrawal(
+                repo.as_ref(),
+                speaker.as_ref(),
+                false,
+                &request,
+                None,
+                RetryPolicy::Durable,
+            )
+            .await
+            .unwrap();
             assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
             assert_eq!(speaker.inner.list_active().await.unwrap().len(), 1);
         }
@@ -3985,7 +4103,7 @@ mod tests {
         assert_eq!(pending[0].operation_id, request.operation_id);
     }
 
-    /// A retried withdrawal counts under its requester: detector unban or operator.
+    /// A retried withdrawal counts under its requester: detector unban, safelist or operator.
     #[tokio::test]
     async fn retried_withdrawals_count_under_their_requester() {
         let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
@@ -3999,9 +4117,29 @@ mod tests {
         let state = action_state(repo.clone(), speaker.clone());
         let reconciler =
             ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false).with_app_state(state);
-        for (prefix, actor_type, reason, other) in [
-            ("192.0.2.73/32", "detector", "detector_unban", "operator"),
-            ("192.0.2.74/32", "operator", "operator", "detector_unban"),
+        for (prefix, actor_type, actor, reason, other) in [
+            (
+                "192.0.2.73/32",
+                "detector",
+                "a",
+                "detector_unban",
+                "operator",
+            ),
+            (
+                "192.0.2.74/32",
+                "operator",
+                "a",
+                "operator",
+                "detector_unban",
+            ),
+            // A safelist withdrawal left to reconciliation keeps its reason.
+            (
+                "192.0.2.75/32",
+                "system",
+                crate::domain::SAFELIST_RECHECK_ACTOR,
+                "safelisted",
+                "operator",
+            ),
         ] {
             let mitigation = action_mitigation(prefix, FlowSpecAction::discard());
             repo.insert_mitigation(&mitigation).await.unwrap();
@@ -4014,7 +4152,7 @@ mod tests {
                 &mitigation,
                 false,
                 actor_type,
-                "a",
+                actor,
                 "test".into(),
                 true,
                 None,
@@ -4067,9 +4205,16 @@ mod tests {
             .unwrap();
             assert_eq!(request.rule_kind, "blackhole");
             assert!(
-                execute_withdrawal(repo.as_ref(), speaker.as_ref(), false, &request, None)
-                    .await
-                    .is_err()
+                execute_withdrawal(
+                    repo.as_ref(),
+                    speaker.as_ref(),
+                    false,
+                    &request,
+                    None,
+                    RetryPolicy::Durable,
+                )
+                .await
+                .is_err()
             );
             for _ in 0..2 {
                 // Operator retry and TTL expiry both fail; the missing route is never re-added.
@@ -5393,9 +5538,16 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            execute_withdrawal(repo.as_ref(), speaker.as_ref(), false, &request, None)
-                .await
-                .is_err()
+            execute_withdrawal(
+                repo.as_ref(),
+                speaker.as_ref(),
+                false,
+                &request,
+                None,
+                RetryPolicy::Durable,
+            )
+            .await
+            .is_err()
         );
         // A FlowSpec rule on the same host is a separate, unblocked identity.
         let flowspec = action_mitigation("192.0.2.1/32", FlowSpecAction::discard());
@@ -5592,9 +5744,16 @@ mod tests {
             )
             .await
             .unwrap();
-            execute_withdrawal(repo.as_ref(), speaker.as_ref(), false, &request, None)
-                .await
-                .unwrap();
+            execute_withdrawal(
+                repo.as_ref(),
+                speaker.as_ref(),
+                false,
+                &request,
+                None,
+                RetryPolicy::Durable,
+            )
+            .await
+            .unwrap();
         }
         assert_eq!(*speaker.delete_owners.lock().unwrap(), [LEASE_OWNER, ""]);
     }
@@ -5775,9 +5934,16 @@ mod tests {
                 request.flowspec_rule().unwrap().owner,
                 mitigation.action_params.injection_owner
             );
-            execute_withdrawal(repo.as_ref(), speaker.as_ref(), false, &request, None)
-                .await
-                .unwrap();
+            execute_withdrawal(
+                repo.as_ref(),
+                speaker.as_ref(),
+                false,
+                &request,
+                None,
+                RetryPolicy::Durable,
+            )
+            .await
+            .unwrap();
         }
         assert_eq!(
             *speaker.flowspec_delete_owners.lock().unwrap(),
