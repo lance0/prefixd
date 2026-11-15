@@ -12,18 +12,67 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 /// Fixed parsing policy for operator-owned configuration. No includes or interpolation.
+fn yaml_options() -> serde_saphyr::Options {
+    serde_saphyr::options! {
+        strict_booleans: true,
+        merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
+        duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
+        with_snippet: false,
+    }
+}
+
 pub(crate) fn parse_yaml<'de, T: serde::Deserialize<'de>>(
     content: &'de str,
 ) -> Result<T, serde_saphyr::Error> {
-    serde_saphyr::from_str_with_options(
-        content,
-        serde_saphyr::options! {
-            strict_booleans: true,
-            merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
-            duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
-            with_snippet: false,
-        },
-    )
+    serde_saphyr::from_str_with_options(content, yaml_options())
+}
+
+/// [`parse_yaml`] for files that hold secrets: `prefixd.yaml`,
+/// `correlation.yaml` and `alerting.yaml`. Serde errors can quote the
+/// offending value, so the error keeps only the key path, line, column and
+/// what was expected.
+pub(crate) fn parse_secret_yaml<T: serde::de::DeserializeOwned>(content: &str) -> Result<T> {
+    let mut path = None;
+    serde_saphyr::with_deserializer_from_str_with_options(content, yaml_options(), |de| {
+        serde_path_to_error::deserialize(de).map_err(|error| {
+            path = Some(error.path().to_string());
+            error.into_inner()
+        })
+    })
+    .map_err(|error| anyhow::anyhow!(redacted_yaml_error(path.as_deref(), &error)))
+}
+
+fn redacted_yaml_error(path: Option<&str>, error: &serde_saphyr::Error) -> String {
+    use serde_saphyr::Error as E;
+    // Keys, types and expectations only; serde's own value-quoting text is
+    // dropped. `Message` is a custom error, which prefixd's own validation
+    // writes; secret fields are plain strings with no custom deserializer.
+    let what = match error {
+        E::Message { msg, .. } => msg.clone(),
+        E::SerdeUnknownField { field, .. } => format!("unknown field `{field}`"),
+        E::SerdeMissingField { field, .. } => format!("missing field `{field}`"),
+        E::DuplicateMappingKey { key: Some(key), .. } => format!("duplicate key `{key}`"),
+        E::SerdeInvalidType { expected, .. } => format!("invalid type, expected {expected}"),
+        E::SerdeInvalidValue { expected, .. } => format!("invalid value, expected {expected}"),
+        E::SerdeUnknownVariant { expected, .. } => {
+            format!("unknown variant, expected one of {}", expected.join(", "))
+        }
+        E::InvalidScalar { ty, .. } => format!("invalid {ty}"),
+        E::Unexpected { expected, .. } => format!("expected {expected}"),
+        _ => "invalid value".to_string(),
+    };
+    let mut message = match path.filter(|path| *path != ".") {
+        Some(path) => format!("{path}: {what}"),
+        None => what,
+    };
+    if let Some(location) = error.location() {
+        message.push_str(&format!(
+            " at line {} column {}",
+            location.line(),
+            location.column()
+        ));
+    }
+    message
 }
 
 /// Key paths of string values written as `${VAR}`. The loader never expands
@@ -310,6 +359,64 @@ customers:
             assert!(!format!("{error:?}").contains("SECRET_CANARY"));
         }
     }
+    #[test]
+    fn secret_file_parse_errors_name_path_and_location_never_value() {
+        const CANARY: &str = "hunter2-canary";
+        let check = |error: anyhow::Error, raw: String, expected: &str| {
+            // Negative control: the plain parser's error quotes the value.
+            assert!(raw.contains(CANARY), "control lost its canary: {raw}");
+            let error = format!("{error:#}");
+            assert_eq!(error, expected);
+            assert!(!error.contains(CANARY));
+        };
+        let yaml = format!("pop: iad1\nmode: {CANARY}\n");
+        check(
+            parse_secret_yaml::<Settings>(&yaml).unwrap_err(),
+            parse_yaml::<Settings>(&yaml).unwrap_err().to_string(),
+            "mode: unknown variant, expected one of dry-run, enforced at line 2 column 7",
+        );
+        let yaml = format!("destinations: [{{type: {CANARY}}}]\n");
+        check(
+            parse_secret_yaml::<crate::alerting::AlertingConfig>(&yaml).unwrap_err(),
+            parse_yaml::<crate::alerting::AlertingConfig>(&yaml)
+                .unwrap_err()
+                .to_string(),
+            "destinations[0].type: unknown variant, expected one of slack, discord, teams, \
+             telegram, pagerduty, opsgenie, generic at line 1 column 17",
+        );
+        let yaml = format!("webhook_adapters: [{{name: a, auth: {{type: {CANARY}}}}}]\n");
+        check(
+            parse_secret_yaml::<crate::correlation::CorrelationConfig>(&yaml).unwrap_err(),
+            parse_yaml::<crate::correlation::CorrelationConfig>(&yaml)
+                .unwrap_err()
+                .to_string(),
+            "webhook_adapters[0].auth.type: unknown variant, expected one of hmac, bearer, none \
+             at line 1 column 37",
+        );
+        // Scalar failures name the type, as the plain parser does.
+        assert_eq!(
+            format!(
+                "{:#}",
+                parse_secret_yaml::<Settings>(&format!(
+                    "pop: iad1\nstorage: {{connection_string: [\"postgres://a:{CANARY}@db\"]}}\n"
+                ))
+                .unwrap_err()
+            ),
+            "storage.connection_string: expected string scalar at line 2 column 30"
+        );
+        // Key names are not values, so unknown and missing keys stay named.
+        assert_eq!(
+            format!(
+                "{:#}",
+                parse_secret_yaml::<Settings>(&format!(
+                    "pop: iad1\nobservability: {{log_levle: {CANARY}}}\n"
+                ))
+                .unwrap_err()
+            ),
+            "observability.log_levle: unknown field `log_levle` at line 2 column 17"
+        );
+    }
+
     #[cfg(unix)]
     fn assert_yaml_save_contract<T>(value: &T, save: impl Fn(&Path) -> anyhow::Result<()>)
     where

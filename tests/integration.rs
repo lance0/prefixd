@@ -6993,6 +6993,104 @@ async fn test_reload_error_names_file_without_echoing_settings() {
     );
 }
 
+/// Loader errors for secret-bearing files reach the reload log as key path,
+/// line and column only. Inventory and playbook errors keep full detail.
+#[tokio::test]
+async fn reload_log_redacts_secret_file_loader_errors() {
+    #[derive(Clone, Default)]
+    struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    const CANARY: &str = "hunter2-canary";
+    let capture = Capture::default();
+    let writer = capture.clone();
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let app = setup_app_with_config_dir(directory.path().to_path_buf()).await;
+    let settings = format!("pop: iad1\nmode: {CANARY}\n");
+    let alerting = format!("destinations: [{{type: {CANARY}}}]\n");
+    let correlation = format!("webhook_adapters: [{{name: a, auth: {{type: {CANARY}}}}}]\n");
+    // Negative control: the loader text these files produced before quotes the value.
+    for raw in [
+        serde_saphyr::from_str::<prefixd::config::Settings>(&settings)
+            .unwrap_err()
+            .to_string(),
+        serde_saphyr::from_str::<prefixd::alerting::AlertingConfig>(&alerting)
+            .unwrap_err()
+            .to_string(),
+        serde_saphyr::from_str::<prefixd::correlation::CorrelationConfig>(&correlation)
+            .unwrap_err()
+            .to_string(),
+    ] {
+        assert!(raw.contains(CANARY), "control lost its canary: {raw}");
+    }
+
+    for (file, content, logged) in [
+        (
+            "prefixd.yaml",
+            settings,
+            "prefixd.yaml: mode: unknown variant, expected one of dry-run, enforced at line 2 column 7",
+        ),
+        (
+            "alerting.yaml",
+            alerting,
+            "alerting.yaml: destinations[0].type: unknown variant, expected one of slack, discord, \
+             teams, telegram, pagerduty, opsgenie, generic at line 1 column 17",
+        ),
+        (
+            "correlation.yaml",
+            correlation,
+            "correlation.yaml: webhook_adapters[0].auth.type: unknown variant, expected one of \
+             hmac, bearer, none at line 1 column 37",
+        ),
+    ] {
+        capture.0.lock().unwrap().clear();
+        let path = directory.path().join(file);
+        std::fs::write(&path, content).unwrap();
+        let (status, rejection) =
+            correlation_config_request(&app, "POST", "/v1/config/reload", "").await;
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{file}");
+        assert!(
+            !rejection.to_string().contains(CANARY),
+            "{file}: {rejection}"
+        );
+        let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(!output.contains(CANARY), "{file}: {output}");
+        let errors: Vec<_> = output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|event| event["fields"]["message"] == "reload_config failed")
+            .map(|event| event["fields"]["error"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(errors, vec![logged.to_string()], "{file}");
+    }
+
+    capture.0.lock().unwrap().clear();
+    std::fs::write(
+        directory.path().join("playbooks.yaml"),
+        "playbooks: visible-playbook-detail\n",
+    )
+    .unwrap();
+    let (status, _) = correlation_config_request(&app, "POST", "/v1/config/reload", "").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(output.contains("visible-playbook-detail"), "{output}");
+}
+
 /// VAL-ADAPT-016: POST /v1/config/reload refreshes correlation config from YAML
 #[tokio::test]
 async fn test_reload_picks_up_correlation_config() {

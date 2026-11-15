@@ -809,7 +809,7 @@ impl Settings {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         reject_removed_keys(&content)?;
-        let settings: Settings = crate::config::parse_yaml(&content)?;
+        let settings: Settings = crate::config::parse_secret_yaml(&content)?;
         let mut errors = crate::config::env_placeholder_errors(&serde_json::to_value(&settings)?);
         errors.extend(
             settings
