@@ -1451,11 +1451,14 @@ controller's environment, such as `DATABASE_URL`, to a URL of their choosing.
 
 ## Alert destination URLs
 
-The alerting configuration editor requires HTTPS for Slack, Discord, Teams,
-PagerDuty `events_url` and generic webhook URLs. Validation rejects `localhost`
-and its subdomains, including absolute names ending in a dot, plus literal
-private, loopback, link-local, unspecified,
-multicast, broadcast and documentation addresses where applicable. IPv4-mapped
+Startup, reload and the alerting configuration editor require HTTPS for
+Slack, Discord, Teams, PagerDuty `events_url` and generic webhook URLs.
+Startup and reload check `alerting.yaml` or, without it, the `alerting`
+section of `prefixd.yaml`. A refusal names the file and the key but not the
+URL. Validation rejects `localhost` and its subdomains,
+including absolute names ending in a dot, plus literal private, loopback,
+link-local, unspecified, multicast, broadcast and documentation addresses
+where applicable. IPv4-mapped
 IPv6 literals are checked as their underlying IPv4 addresses. Public IP literals
 and domain names remain accepted.
 
@@ -1509,7 +1512,8 @@ Every present file, including `prefixd.yaml`, is loaded and validated before any
 section is published. A failed reload leaves all of them unchanged. Every other
 `prefixd.yaml` key, including `alerting` when there is no `alerting.yaml`, is
 read only at startup; the response's `restart_required` lists the ones that
-differ from the running settings.
+differ from the running settings. Reload still refuses inline `alerting` that
+the next startup would refuse.
 
 - Startup adds `safelist.prefixes` entries but never deletes them, so removing
   one from the file does not remove it on restart; use
@@ -1543,7 +1547,9 @@ curl -X POST http://localhost/v1/config/reload
 
 prefixd validates configuration while loading it at startup. There is no
 validate-only flag; a malformed or invalid file stops startup before the
-controller connects to PostgreSQL or the speaker:
+controller connects to PostgreSQL or the speaker. Checks that need the
+speaker's capabilities, such as the playbook capability checks, run after it
+connects:
 
 ```bash
 RUST_LOG=debug docker compose --profile rustbgpd up -d --no-build

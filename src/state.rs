@@ -309,6 +309,19 @@ impl AppState {
                 }
             })
             .transpose()?;
+        // Without `alerting.yaml`, the next startup uses inline alerting, so
+        // refuse what startup would refuse. With it, the inline section is unused.
+        if alerting.is_none()
+            && let Some(file) = &settings
+        {
+            let errors = file.alerting.validate();
+            if !errors.is_empty() {
+                return Err(invalid(
+                    "prefixd.yaml",
+                    format!("alerting: {}", errors.join("; ")),
+                ));
+            }
+        }
         let restart_required = match &settings {
             // Without `alerting.yaml`, inline alerting applies only at startup;
             // compare it with what is running, which an earlier reload may have set.

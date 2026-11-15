@@ -16163,6 +16163,62 @@ mod manual_destination_cidr {
         );
     }
 
+    /// Without `alerting.yaml`, reload refuses inline alerting that the next
+    /// startup would refuse, without echoing the URL; nothing is published.
+    #[tokio::test]
+    async fn unsafe_inline_alerting_reload_keeps_previous_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("inventory.yaml"), r#"{"customers":[]}"#).unwrap();
+        let (mut state, _, _) = state(OperationMode::Enforced, true, owned_inventory());
+        Arc::get_mut(&mut state).unwrap().config_dir = dir.path().into();
+        let mut settings = state.settings.clone();
+        settings.alerting = serde_json::from_value(serde_json::json!({
+            "destinations": [{
+                "type": "generic",
+                "url": "http://example.com/hook?token=request-secret",
+            }],
+        }))
+        .unwrap();
+        let path = dir.path().join("prefixd.yaml");
+        std::fs::write(&path, serde_saphyr::to_string(&settings).unwrap()).unwrap();
+        // The low-level settings loader accepts the URL.
+        prefixd::config::Settings::load(&path).unwrap();
+        let error = state.reload_config().await.unwrap_err();
+        assert!(
+            error.to_string().starts_with(
+                "prefixd.yaml: alerting: destination[0] (generic): url must use https"
+            ),
+            "{error}"
+        );
+        assert!(!error.public_message().contains("request-secret"));
+        assert!(
+            state
+                .inventory
+                .read()
+                .await
+                .lookup_prefix(&"203.0.112.0/22".parse().unwrap())
+                .unwrap()
+                .is_some()
+        );
+        // Control: a valid `alerting.yaml` replaces the inline section, so the
+        // same prefixd.yaml reloads and the inventory publishes.
+        std::fs::write(
+            dir.path().join("alerting.yaml"),
+            "destinations:\n  - type: generic\n    url: https://example.com/hook\n",
+        )
+        .unwrap();
+        state.reload_config().await.unwrap();
+        assert!(
+            state
+                .inventory
+                .read()
+                .await
+                .lookup_prefix(&"203.0.112.0/22".parse().unwrap())
+                .unwrap()
+                .is_none()
+        );
+    }
+
     /// A present `prefixd.yaml` that fails to load fails the reload even when
     /// `correlation.yaml` supplies correlation; nothing is published.
     #[tokio::test]
