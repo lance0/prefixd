@@ -15,8 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   controller's rustbgpd injection lease. A controller outage longer than one
   lease (`blackhole.lease_seconds`, 60 by default) now removes active
   mitigations from rustbgpd, by design, while the database still holds them;
-  the restarted controller re-adds the ones still active. Finish a controller
-  replacement within one lease. To keep rules announced through a controller
+  the restarted controller re-adds the ones still active. A controller
+  replacement must finish before the old controller's lease runs out, which
+  can be as little as two thirds of a lease after it stops, since renewal runs
+  about every `lease_seconds / 3`. To keep rules announced through a controller
   outage, set `leased_flowspec: false` before the first leased rule is added:
   afterwards startup refuses `false` until the leased rules end. Rules added
   before the change stay unleased until they are withdrawn or expire, and

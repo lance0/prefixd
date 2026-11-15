@@ -941,10 +941,11 @@ Replacing only the controller can preserve the independent speaker's sessions:
    expiry pauses during controller downtime and resumes with reconciliation.
    With the shipped rustbgpd config's
    [leased FlowSpec](../reference/configuration.md#leased-flowspec), rustbgpd
-   keeps leased rules only for `blackhole.lease_seconds` (60 by default) after
-   the old controller stops renewing. Finish the replacement within one lease,
-   or the leased rules are withdrawn until the new controller re-adds them at
-   startup.
+   keeps leased rules only until the old controller's lease runs out. It
+   renews about every `blackhole.lease_seconds / 3`, so as little as two
+   thirds of a lease (about 40 of the default 60 seconds) can remain when it
+   stops. Start the new controller before then, or the leased rules are
+   withdrawn until it re-adds them at startup.
 
 The API is unavailable during replacement and unleased rules can outlive their
 deadlines until cleanup resumes. This is not a zero-downtime promise.
