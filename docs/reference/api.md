@@ -1398,7 +1398,7 @@ Content-Type: application/json
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `mitigation_ids` | array of UUIDs | yes | Up to 100 mitigation IDs to withdraw |
-| `operator_id` | string | yes | Operator performing the withdrawal |
+| `operator_id` | string | no | Legacy field, ignored; authenticated operator identity is authoritative |
 | `reason` | string | yes | Non-whitespace reason for withdrawal, at most 1,024 UTF-8 bytes; blank returns `400` |
 
 **Response (200 OK):**
@@ -1439,7 +1439,7 @@ Content-Type: application/json
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `mitigation_ids` | array of UUIDs | yes | Up to 100 mitigation IDs to acknowledge |
-| `operator_id` | string | yes | Operator acknowledging the mitigations |
+| `operator_id` | string | no | Legacy field, ignored; authenticated operator identity is authoritative |
 
 **Response (200 OK):**
 
@@ -2429,8 +2429,10 @@ GET /v1/health
 ```
 
 Lightweight liveness check. No authentication required. Does not query the
-database or selected speaker. In the examples below, `<prefixd-version>` is the
-running controller's package version; `auth_mode` reflects its configured mode.
+database or selected speaker, and ignores any session cookie, so it answers the
+same way while PostgreSQL is down. In the examples below, `<prefixd-version>` is
+the running controller's package version; `auth_mode` reflects its configured
+mode.
 
 **Response:**
 
@@ -2455,7 +2457,8 @@ GET /v1/ready
 ```
 
 Public readiness for load balancers and detector routing. No authentication is
-required, and it does not query the database or speaker. The response is
+required, and it does not query the database or speaker or read a session
+cookie. The response is
 `{"status": "<status>"}`; the first matching row applies:
 
 | Status | HTTP | Meaning |

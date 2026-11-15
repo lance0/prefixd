@@ -1316,6 +1316,76 @@ async fn test_health_endpoint() {
     );
 }
 
+/// A browser keeps its session cookie after PostgreSQL goes down. Public routes
+/// that never read the session must answer as they do without the cookie, while
+/// routes that do read it still fail closed with an empty 500.
+#[tokio::test]
+async fn sessionless_public_routes_ignore_cookie_when_session_store_is_down() {
+    use std::time::Duration;
+
+    let mut settings = test_settings();
+    settings.http.auth.mode = AuthMode::Credentials;
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        Arc::new(MockAnnouncer::new()),
+        std::path::PathBuf::from("."),
+    )
+    .expect("failed to create app state");
+    // Nothing listens on port 1, so every session load fails.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(500))
+        .connect_lazy("postgres://prefixd@127.0.0.1:1/prefixd")
+        .unwrap();
+    let auth_layer =
+        prefixd::auth::create_auth_layer(pool, repo, AuthMode::Credentials, false).await;
+    let app = prefixd::api::create_router(state, auth_layer);
+    let cookie = format!("id={}", tower_sessions::session::Id::default());
+
+    let send = |path: &str, cookie: Option<&str>| {
+        let mut request = Request::builder().uri(path);
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
+        }
+        app.clone().oneshot(request.body(Body::empty()).unwrap())
+    };
+    let read = |response: axum::response::Response| async move {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        (status, body)
+    };
+
+    for path in ["/v1/health", "/v1/ready", "/openapi.json", "/metrics"] {
+        let (bare_status, bare_body) = read(send(path, None).await.unwrap()).await;
+        let (status, body) = read(send(path, Some(&cookie)).await.unwrap()).await;
+        assert_eq!(status, bare_status, "{path} changed status with a cookie");
+        assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
+        if path != "/metrics" {
+            assert_eq!(body, bare_body, "{path} changed body with a cookie");
+        }
+    }
+    let (status, body) = read(send("/v1/health", Some(&cookie)).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["auth_mode"], "credentials");
+
+    // Control: the cookie does reach the unreachable store on session routes,
+    // and the failure exposes nothing about the session or the database.
+    for path in ["/v1/health/detail", "/v1/auth/me", "/v1/mitigations"] {
+        let (status, body) = read(send(path, Some(&cookie)).await.unwrap()).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
+        assert!(body.is_empty(), "{path} leaked {body:?}");
+        let (status, _) = read(send(path, None).await.unwrap()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path} without a cookie");
+    }
+}
+
 #[tokio::test]
 async fn test_health_detail_endpoint() {
     let app = setup_app().await;
