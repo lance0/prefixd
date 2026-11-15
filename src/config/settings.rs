@@ -1150,7 +1150,7 @@ observability:
         let yaml = |destinations: &str| {
             MINIMAL_SETTINGS_YAML.replace(
                 "  router_id: \"10.10.0.10\"\n",
-                "  router_id: \"10.10.0.10\"\n  vpn_scopes:\n    TRANSIT: {family: ipv4, rd: '44407:40', route_targets: ['44407:777']}\n",
+                "  router_id: \"10.10.0.10\"\n  vpn_scopes:\n    TRANSIT: {family: ipv4, rd: '64500:40', route_targets: ['64500:777']}\n",
             ) + &format!(
                 "scrubber:\n  profiles:\n  - {{id: a, revision: v1, scope: TRANSIT, ipv4_target: 192.0.2.99, \
                  destinations: {destinations}, router_peers: [192.0.2.2], policy_binding: p, \

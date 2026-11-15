@@ -1070,7 +1070,7 @@ mod tests {
         for family in [VpnFlowSpecFamily::Ipv4, VpnFlowSpecFamily::Ipv6] {
             let rule = FlowSpecRule::new(
                 FlowSpecNlri {
-                    scope: Some(VpnFlowSpecIdentity::new(family, "44407:40").unwrap()),
+                    scope: Some(VpnFlowSpecIdentity::new(family, "64500:40").unwrap()),
                     dst_prefix: if family == VpnFlowSpecFamily::Ipv4 {
                         "192.0.2.1/32"
                     } else {
@@ -1081,7 +1081,7 @@ mod tests {
                 },
                 FlowSpecAction::discard(),
             )
-            .with_route_targets(vec!["44407:777".into()]);
+            .with_route_targets(vec!["64500:777".into()]);
             for error in [
                 speaker.announce(&rule).await.unwrap_err(),
                 speaker.withdraw(&rule).await.unwrap_err(),

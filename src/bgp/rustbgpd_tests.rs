@@ -2742,10 +2742,10 @@ async fn historical_mark_scope_policy_never_blocks_exact_key_delete_rpc() {
             )
             .with_owner("historical-owner");
             let mut siblings = Vec::new();
-            for rd in ["44407:40", "44407:41"] {
+            for rd in ["64500:40", "64500:41"] {
                 let mut sibling = global.clone();
                 sibling.nlri.scope = Some(VpnFlowSpecIdentity::new(family, rd).unwrap());
-                sibling.route_targets = vec!["44407:777".into()];
+                sibling.route_targets = vec!["64500:777".into()];
                 if source_only {
                     sibling.nlri.dst_prefix.clear();
                 }

@@ -766,10 +766,10 @@ mod tests {
                 );
                 speaker.announce(&global).await.unwrap();
                 let mut siblings = Vec::new();
-                for rd in ["44407:40", "44407:41"] {
+                for rd in ["64500:40", "64500:41"] {
                     let mut sibling = global.clone();
                     sibling.nlri.scope = Some(VpnFlowSpecIdentity::new(family, rd).unwrap());
-                    sibling.route_targets = vec!["44407:777".into()];
+                    sibling.route_targets = vec!["64500:777".into()];
                     if source_only {
                         sibling.nlri.dst_prefix.clear();
                     }
@@ -913,11 +913,11 @@ mod tests {
         scoped.nlri.scope = Some(
             crate::domain::VpnFlowSpecIdentity::new(
                 crate::domain::VpnFlowSpecFamily::Ipv4,
-                "44407:40",
+                "64500:40",
             )
             .unwrap(),
         );
-        scoped.route_targets = vec!["44407:777".into()];
+        scoped.route_targets = vec!["64500:777".into()];
         scoped.actions = vec![FlowSpecAction::mark(46)];
         speaker.announce(&scoped).await.unwrap();
         scoped.actions[0].dscp = None;
@@ -942,17 +942,17 @@ mod tests {
         );
         speaker.announce(&global).await.unwrap();
         let mut scoped = Vec::new();
-        for rd in ["44407:40", "44407:41"] {
+        for rd in ["64500:40", "64500:41"] {
             let mut rule = global.clone();
             rule.nlri.scope = Some(VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, rd).unwrap());
-            rule.route_targets = vec!["44407:777".into()];
+            rule.route_targets = vec!["64500:777".into()];
             assert!(!speaker.matches_nlri(&global.nlri, &rule.nlri).unwrap());
             speaker.announce(&rule).await.unwrap();
             scoped.push(rule);
         }
         assert_eq!(speaker.list_active().await.unwrap().len(), 3);
         let mut replacement = scoped[0].clone();
-        replacement.route_targets = vec!["44407:778".into()];
+        replacement.route_targets = vec!["64500:778".into()];
         speaker.announce(&replacement).await.unwrap();
         assert_eq!(speaker.list_active().await.unwrap().len(), 3);
         speaker.withdraw(&replacement).await.unwrap();

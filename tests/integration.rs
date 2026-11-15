@@ -3656,7 +3656,7 @@ async fn test_batch_event_ingestion_rejects_one_scope_selector_item_only() {
                 "source": "fastnetmon",
                 "victim_ip": "203.0.113.200",
                 "vector": "udp_flood",
-                "rd": "44407:40"
+                "rd": "64500:40"
             },
             {
                 "timestamp": "2026-01-16T14:00:01Z",

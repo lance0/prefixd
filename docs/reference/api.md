@@ -2745,7 +2745,7 @@ Returns the running daemon configuration with sensitive fields redacted (allowli
     "pop": "iad1",
     "mode": "enforced",
     "http": { "listen": "0.0.0.0:8080", "auth": { "mode": "bearer" }, "rate_limit": { "events_per_second": 100, "burst": 500 } },
-    "bgp": { "mode": "sidecar", "local_asn": 65010, "default_scope": "global", "vpn_scopes": { "TRANSIT": { "family": "ipv4", "rd": "44407:40", "route_targets": ["44407:777"], "allow_source_only": false } }, "neighbors": [{ "name": "172.30.30.3", "address": "172.30.30.3", "peer_asn": 65001, "afi_safi": ["ipv4-flowspec"] }] },
+    "bgp": { "mode": "sidecar", "local_asn": 65010, "default_scope": "global", "vpn_scopes": { "TRANSIT": { "family": "ipv4", "rd": "64500:40", "route_targets": ["64500:777"], "allow_source_only": false } }, "neighbors": [{ "name": "172.30.30.3", "address": "172.30.30.3", "peer_asn": 65001, "afi_safi": ["ipv4-flowspec"] }] },
     "guardrails": { "require_ttl": true, "dst_prefix_minlen": 32, "dst_prefix_maxlen": 32, "max_ports": 5 },
     "quotas": { "max_active_per_customer": 20, "max_active_global": 500 },
     "timers": { "default_ttl_seconds": 120, "reconciliation_interval_seconds": 30 },

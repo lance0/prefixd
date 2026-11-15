@@ -43,10 +43,10 @@ fn settings() -> Settings {
     let mut settings = common::test_settings();
     settings.mode = OperationMode::Enforced;
     settings.bgp.vpn_scopes = serde_json::from_value(json!({
-        "V4": {"family":"ipv4","rd":"44407:40","route_targets":["44407:777"]},
-        "V6": {"family":"ipv6","rd":"44407:40","route_targets":["44407:777"]},
-        "NEXT4": {"family":"ipv4","rd":"44407:50","route_targets":["44407:778"]},
-        "NEXT6": {"family":"ipv6","rd":"44407:50","route_targets":["44407:778"]}
+        "V4": {"family":"ipv4","rd":"64500:40","route_targets":["64500:777"]},
+        "V6": {"family":"ipv6","rd":"64500:40","route_targets":["64500:777"]},
+        "NEXT4": {"family":"ipv4","rd":"64500:50","route_targets":["64500:778"]},
+        "NEXT6": {"family":"ipv6","rd":"64500:50","route_targets":["64500:778"]}
     }))
     .unwrap();
     settings.bgp.default_scope = serde_json::from_value(json!({"ipv4":"V4","ipv6":"V6"})).unwrap();
@@ -118,7 +118,7 @@ async fn automatic_family_defaults_snapshot_and_unban_original_scope_after_resta
                 .nlri
                 .scope
                 .as_ref()
-                .is_some_and(|scope| scope.rd() == "44407:40"))
+                .is_some_and(|scope| scope.rd() == "64500:40"))
             .count(),
         2
     );
@@ -164,7 +164,7 @@ async fn automatic_family_defaults_snapshot_and_unban_original_scope_after_resta
         rules
             .iter()
             .filter_map(|rule| rule.nlri.scope.as_ref())
-            .all(|scope| scope.rd() == "44407:50")
+            .all(|scope| scope.rd() == "64500:50")
     );
 }
 

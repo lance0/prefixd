@@ -2754,7 +2754,7 @@ mod tests {
             crate::domain::VpnScopeSnapshot::new(
                 name,
                 crate::domain::VpnFlowSpecIdentity::new(family, rd).unwrap(),
-                &["44407:777".into()],
+                &["64500:777".into()],
             )
             .unwrap(),
         );
@@ -2772,13 +2772,13 @@ mod tests {
             let repo = Arc::new(MockRepository::new());
             let speaker = action_speaker(0);
             let global = action_mitigation(prefix, FlowSpecAction::discard());
-            let a = scoped_mitigation(prefix, family, "A", "44407:40");
-            let b = scoped_mitigation(prefix, family, "B", "44407:41");
+            let a = scoped_mitigation(prefix, family, "A", "64500:40");
+            let b = scoped_mitigation(prefix, family, "B", "64500:41");
             for mitigation in [&global, &a, &b] {
                 repo.insert_mitigation(mitigation).await.unwrap();
                 let mut rule = crate::domain::mitigation_rule(mitigation).unwrap();
                 if mitigation.mitigation_id == a.mitigation_id {
-                    rule.route_targets = vec!["44407:888".into()];
+                    rule.route_targets = vec!["64500:888".into()];
                 }
                 speaker.inner.announce(&rule).await.unwrap();
             }
@@ -2818,9 +2818,9 @@ mod tests {
         let mut state = action_state(repo, speaker);
         let settings = &mut Arc::get_mut(&mut state).unwrap().settings;
         settings.guardrails.allow_src_prefix_match = true;
-        for (name, rd) in [("A", "44407:40"), ("B", "44407:41")] {
+        for (name, rd) in [("A", "64500:40"), ("B", "64500:41")] {
             settings.bgp.vpn_scopes.insert(name.into(), serde_json::from_value(serde_json::json!({
-                "family": family, "rd": rd, "route_targets": ["44407:777"], "allow_source_only": true,
+                "family": family, "rd": rd, "route_targets": ["64500:777"], "allow_source_only": true,
             })).unwrap());
         }
         state
@@ -3044,7 +3044,7 @@ mod tests {
         assert_eq!(status(&repo, &control).await, MitigationStatus::Active);
         let inventory = speaker.inner.list_active().await.unwrap();
         assert_eq!(inventory.len(), 1);
-        assert_eq!(inventory[0].nlri.scope.as_ref().unwrap().rd(), "44407:41");
+        assert_eq!(inventory[0].nlri.scope.as_ref().unwrap().rd(), "64500:41");
     }
 
     #[tokio::test]
