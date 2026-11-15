@@ -10894,6 +10894,88 @@ async fn test_create_mitigation() {
     assert_eq!(response.status(), StatusCode::CREATED);
 }
 
+/// A manual creation sends one `mitigation.created` alert, like a detector
+/// creation, in dry-run too; a refused creation sends none.
+#[tokio::test]
+async fn manual_creation_sends_one_created_alert() {
+    use axum::{Json, Router, extract::State, routing::post};
+    type Received = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+    let received: Received = Default::default();
+    let receiver = Router::new()
+        .route(
+            "/",
+            post(
+                |State(received): State<Received>, Json(alert): Json<serde_json::Value>| async move {
+                    received.lock().unwrap().push(alert);
+                },
+            ),
+        )
+        .with_state(received.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, receiver).await });
+
+    let mut settings = test_settings();
+    // Startup validation requires https; the service itself does not.
+    settings.alerting = serde_json::from_value(serde_json::json!({
+        "destinations": [{ "type": "generic", "url": url }]
+    }))
+    .unwrap();
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        Arc::new(MockRepository::new()),
+        Arc::new(MockAnnouncer::new()),
+        std::path::PathBuf::from("."),
+    )
+    .unwrap();
+    let app = create_test_router(state);
+    let create = |ttl_seconds: u32| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/mitigations")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "reason": "manual mitigation",
+                    "victim_ip": "203.0.113.10",
+                    "protocol": "udp",
+                    "dst_ports": [53],
+                    "action": "discard",
+                    "ttl_seconds": ttl_seconds
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let refused = app.clone().oneshot(create(0)).await.unwrap();
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let response = app.oneshot(create(120)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while received.lock().unwrap().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("manual creation must send mitigation.created");
+    // Give a duplicate or the refused request's alert time to arrive.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let received = received.lock().unwrap();
+    assert_eq!(received.len(), 1, "{received:?}");
+    assert_eq!(received[0]["event_type"], "mitigation.created");
+    assert_eq!(received[0]["mitigation_id"], body["mitigation_id"]);
+}
+
 #[tokio::test]
 async fn test_create_mitigation_safelisted() {
     let app = setup_app().await;

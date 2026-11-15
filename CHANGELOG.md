@@ -281,6 +281,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canceled mid-publish can no longer leave only some sections published, and
   a concurrent correlation edit can no longer be overwritten by the file it
   replaced.
+- A mitigation created through `POST /v1/mitigations`, which the dashboard and
+  `prefixdctl` use, now sends the `mitigation.created` alert, as detector
+  creations do, including in dry-run. A manual FlowSpec creation also now
+  broadcasts the `mitigation_created` WebSocket message. A refused creation
+  sends neither.
 - `prefixdctl mitigations withdraw` and `prefixdctl safelist add` no longer
   require `--operator`. The option defaulted from `USER`, which the container
   image leaves unset, so both commands failed there before sending a request.
