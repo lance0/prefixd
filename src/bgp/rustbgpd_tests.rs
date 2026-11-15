@@ -811,9 +811,153 @@ async fn secure_transport_configuration_rejects_partial_identity_without_leaking
 }
 
 #[cfg(unix)]
+fn socket_refusal_message(error: std::io::Error) -> String {
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    error.to_string()
+}
+
+#[cfg(unix)]
+fn socket_facts(
+    is_directory: bool,
+    is_socket: bool,
+    is_symlink: bool,
+    uid: u32,
+    mode: u32,
+) -> SocketPathFacts {
+    SocketPathFacts {
+        is_directory,
+        is_socket,
+        is_symlink,
+        uid,
+        mode,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn owner_socket_refusals_name_the_failed_check_and_expected_owner() {
+    use std::path::Path;
+    let directory = Path::new("/var/lib/rustbgpd");
+    let path = Path::new("/var/lib/rustbgpd/grpc.sock");
+    let uid = 999;
+
+    let message = socket_refusal_message(
+        check_socket_directory(directory, uid, socket_facts(true, false, false, 0, 0o700))
+            .unwrap_err(),
+    );
+    assert_eq!(
+        message,
+        "rustbgpd socket directory /var/lib/rustbgpd is owned by uid 0; \
+         prefixd requires mode 0700 and owner uid 999"
+    );
+
+    let message = socket_refusal_message(
+        check_socket_directory(directory, uid, socket_facts(true, false, false, uid, 0o755))
+            .unwrap_err(),
+    );
+    assert_eq!(
+        message,
+        "rustbgpd socket directory /var/lib/rustbgpd has mode 0755; \
+         prefixd requires 0700 and owner uid 999"
+    );
+
+    let message = socket_refusal_message(
+        check_socket_directory(
+            directory,
+            uid,
+            socket_facts(false, false, false, uid, 0o700),
+        )
+        .unwrap_err(),
+    );
+    assert_eq!(
+        message,
+        "rustbgpd socket directory /var/lib/rustbgpd is not a directory; \
+         prefixd requires mode 0700 and owner uid 999"
+    );
+
+    let message = socket_refusal_message(
+        check_socket_file(path, uid, socket_facts(false, false, false, uid, 0o600)).unwrap_err(),
+    );
+    assert_eq!(
+        message,
+        "rustbgpd socket /var/lib/rustbgpd/grpc.sock is not a Unix socket; \
+         prefixd requires a socket with mode 0600 owned by uid 999"
+    );
+
+    let message = socket_refusal_message(
+        check_socket_file(path, uid, socket_facts(false, true, false, 0, 0o600)).unwrap_err(),
+    );
+    assert_eq!(
+        message,
+        "rustbgpd socket /var/lib/rustbgpd/grpc.sock is owned by uid 0; \
+         prefixd requires a socket with mode 0600 owned by uid 999"
+    );
+
+    let message = socket_refusal_message(
+        check_socket_file(path, uid, socket_facts(false, true, false, uid, 0o660)).unwrap_err(),
+    );
+    assert_eq!(
+        message,
+        "rustbgpd socket /var/lib/rustbgpd/grpc.sock has mode 0660; \
+         prefixd requires 0600 and owner uid 999"
+    );
+
+    let message = socket_refusal_message(
+        check_socket_ancestor(
+            Path::new("/var/lib"),
+            uid,
+            socket_facts(true, false, false, 4242, 0o755),
+        )
+        .unwrap_err(),
+    );
+    assert_eq!(
+        message,
+        "rustbgpd socket ancestor /var/lib is owned by uid 4242; \
+         prefixd requires owner uid 0 or 999"
+    );
+
+    let message = socket_refusal_message(
+        check_socket_ancestor(
+            Path::new("/var/lib"),
+            uid,
+            socket_facts(true, false, false, 0, 0o777),
+        )
+        .unwrap_err(),
+    );
+    assert_eq!(
+        message,
+        "rustbgpd socket ancestor /var/lib has mode 0777; prefixd requires \
+         group and world write to be off or the sticky bit set (for example 0755 or 1777)"
+    );
+
+    let message = socket_refusal_message(check_socket_peer(path, uid, 0).unwrap_err());
+    assert_eq!(
+        message,
+        "rustbgpd socket /var/lib/rustbgpd/grpc.sock is served by peer uid 0; \
+         prefixd requires uid 999"
+    );
+
+    assert!(
+        check_socket_directory(directory, uid, socket_facts(true, false, false, uid, 0o700))
+            .is_ok()
+    );
+    assert!(check_socket_file(path, uid, socket_facts(false, true, false, uid, 0o600)).is_ok());
+    assert!(
+        check_socket_ancestor(
+            Path::new("/var/lib"),
+            uid,
+            socket_facts(true, false, false, 0, 0o1777)
+        )
+        .is_ok()
+    );
+    assert!(check_socket_peer(path, uid, uid).is_ok());
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn owner_socket_rejects_permissive_directory_socket_and_symlinks() {
     use std::os::unix::fs::PermissionsExt;
+    let uid = rustix::process::geteuid().as_raw();
     let directory = tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()
@@ -823,14 +967,32 @@ async fn owner_socket_rejects_permissive_directory_socket_and_symlinks() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(connect_owner_socket(&path).await.is_ok());
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
-    assert!(connect_owner_socket(&path).await.is_err());
+    assert_eq!(
+        socket_refusal_message(connect_owner_socket(&path).await.unwrap_err()),
+        format!(
+            "rustbgpd socket {} has mode 0660; prefixd requires 0600 and owner uid {uid}",
+            path.display()
+        )
+    );
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
-    assert!(connect_owner_socket(&path).await.is_err());
+    assert_eq!(
+        socket_refusal_message(connect_owner_socket(&path).await.unwrap_err()),
+        format!(
+            "rustbgpd socket directory {} has mode 0750; prefixd requires 0700 and owner uid {uid}",
+            directory.path().display()
+        )
+    );
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let link = directory.path().join("link.sock");
     std::os::unix::fs::symlink(&path, &link).unwrap();
-    assert!(connect_owner_socket(&link).await.is_err());
+    assert_eq!(
+        socket_refusal_message(connect_owner_socket(&link).await.unwrap_err()),
+        format!(
+            "rustbgpd socket {} is a symbolic link, not a socket; prefixd requires a socket with mode 0600 owned by uid {uid}",
+            link.display()
+        )
+    );
     drop(listener);
 }
 
@@ -849,8 +1011,14 @@ async fn owner_socket_rejects_ancestors_that_allow_untrusted_directory_replaceme
     let _listener = tokio::net::UnixListener::bind(&path).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     std::fs::set_permissions(ancestor.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
-    assert!(
-        connect_owner_socket(&path).await.is_err(),
+    let message = socket_refusal_message(connect_owner_socket(&path).await.unwrap_err());
+    assert_eq!(
+        message,
+        format!(
+            "rustbgpd socket ancestor {} has mode 0777; prefixd requires group and world write \
+             to be off or the sticky bit set (for example 0755 or 1777)",
+            ancestor.path().display()
+        ),
         "a private parent is replaceable through a non-sticky writable ancestor"
     );
     std::fs::set_permissions(ancestor.path(), std::fs::Permissions::from_mode(0o1777)).unwrap();
@@ -859,10 +1027,54 @@ async fn owner_socket_rejects_ancestors_that_allow_untrusted_directory_replaceme
     assert!(connect_owner_socket(&path).await.is_ok());
     let alias = ancestor.path().join("alias");
     std::os::unix::fs::symlink(&private, &alias).unwrap();
+    let alias_path = alias.join("grpc.sock");
+    let message = socket_refusal_message(connect_owner_socket(&alias_path).await.unwrap_err());
+    assert_eq!(
+        message,
+        format!(
+            "rustbgpd socket directory {} is a symbolic link, not a directory; prefixd requires \
+             mode 0700 and owner uid {}",
+            alias.display(),
+            rustix::process::geteuid().as_raw()
+        )
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn connect_error_reports_the_refused_socket_path_and_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let uid = rustix::process::geteuid().as_raw();
+    let directory = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let path = directory.path().join("grpc.sock");
+    let _listener = tokio::net::UnixListener::bind(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let config = RustBgpdConfig {
+        endpoint: format!("unix://{}", path.display()),
+        ..Default::default()
+    };
+    let error = RustBgpdAnnouncer::connect(&config)
+        .await
+        .err()
+        .unwrap()
+        .to_string();
     assert!(
-        connect_owner_socket(&alias.join("grpc.sock"))
-            .await
-            .is_err()
+        error.contains(&format!(
+            "rustbgpd Unix connection failed for {}",
+            path.display()
+        )),
+        "{error}"
+    );
+    assert!(
+        error.contains(&format!(
+            "socket directory {} has mode 0755; prefixd requires 0700 and owner uid {uid}",
+            directory.path().display()
+        )),
+        "{error}"
     );
 }
 

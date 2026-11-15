@@ -170,6 +170,7 @@ impl RustBgpdAnnouncer {
             );
             #[cfg(unix)]
             {
+                let display_path = path.clone();
                 let channel = Endpoint::from_static("http://[::]:50051")
                     .connect_timeout(Duration::from_secs(10))
                     .timeout(Duration::from_secs(30))
@@ -182,7 +183,13 @@ impl RustBgpdAnnouncer {
                         }
                     }))
                     .await
-                    .map_err(|_| anyhow::anyhow!("rustbgpd Unix connection failed"))?;
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "rustbgpd Unix connection failed for {}: {}",
+                            display_path.display(),
+                            error_chain(&error)
+                        )
+                    })?;
                 return Ok(Self::new(channel, token));
             }
             #[cfg(not(unix))]
@@ -533,41 +540,216 @@ async fn read_tls_file(path: &str) -> anyhow::Result<Vec<u8>> {
         .map_err(|_| anyhow::anyhow!("cannot read rustbgpd TLS credential file"))
 }
 
+/// Flattens an error and its sources. tonic's own transport error renders only
+/// "transport error"; the connector's refusal is further down the chain.
 #[cfg(unix)]
-async fn connect_owner_socket(path: &std::path::Path) -> std::io::Result<tokio::net::UnixStream> {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    let denied = || {
-        std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "rustbgpd socket must be owner-only",
-        )
-    };
-    let parent = path.parent().ok_or_else(denied)?;
-    let uid = rustix::process::geteuid().as_raw();
-    for ancestor in parent.ancestors() {
-        let directory = tokio::fs::symlink_metadata(ancestor).await?;
-        let mode = directory.mode();
-        // Sticky directories protect entries owned by root or this trusted UID.
-        if !directory.is_dir()
-            || ![0, uid].contains(&directory.uid())
-            || (mode & 0o022 != 0 && mode & 0o1000 == 0)
-            || (ancestor == parent && (directory.uid() != uid || mode & 0o077 != 0))
-        {
-            return Err(denied());
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
+
+/// Filesystem facts a socket-path check needs. Splitting them from `Metadata`
+/// keeps every refusal testable without privileged owners or modes.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+struct SocketPathFacts {
+    is_directory: bool,
+    is_socket: bool,
+    is_symlink: bool,
+    uid: u32,
+    mode: u32,
+}
+
+#[cfg(unix)]
+impl SocketPathFacts {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let file_type = metadata.file_type();
+        Self {
+            is_directory: file_type.is_dir(),
+            is_socket: file_type.is_socket(),
+            is_symlink: file_type.is_symlink(),
+            uid: metadata.uid(),
+            mode: metadata.mode() & 0o7777,
         }
     }
-    let socket = tokio::fs::symlink_metadata(path).await?;
-    if !socket.file_type().is_socket()
-        || socket.uid() != uid
-        || socket.mode() & 0o077 != 0
-        || tokio::fs::canonicalize(parent).await? != parent
-    {
-        return Err(denied());
+}
+
+#[cfg(unix)]
+fn refusal(message: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::PermissionDenied, message)
+}
+
+/// Describes a path that is not a real directory, for a refusal message.
+#[cfg(unix)]
+fn not_a_directory(facts: SocketPathFacts) -> &'static str {
+    if facts.is_symlink {
+        "is a symbolic link, not a directory"
+    } else {
+        "is not a directory"
     }
-    let stream = tokio::net::UnixStream::connect(path).await?;
-    if stream.peer_cred()?.uid() != uid {
-        return Err(denied());
+}
+
+/// The socket's own directory must be a real directory owned by this UID with
+/// no group or world permission at all.
+#[cfg(unix)]
+fn check_socket_directory(
+    path: &std::path::Path,
+    own_uid: u32,
+    facts: SocketPathFacts,
+) -> std::io::Result<()> {
+    let path = path.display();
+    if !facts.is_directory || facts.is_symlink {
+        let state = not_a_directory(facts);
+        return Err(refusal(format!(
+            "rustbgpd socket directory {path} {state}; prefixd requires mode 0700 and owner uid {own_uid}"
+        )));
     }
+    if facts.uid != own_uid {
+        return Err(refusal(format!(
+            "rustbgpd socket directory {path} is owned by uid {}; prefixd requires mode 0700 and owner uid {own_uid}",
+            facts.uid
+        )));
+    }
+    if facts.mode & 0o077 != 0 {
+        return Err(refusal(format!(
+            "rustbgpd socket directory {path} has mode {:04o}; prefixd requires 0700 and owner uid {own_uid}",
+            facts.mode
+        )));
+    }
+    Ok(())
+}
+
+/// Higher ancestors may be root- or controller-owned, but must not let an
+/// untrusted user replace the entries below them.
+#[cfg(unix)]
+fn check_socket_ancestor(
+    path: &std::path::Path,
+    own_uid: u32,
+    facts: SocketPathFacts,
+) -> std::io::Result<()> {
+    let path = path.display();
+    if !facts.is_directory || facts.is_symlink {
+        let state = not_a_directory(facts);
+        return Err(refusal(format!(
+            "rustbgpd socket ancestor {path} {state}; prefixd requires a directory owned by uid 0 or {own_uid}"
+        )));
+    }
+    if facts.uid != 0 && facts.uid != own_uid {
+        return Err(refusal(format!(
+            "rustbgpd socket ancestor {path} is owned by uid {}; prefixd requires owner uid 0 or {own_uid}",
+            facts.uid
+        )));
+    }
+    if facts.mode & 0o022 != 0 && facts.mode & 0o1000 == 0 {
+        return Err(refusal(format!(
+            "rustbgpd socket ancestor {path} has mode {:04o}; prefixd requires group and world write to be off or the sticky bit set (for example 0755 or 1777)",
+            facts.mode
+        )));
+    }
+    Ok(())
+}
+
+/// The socket itself must be a socket owned by this UID with no group or world
+/// permission.
+#[cfg(unix)]
+fn check_socket_file(
+    path: &std::path::Path,
+    own_uid: u32,
+    facts: SocketPathFacts,
+) -> std::io::Result<()> {
+    let path = path.display();
+    if !facts.is_socket || facts.is_symlink {
+        let state = if facts.is_symlink {
+            "is a symbolic link, not a socket".to_string()
+        } else {
+            "is not a Unix socket".to_string()
+        };
+        return Err(refusal(format!(
+            "rustbgpd socket {path} {state}; prefixd requires a socket with mode 0600 owned by uid {own_uid}"
+        )));
+    }
+    if facts.uid != own_uid {
+        return Err(refusal(format!(
+            "rustbgpd socket {path} is owned by uid {}; prefixd requires a socket with mode 0600 owned by uid {own_uid}",
+            facts.uid
+        )));
+    }
+    if facts.mode & 0o077 != 0 {
+        return Err(refusal(format!(
+            "rustbgpd socket {path} has mode {:04o}; prefixd requires 0600 and owner uid {own_uid}",
+            facts.mode
+        )));
+    }
+    Ok(())
+}
+
+/// The connected peer UID must match the UID that owns the socket path. Kept
+/// pure so the refusal is testable; `peer_cred` needs a live server.
+#[cfg(unix)]
+fn check_socket_peer(path: &std::path::Path, own_uid: u32, peer_uid: u32) -> std::io::Result<()> {
+    if peer_uid != own_uid {
+        return Err(refusal(format!(
+            "rustbgpd socket {} is served by peer uid {peer_uid}; prefixd requires uid {own_uid}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn connect_owner_socket(path: &std::path::Path) -> std::io::Result<tokio::net::UnixStream> {
+    let parent = path.parent().ok_or_else(|| {
+        refusal(format!(
+            "rustbgpd socket {} has no parent directory; prefixd requires an owner-only directory",
+            path.display()
+        ))
+    })?;
+    let uid = rustix::process::geteuid().as_raw();
+    for (depth, ancestor) in parent.ancestors().enumerate() {
+        let metadata = tokio::fs::symlink_metadata(ancestor)
+            .await
+            .map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "cannot inspect rustbgpd socket directory {}: {error}",
+                        ancestor.display()
+                    ),
+                )
+            })?;
+        let facts = SocketPathFacts::of(&metadata);
+        if depth == 0 {
+            check_socket_directory(ancestor, uid, facts)?;
+        } else {
+            check_socket_ancestor(ancestor, uid, facts)?;
+        }
+    }
+    let metadata = tokio::fs::symlink_metadata(path).await.map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("cannot inspect rustbgpd socket {}: {error}", path.display()),
+        )
+    })?;
+    check_socket_file(path, uid, SocketPathFacts::of(&metadata))?;
+    let stream = tokio::net::UnixStream::connect(path)
+        .await
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!(
+                    "cannot connect to rustbgpd socket {}: {error}",
+                    path.display()
+                ),
+            )
+        })?;
+    check_socket_peer(path, uid, stream.peer_cred()?.uid())?;
     Ok(stream)
 }
 

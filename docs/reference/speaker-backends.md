@@ -222,6 +222,21 @@ replacement; writable ancestors require the sticky bit. Root and the controller
 UID are trusted to maintain these paths. A listener declaring `token_file` also
 requires `bearer_token_env` in prefixd.
 
+A refused socket path fails startup with the failed check, the path, and the
+expected and actual mode or owner, for example:
+
+```text
+socket directory /var/lib/rustbgpd has mode 0755; prefixd requires 0700 and owner uid 999
+```
+
+| Check | Refusal names | Fix |
+| --- | --- | --- |
+| Socket directory is a real directory, mode 0700, owned by the controller UID | `rustbgpd socket directory ...` | `chown 999` and `chmod 0700` the directory; do not bind the socket through a symlinked directory |
+| Socket is a real Unix socket, mode 0600, owned by the controller UID | `rustbgpd socket ...` | `chown 999` and `chmod 0600` the socket; recreate it if it is a regular file or symlink |
+| Every ancestor is a directory owned by root or the controller UID | `rustbgpd socket ancestor ...` | `chown root` or `chown 999` the ancestor |
+| Every ancestor disables group and world write, or sets the sticky bit | `rustbgpd socket ancestor ...` | `chmod 0755` or `chmod 1777` on a shared temporary directory |
+| The connected peer UID matches the socket owner | `rustbgpd socket ... is served by peer uid ...` | run rustbgpd as the same UID as prefixd, or correct the socket owner |
+
 ### Remote mTLS
 
 For a remote speaker, verify its certificate against a trusted CA and hostname,
