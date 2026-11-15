@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::future::Future;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use super::apipb::{
 use super::apipb::{attribute, extended_community, flow_spec_rule, nlri};
 use super::{
     FlowSpecAnnouncer, FlowSpecMatchSupport, FlowSpecReader, FlowSpecWriter, PeerObserver,
-    PeerStatus, SessionState,
+    PeerStatus, RetryPolicy, SessionState,
 };
 #[cfg(test)]
 use crate::domain::ActionType;
@@ -27,10 +28,10 @@ const AFI_IP: i32 = 1;
 const AFI_IP6: i32 = 2;
 const SAFI_FLOWSPEC: i32 = 133;
 
-// Timeout and retry configuration
+// Timeout and retry configuration; the attempt budget itself lives in
+// `RetryPolicy`, so the reconciler and the interactive paths never disagree.
 const GRPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const GRPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 
 /// GoBGP gRPC client for FlowSpec announcements
@@ -77,17 +78,24 @@ impl GoBgpAnnouncer {
         Ok(())
     }
 
-    /// Execute a gRPC call with retry logic and exponential backoff
-    async fn with_retry<F, Fut, T>(&self, operation: &str, mut f: F) -> Result<T>
+    /// Spends `policy` on one logical call: `attempts` dispatches, each bounded
+    /// by `policy.attempt_deadline()`. A caller holding the lifecycle mutex uses
+    /// `RetryPolicy::Bounded`, so a mute speaker costs one interactive deadline.
+    async fn with_retry_policy<F, Fut, T>(
+        &self,
+        operation: &str,
+        policy: RetryPolicy,
+        mut f: F,
+    ) -> Result<T>
     where
         F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<T>>,
+        Fut: Future<Output = Result<T>>,
     {
         let mut last_error = None;
         let mut backoff = INITIAL_BACKOFF;
 
-        for attempt in 1..=MAX_RETRIES {
-            let result = tokio::time::timeout(GRPC_REQUEST_TIMEOUT, f())
+        for attempt in 1..=policy.attempts() {
+            let result = tokio::time::timeout(policy.attempt_deadline(), f())
                 .await
                 .unwrap_or_else(|_| {
                     Err(PrefixdError::BgpSessionError {
@@ -99,11 +107,11 @@ impl GoBgpAnnouncer {
                 Ok(result) => return Ok(result),
                 Err(e) => {
                     last_error = Some(e);
-                    if attempt < MAX_RETRIES {
+                    if attempt < policy.attempts() {
                         tracing::warn!(
                             operation = %operation,
                             attempt = attempt,
-                            max_retries = MAX_RETRIES,
+                            max_retries = policy.attempts(),
                             backoff_ms = backoff.as_millis(),
                             "gRPC call failed, retrying"
                         );
@@ -117,7 +125,8 @@ impl GoBgpAnnouncer {
         Err(last_error.unwrap_or_else(|| {
             PrefixdError::Internal(format!(
                 "{} failed after {} retries",
-                operation, MAX_RETRIES
+                operation,
+                policy.attempts()
             ))
         }))
     }
@@ -493,6 +502,26 @@ impl FlowSpecWriter for GoBgpAnnouncer {
     }
 
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.dispatch_announce(rule, RetryPolicy::Durable).await
+    }
+
+    async fn announce_bounded(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.dispatch_announce(rule, RetryPolicy::Bounded).await
+    }
+
+    async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.dispatch_withdraw(rule, RetryPolicy::Durable).await
+    }
+
+    async fn withdraw_bounded(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.dispatch_withdraw(rule, RetryPolicy::Bounded).await
+    }
+}
+
+impl GoBgpAnnouncer {
+    /// One logical FlowSpec add under `policy`: the reconciler retries durable
+    /// intent, a caller holding the lifecycle mutex spends one bounded attempt.
+    async fn dispatch_announce(&self, rule: &FlowSpecRule, policy: RetryPolicy) -> Result<()> {
         self.register_scope(rule.nlri.scope.as_ref())?;
         super::announcer::validate_add_scope(rule)?;
         // GoBGP has no injection lease; a leased rule never becomes an unleased one.
@@ -511,7 +540,7 @@ impl FlowSpecWriter for GoBgpAnnouncer {
             "announcing flowspec rule via GoBGP"
         );
 
-        self.with_retry("AddPath", || async {
+        self.with_retry_policy("AddPath", policy, || async {
             let mut client = self.get_client().await?;
             let request = AddPathRequest {
                 table_type: TableType::Global as i32,
@@ -534,7 +563,8 @@ impl FlowSpecWriter for GoBgpAnnouncer {
 
         Ok(())
     }
-    async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+
+    async fn dispatch_withdraw(&self, rule: &FlowSpecRule, policy: RetryPolicy) -> Result<()> {
         self.register_scope(rule.nlri.scope.as_ref())?;
         let path = self.build_flowspec_withdraw_path(&rule.nlri)?;
         let is_v6 = rule.nlri.ip_version() == IpVersion::V6;
@@ -549,7 +579,7 @@ impl FlowSpecWriter for GoBgpAnnouncer {
             "withdrawing flowspec rule via GoBGP"
         );
 
-        self.with_retry("DeletePath", || async {
+        self.with_retry_policy("DeletePath", policy, || async {
             let mut client = self.get_client().await?;
             let request = DeletePathRequest {
                 table_type: TableType::Global as i32,
@@ -657,7 +687,7 @@ impl GoBgpAnnouncer {
     async fn observe<T>(
         &self,
         operation: &str,
-        future: impl std::future::Future<Output = Result<T>>,
+        future: impl Future<Output = Result<T>>,
     ) -> Result<T> {
         tokio::time::timeout(GRPC_REQUEST_TIMEOUT, future)
             .await
@@ -1042,7 +1072,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let result = tokio::time::timeout(
             Duration::from_secs(95),
-            announcer.with_retry("AddPath", || {
+            announcer.with_retry_policy("AddPath", RetryPolicy::Durable, || {
                 attempts += 1;
                 std::future::pending::<Result<()>>()
             }),

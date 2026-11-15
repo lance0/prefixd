@@ -1,7 +1,65 @@
 use async_trait::async_trait;
+use std::time::Duration;
 
 use crate::domain::{FlowSpecNlri, FlowSpecRule, VpnFlowSpecIdentity, canonical_ports};
 use crate::error::Result;
+
+/// Longest wait for a speaker call whose caller holds the lifecycle mutex, or
+/// whose result a guarded operation cannot proceed without. A wedged speaker
+/// that accepts connections and never answers costs this deadline once, not a
+/// retry budget; repair belongs to reconciliation.
+pub const GUARDED_RPC_DEADLINE: Duration = Duration::from_secs(3);
+
+/// How a mutation may spend time against the speaker, chosen by who is waiting.
+///
+/// Every intent this controller sends is durable, so a transient failure is
+/// always repairable. The reconciler therefore keeps a retry budget, while a
+/// caller holding the lifecycle mutex makes one bounded attempt and lets
+/// reconciliation finish the job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryPolicy {
+    /// Three attempts of up to 30 s each, for callers that may wait.
+    Durable,
+    /// One attempt returning inside [`GUARDED_RPC_DEADLINE`].
+    Bounded,
+}
+
+impl RetryPolicy {
+    pub const fn attempts(self) -> u32 {
+        match self {
+            Self::Durable => 3,
+            Self::Bounded => 1,
+        }
+    }
+
+    pub const fn attempt_deadline(self) -> Duration {
+        match self {
+            Self::Durable => Duration::from_secs(30),
+            Self::Bounded => GUARDED_RPC_DEADLINE,
+        }
+    }
+
+    pub const fn is_bounded(self) -> bool {
+        matches!(self, Self::Bounded)
+    }
+}
+
+/// A timed-out add is ambiguous, so it is reported as unconfirmed rather than as
+/// a refusal; durable intent and reconciliation repair it.
+fn unconfirmed_add(operation: &str) -> crate::error::PrefixdError {
+    crate::error::PrefixdError::BgpAnnouncementFailed(format!(
+        "{operation} outcome unconfirmed after the {} s interactive deadline; reconciliation repairs from durable intent",
+        GUARDED_RPC_DEADLINE.as_secs()
+    ))
+}
+
+/// A timed-out delete stays a pending withdrawal exactly as its intent was recorded.
+fn unconfirmed_withdrawal(operation: &str) -> crate::error::PrefixdError {
+    crate::error::PrefixdError::BgpWithdrawalFailed(format!(
+        "{operation} outcome unconfirmed after the {} s interactive deadline; reconciliation repairs from durable intent",
+        GUARDED_RPC_DEADLINE.as_secs()
+    ))
+}
 
 #[derive(Debug, Clone)]
 pub struct PeerStatus {
@@ -100,6 +158,15 @@ pub trait FlowSpecWriter: Send + Sync {
 
     /// Unleased upsert; a rule with an owner is refused before any RPC.
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()>;
+    /// One upsert attempt for a caller holding the lifecycle mutex. Backends
+    /// override this to honor the budget inside their own retry loop; the default
+    /// cancels the retrying call at the deadline.
+    async fn announce_bounded(&self, rule: &FlowSpecRule) -> Result<()> {
+        match tokio::time::timeout(GUARDED_RPC_DEADLINE, self.announce(rule)).await {
+            Ok(result) => result,
+            Err(_) => Err(unconfirmed_add("AddFlowSpec")),
+        }
+    }
     /// Leased upsert under the rule's owner, returning the owner's live
     /// generation (ADR 027). It never falls back to `announce`. Backends
     /// without the injection lease refuse it.
@@ -112,8 +179,32 @@ pub trait FlowSpecWriter: Send + Sync {
             "the speaker has no leased FlowSpec injection".into(),
         ))
     }
+    /// One leased upsert attempt under the lifecycle mutex; see [`Self::announce_bounded`].
+    async fn announce_leased_bounded(
+        &self,
+        rule: &FlowSpecRule,
+        lease_seconds: u32,
+    ) -> Result<LeaseGeneration> {
+        match tokio::time::timeout(
+            GUARDED_RPC_DEADLINE,
+            self.announce_leased(rule, lease_seconds),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(unconfirmed_add("AddLeasedFlowSpec")),
+        }
+    }
     /// Idempotent delete; passes the rule's recorded owner where supported.
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()>;
+    /// One delete attempt for a caller holding the lifecycle mutex. A timeout
+    /// leaves the withdrawal pending with its recorded intent unchanged.
+    async fn withdraw_bounded(&self, rule: &FlowSpecRule) -> Result<()> {
+        match tokio::time::timeout(GUARDED_RPC_DEADLINE, self.withdraw(rule)).await {
+            Ok(result) => result,
+            Err(_) => Err(unconfirmed_withdrawal("DeleteFlowSpec")),
+        }
+    }
 }
 
 pub(crate) fn require_global_scope(
@@ -437,6 +528,40 @@ pub trait BlackholeSpeaker: Send + Sync {
     /// Idempotent delete passing the owner the route was added under (`""`
     /// unleased), never an override: an absent route is success.
     async fn withdraw_blackhole(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()>;
+    /// One unleased upsert attempt for a caller holding the lifecycle mutex; see
+    /// [`FlowSpecWriter::announce_bounded`].
+    async fn announce_blackhole_bounded(&self, route: &BlackholeRoute) -> Result<AddOutcome> {
+        match tokio::time::timeout(GUARDED_RPC_DEADLINE, self.announce_blackhole(route)).await {
+            Ok(result) => result,
+            Err(_) => Err(unconfirmed_add("AddPath")),
+        }
+    }
+    /// One leased upsert attempt under the lifecycle mutex.
+    async fn announce_leased_blackhole_bounded(
+        &self,
+        route: &BlackholeRoute,
+        lease_seconds: u32,
+    ) -> Result<(LeaseGeneration, AddOutcome)> {
+        match tokio::time::timeout(
+            GUARDED_RPC_DEADLINE,
+            self.announce_leased_blackhole(route, lease_seconds),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(unconfirmed_add("AddLeasedPath")),
+        }
+    }
+    /// One delete attempt under the lifecycle mutex: a timeout keeps the
+    /// withdrawal pending with its recorded intent.
+    async fn withdraw_blackhole_bounded(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()> {
+        match tokio::time::timeout(GUARDED_RPC_DEADLINE, self.withdraw_blackhole(prefix, owner))
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(unconfirmed_withdrawal("DeletePath")),
+        }
+    }
     /// Complete retained local intent for both families. A failed, partial or
     /// malformed read is an error, never an empty or truncated inventory.
     async fn list_blackholes(&self) -> Result<BlackholeInventory>;

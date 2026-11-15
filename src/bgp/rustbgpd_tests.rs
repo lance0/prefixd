@@ -1997,6 +1997,69 @@ async fn flowspec_speaker() -> (RustBgpdAnnouncer, Fake, tokio::task::JoinHandle
     (speaker, fake, server)
 }
 
+/// A daemon that accepts the request and never answers costs one bounded attempt
+/// while a caller holds the lifecycle mutex, and the full attempt deadline on the
+/// reconciliation path. Retryable failures keep the reconciler's retry budget.
+#[tokio::test]
+async fn mute_daemon_costs_one_bounded_attempt_instead_of_the_retry_budget() {
+    let (speaker, service, server) = flowspec_speaker().await;
+    let rule = rule("192.0.2.231/32", 0);
+    // Mode 11: the handler sleeps past every client deadline.
+    service.mode.store(11, SeqCst);
+    tokio::time::pause();
+    let before = service.attempts.load(SeqCst);
+    let started = tokio::time::Instant::now();
+    assert!(speaker.announce_bounded(&rule).await.is_err());
+    let bounded = started.elapsed();
+    // Tokio documents at most 1 ms of upward rounding on paused timers.
+    assert!(
+        bounded <= GUARDED_RPC_DEADLINE + Duration::from_millis(1),
+        "{bounded:?}"
+    );
+    assert_eq!(
+        service.attempts.load(SeqCst) - before,
+        1,
+        "one attempt while the mutex is held"
+    );
+    // Negative control: the same mute daemon costs the repair path a full
+    // attempt deadline, ten times what the mutex-held caller may spend.
+    let before = service.attempts.load(SeqCst);
+    let started = tokio::time::Instant::now();
+    let error = speaker.announce(&rule).await.unwrap_err();
+    let repair = started.elapsed();
+    assert!(
+        repair >= Duration::from_secs(30),
+        "the repair path spends its whole attempt deadline: {repair:?}: {error}"
+    );
+    assert_eq!(service.attempts.load(SeqCst) - before, 1);
+
+    // A retryable failure keeps the reconciler's retry budget: three attempts
+    // there, one under the mutex.
+    service.mode.store(1, SeqCst);
+    let before = service.attempts.load(SeqCst);
+    assert!(speaker.announce(&rule).await.is_err());
+    assert_eq!(
+        service.attempts.load(SeqCst) - before,
+        3,
+        "the reconciliation path retries"
+    );
+    let before = service.attempts.load(SeqCst);
+    assert!(speaker.announce_bounded(&rule).await.is_err());
+    assert_eq!(service.attempts.load(SeqCst) - before, 1);
+
+    // The delete path spends the same budget: a retryable failure costs three
+    // attempts on the reconciliation path and one under the mutex.
+    *service.refusal.lock().unwrap() = Some(Status::unavailable("mute"));
+    let before = service.deletes.load(SeqCst);
+    assert!(speaker.withdraw(&rule).await.is_err());
+    assert_eq!(service.deletes.load(SeqCst) - before, 3);
+    let before = service.deletes.load(SeqCst);
+    assert!(speaker.withdraw_bounded(&rule).await.is_err());
+    assert_eq!(service.deletes.load(SeqCst) - before, 1);
+    tokio::time::resume();
+    server.abort();
+}
+
 #[tokio::test]
 async fn source_prefix_rpc_identity_delete_and_whole_inventory_failure() {
     let (speaker, fake, server) = flowspec_speaker().await;

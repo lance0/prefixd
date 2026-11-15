@@ -62,6 +62,78 @@ The lease does not cover:
   received rule with the same match keeps filtering, and routers acting as
   Graceful Restart helpers retain it for their stale timers.
 
+### Amendment: the lease is bounded by leased TTLs
+
+Amended 2026-11-15: renewal is independent of PostgreSQL and of the controller
+fence so that a database outage shorter than the leased routes' TTLs does not
+drop them. That independence cannot be unbounded, or the TTL guarantee in this
+ADR would be suspended for the length of the outage.
+
+The lease keeper therefore keeps `renew_until`: the latest `expires_at` among
+the leased routes this owner holds. Leased FlowSpec rules and leased
+blackholes (`blackhole.leased`) count alike, because one lease covers both.
+Two things refresh it:
+
+- **Reads.** A successful read of active intent at the start of every
+  reconciliation pass, before expiry runs, replaces it. A failed read leaves
+  the previous bound standing (fail-closed), and an empty leased set bounds
+  renewal to the read itself.
+- **Writes.** Every committed leased admission and TTL extension (a detector
+  re-send, `POST /v1/mitigations/{id}/extend` and a blackhole extension)
+  raises it to that row's `expires_at` at once. A later read never lowers it
+  below a leased write committed since the previous read, so a row added after
+  a read cannot lapse inside its TTL while the next read is late.
+
+Renewal stops at the cutoff, `renew_until + margin`, where the margin is
+`max(blackhole.lease_seconds, timers.reconciliation_interval_seconds +
+blackhole.lease_seconds / 3)`. A renewal is sent only if its own deadline ends
+by the cutoff, so no accepted renewal lands after it, and rustbgpd removes the
+owner's leased routes within one lease of the cutoff. A row past its TTL but
+not yet withdrawn keeps its past `expires_at`, so rereading it never grants a
+fresh margin. A read or write that refreshes the bound after a stop
+renews at once, including for a rule still inside its TTL.
+
+The lease is owner-wide, so the bound is too. During an outage, every leased
+route of this owner is renewed until the latest leased `expires_at` among them,
+plus the margin, and lapses within one more lease. A route is therefore bounded
+by the latest leased TTL among the owner's routes, not by its own: a 60-second
+rule next to an 1800-second rule can stay installed for about 1800 seconds
+plus the margin and one lease of outage. Once the database returns, expiry
+withdraws the shorter rule as usual.
+
+Details:
+
+- **Margin.** One lease would be enough for an outage, but with
+  `lease_seconds` shorter than the reconciliation interval a healthy
+  controller could stop renewing between passes. The margin covers one
+  interval plus a third of a lease, so a healthy controller always reads, and
+  withdraws an expired row, before renewal would stop. It lengthens the outage
+  tail by at most one reconciliation interval.
+- **Startup.** Before any read or write, renewal is bounded to one margin
+  after startup. A freshly started controller that cannot read the database
+  lets the adopted lease lapse; it never renews it indefinitely without
+  evidence of the TTLs.
+- **Standby.** A standby mutates nothing, but it reads active intent on the
+  reconciliation interval, so its unfenced renewal follows the same bound as
+  the active controller and a live lease stays live through a failover. A
+  standby that cannot read stops at its own bound and reports the lease as
+  `standby`, not `expired`, because the active controller may still keep it
+  live.
+- **Not a failure.** A stop at the bound is reported as a lease TTL bound
+  (`renewal_stopped: "ttl_bound"` in health), not as a failed renewal. In a
+  real database outage the active controller loses its fence within a few
+  seconds, so it is standby when it reaches the bound and reports the lease as
+  `standby` with `renewal_stopped: "ttl_bound"`, even after rustbgpd has
+  removed the routes, because another controller could still be renewing the
+  owner. The lease state reports `expired` at the bound only when reads fail
+  while this controller still holds the fence, once one more lease has passed
+  after the stop. Operators detect an outage stop from `renewal_stopped`
+  together with `prefixd_controller_fence_active`.
+- **No resurrection.** The bound only stops and resumes renewal. It never
+  adds, re-adds or resurrects a route: adds stay fenced and database-gated,
+  expiry withdraws an expired row before any re-add, and dry-run still never
+  renews.
+
 ## Consequences
 
 **Positive:**

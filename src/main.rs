@@ -181,12 +181,7 @@ async fn main() -> anyhow::Result<()> {
     if !playbook_errors.is_empty() {
         anyhow::bail!("playbooks.yaml: {}", playbook_errors.join("; "));
     }
-    for warning in config
-        .playbooks
-        .prefix_scope_warnings(&config.settings.guardrails)
-    {
-        tracing::warn!(%warning, "prefix playbook is unreachable");
-    }
+    config.playbooks.log_warnings(&config.settings.guardrails);
     // The lease probe is the capability check and recovers a live generation
     // after a restart (ADR 027); it is asked only when the lease is configured.
     let blackhole = &config.settings.blackhole;
@@ -197,7 +192,9 @@ async fn main() -> anyhow::Result<()> {
         .as_ref()
         .is_some_and(|rustbgpd| rustbgpd.leased_flowspec);
     let lease = if (blackhole.enabled && blackhole.leased) || leased_flowspec {
-        let keeper = prefixd::domain::LeaseKeeper::new(owner.clone(), blackhole.lease_seconds);
+        let keeper = prefixd::domain::LeaseKeeper::new(owner.clone(), blackhole.lease_seconds)
+            .with_reconcile_interval(config.settings.timers.reconciliation_interval_seconds)
+            .with_fence(controller_fence.clone());
         // RenewLease is a speaker mutation, so dry-run never renews: leased
         // routes left by an enforced run lapse within one lease.
         let keeper = Arc::new(

@@ -2391,23 +2391,41 @@ async fn test_update_playbooks_success_writes_file() {
         }]
     }"#;
 
-    let response = app
-        .oneshot(
+    // The update logs the warning startup and reload log for a second step.
+    let log_path = temp_dir.path().join("trace.log");
+    let logs = Arc::new(std::fs::File::create(&log_path).unwrap());
+    // A second dispatcher keeps callsite interest per-dispatch, as in TraceOutput.
+    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let capture = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_writer(logs)
+            .finish(),
+    );
+    let response = tracing::instrument::WithSubscriber::with_subscriber(
+        app.oneshot(
             Request::builder()
                 .method("PUT")
                 .uri("/v1/config/playbooks")
                 .header("content-type", "application/json")
                 .body(Body::from(body))
                 .unwrap(),
-        )
-        .await
-        .unwrap();
+        ),
+        capture,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
 
     let written = std::fs::read_to_string(config_dir.join("playbooks.yaml")).unwrap();
     assert!(written.contains("syn_discard_test"));
     assert!(written.contains("syn_flood"));
+    let logs = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        logs.contains("playbook steps are not executed") && logs.contains("syn_discard_test"),
+        "{logs}"
+    );
 }
 
 /// An unknown key at any level of the body is refused and named, and the file

@@ -171,6 +171,12 @@ Existing YAML may omit the client identity fields. Rust callers constructing
 `RustBgpdConfig` literals must add the optional fields, including
 `leased_flowspec`, or use `..Default::default()` for omitted options.
 
+Speaker mutation budgets are fixed and have no configuration key. Requests that
+hold the lifecycle mutex, such as admission, manual creation, withdrawal, unban
+and safelist additions, make one attempt bounded by three seconds; the
+scheduler keeps three 30-second attempts. See the
+[interactive speaker deadline](speaker-backends.md#interactive-speaker-deadline).
+
 #### Leased FlowSpec
 
 ```yaml
@@ -247,6 +253,14 @@ key back to `true` to recover. To turn the lease off:
 - **Lost lease.** A refused renewal, a changed lease generation or a speaker
   restart re-adds every active leased FlowSpec rule and leased blackhole at
   once. Lease expiry is never recorded as a withdrawal.
+- **Database outages.** Renewal is unfenced and needs no database, but it is
+  bounded by leased TTLs: it continues until one margin after the latest
+  `expires_at` among the rows this owner holds, then stops and rustbgpd
+  removes the rules within one more lease. Leased FlowSpec and leased
+  blackholes share the owner-wide bound, so a short rule can outlive its own
+  TTL while a longer leased rule keeps the lease live. See
+  [leased blackholes](#leased-blackholes) and
+  [ADR 003](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls).
 - **Unknown rules.** Another owner's rule at a desired match is reported in
   `prefixd_unknown_local_routes{kind="flowspec"}` as a repair error and never
   touched.
@@ -399,8 +413,9 @@ safelist checks as a manual CIDR. A prefix event selects only a
 `udp_flood` prefix police step may match protocol only. Detector events cannot
 select a source prefix, VPN scope or action target; `bgp.default_scope` still
 applies. A customer prefix sub-allocated inside another customer's configured
-aggregate has conflicting ownership and cannot be prefix-mitigated. Startup and
-playbook reload log a warning when a `scope: prefix` playbook is loaded while
+aggregate has conflicting ownership and cannot be prefix-mitigated. Startup,
+playbook reload and `PUT /v1/config/playbooks` log a warning when a
+`scope: prefix` playbook is loaded while
 `allow_detector_prefix` is false or the destination bounds admit hosts only.
 See [detector prefix events](api.md#detector-prefix-events) and
 [ADR 033](../adr/033-detector-prefix-mitigations.md).
@@ -1043,10 +1058,33 @@ routes the network holds can still apply.
   [upgrade guide](../how-to/upgrading.md#mitigation-origin-mode) already asks.
 - **Database outages.** Renewal needs no database and no controller fence, so
   a PostgreSQL outage that puts the controller in standby does not drop leased
-  blackholes. New adds and withdrawals wait for the fence.
+  blackholes while the leased routes are inside their TTL. Renewal is bounded
+  rather than unbounded. The bound is the latest `expires_at` among the rows
+  this owner holds: the read at the start of each reconciliation pass sets it,
+  and every leased admission or TTL extension raises it at once. Renewal stops
+  one margin after it, `max(lease_seconds,
+  timers.reconciliation_interval_seconds + lease_seconds / 3)`, and rustbgpd
+  removes the routes within one more lease. The bound is owner-wide: leased
+  FlowSpec rules and leased blackholes share it, so every leased route lasts
+  as long as the latest leased TTL during an outage. Unleased routes, pending
+  rows and dry-run rows do not extend it. A read that succeeds again refreshes
+  it and renewal resumes at once; expiry still withdraws a row whose TTL
+  passed, and nothing is re-added for it. Before the first read or leased
+  write, renewal is bounded to one margin after startup, so a controller that
+  starts while the database is unreachable lets the adopted lease lapse. New
+  adds and withdrawals wait for the fence. Health reports
+  `renewal_stopped: "ttl_bound"` and `renew_until`; a stop at the bound is not
+  a renewal failure. See
+  [leased TTLs](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls).
+- **Standby.** A standby controller reads active intent on the reconciliation
+  interval, without mutating anything, so its unfenced renewal follows the
+  same bound and a live lease stays live through a failover. A standby that
+  cannot read stops renewing at its own bound and reports the lease state as
+  `standby`, not `expired`.
 - **Visibility.** Health detail reports `speaker.lease` (owner, state,
-  generation and the last renewal), and
+  generation, the last renewal, `renew_until` and `renewal_stopped`), and
   [metrics](api.md#metrics) count renewals and report the lease state.
+
 ### Amplification
 
 UDP reflection handling for the `udp_amplification` vector
@@ -1221,10 +1259,10 @@ playbooks:
       - action: police
         rate_bps: 10000000
         ttl_seconds: 120
-      - action: discard
-        ttl_seconds: 300
-        require_confidence_at_least: 0.8
 ```
+
+Use one step per playbook. The controller executes only the first step, so any
+later step is accepted and validated but never run.
 
 ### Match Criteria
 
@@ -1257,7 +1295,8 @@ the key.
 |--------|------|-------------|
 | `rate_bps` | integer | Positive bit rate exactly representable as an `f32` bytes/second traffic rate (police only) |
 | `ttl_seconds` | integer | Mitigation duration |
-| `require_confidence_at_least` | float | Min confidence for this step |
+| `require_confidence_at_least` | float | Min confidence for this step; accepted on steps after the first, which do not run |
+| `require_persistence_seconds` | integer | Min persistence for this step; accepted on steps after the first, which do not run |
 
 Policing rates are preserved exactly by both speaker backends. Fractional
 bytes/second are supported: 1, 7, 8 and 9 bits/second are valid. Missing or zero
@@ -1315,17 +1354,26 @@ playbooks:
 
 ### Step selection
 
-The controller uses the first step of the matching playbook. Later steps and
-`require_confidence_at_least` / `require_persistence_seconds` remain accepted in
-the playbook schema, but automatic progression to later steps is unavailable.
-The second step below is retained configuration, not an automatic fallback:
+The controller uses the first step of the matching playbook and never runs
+later ones. Later steps and `require_confidence_at_least` /
+`require_persistence_seconds` remain accepted in the playbook schema, so an
+existing file with more than one step still loads and validates unchanged, but
+automatic progression to later steps is unavailable. Startup, playbook reload
+and `PUT /v1/config/playbooks` log one warning per playbook with more than one
+step, naming it, stating that later steps are not executed and saying to remove
+them from `playbooks.yaml`. The dashboard playbook editor marks steps after the
+first as not executed.
+
+The shipped `configs/playbooks.yaml` gives every playbook exactly one step, so
+what it says is what runs. The two-step shape below is accepted configuration,
+not an automatic fallback; write one step instead until progression ships:
 
 ```yaml
 steps:
-  - action: police        # Step 1: Rate limit
+  - action: police        # Step 1: the only step that runs
     rate_bps: 10000000
     ttl_seconds: 120
-  - action: discard       # Later step: not selected automatically
+  - action: discard       # Later step: accepted, warned about, never run
     ttl_seconds: 300
     require_confidence_at_least: 0.7
 ```
@@ -1389,7 +1437,7 @@ an unknown vector use the playbook that matches `vector: unknown`.
 
 ```yaml
 playbooks:
-  # UDP flood: police; the later discard step is not selected automatically
+  # UDP flood: police
   - name: udp_flood
     match:
       vector: udp_flood
@@ -1397,9 +1445,6 @@ playbooks:
       - action: police
         rate_bps: 10000000
         ttl_seconds: 120
-      - action: discard
-        ttl_seconds: 300
-        require_confidence_at_least: 0.8
 
   # SYN flood: immediate discard
   - name: syn_flood

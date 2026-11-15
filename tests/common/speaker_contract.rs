@@ -671,6 +671,7 @@ pub async fn run_action_reconciliation_contract(
             false,
             &request,
             Some(&binding),
+            prefixd::bgp::RetryPolicy::Durable,
         )
         .await?;
         remaining.retain(|rule| rule.nlri_hash() != mitigation_rule(owner).unwrap().nlri_hash());
