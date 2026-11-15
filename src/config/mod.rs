@@ -52,28 +52,44 @@ pub(crate) fn parse_secret_yaml<T: serde::de::DeserializeOwned>(
     Ok((value, unknown_keys))
 }
 
-/// serde_ignored writes a sequence index as `destinations.0` and marks every
-/// `Option` it descends through with a `?` segment. Report
-/// `destinations[0].chanel`, matching the key paths parse errors use. A
-/// redacted segment ends the path, since what follows belongs to its key.
+/// Report `destinations[0].chanel`, matching the key paths parse errors use.
+/// The path is walked as serde_ignored built it, so a dot inside a key is not
+/// mistaken for a separator. Each map key is redacted, and a redacted key ends
+/// the path, since what follows belongs to it.
 fn unknown_key_path(path: &serde_ignored::Path<'_>) -> String {
-    let raw = path.to_string();
+    use serde_ignored::Path;
+    let mut segments = Vec::new();
+    let mut current = path;
+    loop {
+        current = match current {
+            Path::Root => break,
+            Path::Seq { parent, index } => {
+                segments.push(Err(*index));
+                parent
+            }
+            Path::Map { parent, key } => {
+                segments.push(Ok(key.as_str()));
+                parent
+            }
+            Path::Some { parent }
+            | Path::NewtypeStruct { parent }
+            | Path::NewtypeVariant { parent } => parent,
+        };
+    }
     let mut key = String::new();
-    for segment in raw.split('.') {
-        if segment.is_empty() || segment == "?" {
-            continue;
-        }
-        if let Ok(index) = segment.parse::<usize>() {
-            key.push_str(&format!("[{index}]"));
-            continue;
-        }
-        if !key.is_empty() {
-            key.push('.');
-        }
-        let safe = redacted_key(segment);
-        key.push_str(safe);
-        if safe.len() != segment.len() {
-            break;
+    for segment in segments.into_iter().rev() {
+        match segment {
+            Err(index) => key.push_str(&format!("[{index}]")),
+            Ok(segment) => {
+                if !key.is_empty() {
+                    key.push('.');
+                }
+                let safe = redacted_key(segment);
+                key.push_str(safe);
+                if safe.len() != segment.len() {
+                    break;
+                }
+            }
         }
     }
     if key.is_empty() {
@@ -606,6 +622,8 @@ mod tests {
                 "correlation: {windows: 30}",
                 "correlation.windows",
             ),
+            // A numeric map key is a key, not a sequence index.
+            ("numeric key", "timers", "timers: {0: 1}", "timers.0"),
             // Non-strict sections nested in a strict one warn too.
             (
                 "rustbgpd",
@@ -735,6 +753,15 @@ mod tests {
             assert_eq!(keys, vec![expected]);
             assert!(!keys.join(" ").contains(CANARY), "{keys:?}");
         }
+        // A dot inside one key is not a path separator.
+        let keys = settings_unknown_keys(&settings_document(&[(
+            "http",
+            &format!(
+                "http: {{listen: '127.0.0.1:8080', auth: {{mode: none, token_env.{CANARY}: 1}}}}"
+            ),
+        )]));
+        assert_eq!(keys, vec!["http.auth.token_env"]);
+        assert!(!keys.join(" ").contains(CANARY), "{keys:?}");
         let (_, keys) = crate::alerting::AlertingConfig::from_yaml(&format!(
             "destinations:\n  - {{type: generic, url: https://example.invalid/hook, secret_x:{CANARY}}}\n"
         ))
