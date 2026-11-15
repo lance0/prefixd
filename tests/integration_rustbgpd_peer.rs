@@ -524,7 +524,7 @@ async fn released_blackhole_export_dispositions_join_established_and_configured_
 /// HTTP admission through prefixd, released speaker, and negotiated peer RIB.
 /// These are local intent and wire receipts; there is no router enforcement oracle.
 #[tokio::test]
-#[ignore = "requires isolated pinned Docker speakers; run scripts/test-rustbgpd.sh with version 0.82.0"]
+#[ignore = "requires isolated pinned Docker speakers; run scripts/test-rustbgpd.sh"]
 async fn released_vpn_http_rules_reach_only_negotiated_peers_with_exact_scope() {
     use axum::{
         body::Body,
@@ -542,12 +542,6 @@ async fn released_vpn_http_rules_reach_only_negotiated_peers_with_exact_scope() 
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    // The minimum-release matrix keeps its existing global cases; this test
-    // explicitly qualifies the released contract containing VPN families.
-    if std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").as_deref() != Ok("0.82.0") {
-        eprintln!("VPN wire receipt not applicable to this release; requires 0.82.0");
-        return;
-    }
     let pair = peer_receipt::Pair::start_vpn().await;
     let speaker = Arc::new(pair.rust.connect().await);
     let global_peer = pair.global_only.as_ref().unwrap();
@@ -784,7 +778,7 @@ async fn released_vpn_http_rules_reach_only_negotiated_peers_with_exact_scope() 
 /// oracle reads serialized attributes. This qualifies neither VRF installation
 /// nor the action's effect on traffic.
 #[tokio::test]
-#[ignore = "requires isolated pinned speakers and PostgreSQL; use rustbgpd 0.82.0"]
+#[ignore = "requires isolated pinned speakers and PostgreSQL; run scripts/test-rustbgpd.sh"]
 async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_bytes() {
     use argon2::PasswordHasher;
     use axum::{
@@ -814,45 +808,6 @@ async fn released_vpn_five_actions_use_authenticated_admission_and_exact_peer_by
     };
     use tower::ServiceExt;
 
-    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
-    if version == "0.81.0" {
-        let fixture = rustbgpd::Speaker::start().await;
-        let speaker = fixture.connect().await;
-        let global = FlowSpecRule::new(
-            FlowSpecNlri {
-                dst_prefix: "203.0.113.20/32".into(),
-                ..Default::default()
-            },
-            FlowSpecAction::discard(),
-        );
-        speaker.announce(&global).await.unwrap();
-        let before = fixture.received_flow_spec(3, "0.0.0.0").await;
-        assert_eq!(before.received_routes.len(), 1);
-        for family in [VpnFlowSpecFamily::Ipv4, VpnFlowSpecFamily::Ipv6] {
-            let scope = VpnFlowSpecIdentity::new(family, "44407:40").unwrap();
-            assert!(matches!(speaker.validate_scope(Some(&scope)).await,
-                Err(prefixd::error::PrefixdError::UnsupportedFlowSpecScope { family: refused, .. })
-                if refused == family.afi_safi()));
-            assert_eq!(fixture.received_flow_spec(3, "0.0.0.0").await, before);
-        }
-        speaker.withdraw(&global).await.unwrap();
-        assert!(
-            fixture
-                .received_flow_spec(3, "0.0.0.0")
-                .await
-                .received_routes
-                .is_empty()
-        );
-        fixture.container.rm().await.unwrap();
-        eprintln!(
-            "rustbgpd 0.81.0 negative control PASS: both VPN families refused with typed capability errors; seeded global rule unchanged"
-        );
-        return;
-    }
-    assert_eq!(
-        version, "0.82.0",
-        "all-five positive receipt requires released 0.82.0"
-    );
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let database = common::TestContext::new().await;
     let pair = peer_receipt::Pair::start_vpn().await;
@@ -1588,7 +1543,7 @@ async fn released_return_leg_reaches_only_its_peers_with_exact_bytes() {
     use prefixd::scrubber::{ReturnLeg, ReturnTcpFlags, derive_return};
     use std::time::Duration;
     const COMMUNITY: u32 = (64496 << 16) | 100;
-    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.81.0".into());
+    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.83.0".into());
     let pair = peer_receipt::Pair::start_return_leg("64496:100").await;
     let speaker = pair.rust.connect().await;
     let router_a = &pair.go;

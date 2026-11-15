@@ -513,7 +513,9 @@ message SighupReloadEffect {
 message SighupReloadRecord {
   uint64 started_unix_millis = 1;
   uint64 finished_unix_millis = 2;
-  // complete, rejected_no_effect, known_partial, task_failed, ignored_in_flight.
+  // complete, rejected_no_effect, known_partial, task_failed. A SIGHUP
+  // received during a reload publishes no record: one follow-up reload
+  // serves it and publishes its own.
   string outcome = 3;
   // generation or sequential; empty if the reload stopped before classification.
   string route = 4;
@@ -526,6 +528,11 @@ message SighupReloadRecord {
   uint64 unapplied_count = 11;
   repeated SighupReloadEffect unapplied = 12;
   uint64 unapplied_omitted = 13;
+  // Daemon host CLOCK_MONOTONIC, in microseconds, when this reload started;
+  // it read the config file after this instant. A local client that reads
+  // the same clock before signalling knows its reload has settled once a
+  // record starts at or after that reading. Meaningless on another host.
+  uint64 started_monotonic_micros = 14;
 }
 
 // RIB-side outbound convergence of the export view the latest SIGHUP
@@ -699,6 +706,32 @@ message PathsLimitState {
   // Normalized effective send cap. Presence means Add-Path send is active:
   // 0 = unlimited, non-zero = finite. Absence means inactive.
   optional uint32 effective_send_limit = 6;
+}
+
+// Administrative state of a neighbor: whether the daemon is holding it down,
+// and which owner did. A held-down neighbor settles to SessionState IDLE and
+// is not trying to connect; last_error is then the failure from before the
+// hold, except for SESSION_CRASH_LATCHED and MAX_PREFIX_LATCHED, where it is
+// the latch message. When several owners hold one neighbor, the value names
+// the first of: SESSION_CRASH_LATCHED, MAX_PREFIX_LATCHED, CONFIG_ADMIN_DOWN,
+// OPERATOR_DISABLED.
+enum NeighborAdminState {
+  // A daemon that does not report administrative state, or a retention-only
+  // row with no neighbor behind it.
+  NEIGHBOR_ADMIN_STATE_UNSPECIFIED = 0;
+  // Not held down: the session connects or accepts as configured.
+  NEIGHBOR_ADMIN_STATE_ENABLED = 1;
+  // Disabled at runtime by an operator (DisableNeighbor or rbgp neighbor
+  // disable). EnableNeighbor clears it.
+  NEIGHBOR_ADMIN_STATE_OPERATOR_DISABLED = 2;
+  // Held down by the neighbor's configured admin_down.
+  NEIGHBOR_ADMIN_STATE_CONFIG_ADMIN_DOWN = 3;
+  // Latched down after a max-prefix shutdown; EnableNeighbor, or the
+  // configured max_prefix_restart_seconds hold-down, clears it.
+  NEIGHBOR_ADMIN_STATE_MAX_PREFIX_LATCHED = 4;
+  // Latched down after its session task crashed repeatedly within the crash
+  // window. EnableNeighbor clears it; last_error carries the latch message.
+  NEIGHBOR_ADMIN_STATE_SESSION_CRASH_LATCHED = 5;
 }
 
 message NeighborState {
@@ -909,6 +942,9 @@ message NeighborState {
   // its link-local address when it was admitted, and every collector sets
   // on_identity_conflict = "exclude". Kept for the life of the session.
   bool bmp_identity_excluded = 68;
+  // Administrative hold-down state and its owner. UNSPECIFIED from an older
+  // daemon and on a retention-only row.
+  NeighborAdminState admin_state = 69;
 }
 
 // Stale routes one family of a neighbor still holds for GR or LLGR.
@@ -2104,7 +2140,7 @@ message TestPolicyRequest {
   // version-fenced walk in canonical (prefix, peer, path_id) order.
   uint32 limit = 6;
   // Maximum before/after attribute diffs to return (routes the policy
-  // accepted with modifications). 0 = none.
+  // accepted with modifications), up to 1,000. 0 = none.
   uint32 show_changes = 7;
   // Candidate dataset file contents supplied by the client, matched to
   // declarations in rpol_source. At most 16 bindings; missing, duplicate,
@@ -3294,10 +3330,10 @@ message Route {
   // route carries one, otherwise the default 100 the RIB applies during
   // best-path selection. Wire-level presence is `local_pref_attr`.
   uint32 local_pref = 7;
-  // Deprecated for absence-sensitive consumers: a bare integer cannot
-  // distinguish "no MED attribute" from "MED 0" (absent encodes as 0).
-  // Prefer `med_attr`.
-  uint32 med = 8;
+  // The bare MED scalar could not distinguish "no MED attribute" from
+  // "MED 0"; `med_attr` carries MED with presence.
+  reserved 8;
+  reserved "med";
   bool best = 9;
   repeated uint32 communities = 10;
   repeated uint64 extended_communities = 11;
@@ -3322,10 +3358,9 @@ message Route {
   // same recovery the RFC 9069 BMP Loc-RIB dump uses for its per-peer
   // header timestamp). 0 = unknown.
   uint64 received_at_epoch_seconds = 17;
-  // Distinguishes "explicit MED attribute set on the wire or by policy"
-  // (Some(value)) from "no MED attribute" (absent). Without this
-  // distinction `med = 0` could mean either "MED zero" or "no
-  // attribute". Mirrors `local_pref_attr`.
+  // MULTI_EXIT_DISC with presence: set when the route carries a MED
+  // attribute (on the wire or from policy), absent when it carries none.
+  // Mirrors `local_pref_attr`.
   optional uint32 med_attr = 18;
   // True while this route is retained as stale during a peer graceful
   // restart (RFC 4724). Mirrors the per-family route entries
@@ -3377,8 +3412,9 @@ message RouteEvent {
   uint32 prefix_length = 3;
   string peer_address = 4;
   AddressFamily afi_safi = 5;
-  // Deprecated: use timestamp_unix_ms. Unix epoch seconds as a decimal string.
-  string timestamp = 6;
+  // 6 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 6;
+  reserved "timestamp";
   string previous_peer_address = 7;
   // Add-Path path identifier (RFC 7911). 0 = no Add-Path.
   uint32 path_id = 8;
@@ -3390,8 +3426,7 @@ message RouteEvent {
   // Stable operator-facing reason, e.g. "policy_denied".
   string reason = 11;
   // Event time in Unix epoch milliseconds, captured when the event is
-  // recorded. The deprecated timestamp string is this value truncated to
-  // whole seconds.
+  // recorded.
   int64 timestamp_unix_ms = 12;
   // Interfaces of the scoped (IPv6 link-local) neighbors named by
   // peer_address, previous_peer_address and target_peer_address; empty
@@ -3557,8 +3592,9 @@ message ListPolicyEventsResponse {
 message SessionEvent {
   BgpEventType event_type = 1;
   string peer_address = 2;
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
-  string timestamp = 3;
+  // 3 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 3;
+  reserved "timestamp";
   // Lowercase BGP FSM state names from the transport layer (`idle`, `connect`,
   // `active`, `open_sent`, `open_confirm`, `established`). PeerAdded has
   // empty old_state and `idle` new_state; PeerRemoved and peer
@@ -3575,6 +3611,9 @@ message SessionEvent {
   // one. peer_address is the bare IP literal; the pair identifies the
   // neighbor, as on RouteEvent.
   string peer_interface = 8;
+  // Event time in Unix epoch milliseconds, captured when the event is
+  // recorded.
+  int64 timestamp_unix_ms = 9;
 }
 
 message StreamLagEvent {
@@ -3590,8 +3629,9 @@ message StreamLagEvent {
 message NotificationEvent {
   BgpEventType event_type = 1;
   string peer_address = 2;
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
-  string timestamp = 3;
+  // 3 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 3;
+  reserved "timestamp";
   // "sent" or "received".
   string direction = 4;
   // BGP NOTIFICATION error code and subcode (RFC 4271 section 4.5).
@@ -3610,6 +3650,9 @@ message NotificationEvent {
   // one. peer_address is the bare IP literal; the pair identifies the
   // neighbor, as on RouteEvent.
   string peer_interface = 11;
+  // Event time in Unix epoch milliseconds, captured when the event is
+  // recorded.
+  int64 timestamp_unix_ms = 12;
 }
 
 message PolicyEvent {
@@ -3626,14 +3669,18 @@ message PolicyEvent {
   string peer_address = 5;
   // Number of currently managed peers the runtime mutation touched.
   uint32 affected_peer_count = 6;
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
-  string timestamp = 7;
+  // 7 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 7;
+  reserved "timestamp";
   // Stable operator-facing reason/summary string for this event.
   string reason = 8;
   // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
   // one. peer_address is the bare IP literal; the pair identifies the
   // neighbor, as on RouteEvent.
   string peer_interface = 9;
+  // Event time in Unix epoch milliseconds, captured when the event is
+  // recorded.
+  int64 timestamp_unix_ms = 10;
 }
 
 message DataplaneEvent {
@@ -3660,21 +3707,26 @@ message DataplaneRouteEvent {
   uint32 prefix_length = 7;
   string next_hop = 8;
   string peer_address = 9;
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
-  string timestamp = 10;
+  // 10 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 10;
+  reserved "timestamp";
   // Stable operator-facing reason/summary string for this event.
   string reason = 11;
   // Interface of the scoped (IPv6 link-local) neighbor named by
   // peer_address; empty for a numbered neighbor, as on FibRouteStatus.
   string peer_interface = 12;
+  // Event time in Unix epoch milliseconds, captured when the event is
+  // recorded.
+  int64 timestamp_unix_ms = 13;
 }
 
 message EvpnRouteEvent {
   BgpEventType event_type = 1;
   string peer_address = 2;
   string previous_peer_address = 3;
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
-  string timestamp = 4;
+  // 4 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 4;
+  reserved "timestamp";
   // Supported EVPN route type (1..=6).
   uint32 route_type = 5;
   // Lossless RD text; small-ASN Type 2 RDs use 0x plus 16 hex digits.
@@ -3692,13 +3744,17 @@ message EvpnRouteEvent {
   // Empty for numbered or absent peers, independent of the current roster.
   string peer_interface = 11;
   string previous_peer_interface = 12;
+  // Event time in Unix epoch milliseconds, captured when the event is
+  // recorded.
+  int64 timestamp_unix_ms = 13;
 }
 
 message BfdSessionEvent {
   BgpEventType event_type = 1;
   string peer_address = 2;
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
-  string timestamp = 3;
+  // 3 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 3;
+  reserved "timestamp";
   BfdSessionState old_state = 4;
   BfdSessionState new_state = 5;
   // Local diagnostic for this transition (RFC 5880 section 4.1), as a stable
@@ -3709,14 +3765,17 @@ message BfdSessionEvent {
   // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
   // one, as on BfdSession.
   string peer_interface = 8;
+  // Event time in Unix epoch milliseconds, captured when the event is
+  // recorded.
+  int64 timestamp_unix_ms = 9;
 }
 
 message BgpEvent {
-  // Deprecated: use timestamp_unix_ms. Unix epoch seconds as a decimal string.
-  string timestamp = 1;
+  // 1 was the decimal-string Unix-seconds timestamp; use timestamp_unix_ms.
+  reserved 1;
+  reserved "timestamp";
   // Event time in Unix epoch milliseconds, captured when the event is
-  // recorded. The deprecated timestamp string is this value truncated to
-  // whole seconds.
+  // recorded.
   int64 timestamp_unix_ms = 23;
   // Common fields are duplicated from the category-specific payload on purpose:
   // category-agnostic consumers can filter/render without unpacking the oneof,
@@ -3863,6 +3922,20 @@ service InjectionService {
   // them. A key with no local rule returns NOT_FOUND. This new diagnostic RPC
   // is outside v1.
   rpc ListFlowSpecExportDispositions(ListFlowSpecExportDispositionsRequest) returns (ListPathExportDispositionsResponse);
+  // ListFlowSpecExportDispositions over a list of local FlowSpec rule keys
+  // in one paged walk, with the key bound, duplicate check, page entries,
+  // key order, found flag and ABORTED and INVALID_ARGUMENT contract of
+  // BatchListPathExportDispositions, except for malformed keys. Keys may mix
+  // global and VPN families and RDs. A key that ListFlowSpecExportDispositions
+  // would refuse as malformed does not fail the call: it keeps its place in
+  // the walk as one entry with found false, no rows and error set. A key
+  // with no local rule is listed with found false and no error. Two parsed
+  // keys are the same when ListFlowSpecExportDispositions would name the same
+  // rule; a key named twice is INVALID_ARGUMENT, but malformed keys are never
+  // duplicates, even of each other. An empty key list, more than 1000 keys,
+  // a duplicate key or a foreign page token is INVALID_ARGUMENT. Each page
+  // reads all its keys in one RIB turn. This diagnostic RPC is outside v1.
+  rpc BatchListFlowSpecExportDispositions(BatchListFlowSpecExportDispositionsRequest) returns (BatchListFlowSpecExportDispositionsResponse);
   // Inject or replace a locally originated FlowSpec rule. The rule is an upsert
   // keyed on (afi_safi, components): repeating an identical request is
   // idempotent, and a request with the same key but different actions or
@@ -4276,6 +4349,48 @@ message BatchListPathExportDispositionsResponse {
   string next_page_token = 2;
 }
 
+message BatchListFlowSpecExportDispositionsRequest {
+  // The local rules' AddFlowSpec keys, in walk order: 1 to 1000 keys per
+  // walk, no parsed key named twice. rd is required for VPN FlowSpec and
+  // empty for global FlowSpec; a key that breaks this is reported per key.
+  repeated LeasedFlowSpecKey keys = 1;
+  // As BatchListPathExportDispositionsRequest.page_size, page_token and
+  // include_configured.
+  uint32 page_size = 2;
+  string page_token = 3;
+  bool include_configured = 4;
+}
+
+// The export dispositions of one requested FlowSpec key on one page.
+message FlowSpecExportDispositions {
+  // The key as the request named it.
+  LeasedFlowSpecKey key = 1;
+  // As PathExportDispositions.found, for a local rule. false for a key
+  // with error set.
+  bool found = 2;
+  // One row per peer, as ListFlowSpecExportDispositions lists them; the
+  // key's remaining peers continue on the next page when it ends mid-key.
+  repeated PathExportDispositionEntry peers = 3;
+  // Set when the key is malformed; such a key lists no rows.
+  FlowSpecKeyError error = 4;
+}
+
+// Why one requested FlowSpec key could not be read.
+message FlowSpecKeyError {
+  // Bounded code: invalid_key, a key AddFlowSpec would refuse (family, RD or
+  // components). New codes may be added.
+  string code = 1;
+  // Human-readable detail that starts with the key's index, as keys[i]:
+  // followed by the reason; not a stable string.
+  string message = 2;
+}
+
+message BatchListFlowSpecExportDispositionsResponse {
+  repeated FlowSpecExportDispositions rules = 1;
+  // Empty when no entries remain.
+  string next_page_token = 2;
+}
+
 // FlowSpec match component (RFC 8955).
 message FlowSpecComponent {
   // Component type (1=destination, 2=source, 3=protocol, 4=port, etc.)
@@ -4326,7 +4441,11 @@ message FlowSpecTrafficAction {
   bool terminal = 2;
 }
 
+// Traffic-marking (RFC 8955 §7.5, type 0x8009).
 message FlowSpecTrafficMarking {
+  // DSCP to set, 0 to 63. A larger value is refused with INVALID_ARGUMENT.
+  // A listing reports the six DSCP bits of a received community; its two
+  // reserved bits are ignored here and retained in the raw list.
   uint32 dscp = 1;
 }
 
@@ -5502,7 +5621,12 @@ service ControlService {
   // miss may be transient (busy, as while a reload settles) or persistent (a
   // wedged actor): retry once and treat a repeated miss as a failure. Other
   // core snapshot failures (closed actor channel, dropped reply, stalled
-  // readiness transition or release) fail INTERNAL.
+  // readiness transition or release) fail INTERNAL. While the daemon gate
+  // holds readiness red (coordinated shutdown or the runtime-config
+  // settlement recovery fence, as for HTTP /readyz) it fails UNAVAILABLE with
+  // a google.rpc.ErrorInfo (domain "rustbgpd") whose reason is
+  // DAEMON_SHUTTING_DOWN or RUNTIME_CONFIG_RECOVERY_FENCE; that lasts until
+  // the process exits, so do not retry it.
   rpc GetHealth(HealthRequest) returns (HealthResponse);
   rpc GetMetrics(MetricsRequest) returns (MetricsResponse);
   rpc TriggerMrtDump(TriggerMrtDumpRequest) returns (TriggerMrtDumpResponse);

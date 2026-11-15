@@ -40,8 +40,9 @@ const GUARDED_RPC_DEADLINE: Duration = Duration::from_secs(3);
 /// The oldest daemon prefixd runs against: 0.79.0 adds the injection lease
 /// (rustbgpd ADR-0141); 0.80.0 scopes link-local export rows by interface and
 /// aborts export walks whose pages disagree; 0.81.0 adds the guarded FlowSpec
-/// mutations that scrubber diversion uses.
-const MINIMUM_DAEMON_VERSION: [u64; 3] = [0, 81, 0];
+/// mutations that scrubber diversion uses; 0.82.0 adds VPN FlowSpec; 0.83.0
+/// removes the listener `access_mode` key and the bare `Route.med` scalar.
+const MINIMUM_DAEMON_VERSION: [u64; 3] = [0, 83, 0];
 
 #[path = "rustbgpd_guarded.rs"]
 mod guarded;
@@ -122,7 +123,7 @@ impl RustBgpdAnnouncer {
         Ok(speaker)
     }
 
-    /// Startup contract check: refuse a daemon older than 0.81.0, or one whose
+    /// Startup contract check: refuse a daemon older than 0.83.0, or one whose
     /// version cannot be read, before any intent is read or written.
     async fn require_minimum_version(&self) -> anyhow::Result<()> {
         let version = self
@@ -1008,7 +1009,6 @@ fn decode_blackhole(
         || !route.as_path.is_empty()
         || route.local_pref_attr.is_some()
         || route.med_attr.is_some()
-        || route.med != 0
         || !route.extended_communities.is_empty()
         || route.stale
         || route.llgr_stale

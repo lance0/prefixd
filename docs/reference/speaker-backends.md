@@ -278,15 +278,18 @@ Initial network connections and TLS handshakes have a ten-second budget;
 complete RPC attempts are bounded separately.
 
 `proto/rustbgpd.proto` is the unmodified `rustbgpd.proto` asset of the
-rustbgpd `v0.82.0` release, checked offline against the release's sha256 by
+rustbgpd `v0.83.0` release, checked offline against the release's sha256 by
 `just proto`. The controller message fields prefixd uses were checked against
 it. This is a protocol baseline, not proof that an arbitrary binary reporting
 that version has passed the deployment or router tests. The stubs follow the
-pinned release, and v0.81.0 remains the minimum daemon. The v0.82.0
-fixture also runs the existing controller lifecycle; VPN runtime is not enabled
-by updating the schema pin. At startup prefixd reads
-the version that `GetHealth` reports and refuses a daemon older than v0.81.0,
-or one that reports no readable version, with "upgrade the speaker first".
+pinned release, and v0.83.0 is also the minimum daemon. Local blackhole
+read-back takes a route's MED only from `med_attr`, which v0.83.0 keeps after
+removing the bare `med` scalar; any MED, including an explicit 0, marks the
+row as not prefixd's. Upgrade rustbgpd to v0.83.0 before upgrading prefixd. At
+startup prefixd reads the version that `GetHealth` reports and refuses a daemon
+older than v0.83.0, or one that reports no readable version, with "upgrade the
+speaker first". See the [upgrade guide](../how-to/upgrading.md#rustbgpd-v083)
+for the Compose steps.
 Peer identity fields are decoded. Both export RPCs set `include_configured`,
 so complete walks also identify managed peers without an Established session.
 Batch and per-owner key-listing RPCs remain unused. A daemon rolled back while
@@ -331,7 +334,7 @@ rule as its own only when owner, key, community and revision match a durable
 row. Any other destination-less local rule, guarded by another owner or
 unowned, is an occupied key that affects every victim of its family, or of both
 families when it has no prefix component. The speaker contract is unchanged;
-the released fixtures cover it on v0.81.0 and v0.82.0.
+the released fixtures cover it on v0.83.0.
 
 [Manual scrubber diversion](../how-to/scrubber-diversion.md) is disabled by
 default. It requires configured per-POP profiles, qualified forwarding and export
@@ -355,21 +358,20 @@ safely. This does not change route injection or withdrawal. See the
 
 ## Released controller qualification
 
-The scoped controller promotion is released: v0.81.0 is the minimum controller
-contract version and the default local fixture version; Compose pins v0.82.0
-for the VPN paths. CI runs the lifecycle, TTL and restart suite against both
-released image references in
+The scoped controller promotion is released: v0.83.0 is the minimum controller
+contract version, the default local fixture version and the Compose pin, for
+global and VPN paths alike. CI runs the lifecycle, TTL and restart suite against
+the released image reference in
 [releases.json](../../tests/fixtures/rustbgpd/releases.json), and checks that
-startup refuses the released v0.80.1 image. Image OCI source
+startup refuses the released v0.82.0 image. Image OCI source
 revisions match the dereferenced release-tag commits. This qualifies the local
 controller boundary on Linux amd64, independently of router interoperability.
 
 Run the same isolated suite locally with Docker available:
 
 ```bash
-PREFIXD_RUSTBGPD_TEST_VERSION=0.81.0 scripts/test-rustbgpd.sh
-PREFIXD_RUSTBGPD_TEST_VERSION=0.82.0 scripts/test-rustbgpd.sh
-# plus the v0.80.1 refusal
+PREFIXD_RUSTBGPD_TEST_VERSION=0.83.0 scripts/test-rustbgpd.sh
+# includes the v0.82.0 refusal
 ```
 
 Fixtures bind ephemeral loopback ports, create an owner-only bearer token, and
@@ -919,9 +921,9 @@ write-only backends are not qualified by this readable suite.
 
 ## Scoped VPN FlowSpec
 
-Opt-in VPNv4 and VPNv6 controller paths require rustbgpd 0.82.0 and positive
-read-only local-intent probes for families 13/14. Global rules retain the 0.81.0
-floor. GoBGP returns a typed unsupported-scope error before any VPN RPC. Scope
+Opt-in VPNv4 and VPNv6 controller paths require positive read-only
+local-intent probes for families 13/14 on rustbgpd 0.83.0, prefixd's minimum
+for global rules too. GoBGP returns a typed unsupported-scope error before any VPN RPC. Scope
 identity and RT snapshots survive withdrawal/recovery; no refused VPN operation
 falls back globally. The current action slice covers discard, police, manual
 destination DSCP marking, and guarded target-IP and VRF redirect diversion;
