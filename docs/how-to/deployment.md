@@ -191,7 +191,9 @@ response, measured from browser receipt:
 While the status is **Stale** or **Offline**, every dashboard page also shows
 a notice with the time of the last update, because lists, counts and expiry
 times on screen have not refreshed. A connected feed never shows **Live** over
-failing requests. Focus or hover the status for the feed requirements and
+failing requests for more than 15 seconds: a failure after a recent success
+keeps the current status until that success is 15 seconds old, so **Live** and
+**Polling** do not prove that the latest request succeeded. Focus or hover the status for the feed requirements and
 fallback details. Failed handshakes, including ones pending
 for 10 seconds, switch to polling while the feed retries up to ten times with
 backoff. Returning to the tab starts another attempt. Network and authentication

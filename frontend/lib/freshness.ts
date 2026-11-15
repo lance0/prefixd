@@ -50,6 +50,8 @@ export interface DataFreshness {
 /**
  * Combines the realtime feed with API receipt. Only a recent successful response
  * is fresh: a connected feed with failing or hung requests is stale, never live.
+ * A failure after a recent success stays fresh until that success is
+ * STALE_AFTER_MS old, so one failed poll does not flip the status.
  */
 export function dataFreshness(connection: ConnectionState, api: ApiReceipt, now: number, startedAt: number): DataFreshness {
   const ageMs = api.lastSuccessAt === null ? null : Math.max(0, now - api.lastSuccessAt)
