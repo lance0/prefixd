@@ -1,6 +1,6 @@
 import type { ReactNode } from "react"
 import { cn } from "@/lib/utils"
-import type { Mitigation, SignalGroup } from "@/lib/api"
+import { EVENT_OUTCOMES, type EventOutcome, type Mitigation, type SignalGroup } from "@/lib/api"
 
 /**
  * Status colour is reserved for state. Every pill pairs a dot (or icon) and a
@@ -72,6 +72,52 @@ export function auditActionTone(action: string): StatusTone {
   const normalized = action.toLowerCase()
 
   return normalized === "reject" || normalized === "escalate" ? "danger" : "neutral"
+}
+
+export const EVENT_OUTCOME_LABELS: Record<EventOutcome, string> = {
+  mitigated: "Mitigation created",
+  extended: "Mitigation extended",
+  dry_run: "Dry run",
+  guardrail_rejected: "Guardrail refused",
+  safelisted: "Safelisted",
+  no_playbook: "No playbook",
+  not_owned: "Not in inventory",
+  awaiting_corroboration: "Corroboration not met",
+  conflict: "Conflict",
+  failed: "Failed",
+  withdrawn: "Withdrawn",
+  not_recorded: "Outcome not recorded",
+}
+
+/**
+ * Refusals and failures need attention. A created or extended mitigation is not
+ * proof of speaker acceptance or router enforcement, so it is never shown as
+ * healthy; the linked mitigation's status is authoritative.
+ */
+export function eventOutcomeTone(outcome: string): StatusTone {
+  switch (outcome) {
+    case "guardrail_rejected":
+    case "conflict":
+    case "failed":
+      return "danger"
+    case "safelisted":
+    case "no_playbook":
+      return "warning"
+    case "mitigated":
+    case "extended":
+    case "dry_run":
+    case "awaiting_corroboration":
+      return "info"
+    default:
+      return "neutral"
+  }
+}
+
+/** An event's outcome; missing or unknown values read as not recorded. */
+export function EventOutcomePill({ outcome }: { outcome?: string | null }) {
+  const known = EVENT_OUTCOMES.find((value) => value === outcome) ?? "not_recorded"
+
+  return <StatusPill tone={eventOutcomeTone(known)}>{EVENT_OUTCOME_LABELS[known]}</StatusPill>
 }
 
 interface StatusPillProps {

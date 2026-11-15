@@ -542,6 +542,20 @@ impl RepositoryTrait for MockRepository {
         Ok(())
     }
 
+    async fn record_event_outcome(
+        &self,
+        event_id: Uuid,
+        record: &crate::domain::EventOutcomeRecord,
+    ) -> Result<()> {
+        let mut events = self.events.lock().unwrap();
+        if let Some(event) = events.iter_mut().find(|e| e.event_id == event_id)
+            && event.outcome.outcome == crate::domain::EventOutcome::NotRecorded
+        {
+            event.outcome = record.clone();
+        }
+        Ok(())
+    }
+
     async fn find_ban_event_by_external_id(
         &self,
         source: &str,
@@ -587,6 +601,12 @@ impl RepositoryTrait for MockRepository {
                     .vector
                     .as_ref()
                     .is_none_or(|vector| &e.vector == vector)
+            })
+            .filter(|e| {
+                filters
+                    .outcomes
+                    .as_ref()
+                    .is_none_or(|outcomes| outcomes.contains(&e.outcome.outcome))
             })
             .filter(|e| {
                 query.as_ref().is_none_or(|q| {

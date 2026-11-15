@@ -363,7 +363,18 @@ export interface Event {
   /** Absent or null when the detector sent no source ports; "[]" when it sent an empty list. */
   top_src_ports_json?: string | null
   confidence: number | null
+  /** What ingestion did with the event; absent from older controllers. */
+  outcome?: EventOutcome
+  outcome_reason?: string | null
+  outcome_mitigation_ids?: string[]
 }
+
+export const EVENT_OUTCOMES = [
+  "mitigated", "extended", "dry_run", "guardrail_rejected", "safelisted", "no_playbook",
+  "not_owned", "awaiting_corroboration", "conflict", "failed", "withdrawn", "not_recorded",
+] as const
+
+export type EventOutcome = (typeof EVENT_OUTCOMES)[number]
 
 export interface Stats {
   total_active: number
@@ -1052,6 +1063,8 @@ export async function getEvents(params?: {
   q?: string
   source?: string
   vector?: string
+  /** Comma-separated outcomes. */
+  outcome?: string
   limit?: number
   cursor?: string
   start?: string
@@ -1067,7 +1080,7 @@ export async function getEvents(params?: {
 
   if (params?.end) searchParams.set("end", params.end)
 
-  for (const name of ["q", "source", "vector"] as const) {
+  for (const name of ["q", "source", "vector", "outcome"] as const) {
     if (params?.[name] !== undefined) searchParams.set(name, params[name])
   }
 

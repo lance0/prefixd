@@ -356,6 +356,7 @@ mod tests {
             confidence: Some(0.9),
             action: "ban".to_string(),
             raw_details: None,
+            outcome: Default::default(),
         }
     }
 

@@ -1174,6 +1174,7 @@ async fn test_timeseries_non_hour_bucket_alignment() {
         confidence: Some(0.9),
         action: "ban".to_string(),
         raw_details: None,
+        outcome: Default::default(),
     };
 
     let event_two = AttackEvent {
@@ -1192,6 +1193,7 @@ async fn test_timeseries_non_hour_bucket_alignment() {
         confidence: Some(0.92),
         action: "ban".to_string(),
         raw_details: None,
+        outcome: Default::default(),
     };
 
     ctx.repo
@@ -1672,6 +1674,7 @@ async fn test_signal_group_add_events_and_list() {
         confidence: Some(0.9),
         action: "ban".to_string(),
         raw_details: None,
+        outcome: Default::default(),
     };
     let event2 = AttackEvent {
         event_id: uuid::Uuid::new_v4(),
@@ -1689,6 +1692,7 @@ async fn test_signal_group_add_events_and_list() {
         confidence: Some(0.7),
         action: "ban".to_string(),
         raw_details: None,
+        outcome: Default::default(),
     };
 
     ctx.repo.insert_event(&event1).await.unwrap();
@@ -7584,5 +7588,136 @@ async fn test_event_search_is_literal_complete_and_matches_postgres() {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["count"], expected);
+    }
+}
+
+#[tokio::test]
+async fn test_event_outcomes_replay_filter_and_write_once_postgres_mock_parity() {
+    use prefixd::db::{EventListParams, ListParams, MockRepository, RepositoryTrait};
+    use prefixd::domain::{AttackEvent, EventOutcome, EventOutcomeRecord};
+    use std::sync::Arc;
+
+    let ctx = TestContext::new().await;
+    // A database from before migration 020, with a stored event.
+    sqlx::raw_sql(
+        "ALTER TABLE events DROP COLUMN outcome, DROP COLUMN outcome_reason,
+             DROP COLUMN outcome_mitigation_ids;
+         INSERT INTO events (event_id, external_event_id, source, event_timestamp, ingested_at,
+             victim_ip, vector, top_dst_ports_json, action)
+         VALUES (gen_random_uuid(), 'legacy', 'replay', now(), now() - interval '1 minute',
+             '203.0.113.30', 'udp_flood', '[]', 'ban');",
+    )
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
+    // Replay is repeatable and infers no outcome for an older event.
+    for _ in 0..2 {
+        prefixd::db::init_postgres_pool(&ctx.state.settings.storage.connection_string)
+            .await
+            .unwrap();
+    }
+    let raw: Vec<(Option<String>, Option<String>, Vec<uuid::Uuid>)> =
+        sqlx::query_as("SELECT outcome, outcome_reason, outcome_mitigation_ids FROM events")
+            .fetch_all(&ctx.pool)
+            .await
+            .unwrap();
+    assert_eq!(raw, [(None, None, Vec::new())]);
+    // A value a newer controller wrote reads, and filters, as not_recorded.
+    sqlx::raw_sql(
+        "INSERT INTO events (event_id, external_event_id, source, event_timestamp, ingested_at,
+             victim_ip, vector, top_dst_ports_json, action, outcome)
+         VALUES (gen_random_uuid(), 'future', 'replay', now(), now() - interval '2 minutes',
+             '203.0.113.30', 'udp_flood', '[]', 'ban', 'future_outcome');",
+    )
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
+
+    let mock = Arc::new(MockRepository::new());
+    let older = ctx
+        .repo
+        .list_events(&ListParams {
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(older.len(), 2);
+    for event in &older {
+        assert_eq!(event.outcome, EventOutcomeRecord::default());
+        mock.insert_event(event).await.unwrap();
+    }
+
+    let repositories: [Arc<dyn RepositoryTrait>; 2] = [ctx.repo.clone(), mock];
+    for repo in repositories {
+        let input = |external: &str| -> prefixd::domain::AttackEventInput {
+            serde_json::from_value(serde_json::json!({
+                "event_id": external, "timestamp": "2026-11-14T00:00:00Z",
+                "source": "replay", "victim_ip": "203.0.113.31", "vector": "udp_flood",
+            }))
+            .unwrap()
+        };
+        let mitigated = AttackEvent::from_input(input("mitigated"));
+        let refused = AttackEvent::from_input(input("refused"));
+        let mitigation_id = uuid::Uuid::new_v4();
+        repo.insert_event(&mitigated).await.unwrap();
+        repo.insert_event(&refused).await.unwrap();
+        let record = EventOutcomeRecord::new(EventOutcome::Mitigated, None, vec![mitigation_id]);
+        repo.record_event_outcome(mitigated.event_id, &record)
+            .await
+            .unwrap();
+        let refusal = EventOutcomeRecord::new(
+            EventOutcome::GuardrailRejected,
+            Some("guardrail violation: no allowed ports for service".into()),
+            Vec::new(),
+        );
+        repo.record_event_outcome(refused.event_id, &refusal)
+            .await
+            .unwrap();
+        // Written once.
+        repo.record_event_outcome(refused.event_id, &record)
+            .await
+            .unwrap();
+
+        let list = |outcomes: Option<Vec<EventOutcome>>| {
+            let repo = repo.clone();
+            async move {
+                repo.list_events_filtered(&EventListParams {
+                    pagination: ListParams {
+                        limit: 10,
+                        ..Default::default()
+                    },
+                    outcomes,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|event| (event.external_event_id.unwrap(), event.outcome))
+                .collect::<Vec<_>>()
+            }
+        };
+        let all = list(None).await;
+        assert_eq!(all.len(), 4);
+        assert!(all.contains(&("mitigated".into(), record.clone())));
+        assert!(all.contains(&("refused".into(), refusal.clone())));
+        assert_eq!(
+            list(Some(vec![EventOutcome::NotRecorded])).await,
+            [
+                ("legacy".into(), EventOutcomeRecord::default()),
+                ("future".into(), EventOutcomeRecord::default())
+            ]
+        );
+        let mut refused_or_legacy = list(Some(vec![
+            EventOutcome::GuardrailRejected,
+            EventOutcome::NotRecorded,
+        ]))
+        .await
+        .into_iter()
+        .map(|(external, _)| external)
+        .collect::<Vec<_>>();
+        refused_or_legacy.sort();
+        assert_eq!(refused_or_legacy, ["future", "legacy", "refused"]);
+        assert!(list(Some(vec![EventOutcome::Safelisted])).await.is_empty());
     }
 }
