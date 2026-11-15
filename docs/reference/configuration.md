@@ -1522,7 +1522,11 @@ differ from the running settings.
 
 A file that fails to load or validate returns 422 with an error naming it. Loader
 detail is included for `inventory.yaml` and `playbooks.yaml` only; for other
-files, which can hold secrets, see the controller log.
+files, which can hold secrets, see the controller log. For `prefixd.yaml`,
+`correlation.yaml` and `alerting.yaml`, the log and startup errors give the key
+path, line, column and what was expected, never the value, for example
+`prefixd.yaml: mode: unknown variant, expected one of dry-run, enforced at line 2
+column 7`.
 
 ```bash
 # CLI

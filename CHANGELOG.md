@@ -155,6 +155,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Parse errors for `prefixd.yaml`, `correlation.yaml` and `alerting.yaml` no
+  longer quote the offending value, which could be part of a secret such as
+  `storage.connection_string` or a webhook URL, in the reload log or startup
+  error. They name the file, key path, line and column instead. Inventory and
+  playbook errors keep their full detail.
 - Alert delivery errors no longer include the request URL, which could carry a
   webhook secret or a Telegram bot token, in the controller log or the
   `POST /v1/config/alerting/test` response.

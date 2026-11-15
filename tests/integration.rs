@@ -7016,6 +7016,10 @@ async fn reload_log_redacts_secret_file_loader_errors() {
     const CANARY: &str = "hunter2-canary";
     let capture = Capture::default();
     let writer = capture.clone();
+    // As in `TraceOutput::subscriber`: a second live dispatcher keeps callsite
+    // interest per dispatcher, so a parallel test that registered the reload
+    // callsite first cannot hide it from this capture.
+    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let _subscriber = tracing::subscriber::set_default(
         tracing_subscriber::fmt()
             .json()
@@ -7023,6 +7027,7 @@ async fn reload_log_redacts_secret_file_loader_errors() {
             .with_writer(move || writer.clone())
             .finish(),
     );
+    tracing::callsite::rebuild_interest_cache();
     let directory = tempfile::tempdir().unwrap();
     let app = setup_app_with_config_dir(directory.path().to_path_buf()).await;
     let settings = format!("pop: iad1\nmode: {CANARY}\n");
@@ -7087,7 +7092,7 @@ async fn reload_log_redacts_secret_file_loader_errors() {
     capture.0.lock().unwrap().clear();
     std::fs::write(
         directory.path().join("playbooks.yaml"),
-        "playbooks: visible-playbook-detail\n",
+        "playbooks: [{name: x, match: {vector: visible-playbook-detail}, steps: []}]\n",
     )
     .unwrap();
     let (status, _) = correlation_config_request(&app, "POST", "/v1/config/reload", "").await;
