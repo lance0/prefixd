@@ -1016,43 +1016,73 @@ impl AlertingConfig {
                     secret,
                     url,
                     url_env,
+                    headers,
                     ..
                 } => {
+                    let redacted_headers: Vec<String> = headers
+                        .iter()
+                        .filter(|(_, value)| value.as_str() == REDACTED)
+                        .map(|(key, _)| key.clone())
+                        .collect();
+                    if secret.as_deref() != Some(REDACTED) && redacted_headers.is_empty() {
+                        continue;
+                    }
+                    // One running destination supplies every redacted value, so
+                    // a `***` is never saved literally. An env-backed URL
+                    // matches by variable; a redacted inline URL by uniqueness.
+                    let matches: Vec<&DestinationConfig> = current
+                        .destinations
+                        .iter()
+                        .filter(|d| match d {
+                            DestinationConfig::Generic {
+                                url: existing_url,
+                                url_env: existing_url_env,
+                                ..
+                            } => match url_env {
+                                Some(_) => existing_url_env == url_env,
+                                None if url == REDACTED => existing_url_env.is_none(),
+                                None => existing_url_env.is_none() && existing_url == url,
+                            },
+                            _ => false,
+                        })
+                        .collect();
+                    let [
+                        DestinationConfig::Generic {
+                            secret: existing_secret,
+                            secret_env: existing_secret_env,
+                            headers: existing_headers,
+                            ..
+                        },
+                    ] = matches.as_slice()
+                    else {
+                        errors.push(if matches.is_empty() {
+                            format!(
+                                "{ctx}: cannot resolve redacted secret or headers — no matching existing Generic destination"
+                            )
+                        } else {
+                            format!(
+                                "{ctx}: ambiguous redacted secret or headers — multiple matching Generic destinations"
+                            )
+                        });
+                        continue;
+                    };
                     if secret.as_deref() == Some(REDACTED) {
-                        let u = url.clone();
-                        // Inline signing secrets only; an env-backed URL matches by variable.
-                        let matches: Vec<String> = current
-                            .destinations
-                            .iter()
-                            .filter_map(|d| match d {
-                                DestinationConfig::Generic {
-                                    secret: Some(s),
-                                    secret_env: None,
-                                    url: existing_url,
-                                    url_env: existing_url_env,
-                                    ..
-                                } if !s.is_empty()
-                                    && match url_env {
-                                        Some(_) => existing_url_env == url_env,
-                                        // URL also redacted: match by uniqueness.
-                                        None if u == REDACTED => existing_url_env.is_none(),
-                                        None => existing_url_env.is_none() && existing_url == &u,
-                                    } =>
-                                {
-                                    Some(s.clone())
-                                }
-                                _ => None,
-                            })
-                            .collect();
-                        match matches.as_slice() {
-                            [s] => *secret = Some(s.clone()),
-                            [] => errors.push(format!(
-                                "{}: cannot resolve redacted secret — no existing Generic destination for url={}",
-                                ctx, url
-                            )),
-                            _ => errors.push(format!(
-                                "{}: ambiguous redacted secret — multiple Generic destinations for url={}",
-                                ctx, url
+                        if existing_secret_env.is_some() {
+                            errors.push(format!(
+                                "{ctx}: cannot resolve redacted secret — the matching destination reads it from secret_env"
+                            ));
+                        } else {
+                            // An absent or empty signing secret stays absent or empty.
+                            *secret = existing_secret.clone();
+                        }
+                    }
+                    for key in redacted_headers {
+                        match existing_headers.get(&key) {
+                            Some(value) => {
+                                headers.insert(key, value.clone());
+                            }
+                            None => errors.push(format!(
+                                "{ctx}: cannot resolve redacted header {key} — the matching destination has no such header"
                             )),
                         }
                     }
@@ -2061,5 +2091,79 @@ mod tests {
             .unwrap_err();
         assert!(error.starts_with("webhook request failed"), "{error}");
         assert!(!error.contains("hook-secret-canary"), "{error}");
+    }
+
+    #[test]
+    fn redacted_generic_headers_are_inherited_or_refused() {
+        let current: AlertingConfig = serde_json::from_value(serde_json::json!({
+            "destinations": [{
+                "type": "generic", "url_env": PRESENT_ENV, "secret": "signing-secret",
+                "headers": { "Authorization": "Bearer header-secret" },
+            }],
+        }))
+        .unwrap();
+        let redacted = serde_json::json!({ "destinations": [current.destinations[0].redacted()] });
+        // Negative control: the earlier merge cleared only the URL sentinel and
+        // left headers alone, so the editor saved and sent `Authorization: ***`.
+        let mut control: AlertingConfig = serde_json::from_value(redacted.clone()).unwrap();
+        control.destinations[0].clear_env_sentinels();
+        let DestinationConfig::Generic { headers, .. } = &control.destinations[0] else {
+            panic!("expected generic");
+        };
+        assert_eq!(headers["Authorization"], REDACTED);
+
+        let mut incoming: AlertingConfig = serde_json::from_value(redacted.clone()).unwrap();
+        assert!(incoming.merge_secrets(&current).is_empty());
+        assert_eq!(
+            serde_json::to_value(&incoming).unwrap(),
+            serde_json::to_value(&current).unwrap()
+        );
+
+        let mut added = redacted.clone();
+        added["destinations"][0]["headers"]["X-New"] = REDACTED.into();
+        assert_eq!(
+            editor_merge(&current, added),
+            [
+                "destination[0] (generic): cannot resolve redacted header X-New — the matching \
+              destination has no such header"
+            ]
+        );
+        let mut twice = current.clone();
+        twice.destinations.push(current.destinations[0].clone());
+        assert_eq!(
+            editor_merge(&twice, redacted),
+            [
+                "destination[0] (generic): ambiguous redacted secret or headers — multiple \
+              matching Generic destinations"
+            ]
+        );
+    }
+
+    #[test]
+    fn unchanged_generic_without_signing_secret_round_trips() {
+        for secret in [None, Some("")] {
+            let current = AlertingConfig {
+                destinations: vec![DestinationConfig::Generic {
+                    url: String::new(),
+                    url_env: Some(PRESENT_ENV.into()),
+                    secret: secret.map(String::from),
+                    secret_env: None,
+                    headers: HashMap::new(),
+                    events: vec![],
+                }],
+                events: vec![],
+            };
+            let redacted = current.destinations[0].redacted();
+            // Negative control: GET reports `***` even without a signing secret.
+            assert_eq!(redacted["secret"], REDACTED);
+            let mut incoming: AlertingConfig =
+                serde_json::from_value(serde_json::json!({ "destinations": [redacted] })).unwrap();
+            let errors = incoming.merge_secrets(&current);
+            assert!(errors.is_empty(), "{secret:?}: {errors:?}");
+            assert_eq!(
+                serde_json::to_value(&incoming).unwrap(),
+                serde_json::to_value(&current).unwrap()
+            );
+        }
     }
 }
