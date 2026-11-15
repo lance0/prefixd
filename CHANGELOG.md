@@ -276,6 +276,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canceled mid-publish can no longer leave only some sections published, and
   a concurrent correlation edit can no longer be overwritten by the file it
   replaced.
+- Withdrawing from the mitigation detail page now refreshes its timeline, so the
+  Withdrawn step shows the actor, reason and operation ID without a reload.
 
 ### Security
 
