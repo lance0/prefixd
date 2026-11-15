@@ -194,7 +194,7 @@ export async function createDiversion(request: DiversionRequest, expectedScope =
 }
 
 export const armScrubber = (id: string, revision: string) => fetchApi<null>(`/v1/scrubbers/${encodeURIComponent(id)}/arm`, { method: "POST", body: JSON.stringify({ revision }) })
-export const withdrawDiversion = (id: string, reason?: string) => fetchApi<ScrubberDiversion>(`/v1/diversions/${encodeURIComponent(id)}/withdraw`, { method: "POST", body: JSON.stringify(reason?.trim() ? { reason: reason.trim() } : {}) })
+export const withdrawDiversion = (id: string, reason: string) => fetchApi<ScrubberDiversion>(`/v1/diversions/${encodeURIComponent(id)}/withdraw`, { method: "POST", body: JSON.stringify({ reason }) })
 
 // Cache for deduplicating in-flight requests (client-swr-dedup pattern)
 const requestCache = new Map<string, Promise<unknown>>()

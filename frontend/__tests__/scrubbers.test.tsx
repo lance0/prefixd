@@ -300,6 +300,7 @@ describe("diversion withdrawal", () => {
     controller.route("GET", "/v1/diversions", () => json([]))
     const dialog = await openWithdraw()
 
+    fireEvent.change(within(dialog).getByLabelText("Withdrawal reason"), { target: { value: "Attack subsided" } })
     fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" }))
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
     await waitFor(() => expect(screen.getByText("Outstanding diversions")).toHaveFocus())
@@ -310,7 +311,7 @@ describe("diversion withdrawal", () => {
     controller.route("POST", "/v1/diversions/operation-1/withdraw", () => json({ ...active, status: "withdrawing" }, 202))
     const dialog = await openWithdraw()
 
-    fireEvent.change(within(dialog).getByLabelText("Withdrawal reason (optional)"), { target: { value: "  Attack subsided  " } })
+    fireEvent.change(within(dialog).getByLabelText("Withdrawal reason"), { target: { value: "  Attack subsided  " } })
     fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" }))
     await screen.findByText("Withdrawal requested. Victim exclusion remains until local absence is confirmed.")
     expect(mutations()).toHaveLength(1)
@@ -318,14 +319,17 @@ describe("diversion withdrawal", () => {
     expect(JSON.parse(controller.calls("POST", "/v1/diversions/operation-1/withdraw")[0].body ?? "")).toEqual({ reason: "Attack subsided" })
   })
 
-  it("sends an empty body when no reason is given", async () => {
+  it("cannot withdraw without a reason", async () => {
     await render()
-    controller.route("POST", "/v1/diversions/operation-1/withdraw", () => json({ ...active, status: "withdrawing" }, 202))
     const dialog = await openWithdraw()
+    const submit = within(dialog).getByRole("button", { name: "Withdraw" })
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" }))
-    await waitFor(() => expect(controller.calls("POST", "/v1/diversions/operation-1/withdraw")).toHaveLength(1))
-    expect(JSON.parse(controller.calls("POST", "/v1/diversions/operation-1/withdraw")[0].body ?? "")).toEqual({})
+    expect(submit).toBeDisabled()
+    fireEvent.change(within(dialog).getByLabelText("Withdrawal reason"), { target: { value: "   " } })
+    expect(submit).toBeDisabled()
+    fireEvent.click(submit)
+    await settle()
+    expect(mutations()).toHaveLength(0)
   })
 
   it("closes after an accepted withdrawal while the diversions refresh is still pending", async () => {
@@ -335,6 +339,7 @@ describe("diversion withdrawal", () => {
     const refresh = deferred<Response>()
 
     controller.route("GET", "/v1/diversions", () => refresh.promise)
+    fireEvent.change(within(dialog).getByLabelText("Withdrawal reason"), { target: { value: "Attack subsided" } })
     fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" }))
     await screen.findByText("Withdrawal requested. Victim exclusion remains until local absence is confirmed.")
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
@@ -347,6 +352,7 @@ describe("diversion withdrawal", () => {
     controller.route("POST", "/v1/diversions/operation-1/withdraw", () => json({ error: "withdrawal not accepted" }, status))
     const dialog = await openWithdraw()
 
+    fireEvent.change(within(dialog).getByLabelText("Withdrawal reason"), { target: { value: "Attack subsided" } })
     fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" }))
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("withdrawal not accepted")
     expect(screen.getByText("203.0.113.20/32 → 192.0.2.99 · a@v1")).toBeInTheDocument()

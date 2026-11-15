@@ -385,7 +385,7 @@ async fn dry_run_sends_no_window_add_renew_or_delete() {
     state.scrubber.tick(&state).await.unwrap();
     state
         .scrubber
-        .withdraw(&state, row.id, "admin", None)
+        .withdraw(&state, row.id, "admin", "operator withdrawal".into())
         .await
         .unwrap();
     assert_eq!(fake.writes.load(SeqCst), 0);
@@ -485,7 +485,7 @@ async fn ambiguous_add_keeps_exclusion_until_window_barrier_and_final_absence() 
     assert!(!state.scrubber.profiles().await["a"].armed);
     let row = state
         .scrubber
-        .withdraw(&state, row.id, "admin", None)
+        .withdraw(&state, row.id, "admin", "operator withdrawal".into())
         .await
         .unwrap();
     assert_eq!(row.status, DiversionStatus::Withdrawing);
@@ -505,14 +505,14 @@ async fn ambiguous_add_keeps_exclusion_until_window_barrier_and_final_absence() 
     );
     let row = state
         .scrubber
-        .withdraw(&state, row.id, "admin", None)
+        .withdraw(&state, row.id, "admin", "operator withdrawal".into())
         .await
         .unwrap();
     assert_eq!(row.status, DiversionStatus::Withdrawing);
     tokio::time::advance(Duration::from_secs(20)).await;
     let row = state
         .scrubber
-        .withdraw(&state, row.id, "admin", None)
+        .withdraw(&state, row.id, "admin", "operator withdrawal".into())
         .await
         .unwrap();
     assert_eq!(row.status, DiversionStatus::Withdrawn);
@@ -794,14 +794,24 @@ async fn withdrawal_retries_preserve_the_requesting_operator() {
     );
     let row = state
         .scrubber
-        .withdraw(&state, row.id, "withdrawing-admin", None)
+        .withdraw(
+            &state,
+            row.id,
+            "withdrawing-admin",
+            "operator withdrawal".into(),
+        )
         .await
         .unwrap();
     assert_eq!(row.withdrawal_actor.as_deref(), Some("withdrawing-admin"));
     tokio::time::advance(Duration::from_secs(30)).await;
     let row = state
         .scrubber
-        .withdraw(&state, row.id, "retrying-admin", None)
+        .withdraw(
+            &state,
+            row.id,
+            "retrying-admin",
+            "operator withdrawal".into(),
+        )
         .await
         .unwrap();
     assert_eq!(row.status, DiversionStatus::Withdrawn);
@@ -1157,7 +1167,7 @@ async fn steady_lifecycle_passes_write_no_audit_rows() {
     );
     state
         .scrubber
-        .withdraw(&state, rows[0].id, "admin", None)
+        .withdraw(&state, rows[0].id, "admin", "operator withdrawal".into())
         .await
         .unwrap();
     assert!(
@@ -1220,21 +1230,23 @@ async fn saved_withdrawal_cannot_move_backwards_or_change_its_reason() {
         .unwrap();
     let row = state
         .scrubber
-        .withdraw(&state, row.id, "admin", Some("investigated".into()))
+        .withdraw(&state, row.id, "admin", "investigated".into())
         .await
         .unwrap();
     assert_eq!(row.status, DiversionStatus::Withdrawing);
     assert_eq!(row.withdrawal_reason.as_deref(), Some("investigated"));
     let audit = row.audit("scrubber_withdraw_requested");
     assert_eq!(audit.details["reason"], "investigated");
-    assert!(
-        state
-            .scrubber
-            .withdraw(&state, row.id, "admin", Some(" ".into()))
-            .await
-            .is_err(),
-        "an explicit reason must contain text"
-    );
+    for blank in ["", " \t"] {
+        assert!(
+            state
+                .scrubber
+                .withdraw(&state, row.id, "admin", blank.into())
+                .await
+                .is_err(),
+            "a withdrawal reason must contain text"
+        );
+    }
     let mut backwards = row.clone();
     backwards.status = DiversionStatus::Active;
     assert!(repo.save_diversion(&backwards, "invalid").await.is_err());
@@ -1292,6 +1304,29 @@ async fn api_statuses_distinguish_disabled_and_unknown_resources() {
         .await,
         StatusCode::NOT_FOUND
     );
+    let withdraw = |body: &'static str| {
+        Request::post(format!("/v1/diversions/{unknown}/withdraw"))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    };
+    assert_eq!(
+        status(withdraw(r#"{"reason":"attack ended"}"#)).await,
+        StatusCode::NOT_FOUND
+    );
+    // A withdrawal must say why: blank is refused before lookup, missing at the schema.
+    for blank in [r#"{"reason":""}"#, r#"{"reason":" \t"}"#] {
+        assert_eq!(
+            status(withdraw(blank)).await,
+            StatusCode::BAD_REQUEST,
+            "{blank}"
+        );
+    }
+    assert_eq!(
+        status(withdraw("{}")).await,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    // The body is required: a bare POST has no JSON content type.
     assert_eq!(
         status(
             Request::post(format!("/v1/diversions/{unknown}/withdraw"))
@@ -1299,8 +1334,9 @@ async fn api_statuses_distinguish_disabled_and_unknown_resources() {
                 .unwrap()
         )
         .await,
-        StatusCode::NOT_FOUND
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
+    assert_eq!(status(withdraw("")).await, StatusCode::BAD_REQUEST);
     assert_eq!(
         status(
             Request::post("/v1/scrubbers/missing/arm")

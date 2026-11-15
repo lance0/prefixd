@@ -538,6 +538,16 @@ fn validate_string_len(value: &str, field: &str, max: usize) -> Result<(), Prefi
     }
 }
 
+/// A withdrawal records why the operator acted, so its reason must contain text.
+fn validate_withdrawal_reason(reason: &str) -> Result<(), PrefixdError> {
+    if reason.trim().is_empty() || reason.len() > MAX_STRING_LEN {
+        return Err(PrefixdError::InvalidRequest(format!(
+            "reason must contain text and be at most {MAX_STRING_LEN} UTF-8 bytes"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_ip(ip: &str) -> Result<IpAddr, PrefixdError> {
     ip.parse::<IpAddr>()
         .map_err(|_| PrefixdError::InvalidRequest(format!("invalid IP address: '{}'", ip)))
@@ -725,7 +735,8 @@ pub struct WithdrawRequest {
         reason = "Caller-supplied actor is ignored; request authentication determines the actor"
     )]
     operator_id: String,
-    /// Why the mitigation is withdrawn; retained with the withdrawal intent and audit entry
+    /// Why the mitigation is withdrawn: nonblank, at most 1,024 UTF-8 bytes;
+    /// retained with the withdrawal intent and audit entry
     reason: String,
 }
 // Handlers
@@ -2649,7 +2660,7 @@ fn blackhole_rejection_reason(violation: &GuardrailError) -> &'static str {
     request_body = WithdrawRequest,
     responses(
         (status = 200, description = "Withdrawal processed; `status` shows the terminal state", body = MitigationResponse),
-        (status = 400, description = "Malformed JSON, overlong reason, or mitigation is not active"),
+        (status = 400, description = "Malformed JSON, blank or overlong reason, or mitigation is not active"),
         (status = 401, description = "Not authenticated"),
         (status = 403, description = "Operator role required"),
         (status = 404, description = "Mitigation not found"),
@@ -2664,7 +2675,7 @@ pub async fn withdraw_mitigation(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(req): Json<WithdrawRequest>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<axum::response::Response, StatusCode> {
     // Check auth
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
@@ -2677,8 +2688,8 @@ pub async fn withdraw_mitigation(
     if validate_string_len(&operator_id, "operator_id", MAX_USERNAME_LEN).is_err() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    if validate_string_len(&req.reason, "reason", MAX_STRING_LEN).is_err() {
-        return Err(StatusCode::BAD_REQUEST);
+    if let Err(error) = validate_withdrawal_reason(&req.reason) {
+        return Ok(AppError(error).into_response());
     }
 
     let _mitigation_guard = state.mitigation_lock.lock().await;
@@ -2709,7 +2720,7 @@ pub async fn withdraw_mitigation(
         "mitigation withdrawn"
     );
 
-    Ok(Json(MitigationResponse::from(&mitigation)))
+    Ok(Json(MitigationResponse::from(&mitigation)).into_response())
 }
 
 const MAX_BULK_WITHDRAW: usize = 100;
@@ -2723,6 +2734,7 @@ pub struct BulkWithdrawRequest {
         reason = "Caller-supplied actor is ignored; request authentication determines the actor"
     )]
     operator_id: String,
+    /// Why the mitigations are withdrawn: nonblank, at most 1,024 UTF-8 bytes
     reason: String,
 }
 
@@ -2747,7 +2759,11 @@ pub struct BulkWithdrawResponse {
     tag = "mitigations",
     request_body = BulkWithdrawRequest,
     responses(
-        (status = 200, description = "Bulk withdraw results", body = BulkWithdrawResponse)
+        (status = 200, description = "Bulk withdraw results", body = BulkWithdrawResponse),
+        (status = 400, description = "No or more than 100 IDs, or a blank or overlong reason"),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "Operator role required"),
+        (status = 422, description = "Request body does not match the schema, such as a missing `reason`")
     )
 )]
 pub async fn bulk_withdraw_mitigations(
@@ -2755,7 +2771,7 @@ pub async fn bulk_withdraw_mitigations(
     auth_session: AuthSession,
     headers: HeaderMap,
     Json(req): Json<BulkWithdrawRequest>,
-) -> Result<Json<BulkWithdrawResponse>, StatusCode> {
+) -> Result<axum::response::Response, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
     let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
@@ -2770,8 +2786,8 @@ pub async fn bulk_withdraw_mitigations(
     if validate_string_len(&operator_id, "operator_id", MAX_USERNAME_LEN).is_err() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    if validate_string_len(&req.reason, "reason", MAX_STRING_LEN).is_err() {
-        return Err(StatusCode::BAD_REQUEST);
+    if let Err(error) = validate_withdrawal_reason(&req.reason) {
+        return Ok(AppError(error).into_response());
     }
 
     let mut results = Vec::with_capacity(req.mitigation_ids.len());
@@ -2856,7 +2872,8 @@ pub async fn bulk_withdraw_mitigations(
         withdrawn,
         failed,
         results,
-    }))
+    })
+    .into_response())
 }
 
 const MAX_BULK_ACKNOWLEDGE: usize = 100;

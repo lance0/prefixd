@@ -121,7 +121,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
     setWithdrawError(null)
 
     try {
-      await withdrawMitigation(mitigation.mitigation_id, reason || "Manual withdrawal", "dashboard")
+      await withdrawMitigation(mitigation.mitigation_id, reason, "dashboard")
       mutate()
 
       return true

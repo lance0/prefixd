@@ -755,6 +755,41 @@ and CLI request arrives from nginx and every browser session from the dashboard
 container, so those groups each share one bucket per class; see the
 [configuration note](../reference/configuration.md#rate-limiting).
 
+## Withdrawal reasons are required
+
+Releases after 0.26.0 require a reason on every operator withdrawal, so the
+audit trail records why the operator acted. This applies to
+`POST /v1/mitigations/{id}/withdraw`, `POST /v1/mitigations/withdraw` and
+`POST /v1/diversions/{id}/withdraw`. Diversion withdrawal no longer records
+`operator withdrawal by <user>` when the reason is missing. Each endpoint
+responds:
+
+| Request | Status |
+| --- | --- |
+| `reason` is empty or whitespace only, or over 1,024 UTF-8 bytes | `400`, JSON `{"error": "invalid request: reason must contain text and be at most 1024 UTF-8 bytes"}` |
+| JSON body without `reason`, such as `{}` | `422` |
+| No body and no `Content-Type: application/json` | `415` |
+| Empty body with `Content-Type: application/json` | `400` |
+
+Update scripts and clients to send the header and a nonblank reason. Diversion
+withdrawal needs an administrator session cookie, as in
+[scrubber diversion](scrubber-diversion.md#preview-confirm-and-withdraw); the
+mitigation endpoints take the same body with an Operator bearer token:
+
+```bash
+curl -X POST "$PREFIXD_API/v1/diversions/$ID/withdraw" \
+  -H "Cookie: $PREFIXD_SESSION_COOKIE" \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"Attack ended; verified at the edge"}'
+```
+
+`prefixdctl mitigations withdraw` and `prefixdctl diversions withdraw` refuse a
+blank `--reason`, and `diversions withdraw` now requires one. An older
+`prefixdctl diversions withdraw ID` run without `--reason` sends `{}` and gets
+`422` from an upgraded controller; upgrade the CLI or pass `--reason`. Detector
+unbans withdraw inside the controller and are unaffected, and the bundled
+FastNetMon script already sends a reason.
+
 ---
 
 ## Docker Compose Upgrade

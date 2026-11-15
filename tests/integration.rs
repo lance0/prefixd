@@ -13416,6 +13416,7 @@ mod reason_and_bulk_validation {
     async fn reason_byte_boundaries_preserve_data_and_reject_without_mutation() {
         let reasons = [
             (String::new(), 0, true),
+            (" \t\n".into(), 3, true),
             ("a".repeat(1023), 1023, true),
             ("a".repeat(1024), 1024, true),
             (format!("{}a", "é".repeat(511)), 1023, true),
@@ -13442,9 +13443,17 @@ mod reason_and_bulk_validation {
                     "{operation}, {bytes} UTF-8 bytes, {} Unicode scalars",
                     reason.chars().count()
                 );
-                if !valid {
+                // A withdrawal must say why; creation and safelist reasons may be blank.
+                let withdrawal = matches!(operation, "single" | "bulk");
+                if !valid || (withdrawal && reason.trim().is_empty()) {
                     assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{context}");
-                    if operation == "manual" {
+                    if withdrawal {
+                        assert_eq!(
+                            body(response).await["error"],
+                            "invalid request: reason must contain text and be at most 1024 UTF-8 bytes",
+                            "{context}"
+                        );
+                    } else if operation == "manual" {
                         assert_eq!(
                             body(response).await["error"],
                             "invalid request: reason exceeds maximum length of 1024 bytes",
