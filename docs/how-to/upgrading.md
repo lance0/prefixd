@@ -363,6 +363,12 @@ connecting to the speaker.
   stays unconfirmed or the withdrawal stays pending with its original rule,
   actor, reason and operation ID. A process that lost the lock without seeing
   it can keep issuing RPCs for up to about 4 seconds plus one RPC deadline.
+- **Leased routes in standby.** A standby still renews the injection lease
+  and reads active intent on the reconciliation interval to bound that
+  renewal by the leased TTLs, so a failover keeps live leased routes live. A
+  standby that cannot read the database stops renewing at its bound and
+  reports `speaker.lease.state` as `standby`
+  ([leased TTLs](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls)).
 - **Crashed hosts.** PostgreSQL holds a crashed host's lock until it ends that
   session. The fence session sets server-side TCP keepalives (10 seconds idle,
   then three probes 5 seconds apart) to bound the delay; do not block them
@@ -881,6 +887,22 @@ blank `--reason`, and `diversions withdraw` now requires one. An older
 `422` from an upgraded controller; upgrade the CLI or pass `--reason`. Detector
 unbans withdraw inside the controller and are unaffected, and the bundled
 FastNetMon script already sends a reason.
+
+## Multi-step playbooks
+
+The controller runs only the first step of a playbook. Releases after 0.27.0
+ship `configs/playbooks.yaml` with one step per playbook, and startup, reload
+and `PUT /v1/config/playbooks` log a warning for each playbook with more than
+one step. Mitigation behavior is unchanged: a later step never ran.
+
+Compose installs copy the shipped playbooks into the `prefixd-config` volume
+only when the file is missing, so an existing volume keeps the file an earlier
+release installed. Its `udp_flood_police_first`, `syn_flood_police` and
+`ack_flood_police` playbooks each carry a second `discard` step, and the
+upgraded controller logs three warnings on every start and reload. To clear
+them, delete step 2 of each playbook in the dashboard playbook editor, or in
+`/etc/prefixd/playbooks.yaml` followed by a reload. Keep the first step as it
+is; it is the one that runs.
 
 ---
 

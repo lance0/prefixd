@@ -9,13 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
-- Upgrade every controller that shares a database together. The newer-schema
-  check starts with this release: a 0.27.0 or older controller has none and
-  runs against whatever schema it finds, so stop older controllers before the
-  first upgraded one starts. A release that adds a migration is one-way; roll
-  back by restoring the pre-upgrade backup, as
-  [database schema version and downgrade](docs/how-to/upgrading.md#database-schema-version-and-downgrade)
-  describes.
+- This release adds no migration: migration 020 is still the latest, as in
+  0.27.0, so a rolling replacement from 0.27.0, with the new controller started
+  in standby, is unaffected. From this release on, a controller refuses a
+  database that records a migration newer than it knows, but 0.27.0 and older
+  have no such check. A future release that adds a migration is one-way: its
+  upgrade notes state whether a rolling replacement is safe, and rolling it back
+  means restoring the pre-upgrade backup. See
+  [database schema version and downgrade](docs/how-to/upgrading.md#database-schema-version-and-downgrade).
+- The lease state adds `standby`. During a PostgreSQL outage the active
+  controller loses its fence within seconds, so once renewal stops at the TTL
+  bound it reports `standby` with `renewal_stopped: "ttl_bound"`, not
+  `expired`, even after rustbgpd has removed the routes, because another
+  controller could still be renewing the owner. `expired` at the bound appears
+  only when reads fail while the fence is still held. To detect an outage
+  stop, alert on `renewal_stopped` in health detail together with
+  `prefixd_controller_fence_active`, not on
+  `prefixd_injection_lease_state{state="expired"}` alone.
+- Mitigation behavior is unchanged, but Compose installs keep the
+  `playbooks.yaml` an earlier release copied into the `prefixd-config` volume,
+  so startup and reload now warn that `udp_flood_police_first`,
+  `syn_flood_police` and `ack_flood_police` have steps that are not executed.
+  To clear the warnings, delete step 2 of each in the dashboard playbook editor
+  or in `/etc/prefixd/playbooks.yaml`; see
+  [multi-step playbooks](docs/how-to/upgrading.md#multi-step-playbooks).
+
+### Known limitations
+
+- The TTL bound on lease renewal is owner-wide, because the rustbgpd lease is.
+  During a PostgreSQL outage every leased FlowSpec rule and leased blackhole of
+  a controller is renewed until the latest leased `expires_at` among them,
+  plus the margin, and lapses within one more lease. A 60-second rule next to
+  an 1800-second rule can stay installed for about 1800 seconds plus the
+  margin and one lease. Expiry withdraws it once the database returns.
+- The margin is `max(blackhole.lease_seconds,
+  timers.reconciliation_interval_seconds + blackhole.lease_seconds / 3)`, so a
+  reconciliation interval longer than the lease lengthens that tail by up to
+  one interval.
+- TTL expiry, reconciliation repair, the safety rechecks and the lease re-add
+  keep the durable speaker retry budget and hold the lifecycle mutex for one
+  rule at a time. Against a speaker that never answers, an interactive request
+  queued behind one of them can still wait for that rule's whole budget: about
+  90 seconds with GoBGP and about 30 seconds with rustbgpd. See the
+  [interactive speaker deadline](docs/reference/speaker-backends.md#interactive-speaker-deadline).
+- If an operator withdraws a rule within seconds of its timed-out add, the
+  delete can complete as not found before the speaker applies the late add,
+  leaving a local route with no live owner. A FlowSpec rule is reported as
+  unknown and never removed; a leased one is kept by this controller's own lease
+  renewal until renewal stops. A blackhole route that exactly matches the frozen
+  route of a withdrawn or expired enforced-origin row of this POP, with no live
+  row or pending withdrawal at its prefix, is withdrawn by the next
+  reconciliation pass; any other is reported as unknown.
+- A detector event that creates several rules admits them under one lock hold
+  and still makes one bounded attempt per rule, so a wedged speaker can hold
+  the lifecycle mutex for up to N × 3 seconds for an event with N rules.
 
 ### Changed
 
@@ -26,13 +73,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table locks, so queries queued behind its `ACCESS EXCLUSIVE` request wait a
   bounded time; a migration still blocked after 5 attempts with backoff, about
   20 seconds, rolls back and fails the start with its version, name and a
-  `pg_blocking_pids` query to find the blocker. A database that predates
+  `pg_locks` query to find the blocker. A database that predates
   version tracking replays migrations 1-3, whose statements are all
   `IF NOT EXISTS`. A database migrated by a newer release refuses to start
   rather than running an older binary against a newer schema.
+- Health detail `speaker.lease` adds `renew_until` and `renewal_stopped`, and
+  its `state`, like `prefixd_injection_lease_state`, adds `standby`. `expired`
+  also covers a renewal that stopped at the TTL bound one lease ago.
+- The shipped `configs/playbooks.yaml` gives every playbook one step. The three
+  police playbooks carried a later discard step with confidence and persistence
+  thresholds that the controller accepted and validated but never ran, so
+  `udp_flood_police_first` read as "discard after 120 s" while it policed at the
+  same rate for the whole attack. Each now has the single police step that
+  actually ran, with the same `rate_bps` and `ttl_seconds`. Startup, playbook
+  reload and `PUT /v1/config/playbooks` log a warning for every playbook with
+  more than one step, naming the playbook and stating that later steps are not
+  executed, and the dashboard playbook editor marks steps after the first as
+  not executed. Existing files with extra steps still load unchanged;
+  validation rules are unchanged.
+- `PUT /v1/config/playbooks` logs the unreachable `scope: prefix` playbook
+  warning that startup and reload already logged.
+- Requests that hold the lifecycle mutex make one speaker attempt bounded by a
+  fixed three-second deadline. A speaker that needs longer per mutation now gets
+  `202` with `"announcement_outcome": "unconfirmed"` on create, and withdrawal
+  returns the documented `500` while the delete stays pending. Reconciliation
+  completes both. See
+  [troubleshooting](docs/how-to/troubleshooting.md#create-returns-announcement_outcome-unconfirmed).
 
 ### Fixed
 
+- Leased FlowSpec rules and leased blackholes are no longer renewed
+  indefinitely during a PostgreSQL outage. Renewal stays independent of the
+  database and the fence, but it now stops one margin after the latest leased
+  `expires_at`, and rustbgpd removes the routes within one more lease. The
+  read at the start of every reconciliation pass sets that bound, and each
+  leased admission and TTL extension raises it at once, so a row added after
+  the last read keeps renewing until its own expiry. A refreshed bound renews
+  at once and never re-adds an expired row. A standby reads leased intent on
+  the reconciliation interval, so its renewal follows the same bound and a
+  failover keeps live leased routes live. A stop at the bound is reported as
+  `renewal_stopped: "ttl_bound"`, not as a failed renewal.
+- A speaker that accepts a connection and never answers no longer stalls the
+  controller for minutes. Admission, manual creation, operator withdrawal,
+  detector unban and safelist withdrawal hold the lifecycle mutex and now make
+  one bounded speaker attempt, including through the controller fence that
+  wraps every backend; reconciliation keeps the three-attempt, 30-second budget
+  and repairs the durable intent. A timed-out add returns an unconfirmed outcome
+  and a timed-out delete stays pending with its recorded actor, reason and
+  operation ID. The unleased blackhole admission pre-read shares the deadline
+  and refuses the admission when the read fails or does not answer. After one
+  failed delete, a safelist addition records the remaining withdrawals for
+  reconciliation instead of calling the speaker again.
+- A safelist withdrawal that reconciliation completes now counts in
+  `prefixd_mitigations_withdrawn_total` under `reason="safelisted"`, as an
+  immediate one does, instead of `operator`.
+- Completing a withdrawal reads its own pending request by operation ID instead
+  of loading every pending request to find one.
 - The release workflow stages its assets in `release-assets/` instead of
   `dist/`. The checkout tracks `dist/systemd/`, so the v0.27.0 run tagged the
   release and pushed both images but failed to create the GitHub Release when
