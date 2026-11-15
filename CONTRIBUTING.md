@@ -339,6 +339,20 @@ cargo install cargo-tarpaulin
 cargo tarpaulin --out Html
 ```
 
+### Mutation Testing
+
+`.cargo/mutants.toml` runs mutants against the library and the integration
+tests that need no container, through cargo-nextest. Mutate one file at a
+time and shard long files so each run stays bounded:
+
+```bash
+cargo install cargo-mutants cargo-nextest --locked
+cargo mutants -f src/bgp/guarded.rs --shard 0/2 --timeout 90
+```
+
+Docker-backed suites are outside this loop. A timeout or unviable mutant
+does not count as covered.
+
 ---
 
 ## Documentation
