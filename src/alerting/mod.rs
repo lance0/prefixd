@@ -2032,11 +2032,29 @@ mod tests {
             if !dropped.is_empty() {
                 return Err(format!("ignored keys {dropped:?}"));
             }
-            let errors: Vec<_> = config
-                .validate()
-                .into_iter()
-                .filter(|error| !error.ends_with("which is not set or empty"))
-                .collect();
+            // An unset variable stops validation of its destination, so check
+            // a copy with each `*_env` key replaced by an inline fixture.
+            let mut inline = serde_json::to_value(&config).unwrap();
+            for dest in inline["destinations"].as_array_mut().unwrap() {
+                let dest = dest.as_object_mut().unwrap();
+                let envs: Vec<String> = dest
+                    .keys()
+                    .filter(|key| key.ends_with("_env"))
+                    .cloned()
+                    .collect();
+                for env in envs {
+                    dest.remove(&env);
+                    let field = env.trim_end_matches("_env");
+                    let fixture = if field.ends_with("url") {
+                        "https://example.com/hook"
+                    } else {
+                        "fixture"
+                    };
+                    dest.insert(field.into(), fixture.into());
+                }
+            }
+            let inline: AlertingConfig = serde_json::from_value(inline).unwrap();
+            let errors = inline.validate();
             if errors.is_empty() {
                 Ok(true)
             } else {
@@ -2052,7 +2070,8 @@ mod tests {
         }
         assert!(alerting >= 10, "only {alerting} alerting examples found");
 
-        // Negative controls: a typo serde ignores, and a URL validation refuses.
+        // Negative controls: a typo serde ignores, a URL validation refuses,
+        // and a bad non-secret field beside an unset variable.
         assert!(
             check("destinations:\n  - type: slack\n    webhook_url_env: X\n    chanel: a\n")
                 .is_err()
@@ -2060,6 +2079,12 @@ mod tests {
         assert!(
             check("destinations:\n  - type: discord\n    webhook_url: http://example.com/h\n")
                 .is_err()
+        );
+        assert!(
+            check(
+                "destinations:\n  - type: opsgenie\n    api_key_env: UNSET_X\n    region: mars\n"
+            )
+            .is_err()
         );
     }
 

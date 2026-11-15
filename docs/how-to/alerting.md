@@ -239,13 +239,19 @@ working when that user leaves.
 1. Message [@BotFather](https://t.me/BotFather), send `/newbot` and follow the
    prompts. Copy the bot token, which looks like `123456789:AA...`; see
    Telegram's [bot tutorial](https://core.telegram.org/bots/tutorial).
-2. Add the bot to the group, or as an administrator to the channel, and send a
-   message there. Bots cannot start a conversation.
+2. Add the bot to the group, or as an administrator to the channel. Bots
+   cannot start a conversation. In a group, send a command addressed to the
+   bot, such as `/start@your_bot_username`: by default a bot in a group sees
+   only commands and replies; see Telegram's
+   [bot FAQ](https://core.telegram.org/bots/faq#what-messages-will-my-bot-get).
+   In a channel, post any message.
 3. Find the chat ID with the Bot API's
    [`getUpdates`](https://core.telegram.org/bots/api#getupdates). Group and
-   channel IDs are negative, often starting with `-100`:
+   channel IDs are negative, often starting with `-100`. Enter the token at the
+   hidden prompt, since `.env` does not set shell variables:
 
    ```bash
+   read -rs TELEGRAM_BOT_TOKEN
    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates" |
      jq '.result[] | (.message // .channel_post).chat | {id, title}'
    ```
@@ -391,9 +397,10 @@ Filters also accept `config.reloaded` and `guardrail.rejected`, and the editor
 offers them, but prefixd sends no alert for either today. `mitigation.escalated`
 is accepted so older files still load; it is never sent.
 
-A destination with its own `events` list receives only those events. A
-destination without one uses the top-level `events` list, and an empty or absent
-top-level list means every event. For example, page only on new mitigations and
+A destination with a nonempty `events` list receives only those events. A
+destination whose list is absent or empty, including `events: []`, uses the
+top-level `events` list, and an empty or absent top-level list means every
+event. Emptying a destination's list does not silence it. For example, page only on new mitigations and
 send everything to chat:
 
 ```yaml
@@ -576,9 +583,10 @@ so the platform's own error text is in it.
 
 ### Rate limits
 
-Platforms throttle webhooks. Microsoft documents throttling above four requests
-per second to a Teams workflow, and Slack, Discord and Telegram apply their own
-limits. An attack wave that creates many mitigations sends one alert per
+Platforms throttle webhooks. Teams Workflows limits follow the workflow's
+Power Automate performance profile; see the
+[Teams connector limits](https://learn.microsoft.com/en-us/connectors/teams/).
+Slack, Discord and Telegram apply their own limits. An attack wave that creates many mitigations sends one alert per
 mitigation to each destination. A throttled post counts as a failure and is
 retried as described under [current limits](#current-limits). To cut volume, send only `mitigation.created` to
 busy chat channels, or point busy events at a generic webhook that aggregates.
