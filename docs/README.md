@@ -27,6 +27,7 @@ covers the daemon.
 | Connect FastNetMon | [FastNetMon](how-to/detectors/fastnetmon.md) |
 | Connect a detector without a native adapter | [Generic webhooks](how-to/detectors/generic-webhook.md) |
 | Add supporting telemetry to correlation | [Corroborating signals](how-to/detectors/corroborating-signals.md) |
+| Post mitigations to Slack, Discord, Teams, Telegram, PagerDuty or Opsgenie | [Alerting](how-to/alerting.md) |
 | Deploy beyond the local stack | [Deployment](how-to/deployment.md) |
 | Change speaker, POP or version safely | [Upgrading and rollback](how-to/upgrading.md) |
 | Find why a mitigation didn't reach the router | [Troubleshooting](how-to/troubleshooting.md) |
@@ -64,6 +65,7 @@ Follow a procedure for a specific task.
 | [Upgrading and rollback](how-to/upgrading.md) | Back up state and apply version-specific upgrade procedures. |
 | [Troubleshooting](how-to/troubleshooting.md) | Diagnose API, mitigation and BGP problems. |
 | [Grafana and monitoring](how-to/grafana.md) | Set up dashboards and investigate operational metrics. |
+| [Alerting](how-to/alerting.md) | Send mitigation alerts to chat, paging or a webhook, and test delivery. |
 | [FastNetMon](how-to/detectors/fastnetmon.md) | Connect the detector notify script. |
 | [Generic webhooks](how-to/detectors/generic-webhook.md) | Map detector payloads into attack events. |
 | [Corroborating signals](how-to/detectors/corroborating-signals.md) | Add supporting telemetry to signal correlation. |

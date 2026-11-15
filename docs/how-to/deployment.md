@@ -706,6 +706,9 @@ drops privileges, so it can stay root-only:
 PREFIXD_API_TOKEN=your-secret-token
 ```
 
+Alert destination variables named by `*_env` keys go in the same file; see
+[alerting](alerting.md#pass-variables-with-systemd).
+
 ```bash
 sudo chown root:root /etc/default/prefixd
 sudo chmod 0600 /etc/default/prefixd
@@ -1046,6 +1049,7 @@ curl -v http://localhost/v1/health 2>&1 | grep x-request-id
 
 - [ ] Prometheus scraping metrics
 - [ ] Alerting rules configured
+- [ ] [Alert destinations](alerting.md) configured and a test alert received
 - [ ] Dashboard for visibility
 - [ ] BGP session monitoring
 

@@ -1402,6 +1402,9 @@ playbooks:
 
 ## Alert destination secrets
 
+For per-platform setup, event routing and test alerts, see the
+[alerting guide](../how-to/alerting.md).
+
 Each alert secret is given inline or through its `*_env` key, which names an
 environment variable. Set one or the other, not both.
 

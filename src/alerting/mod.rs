@@ -1976,6 +1976,118 @@ mod tests {
         );
     }
 
+    /// Source keys the loaded config does not serialize back, such as a typo
+    /// that serde ignores.
+    fn dropped_keys(source: &serde_json::Value, loaded: &serde_json::Value) -> Vec<String> {
+        match (source, loaded) {
+            (serde_json::Value::Object(source), serde_json::Value::Object(loaded)) => source
+                .iter()
+                .flat_map(|(key, value)| match loaded.get(key) {
+                    Some(loaded) => dropped_keys(value, loaded),
+                    None => vec![key.clone()],
+                })
+                .collect(),
+            (serde_json::Value::Array(source), serde_json::Value::Array(loaded)) => source
+                .iter()
+                .zip(loaded)
+                .flat_map(|(source, loaded)| dropped_keys(source, loaded))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Every YAML block in the alerting guide parses. Each `destinations`
+    /// example loads with no ignored key and fails validation only because the
+    /// variables it names are unset here.
+    #[test]
+    fn alerting_guide_examples_load() {
+        let guide = include_str!("../../docs/how-to/alerting.md");
+        let blocks: Vec<String> = guide
+            .split("```yaml\n")
+            .skip(1)
+            .map(|rest| {
+                let block = rest.split("```").next().unwrap();
+                let indent = block
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|line| line.len() - line.trim_start().len())
+                    .min()
+                    .unwrap_or(0);
+                block
+                    .lines()
+                    .map(|line| line.get(indent..).unwrap_or(""))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect();
+        let check = |yaml: &str| -> Result<bool, String> {
+            let source: serde_json::Value =
+                crate::config::parse_yaml(yaml).map_err(|e| e.to_string())?;
+            if source.get("destinations").is_none() {
+                return Ok(false);
+            }
+            let config: AlertingConfig =
+                crate::config::parse_secret_yaml(yaml).map_err(|e| e.to_string())?;
+            let dropped = dropped_keys(&source, &serde_json::to_value(&config).unwrap());
+            if !dropped.is_empty() {
+                return Err(format!("ignored keys {dropped:?}"));
+            }
+            // An unset variable stops validation of its destination, so check
+            // a copy with each `*_env` key replaced by an inline fixture.
+            let mut inline = serde_json::to_value(&config).unwrap();
+            for dest in inline["destinations"].as_array_mut().unwrap() {
+                let dest = dest.as_object_mut().unwrap();
+                let envs: Vec<String> = dest
+                    .keys()
+                    .filter(|key| key.ends_with("_env"))
+                    .cloned()
+                    .collect();
+                for env in envs {
+                    dest.remove(&env);
+                    let field = env.trim_end_matches("_env");
+                    let fixture = if field.ends_with("url") {
+                        "https://example.com/hook"
+                    } else {
+                        "fixture"
+                    };
+                    dest.insert(field.into(), fixture.into());
+                }
+            }
+            let inline: AlertingConfig = serde_json::from_value(inline).unwrap();
+            let errors = inline.validate();
+            if errors.is_empty() {
+                Ok(true)
+            } else {
+                Err(errors.join("; "))
+            }
+        };
+        let mut alerting = 0;
+        for block in &blocks {
+            match check(block) {
+                Ok(is_alerting) => alerting += usize::from(is_alerting),
+                Err(error) => panic!("{error} in guide example:\n{block}"),
+            }
+        }
+        assert!(alerting >= 10, "only {alerting} alerting examples found");
+
+        // Negative controls: a typo serde ignores, a URL validation refuses,
+        // and a bad non-secret field beside an unset variable.
+        assert!(
+            check("destinations:\n  - type: slack\n    webhook_url_env: X\n    chanel: a\n")
+                .is_err()
+        );
+        assert!(
+            check("destinations:\n  - type: discord\n    webhook_url: http://example.com/h\n")
+                .is_err()
+        );
+        assert!(
+            check(
+                "destinations:\n  - type: opsgenie\n    api_key_env: UNSET_X\n    region: mars\n"
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn placeholder_values_are_refused_by_load_and_validate() {
         let yaml =

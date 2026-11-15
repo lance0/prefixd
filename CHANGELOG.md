@@ -84,6 +84,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An [alerting guide](docs/how-to/alerting.md) covers Slack, Discord, Teams,
+  Telegram, PagerDuty, Opsgenie and generic webhook destinations: platform
+  setup, `*_env` secrets for Compose and systemd, the dashboard editor,
+  per-destination events, test alerts, message formats, troubleshooting and
+  current limits. The README and documentation index link to it, and a unit
+  test loads every example in it.
 - `prefixd_http_rate_limited_total{class}` counts requests rejected with 429,
   by request class.
 - The `POST /v1/config/reload` response adds `restart_required`, the dotted
