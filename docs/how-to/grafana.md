@@ -97,7 +97,7 @@ scrape_configs:
 ### Availability alerts
 
 [`grafana/prometheus-alerts.yml`](../../grafana/prometheus-alerts.yml) ships
-availability, [export](#export-alerts) and
+availability, [export](#export-alerts), [lease](#lease-alerts) and
 [replacement-conflict](#replacement-conflict-alert) rules, loaded by the Compose
 Prometheus through `rule_files` in
 `grafana/prometheus.yml`. They expect the scrape job to be named `prefixd`.
@@ -125,6 +125,59 @@ docker run --rm -v "$PWD/grafana:/rules:ro" --entrypoint promtool \
 docker run --rm -v "$PWD/grafana:/rules:ro" --entrypoint promtool \
   prom/prometheus:v3.15.0 test rules /rules/prometheus-alerts.test.yml
 ```
+
+### Lease alerts
+
+The `prefixd-lease` group reports mitigations the speaker removes with the
+injection lease ([ADR 027](../adr/027-blackhole-mitigations.md#owner-and-lease)),
+so it applies to deployments with leased blackholes or leased FlowSpec. It does
+not replace `PrefixdDown`; it says whether an outage or a failed renewal is
+dropping active mitigations.
+
+| Alert | Fires when | Why it matters |
+| --- | --- | --- |
+| `PrefixdLeasedMitigationsWhileDown` | Every scraped `prefixd` is down for 2 minutes, and `prefixd_leased_mitigations_active` was above zero for a POP at the last moment a controller held the fence (within 3 days) | Nothing renews that injection lease, and the speaker removes every route the owner added within one lease (`blackhole.lease_seconds`, 60 s by default) |
+| `PrefixdLeaseNotRenewing` | `prefixd_injection_lease_state` is `renewal_failing` or `expired` for 1 minute while `prefixd_leased_mitigations_active` is above zero | Renewal failed or the lease lapsed; the speaker removes the owner's routes within one lease unless renewal resumes |
+
+Both gauges count desired leased intent from the last successful reconciliation
+read, not speaker acceptance or router enforcement.
+`prefixd_leased_mitigations_active` has only the `pop` label and reads zero when
+only unleased rules exist, so a deployment without leased intent cannot fire
+either alert. `PrefixdLeasedMitigationsWhileDown` keeps firing through a long
+outage instead of resolving five minutes in: it compares the last positive
+sample with the last scrape where a controller held its fence, rather than
+looking back over a fixed window. It does not fire for a standby process, which
+keeps renewing its adopted lease without the fence until the leased TTLs run
+out. A lease that stops at that TTL bound ends as `expired`, so
+`PrefixdLeaseNotRenewing` reports a database outage only once the speaker has
+removed the routes.
+
+**Operator response.** These routes come back only through prefixd; the
+speaker holds no record of why they were announced.
+
+1. Restart prefixd where the alert says it is down. Its first reconciliation
+   re-adds the leased intent the database still desires, under a fresh lease.
+2. If it refuses to start, read the refusal in the log before changing
+   configuration. Startup refuses leased blackholes while `blackhole.enabled`
+   or `blackhole.leased` is off, refuses leased FlowSpec while
+   `bgp.rustbgpd.leased_flowspec` is off, and refuses routes the speaker holds
+   under this owner that the ledger neither desires nor is withdrawing. While
+   startup is refused nothing renews, so the speaker drops the leased routes
+   within one lease. See
+   [leased blackholes](../reference/configuration.md#leased-blackholes) and
+   [leased FlowSpec](../reference/configuration.md#leased-flowspec).
+3. For `PrefixdLeaseNotRenewing` with prefixd still up, check the speaker
+   connection and rustbgpd health. Renewal uses the same gRPC channel as
+   announcements, so a failing channel also stops repairs. `renewal_failing`
+   clears when a renewal succeeds; after `expired`, the next successful
+   reconciliation pass re-adds the missing leased rules. Authenticated health
+   reports `speaker.lease` with the last renewal result, `renew_until` and
+   `renewal_stopped`; `renewal_stopped: "ttl_bound"` means a database outage,
+   not a speaker fault.
+4. Do not re-announce the routes by hand as a substitute. A hand-added route is
+   not leased, is not in prefixd's intent, and startup ownership checks may
+   refuse it or reconciliation may replace it. Check
+   `prefixd_unknown_local_routes` if someone did.
 
 ### Export alerts
 

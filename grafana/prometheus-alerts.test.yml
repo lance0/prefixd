@@ -281,3 +281,157 @@ tests:
             value: 0.5
           - labels: '{backend="gobgp"}'
             value: 0.5
+
+  # Leased intent at the last active scrape, then every target goes down: the
+  # down alert fires and keeps firing through a long outage, using the
+  # timestamp comparison rather than a bounded last_over_time window.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x10 0x120'
+      - series: 'prefixd_controller_fence_active{job="prefixd",instance="a"}'
+        values: '1x10 stale'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="a",pop="pop-a"}'
+        values: '2x10 stale'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PrefixdLeasedMitigationsWhileDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: prefixd, pop: pop-a}
+            exp_annotations:
+              summary: "Leased mitigations are being removed while prefixd is down"
+              description: "Every scraped prefixd for this job is down after reporting leased mitigations; its last active scrape showed leased intent for POP pop-a. Nothing renews that injection lease now, and the speaker removes every route under it within one lease (blackhole.lease_seconds, 60 s by default) of the last renewal, so those mitigations are gone mid-attack or about to be. Restart prefixd: its first reconciliation re-adds the leased intent the database still desires. The gauge counts desired leased intent, not speaker acceptance or router enforcement."
+      - eval_time: 120m
+        alertname: PrefixdLeasedMitigationsWhileDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: prefixd, pop: pop-a}
+            exp_annotations:
+              summary: "Leased mitigations are being removed while prefixd is down"
+              description: "Every scraped prefixd for this job is down after reporting leased mitigations; its last active scrape showed leased intent for POP pop-a. Nothing renews that injection lease now, and the speaker removes every route under it within one lease (blackhole.lease_seconds, 60 s by default) of the last renewal, so those mitigations are gone mid-attack or about to be. Restart prefixd: its first reconciliation re-adds the leased intent the database still desires. The gauge counts desired leased intent, not speaker acceptance or router enforcement."
+      - eval_time: 20m
+        alertname: PrefixdLeaseNotRenewing
+        exp_alerts: []
+  # The leased set ended before the outage: nothing is being removed with the
+  # lease, so the down alert stays quiet even though the target is down.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x10 0x20'
+      - series: 'prefixd_controller_fence_active{job="prefixd",instance="a"}'
+        values: '1x10 stale'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="a",pop="pop-a"}'
+        values: '2x4 0x6 stale'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PrefixdLeasedMitigationsWhileDown
+        exp_alerts: []
+  # Only unleased rules exist, and the lease reports expired: neither alert
+  # fires, because unleased routes outlive a stopped controller.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x10 0x20'
+      - series: 'prefixd_controller_fence_active{job="prefixd",instance="a"}'
+        values: '1x10 stale'
+      - series: 'prefixd_mitigations_active{job="prefixd",instance="a",action_type="discard",pop="pop-a"}'
+        values: '3x30'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="a",pop="pop-a"}'
+        values: '0x10 stale'
+      - series: 'prefixd_injection_lease_state{job="prefixd",instance="a",state="expired"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PrefixdLeasedMitigationsWhileDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PrefixdLeaseNotRenewing
+        exp_alerts: []
+  # Up, active and holding leased intent: nothing fires.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x30'
+      - series: 'prefixd_controller_fence_active{job="prefixd",instance="a"}'
+        values: '1x30'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="a",pop="pop-a"}'
+        values: '2x30'
+      - series: 'prefixd_injection_lease_state{job="prefixd",instance="a",state="live"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PrefixdLeasedMitigationsWhileDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PrefixdLeaseNotRenewing
+        exp_alerts: []
+  # Renewal failing with leased intent active fires once the failure outlasts
+  # the one-minute hold; the same state while live does not.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x30'
+      - series: 'prefixd_controller_fence_active{job="prefixd",instance="a"}'
+        values: '1x30'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="a",pop="pop-a"}'
+        values: '2x30'
+      - series: 'prefixd_injection_lease_state{job="prefixd",instance="a",state="live"}'
+        values: '1x5 0x25'
+      - series: 'prefixd_injection_lease_state{job="prefixd",instance="a",state="renewal_failing"}'
+        values: '0x5 1x25'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PrefixdLeaseNotRenewing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: PrefixdLeaseNotRenewing
+        exp_alerts:
+          - exp_labels: {severity: critical, job: prefixd, instance: a, pop: pop-a, state: renewal_failing}
+            exp_annotations:
+              summary: "Lease renewal is failing with leased mitigations active"
+              description: "prefixd on a reports injection lease state renewal_failing at POP pop-a while 2 leased mitigation(s) are active. The speaker removes every route this owner added within one lease (blackhole.lease_seconds, 60 s by default) of the last successful renewal, so those mitigations lapse within one lease unless renewal resumes; once the state is expired, the speaker has already dropped them. Check the speaker connection and rustbgpd health; health detail reports speaker.lease with renew_until and renewal_stopped."
+      - eval_time: 10m
+        alertname: PrefixdLeasedMitigationsWhileDown
+        exp_alerts: []
+  # An expired lease with leased intent fires the lease-state alert.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x30'
+      - series: 'prefixd_controller_fence_active{job="prefixd",instance="a"}'
+        values: '1x30'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="a",pop="pop-a"}'
+        values: '1x30'
+      - series: 'prefixd_injection_lease_state{job="prefixd",instance="a",state="live"}'
+        values: '1x20 0x10'
+      - series: 'prefixd_injection_lease_state{job="prefixd",instance="a",state="expired"}'
+        values: '0x20 1x10'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: PrefixdLeaseNotRenewing
+        exp_alerts:
+          - exp_labels: {severity: critical, job: prefixd, instance: a, pop: pop-a, state: expired}
+            exp_annotations:
+              summary: "Lease renewal is failing with leased mitigations active"
+              description: "prefixd on a reports injection lease state expired at POP pop-a while 1 leased mitigation(s) are active. The speaker removes every route this owner added within one lease (blackhole.lease_seconds, 60 s by default) of the last successful renewal, so those mitigations lapse within one lease unless renewal resumes; once the state is expired, the speaker has already dropped them. Check the speaker connection and rustbgpd health; health detail reports speaker.lease with renew_until and renewal_stopped."
+      - eval_time: 15m
+        alertname: PrefixdLeaseNotRenewing
+        exp_alerts: []
+  # Renewal failing with no leased intent: the speaker holds no route of this
+  # owner's, so nothing is removed and neither alert fires.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x30'
+      - series: 'prefixd_controller_fence_active{job="prefixd",instance="a"}'
+        values: '1x30'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="a",pop="pop-a"}'
+        values: '0x30'
+      - series: 'prefixd_injection_lease_state{job="prefixd",instance="a",state="renewal_failing"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PrefixdLeaseNotRenewing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PrefixdLeasedMitigationsWhileDown
+        exp_alerts: []

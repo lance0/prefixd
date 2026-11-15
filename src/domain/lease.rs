@@ -458,6 +458,14 @@ pub fn leased_expiry(mitigations: &[Mitigation], owner: &str) -> Option<DateTime
         .max()
 }
 
+/// True when the row's route was added under an injection owner, so the
+/// speaker removes it within one lease if that owner stops renewing. Counts
+/// FlowSpec rules by `injection_owner` and blackholes by their frozen route's
+/// `owner`.
+pub fn is_leased(mitigation: &Mitigation) -> bool {
+    recorded_owner(mitigation).is_some()
+}
+
 /// The injection owner a row's route was added under; `None` when unleased.
 fn recorded_owner(mitigation: &Mitigation) -> Option<&str> {
     let owner = match mitigation.action_type {

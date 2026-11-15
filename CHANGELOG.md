@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- An outage or failed lease renewal that drops leased mitigations is now
+  visible: `prefixd_leased_mitigations_active{pop}` counts active intent the
+  speaker holds under an injection owner, from the last reconciliation read,
+  and two shipped rules use it. `PrefixdLeasedMitigationsWhileDown` fires when
+  every target is down with leased intent present at the last active scrape,
+  and `PrefixdLeaseNotRenewing` fires on a `renewal_failing` or `expired`
+  lease with leased intent active; both state that the speaker removes those
+  routes within one lease (`blackhole.lease_seconds`, 60 s by default).
+  Deployments with only unleased rules report zero and alert nothing.
+
 ### Fixed
 
 - Leased FlowSpec rules and leased blackholes no longer outlive their TTL

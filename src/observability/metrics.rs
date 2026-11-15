@@ -254,6 +254,20 @@ pub static INJECTION_LEASE_STATE: Lazy<GaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Active desired intent the speaker holds under an injection owner, by
+/// configured POP (ADR 027). The speaker removes these routes within one lease
+/// once renewal stops, so a controller outage longer than the lease drops them
+/// mid-attack. This counts database intent, not speaker acceptance or router
+/// enforcement.
+pub static LEASED_MITIGATIONS_ACTIVE: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_leased_mitigations_active",
+        "Active desired mitigations added under an injection owner, by POP; the speaker removes them within one lease once renewal stops. Not speaker acceptance or router enforcement",
+        &["pop"]
+    )
+    .unwrap()
+});
+
 /// Established-peer export dispositions summed over active enforced blackholes,
 /// from the last reconciliation pass. Committed is Adj-RIB-Out, not enforcement.
 pub static BLACKHOLE_EXPORT_PEERS: Lazy<GaugeVec> = Lazy::new(|| {
@@ -614,6 +628,7 @@ pub fn init_metrics(pop: &str) {
     for state in crate::domain::LeaseState::ALL {
         INJECTION_LEASE_STATE.with_label_values(&[state.as_str()]);
     }
+    LEASED_MITIGATIONS_ACTIVE.with_label_values(&[pop]);
     for disposition in crate::bgp::ExportDisposition::ALL {
         BLACKHOLE_EXPORT_PEERS.with_label_values(&[disposition.as_str()]);
         FLOWSPEC_EXPORT_PEERS.with_label_values(&[disposition.as_str()]);

@@ -59,6 +59,75 @@ groups:
             withdraw in prefixd once it returns, or reconciliation re-announces
             blackholes whose TTL has not passed.
 
+  # Leased intent (ADR 027): the speaker removes every route the controller
+  # added under its injection lease within one lease of renewal stopping, so an
+  # outage or startup refusal longer than the lease drops active mitigations
+  # mid-attack. These rules separate that from an outage that dropped nothing:
+  # the first compares the last time the leased gauge was positive with the
+  # last time a controller was active, so it keeps firing through a long
+  # outage instead of resolving when the gauge leaves the lookback window, the
+  # same reason PrefixdBlackholesWhileDegraded compares timestamps. The
+  # subquery steps at 1m, not 5m, because a 5m step would both miss a leased
+  # set that ended shortly before the outage and quantize the comparison to
+  # its own grid; the 60-second tolerance covers a pass that landed just
+  # before the last scrape. The gauge counts leased database intent, not
+  # routes the router enforces. Unleased rules never set it, so a deployment
+  # without leased intent cannot fire.
+  #
+  # Only a down target stops renewal this way. A standby process still renews
+  # its adopted lease (renewal is deliberately unfenced), and renewal that
+  # fails or lapses is PrefixdLeaseNotRenewing's job.
+  - name: prefixd-lease
+    rules:
+      - alert: PrefixdLeasedMitigationsWhileDown
+        expr: |
+          (
+            last_over_time((timestamp(max by (job, pop) (prefixd_leased_mitigations_active > 0)))[3d:1m])
+            >= on (job) group_left
+            last_over_time((timestamp(max by (job) (prefixd_controller_fence_active == 1)))[3d:1m]) - 60
+          )
+          and on (job)
+          (max by (job) (up{job="prefixd"}) == 0)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Leased mitigations are being removed while prefixd is down"
+          description: >-
+            Every scraped prefixd for this job is down after reporting leased
+            mitigations; its last active scrape showed leased intent for POP
+            {{ $labels.pop }}. Nothing renews that injection lease now, and
+            the speaker removes every route under it within one lease
+            (blackhole.lease_seconds, 60 s by default) of the last renewal, so
+            those mitigations are gone mid-attack or about to be. Restart
+            prefixd: its first reconciliation re-adds the leased intent the
+            database still desires. The gauge counts desired leased intent,
+            not speaker acceptance or router enforcement.
+
+      # renewal_failing covers the state that still allows rescue; expired
+      # means the speaker has already dropped the owner's routes.
+      - alert: PrefixdLeaseNotRenewing
+        expr: |
+          (last_over_time(prefixd_leased_mitigations_active[5m]) > 0)
+          * on (job, instance) group_left (state)
+          (prefixd_injection_lease_state{state=~"renewal_failing|expired"} == 1)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Lease renewal is failing with leased mitigations active"
+          description: >-
+            prefixd on {{ $labels.instance }} reports injection lease state
+            {{ $labels.state }} at POP {{ $labels.pop }} while
+            {{ $value }} leased mitigation(s) are active. The speaker removes
+            every route this owner added within one lease
+            (blackhole.lease_seconds, 60 s by default) of the last successful
+            renewal, so those mitigations lapse within one lease unless
+            renewal resumes; once the state is expired, the speaker has
+            already dropped them. Check the speaker connection and rustbgpd
+            health; health detail reports speaker.lease with renew_until and
+            renewal_stopped.
+
   # Export evidence (rustbgpd only): committed means the route is in a peer's
   # Adj-RIB-Out, so this rule detects missing export and never proves
   # enforcement. See docs/reference/speaker-backends.md#export-evidence.

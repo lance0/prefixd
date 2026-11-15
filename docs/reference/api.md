@@ -3436,6 +3436,17 @@ current state (`none`, `live`, `renewal_failing`, `expired` or
 the others, matching health detail's `speaker.lease.state` after each
 renewal. Both series exist with zero values in every deployment.
 
+`prefixd_leased_mitigations_active{pop}` counts active desired intent held
+under an injection owner, from the last successful active-intent read in
+reconciliation: FlowSpec rules with a recorded `injection_owner` plus
+blackholes whose frozen route carries an `owner`. Unleased rows, pending rows
+and dry-run rows are excluded, and a POP with none reports zero. The speaker
+removes exactly these routes within one lease of renewal stopping, so the gauge
+is the blast radius of a controller outage, a startup refusal or a failed
+renewal. It is desired intent only: it does not prove speaker acceptance,
+export or router enforcement. The shipped
+[lease alerts](../how-to/grafana.md#lease-alerts) use it.
+
 Series labelled `action_type` (`prefixd_mitigations_active`,
 `prefixd_mitigations_created_total`, `prefixd_mitigations_expired_total` and
 `prefixd_mitigations_withdrawn_total`) use `blackhole` for blackholes. Blackhole

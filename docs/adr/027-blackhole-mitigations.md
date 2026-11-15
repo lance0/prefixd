@@ -45,10 +45,10 @@ startup refuses outstanding leased intent when either `blackhole.enabled` or
 Two decisions on review, 2026-10-20: renewal is not gated by the controller
 fence, so a database outage that forces standby cannot drop leased routes
 (renewal only extends what the owner holds, and a second process renewing the
-same owner is harmless; adds, deletes and re-adds stay fenced), which
-supersedes "standby never renews" below; and a dry-run controller never
-renews, so switching an enforced leased controller to dry-run lets its leased
-routes lapse within one lease.
+same owner is harmless; adds, deletes and re-adds stay fenced), which replaced
+the draft's "standby never renews" claim; and a dry-run controller
+never renews, so switching an enforced leased controller to dry-run lets its
+leased routes lapse within one lease.
 
 Status note 2026-11-15 (TTL bound): unfenced renewal is bounded by the leased
 routes' TTLs, so an outage cannot renew them past every TTL. The keeper stops
@@ -570,10 +570,12 @@ enabled. The owner name is derived as above in every deployment.
   connection must be direct or use a session-mode pooler, and the deployment
   documentation must say so.
 - **Standby.** Without the lock, the controller runs no scheduler, expiry,
-  reconciliation, announcement, withdrawal or lease renewal, and refuses
-  mutation requests with `503`. Public liveness stays up, and authenticated
-  operational health reports `standby` with a fence-state metric. Standby
-  retries `pg_try_advisory_lock` every 5 seconds rather than blocking in
+  reconciliation, announcement or withdrawal, and refuses mutation requests
+  with `503`. The one speaker mutation it may still send is a `RenewLease` for
+  a lease it adopted (see Lease interaction); lease probes and read-back stay
+  available. Public liveness stays up, and authenticated operational health
+  reports `standby` with a fence-state metric. Standby retries
+  `pg_try_advisory_lock` every 5 seconds rather than blocking in
   `pg_advisory_lock`, so it stays observable and responsive to shutdown.
 - **Losing the lock.** A failed fence check, a dropped fence connection or a
   database restart means the lock may be gone. The controller stops starting
@@ -593,8 +595,16 @@ enabled. The owner name is derived as above in every deployment.
 - **Lease interaction.** A restarted process that takes the lock adopts the
   existing lease under the same owner. It learns the generation from
   `ListInjectionLeases(owner)` or its first leased add, so restarts and
-  deploys have no lease-length gap. Standby never renews, so a lease outlives
-  a fenced-out process only until its deadline.
+  deploys have no lease-length gap. Renewal is deliberately not fenced: a
+  process in standby keeps renewing the lease it adopted, so a database
+  outage that forces standby does not drop leased routes. Renewal only
+  extends what the owner already holds, and a second process renewing the
+  same owner is harmless, while adds, deletes and re-adds stay behind the
+  fence. A lease therefore outlives a fenced-out process that is still
+  running and keeps renewing; it lapses from its deadline only when no
+  process renews it, or earlier when the
+  [TTL bound](003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls)
+  stops an outage from outliving every TTL.
 - **Startup check stays.** Startup still refuses when the speaker holds
   routes under this owner that the ledger neither desires nor is withdrawing.
   It is the only check for two controllers with separate databases, which the

@@ -658,8 +658,17 @@ impl ReconciliationLoop {
             // A scoped loop always reports its POP, including zero; an
             // unscoped loop reports each mitigation POP it saw.
             let mut by_pop: HashMap<&str, f64> = pop.map(|pop| (pop, 0.0)).into_iter().collect();
+            // Leased intent: rows whose route the speaker removes within one
+            // lease if this owner stops renewing. Desired intent, not
+            // acceptance or enforcement; dry-run rows were never announced
+            // and rows without an owner were never leased.
+            let mut leased_by_pop: HashMap<&str, f64> =
+                pop.map(|pop| (pop, 0.0)).into_iter().collect();
             let mut flowspec_families = [0.0; 4];
             for m in &active {
+                if !m.is_dry_run_origin() && crate::domain::is_leased(m) {
+                    *leased_by_pop.entry(m.pop.as_str()).or_default() += 1.0;
+                }
                 if m.action_type != ActionType::Blackhole {
                     let nlri = crate::domain::FlowSpecNlri::from(&m.match_criteria);
                     let family = match (nlri.scope.is_some(), nlri.ip_version()) {
@@ -700,6 +709,12 @@ impl ReconciliationLoop {
             for ((action_type, pop), count) in &counts {
                 crate::observability::metrics::MITIGATIONS_ACTIVE
                     .with_label_values(&[action_type, pop])
+                    .set(*count);
+            }
+            crate::observability::metrics::LEASED_MITIGATIONS_ACTIVE.reset();
+            for (pop, count) in &leased_by_pop {
+                crate::observability::metrics::LEASED_MITIGATIONS_ACTIVE
+                    .with_label_values(&[pop])
                     .set(*count);
             }
         }
@@ -5493,6 +5508,64 @@ mod tests {
         }
         reconciler.reconcile().await.unwrap();
         assert_eq!(lease.health().renew_until, Some(blackhole.expires_at));
+    }
+
+    /// The leased-intent gauge counts committed intent the speaker removes
+    /// with the lease: leased FlowSpec and leased blackholes, not unleased or
+    /// dry-run rows. It is desired intent, not enforcement.
+    #[tokio::test]
+    async fn leased_intent_gauge_counts_committed_leased_rows_by_pop() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FaultyBlackholes::default());
+        let lease = Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60));
+        let reconciler = leased_reconciler(repo.clone(), speaker, lease);
+        let gauge = || {
+            crate::observability::metrics::LEASED_MITIGATIONS_ACTIVE
+                .with_label_values(&["test"])
+                .get()
+        };
+        crate::observability::metrics::LEASED_MITIGATIONS_ACTIVE
+            .with_label_values(&["test"])
+            .set(9.0);
+        let rule = leased_rule_row("192.0.2.10/32");
+        let blackhole = leased_row("192.0.2.1");
+        let unleased = action_mitigation("192.0.2.11/32", FlowSpecAction::discard());
+        let mut dry_run = leased_rule_row("192.0.2.12/32");
+        dry_run.origin_mode = Some(crate::config::OperationMode::DryRun);
+        let mut pending = leased_rule_row("192.0.2.13/32");
+        pending.status = MitigationStatus::Pending;
+        for mitigation in [&rule, &blackhole, &unleased, &dry_run, &pending] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(gauge(), 2.0);
+    }
+
+    /// A pass that sees only unleased intent clears the previous count, so the
+    /// shipped alerts cannot fire for mitigations the speaker will keep.
+    #[tokio::test]
+    async fn leased_intent_gauge_returns_to_zero_without_leased_rows() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker: Arc<dyn FlowSpecAnnouncer> = Arc::new(MockAnnouncer::new());
+        let reconciler = blackhole_reconciler(repo.clone(), speaker, live_config(), false);
+        repo.insert_mitigation(&action_mitigation(
+            "192.0.2.20/32",
+            FlowSpecAction::discard(),
+        ))
+        .await
+        .unwrap();
+        crate::observability::metrics::LEASED_MITIGATIONS_ACTIVE
+            .with_label_values(&["test"])
+            .set(4.0);
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(
+            crate::observability::metrics::LEASED_MITIGATIONS_ACTIVE
+                .with_label_values(&["test"])
+                .get(),
+            0.0
+        );
     }
 
     /// As at admission, only an unleased repair add that replaced a different
