@@ -238,6 +238,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `GET /v1/health` no longer returns `500` when a request carries a session
+  cookie and PostgreSQL is down. `GET /v1/ready`, `/metrics` and
+  `/openapi.json` no longer read the session either, so they answer the same
+  with or without a cookie. Routes that use the session, including
+  `GET /v1/health/detail`, still fail closed.
 - **Rate limiting no longer lets a detector flood block operators.** The single
   global token bucket is replaced by one bucket per request class (`ingest`,
   `signals`, `mutation`, `read`, `auth`) and per client address. Withdrawals
@@ -276,6 +281,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canceled mid-publish can no longer leave only some sections published, and
   a concurrent correlation edit can no longer be overwritten by the file it
   replaced.
+- A mitigation created through `POST /v1/mitigations`, which the dashboard and
+  `prefixdctl` use, now sends the `mitigation.created` alert, as detector
+  creations do, including in dry-run. A manual FlowSpec creation also now
+  broadcasts the `mitigation_created` WebSocket message. A refused creation
+  sends neither.
+- `prefixdctl mitigations withdraw` and `prefixdctl safelist add` no longer
+  require `--operator`. The option defaulted from `USER`, which the container
+  image leaves unset, so both commands failed there before sending a request.
+  The server already took the actor from the authenticated identity and
+  ignored the value. `--operator` is still accepted, ignored and no longer
+  sent. The API reference no longer marks `operator_id` as required for bulk
+  withdraw and bulk acknowledge, which ignore it too.
+- `prefixdctl` names a bare 401 or 403 response as an authentication failure
+  or a permission denial instead of printing `unknown error`.
 - Withdrawing from the mitigation detail page now refreshes its timeline, so the
   Withdrawn step shows the actor, reason and operation ID without a reload.
 

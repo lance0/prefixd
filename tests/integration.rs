@@ -1316,6 +1316,76 @@ async fn test_health_endpoint() {
     );
 }
 
+/// A browser keeps its session cookie after PostgreSQL goes down. Public routes
+/// that never read the session must answer as they do without the cookie, while
+/// routes that do read it still fail closed with an empty 500.
+#[tokio::test]
+async fn sessionless_public_routes_ignore_cookie_when_session_store_is_down() {
+    use std::time::Duration;
+
+    let mut settings = test_settings();
+    settings.http.auth.mode = AuthMode::Credentials;
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        Arc::new(MockAnnouncer::new()),
+        std::path::PathBuf::from("."),
+    )
+    .expect("failed to create app state");
+    // Nothing listens on port 1, so every session load fails.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(500))
+        .connect_lazy("postgres://prefixd@127.0.0.1:1/prefixd")
+        .unwrap();
+    let auth_layer =
+        prefixd::auth::create_auth_layer(pool, repo, AuthMode::Credentials, false).await;
+    let app = prefixd::api::create_router(state, auth_layer);
+    let cookie = format!("id={}", tower_sessions::session::Id::default());
+
+    let send = |path: &str, cookie: Option<&str>| {
+        let mut request = Request::builder().uri(path);
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
+        }
+        app.clone().oneshot(request.body(Body::empty()).unwrap())
+    };
+    let read = |response: axum::response::Response| async move {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        (status, body)
+    };
+
+    for path in ["/v1/health", "/v1/ready", "/openapi.json", "/metrics"] {
+        let (bare_status, bare_body) = read(send(path, None).await.unwrap()).await;
+        let (status, body) = read(send(path, Some(&cookie)).await.unwrap()).await;
+        assert_eq!(status, bare_status, "{path} changed status with a cookie");
+        assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
+        if path != "/metrics" {
+            assert_eq!(body, bare_body, "{path} changed body with a cookie");
+        }
+    }
+    let (status, body) = read(send("/v1/health", Some(&cookie)).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["auth_mode"], "credentials");
+
+    // Control: the cookie does reach the unreachable store on session routes,
+    // and the failure exposes nothing about the session or the database.
+    for path in ["/v1/health/detail", "/v1/auth/me", "/v1/mitigations"] {
+        let (status, body) = read(send(path, Some(&cookie)).await.unwrap()).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
+        assert!(body.is_empty(), "{path} leaked {body:?}");
+        let (status, _) = read(send(path, None).await.unwrap()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path} without a cookie");
+    }
+}
+
 #[tokio::test]
 async fn test_health_detail_endpoint() {
     let app = setup_app().await;
@@ -10822,6 +10892,88 @@ async fn test_create_mitigation() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+/// A manual creation sends one `mitigation.created` alert, like a detector
+/// creation, in dry-run too; a refused creation sends none.
+#[tokio::test]
+async fn manual_creation_sends_one_created_alert() {
+    use axum::{Json, Router, extract::State, routing::post};
+    type Received = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+    let received: Received = Default::default();
+    let receiver = Router::new()
+        .route(
+            "/",
+            post(
+                |State(received): State<Received>, Json(alert): Json<serde_json::Value>| async move {
+                    received.lock().unwrap().push(alert);
+                },
+            ),
+        )
+        .with_state(received.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, receiver).await });
+
+    let mut settings = test_settings();
+    // Startup validation requires https; the service itself does not.
+    settings.alerting = serde_json::from_value(serde_json::json!({
+        "destinations": [{ "type": "generic", "url": url }]
+    }))
+    .unwrap();
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        Arc::new(MockRepository::new()),
+        Arc::new(MockAnnouncer::new()),
+        std::path::PathBuf::from("."),
+    )
+    .unwrap();
+    let app = create_test_router(state);
+    let create = |ttl_seconds: u32| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/mitigations")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "reason": "manual mitigation",
+                    "victim_ip": "203.0.113.10",
+                    "protocol": "udp",
+                    "dst_ports": [53],
+                    "action": "discard",
+                    "ttl_seconds": ttl_seconds
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let refused = app.clone().oneshot(create(0)).await.unwrap();
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let response = app.oneshot(create(120)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while received.lock().unwrap().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("manual creation must send mitigation.created");
+    // Give a duplicate or the refused request's alert time to arrive.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let received = received.lock().unwrap();
+    assert_eq!(received.len(), 1, "{received:?}");
+    assert_eq!(received[0]["event_type"], "mitigation.created");
+    assert_eq!(received[0]["mitigation_id"], body["mitigation_id"]);
 }
 
 #[tokio::test]
