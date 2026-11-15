@@ -3159,7 +3159,8 @@ Requires session authentication (send session cookie).
 **ResyncRequired:** Sent when server detects client may have missed messages. Client should refresh data.
 
 `mitigation` uses the [mitigation response](#get-mitigation) shape, including
-the `blackhole` object for blackholes. A manual blackhole broadcasts
+the `blackhole` object for blackholes. Every new mitigation, from a detector
+or from `POST /v1/mitigations` (including a manual blackhole), broadcasts
 `mitigation_created`.
 
 `diversion_updated` carries a [diversion](#manual-scrubber-diversion) after
