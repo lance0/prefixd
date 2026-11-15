@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { useCachedCorroborators } from "@/hooks/use-api"
+import { usePermissions } from "@/hooks/use-permissions"
 import { MISSING, formatRelative } from "@/lib/format"
 import { useTimeFormat } from "@/components/time-zone-provider"
 
@@ -30,7 +31,16 @@ function dimsLabel(s: {
 
 export function CacheTab() {
   const { formatTime } = useTimeFormat()
-  const { data, error, isLoading, mutate } = useCachedCorroborators({ limit: 200 })
+  const { isAdmin } = usePermissions()
+  const { data, error, isLoading, mutate } = useCachedCorroborators(isAdmin ? { limit: 200 } : null)
+
+  if (!isAdmin) {
+    return (
+      <div className="rounded-md border bg-card">
+        <EmptyState title="The corroborator cache needs the admin role" description="Cached signals are visible to administrators only." />
+      </div>
+    )
+  }
 
   if (isLoading) {
     return <div className="rounded-md border bg-card"><LoadingRows label="Loading corroborator cache" /></div>

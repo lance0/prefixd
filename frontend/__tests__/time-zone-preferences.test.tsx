@@ -7,7 +7,7 @@ import { TimeZoneProvider, TIME_ZONE_STORAGE_KEY, useTimeFormat, useTimeZone } f
 import { DisplayPreferencesPanel } from "@/components/dashboard/display-preferences"
 import { ActiveMitigationsMini } from "@/components/dashboard/active-mitigations-mini"
 import { AuditLogContentLive } from "@/components/dashboard/audit-log-content-live"
-import { json, renderApp, useFakeController } from "./support/fake-controller"
+import { json, operatorResponse, renderApp, signIn, useFakeController } from "./support/fake-controller"
 import type { AuditEntry, Mitigation } from "@/lib/api"
 
 const controller = useFakeController()
@@ -120,8 +120,9 @@ describe("browser display timezone", () => {
       action: "mitigation.created", target_type: "mitigation", target_id: "rule-1", details: {},
     }
 
+    signIn(controller, "credentials", operatorResponse("operator"))
     controller.route("GET", "/v1/audit", () => json({ entries: [audit], count: 1, next_cursor: null, has_more: false }))
-    const { container } = renderApp(<TimeZoneProvider><TimeReadout /><ActiveMitigationsMini mitigations={[mitigation]} /><AuditLogContentLive /></TimeZoneProvider>, { withoutAuth: true })
+    const { container } = renderApp(<TimeZoneProvider><TimeReadout /><ActiveMitigationsMini mitigations={[mitigation]} /><AuditLogContentLive /></TimeZoneProvider>)
     expect(await screen.findByText("01 Nov 06:30:00 UTC")).toBeInTheDocument()
     expect(screen.getByText("1h 5m")).toBeInTheDocument()
     const requests = controller.requests.map(request => [request.method, request.path, request.query.toString()])

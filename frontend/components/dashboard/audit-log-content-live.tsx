@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useAuditLog } from "@/hooks/use-api"
+import { usePermissions } from "@/hooks/use-permissions"
 import type { AuditEntry } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { downloadCsv } from "@/lib/csv"
@@ -107,7 +108,8 @@ export function AuditLogContentLive() {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const itemsPerPage = 20
 
-  const { data: auditResp, error, isLoading, mutate } = useAuditLog({ limit: 200 })
+  const { isOperator: canReadAudit } = usePermissions()
+  const { data: auditResp, error, isLoading, mutate } = useAuditLog(canReadAudit ? { limit: 200 } : null)
   const entries = auditResp?.entries
 
   const handleSort = (field: SortField) => {
@@ -203,6 +205,14 @@ export function AuditLogContentLive() {
   )
 
   const filtersActive = searchQuery !== "" || actionFilter !== "All" || actorFilter !== "All"
+
+  if (!canReadAudit) {
+    return (
+      <section aria-label="Audit entries" className="rounded-md border bg-card">
+        <EmptyState title="The audit log needs the operator role" description="Ask an administrator for operator access to see who changed mitigation intent and configuration." />
+      </section>
+    )
+  }
 
   return (
     <section aria-label="Audit entries" className="overflow-hidden rounded-md border bg-card">

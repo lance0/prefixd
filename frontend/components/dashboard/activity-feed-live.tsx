@@ -4,6 +4,7 @@ import Link from "next/link"
 import { Shield, AlertTriangle, User, FileText } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useEvents, useAuditLog } from "@/hooks/use-api"
+import { usePermissions } from "@/hooks/use-permissions"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { formatRelative } from "@/lib/format"
 import { useTimeFormat } from "@/components/time-zone-provider"
@@ -33,7 +34,9 @@ function getActivityIcon(type: ActivityItem["type"]) {
 export function ActivityFeedLive() {
   const { formatTime } = useTimeFormat()
   const { data: eventsResp, error: eventsError, isLoading: eventsLoading, mutate: retryEvents } = useEvents({ limit: 10 })
-  const { data: auditResp, error: auditError, isLoading: auditLoading, mutate: retryAudit } = useAuditLog({ limit: 10 })
+  // The audit needs the operator role; a viewer's feed shows events only.
+  const { isOperator: canReadAudit } = usePermissions()
+  const { data: auditResp, error: auditError, isLoading: auditLoading, mutate: retryAudit } = useAuditLog(canReadAudit ? { limit: 10 } : null)
   const events = eventsResp?.events
   const audit = auditResp?.entries
 
@@ -94,7 +97,11 @@ export function ActivityFeedLive() {
       <section aria-label="Recent activity" className="min-w-0">
         {heading}
         <div className="rounded-md border bg-card">
-          <ErrorState title="Unable to load recent activity" detail="Events and audit entries could not be refreshed. Open the audit log for the full record." onRetry={() => { void Promise.allSettled([retryEvents(), retryAudit()]) }} />
+          <ErrorState
+            title="Unable to load recent activity"
+            detail={canReadAudit ? "Events and audit entries could not be refreshed. Open the audit log for the full record." : "Events could not be refreshed. Open the events page for the full record."}
+            onRetry={() => { void Promise.allSettled([retryEvents(), retryAudit()]) }}
+          />
         </div>
       </section>
     )
@@ -114,11 +121,15 @@ export function ActivityFeedLive() {
       <section aria-label="Recent activity" className="min-w-0">
         {heading}
         <div className="rounded-md border bg-card">
-          <EmptyState
-            title="No recent activity"
-            description="Events and operator actions will appear here."
-            action={<Link href="/audit-log" className="rounded-sm text-sm text-primary hover:underline">View audit log</Link>}
-          />
+          {canReadAudit ? (
+            <EmptyState
+              title="No recent activity"
+              description="Events and operator actions will appear here."
+              action={<Link href="/audit-log" className="rounded-sm text-sm text-primary hover:underline">View audit log</Link>}
+            />
+          ) : (
+            <EmptyState title="No recent activity" description="Events will appear here. Operator actions are in the audit log, which needs the operator role." />
+          )}
         </div>
       </section>
     )

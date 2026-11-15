@@ -114,7 +114,7 @@ export default function AdminPage() {
   const { data: stats, error: statsError, isLoading: statsLoading, mutate: mutateStats } = useStats()
   const { data: safelist, error: safelistError, isLoading: safelistLoading, mutate: mutateSafelist } = useSafelist()
   const { data: pops, error: popsError, isLoading: popsLoading, mutate: mutatePops } = usePops()
-  const { data: operators, error: operatorsError, isLoading: operatorsLoading, mutate: mutateOperators } = useOperators()
+  const { data: operators, error: operatorsError, isLoading: operatorsLoading, mutate: mutateOperators } = useOperators(permissions.canManageUsers)
 
   const [newPrefix, setNewPrefix] = useState("")
   const [newReason, setNewReason] = useState("")

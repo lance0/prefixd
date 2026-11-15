@@ -8,7 +8,7 @@ import { CommandPalette } from "@/components/dashboard/command-palette"
 import IpHistoryPage from "@/app/(dashboard)/ip-history/page"
 import { CacheTab } from "@/components/dashboard/correlation/cache-tab"
 import type { Event } from "@/lib/api"
-import { json, renderApp, settle, useFakeController } from "./support/fake-controller"
+import { json, operatorResponse, renderApp, settle, signIn, useFakeController } from "./support/fake-controller"
 
 const controller = useFakeController()
 
@@ -134,7 +134,8 @@ describe("confidence display callers", () => {
         ingested_at: e.ingested_at, expires_at: "2026-10-18T13:00:00Z",
       })),
     }))
-    renderApp(<CacheTab />, { withoutAuth: true })
+    signIn(controller, "credentials", operatorResponse("admin"))
+    renderApp(<CacheTab />)
 
     for (const label of ["95%", "0%", "Unavailable", "Invalid"]) {
       expect(await screen.findByText(label)).toBeInTheDocument()
