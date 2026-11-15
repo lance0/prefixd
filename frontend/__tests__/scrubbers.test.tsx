@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { ScrubbersContent } from "@/components/dashboard/scrubbers-content"
 import { Sidebar } from "@/components/dashboard/sidebar"
 import { Dialog } from "@/components/ui/dialog"
-import { createDiversion, previewDiversion, type DiversionPreview, type DiversionRequest, type ScrubberDiversion, type ScrubberProfiles } from "@/lib/api"
+import { createDiversion, previewDiversion, type DiversionPreview, type PeerExport, type DiversionRequest, type ScrubberDiversion, type ScrubberProfiles } from "@/lib/api"
 import type { OperatorRole } from "@/lib/auth"
 import { deferred, failure, json, operatorResponse, renderApp, settle, signIn, useFakeController } from "./support/fake-controller"
 
@@ -37,6 +37,10 @@ function result(dryRun = false): DiversionPreview {
 }
 
 const active = { ...result().candidate, status: "active" as const }
+
+function committed(peer_address: string): PeerExport {
+  return { peer_address, disposition: "committed", reason: "", explain_code: "", detail: "", advertised_path_id: 0 }
+}
 
 function profiles(armed: boolean, ready: boolean): ScrubberProfiles {
   return { enabled: true, profiles: { a: { armed, ready, readiness: ready ? "ready" : "unknown", observed_at: null, latch_reason: null } }, configuration: [{ id: "a", revision: "v1", ipv4_target: "192.0.2.99", ipv6_target: null }] }
@@ -147,10 +151,13 @@ describe("manual scrubber workflow", { timeout: 10_000 }, () => {
   it.each([
     ["Victim host CIDR", "203.0.113.20", "Diversion needs one host. Use 203.0.113.20/32."],
     ["Victim host CIDR", "203.0.113.0/24", "Diversion needs one host. Use 203.0.113.0/32."],
+    ["Victim host CIDR", "203.0.113.20/24", "Diversion needs one host. Use 203.0.113.20/32."],
+    ["Victim host CIDR", "2001:db8::20/64", "Diversion needs one host. Use 2001:db8::20/128."],
     ["Source prefix (optional)", "198.51.100.1/24", "Host bits are set. Use 198.51.100.0/24 to match that network."],
     ["Source prefix (optional)", "2001:db8::/64", "Source prefix must match the victim's address family."],
     ["Destination ports (optional)", "80, http", "Comma-separated ports, 0-65535."],
-    ["Lifetime in seconds", "3601", "Lifetime must be a whole number from 5 to 3600 seconds. The profile may allow less."],
+    ["Lifetime in seconds", "3601", "Lifetime must be a whole number from 1 to 3600 seconds. The profile may allow less."],
+    ["Lifetime in seconds", "0", "Lifetime must be a whole number from 1 to 3600 seconds. The profile may allow less."],
     ["Reason", "   ", "A reason is required for the audit log."],
   ])("refuses %s %j before any preview request", async (label, value, message) => {
     await setup()
@@ -175,6 +182,34 @@ describe("manual scrubber workflow", { timeout: 10_000 }, () => {
     expect(screen.getByRole("combobox", { name: "Profile" })).toHaveAttribute("aria-invalid", "true")
     await settle()
     expect(controller.calls("POST", "/v1/diversions/preview")).toHaveLength(0)
+  })
+
+  it("accepts a one-second lifetime, as the controller does", async () => {
+    await setup()
+    fireEvent.change(screen.getByLabelText("Lifetime in seconds"), { target: { value: "1" } })
+    fireEvent.click(screen.getByRole("button", { name: "Preview diversion" }))
+    await waitFor(() => expect(controller.calls("POST", "/v1/diversions/preview")).toHaveLength(1))
+    expect(JSON.parse(controller.calls("POST", "/v1/diversions/preview")[0].body ?? "{}").ttl_seconds).toBe(1)
+  })
+
+  it("focuses the first invalid field on an invalid submit", async () => {
+    await setup()
+    fireEvent.change(screen.getByLabelText("Destination ports (optional)"), { target: { value: "http" } })
+    fireEvent.change(screen.getByLabelText("Victim host CIDR"), { target: { value: "203.0.113.20" } })
+    fireEvent.click(screen.getByRole("button", { name: "Preview diversion" }))
+    await waitFor(() => expect(screen.getByLabelText("Victim host CIDR")).toHaveFocus())
+  })
+
+  it("shows a field's error after it loses focus, not while typing", async () => {
+    await setup()
+    const victim = screen.getByLabelText("Victim host CIDR")
+
+    fireEvent.change(victim, { target: { value: "203.0" } })
+    expect(screen.queryByText(/Enter a host CIDR/)).not.toBeInTheDocument()
+    expect(victim).toHaveAttribute("aria-invalid", "false")
+    fireEvent.blur(victim)
+    expect(await screen.findByText(/Enter a host CIDR/)).toBeInTheDocument()
+    expect(victim).toHaveAttribute("aria-invalid", "true")
   })
 
   it("offers source ports only for UDP and never sends them for TCP", async () => {
@@ -246,6 +281,28 @@ describe("diversion withdrawal", () => {
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
     await settle()
     expect(mutations()).toHaveLength(0)
+  })
+
+  it.each(["Cancel", "Escape"])("returns focus to the row's Withdraw button after %s", async how => {
+    await render()
+    const opener = await screen.findByRole("button", { name: "Withdraw 203.0.113.20/32" })
+    const dialog = await openWithdraw()
+
+    if (how === "Cancel") fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }))
+    else fireEvent.keyDown(dialog, { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+    await waitFor(() => expect(opener).toHaveFocus())
+  })
+
+  it("moves focus to the diversions list title after an accepted withdrawal", async () => {
+    await render()
+    controller.route("POST", "/v1/diversions/operation-1/withdraw", () => json({ ...active, status: "withdrawing" }, 202))
+    controller.route("GET", "/v1/diversions", () => json([]))
+    const dialog = await openWithdraw()
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" }))
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText("Outstanding diversions")).toHaveFocus())
   })
 
   it("sends the typed reason once on confirm", async () => {
@@ -411,8 +468,38 @@ describe("scrubber re-arm and access", () => {
     expect(screen.getByText("Active")).toHaveAttribute("data-tone", "success")
   })
 
+  it("shows retained rows as historical after a failed diversions refresh", async () => {
+    const peers = [committed("192.0.2.2")]
+
+    signIn(controller, "credentials", operatorResponse("admin"))
+    controller.route("GET", "/v1/scrubbers", () => json(profiles(true, true)))
+    controller.route("GET", "/v1/diversions", () => json([{ ...active, export_observation: { observed_at: "2030-01-01T00:00:00Z", peers } }]))
+    const view = renderApp(<ScrubbersContent />, { url: "/scrubbers" })
+    const table = await screen.findByRole("table", { name: "Peer export" })
+
+    expect(within(table).getByText("Committed")).toHaveAttribute("data-tone", "success")
+    controller.route("GET", "/v1/diversions", () => failure(500))
+    await act(async () => { await view.mutate()("scrubber-diversions").catch(() => {}) })
+    expect(await screen.findByText("Scrubber observations could not be refreshed. Current state is unknown.")).toBeInTheDocument()
+    const stale = screen.getByRole("table", { name: "Peer export" })
+
+    expect(within(stale).getByRole("columnheader", { name: "Export at observation" })).toBeInTheDocument()
+    expect(within(stale).getByText("Committed")).toHaveAttribute("data-tone", "neutral")
+    expect(screen.getByText(/Historical observation from/)).toHaveTextContent("Current export is unknown: the diversions refresh failed")
+    expect(screen.getByText("Active")).toHaveAttribute("data-tone", "neutral")
+    expect(screen.getByText(/At the last read: Local intent observed/)).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Withdraw 203.0.113.20/32" })).toBeEnabled()
+  })
+
+  it("never presents a failed first export read as a successful empty observation", async () => {
+    await render({ rows: [{ ...active, export_observation: { observed_at: "2030-01-01T00:00:00Z", peers: [], error: "export inventory unsupported" } }] })
+    expect(await screen.findByText("No peers from a successful export observation are retained.")).toBeInTheDocument()
+    expect(screen.queryByText("The last complete observation listed no peers.")).not.toBeInTheDocument()
+    expect(screen.getByText("Export unknown")).toHaveAttribute("data-tone", "warning")
+  })
+
   it("labels export evidence from a failed read as historical in a per-peer table", async () => {
-    const peers = [{ peer_address: "192.0.2.2", disposition: "committed", reason: "" }]
+    const peers = [committed("192.0.2.2")]
 
     await render({ rows: [{ ...active, export_observation: { observed_at: "2030-01-01T00:00:00Z", peers, error: "scrubber export observation timed out" } }] })
     expect(await screen.findByText(/Historical observation from .*Current export is unknown: scrubber export observation timed out/)).not.toHaveTextContent("2030-01-01T00:00:00Z")
@@ -424,8 +511,8 @@ describe("scrubber re-arm and access", () => {
   })
 
   it("shows both legs, the return leg as destination any, and separate export evidence", async () => {
-    const inbound = [{ peer_address: "192.0.2.2", disposition: "committed", reason: "" }]
-    const returned = [{ peer_address: "192.0.2.3", disposition: "committed", reason: "" }]
+    const inbound = [committed("192.0.2.2")]
+    const returned = [committed("192.0.2.3")]
     const row = pairResult().candidate
 
     await render({ rows: [{ ...row, status: "active", export_observation: { observed_at: "2030-01-01T00:00:00Z", peers: inbound }, return_export_observation: { observed_at: "2030-01-01T00:00:05Z", peers: returned, error: "scrubber export observation timed out" } }] })
