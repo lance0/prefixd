@@ -717,9 +717,46 @@ mod tests {
                 },
                 FlowSpecActionError::NotFlowSpec,
             ),
+            // Only mark carries DSCP; a rate action with it is refused, never encoded.
+            (
+                FlowSpecAction {
+                    dscp: Some(46),
+                    ..FlowSpecAction::discard()
+                },
+                FlowSpecActionError::UnexpectedDscp,
+            ),
+            (
+                FlowSpecAction {
+                    dscp: Some(46),
+                    ..FlowSpecAction::police(8_000)
+                },
+                FlowSpecActionError::UnexpectedDscp,
+            ),
         ] {
-            assert_eq!(action.traffic_rate_bytes_per_second(), Err(error));
+            assert_eq!(action.traffic_rate_bytes_per_second(), Err(error.clone()));
+            assert_eq!(action.validate(), Err(error));
         }
+    }
+
+    /// Exact RFC 8955 action communities: traffic-rate type 0x8006, DSCP type 0x8009.
+    #[test]
+    fn extended_communities_keep_exact_type_and_value_bytes() {
+        assert_eq!(
+            FlowSpecAction::discard().extended_community(),
+            Ok(0x8006_0000_0000_0000)
+        );
+        assert_eq!(
+            FlowSpecAction::police(8_000).extended_community(),
+            Ok(0x8006_0000_0000_0000 | u64::from(1000.0_f32.to_bits()))
+        );
+        assert_eq!(
+            FlowSpecAction::mark(46).extended_community(),
+            Ok(0x8009_0000_0000_002e)
+        );
+        assert_eq!(
+            FlowSpecAction::mark(64).extended_community(),
+            Err(FlowSpecActionError::InvalidDscp(64))
+        );
     }
 
     #[test]
@@ -929,6 +966,17 @@ mod tests {
             (
                 FlowSpecNlri {
                     tcp_flags: Some(both),
+                    ..tcp.clone()
+                },
+                FlowSpecMatchError::ConflictingTcpFlags,
+            ),
+            // Identical masks conflict; they are not an empty match.
+            (
+                FlowSpecNlri {
+                    tcp_flags: Some(TcpFlagsMatch {
+                        set: [TcpFlag::Syn].into(),
+                        not_set: [TcpFlag::Syn].into(),
+                    }),
                     ..tcp.clone()
                 },
                 FlowSpecMatchError::ConflictingTcpFlags,

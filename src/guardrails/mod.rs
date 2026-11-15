@@ -689,6 +689,85 @@ mod tests {
         .unwrap();
     }
 
+    /// The detector prefix budget is per customer and only for prefix
+    /// destinations; a host or customerless intent never consumes it.
+    #[tokio::test]
+    async fn detector_prefix_quota_counts_only_customer_prefix_intent() {
+        use crate::domain::{ActionParams, ActionType, AttackEvent, AttackVector, Mitigation};
+        let (config, mut quotas) = test_config();
+        quotas.max_active_prefix_per_customer = 1;
+        let guardrails = Guardrails::new(config, quotas);
+        let repo = crate::db::MockRepository::new();
+        let intent = |customer: Option<&str>, prefix: &str| MitigationIntent {
+            event_id: uuid::Uuid::new_v4(),
+            customer_id: customer.map(Into::into),
+            service_id: None,
+            pop: "test".into(),
+            match_criteria: MatchCriteria {
+                dst_prefix: prefix.into(),
+                protocol: Some(17),
+                dst_ports: vec![53],
+                ..Default::default()
+            },
+            action_type: ActionType::Discard,
+            action_params: ActionParams::default(),
+            ttl_seconds: 60,
+            reason: "test".into(),
+        };
+        let quota = |result: Result<()>| {
+            matches!(result, Err(PrefixdError::GuardrailViolation(
+                GuardrailError::QuotaExceeded { quota_type, current: 1, max: 1 }
+            )) if quota_type == "prefix_customer")
+        };
+        let first = intent(Some("cust_a"), "203.0.113.0/24");
+        guardrails
+            .validate_detector_prefix_quota(&first, &repo)
+            .await
+            .unwrap();
+        repo.insert_event(&AttackEvent {
+            event_id: first.event_id,
+            external_event_id: None,
+            source: "fastnetmon".into(),
+            event_timestamp: chrono::Utc::now(),
+            ingested_at: chrono::Utc::now(),
+            victim_ip: "203.0.113.0/24".into(),
+            vector: "udp_flood".into(),
+            protocol: Some(17),
+            bps: None,
+            pps: None,
+            top_dst_ports_json: "[53]".into(),
+            top_src_ports_json: None,
+            confidence: None,
+            action: "ban".into(),
+            raw_details: None,
+            outcome: Default::default(),
+        })
+        .await
+        .unwrap();
+        let mut held = Mitigation::from_intent(
+            first.clone(),
+            "203.0.113.0/24".into(),
+            AttackVector::UdpFlood,
+        );
+        held.activate();
+        repo.insert_mitigation(&held).await.unwrap();
+        assert!(quota(
+            guardrails
+                .validate_detector_prefix_quota(&intent(Some("cust_a"), "203.0.113.128/25"), &repo)
+                .await
+        ));
+        for free in [
+            intent(Some("cust_b"), "203.0.113.0/24"),
+            intent(Some("cust_a"), "203.0.113.7/32"),
+            intent(None, "203.0.113.0/24"),
+        ] {
+            guardrails
+                .validate_detector_prefix_quota(&free, &repo)
+                .await
+                .unwrap();
+        }
+    }
+
     fn test_config() -> (GuardrailsConfig, QuotasConfig) {
         (
             GuardrailsConfig {

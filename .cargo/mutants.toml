@@ -1,0 +1,16 @@
+# Focused mutation runs: `cargo mutants -f <file> --shard k/n`. Tests are the
+# library and the integration binaries that need no container; Docker-backed
+# suites (including the ignored speaker fixtures) stay outside the mutant loop.
+test_tool = "nextest"
+all_features = true
+additional_cargo_test_args = [
+    "--lib",
+    "--test", "integration",
+    "--test", "integration_vpn_scope",
+    "--test", "integration_address_family",
+    "--test", "integration_speaker_routes",
+    "--test", "fastnetmon_vector",
+    "-E", "not test(/checked_timestamp_rows/)",
+    # A hung test after a failure must not turn a caught mutant into a timeout.
+    "--max-fail", "1:immediate",
+]
