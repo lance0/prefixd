@@ -61,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
         mode = ?config.settings.mode,
         "starting prefixd"
     );
+    tracing::info!(alerting_source = config.alerting_source, "loaded alerting");
     prefixd::observability::init_metrics(&config.settings.pop);
 
     // Init database

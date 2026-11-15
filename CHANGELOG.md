@@ -55,8 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only the alerting editor refused before: a URL that is not `https://`, or
   whose host is `localhost` or a literal private, loopback, link-local or other
   non-public address, in a Slack, Discord or Teams `webhook_url`, PagerDuty
-  `events_url` or generic `url`. Startup checks `alerting.yaml` or, without it,
-  the `alerting` section of `prefixd.yaml`; reload checks `alerting.yaml`.
+  `events_url` or generic `url`. Startup and reload check `alerting.yaml` or,
+  without it, the `alerting` section of `prefixd.yaml`.
   0.26.0 accepted such a destination. Before upgrading, check that each
   alerting destination uses https and a public host. The error names the file
   and the key, never the URL; see

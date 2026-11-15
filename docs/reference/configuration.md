@@ -1453,9 +1453,9 @@ controller's environment, such as `DATABASE_URL`, to a URL of their choosing.
 
 Startup, reload and the alerting configuration editor require HTTPS for
 Slack, Discord, Teams, PagerDuty `events_url` and generic webhook URLs.
-Startup checks `alerting.yaml` or, without it, the `alerting` section of
-`prefixd.yaml`; reload checks `alerting.yaml`. A refusal names the file and
-the key but not the URL. Validation rejects `localhost` and its subdomains,
+Startup and reload check `alerting.yaml` or, without it, the `alerting`
+section of `prefixd.yaml`. A refusal names the file and the key but not the
+URL. Validation rejects `localhost` and its subdomains,
 including absolute names ending in a dot, plus literal private, loopback,
 link-local, unspecified, multicast, broadcast and documentation addresses
 where applicable. IPv4-mapped
@@ -1512,7 +1512,8 @@ Every present file, including `prefixd.yaml`, is loaded and validated before any
 section is published. A failed reload leaves all of them unchanged. Every other
 `prefixd.yaml` key, including `alerting` when there is no `alerting.yaml`, is
 read only at startup; the response's `restart_required` lists the ones that
-differ from the running settings.
+differ from the running settings. Reload still refuses inline `alerting` that
+the next startup would refuse.
 
 - Startup adds `safelist.prefixes` entries but never deletes them, so removing
   one from the file does not remove it on restart; use

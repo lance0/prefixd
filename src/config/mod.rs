@@ -125,6 +125,8 @@ pub struct AppConfig {
     pub settings: Settings,
     pub inventory: Inventory,
     pub playbooks: Playbooks,
+    /// The file alerting came from: `alerting.yaml` or `prefixd.yaml`.
+    pub alerting_source: &'static str,
 }
 
 impl AppConfig {
@@ -143,11 +145,11 @@ impl AppConfig {
         }
         // A present alerting.yaml replaces inline alerting. Either one gets the
         // destination checks reload and the alerting editor apply.
-        let mut alerting_file = "prefixd.yaml";
+        let mut alerting_source = "prefixd.yaml";
         match crate::alerting::AlertingConfig::load(path("alerting.yaml")) {
             Ok(alerting) => {
                 settings.alerting = alerting;
-                alerting_file = "alerting.yaml";
+                alerting_source = "alerting.yaml";
             }
             Err(error)
                 if error
@@ -157,7 +159,11 @@ impl AppConfig {
         }
         let errors = settings.alerting.validate();
         if !errors.is_empty() {
-            anyhow::bail!("{}: alerting: {}", failed(alerting_file), errors.join("; "));
+            anyhow::bail!(
+                "{}: alerting: {}",
+                failed(alerting_source),
+                errors.join("; ")
+            );
         }
         let inventory =
             Inventory::load(path("inventory.yaml")).with_context(|| failed("inventory.yaml"))?;
@@ -168,6 +174,7 @@ impl AppConfig {
             settings,
             inventory,
             playbooks,
+            alerting_source,
         })
     }
 }
@@ -230,6 +237,18 @@ mod tests {
     }
 
     #[test]
+    fn startup_rejects_unreadable_standalone_alerting() {
+        let directory = fixture();
+        assert_eq!(
+            AppConfig::load(directory.path()).unwrap().alerting_source,
+            "prefixd.yaml"
+        );
+        std::fs::create_dir(directory.path().join("alerting.yaml")).unwrap();
+        let error = format!("{:#}", AppConfig::load(directory.path()).unwrap_err());
+        assert!(error.contains("alerting.yaml"), "{error}");
+    }
+
+    #[test]
     fn startup_rejects_invalid_standalone_correlation() {
         let directory = fixture();
         std::fs::write(
@@ -279,7 +298,7 @@ mod tests {
             let directory = fixture();
             let path = directory.path().join("alerting.yaml");
             std::fs::write(&path, alerting(url)).unwrap();
-            // Negative control: the loader alone, the old startup path, accepts it.
+            // The low-level loader, the old startup path, accepts the URL.
             crate::alerting::AlertingConfig::load(&path).unwrap();
             let error = format!("{:#}", AppConfig::load(directory.path()).unwrap_err());
             assert!(error.contains("alerting.yaml"), "{error}");
@@ -298,7 +317,7 @@ mod tests {
             crate::config::parse_yaml(&alerting("http://example.com/hook?token=request-secret"))
                 .unwrap();
         std::fs::write(&path, serde_saphyr::to_string(&settings).unwrap()).unwrap();
-        // Negative control: settings load alone accepts it.
+        // The low-level settings loader accepts the URL.
         Settings::load(&path).unwrap();
         let error = format!("{:#}", AppConfig::load(directory.path()).unwrap_err());
         assert!(error.contains("prefixd.yaml: alerting:"), "{error}");
@@ -312,6 +331,7 @@ mod tests {
         )
         .unwrap();
         let config = AppConfig::load(directory.path()).unwrap();
+        assert_eq!(config.alerting_source, "alerting.yaml");
         assert_eq!(config.settings.alerting.destinations.len(), 1);
         assert!(config.settings.alerting.validate().is_empty());
     }
