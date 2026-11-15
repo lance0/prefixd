@@ -223,9 +223,6 @@ impl ReconciliationLoop {
             // reconcile at once.
             if let Some(fence) = fence.as_mut() {
                 if !*fence.borrow() {
-                    if let Some(lease) = self.lease() {
-                        lease.set_standby(true);
-                    }
                     let mut reads = tokio::time::interval(self.interval);
                     reads.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     loop {
@@ -253,9 +250,6 @@ impl ReconciliationLoop {
                             }
                         }
                     }
-                }
-                if let Some(lease) = self.lease() {
-                    lease.set_standby(false);
                 }
             }
             self.record_run().await;
@@ -5651,9 +5645,10 @@ mod tests {
         let speaker = Arc::new(FaultyBlackholes::default());
         let fence = Arc::new(crate::fence::ControllerFence::new(false));
         let state = action_state(repo.clone(), speaker.clone())
-            .with_fence(fence)
+            .with_fence(fence.clone())
             .unwrap();
-        let lease = Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60));
+        let lease =
+            Arc::new(crate::domain::LeaseKeeper::new(LEASE_OWNER.into(), 60).with_fence(fence));
         lease.take_readd();
         lease.observe_add(crate::bgp::LeaseGeneration {
             incarnation: 1,

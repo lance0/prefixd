@@ -146,8 +146,6 @@ struct Held {
     written_since_read: Option<RenewUntil>,
     /// Renewal stopped at the TTL bound and logged its one warning.
     ttl_bound: bool,
-    /// The controller fence is held elsewhere or lost.
-    standby: bool,
 }
 
 /// One per controller. Every leased add and renewal uses its owner and
@@ -168,6 +166,7 @@ pub struct LeaseKeeper {
     readd_requested: tokio::sync::Notify,
     /// Wakes renewal at once when the bound is refreshed after a stop.
     renew_requested: tokio::sync::Notify,
+    fence: Option<std::sync::Arc<crate::fence::ControllerFence>>,
     /// False in dry-run, which sends no speaker mutation.
     renewing: bool,
 }
@@ -189,11 +188,11 @@ impl LeaseKeeper {
                 renew_until: None,
                 written_since_read: None,
                 ttl_bound: false,
-                standby: false,
             }),
             readd: AtomicBool::new(true),
             readd_requested: tokio::sync::Notify::new(),
             renew_requested: tokio::sync::Notify::new(),
+            fence: None,
             renewing: true,
         };
         keeper.publish(LeaseState::None);
@@ -285,11 +284,16 @@ impl LeaseKeeper {
         self.publish(self.state());
     }
 
-    /// The controller fence changed: a standby that stopped at the bound
+    /// The controller fence, read directly so a fence loss is reported even
+    /// while reconciliation is blocked: a standby that stopped at the bound
     /// reports `standby`, not `expired`.
-    pub fn set_standby(&self, standby: bool) {
-        self.held.lock().unwrap().standby = standby;
-        self.publish(self.state());
+    pub fn with_fence(mut self, fence: std::sync::Arc<crate::fence::ControllerFence>) -> Self {
+        self.fence = Some(fence);
+        self
+    }
+
+    fn standby(&self) -> bool {
+        self.fence.as_ref().is_some_and(|fence| !fence.is_active())
     }
 
     /// The outage has outlasted every leased route's TTL, so renewal stops
@@ -494,7 +498,7 @@ impl LeaseKeeper {
             // A standby stopped at the bound cannot read leased intent; the
             // active controller may still keep the lease live.
             LeaseState::Live | LeaseState::RenewalFailing
-                if held.standby && self.stopped_at_bound(&held) =>
+                if self.standby() && self.stopped_at_bound(&held) =>
             {
                 LeaseState::Standby
             }
@@ -1059,8 +1063,8 @@ mod tests {
     async fn standby_renewal_stops_at_the_ttl_bound() {
         let inner = std::sync::Arc::new(FaultyBlackholes::default());
         let fence = std::sync::Arc::new(crate::fence::ControllerFence::new(false));
-        let fenced = crate::fence::FencedAnnouncer::new(inner.clone(), fence);
-        let keeper = LeaseKeeper::new(OWNER.into(), 60);
+        let fenced = crate::fence::FencedAnnouncer::new(inner.clone(), fence.clone());
+        let keeper = LeaseKeeper::new(OWNER.into(), 60).with_fence(fence.clone());
         keeper.take_readd();
         keeper.observe_add(
             inner
@@ -1075,7 +1079,6 @@ mod tests {
         keeper.renew_once(leases).await;
         assert_eq!(inner.renewals.load(SeqCst), 1, "unfenced inside the TTL");
         tokio::time::advance(Duration::from_secs(61)).await;
-        keeper.set_standby(true);
         keeper.renew_once(leases).await;
         assert_eq!(inner.renewals.load(SeqCst), 1);
         let health = keeper.health();
@@ -1085,9 +1088,12 @@ mod tests {
         assert_eq!(health.state, LeaseState::Standby);
         tokio::time::advance(Duration::from_secs(120)).await;
         assert_eq!(keeper.health().state, LeaseState::Standby);
-        // Taking the fence reports the bound's own conclusion again.
-        keeper.set_standby(false);
+        // The fence alone decides, with no reconciliation pass involved, so a
+        // fence change during a stalled read is reported at once.
+        fence.set(true);
         assert_eq!(keeper.health().state, LeaseState::Expired);
+        fence.set(false);
+        assert_eq!(keeper.health().state, LeaseState::Standby);
     }
 
     fn leased_rule(ttl_seconds: u32) -> Mitigation {
