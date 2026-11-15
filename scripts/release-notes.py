@@ -19,10 +19,17 @@ CHANGELOG.md is hard-wrapped, but GitHub renders every newline in a release
 body as a line break. Each paragraph and list item is joined onto one line;
 blank lines, headings, fenced code, tables, blockquotes and list-item
 boundaries (including nesting) stay as they are.
+
+CHANGELOG.md links to repository files with relative paths, which a release
+page would resolve against /releases/. Those targets become
+https://github.com/<repo>/blob/vX.Y.Z/<path>, where <repo> is
+$GITHUB_REPOSITORY (default lance0/prefixd). URLs with a scheme (http, https,
+mailto), #anchors and fenced code stay as they are.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -31,6 +38,10 @@ HEADING = re.compile(r"^#{1,6}\s")
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
 VERBATIM = re.compile(r"^\s*[|>]")
+INLINE_LINK = re.compile(r"(\]\()([^)\s]+)")
+REF_DEF = re.compile(r"^(\s{0,3}\[[^\]]+\]:\s+)(\S+)")
+SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
+DEFAULT_REPO = "lance0/prefixd"
 TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?")
 
 
@@ -97,8 +108,34 @@ def reflow(text: str) -> str:
     return "\n".join(out)
 
 
-def notes(changelog: str, version: str) -> str:
-    return reflow(extract(changelog, version))
+def absolutize(text: str, repo: str, tag: str) -> str:
+    """Point repo-relative link targets at the tagged files on GitHub."""
+
+    def sub(m: re.Match[str]) -> str:
+        t = m.group(2)
+        if not (t.startswith(("#", "/")) or SCHEME.match(t)):
+            t = f"https://github.com/{repo}/blob/{tag}/{t.removeprefix('./')}"
+        return m.group(1) + t
+
+    out = []
+    fence = ""
+    # ponytail: links inside inline code spans are rewritten too; the
+    # CHANGELOG has none, so code spans are not parsed.
+    for line in text.split("\n"):
+        mark = FENCE.match(line)
+        if fence:
+            if mark and mark.group(1)[0] == fence[0] and line.strip() == mark.group(1):
+                fence = ""
+        elif mark:
+            fence = mark.group(1)
+        else:
+            line = REF_DEF.sub(sub, INLINE_LINK.sub(sub, line))
+        out.append(line)
+    return "\n".join(out)
+
+
+def notes(changelog: str, version: str, repo: str = DEFAULT_REPO) -> str:
+    return reflow(absolutize(extract(changelog, version), repo, f"v{version}"))
 
 
 def tag_info(tag: str, tags: list[str]) -> tuple[str, bool]:
@@ -179,6 +216,36 @@ keep
 """
     got = notes(changelog, "1.2.0")
     assert got == want, f"reflow mismatch:\n{got}"
+    links = """## [1.3.0] - 2026-11-15
+
+- See [the guide](docs/how-to/upgrading.md#v120--130), [notes](./docs/a.md),
+  [web](https://example.com/x), [mail](mailto:ops@example.com) and [here](#top).
+- ![diagram](docs/img/flow.svg) [ref][r]
+
+```text
+[fenced](docs/kept.md)
+```
+
+[r]: docs/reference/api.md
+
+[w]: https://example.com/y
+"""
+    base = "https://github.com/o/r/blob/v1.3.0"
+    want = f"""- See [the guide]({base}/docs/how-to/upgrading.md#v120--130), \
+[notes]({base}/docs/a.md), [web](https://example.com/x), \
+[mail](mailto:ops@example.com) and [here](#top).
+- ![diagram]({base}/docs/img/flow.svg) [ref][r]
+
+```text
+[fenced](docs/kept.md)
+```
+
+[r]: {base}/docs/reference/api.md
+
+[w]: https://example.com/y
+"""
+    got = notes(links, "1.3.0", "o/r")
+    assert got == want, f"link mismatch:\n{got}"
     assert notes(changelog, "1.1.0") == "- Older entry.\n"
     for bad, version in [
         (changelog, "9.9.9"),
@@ -237,7 +304,8 @@ def main(argv: list[str]) -> int:
     with open(path, encoding="utf-8") as f:
         changelog = f.read()
     try:
-        sys.stdout.write(notes(changelog, argv[0]))
+        repo = os.environ.get("GITHUB_REPOSITORY") or DEFAULT_REPO
+        sys.stdout.write(notes(changelog, argv[0], repo))
     except NotesError as e:
         print(f"::error file={path}::{e}", file=sys.stderr)
         return 1

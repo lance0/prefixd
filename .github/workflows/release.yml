@@ -190,21 +190,23 @@ jobs:
       - name: Package, smoke-test and checksum
         run: |
           set -euo pipefail
-          mkdir -p staging dist
+          mkdir -p staging release-assets
           cp target/release/prefixd target/release/prefixdctl LICENSE staging/
           test "$(staging/prefixdctl --version)" = "prefixdctl $VERSION"
           test "$(staging/prefixd --version)" = "prefixd $VERSION"
           # Version-less name, so releases/latest/download/ URLs stay stable.
-          tar -C staging -czf dist/prefixd-linux-amd64.tar.gz prefixd prefixdctl LICENSE
-          cp prefixd-sbom.cdx.json dist/
-          cd dist
+          tar -C staging -czf release-assets/prefixd-linux-amd64.tar.gz prefixd prefixdctl LICENSE
+          cp prefixd-sbom.cdx.json release-assets/
+          cd release-assets
           sha256sum prefixd-linux-amd64.tar.gz prefixd-sbom.cdx.json > SHA256SUMS
           cat SHA256SUMS
 
       - uses: actions/upload-artifact@v7
         with:
           name: binaries
-          path: dist/
+          # Not dist/: the checkout tracks dist/systemd/, which would ship as a
+          # directory in the artifact and break the asset upload.
+          path: release-assets/
           if-no-files-found: error
 
   tag:
@@ -352,7 +354,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: binaries
-          path: dist
+          path: release-assets
 
       - uses: actions/download-artifact@v8
         if: needs.verify.outputs.publish == 'true'
@@ -365,8 +367,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$PUBLISH" = true ]; then
-            cat digests/* | sort > dist/image-digests.txt
-            test "$(wc -l < dist/image-digests.txt)" -eq 2
+            cat digests/* | sort > release-assets/image-digests.txt
+            test "$(wc -l < release-assets/image-digests.txt)" -eq 2
           fi
           version="${TAG#v}"
           image_tags="\`$version\`"
@@ -378,8 +380,8 @@ jobs:
             echo
             echo "Container images, tagged $image_tags:"
             echo
-            if [ -s dist/image-digests.txt ]; then
-              while read -r repo digest; do echo "- \`$repo@$digest\`"; done < dist/image-digests.txt
+            if [ -s release-assets/image-digests.txt ]; then
+              while read -r repo digest; do echo "- \`$repo@$digest\`"; done < release-assets/image-digests.txt
             else
               echo "- dry run: no images pushed"
             fi
@@ -387,7 +389,7 @@ jobs:
             echo "SHA256SUMS:"
             echo
             echo '```text'
-            cat dist/SHA256SUMS
+            cat release-assets/SHA256SUMS
             echo '```'
             if [ -n "$PREVIOUS" ]; then
               echo
@@ -395,6 +397,29 @@ jobs:
             fi
           } > release-body.md
           cat release-body.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Runs in dry runs too, so a dispatch catches a bad asset set before a
+      # real release does.
+      - name: Check release assets
+        run: |
+          set -euo pipefail
+          cd release-assets
+          expected=(SHA256SUMS prefixd-linux-amd64.tar.gz prefixd-sbom.cdx.json)
+          if [ "$PUBLISH" = true ]; then expected+=(image-digests.txt); fi
+          for f in *; do
+            if [ ! -f "$f" ] || [ -L "$f" ]; then
+              echo "::error::$f is not a regular file"
+              exit 1
+            fi
+          done
+          want="$(printf '%s\n' "${expected[@]}" | sort)"
+          got="$(find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::release assets differ from the expected set"
+            diff <(echo "$want") <(echo "$got") || true
+            exit 1
+          fi
+          sha256sum --check --strict SHA256SUMS
 
       - name: Publish release
         if: needs.verify.outputs.publish == 'true'
@@ -411,7 +436,8 @@ jobs:
           fi
           # Fails if a release for this tag already exists; nothing is overwritten.
           gh release create "$TAG" --verify-tag "${flags[@]}" \
-            --title "$TAG" --notes-file release-body.md dist/*
+            --title "$TAG" --notes-file release-body.md \
+            release-assets/{SHA256SUMS,prefixd-linux-amd64.tar.gz,prefixd-sbom.cdx.json,image-digests.txt}
 
   install-contract:
     name: Install contract
