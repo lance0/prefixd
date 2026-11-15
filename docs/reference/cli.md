@@ -14,7 +14,7 @@ cargo build --release
 Or use the Docker image:
 
 ```bash
-docker run --rm ghcr.io/lance0/prefixd:0.26.0 prefixdctl --help
+docker run --rm ghcr.io/lance0/prefixd:0.27.0 prefixdctl --help
 ```
 
 Use the release tag that matches your controller. `latest` and `main` follow
@@ -77,7 +77,7 @@ refuses to run until it does. It can't be combined with
 `--adopt-legacy-speaker`; see
 [mitigation origin mode](../how-to/upgrading.md#mitigation-origin-mode).
 
-`prefixd --version` prints the daemon version, such as `prefixd 0.26.0`, and
+`prefixd --version` prints the daemon version, such as `prefixd 0.27.0`, and
 exits.
 
 ## Commands
