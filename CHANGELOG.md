@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Withdrawals now require a reason. `POST /v1/mitigations/{id}/withdraw` and
+  `POST /v1/mitigations/withdraw` return `400` for an empty or whitespace-only
+  `reason`. `POST /v1/diversions/{id}/withdraw` requires a JSON body with a
+  nonblank `reason` and no longer records `operator withdrawal by <user>`: a
+  blank reason returns `400`, `{}` returns `422`, a bare POST with no
+  `Content-Type: application/json` returns `415`, and an empty JSON body `400`.
+  An older `prefixdctl diversions withdraw ID` without `--reason` sends `{}`
+  and gets `422`. Update scripts and clients that withdraw without a reason;
+  see [withdrawal reasons are required](docs/how-to/upgrading.md#withdrawal-reasons-are-required). `prefixdctl mitigations withdraw` and
+  `prefixdctl diversions withdraw` refuse a blank `--reason`, and `diversions
+  withdraw` now requires one. The dashboard withdrawal dialogs require a reason
+  and count its UTF-8 bytes against the 1,024-byte limit. Detector unbans and
+  the bundled FastNetMon script are unaffected.
 - `http.rate_limit.events_per_second` and `burst` now size one bucket per
   request class and per client instead of one bucket for the whole listener.
   Total admitted load can reach the number of classes times the number of

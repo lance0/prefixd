@@ -35,6 +35,10 @@ interface WithdrawConfirmDialogProps {
   children?: ReactNode
 }
 
+/** The API's reason limit counts UTF-8 bytes, not characters. */
+const MAX_REASON_BYTES = 1024
+const encoder = new TextEncoder()
+
 /** The one withdrawal confirmation: a request in flight cannot be repeated or dismissed. */
 export function WithdrawConfirmDialog({
   open, onClose, title, description, reasonPlaceholder, submitLabel = "Withdraw", pendingStatus,
@@ -45,6 +49,9 @@ export function WithdrawConfirmDialog({
   const [busy, setBusy] = useState(false)
   const inFlight = useRef(false)
   const completed = useRef(false)
+  // Count what is sent: the trimmed reason.
+  const reasonBytes = encoder.encode(reason.trim()).length
+  const overLimit = reasonBytes > MAX_REASON_BYTES
 
   const close = () => {
     setReason("")
@@ -52,13 +59,14 @@ export function WithdrawConfirmDialog({
   }
 
   const confirm = async () => {
-    if (inFlight.current) return
+    const trimmed = reason.trim()
+    if (inFlight.current || !trimmed || overLimit) return
     inFlight.current = true
     setBusy(true)
     let done = false
 
     try {
-      done = await onConfirm(reason)
+      done = await onConfirm(trimmed)
     } catch {
       // A rejected request did not complete; keep the dialog open for a retry.
       done = false
@@ -91,16 +99,21 @@ export function WithdrawConfirmDialog({
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
         <div className="py-4">
-          <Label htmlFor={reasonId}>Withdrawal reason (optional)</Label>
+          <Label htmlFor={reasonId}>Withdrawal reason</Label>
           <Input
             id={reasonId}
             className="mt-2"
-            maxLength={1024}
+            required
+            aria-describedby={`${reasonId}-count`}
+            aria-invalid={overLimit || undefined}
             placeholder={reasonPlaceholder}
             value={reason}
             disabled={busy}
             onChange={(event) => setReason(event.target.value)}
           />
+          <p id={`${reasonId}-count`} className={`mt-1 text-xs tabular-nums ${overLimit ? "text-destructive" : "text-muted-foreground"}`}>
+            {reasonBytes} / {MAX_REASON_BYTES} bytes{overLimit ? " (over limit)" : ""}
+          </p>
           {error && (
             <div role="alert" className="mt-2 text-sm text-destructive">
               <p>{error}</p>
@@ -112,7 +125,7 @@ export function WithdrawConfirmDialog({
         </div>
         <AlertDialogFooter>
           <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
-          <Button type="button" variant="destructive" onClick={confirm} disabled={busy}>
+          <Button type="button" variant="destructive" onClick={confirm} disabled={busy || !reason.trim() || overLimit}>
             {busy && <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />}
             {busy ? "Withdrawing…" : submitLabel}
           </Button>
