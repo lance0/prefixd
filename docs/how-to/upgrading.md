@@ -815,9 +815,10 @@ ledger or an active-active controller protocol.
 body, while `blackhole.detector_sources` and
 `guardrails.detector_prefix_sources` grant detector privileges by that name. A
 `ban` naming either allowlisted source now needs an Admin session. An Operator
-session and the shared bearer token get `403` with an `error` naming the bound
-source, before any event is stored; no guardrail counter moves and no
-mitigation or withdrawal state changes.
+session and the shared bearer token get `403` for a single event; a batch
+returns `207` with an error on each refused item and continues processing the
+other items. The error names the bound source. A refused item stores no event,
+moves no guardrail counter, and changes no mitigation or withdrawal state.
 
 Only an adapter route may bind `source` under an Operator credential. Their
 behavior is unchanged, because each overwrites the field with its configured

@@ -4840,6 +4840,8 @@ mod tests {
             .await;
             {
                 let settings = &mut Arc::get_mut(&mut state).unwrap().settings;
+                // Isolate prefix authorization from the independent blackhole allowlist.
+                settings.blackhole.detector_sources.clear();
                 settings.guardrails.allow_detector_prefix = true;
                 settings.guardrails.detector_prefix_sources = vec!["fastnetmon".into()];
             }
@@ -4864,6 +4866,25 @@ mod tests {
                 assert_eq!(status, StatusCode::FORBIDDEN, "{auth:?}: {body}");
                 assert!(
                     body["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("bound by a detector adapter route"),
+                    "{body}"
+                );
+            }
+            for auth in [bearer, ("cookie", operator.as_str())] {
+                let (status, body) = send(
+                    &app,
+                    "/v1/events/batch",
+                    Some(auth),
+                    json!({"events": [carpet_bomb.clone()]}),
+                )
+                .await;
+                assert_eq!(status, StatusCode::MULTI_STATUS, "{auth:?}: {body}");
+                assert_eq!(body["accepted"], 0);
+                assert_eq!(body["rejected"], 1);
+                assert!(
+                    body["results"][0]["error"]
                         .as_str()
                         .unwrap()
                         .contains("bound by a detector adapter route"),

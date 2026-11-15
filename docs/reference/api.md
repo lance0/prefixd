@@ -351,9 +351,9 @@ guardrails grant detector privileges by that name:
 `blackhole.detector_sources` admits a playbook blackhole step, and
 `guardrails.detector_prefix_sources` admits one canonical CIDR. A `ban` naming
 either allowlisted source needs an **Admin** session. An Operator session, the
-shared bearer token and every other non-admin caller get `403` with an
-`error` naming the bound source; no event is stored and no guardrail counter
-moves.
+shared bearer token and every other non-admin caller get `403` for a single
+event, or a per-item error in a `207` batch response. The error names the
+bound source; the refused item stores no event and moves no guardrail counter.
 
 Detector adapter routes bind the field themselves and are unaffected: a bearer
 token keeps working on `/v1/signals/fastnetmon`, `/v1/signals/alertmanager` and
