@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The release workflow stages its assets in `release-assets/` instead of
+  `dist/`. The checkout tracks `dist/systemd/`, so the v0.27.0 run tagged the
+  release and pushed both images but failed to create the GitHub Release when
+  it tried to upload that directory as an asset. A new step, which also runs in
+  dispatch dry runs, checks the exact asset set, requires each asset to be a
+  regular file and verifies `SHA256SUMS` before publishing.
+
 ## [0.27.0] - 2026-11-15
 
 prefixd 0.27.0 is a safety and correctness release. Withdrawals require a
