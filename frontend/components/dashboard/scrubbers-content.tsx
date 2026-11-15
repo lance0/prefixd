@@ -432,6 +432,7 @@ function ExportEvidence({ label, observation, now }: { label: string; observatio
           <TableHeader><TableRow className="hover:bg-transparent"><TableHead>Peer</TableHead><TableHead>{historical ? "Export at observation" : "Export"}</TableHead><TableHead>Reason</TableHead></TableRow></TableHeader>
           <TableBody>
             {observation.peers.map(peer => {
+              // SAFETY: an unrecognized disposition indexes to undefined and falls back to a neutral label.
               const disposition = DISPOSITION_LABEL[peer.disposition as ExportDisposition] ?? { label: peer.disposition, tone: "neutral" as const }
 
               return <TableRow key={peer.peer_address}>
