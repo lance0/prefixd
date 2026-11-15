@@ -351,12 +351,13 @@ pub async fn get(
 }
 #[utoipa::path(post,path="/v1/diversions/{id}/withdraw",tag="scrubbers",params(("id"=Uuid,Path)),request_body=WithdrawDiversion,responses(
     (status=202,body=Diversion,description="Withdrawal retained until authorization expiry, final fenced delete and complete local absence"),
-    (status=400,body=ErrorResponse,description="Blank or oversized reason"),
+    (status=400,body=ErrorResponse,description="Blank or oversized reason; an empty or malformed JSON body returns 400 with a plain-text body"),
     (status=401,description="Authentication required"),
     (status=403,description="Administrator role required"),
     (status=404,body=ErrorResponse,description="Unknown diversion"),
     (status=409,body=ErrorResponse,description="Diversion belongs to another POP"),
-    (status=422,description="Malformed request body"),
+    (status=415,description="No `Content-Type: application/json` header, such as a bare POST with no body"),
+    (status=422,description="Request body does not match the schema, such as a missing `reason`"),
     (status=503,body=ErrorResponse,description="Controller in standby"),
     (status=500,body=ErrorResponse,description="Durable withdrawal could not be confirmed"),
 ))]

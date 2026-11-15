@@ -213,12 +213,13 @@ describe("WithdrawConfirmDialog", () => {
 
     // 512 two-byte characters fill the limit exactly; one more passes a
     // 1,024-character check but not the API's byte check.
-    fireEvent.change(reason(dialog), { target: { value: "é".repeat(512) } })
+    // Surrounding whitespace is trimmed before sending, so it does not count.
+    fireEvent.change(reason(dialog), { target: { value: `  ${"é".repeat(512)}  ` } })
     expect(within(dialog).getByText("1024 / 1024 bytes")).toBeInTheDocument()
     expect(submit).toBeEnabled()
 
     fireEvent.change(reason(dialog), { target: { value: "é".repeat(513) } })
-    expect(within(dialog).getByText("1026 / 1024 bytes")).toBeInTheDocument()
+    expect(within(dialog).getByText("1026 / 1024 bytes (over limit)")).toBeInTheDocument()
     expect(reason(dialog)).toHaveAttribute("aria-invalid", "true")
     expect(submit).toBeDisabled()
     fireEvent.click(submit)

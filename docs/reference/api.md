@@ -3625,8 +3625,10 @@ its victim, and such a mitigation or diversion is refused while the pair is
 outstanding. Audit details add `return_match` and `export_community`.
 
 Withdrawal requires a JSON body `{"reason": "..."}` with non-whitespace text of
-at most 1,024 UTF-8 bytes. A blank or overlong reason returns `400`, and an
-omitted reason `422`. The first withdrawal reason and requester are immutable; a
+at most 1,024 UTF-8 bytes, sent with `Content-Type: application/json`. A blank
+or overlong reason returns `400` with a JSON error and an omitted reason (`{}`)
+`422`. A request with no body and no JSON content type returns `415`, and an
+empty body with that content type `400`, both with plain-text bodies. The first withdrawal reason and requester are immutable; a
 later request, or a controller latch that already recorded a reason, keeps
 them. A later request still needs a valid reason, which is not recorded.
 

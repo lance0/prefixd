@@ -1326,6 +1326,17 @@ async fn api_statuses_distinguish_disabled_and_unknown_resources() {
         status(withdraw("{}")).await,
         StatusCode::UNPROCESSABLE_ENTITY
     );
+    // The body is required: a bare POST has no JSON content type.
+    assert_eq!(
+        status(
+            Request::post(format!("/v1/diversions/{unknown}/withdraw"))
+                .body(Body::empty())
+                .unwrap()
+        )
+        .await,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+    assert_eq!(status(withdraw("")).await, StatusCode::BAD_REQUEST);
     assert_eq!(
         status(
             Request::post("/v1/scrubbers/missing/arm")

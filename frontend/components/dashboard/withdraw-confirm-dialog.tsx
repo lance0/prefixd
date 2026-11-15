@@ -49,7 +49,8 @@ export function WithdrawConfirmDialog({
   const [busy, setBusy] = useState(false)
   const inFlight = useRef(false)
   const completed = useRef(false)
-  const reasonBytes = encoder.encode(reason).length
+  // Count what is sent: the trimmed reason.
+  const reasonBytes = encoder.encode(reason.trim()).length
   const overLimit = reasonBytes > MAX_REASON_BYTES
 
   const close = () => {
@@ -111,7 +112,7 @@ export function WithdrawConfirmDialog({
             onChange={(event) => setReason(event.target.value)}
           />
           <p id={`${reasonId}-count`} className={`mt-1 text-xs tabular-nums ${overLimit ? "text-destructive" : "text-muted-foreground"}`}>
-            {reasonBytes} / {MAX_REASON_BYTES} bytes
+            {reasonBytes} / {MAX_REASON_BYTES} bytes{overLimit ? " (over limit)" : ""}
           </p>
           {error && (
             <div role="alert" className="mt-2 text-sm text-destructive">

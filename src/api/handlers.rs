@@ -2760,7 +2760,10 @@ pub struct BulkWithdrawResponse {
     request_body = BulkWithdrawRequest,
     responses(
         (status = 200, description = "Bulk withdraw results", body = BulkWithdrawResponse),
-        (status = 400, description = "No or more than 100 IDs, or a blank or overlong reason")
+        (status = 400, description = "No or more than 100 IDs, or a blank or overlong reason"),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "Operator role required"),
+        (status = 422, description = "Request body does not match the schema, such as a missing `reason`")
     )
 )]
 pub async fn bulk_withdraw_mitigations(
