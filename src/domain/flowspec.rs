@@ -738,6 +738,27 @@ mod tests {
         }
     }
 
+    /// Exact RFC 8955 action communities: traffic-rate type 0x8006, DSCP type 0x8009.
+    #[test]
+    fn extended_communities_keep_exact_type_and_value_bytes() {
+        assert_eq!(
+            FlowSpecAction::discard().extended_community(),
+            Ok(0x8006_0000_0000_0000)
+        );
+        assert_eq!(
+            FlowSpecAction::police(8_000).extended_community(),
+            Ok(0x8006_0000_0000_0000 | u64::from(1000.0_f32.to_bits()))
+        );
+        assert_eq!(
+            FlowSpecAction::mark(46).extended_community(),
+            Ok(0x8009_0000_0000_002e)
+        );
+        assert_eq!(
+            FlowSpecAction::mark(64).extended_community(),
+            Err(FlowSpecActionError::InvalidDscp(64))
+        );
+    }
+
     #[test]
     fn match_invariants_are_typed_errors_with_passing_controls() {
         let udp = |prefix: &str| FlowSpecNlri {
