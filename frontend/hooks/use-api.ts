@@ -208,6 +208,11 @@ export function useAlertingConfig() {
   )
 }
 
+/** Outstanding scrubber diversions. The Scrubbers page and WebSocket refresh share this key. */
+export function useDiversions() {
+  return useSWR("scrubber-diversions", api.getDiversions, { refreshInterval: REFRESH_INTERVAL })
+}
+
 export function useIpHistory(ip: string | null) {
   return useSWR(
     ip ? ["ip-history", ip] : null,

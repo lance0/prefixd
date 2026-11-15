@@ -8,6 +8,7 @@ import { Ban, Eye, Search, ShieldPlus, Filter, RefreshCw, XCircle, Plus, Downloa
 import { Checkbox } from "@/components/ui/checkbox"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 import { OriginTag } from "@/components/dashboard/status-pill"
+import { DivertedIndicator } from "@/components/dashboard/diverted-indicator"
 import { ActionBadge } from "@/components/dashboard/action-badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -524,6 +525,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                         <span className="flex flex-wrap items-center justify-end gap-1 md:justify-start">
                           <StatusBadge status={mitigation.status} />
                           <OriginTag origin={mitigation.origin_mode} />
+                          <DivertedIndicator host={mitigation.victim_ip} scope={mitigation.vpn_scope?.identity ?? null} />
                         </span>
                       </TableCell>
                       <TableCell className="order-3 p-0 md:px-3 md:py-2">
