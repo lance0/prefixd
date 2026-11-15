@@ -939,9 +939,15 @@ Replacing only the controller can preserve the independent speaker's sessions:
    after startup; no fixed recovery time is guaranteed.
 4. The speaker may retain announcements while prefixd restarts. Application TTL
    expiry pauses during controller downtime and resumes with reconciliation.
+   With the shipped rustbgpd config's
+   [leased FlowSpec](../reference/configuration.md#leased-flowspec), rustbgpd
+   keeps leased rules only for `blackhole.lease_seconds` (60 by default) after
+   the old controller stops renewing. Finish the replacement within one lease,
+   or the leased rules are withdrawn until the new controller re-adds them at
+   startup.
 
-The API is unavailable during replacement and rules can outlive their deadlines
-until cleanup resumes. This is not a zero-downtime or automatic fail-open promise.
+The API is unavailable during replacement and unleased rules can outlive their
+deadlines until cleanup resumes. This is not a zero-downtime promise.
 
 ---
 

@@ -178,7 +178,8 @@ bgp:
   backend: rustbgpd
   rustbgpd:
     endpoint: "unix:///run/rustbgpd/grpc.sock"
-    # Off by default. Every supported rustbgpd (0.83.0 or later) has the lease.
+    # Off by default; on in the shipped configs/prefixd.yaml. Every supported
+    # rustbgpd (0.83.0 or later) has the lease.
     leased_flowspec: true
 ```
 
@@ -190,6 +191,14 @@ lease instead of keeping them until prefixd returns. They share the owner,
 `blackhole.lease_seconds`, the renewal task and the generation with
 [leased blackholes](#leased-blackholes), because any leased add moves the
 owner's whole deadline. `blackhole.leased` is not required.
+
+The code default is `false`. The shipped `configs/prefixd.yaml`, which the
+rustbgpd Compose profile mounts, sets it to `true`, so a controller outage
+longer than one lease removes active FlowSpec mitigations from rustbgpd while
+the database still desires them. When prefixd returns, startup re-adds the
+rules that are still active. Set `false` to keep rules announced through a
+controller outage; startup refuses that while leased rules are active or
+awaiting withdrawal.
 
 - **Startup.** Refused unless the speaker answers the injection lease probe,
   which every supported rustbgpd does. Refused when the speaker holds live FlowSpec

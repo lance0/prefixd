@@ -3406,6 +3406,7 @@ mod tests {
                 let mut settings: Settings =
                     crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
                 settings.bgp.mode = BgpMode::Mock;
+                settings.bgp.rustbgpd = None;
                 settings.mode = mode;
                 let repo = Arc::new(MockRepository::new());
                 let speaker = Arc::new(if supported {
@@ -3488,6 +3489,7 @@ mod tests {
                 let mut settings: Settings =
                     crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
                 settings.bgp.mode = BgpMode::Mock;
+                settings.bgp.rustbgpd = None;
                 settings.mode = mode;
                 settings.guardrails.allow_fragment_match = allowed;
                 let repo = Arc::new(MockRepository::new());
@@ -3618,6 +3620,7 @@ mod tests {
             let mut settings: crate::config::Settings =
                 crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
             settings.bgp.mode = BgpMode::Mock;
+            settings.bgp.rustbgpd = None;
             settings.mode = mode;
             settings.http.auth.mode = AuthMode::None;
             settings.blackhole.enabled = true;
@@ -5094,6 +5097,7 @@ playbooks:
         let mut settings: Settings =
             crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
         settings.bgp.mode = BgpMode::Mock;
+        settings.bgp.rustbgpd = None;
         settings.mode = mode;
         settings.correlation.enabled = false;
         settings.guardrails.allow_fragment_match = true;

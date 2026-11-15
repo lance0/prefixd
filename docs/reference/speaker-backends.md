@@ -467,10 +467,10 @@ router receipt, or traffic enforcement.
 
 Mandatory TTLs for unleased rules are enforced by the running controller. Losing
 prefixd does not drop a separate daemon's router sessions or automatically expire
-those rules. Opt-in rustbgpd [injection leases](#injection-lease) let the speaker
-remove leased intent after renewal stops; enabling them does not convert existing
-unleased rules. Monitor controller availability and restore reconciliation after
-failure.
+those rules. rustbgpd [injection leases](#injection-lease), on for FlowSpec in
+the shipped rustbgpd config, let the speaker remove leased intent after renewal
+stops; enabling them does not convert existing unleased rules. Monitor
+controller availability and restore reconciliation after failure.
 
 ## Withdrawal recovery
 

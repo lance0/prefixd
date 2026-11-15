@@ -38,9 +38,10 @@ advisory-lock fence keeps a second controller for the same owner in standby when
 both share the database. Separate databases are outside that fence.
 
 TTL expiry requires the running controller for unleased rules; a separate
-speaker can continue advertising after prefixd stops. With rustbgpd, opt-in [leased blackholes](docs/reference/configuration.md#leased-blackholes)
-(`blackhole.leased`) and [leased FlowSpec](docs/reference/configuration.md#leased-flowspec)
-(`bgp.rustbgpd.leased_flowspec`) let the speaker remove leased intent within one
+speaker can continue advertising after prefixd stops. With rustbgpd, [leased FlowSpec](docs/reference/configuration.md#leased-flowspec)
+(`bgp.rustbgpd.leased_flowspec`, on in the shipped config) and opt-in
+[leased blackholes](docs/reference/configuration.md#leased-blackholes)
+(`blackhole.leased`) let the speaker remove leased intent within one
 lease after renewal stops. Existing unleased rules stay unleased until withdrawn
 or expired. An independent two-second liveness probe detects a changed rustbgpd
 incarnation and wakes recovery for held leases; unleased recovery remains

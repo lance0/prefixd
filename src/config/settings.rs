@@ -911,22 +911,34 @@ mod tests {
 
     #[test]
     fn shipped_speaker_examples_select_the_matching_backend() {
-        for (yaml, expected) in [
+        // Only the rustbgpd Compose profile's main config leases FlowSpec.
+        for (yaml, expected, leased) in [
             (
                 include_str!("../../configs/prefixd.yaml"),
                 BgpMode::Rustbgpd,
+                true,
             ),
             (
                 include_str!("../../configs/prefixd.yaml.example"),
                 BgpMode::Rustbgpd,
+                false,
             ),
             (
                 include_str!("../../configs/prefixd-gobgp.yaml"),
                 BgpMode::Gobgp,
+                false,
             ),
         ] {
             let settings = load_yaml(yaml).unwrap();
             assert_eq!(settings.bgp.mode, expected);
+            assert_eq!(
+                settings
+                    .bgp
+                    .rustbgpd
+                    .as_ref()
+                    .is_some_and(|rustbgpd| rustbgpd.leased_flowspec),
+                leased
+            );
             // Shipped files pin the backend instead of relying on resolution.
             assert!(yaml.contains("\nbgp:\n") && yaml.contains("\n  backend: "));
             assert_eq!(settings.http.auth.mode, AuthMode::Credentials);
