@@ -1010,7 +1010,8 @@ async fn test_detector_unban_is_recorded_beside_its_ban() {
          INSERT INTO events (event_id, external_event_id, source, event_timestamp, ingested_at,
              victim_ip, vector, top_dst_ports_json, action)
          VALUES (gen_random_uuid(), 'old-1', 'replay', now(), now(), '203.0.113.30',
-             'udp_flood', '[]', 'ban');",
+             'udp_flood', '[]', 'ban');
+         DELETE FROM schema_migrations WHERE version = 18;",
     )
     .execute(&ctx.pool)
     .await
@@ -2166,6 +2167,10 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
         .unwrap();
     // Simulate an existing table from before originating mode was recorded.
     sqlx::query("ALTER TABLE withdrawal_requests DROP COLUMN speaker_delete_required")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM schema_migrations WHERE version = 13")
         .execute(&pool)
         .await
         .unwrap();
@@ -7697,7 +7702,8 @@ async fn test_event_outcomes_replay_filter_and_write_once_postgres_mock_parity()
          INSERT INTO events (event_id, external_event_id, source, event_timestamp, ingested_at,
              victim_ip, vector, top_dst_ports_json, action)
          VALUES (gen_random_uuid(), 'legacy', 'replay', now(), now() - interval '1 minute',
-             '203.0.113.30', 'udp_flood', '[]', 'ban');",
+             '203.0.113.30', 'udp_flood', '[]', 'ban');
+         DELETE FROM schema_migrations WHERE version = 20;",
     )
     .execute(&ctx.pool)
     .await

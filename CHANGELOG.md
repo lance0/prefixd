@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- This release adds no migration: migration 020 is still the latest, as in
+  0.27.0, so a rolling replacement from 0.27.0, with the new controller started
+  in standby, is unaffected. From this release on, a controller refuses a
+  database that records a migration newer than it knows, but 0.27.0 and older
+  have no such check. A future release that adds a migration is one-way: its
+  upgrade notes state whether a rolling replacement is safe, and rolling it back
+  means restoring the pre-upgrade backup. See
+  [database schema version and downgrade](docs/how-to/upgrading.md#database-schema-version-and-downgrade).
 - The lease state adds `standby`. During a PostgreSQL outage the active
   controller loses its fence within seconds, so once renewal stops at the TTL
   bound it reports `standby` with `renewal_stopped: "ttl_bound"`, not
@@ -58,6 +66,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Startup applies only the migrations the database has not recorded, each in
+  its own transaction under a PostgreSQL advisory lock. A second controller
+  waits instead of racing the first through the same DDL, and an up-to-date
+  database runs no DDL at all. Each attempt waits at most 2 seconds for its
+  table locks, so queries queued behind its `ACCESS EXCLUSIVE` request wait a
+  bounded time; a migration still blocked after 5 attempts with backoff, about
+  20 seconds, rolls back and fails the start with its version, name and a
+  `pg_locks` query to find the blocker. A database that predates
+  version tracking replays migrations 1-3, whose statements are all
+  `IF NOT EXISTS`. A database migrated by a newer release refuses to start
+  rather than running an older binary against a newer schema.
 - Health detail `speaker.lease` adds `renew_until` and `renewal_stopped`, and
   its `state`, like `prefixd_injection_lease_state`, adds `standby`. `expired`
   also covers a renewal that stopped at the TTL bound one lease ago.
