@@ -55,20 +55,22 @@ describe("event outcomes", () => {
     await screen.findByRole("link", { name: "203.0.113.10" })
     expect(screen.getByRole("columnheader", { name: "Outcome" })).toBeInTheDocument()
     const [, mitigated, refused, legacy] = screen.getAllByRole("row")
-    expect(within(mitigated).getByText("Mitigated")).toHaveAttribute("data-tone", "success")
+    // A created mitigation is not proof of enforcement, so it is never shown as healthy.
+    expect(within(mitigated).getByText("Mitigation created")).toHaveAttribute("data-tone", "info")
     expect(within(refused).getByText("Safelisted")).toHaveAttribute("data-tone", "warning")
     expect(within(refused).getByText("guardrail violation: IP 203.0.113.11 is safelisted")).toBeInTheDocument()
     expect(within(legacy).getByText("Outcome not recorded")).toHaveAttribute("data-tone", "neutral")
 
     fireEvent.click(within(mitigated).getByRole("button", { name: "View event details" }))
     const dialog = await screen.findByRole("dialog", { name: "Event details" })
-    expect(within(dialog).getByText("Mitigated")).toBeInTheDocument()
+    expect(within(dialog).getByText("Mitigation created")).toBeInTheDocument()
     expect(within(dialog).getByRole("link", { name: "11111111-1111-1111-1111-111111111111" })).toHaveAttribute("href", "/mitigations/11111111-1111-1111-1111-111111111111")
   })
 
   it("filters by outcome on the server and resets to the first page", async () => {
     renderEvents()
     await screen.findByRole("link", { name: "203.0.113.10" })
+    expect(screen.getByRole("link", { name: "audit log" })).toHaveAttribute("href", "/audit-log")
     fireEvent.keyDown(screen.getByRole("combobox", { name: "Outcome" }), { key: "Enter" })
     fireEvent.click(await screen.findByRole("option", { name: "Any refusal or failure" }))
     await waitFor(() => expect(screen.queryByRole("link", { name: "203.0.113.10" })).not.toBeInTheDocument())
@@ -91,7 +93,7 @@ describe("event outcomes", () => {
 
   it("maps every outcome to a labeled tone and unknown values to not recorded", () => {
     expect(EVENT_OUTCOMES.map(eventOutcomeTone)).toEqual([
-      "success", "success", "info", "danger", "warning", "warning",
+      "info", "info", "info", "danger", "warning", "warning",
       "neutral", "info", "danger", "danger", "neutral", "neutral",
     ])
     render(<EventOutcomePill outcome="something_new" />)

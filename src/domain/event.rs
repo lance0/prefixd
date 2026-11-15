@@ -162,9 +162,12 @@ pub struct AttackEvent {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EventOutcome {
-    /// Created at least one enforced mitigation; later rules may have been refused.
+    /// Created at least one mitigation in enforced mode; later rules may have
+    /// been refused. Not proof of speaker acceptance or router enforcement: the
+    /// linked mitigation's status and export evidence are authoritative.
     Mitigated,
-    /// Only extended mitigations that already existed.
+    /// Only extended mitigations that already existed; as for `Mitigated`, the
+    /// linked mitigation is authoritative.
     Extended,
     /// Created or extended simulated mitigations in dry-run mode; nothing was announced.
     DryRun,
@@ -180,7 +183,8 @@ pub enum EventOutcome {
     AwaitingCorroboration,
     /// Refused because another rule, owner or speaker state holds the match.
     Conflict,
-    /// Admission or withdrawal failed after the event was stored.
+    /// The request failed after the event was stored. The linked mitigation's
+    /// status is authoritative: withdrawal intent may be retained and reconciled.
     Failed,
     /// A detector unban withdrew the ban's mitigations.
     Withdrawn,

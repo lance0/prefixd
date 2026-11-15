@@ -454,7 +454,8 @@ page counts, not a total. Source and vector use exact text inputs because there
 is no complete historical catalog; a blank input omits that filter. The outcome
 column shows each event's outcome and reason, and the outcome filter offers each
 outcome plus "Any refusal or failure" (`guardrail_rejected`, `safelisted`,
-`conflict` and `failed`). An event
+`conflict` and `failed`). A note under the filters points to the audit log for
+refusals before storage. An event
 UUID deep link starts a server search, so older events can open their detail
 panel. Invalid filter drafts retain the last valid results and disable export.
 
@@ -502,7 +503,10 @@ also retains visited pages for the app lifetime. Large-history memory and
 #### Event outcomes
 
 Every event the controller stores records what ingestion did with it, once,
-when processing finishes. This covers single, batch and signal-adapter events.
+when processing finishes. An outcome describes the event at ingestion and is
+never updated: `failed` means the request failed then, and the linked
+mitigation's current status is authoritative, since withdrawal intent may be
+retained and reconciled later. This covers single, batch and signal-adapter events.
 `outcome_mitigation_ids` lists the mitigations the event created, extended or
 withdrew (`[]` when none). `outcome_reason` explains an event that did not
 mitigate; for `mitigated`, `extended` and `dry_run` it names the first refused
@@ -510,16 +514,16 @@ rule of a partial admission and is otherwise `null`.
 
 | Outcome | Meaning |
 |---------|---------|
-| `mitigated` | Created at least one enforced mitigation |
-| `extended` | Only extended mitigations that already existed |
+| `mitigated` | Mitigation created: at least one mitigation in enforced mode. Not proof of speaker acceptance or router enforcement; see the linked mitigation |
+| `extended` | Mitigation extended: only mitigations that already existed. See the linked mitigation |
 | `dry_run` | Created or extended simulated mitigations in dry-run mode; nothing was announced |
 | `guardrail_rejected` | Every rule was refused by a guardrail; the reason names the guardrail, quota or setting |
 | `safelisted` | The destination is safelisted |
-| `no_playbook` | No playbook matched the event |
+| `no_playbook` | No playbook matched the event, or the matching playbook has no usable step |
 | `not_owned` | The destination is not in the inventory |
-| `awaiting_corroboration` | Recorded in a signal group that has not met its corroboration threshold |
+| `awaiting_corroboration` | Corroboration not met: recorded in a signal group below its corroboration threshold at ingestion. A later event that meets it has its own outcome |
 | `conflict` | Refused because a dry-run simulation, a manual mark, another injection owner or an ownership change holds the match |
-| `failed` | Admission or withdrawal failed after the event was stored |
+| `failed` | The request failed after the event was stored; the linked mitigation's status is authoritative |
 | `withdrawn` | A detector `unban` withdrew the ban's mitigations |
 | `not_recorded` | Stored before outcomes were recorded, by an older controller after a downgrade, or processing did not finish |
 
@@ -527,6 +531,10 @@ A client-error reason repeats the error the detector received. A server error
 is summarized as its HTTP status, for example `500 Internal Server Error; see
 controller logs`, so storage and speaker details never reach the event list.
 An outcome value this controller does not recognize reads as `not_recorded`.
+
+A policy refusal after storage, such as a prefix playbook with multi-rule steps
+(`PrefixMatchRequiresPorts`), still returns 202 `accepted_no_playbook` as
+before, but records `guardrail_rejected` and writes a `reject` audit entry.
 
 Refusals that happen before the event is stored, such as a detector prefix
 event outside its opt-in, bounds or ownership, a policy with no allowed ports,

@@ -397,4 +397,172 @@ async fn refused_unban_records_a_conflict_and_is_audited() {
     assert_eq!(audit[0]["details"]["outcome"], "conflict");
     assert_eq!(audit[0]["details"]["guardrail"], "Conflict");
     assert_eq!(audit[0]["details"]["stored"], true);
+    // The failing mitigation is linked, so its status can be checked.
+    assert_eq!(row["outcome_mitigation_ids"], json!([ban["mitigation_id"]]));
+}
+
+/// A prefix playbook whose step has rules cannot produce a narrow prefix match.
+/// Load refuses it; the policy check behind it must record a refusal, not
+/// `no_playbook`, even though the response stays `accepted_no_playbook`.
+#[tokio::test]
+async fn prefix_rules_refusal_after_storage_is_a_guardrail_refusal_and_audited() {
+    use prefixd::config::{
+        EventScope, Playbook, PlaybookAction, PlaybookMatch, PlaybookRule, PlaybookRuleMatch,
+        PlaybookStep,
+    };
+    let repo = Arc::new(MockRepository::new());
+    let mut settings = common::test_settings();
+    settings.mode = OperationMode::Enforced;
+    settings.guardrails.allow_detector_prefix = true;
+    settings.guardrails.detector_prefix_sources = vec!["outcome-test".into()];
+    settings.guardrails.dst_prefix_minlen = 24;
+    let mut playbooks = common::test_playbooks();
+    playbooks.playbooks.push(Playbook {
+        name: "carpet_rules".into(),
+        match_criteria: PlaybookMatch {
+            vector: prefixd::domain::AttackVector::UdpFlood,
+            require_top_ports: true,
+            scope: EventScope::Prefix,
+        },
+        correlation: None,
+        steps: vec![PlaybookStep {
+            action: None,
+            rate_bps: None,
+            ttl_seconds: 120,
+            require_confidence_at_least: None,
+            require_persistence_seconds: None,
+            rules: vec![PlaybookRule {
+                match_criteria: PlaybookRuleMatch {
+                    fragment: Some(prefixd::domain::FragmentMatch::NonFirst),
+                    ..Default::default()
+                },
+                action: PlaybookAction::Police,
+                rate_bps: Some(1_000_000),
+            }],
+        }],
+    });
+    let state = AppState::new(
+        settings,
+        common::test_inventory(),
+        playbooks,
+        repo.clone(),
+        Arc::new(MockAnnouncer::new()),
+        ".".into(),
+    )
+    .unwrap();
+    let (status, body) = post(&state, event("carpet", "203.0.113.0/24", "udp_flood")).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["status"], "accepted_no_playbook");
+    let row = listed(&state, "carpet").await;
+    assert_eq!(row["outcome"], "guardrail_rejected", "{row}");
+    assert!(
+        row["outcome_reason"]
+            .as_str()
+            .unwrap()
+            .contains("prefix rules require a protocol and at least one destination port")
+    );
+    let audit = rejections(&repo).await;
+    assert_eq!(audit.len(), 1, "{audit:?}");
+    assert_eq!(audit[0]["target_id"], row["event_id"]);
+    assert_eq!(audit[0]["details"]["guardrail"], "PrefixMatchRequiresPorts");
+    assert_eq!(audit[0]["details"]["stored"], true);
+}
+
+#[tokio::test]
+async fn corroboration_not_met_is_recorded() {
+    let repo = Arc::new(MockRepository::new());
+    let mut settings = common::test_settings();
+    settings.mode = OperationMode::Enforced;
+    settings.correlation.enabled = true;
+    settings.correlation.min_sources = 2;
+    let state = AppState::new(
+        settings,
+        common::test_inventory(),
+        common::test_playbooks(),
+        repo.clone(),
+        Arc::new(MockAnnouncer::new()),
+        ".".into(),
+    )
+    .unwrap();
+    let (status, body) = post(&state, event("lonely", "203.0.113.10", "udp_flood")).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["status"], "accepted");
+    assert_eq!(body["mitigation_id"], Value::Null);
+    let row = listed(&state, "lonely").await;
+    assert_eq!(row["outcome"], "awaiting_corroboration");
+    assert!(
+        row["outcome_reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("corroboration not met: 1 source(s)")
+    );
+    assert!(rejections(&repo).await.is_empty());
+}
+
+#[tokio::test]
+async fn server_error_after_storage_is_failed_and_summarized() {
+    let (mut state, repo) = state(OperationMode::Enforced);
+    // Leased FlowSpec without the controller's lease fails admission with a
+    // server-side configuration error after the event is stored.
+    Arc::get_mut(&mut state).unwrap().settings.bgp.rustbgpd =
+        Some(prefixd::config::RustBgpdConfig {
+            leased_flowspec: true,
+            ..Default::default()
+        });
+    let (status, body) = post(&state, event("broken", "203.0.113.10", "udp_flood")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    let row = listed(&state, "broken").await;
+    assert_eq!(row["outcome"], "failed");
+    assert_eq!(
+        row["outcome_reason"],
+        "500 Internal Server Error; see controller logs"
+    );
+    assert!(!row.to_string().contains("injection lease"));
+    assert!(rejections(&repo).await.is_empty());
+}
+
+#[tokio::test]
+async fn fastnetmon_adapter_events_record_outcomes() {
+    let (state, repo) = state(OperationMode::Enforced);
+    repo.insert_safelist("203.0.113.11/32", "test", None)
+        .await
+        .unwrap();
+    let fastnetmon = |ip: &str, uuid: &str| {
+        json!({
+            "action": "ban", "ip": ip, "alert_scope": "host",
+            "attack_details": {
+                "attack_uuid": uuid, "attack_severity": "high",
+                "attack_detection_source": "automatic", "attack_direction": "incoming",
+                "attack_protocol": "udp", "host_network": "203.0.113.0/24",
+                "incoming_udp_pps": 50000, "incoming_udp_traffic_bits": 500000000,
+                "total_incoming_pps": 50000, "total_incoming_traffic_bits": 500000000,
+            }
+        })
+    };
+    for (ip, uuid) in [("203.0.113.10", "fnm-ok"), ("203.0.113.11", "fnm-safe")] {
+        let (status, body) = send(
+            &state,
+            "POST",
+            "/v1/signals/fastnetmon",
+            Some(fastnetmon(ip, uuid)),
+        )
+        .await;
+        assert!(
+            status.is_success() || status.is_client_error(),
+            "{status}: {body}"
+        );
+    }
+    let (_, list) = send(&state, "GET", "/v1/events", None).await;
+    let outcome = |uuid: &str| {
+        list["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["external_event_id"] == uuid)
+            .map(|event| event["outcome"].clone())
+            .unwrap_or_else(|| panic!("no event {uuid}: {list}"))
+    };
+    assert_eq!(outcome("fnm-ok"), "mitigated");
+    assert_eq!(outcome("fnm-safe"), "safelisted");
+    assert_eq!(rejections(&repo).await.len(), 1);
 }

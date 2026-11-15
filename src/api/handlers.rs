@@ -1087,19 +1087,26 @@ async fn handle_unban(
                 withdrawn.push(mitigation.mitigation_id);
             }
             Err(error) => {
-                failure = Some(error);
+                failure = Some((mitigation.mitigation_id, error));
                 break;
             }
         }
     }
+    let failure = failure.map(|(failed_id, error)| {
+        // The failing mitigation is linked too: its status, not this outcome,
+        // says whether withdrawal intent was retained.
+        let mut ids = withdrawn.clone();
+        ids.push(failed_id);
+        (ids, error)
+    });
     if stored {
         let record = match &failure {
             None => EventOutcomeRecord::new(EventOutcome::Withdrawn, None, withdrawn.clone()),
-            Some(error) => EventOutcomeRecord::from_error(error, withdrawn.clone()),
+            Some((ids, error)) => EventOutcomeRecord::from_error(error, ids.clone()),
         };
         record_event_outcome(&state, unban_event.event_id, &record).await;
     }
-    if let Some(error) = failure {
+    if let Some((_, error)) = failure {
         audit_refusal(&state, &unban_event, &error, None, stored).await;
         return Err(AppError(error));
     }
@@ -1767,11 +1774,18 @@ async fn admit_ban(
         Ok(decision) => decision,
         Err(e) => {
             tracing::warn!(error = %e, "policy evaluation failed");
-            trace.outcome = Some(EventOutcomeRecord::new(
-                EventOutcome::NoPlaybook,
-                Some(e.to_string()),
-                Vec::new(),
-            ));
+            // The 202 `accepted_no_playbook` response predates outcomes and is
+            // kept; the recorded outcome says what actually happened.
+            if matches!(e, PrefixdError::NoPlaybookFound(_)) {
+                trace.outcome = Some(EventOutcomeRecord::new(
+                    EventOutcome::NoPlaybook,
+                    Some(e.to_string()),
+                    Vec::new(),
+                ));
+            } else {
+                trace.outcome = Some(EventOutcomeRecord::from_error(&e, Vec::new()));
+                audit_refusal(&state, &event, &e, None, true).await;
+            }
             return Ok((
                 StatusCode::ACCEPTED,
                 Json(EventResponse::new(

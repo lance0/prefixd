@@ -177,6 +177,11 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
               ))}
             </SelectContent>
           </Select>
+          <p className="w-full text-xs text-muted-foreground">
+            Events refused before they were stored have no row here; see the{" "}
+            <Link href="/audit-log" className="rounded-sm underline hover:text-foreground">audit log</Link>
+            {" "}<code>reject</code> entries.
+          </p>
         </div>
         {filtersInvalid && <p id="event-filter-error" role="alert" className="p-3 text-sm text-destructive">Filters must be at most 256 UTF-8 bytes without null characters. Showing the last valid filters.</p>}
         {exportError && <p role="alert" className="p-3 text-sm text-destructive">{exportError}. No file was downloaded.</p>}

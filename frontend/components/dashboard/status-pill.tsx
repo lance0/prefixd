@@ -75,26 +75,27 @@ export function auditActionTone(action: string): StatusTone {
 }
 
 export const EVENT_OUTCOME_LABELS: Record<EventOutcome, string> = {
-  mitigated: "Mitigated",
-  extended: "Extended",
+  mitigated: "Mitigation created",
+  extended: "Mitigation extended",
   dry_run: "Dry run",
   guardrail_rejected: "Guardrail refused",
   safelisted: "Safelisted",
   no_playbook: "No playbook",
   not_owned: "Not in inventory",
-  awaiting_corroboration: "Awaiting corroboration",
+  awaiting_corroboration: "Corroboration not met",
   conflict: "Conflict",
   failed: "Failed",
   withdrawn: "Withdrawn",
   not_recorded: "Outcome not recorded",
 }
 
-/** Refusals and failures need attention; a simulation is never shown as enforced. */
+/**
+ * Refusals and failures need attention. A created or extended mitigation is not
+ * proof of speaker acceptance or router enforcement, so it is never shown as
+ * healthy; the linked mitigation's status is authoritative.
+ */
 export function eventOutcomeTone(outcome: string): StatusTone {
   switch (outcome) {
-    case "mitigated":
-    case "extended":
-      return "success"
     case "guardrail_rejected":
     case "conflict":
     case "failed":
@@ -102,6 +103,8 @@ export function eventOutcomeTone(outcome: string): StatusTone {
     case "safelisted":
     case "no_playbook":
       return "warning"
+    case "mitigated":
+    case "extended":
     case "dry_run":
     case "awaiting_corroboration":
       return "info"

@@ -114,8 +114,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `outcome_reason` and `outcome_mitigation_ids`. `GET /v1/events` returns the
   three fields and filters by a comma-separated `outcome`. Events stored
   before migration 020, or by an older controller after a downgrade, report
-  `not_recorded`; replay infers no outcome. The Events page adds an outcome
-  column and filter, and the event panel shows the reason and mitigations.
+  `not_recorded`; replay infers no outcome. An outcome describes the event at
+  ingestion: `mitigated` ("Mitigation created") is not proof of speaker
+  acceptance or router enforcement, and the linked mitigation's status is
+  authoritative. A policy refusal after storage, such as
+  `PrefixMatchRequiresPorts`, still returns 202 `accepted_no_playbook` but
+  records `guardrail_rejected`. The Events page adds an outcome column and
+  filter, and the event panel shows the reason and mitigations.
 - A guardrail or conflict refusal of a detector event writes a `reject` audit
   entry with the event's `source`, destination, outcome, guardrail reason and
   whether it was stored. A refusal before storage, such as a detector prefix
