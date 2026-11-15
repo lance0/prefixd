@@ -2,6 +2,7 @@
 /data
 # Compose loads this file; the quickstart writes the API token into it.
 /.env
+/.env-*
 *.db
 *.db-*
 lab/clab-*/

@@ -826,6 +826,8 @@ fn flowspec_rule_for_admission(
 }
 
 /// Caller holds the lifecycle mutex; commit desired state before any speaker mutation.
+/// The announcement makes one bounded attempt: a wedged speaker returns an
+/// unconfirmed outcome that reconciliation repairs from the persisted intent.
 async fn persist_new_mitigation(
     state: &AppState,
     mitigation: &mut Mitigation,
@@ -860,6 +862,12 @@ async fn persist_new_mitigation(
             tracing::warn!(error = %error, pop = %mitigation.pop, reason,
                 "admission rejected new mitigation");
         })?;
+    // A post-commit refusal (InjectionOwnerMismatch) leaves this raised bound in
+    // the keeper until the next read; it is bounded by this row's TTL and never
+    // re-adds anything.
+    if let Some(lease) = state.lease.as_deref() {
+        lease.observe_leased_write(mitigation);
+    }
     if state.is_dry_run() {
         return Ok(None);
     }
@@ -869,8 +877,13 @@ async fn persist_new_mitigation(
             "mitigation expired during persistence; announcement skipped");
         return Ok(Some(AnnouncementOutcome::Unconfirmed));
     }
-    match crate::domain::announce_flowspec(state.announcer.as_ref(), &rule, state.lease.as_deref())
-        .await
+    match crate::domain::announce_flowspec(
+        state.announcer.as_ref(),
+        &rule,
+        state.lease.as_deref(),
+        crate::bgp::RetryPolicy::Bounded,
+    )
+    .await
     {
         Ok(()) => {}
         // Another owner, or none, holds the key and the daemon changed nothing.
@@ -941,6 +954,9 @@ async fn publish_mitigation_created(
         .notify(crate::alerting::Alert::mitigation_created(mitigation));
 }
 
+/// Caller holds the lifecycle mutex. The delete makes one bounded attempt, so a
+/// wedged speaker cannot freeze ingest: a timeout leaves the withdrawal pending
+/// with its recorded intent for reconciliation to complete.
 async fn withdraw_and_notify(
     state: &AppState,
     mitigation: &Mitigation,
@@ -971,6 +987,7 @@ async fn withdraw_and_notify(
         state.is_dry_run(),
         &request,
         binding,
+        crate::bgp::RetryPolicy::Bounded,
     )
     .await?;
     let (message, alert) = if request.is_expiry() {
@@ -988,11 +1005,7 @@ async fn withdraw_and_notify(
             .with_label_values(&[
                 mitigation.action_type.to_string().as_str(),
                 mitigation.pop.as_str(),
-                if request.actor_type == "detector" {
-                    "detector_unban"
-                } else {
-                    "operator"
-                },
+                request.withdrawn_metric_reason(),
             ])
             .inc();
         (
@@ -1869,6 +1882,9 @@ async fn admit_ban(
                     }
                 }
                 state.repo.update_mitigation(&existing).await?;
+                if let Some(lease) = state.lease.as_deref() {
+                    lease.observe_leased_write(&existing);
+                }
                 let _ = state
                     .ws_broadcast
                     .send(crate::ws::WsMessage::MitigationUpdated {
@@ -4785,6 +4801,21 @@ mod tests {
             assert_eq!(stored.action_params.injection_owner, owner);
             assert_eq!(speaker.inner.list_active().await.unwrap()[0].owner, owner);
             assert!(lease.generation().is_some());
+            // The committed row bounds renewal at once, and so does a
+            // detector re-send that extends it.
+            assert_eq!(lease.health().renew_until, Some(stored.expires_at));
+            let (status, body) = send(
+                &app,
+                "/v1/events",
+                None,
+                fastnetmon_ban("fastnetmon", "203.0.113.10"),
+            )
+            .await;
+            assert!(status.is_success(), "{body}");
+            let extended = repo.get_mitigation(id).await.unwrap().unwrap();
+            assert!(extended.expires_at > stored.expires_at);
+            assert_eq!(lease.health().renew_until, Some(extended.expires_at));
+            assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 1);
 
             speaker.fail_adds.store(true, SeqCst);
             let (status, body) = send(
@@ -4901,6 +4932,7 @@ mod tests {
                 false,
                 &request,
                 None,
+                crate::bgp::RetryPolicy::Durable,
             )
             .await
             .unwrap();
@@ -5898,6 +5930,148 @@ mod global_manual_scope_tests {
         assert!(
             serde_json::from_value::<CreateMitigationRequest>(legacy_extra).is_ok(),
             "unrelated legacy fields stay ignored"
+        );
+    }
+}
+
+/// A speaker that accepts the connection and never answers. Each attempt runs
+/// into its own deadline, so a caller holding the lifecycle mutex can be
+/// measured on the virtual clock alone.
+#[cfg(test)]
+mod wedged_speaker_tests {
+    use super::*;
+    use crate::bgp::{GUARDED_RPC_DEADLINE, MuteFlowSpec, RetryPolicy};
+    use crate::config::{BgpMode, Inventory, OperationMode, Playbooks, Settings};
+    use crate::db::{MockRepository, RepositoryTrait};
+    use crate::domain::{
+        ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
+    };
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::time::Duration;
+
+    /// What one attempt against a mute daemon costs: the backend's own deadline.
+    const ATTEMPT_BUDGET: Duration = MuteFlowSpec::ATTEMPT;
+
+    fn settings(mode: OperationMode) -> Settings {
+        let mut settings: Settings =
+            crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+        settings.bgp.mode = BgpMode::Mock;
+        settings.bgp.rustbgpd = None;
+        settings.mode = mode;
+        settings
+    }
+
+    fn intent(pop: &str, prefix: &str) -> Mitigation {
+        Mitigation::from_intent(
+            MitigationIntent {
+                event_id: Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: pop.into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: prefix.into(),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                    ..Default::default()
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams::default(),
+                ttl_seconds: 300,
+                reason: "mute speaker".into(),
+            },
+            prefix.split('/').next().unwrap().into(),
+            AttackVector::UdpFlood,
+        )
+    }
+
+    /// Admission and manual creation both persist intent and announce under the
+    /// lifecycle mutex. N queued bans against a mute speaker cost N bounded
+    /// attempts, so a wedged speaker cannot freeze ingest for minutes.
+    #[tokio::test(start_paused = true)]
+    async fn queued_bans_cost_one_bounded_attempt_each() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(MuteFlowSpec::default());
+        let state = AppState::new(
+            settings(OperationMode::Enforced),
+            Inventory::new(vec![]),
+            Playbooks { playbooks: vec![] },
+            repo.clone(),
+            speaker.clone(),
+            ".".into(),
+        )
+        .unwrap();
+        // The admission, manual-create, withdraw and unban handlers hold this.
+        let lifecycle = state.mitigation_lock.lock().await;
+        let started = tokio::time::Instant::now();
+        for suffix in 1..=3 {
+            let mut mitigation = intent(&state.settings.pop, &format!("192.0.2.{suffix}/32"));
+            let outcome = persist_new_mitigation(
+                &state,
+                &mut mitigation,
+                &CreationActor::Detector("amp-test".into()),
+            )
+            .await
+            .unwrap();
+            // A timed-out add is unconfirmed intent, never a successful install.
+            assert!(matches!(outcome, Some(AnnouncementOutcome::Unconfirmed)));
+            assert!(
+                repo.get_mitigation(mitigation.mitigation_id)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "intent is retained for reconciliation to repair"
+            );
+        }
+        let elapsed = started.elapsed();
+        drop(lifecycle);
+        assert_eq!(speaker.adds.load(SeqCst), 3, "one attempt per queued ban");
+        assert!(
+            elapsed >= 3 * GUARDED_RPC_DEADLINE,
+            "each ban spends the interactive deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed <= 3 * GUARDED_RPC_DEADLINE + Duration::from_millis(10),
+            "{elapsed:?}"
+        );
+    }
+
+    /// The negative control: the same mute speaker on the retrying path spends
+    /// one attempt budget per try, which is what held the mutex for minutes.
+    #[tokio::test(start_paused = true)]
+    async fn the_retrying_path_is_what_makes_a_mute_speaker_expensive() {
+        let speaker = MuteFlowSpec::default();
+        let rule = crate::domain::mitigation_rule(&intent("test", "192.0.2.1/32")).unwrap();
+        let started = tokio::time::Instant::now();
+        let error = crate::domain::announce_flowspec(&speaker, &rule, None, RetryPolicy::Durable)
+            .await
+            .unwrap_err();
+        let retried = started.elapsed();
+        assert!(matches!(
+            error,
+            crate::error::PrefixdError::BgpAnnouncementFailed(_)
+        ));
+        assert_eq!(speaker.adds.load(SeqCst), 3, "the reconciler path retries");
+        assert!(
+            retried >= 3 * ATTEMPT_BUDGET,
+            "the retrying path spends a whole budget: {retried:?}"
+        );
+
+        let started = tokio::time::Instant::now();
+        let error = crate::domain::announce_flowspec(&speaker, &rule, None, RetryPolicy::Bounded)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::PrefixdError::BgpAnnouncementFailed(_)
+        ));
+        assert_eq!(speaker.adds.load(SeqCst), 4, "one bounded attempt");
+        assert!(
+            started.elapsed() <= GUARDED_RPC_DEADLINE + Duration::from_millis(10),
+            "{:?}",
+            started.elapsed()
         );
     }
 }

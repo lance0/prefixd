@@ -402,6 +402,8 @@ struct Fake {
     polls: Arc<AtomicUsize>,
     adds: Arc<Mutex<Vec<AddPathRequest>>>,
     deletes: Arc<Mutex<Vec<DeletePathRequest>>>,
+    /// Accept the mutation and never answer, as a wedged daemon behaves.
+    mute: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -506,7 +508,13 @@ impl tonic::server::UnaryService<AddPathRequest> for Fake {
     type Future = BoxFuture<Response<Self::Response>, Status>;
     fn call(&mut self, request: Request<AddPathRequest>) -> Self::Future {
         self.adds.lock().unwrap().push(request.into_inner());
-        Box::pin(async { Ok(Response::new(AddPathResponse::default())) })
+        let mute = self.mute.clone();
+        Box::pin(async move {
+            if mute.load(SeqCst) {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+            Ok(Response::new(AddPathResponse::default()))
+        })
     }
 }
 
@@ -515,7 +523,13 @@ impl tonic::server::UnaryService<DeletePathRequest> for Fake {
     type Future = BoxFuture<Response<Self::Response>, Status>;
     fn call(&mut self, request: Request<DeletePathRequest>) -> Self::Future {
         self.deletes.lock().unwrap().push(request.into_inner());
-        Box::pin(async { Ok(Response::new(DeletePathResponse::default())) })
+        let mute = self.mute.clone();
+        Box::pin(async move {
+            if mute.load(SeqCst) {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+            Ok(Response::new(DeletePathResponse::default()))
+        })
     }
 }
 
@@ -1285,4 +1299,56 @@ async fn tcp_flags_encode_and_read_back_exactly() {
             assert!(speaker.parse_flowspec_path(&p).is_err(), "mutation {index}");
         }
     }
+}
+
+/// A GoBGP that accepts the request and never answers costs one bounded attempt
+/// while the mutex is held, and the whole budget on the reconciliation path.
+/// Reads keep their complete-read requirement.
+#[tokio::test]
+async fn mute_gobgp_costs_one_bounded_attempt_instead_of_the_retry_budget() {
+    let fake = Fake::default();
+    let mute = fake.mute.clone();
+    let adds = fake.adds.clone();
+    let deletes = fake.deletes.clone();
+    let (speaker, _server) = serve(fake).await;
+    let wanted = rule("192.0.2.1/32");
+    mute.store(true, SeqCst);
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    assert!(speaker.announce_bounded(&wanted).await.is_err());
+    let bounded = started.elapsed();
+    assert!(
+        bounded <= crate::bgp::GUARDED_RPC_DEADLINE + Duration::from_millis(1),
+        "{bounded:?}"
+    );
+    assert_eq!(adds.lock().unwrap().len(), 1, "one attempt under the mutex");
+    // Negative control: the same mute daemon spends one attempt budget per try.
+    let started = tokio::time::Instant::now();
+    assert!(speaker.announce(&wanted).await.is_err());
+    let retried = started.elapsed();
+    assert_eq!(adds.lock().unwrap().len(), 4, "the reconciler path retries");
+    assert!(
+        retried >= 3 * Duration::from_secs(30),
+        "the retrying path spends its whole budget: {retried:?}"
+    );
+    // The delete path spends the same budget.
+    let started = tokio::time::Instant::now();
+    assert!(speaker.withdraw_bounded(&wanted).await.is_err());
+    assert!(
+        started.elapsed() <= crate::bgp::GUARDED_RPC_DEADLINE + Duration::from_millis(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        deletes.lock().unwrap().len(),
+        1,
+        "one attempt under the mutex"
+    );
+    assert!(speaker.withdraw(&wanted).await.is_err());
+    assert_eq!(
+        deletes.lock().unwrap().len(),
+        4,
+        "the reconciler path retries"
+    );
+    tokio::time::resume();
 }

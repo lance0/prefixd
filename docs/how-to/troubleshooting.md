@@ -167,6 +167,25 @@ absent on the receiving router:
 2. Check router import policy accepts FlowSpec
 3. Check FlowSpec validation settings
 
+### Create Returns `announcement_outcome: unconfirmed`
+
+A `202` with `"announcement_outcome": "unconfirmed"` means the mitigation was
+saved but the speaker did not confirm the add within the three-second
+[interactive deadline](../reference/speaker-backends.md#interactive-speaker-deadline),
+or answered with an error. Do not resubmit: the row is active and
+reconciliation repairs it from the saved intent. If every create returns this,
+the speaker is slow or not answering. Check its health and logs, then confirm the
+rule appears in the local inventory above after the next reconciliation pass.
+
+### Withdrawal Returns 500 and Stays Pending
+
+A withdrawal `500` after the intent was saved leaves the delete pending. The
+mitigation keeps its status, re-announcement is blocked, and reconciliation
+retries the same operation with the original actor and reason. A speaker that
+does not answer within three seconds produces this every time. Re-read the
+mitigation rather than withdrawing again, and fix the speaker; the request
+completes on the first reconciliation pass after the speaker answers.
+
 ---
 
 ## Router-Specific Issues
@@ -441,13 +460,7 @@ Generate the token into `.env` as the
 the controller:
 
 ```bash
-token=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env 2>/dev/null | tail -1)
-if [ -z "$token" ] || [ "$token" = "your-secret-token-here" ]; then
-  sed '/^PREFIXD_API_TOKEN=/d' .env > .env.tmp 2>/dev/null || :
-  printf 'PREFIXD_API_TOKEN=%s\n' "$(openssl rand -hex 32)" >> .env.tmp
-  mv .env.tmp .env
-fi
-chmod 600 .env
+python3 scripts/init-env.py
 docker compose --profile rustbgpd up -d --no-build --force-recreate prefixd-rustbgpd
 ```
 

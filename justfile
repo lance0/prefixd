@@ -30,6 +30,7 @@ fmt:
 
 # Lint and format-check every Python file against ruff.toml; uvx fetches the pinned ruff.
 python:
+    python3 scripts/test-init-env.py
     uvx ruff@{{ruff_version}} check .
     uvx ruff@{{ruff_version}} format --check .
 

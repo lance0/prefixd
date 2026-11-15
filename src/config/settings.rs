@@ -85,6 +85,52 @@ pub struct TlsConfig {
     pub ca_path: Option<String>,
 }
 
+impl TlsConfig {
+    /// The HTTPS listener's rustls configuration, read from the configured
+    /// files. Startup serves it; `prefixd --check` builds it to prove the files
+    /// are readable and the key matches the certificate. Errors name the file,
+    /// never key material.
+    pub fn server_config(&self, require_client_cert: bool) -> Result<rustls::ServerConfig> {
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let certificates = |field: &str, path: &str| -> Result<Vec<CertificateDer<'static>>> {
+            CertificateDer::pem_file_iter(path)
+                .and_then(|certificates| certificates.collect::<Result<Vec<_>, _>>())
+                .map_err(|_| anyhow::anyhow!("cannot read http.tls.{field} {path}"))
+        };
+        let certs = certificates("cert_path", &self.cert_path)?;
+        let key = PrivateKeyDer::from_pem_file(&self.key_path).map_err(|_| {
+            anyhow::anyhow!(
+                "cannot read a private key from http.tls.key_path {}",
+                self.key_path
+            )
+        })?;
+        let builder = rustls::ServerConfig::builder();
+        if !require_client_cert {
+            let mut config = builder.with_no_client_auth().with_single_cert(certs, key)?;
+            // As axum-server's `RustlsConfig::from_pem_file`, which served this before.
+            config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            return Ok(config);
+        }
+        let ca_path = self
+            .ca_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("mTLS requires ca_path to be set"))?;
+        let mut root_store = rustls::RootCertStore::empty();
+        for cert in certificates("ca_path", ca_path)? {
+            root_store.add(cert)?;
+        }
+        let client_verifier =
+            rustls::server::WebPkiClientVerifier::builder(std::sync::Arc::new(root_store))
+                .build()
+                .map_err(|e| anyhow::anyhow!("failed to build client verifier: {}", e))?;
+        Ok(builder
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(certs, key)?)
+    }
+}
+
 impl HttpConfig {
     /// Browsers usually reach prefixd through a TLS-terminating proxy, which the
     /// controller cannot see, so session cookies are `Secure` unless explicitly
@@ -122,6 +168,30 @@ pub struct AuthConfig {
     pub mode: AuthMode,
     #[serde(default)]
     pub bearer_token_env: Option<String>,
+}
+
+impl AuthConfig {
+    /// The environment variable that holds the API bearer token.
+    pub fn bearer_token_env(&self) -> &str {
+        self.bearer_token_env
+            .as_deref()
+            .unwrap_or("PREFIXD_API_TOKEN")
+    }
+
+    /// The API bearer token when `mode` is `bearer`, which then must be set and
+    /// nonempty. Startup reads it once; the error names the variable, never a value.
+    pub fn bearer_token(&self) -> crate::error::Result<Option<String>> {
+        if self.mode != AuthMode::Bearer {
+            return Ok(None);
+        }
+        match std::env::var(self.bearer_token_env()) {
+            Ok(token) if !token.is_empty() => Ok(Some(token)),
+            _ => Err(crate::error::PrefixdError::Config(format!(
+                "auth.mode=bearer but {} is not set or empty",
+                self.bearer_token_env()
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,6 +542,28 @@ pub struct StorageConfig {
     pub connection_string: String,
 }
 
+impl StorageConfig {
+    /// `DATABASE_URL` when set and nonempty, else `connection_string`. Refuses
+    /// a missing or malformed URL without repeating it, since it can hold a
+    /// password.
+    pub fn database_url(&self) -> Result<String> {
+        let url = std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| self.connection_string.clone());
+        anyhow::ensure!(
+            !url.is_empty(),
+            "set DATABASE_URL or storage.connection_string"
+        );
+        <sqlx::postgres::PgConnectOptions as std::str::FromStr>::from_str(&url).map_err(|_| {
+            anyhow::anyhow!(
+                "the database URL from DATABASE_URL or storage.connection_string is not a valid PostgreSQL URL"
+            )
+        })?;
+        Ok(url)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservabilityConfig {
@@ -807,48 +899,99 @@ pub const REMOVED_KEYS: &[&str] = &[
 
 impl Settings {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        reject_removed_keys(&content)?;
-        let settings: Settings = crate::config::parse_secret_yaml(&content)?;
-        // Alerting reports in the alerting editor's form, under its section.
-        let mut document = serde_json::to_value(&settings)?;
-        if let Some(object) = document.as_object_mut() {
-            object.remove("alerting");
+        Ok(Self::load_with_unknown_keys(path)?.0)
+    }
+
+    /// [`Settings::load`], also returning the keys the document contains but
+    /// this release ignores. Startup warns about each of them.
+    pub fn load_with_unknown_keys<P: AsRef<Path>>(path: P) -> Result<(Self, Vec<String>)> {
+        let (settings, unknown_keys) = Self::from_yaml(&std::fs::read_to_string(path)?)?;
+        let errors = settings.validate_errors();
+        anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
+        Ok((settings, unknown_keys))
+    }
+
+    /// Parse a `prefixd.yaml` document and collect its unknown keys. The
+    /// cross-checks are separate ([`Settings::validate_errors`]) so
+    /// `--check` can report every error instead of the first.
+    pub fn from_yaml(content: &str) -> Result<(Self, Vec<String>)> {
+        reject_removed_keys(content)?;
+        let (settings, mut unknown_keys) = crate::config::parse_secret_yaml(content)?;
+        // Alert destinations and webhook adapter `auth` and `transforms` are
+        // internally tagged, so serde_ignored cannot see inside them; their
+        // modules check them.
+        #[derive(Deserialize)]
+        struct TaggedSections {
+            #[serde(default)]
+            alerting: Option<crate::alerting::DestinationKeys>,
+            #[serde(default)]
+            correlation: Option<crate::correlation::webhook::AdapterKeys>,
         }
-        let mut errors = crate::config::env_placeholder_errors(&document);
+        if let Ok(probe) = crate::config::parse_yaml::<TaggedSections>(content) {
+            let alerting = probe.alerting.unwrap_or_default().unknown();
+            let correlation = probe.correlation.unwrap_or_default().unknown();
+            unknown_keys.extend(alerting.into_iter().map(|key| format!("alerting.{key}")));
+            unknown_keys.extend(
+                correlation
+                    .into_iter()
+                    .map(|key| format!("correlation.{key}")),
+            );
+        }
+        Ok((settings, unknown_keys))
+    }
+
+    /// Every cross-check startup runs before it connects, in startup order.
+    /// Each message names the key it refuses and never a value.
+    pub fn validate_errors(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        // Alerting reports in the alerting editor's form, under its section.
+        match serde_json::to_value(self) {
+            Ok(mut document) => {
+                if let Some(object) = document.as_object_mut() {
+                    object.remove("alerting");
+                }
+                errors.extend(crate::config::env_placeholder_errors(&document));
+            }
+            Err(error) => errors.push(error.to_string()),
+        }
         errors.extend(
-            settings
-                .alerting
+            self.alerting
                 .load_errors()
                 .into_iter()
                 .map(|error| format!("alerting: {error}")),
         );
-        anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
-        settings.bgp.validate_vpn_scopes()?;
-        settings.http.validate_auth_transport()?;
-        settings.blackhole.validate()?;
-        settings.amplification.validate()?;
-        settings
-            .scrubber
-            .validate_with(&settings.blackhole, &settings.bgp)?;
-        if settings.scrubber.enabled && settings.bgp.mode != BgpMode::Rustbgpd {
-            anyhow::bail!("scrubber diversion requires the rustbgpd backend");
+        if let Err(error) = self.bgp.validate_vpn_scopes() {
+            errors.push(error.to_string());
         }
-        settings
-            .guardrails
-            .validate_for_backend(settings.bgp.mode)?;
-        anyhow::ensure!(
-            settings.quotas.max_active_prefix_per_customer > 0,
-            "quotas.max_active_prefix_per_customer must be nonzero"
-        );
-        let correlation_errors = settings.correlation.validate();
+        if let Err(error) = self.http.validate_auth_transport() {
+            errors.push(error.to_string());
+        }
+        if let Err(error) = self.blackhole.validate() {
+            errors.push(error.to_string());
+        }
+        if let Err(error) = self.amplification.validate() {
+            errors.push(error.to_string());
+        }
+        if let Err(error) = self.scrubber.validate_with(&self.blackhole, &self.bgp) {
+            errors.push(error.to_string());
+        }
+        if self.scrubber.enabled && self.bgp.mode != BgpMode::Rustbgpd {
+            errors.push("scrubber diversion requires the rustbgpd backend".to_string());
+        }
+        if let Err(error) = self.guardrails.validate_for_backend(self.bgp.mode) {
+            errors.push(error.to_string());
+        }
+        if self.quotas.max_active_prefix_per_customer == 0 {
+            errors.push("quotas.max_active_prefix_per_customer must be nonzero".to_string());
+        }
+        let correlation_errors = self.correlation.validate();
         if !correlation_errors.is_empty() {
-            return Err(anyhow::anyhow!(
+            errors.push(format!(
                 "invalid correlation config in settings: {}",
                 correlation_errors.join("; ")
             ));
         }
-        Ok(settings)
+        errors
     }
 }
 
@@ -1153,7 +1296,7 @@ observability:
         let yaml = |destinations: &str| {
             MINIMAL_SETTINGS_YAML.replace(
                 "  router_id: \"10.10.0.10\"\n",
-                "  router_id: \"10.10.0.10\"\n  vpn_scopes:\n    TRANSIT: {family: ipv4, rd: '44407:40', route_targets: ['44407:777']}\n",
+                "  router_id: \"10.10.0.10\"\n  vpn_scopes:\n    TRANSIT: {family: ipv4, rd: '64500:40', route_targets: ['64500:777']}\n",
             ) + &format!(
                 "scrubber:\n  profiles:\n  - {{id: a, revision: v1, scope: TRANSIT, ipv4_target: 192.0.2.99, \
                  destinations: {destinations}, router_peers: [192.0.2.2], policy_binding: p, \

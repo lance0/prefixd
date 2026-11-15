@@ -53,12 +53,12 @@ second profile for the other family:
 
 ```yaml
       scope: TRANSIT
-      redirect_route_target: "44407:888"
+      redirect_route_target: "64500:888"
       # Omit ipv4_target and ipv6_target.
       destinations: [203.0.113.0/24]
 ```
 
-The configured VPN scope's RD and scope RT (for example `44407:777`) identify
+The configured VPN scope's RD and scope RT (for example `64500:777`) identify
 where the receiver imports the mitigation rule. `redirect_route_target` selects
 the scrubbing VRF used by the redirect action. These are different attributes:
 scope RTs use subtype `0x02`; redirect-to-VRF uses RFC 8955/RFC 7674 types

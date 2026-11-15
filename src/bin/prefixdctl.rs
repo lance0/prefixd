@@ -1786,8 +1786,8 @@ mod tests {
             "profile":{"id":"a","revision":"r1","scope":"TRANSIT","router_peers":[],
                 "policy_binding":"vpn","qualification_receipt":"pilot","destinations":[prefix]},
             "rule":{"nlri":{"dst_prefix":prefix,"protocol":6,"dst_ports":[443],
-                "scope":{"family":family,"rd":"44407:40"}},
-                "target":target,"route_targets":["44407:777"],"owner":"prefixd.scrub.cli","revision":7},
+                "scope":{"family":family,"rd":"64500:40"}},
+                "target":target,"route_targets":["64500:777"],"owner":"prefixd.scrub.cli","revision":7},
             "created_at":"2026-11-08T00:00:00Z","expires_at":"2026-11-08T00:01:00Z",
             "actor":"operator","reason":"confirmed attack","dry_run":true,"status":"pending",
             "withdrawal_reason":null,"windows":[],"generation":null,"last_error":null
@@ -1807,8 +1807,8 @@ mod tests {
             let mut candidate: prefixd::scrubber::Diversion =
                 serde_json::from_value(preview["candidate"].clone()).unwrap();
             candidate.rule.target = None;
-            candidate.rule.redirect_route_target = Some("44407:888".into());
-            candidate.profile.redirect_route_target = Some("44407:888".into());
+            candidate.rule.redirect_route_target = Some("64500:888".into());
+            candidate.profile.redirect_route_target = Some("64500:888".into());
             preview["confirmation"] =
                 prefixd::scrubber::ScrubberController::confirmation(&candidate)
                     .unwrap()
@@ -1817,9 +1817,9 @@ mod tests {
             assert!(
                 require_vpn_diversion_preview(&request, &preview)
                     .unwrap()
-                    .contains("VRF RT 44407:888")
+                    .contains("VRF RT 64500:888")
             );
-            preview["candidate"]["rule"]["redirect_route_target"] = "44407:889".into();
+            preview["candidate"]["rule"]["redirect_route_target"] = "64500:889".into();
             assert!(
                 require_vpn_diversion_preview(&request, &preview).is_err(),
                 "changed VRF target requires new confirmation"
@@ -1853,7 +1853,7 @@ mod tests {
             for (pointer, value) in [
                 (
                     "/candidate/rule/nlri/scope/rd",
-                    serde_json::json!("44407:41"),
+                    serde_json::json!("64500:41"),
                 ),
                 (
                     "/candidate/rule/nlri/scope/family",
@@ -1861,7 +1861,7 @@ mod tests {
                 ),
                 (
                     "/candidate/rule/route_targets",
-                    serde_json::json!(["44407:778"]),
+                    serde_json::json!(["64500:778"]),
                 ),
                 ("/candidate/profile/scope", serde_json::json!("OTHER")),
                 ("/candidate/rule/nlri/protocol", serde_json::json!(17)),
@@ -2015,7 +2015,7 @@ mod tests {
         serde_json::json!({
             "outcome": "admissible",
             "candidate": {
-                "vpn_scope": {"name": "TRANSIT", "identity": {"family": family, "rd": "44407:40"}, "route_targets": ["44407:777"]},
+                "vpn_scope": {"name": "TRANSIT", "identity": {"family": family, "rd": "64500:40"}, "route_targets": ["64500:777"]},
                 "destination": "any",
                 "scope": {"src_prefix": if family == "ipv4" {"198.51.100.0/24"} else {"2001:db8:2::/64"}},
             }
@@ -2178,7 +2178,7 @@ mod tests {
                     .unwrap();
             let summary = vpn_scope_summary(Some(&snapshot.identity), &snapshot.route_targets);
             assert!(summary.contains(if family == "ipv4" { "IPv4" } else { "IPv6" }));
-            assert!(summary.contains("RD 44407:40 RT 44407:777"));
+            assert!(summary.contains("RD 64500:40 RT 64500:777"));
             let mitigation: MitigationResponse = serde_json::from_value(serde_json::json!({
                 "mitigation_id": "m", "status": "active", "customer_id": null,
                 "victim_ip": "", "dst_prefix": "", "vector": "manual",

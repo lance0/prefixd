@@ -504,6 +504,20 @@ destination fails:
 Refusals name the file, the destination's position and type, and the key or
 variable. They never include a secret or a URL.
 
+Run `prefixd --check` before a restart to see every refusal without stopping
+the controller; see
+[configuration validation](../reference/configuration.md#validation).
+
+### Unknown keys
+
+A key prefixd does not recognize, such as `chanel:` for `channel:` or `event:`
+for `events:`, is ignored in this release, so the destination behaves as if the
+key were absent. Startup and reload log a warning naming the file and the key
+path, such as `destinations[0].chanel` in `alerting.yaml` or
+`alerting.destinations[0].chanel` inline in `prefixd.yaml`, and `prefixd --check`
+prints the same key. The next release refuses unknown keys, so fix each one the
+warning names before upgrading. The warning never includes the value.
+
 ## Troubleshooting
 
 ### The controller exits at startup
@@ -512,10 +526,7 @@ The log names the file and the problem. For example, a variable missing from
 the controller's environment:
 
 ```text
-Error: failed to load /etc/prefixd/alerting.yaml
-
-Caused by:
-    destination[0] (slack): webhook_url_env names environment variable 'SLACK_WEBHOOK_URL', which is not set or empty
+Error: failed to load /etc/prefixd/alerting.yaml: alerting: destination[0] (slack): webhook_url_env names environment variable 'SLACK_WEBHOOK_URL', which is not set or empty
 ```
 
 A URL that fails the rules:
@@ -524,7 +535,8 @@ A URL that fails the rules:
 Error: failed to load /etc/prefixd/alerting.yaml: alerting: destination[1] (discord): webhook_url must use https
 ```
 
-`destination[N]` counts from 0 in file order. For a missing variable, check
+`destination[N]` counts from 0 in file order. Startup prints every error, one
+per line. For a missing variable, check
 `.env`, the override file and `docker compose config`, or
 `/etc/default/prefixd`, then restart. For a URL, fix the value at its source.
 

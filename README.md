@@ -80,17 +80,12 @@ forwarding; see [vendor compatibility](docs/reference/vendors.md) for their scop
 
 With Git and Docker Compose installed, start the controller, dashboard,
 PostgreSQL and rustbgpd from published images. Nothing compiles locally.
+Python 3.11+ is required for the token initialization helper.
 
 ```bash
 git clone https://github.com/lance0/prefixd.git
 cd prefixd
-token=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env 2>/dev/null | tail -1)
-if [ -z "$token" ] || [ "$token" = "your-secret-token-here" ]; then
-  sed '/^PREFIXD_API_TOKEN=/d' .env > .env.tmp 2>/dev/null || :
-  printf 'PREFIXD_API_TOKEN=%s\n' "$(openssl rand -hex 32)" >> .env.tmp
-  mv .env.tmp .env
-fi
-chmod 600 .env
+python3 scripts/init-env.py
 docker compose --profile rustbgpd up -d --pull always --no-build
 ```
 

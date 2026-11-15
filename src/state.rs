@@ -7,7 +7,7 @@ use tokio::sync::{RwLock, broadcast};
 
 use crate::alerting::AlertingService;
 use crate::bgp::FlowSpecAnnouncer;
-use crate::config::{AuthMode, Inventory, Playbooks, Settings};
+use crate::config::{Inventory, Playbooks, Settings};
 use crate::correlation::CorrelationConfig;
 use crate::db::RepositoryTrait;
 use crate::domain::{SpeakerTarget, VerifiedSpeakerBinding, binding_mismatch};
@@ -92,29 +92,10 @@ impl AppState {
         let alerting = AlertingService::new(settings.alerting.clone());
 
         // Load bearer token at startup (avoids per-request env lookups)
-        let bearer_token = if matches!(settings.http.auth.mode, AuthMode::Bearer) {
-            let env_var = settings
-                .http
-                .auth
-                .bearer_token_env
-                .as_deref()
-                .unwrap_or("PREFIXD_API_TOKEN");
-
-            match std::env::var(env_var) {
-                Ok(token) if !token.is_empty() => {
-                    tracing::info!(env_var = %env_var, "loaded bearer token from environment");
-                    Some(token)
-                }
-                _ => {
-                    return Err(PrefixdError::Config(format!(
-                        "auth.mode=bearer but {} is not set or empty",
-                        env_var
-                    )));
-                }
-            }
-        } else {
-            None
-        };
+        let bearer_token = settings.http.auth.bearer_token()?;
+        if bearer_token.is_some() {
+            tracing::info!(env_var = %settings.http.auth.bearer_token_env(), "loaded bearer token from environment");
+        }
 
         let correlation_config = settings.correlation.clone();
         let scrubber = crate::scrubber::ScrubberController::new(&settings)?;
@@ -291,16 +272,35 @@ impl AppState {
                 }
             })
             .transpose()?;
+        // Reload ignores unknown keys as startup does, and warns about each the
+        // same way; the next release refuses them.
+        let warn_unknown = |path: &std::path::Path, keys: Vec<String>| {
+            for key in keys {
+                tracing::warn!(file = %path.display(), key = %key, "unknown configuration key ignored; the next release refuses it");
+            }
+        };
         let settings = present("prefixd.yaml")
-            .map(|path| Settings::load(&path).map_err(|e| invalid("prefixd.yaml", e)))
+            .map(|path| {
+                let (settings, keys) = Settings::load_with_unknown_keys(&path)
+                    .map_err(|e| invalid("prefixd.yaml", e))?;
+                warn_unknown(&path, keys);
+                Ok::<_, ReloadError>(settings)
+            })
             .transpose()?;
         let correlation_file = present("correlation.yaml")
-            .map(|path| CorrelationConfig::load(&path).map_err(|e| invalid("correlation.yaml", e)))
+            .map(|path| {
+                let (correlation, keys) = CorrelationConfig::load_with_unknown_keys(&path)
+                    .map_err(|e| invalid("correlation.yaml", e))?;
+                warn_unknown(&path, keys);
+                Ok::<_, ReloadError>(correlation)
+            })
             .transpose()?;
         let alerting = present("alerting.yaml")
             .map(|path| {
-                let alerting = crate::alerting::AlertingConfig::load(&path)
-                    .map_err(|e| invalid("alerting.yaml", e))?;
+                let (alerting, keys) =
+                    crate::alerting::AlertingConfig::load_with_unknown_keys(&path)
+                        .map_err(|e| invalid("alerting.yaml", e))?;
+                warn_unknown(&path, keys);
                 let errors = alerting.validate();
                 if errors.is_empty() {
                     Ok(alerting)
@@ -347,9 +347,7 @@ impl AppState {
             reloaded.push("inventory".to_string());
         }
         if let Some(playbooks) = playbooks {
-            for warning in playbooks.prefix_scope_warnings(&self.settings.guardrails) {
-                tracing::warn!(%warning, "prefix playbook is unreachable");
-            }
+            playbooks.log_warnings(&self.settings.guardrails);
             *playbooks_guard = playbooks;
             *playbooks_loaded_at = now;
             reloaded.push("playbooks".to_string());

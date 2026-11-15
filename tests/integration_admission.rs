@@ -252,7 +252,7 @@ fn source_only_quota_row(
     let scope = VpnScopeSnapshot::new(
         "TRANSIT",
         VpnFlowSpecIdentity::new(family, rd).unwrap(),
-        &["44407:777".into()],
+        &["64500:777".into()],
     )
     .unwrap();
     let mut row = Mitigation::from_intent(
@@ -292,8 +292,8 @@ async fn exercise_atomic_source_only_quota(repo: Arc<dyn RepositoryTrait>) {
         ),
         (VpnFlowSpecFamily::Ipv6, ["2001:db9::/64", "2001:dba::/64"]),
     ] {
-        let first = source_only_quota_row(family, "44407:40", sources[0]);
-        let second = source_only_quota_row(family, "44407:40", sources[1]);
+        let first = source_only_quota_row(family, "64500:40", sources[0]);
+        let second = source_only_quota_row(family, "64500:40", sources[1]);
         // Both bypass API preflight. The repository lock must admit only one.
         let (left, right) = tokio::join!(
             repo.admit_mitigation(&first, &quotas, &settings.blackhole, &actor),
@@ -308,14 +308,14 @@ async fn exercise_atomic_source_only_quota(repo: Arc<dyn RepositoryTrait>) {
         assert!(
             matches!(refusal, prefixd::error::PrefixdError::GuardrailViolation(prefixd::error::GuardrailError::QuotaExceeded { quota_type, .. }) if quota_type == "source_only")
         );
-        let other = source_only_quota_row(family, "44407:41", sources[0]);
+        let other = source_only_quota_row(family, "64500:41", sources[0]);
         repo.admit_mitigation(&other, &quotas, &settings.blackhole, &actor)
             .await
             .unwrap();
         let mut admitted = if left.is_ok() { first } else { second };
         admitted.status = MitigationStatus::Expired;
         repo.update_mitigation(&admitted).await.unwrap();
-        let replacement = source_only_quota_row(family, "44407:40", sources[0]);
+        let replacement = source_only_quota_row(family, "64500:40", sources[0]);
         repo.admit_mitigation(&replacement, &quotas, &settings.blackhole, &actor)
             .await
             .unwrap();

@@ -1,7 +1,7 @@
 # Merge this BGP section into prefixd.yaml; keep the other required settings.
 bgp:
   backend: rustbgpd
-  local_asn: 44407
+  local_asn: 64500
   router_id: 192.0.2.1
   rustbgpd:
     endpoint: "unix:///run/rustbgpd/grpc.sock"
@@ -12,11 +12,11 @@ bgp:
   vpn_scopes:
     TRANSIT:
       family: ipv4
-      rd: "44407:40"
-      route_targets: ["44407:777"]
+      rd: "64500:40"
+      route_targets: ["64500:777"]
       allow_source_only: false
     TRANSIT6:
       family: ipv6
-      rd: "44407:40"
-      route_targets: ["44407:777"]
+      rd: "64500:40"
+      route_targets: ["64500:777"]
       allow_source_only: false

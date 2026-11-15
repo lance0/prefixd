@@ -23,8 +23,12 @@ detector TTLs before enabling it. This does not cap blackholes or add a remote
 speaker deadline. An older controller ignores this setting, so downgrading removes
 the protection; drain affected rules or accept that policy change explicitly.
 
-- **Database migrations run automatically** on startup. Legacy speaker state also
-  requires the explicit ownership adoption below before the upgraded daemon starts.
+- **Database migrations run automatically** on startup, and only the versions
+  the database has not recorded. A release that adds a migration is one-way,
+  and its notes state whether a rolling replacement is safe. See
+  [database schema version and downgrade](#database-schema-version-and-downgrade).
+  Legacy speaker state also requires the explicit ownership adoption below
+  before the upgraded daemon starts.
 - Review configuration and ownership changes before upgrading; new defaults do
   not establish downgrade compatibility.
 - PostgreSQL retains mitigation intent. Reconciliation checks eligible intent
@@ -41,6 +45,31 @@ the protection; drain affected rules or accept that policy change explicitly.
   `PREFIXD_API_TOKEN` in `.env` or keep `http.auth.mode: credentials`.
   `bearer` with an empty token refuses startup.
 - **Always back up the database** before upgrading.
+
+## Unknown configuration keys
+
+The release that introduces this check ignores keys it does not recognize after
+naming them; **the following release refuses them at startup and on reload**.
+Run the check against your configuration before restarting and remove every key
+it reports:
+
+```bash
+prefixd --check --config /etc/prefixd
+```
+
+Each line names the file and the full key path:
+
+```text
+/etc/prefixd/prefixd.yaml: unknown key `guardrails.max_port`; ignored in this release, refused in the next
+```
+
+Startup and reload log the same keys as warnings. Only key paths are reported,
+never values. Sections that already reject unknown keys, such as the keys
+directly under `bgp`, `blackhole` and `playbooks.yaml`, stop startup in this
+release, so a deployment that starts today has none there. See
+[unknown keys](../reference/configuration.md#unknown-keys) for the exact list,
+and [configuration validation](../reference/configuration.md#validation) for the
+Compose one-liner and what the check skips.
 
 ## rustbgpd v0.83
 
@@ -356,7 +385,9 @@ connecting to the speaker.
   `GET /v1/ready` returns `503` with `"draining"` from the moment the shutdown
   signal arrives. A replacement started while the old process runs waits in
   standby, takes over within one poll interval of the old process exiting, and
-  reconciles at once.
+  reconciles at once. A release that adds a database migration can rule this
+  out; see
+  [database schema version and downgrade](#database-schema-version-and-downgrade).
 - **Lock loss.** The holder checks its fence session every 2 seconds with a
   2-second timeout. After a failed check or a PostgreSQL restart it stops
   starting speaker mutations, enters standby and reacquires on a new
@@ -365,6 +396,12 @@ connecting to the speaker.
   stays unconfirmed or the withdrawal stays pending with its original rule,
   actor, reason and operation ID. A process that lost the lock without seeing
   it can keep issuing RPCs for up to about 4 seconds plus one RPC deadline.
+- **Leased routes in standby.** A standby still renews the injection lease
+  and reads active intent on the reconciliation interval to bound that
+  renewal by the leased TTLs, so a failover keeps live leased routes live. A
+  standby that cannot read the database stops renewing at its bound and
+  reports `speaker.lease.state` as `standby`
+  ([leased TTLs](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls)).
 - **Crashed hosts.** PostgreSQL holds a crashed host's lock until it ends that
   session. The fence session sets server-side TCP keepalives (10 seconds idle,
   then three probes 5 seconds apart) to bound the delay; do not block them
@@ -884,6 +921,22 @@ blank `--reason`, and `diversions withdraw` now requires one. An older
 unbans withdraw inside the controller and are unaffected, and the bundled
 FastNetMon script already sends a reason.
 
+## Multi-step playbooks
+
+The controller runs only the first step of a playbook. Releases after 0.27.0
+ship `configs/playbooks.yaml` with one step per playbook, and startup, reload
+and `PUT /v1/config/playbooks` log a warning for each playbook with more than
+one step. Mitigation behavior is unchanged: a later step never ran.
+
+Compose installs copy the shipped playbooks into the `prefixd-config` volume
+only when the file is missing, so an existing volume keeps the file an earlier
+release installed. Its `udp_flood_police_first`, `syn_flood_police` and
+`ack_flood_police` playbooks each carry a second `discard` step, and the
+upgraded controller logs three warnings on every start and reload. To clear
+them, delete step 2 of each playbook in the dashboard playbook editor, or in
+`/etc/prefixd/playbooks.yaml` followed by a reload. Keep the first step as it
+is; it is the one that runs.
+
 ---
 
 ## Docker Compose Upgrade
@@ -1008,6 +1061,93 @@ sudo systemctl start prefixd
 prefixdctl status
 prefixdctl migrations
 ```
+
+---
+
+## Database schema version and downgrade
+
+A start applies only the migrations the database has not recorded, each in its
+own transaction under a PostgreSQL advisory lock, so a second controller waits
+instead of racing the first through the same DDL. `schema_migrations` is
+therefore a positive statement of the schema version, and the controller acts on
+it: when the database records a migration newer than the binary knows, startup
+refuses with
+
+```text
+database schema is newer than this binary: it records migration 21, this binary
+knows up to 20; start a release that includes that migration, or restore the
+pre-upgrade database backup
+```
+
+Do not rename, delete or rewrite `schema_migrations` rows to get past it. An
+older binary reads the newer schema as its own: it ignores cleanup state it does
+not understand and can reannounce a requested deletion, as
+[pending withdrawals and rollback](#pending-withdrawals-and-rollback) describes.
+
+The refusal only protects binaries that carry it. A 0.27.0 or older controller
+has no check and runs against whatever schema it finds, so it is not a downgrade
+boundary for those releases.
+
+Version skew matters only across a release that adds a migration. No release
+after 0.27.0 has added one yet: migration 020 is still the latest, so a
+[rolling replacement](#controller-fence-and-rolling-deploys) from 0.27.0, with
+the new controller waiting in standby, is unaffected. For a release that adds a
+migration:
+
+- The first upgraded controller to start migrates the database, even in
+  standby, and older controllers on that database, including the active one,
+  then run against a schema they do not know. That release's upgrade notes
+  state whether a rolling replacement is still safe; if they do not say it is,
+  stop every older controller first, and keep the stop short when leased
+  FlowSpec is on, because nothing renews the lease while no controller runs.
+- The release is one-way. Rolling it back means restoring the pre-upgrade
+  backup, below, not starting the previous binary against the migrated
+  database.
+
+A migration waits at most 2 seconds per attempt for its table locks, so queries
+queued behind its `ACCESS EXCLUSIVE` request wait a bounded time. After 5
+attempts with backoff, about 20 seconds, it rolls back and the start fails with
+the migration's version and name. A long transaction holding a lock on a table
+that the migration's file under `migrations/` alters is the usual cause. This
+query lists the sessions holding table locks, oldest transaction first, and
+works after the start has failed:
+
+```sql
+SELECT a.pid, a.xact_start, a.state, l.relation::regclass, l.mode, a.query
+FROM pg_locks l
+JOIN pg_stat_activity a USING (pid)
+WHERE l.locktype = 'relation' AND l.granted
+ORDER BY a.xact_start;
+```
+
+While a start is still retrying, `pg_blocking_pids` names the blocker directly:
+
+```sql
+SELECT pid, pg_blocking_pids(pid), state, query
+FROM pg_stat_activity
+WHERE wait_event_type = 'Lock';
+```
+
+Let the blocking transaction finish or end it, then start again.
+
+A database whose `schema_migrations` is absent or empty predates version
+tracking. The controller replays migrations 1-3, whose statements are all
+`IF NOT EXISTS` and leave existing tables, indexes and rows alone, then applies
+and records the rest. Stored events, mitigations, pending withdrawals and audit
+history are not rewritten.
+
+A controlled downgrade is a restore, not an in-place rollback:
+
+1. With the newer release still running, pause inputs and drain pending cleanup
+   on the original target, following the sections above for the parts of the
+   schema that changed.
+2. Stop the controller.
+3. Restore the database backup taken immediately before the upgrade.
+4. Start the older binary against the restored copy, and verify that speaker
+   state matches the restored intent before connecting it.
+
+Keep the backup and the newer binary until the downgrade is verified. A restore
+does not undo speaker mutations.
 
 ---
 

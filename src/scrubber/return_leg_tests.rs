@@ -784,13 +784,13 @@ fn return_legs_need_a_global_ip_profile_peers_and_a_canonical_community() {
     assert!(invalid(&|p| {
         p.scope = "customer-a".into();
         p.ipv4_target = None;
-        p.redirect_route_target = Some("44407:888".into());
+        p.redirect_route_target = Some("64500:888".into());
     }));
     // Negative control: the same VRF profile without a return leg is valid.
     let mut vrf = config.clone();
     vrf.profiles[0].scope = "customer-a".into();
     vrf.profiles[0].ipv4_target = None;
-    vrf.profiles[0].redirect_route_target = Some("44407:888".into());
+    vrf.profiles[0].redirect_route_target = Some("64500:888".into());
     vrf.profiles[0].return_leg = None;
     vrf.validate().unwrap();
     for community in [

@@ -1,8 +1,8 @@
 # Run prefixd with rustbgpd
 
 This walkthrough starts a local controller and dashboard with rustbgpd as the
-speaker. Docker Engine and Docker Compose with profiles are required. The default
-uses prebuilt controller/dashboard images from the published `main` build; no
+speaker. Docker Engine, Docker Compose with profiles and Python 3.11+ are required.
+The default uses prebuilt controller/dashboard images from the published `main` build; no
 Rust or JavaScript toolchain is needed. Run commands from the repository root.
 
 ## Start and log in
@@ -14,14 +14,14 @@ Compose loads that file for every later command:
 ```bash
 git clone https://github.com/lance0/prefixd.git
 cd prefixd
-token=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env 2>/dev/null | tail -1)
-if [ -z "$token" ] || [ "$token" = "your-secret-token-here" ]; then
-  sed '/^PREFIXD_API_TOKEN=/d' .env > .env.tmp 2>/dev/null || :
-  printf 'PREFIXD_API_TOKEN=%s\n' "$(openssl rand -hex 32)" >> .env.tmp
-  mv .env.tmp .env
-fi
-chmod 600 .env
+python3 scripts/init-env.py
 ```
+
+The helper keeps existing values (including quoted tokens), preserves other
+variables, and writes generated tokens with mode `0600`. Duplicate token
+assignments are refused: keep the intended assignment and retry. It does not
+rotate existing credentials. Shell environment variables override `.env` in
+Compose; unset an exported `PREFIXD_API_TOKEN` if you want to use the file.
 
 Then start the stack and create the first dashboard administrator:
 
@@ -64,7 +64,8 @@ polices it, so one detector event exercises inventory, policy, the database and
 the rustbgpd speaker:
 
 ```bash
-TOKEN=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env)
+# Read the actual running credential, with Compose quoting/interpolation resolved.
+TOKEN=$(docker compose exec -T prefixd-rustbgpd printenv PREFIXD_API_TOKEN)
 
 curl --fail-with-body --silent --show-error -X POST http://localhost/v1/events \
   -H "Content-Type: application/json" \

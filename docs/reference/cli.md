@@ -91,6 +91,18 @@ refuses to run until it does. It can't be combined with
 `--adopt-legacy-speaker`; see
 [mitigation origin mode](../how-to/upgrading.md#mitigation-origin-mode).
 
+`prefixd --check` validates the configuration directory and exits before
+connecting to PostgreSQL or the speaker. It loads every file startup loads and
+runs the configuration checks startup makes before opening the database,
+prints each error to stderr with its file on its own line, and exits 1 on any
+error; a clean run prints a one-line summary and exits 0. Checks that need a
+live speaker or database are skipped and named in the output. Unknown keys are
+reported for each load, as startup warns about them. It can't be combined with
+`--adopt-legacy-speaker` or `--retire-dry-run-intent`; like any usage error,
+that exits 2. See
+[configuration validation](configuration.md#validation) for the Compose
+one-liner and the full list of checks.
+
 `prefixd --version` prints the daemon version, such as `prefixd 0.27.0`, and
 exits.
 
