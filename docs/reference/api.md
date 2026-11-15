@@ -1348,7 +1348,9 @@ or overlong reason returns `400` with
 ```
 
 Withdrawal intent is saved before calling the speaker. An uncertain speaker
-reply or database completion failure leaves cleanup pending; reconciliation
+reply, including no answer within the three-second
+[interactive deadline](speaker-backends.md#interactive-speaker-deadline), or a
+database completion failure leaves cleanup pending; reconciliation
 retries it, including after a controller restart. The mitigation keeps its
 previous status until deletion and the terminal-state/audit transaction succeed.
 A `500` can also come before intent is saved, when the mitigation lookup or the

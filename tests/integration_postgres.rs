@@ -2821,6 +2821,85 @@ impl prefixd::bgp::PeerObserver for InventorySpeaker {
     }
 }
 
+/// Completion reads one pending row by operation ID and POP. PostgreSQL and the
+/// in-memory repository agree, including for a completed, foreign or unknown one.
+#[tokio::test]
+async fn test_pending_withdrawal_reads_one_row_postgres_mock_parity() {
+    use prefixd::db::{MockRepository, RepositoryTrait};
+    use prefixd::domain::request_withdrawal;
+    use std::sync::Arc;
+
+    let ctx = TestContext::new().await;
+    let repositories: [Arc<dyn RepositoryTrait>; 2] =
+        [ctx.repo.clone(), Arc::new(MockRepository::new())];
+    for repo in repositories {
+        let now = chrono::Utc::now();
+        let target =
+            inventory_mitigation("192.0.2.1/32", "test-pop", now, MitigationStatus::Active);
+        let other = inventory_mitigation("192.0.2.2/32", "test-pop", now, MitigationStatus::Active);
+        let mut requests = Vec::new();
+        for mitigation in [&target, &other] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+            let current = repo
+                .get_mitigation(mitigation.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap();
+            requests.push(
+                request_withdrawal(
+                    repo.as_ref(),
+                    &current,
+                    false,
+                    "operator",
+                    "alice",
+                    "parity".into(),
+                    false,
+                    None,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let request = &requests[0];
+        let found = repo
+            .pending_withdrawal(request.operation_id, "test-pop")
+            .await
+            .unwrap()
+            .expect("the pending row is found by operation ID");
+        assert_eq!(found.operation_id, request.operation_id);
+        assert_eq!(found.mitigation_id, target.mitigation_id);
+        assert_eq!(found.actor, "alice");
+        assert_eq!(found.reason, "parity");
+        assert!(
+            repo.pending_withdrawal(request.operation_id, "other-pop")
+                .await
+                .unwrap()
+                .is_none(),
+            "another POP never sees this row"
+        );
+        assert!(
+            repo.pending_withdrawal(uuid::Uuid::new_v4(), "test-pop")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(repo.finish_withdrawal(request).await.unwrap().is_some());
+        assert!(
+            repo.pending_withdrawal(request.operation_id, "test-pop")
+                .await
+                .unwrap()
+                .is_none(),
+            "a completed request is no longer pending"
+        );
+        assert!(
+            repo.pending_withdrawal(requests[1].operation_id, "test-pop")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
 fn inventory_mitigation(
     prefix: &str,
     pop: &str,

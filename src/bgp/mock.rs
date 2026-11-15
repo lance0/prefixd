@@ -510,6 +510,8 @@ pub struct FaultyBlackholes {
     pub inner: MockAnnouncer,
     /// Every blackhole read fails, as an aborted or partial walk does.
     pub fail_reads: std::sync::atomic::AtomicBool,
+    /// Every blackhole read accepts the request and never answers.
+    pub mute_reads: std::sync::atomic::AtomicBool,
     /// Every FlowSpec read fails.
     pub fail_flowspec_reads: std::sync::atomic::AtomicBool,
     /// Every add fails without changing the speaker.
@@ -718,6 +720,9 @@ impl BlackholeSpeaker for FaultyBlackholes {
         self.inner.withdraw_blackhole(prefix, owner).await
     }
     async fn list_blackholes(&self) -> Result<BlackholeInventory> {
+        if self.mute_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(crate::error::PrefixdError::BgpAnnouncementFailed(
                 "ABORTED: local intent changed during the read".into(),

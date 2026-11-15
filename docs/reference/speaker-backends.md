@@ -495,15 +495,47 @@ bound complete mutation responses, including body and trailers, to 30 seconds
 per attempt, with at most three attempts, on the repair path: each reconciliation
 pass retries a failed announce or delete from the durable intent.
 
+### Interactive speaker deadline
+
 A caller holding the lifecycle mutex cannot wait for that budget, so admission,
-manual creation, operator withdrawal, detector unban and the safelist
-withdrawal make one attempt bounded by three seconds. A speaker that accepts
-connections and never answers therefore costs an accepted request one short
-wait instead of a retry storm that would freeze ingest, withdrawals and expiry
-for minutes. A timed-out add returns an unconfirmed outcome, and a timed-out
-delete stays pending with its recorded actor, reason and operation ID; both are
-repaired by the next reconciliation pass. Health still reports the daemon's own
-state, so an unconfirmed add is never presented as a successful install.
+manual creation, operator single and bulk withdrawal, detector unban and the
+safelist withdrawal make one speaker attempt bounded by a fixed three-second
+deadline. The deadline is not configurable. A speaker that accepts connections
+and never answers therefore costs an accepted request one short wait instead of
+a retry storm that would freeze ingest, withdrawals and expiry for minutes.
+
+- A timed-out add keeps the persisted row and returns `202` with
+  `"announcement_outcome": "unconfirmed"`. Reconciliation repairs it from the
+  durable intent. It is never reported or counted as a successful install.
+- A timed-out delete returns the documented withdrawal `500` and stays pending
+  with its recorded actor, reason and operation ID. The pending request blocks
+  re-announcement, and reconciliation completes that original operation.
+- The unleased blackhole admission pre-read shares the same deadline. A read
+  that errors or does not answer in time refuses the admission and adds nothing;
+  it is never treated as an empty inventory.
+- After one failed delete, a safelist addition records withdrawal intent for the
+  remaining overlapping rules without calling the speaker, and reconciliation
+  completes them. A detector unban stops at its first failed withdrawal.
+
+A speaker that needs more than three seconds for one mutation now gets these
+outcomes on every interactive call, and its rules are installed or removed by
+reconciliation instead.
+
+TTL expiry, reconciliation repair, the safety rechecks and the lease re-add run
+in the scheduler and keep the durable retry budget. Each holds the lifecycle
+mutex for one rule at a time, so an interactive request that queues behind one
+of them against a wedged speaker can wait for that rule's whole budget: about
+90 seconds with GoBGP (three 30-second attempts) and about 30 seconds with
+rustbgpd, which does not retry an attempt that ran out its own deadline.
+
+A small window remains when an operator withdraws a rule within seconds of its
+timed-out add. If the delete reaches the speaker first and answers not found,
+the withdrawal completes; an add that the speaker applies afterward leaves a
+local rule with no live owner. Reconciliation reports it as unknown and never
+removes it, so remove it at the speaker after checking it is prefixd's.
+
+Health still reports the daemon's own state, so an unconfirmed add is never
+presented as a successful install.
 
 Active mitigation gauges count local database status, including expired or
 pending rows awaiting confirmed cleanup; they are not proof of enforcement.

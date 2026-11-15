@@ -5,7 +5,10 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bgp::{AddOutcome, BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer, RetryPolicy};
+use crate::bgp::{
+    AddOutcome, BlackholeRoute, BlackholeSpeaker, FlowSpecAnnouncer, GUARDED_RPC_DEADLINE,
+    RetryPolicy,
+};
 use crate::config::BlackholeConfig;
 use crate::db::RepositoryTrait;
 use crate::error::{PrefixdError, Result};
@@ -101,12 +104,21 @@ pub fn blackhole_rule(mitigation: &Mitigation) -> Result<BlackholeRule> {
 /// Unleased pre-read before the first add (ADR 027 §5). The caller has found
 /// no owner in the ledger, so any local route at the prefix is untracked:
 /// prefixd-shaped or unrecognized, including another `path_id`. A failed read
-/// is an error, never an empty speaker.
+/// is an error, never an empty speaker. The caller holds the lifecycle mutex,
+/// so the read shares the interactive deadline, and a read that does not
+/// answer in time refuses the admission rather than proving absence.
 pub async fn refuse_untracked_route(
     speaker: &dyn BlackholeSpeaker,
     prefix: ipnet::IpNet,
 ) -> Result<()> {
-    let inventory = speaker.list_blackholes().await?;
+    let inventory = tokio::time::timeout(GUARDED_RPC_DEADLINE, speaker.list_blackholes())
+        .await
+        .map_err(|_| {
+            PrefixdError::BgpAnnouncementFailed(format!(
+                "local route read for {prefix} did not answer within {} s; nothing was added",
+                GUARDED_RPC_DEADLINE.as_secs()
+            ))
+        })??;
     if inventory
         .routes
         .iter()
@@ -247,7 +259,25 @@ pub async fn withdraw_safelisted(
     binding: Option<&VerifiedSpeakerBinding>,
     policy: RetryPolicy,
 ) -> Result<Mitigation> {
-    let request = request_withdrawal(
+    let request = request_safelisted_withdrawal(repo, dry_run, mitigation, binding).await?;
+    tracing::warn!(mitigation_id = %mitigation.mitigation_id, operation_id = %request.operation_id,
+        "mitigation destination safelisted after admission; withdrawing");
+    let withdrawn = execute_withdrawal(repo, announcer, dry_run, &request, binding, policy).await?;
+    crate::observability::metrics::MITIGATIONS_WITHDRAWN
+        .with_label_values(&[withdrawn.action_type.as_str(), &withdrawn.pop, "safelisted"])
+        .inc();
+    Ok(withdrawn)
+}
+
+/// Records the audited safelist withdrawal intent without a speaker call, for a
+/// caller that leaves the delete to reconciliation.
+pub async fn request_safelisted_withdrawal(
+    repo: &dyn RepositoryTrait,
+    dry_run: bool,
+    mitigation: &Mitigation,
+    binding: Option<&VerifiedSpeakerBinding>,
+) -> Result<super::WithdrawalRequest> {
+    request_withdrawal(
         repo,
         mitigation,
         false,
@@ -257,14 +287,7 @@ pub async fn withdraw_safelisted(
         !dry_run,
         binding,
     )
-    .await?;
-    tracing::warn!(mitigation_id = %mitigation.mitigation_id, operation_id = %request.operation_id,
-        "mitigation destination safelisted after admission; withdrawing");
-    let withdrawn = execute_withdrawal(repo, announcer, dry_run, &request, binding, policy).await?;
-    crate::observability::metrics::MITIGATIONS_WITHDRAWN
-        .with_label_values(&[withdrawn.action_type.as_str(), &withdrawn.pop, "safelisted"])
-        .inc();
-    Ok(withdrawn)
+    .await
 }
 
 #[cfg(test)]

@@ -2004,6 +2004,48 @@ mod tests {
                 .unwrap()
                 .is_active()
         );
+
+        // The speaker answers again: reconciliation completes the original
+        // operation, never a fresh one.
+        let answering = Arc::new(MockAnnouncer::new());
+        ReconciliationLoop::new(repo.clone(), answering.clone(), 30, false)
+            .expire_mitigations()
+            .await
+            .unwrap();
+        let finished = repo
+            .get_mitigation(mitigation.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(finished.status, MitigationStatus::Withdrawn);
+        assert_eq!(finished.reason, "investigated");
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+        let audit = repo
+            .list_audit(&crate::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let [entry] = audit
+            .iter()
+            .filter(|entry| {
+                entry.target_id.as_deref() == Some(&mitigation.mitigation_id.to_string())
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("one completion audit");
+        assert_eq!(entry.action, "withdraw");
+        assert!(matches!(
+            entry.actor_type,
+            crate::observability::ActorType::Operator
+        ));
+        assert_eq!(entry.actor_id.as_deref(), Some("alice"));
+        assert_eq!(entry.details["reason"], "investigated");
+        assert_eq!(
+            entry.details["operation_id"],
+            request.operation_id.to_string()
+        );
     }
 
     // Deliberately implements no observation traits: writing alone is sufficient.

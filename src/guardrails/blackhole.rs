@@ -973,6 +973,46 @@ mod tests {
         assert_eq!(replacements.get(), before);
     }
 
+    /// The unleased pre-read runs under the lifecycle mutex. A speaker that
+    /// never answers it refuses the admission within the interactive deadline:
+    /// an unanswered read is never an empty inventory.
+    #[tokio::test(start_paused = true)]
+    async fn a_mute_pre_read_refuses_admission_within_the_deadline() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        speaker.mute_reads.store(true, SeqCst);
+        let started = tokio::time::Instant::now();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            admit_enforced(&repo, &speaker, intent("203.0.113.10/32")),
+        )
+        .await
+        .expect("the pre-read is bounded")
+        .unwrap_err();
+        assert!(
+            started.elapsed()
+                <= crate::bgp::GUARDED_RPC_DEADLINE + std::time::Duration::from_millis(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(&error, PrefixdError::BgpAnnouncementFailed(message)
+                if message.contains("nothing was added")),
+            "{error}"
+        );
+        assert_eq!(repo.count_active_global().await.unwrap(), 0);
+        assert_eq!(speaker.adds.load(SeqCst), 0);
+        // Control: the same speaker answering admits and adds the route.
+        speaker.mute_reads.store(false, SeqCst);
+        admit_enforced(&repo, &speaker, intent("203.0.113.10/32"))
+            .await
+            .unwrap();
+        assert_eq!(speaker.adds.load(SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn live_owner_and_pending_withdrawal_return_409_without_add() {
         let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
