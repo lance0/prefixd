@@ -2,6 +2,7 @@
 
 import { use, useEffect, useRef, useState } from "react"
 import Link from "next/link"
+import { useSWRConfig } from "swr"
 import { mitigationTargetHref } from "@/lib/destination"
 import { useMitigation, useMitigations, useConfigInventory, useSignalGroupDetail } from "@/hooks/use-api"
 import { StatusBadge } from "@/components/dashboard/status-badge"
@@ -84,6 +85,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
   }, [])
 
   const { data: mitigation, error: mitigationError, isLoading, mutate } = useMitigation(id)
+  const { mutate: mutateCache } = useSWRConfig()
   const { data: inventory } = useConfigInventory()
 
   // Rules one event produced share triggering_event_id (ADR 028); list them as siblings.
@@ -123,7 +125,11 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
 
     try {
       await withdrawMitigation(mitigation.mitigation_id, reason, "dashboard")
-      mutate()
+      // The timeline's withdraw entry carries the actor and reason; refetch it with the record.
+      void Promise.allSettled([
+        mutate(),
+        mutateCache((key) => key === "audit" || key === "mitigations" || (Array.isArray(key) && ["audit", "mitigations"].includes(key[0]))),
+      ])
 
       return true
     } catch (e) {

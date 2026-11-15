@@ -212,6 +212,46 @@ describe("Mitigation timeline", () => {
     expect(within(timeline).getByText("Lifetime extended")).toBeInTheDocument()
   })
 
+  it("shows the withdrawal's actor and reason right after withdrawing from the detail page", async () => {
+    const withdrawnAt = new Date(Date.now() - 1_000).toISOString()
+    let withdrawn = false
+
+    const withdrawal = entry("withdraw", withdrawnAt, { actor_type: "operator", actor_id: "alice" }, {
+      reason: "attack resolved",
+      operation_id: "op-withdraw-1",
+      previous_expires_at: expiry,
+      ended_at: withdrawnAt,
+    })
+
+    signIn(controller, "credentials", operatorResponse("operator"))
+    controller.route("GET", "/v1/config/inventory", () => json({ customers: [], total_customers: 0, total_services: 0, total_assets: 0, loaded_at: new Date().toISOString() }))
+    controller.route("GET", mitigationPath, () => json(withdrawn ? { ...mitigation, status: "withdrawn", withdrawn_at: withdrawnAt } : mitigation))
+    controller.route("GET", "/v1/audit", () => json(withdrawn
+      ? { entries: [withdrawal, ...entries], count: 3, next_cursor: null, has_more: false }
+      : { entries, count: entries.length, next_cursor: null, has_more: false }))
+    controller.route("POST", `${mitigationPath}/withdraw`, () => {
+      withdrawn = true
+
+      return new Response("", { status: 200 })
+    })
+    const timeline = await renderPage()
+    await waitFor(() => expect(within(timeline).getByText("Lifetime extended")).toBeInTheDocument())
+    const auditReads = controller.calls("GET", "/v1/audit").length
+
+    fireEvent.click(screen.getByRole("button", { name: "Withdraw" }))
+    const dialog = await screen.findByRole("alertdialog", { name: "Withdraw mitigation" })
+    fireEvent.change(within(dialog).getByLabelText("Withdrawal reason"), { target: { value: "attack resolved" } })
+    await act(async () => { fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" })) })
+
+    // No reload and well inside the 5 s refresh interval: the withdrawal itself revalidates the timeline.
+    await waitFor(() => expect(within(timeline).getByText("op-withdraw-1")).toBeInTheDocument())
+    expect(controller.calls("GET", "/v1/audit").length).toBeGreaterThan(auditReads)
+    expect(steps(timeline)).toEqual(["Created", "Lifetime extended", "Withdrawn"])
+    const step = within(within(timeline).getAllByRole("listitem")[2])
+    expect(step.getByText("alice")).toBeInTheDocument()
+    expect(step.getByText("attack resolved")).toBeInTheDocument()
+  })
+
   it("does not request the audit for a viewer and keeps the record's timeline", async () => {
     serve(() => json({ entries, count: entries.length, next_cursor: null, has_more: false }), "viewer")
     const timeline = await renderPage()

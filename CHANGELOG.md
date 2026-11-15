@@ -295,6 +295,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   withdraw and bulk acknowledge, which ignore it too.
 - `prefixdctl` names a bare 401 or 403 response as an authentication failure
   or a permission denial instead of printing `unknown error`.
+- Withdrawing from the mitigation detail page now refreshes its timeline, so the
+  Withdrawn step shows the actor, reason and operation ID without a reload.
 - The dashboard no longer requests data the signed-in role cannot read. A
   viewer's Overview shows recent events without the audit and no longer reports
   "Unable to load recent activity", the Audit log page tells a viewer it needs
