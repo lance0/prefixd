@@ -229,8 +229,22 @@ impl AppConfig {
     pub fn load(config_dir: &Path) -> Result<Self> {
         let path = |name: &str| config_dir.join(name);
         let failed = |name: &str| format!("failed to load {}", path(name).display());
-        let (mut settings, unknown_keys) = Settings::load_with_unknown_keys(path("prefixd.yaml"))
-            .with_context(|| failed("prefixd.yaml"))?;
+        // Read `alerting.yaml` first to know whether it replaces inline
+        // alerting; its own error is still reported in the usual order below.
+        let alerting_file =
+            crate::alerting::AlertingConfig::load_with_unknown_keys(path("alerting.yaml"));
+        let inline_alerting = matches!(
+            &alerting_file,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        );
+        let (mut settings, unknown_keys) = Settings::load_with_unknown_keys_and_inline_alerting(
+            path("prefixd.yaml"),
+            inline_alerting,
+        )
+        .with_context(|| failed("prefixd.yaml"))?;
         let mut unknown_keys: Vec<UnknownKey> = unknown_keys
             .into_iter()
             .map(|key| UnknownKey {
@@ -257,7 +271,7 @@ impl AppConfig {
         // A present alerting.yaml replaces inline alerting. Either one gets the
         // destination checks reload and the alerting editor apply.
         let mut alerting_source = "prefixd.yaml";
-        match crate::alerting::AlertingConfig::load_with_unknown_keys(path("alerting.yaml")) {
+        match alerting_file {
             Ok((alerting, keys)) => {
                 settings.alerting = alerting;
                 alerting_source = "alerting.yaml";
@@ -316,11 +330,6 @@ impl AppConfig {
                             file: "prefixd.yaml",
                             key,
                         }));
-                    for error in loaded.validate_errors() {
-                        check
-                            .errors
-                            .push(format!("{}: {error}", failed("prefixd.yaml")));
-                    }
                     settings = Some(loaded);
                 }
                 Err(error) => check
@@ -372,48 +381,66 @@ impl AppConfig {
         }
 
         // A present alerting.yaml replaces inline alerting, exactly as startup
-        // resolves it before validating the effective destinations.
+        // resolves it before validating the effective destinations. A file that
+        // is present but unreadable or malformed is not "absent", so the inline
+        // block is still not in effect.
         let mut alerting_source = "prefixd.yaml";
+        let mut inline_alerting = true;
         match std::fs::read_to_string(path("alerting.yaml")) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => check
-                .errors
-                .push(format!("{}: {error}", failed("alerting.yaml"))),
-            Ok(content) => match crate::alerting::AlertingConfig::from_yaml(&content) {
-                Ok((alerting, keys)) => {
-                    check.validated.push("alerting.yaml");
-                    alerting_source = "alerting.yaml";
-                    check
-                        .unknown_keys
-                        .extend(keys.into_iter().map(|key| UnknownKey {
-                            file: "alerting.yaml",
-                            key,
-                        }));
-                    let errors = alerting.load_errors();
-                    if !errors.is_empty() {
-                        check.errors.push(format!(
-                            "{}: {}",
-                            failed("alerting.yaml"),
-                            errors.join("; ")
-                        ));
-                    }
-                    if let Some(settings) = settings.as_mut() {
-                        settings.alerting = alerting;
-                    }
-                }
-                Err(error) => check
+            Err(error) => {
+                inline_alerting = false;
+                check
                     .errors
-                    .push(format!("{}: {error:#}", failed("alerting.yaml"))),
-            },
+                    .push(format!("{}: {error}", failed("alerting.yaml")));
+            }
+            Ok(content) => {
+                inline_alerting = false;
+                match crate::alerting::AlertingConfig::from_yaml(&content) {
+                    Ok((alerting, keys)) => {
+                        check.validated.push("alerting.yaml");
+                        alerting_source = "alerting.yaml";
+                        check
+                            .unknown_keys
+                            .extend(keys.into_iter().map(|key| UnknownKey {
+                                file: "alerting.yaml",
+                                key,
+                            }));
+                        let errors = alerting.load_errors();
+                        if !errors.is_empty() {
+                            check.errors.push(format!(
+                                "{}: {}",
+                                failed("alerting.yaml"),
+                                errors.join("; ")
+                            ));
+                        }
+                        if let Some(settings) = settings.as_mut() {
+                            settings.alerting = alerting;
+                        }
+                    }
+                    Err(error) => check
+                        .errors
+                        .push(format!("{}: {error:#}", failed("alerting.yaml"))),
+                }
+            }
         }
         if let Some(settings) = &settings {
-            let errors = settings.alerting.validate();
-            if !errors.is_empty() {
-                check.errors.push(format!(
-                    "{}: alerting: {}",
-                    failed(alerting_source),
-                    errors.join("; ")
-                ));
+            for error in settings.validate_errors_with_inline_alerting(inline_alerting) {
+                check
+                    .errors
+                    .push(format!("{}: {error}", failed("prefixd.yaml")));
+            }
+            // Validate the configuration in effect. A present but unusable
+            // alerting.yaml is already reported and replaces the inline block.
+            if inline_alerting || alerting_source == "alerting.yaml" {
+                let errors = settings.alerting.validate();
+                if !errors.is_empty() {
+                    check.errors.push(format!(
+                        "{}: alerting: {}",
+                        failed(alerting_source),
+                        errors.join("; ")
+                    ));
+                }
             }
         }
 
@@ -943,6 +970,40 @@ mod tests {
         assert_eq!(config.alerting_source, "alerting.yaml");
         assert_eq!(config.settings.alerting.destinations.len(), 1);
         assert!(config.settings.alerting.validate().is_empty());
+    }
+
+    /// Inline alerting is checked only while it is the configuration in
+    /// effect: a stale inline `*_env` is refused without `alerting.yaml` and
+    /// ignored when a standalone file replaces the block.
+    #[test]
+    fn startup_checks_inline_alerting_only_when_it_is_in_effect() {
+        assert!(
+            std::env::var("PREFIXD_TEST_3325_STARTUP_UNSET").is_err(),
+            "the test variable must be unset"
+        );
+        let directory = fixture();
+        let path = directory.path().join("prefixd.yaml");
+        let mut settings: Settings =
+            crate::config::parse_yaml(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        settings.alerting = crate::config::parse_yaml(
+            "destinations:\n  - type: pagerduty\n    routing_key_env: \
+             PREFIXD_TEST_3325_STARTUP_UNSET\n",
+        )
+        .unwrap();
+        std::fs::write(&path, serde_saphyr::to_string(&settings).unwrap()).unwrap();
+
+        let error = format!("{:#}", AppConfig::load(directory.path()).unwrap_err());
+        assert!(error.contains("prefixd.yaml: alerting:"), "{error}");
+        assert!(error.contains("PREFIXD_TEST_3325_STARTUP_UNSET"), "{error}");
+
+        std::fs::write(
+            directory.path().join("alerting.yaml"),
+            alerting("https://example.com/hook"),
+        )
+        .unwrap();
+        let config = AppConfig::load(directory.path()).unwrap();
+        assert_eq!(config.alerting_source, "alerting.yaml");
+        assert_eq!(config.settings.alerting.destinations.len(), 1);
     }
 
     #[test]

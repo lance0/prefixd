@@ -266,11 +266,18 @@ impl AppState {
     /// the lifecycle lock is taken first, then the editors' write guards, the
     /// same order the handlers use. Inventory has no editor, so it is parsed before the locks are taken.
     pub async fn reload_config(&self) -> std::result::Result<ReloadReport, ReloadError> {
-        let present = |name: &str| {
+        // `Path::exists` reports false for any I/O error, so an unreadable
+        // directory would make a present file look absent. Distinguish a
+        // missing file from one the reload cannot inspect, as startup does.
+        let present = |name: &'static str| {
             let path = self.config_dir.join(name);
-            path.exists().then_some(path)
+            match std::fs::metadata(&path) {
+                Ok(_) => Ok(Some(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(invalid(name, error)),
+            }
         };
-        let inventory = present("inventory.yaml")
+        let inventory = present("inventory.yaml")?
             .map(|path| Inventory::load(&path).map_err(|e| invalid("inventory.yaml", e)))
             .transpose()?;
 
@@ -279,7 +286,8 @@ impl AppState {
         let mut alerting_guard = self.alerting.write().await;
         let mut correlation_guard = self.correlation_config.write().await;
 
-        let playbooks = present("playbooks.yaml")
+        let alerting_path = present("alerting.yaml")?;
+        let playbooks = present("playbooks.yaml")?
             .map(|path| {
                 let playbooks = Playbooks::load(&path).map_err(|e| invalid("playbooks.yaml", e))?;
                 let errors =
@@ -291,13 +299,17 @@ impl AppState {
                 }
             })
             .transpose()?;
-        let settings = present("prefixd.yaml")
-            .map(|path| Settings::load(&path).map_err(|e| invalid("prefixd.yaml", e)))
+        let settings = present("prefixd.yaml")?
+            .map(|path| {
+                Settings::load_with_unknown_keys_and_inline_alerting(&path, alerting_path.is_none())
+                    .map(|(settings, _)| settings)
+                    .map_err(|e| invalid("prefixd.yaml", e))
+            })
             .transpose()?;
-        let correlation_file = present("correlation.yaml")
+        let correlation_file = present("correlation.yaml")?
             .map(|path| CorrelationConfig::load(&path).map_err(|e| invalid("correlation.yaml", e)))
             .transpose()?;
-        let alerting = present("alerting.yaml")
+        let alerting = alerting_path
             .map(|path| {
                 let alerting = crate::alerting::AlertingConfig::load(&path)
                     .map_err(|e| invalid("alerting.yaml", e))?;

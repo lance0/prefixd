@@ -294,3 +294,57 @@ fn check_reports_a_missing_directory_file_by_file() {
         );
     }
 }
+
+/// A `prefixd.yaml` whose inline alerting names an unset variable, as left by
+/// an operator who now configures alerting in `alerting.yaml`.
+fn stale_inline_alerting() -> String {
+    let mut document = include_str!("../configs/prefixd.yaml").to_string();
+    document.push_str(
+        "alerting:\n  destinations:\n    - type: pagerduty\n      routing_key_env: \
+         PREFIXD_TEST_3325_CHECK_UNSET\n",
+    );
+    document
+}
+
+/// A standalone `alerting.yaml` replaces the inline block, so a stale inline
+/// `*_env` is not checked and the configuration passes.
+#[test]
+fn check_ignores_stale_inline_alerting_when_alerting_yaml_replaces_it() {
+    assert!(
+        std::env::var("PREFIXD_TEST_3325_CHECK_UNSET").is_err(),
+        "the test variable must be unset"
+    );
+    let directory = tempfile::tempdir().unwrap();
+    write_directory(directory.path(), &stale_inline_alerting());
+    std::fs::write(
+        directory.path().join("alerting.yaml"),
+        "destinations:\n  - type: generic\n    url: https://example.com/hook\n",
+    )
+    .unwrap();
+    let output = check(directory.path());
+    let stderr = String::from_utf8(output.stderr.clone()).unwrap();
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+/// Without `alerting.yaml`, the inline block is the configuration in effect
+/// and the same stale variable is refused.
+#[test]
+fn check_refuses_stale_inline_alerting_when_it_is_in_effect() {
+    assert!(
+        std::env::var("PREFIXD_TEST_3325_CHECK_UNSET").is_err(),
+        "the test variable must be unset"
+    );
+    let directory = tempfile::tempdir().unwrap();
+    write_directory(directory.path(), &stale_inline_alerting());
+    let output = check(directory.path());
+    let lines = stderr_lines(&output);
+    assert_eq!(output.status.code(), Some(1), "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line.contains(
+            "alerting: destination[0] (pagerduty): routing_key_env names environment variable \
+             'PREFIXD_TEST_3325_CHECK_UNSET', which is not set or empty"
+        )),
+        "{lines:?}"
+    );
+}

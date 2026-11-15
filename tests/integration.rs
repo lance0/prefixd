@@ -16371,6 +16371,93 @@ mod manual_destination_cidr {
         );
     }
 
+    /// A stale inline `*_env` stops a reload only while inline alerting is the
+    /// configuration in effect; `alerting.yaml` replaces that block.
+    #[tokio::test]
+    async fn stale_inline_alerting_env_is_ignored_when_alerting_yaml_replaces_it() {
+        assert!(
+            std::env::var("PREFIXD_TEST_3325_RELOAD_UNSET").is_err(),
+            "the test variable must be unset"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("inventory.yaml"), r#"{"customers":[]}"#).unwrap();
+        let (mut state, _, _) = state(OperationMode::Enforced, true, owned_inventory());
+        Arc::get_mut(&mut state).unwrap().config_dir = dir.path().into();
+        let mut settings = state.settings.clone();
+        settings.alerting = serde_json::from_value(serde_json::json!({
+            "destinations": [{
+                "type": "pagerduty",
+                "routing_key_env": "PREFIXD_TEST_3325_RELOAD_UNSET",
+            }],
+        }))
+        .unwrap();
+        std::fs::write(
+            dir.path().join("prefixd.yaml"),
+            serde_saphyr::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        // Without a replacement file the inline section is in effect.
+        let error = state.reload_config().await.unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "routing_key_env names environment variable 'PREFIXD_TEST_3325_RELOAD_UNSET', \
+                 which is not set or empty"
+            ),
+            "{error}"
+        );
+        // The standalone file replaces the inline block, stale key and all.
+        std::fs::write(
+            dir.path().join("alerting.yaml"),
+            "destinations:\n  - type: generic\n    url: https://example.com/hook\n",
+        )
+        .unwrap();
+        let report = state.reload_config().await.unwrap();
+        assert!(
+            report.reloaded.contains(&"alerting".to_string()),
+            "{report:?}"
+        );
+        assert_eq!(state.alerting.read().await.config().destinations.len(), 1);
+    }
+
+    /// `Path::exists` treats every I/O error as absent; a reload must refuse a
+    /// present file it cannot inspect instead of skipping that section.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reload_refuses_a_file_behind_an_unreadable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::write(private.join("inventory.yaml"), r#"{"customers":[]}"#).unwrap();
+        std::os::unix::fs::symlink(
+            private.join("inventory.yaml"),
+            dir.path().join("inventory.yaml"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root ignores the mode; nothing to prove then.
+        if std::fs::metadata(dir.path().join("inventory.yaml")).is_ok() {
+            std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
+        let (mut state, _, _) = state(OperationMode::Enforced, true, owned_inventory());
+        Arc::get_mut(&mut state).unwrap().config_dir = dir.path().into();
+        let error = state.reload_config().await.unwrap_err();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(error.to_string().starts_with("inventory.yaml: "), "{error}");
+        assert!(error.to_string().contains("Permission denied"), "{error}");
+        assert!(
+            state
+                .inventory
+                .read()
+                .await
+                .lookup_prefix(&"203.0.112.0/22".parse().unwrap())
+                .unwrap()
+                .is_some()
+        );
+    }
+
     /// A present `prefixd.yaml` that fails to load fails the reload even when
     /// `correlation.yaml` supplies correlation; nothing is published.
     #[tokio::test]

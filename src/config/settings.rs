@@ -813,8 +813,20 @@ impl Settings {
     /// [`Settings::load`], also returning the keys the document contains but
     /// this release ignores. Startup warns about each of them.
     pub fn load_with_unknown_keys<P: AsRef<Path>>(path: P) -> Result<(Self, Vec<String>)> {
+        Self::load_with_unknown_keys_and_inline_alerting(path, true)
+    }
+
+    /// [`Settings::load_with_unknown_keys`], with `inline_alerting` saying
+    /// whether this document's `alerting` block is the configuration in
+    /// effect. A standalone `alerting.yaml` replaces it, so startup and reload
+    /// skip the inline checks then; its destination checks still run against
+    /// the effective configuration.
+    pub fn load_with_unknown_keys_and_inline_alerting<P: AsRef<Path>>(
+        path: P,
+        inline_alerting: bool,
+    ) -> Result<(Self, Vec<String>)> {
         let (settings, unknown_keys) = Self::from_yaml(&std::fs::read_to_string(path)?)?;
-        let errors = settings.validate_errors();
+        let errors = settings.validate_errors_with_inline_alerting(inline_alerting);
         anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
         Ok((settings, unknown_keys))
     }
@@ -842,6 +854,15 @@ impl Settings {
     /// Every cross-check startup runs before it connects, in startup order.
     /// Each message names the key it refuses and never a value.
     pub fn validate_errors(&self) -> Vec<String> {
+        self.validate_errors_with_inline_alerting(true)
+    }
+
+    /// [`Settings::validate_errors`], skipping the inline `alerting` block when
+    /// a standalone `alerting.yaml` replaces it.
+    pub(crate) fn validate_errors_with_inline_alerting(
+        &self,
+        inline_alerting: bool,
+    ) -> Vec<String> {
         let mut errors = Vec::new();
         // Alerting reports in the alerting editor's form, under its section.
         match serde_json::to_value(self) {
@@ -853,12 +874,14 @@ impl Settings {
             }
             Err(error) => errors.push(error.to_string()),
         }
-        errors.extend(
-            self.alerting
-                .load_errors()
-                .into_iter()
-                .map(|error| format!("alerting: {error}")),
-        );
+        if inline_alerting {
+            errors.extend(
+                self.alerting
+                    .load_errors()
+                    .into_iter()
+                    .map(|error| format!("alerting: {error}")),
+            );
+        }
         if let Err(error) = self.bgp.validate_vpn_scopes() {
             errors.push(error.to_string());
         }
