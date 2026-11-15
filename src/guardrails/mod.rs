@@ -740,6 +740,7 @@ mod tests {
             confidence: None,
             action: "ban".into(),
             raw_details: None,
+            outcome: Default::default(),
         })
         .await
         .unwrap();
