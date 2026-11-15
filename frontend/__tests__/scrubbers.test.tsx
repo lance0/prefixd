@@ -27,7 +27,7 @@ afterEach(() => {
 function result(dryRun = false): DiversionPreview {
   return {
     candidate: {
-      id: "operation-1", profile: { id: "a", revision: "v1" },
+      id: "operation-1", pop: "iad1", profile: { id: "a", revision: "v1" },
       rule: { nlri: { dst_prefix: "203.0.113.20/32", src_prefix: "198.51.100.0/24", protocol: 6, dst_ports: [443] }, target: "192.0.2.99", owner: "profile-owner", revision: 1 },
       expires_at: "2030-01-01T00:00:00Z", status: dryRun ? "simulated" : "pending", dry_run: dryRun, withdrawal_reason: null, last_error: null,
     },
@@ -396,12 +396,30 @@ describe("scrubber re-arm and access", () => {
     expect(icon("Scrubbers")).not.toBe(icon("Correlation"))
   })
 
-  it("shows non-administrators the requirement and sends no mutations", async () => {
-    await render({ role: "operator" })
-    await settle()
-    expect(screen.getByText("Scrubber diversion requires an administrator.")).toBeInTheDocument()
+  it.each(["viewer", "operator"] as const)("shows the %s role profiles and diversions read-only and offers no mutation", async role => {
+    await render({ role, armed: false })
+    expect(await screen.findByText("203.0.113.20/32 → 192.0.2.99 · a@v1")).toBeInTheDocument()
+    expect(screen.getByText("Fresh readiness")).toBeInTheDocument()
+    expect(screen.getByText("Read-only")).toBeInTheDocument()
+    expect(screen.getByText("Re-arm, preview, creation and withdrawal require an administrator.")).toBeInTheDocument()
+    expect(screen.queryByText("New diversion")).not.toBeInTheDocument()
     expect(screen.queryByRole("button", { name: /Withdraw|Re-arm|Preview/ })).not.toBeInTheDocument()
+    await settle()
     expect(mutations()).toHaveLength(0)
+  })
+
+  it("offers administrators every mutation control without the read-only notice", async () => {
+    await render({ armed: false })
+    expect(await screen.findByRole("button", { name: "Withdraw 203.0.113.20/32" })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Re-arm a" })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Preview diversion" })).toBeInTheDocument()
+    expect(screen.queryByText("Read-only")).not.toBeInTheDocument()
+  })
+
+  it("anchors each diversion row for links from Mitigations and IP history", async () => {
+    await render()
+    await screen.findByText("203.0.113.20/32 → 192.0.2.99 · a@v1")
+    expect(document.getElementById("diversion-operation-1")).toHaveTextContent("203.0.113.20/32 → 192.0.2.99 · a@v1")
   })
 
   it("reports unknown profile state when scrubber profiles cannot be loaded", async () => {

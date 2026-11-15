@@ -129,6 +129,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validates each field before preview and offers source ports only for UDP,
   the only protocol the controller accepts them for. Scrubbers has its own
   navigation icon.
+- Viewers and Operators can open the dashboard's Scrubbers page read-only.
+  Re-arm, preview, creation and withdrawal stay Administrator-only, and the
+  controller still refuses them for other roles. Mitigations rows, the
+  mitigation detail page and IP history show when a victim host has
+  outstanding diversion intent and link to it.
 - A present `prefixd.yaml` that fails to load now fails `POST
   /v1/config/reload` even when `correlation.yaml` supplies correlation.
 - A failed reload returns 422 for an invalid file and 500 for an unexpected

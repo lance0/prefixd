@@ -17,8 +17,9 @@ import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/stat
 import { StatusPill, Tag, type StatusTone } from "@/components/dashboard/status-pill"
 import { WithdrawConfirmDialog } from "@/components/dashboard/withdraw-confirm-dialog"
 import { useTimeFormat } from "@/components/time-zone-provider"
+import { useDiversions } from "@/hooks/use-api"
 import { usePermissions } from "@/hooks/use-permissions"
-import { armScrubber, createDiversion, getDiversions, getScrubbers, previewDiversion, withdrawDiversion, type DiversionExportObservation, type DiversionMatch, type DiversionPreview, type DiversionRequest, type DiversionRule, type ScrubberDiversion, type ScrubberProfiles, type ScrubberReturnLeg, type ScrubberState } from "@/lib/api"
+import { armScrubber, createDiversion, getScrubbers, previewDiversion, withdrawDiversion, type DiversionExportObservation, type DiversionMatch, type DiversionPreview, type DiversionRequest, type DiversionRule, type ScrubberDiversion, type ScrubberProfiles, type ScrubberReturnLeg, type ScrubberState } from "@/lib/api"
 import { parseDestination } from "@/lib/destination"
 import { formatTimeRemaining } from "@/lib/format"
 
@@ -91,7 +92,7 @@ export function ScrubbersContent() {
   const permissions = usePermissions()
   const { formatTime } = useTimeFormat()
   const profiles = useSWR("scrubber-profiles", getScrubbers, { refreshInterval: 5000 })
-  const diversions = useSWR("scrubber-diversions", getDiversions, { refreshInterval: 5000 })
+  const diversions = useDiversions()
   const [form, setForm] = useState(EMPTY_FORM)
   const [touched, setTouched] = useState<Set<keyof DiversionForm>>(new Set())
   const [submitted, setSubmitted] = useState(false)
@@ -162,13 +163,14 @@ export function ScrubbersContent() {
 
   if (!permissions.settled) return <div className="space-y-6"><PageHeader title="Scrubbers" description={DESCRIPTION} /><Card><LoadingRows label="Loading permissions" /></Card></div>
 
-  if (!permissions.isAdmin) return <div className="space-y-6"><PageHeader title="Scrubbers" description={DESCRIPTION} /><Card><EmptyState title="Scrubber diversion requires an administrator." /></Card></div>
+  // Every role reads diversions; the controller refuses mutations without the Admin role.
+  const canMutate = permissions.isAdmin
 
   // Stale data after a failed refresh is unknown, not current.
   const staleRefresh = (profiles.error && profiles.data) || (diversions.error && diversions.data)
 
   return <div className="space-y-6">
-    <PageHeader title="Scrubbers" description={DESCRIPTION} />
+    <PageHeader title="Scrubbers" description={DESCRIPTION} meta={canMutate ? null : <><Tag>Read-only</Tag><span className="text-muted-foreground">Re-arm, preview, creation and withdrawal require an administrator.</span></>} />
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
     {staleRefresh && <p role="alert" className="text-sm text-destructive">Scrubber observations could not be refreshed. Current state is unknown.</p>}
     {message && <p role="status" className="text-sm">{message}</p>}
@@ -193,13 +195,13 @@ export function ScrubbersContent() {
               {state?.observed_at ? <Field label="Readiness observed"><time dateTime={state.observed_at}>{formatTime(state.observed_at, now)}</time></Field> : null}
             </FieldList>
             {state?.latch_reason && <p className="text-sm text-muted-foreground">{state.latch_reason}</p>}
-            <Button variant="outline" size="sm" disabled={busy || !profiles.data?.enabled || !state?.ready || state?.armed} onClick={() => action(async () => { await armScrubber(config.id, config.revision); setMessage(`Profile ${config.id} re-armed. New intent requires a separate confirmation.`) })}>Re-arm {config.id}</Button>
+            {canMutate && <Button variant="outline" size="sm" disabled={busy || !profiles.data?.enabled || !state?.ready || state?.armed} onClick={() => action(async () => { await armScrubber(config.id, config.revision); setMessage(`Profile ${config.id} re-armed. New intent requires a separate confirmation.`) })}>Re-arm {config.id}</Button>}
           </CardContent>
         </Card>
       })}
     </section>
 
-    {profiles.data?.enabled && <Card><CardHeader><CardTitle>New diversion</CardTitle></CardHeader><CardContent>
+    {canMutate && profiles.data?.enabled && <Card><CardHeader><CardTitle>New diversion</CardTitle></CardHeader><CardContent>
       <form noValidate className="grid gap-4 sm:grid-cols-2" onSubmit={event => {
         event.preventDefault()
         setSubmitted(true)
@@ -278,7 +280,7 @@ export function ScrubbersContent() {
         {diversions.data?.map(row => {
           const expired = Date.parse(row.expires_at) <= now
 
-          return <div key={row.id} className="space-y-3 rounded-md border p-3 text-sm">
+          return <div key={row.id} id={`diversion-${row.id}`} className="scroll-mt-20 space-y-3 rounded-md border p-3 text-sm">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <p className="min-w-0 break-words font-mono">{describeRow(row)}</p>
               <DiversionStatusPill row={row} stale={Boolean(diversions.error)} />
@@ -295,7 +297,7 @@ export function ScrubbersContent() {
             <ExportEvidence label={row.return_rule ? "Inbound leg peer export" : "Peer export"} observation={row.export_observation} now={now} refreshFailed={Boolean(diversions.error)} />
             {row.return_rule && <ExportEvidence label="Return leg peer export" observation={row.return_export_observation} now={now} refreshFailed={Boolean(diversions.error)} />}
             {(row.withdrawal_reason || row.last_error) && <p>{row.withdrawal_reason || row.last_error}</p>}
-            <Button variant="outline" size="sm" disabled={busy || row.status === "withdrawing"} onClick={event => { withdrawTrigger.current = event.currentTarget; setWithdrawError(""); setWithdrawTarget(row) }}>Withdraw {row.rule.nlri.dst_prefix}</Button>
+            {canMutate && <Button variant="outline" size="sm" disabled={busy || row.status === "withdrawing"} onClick={event => { withdrawTrigger.current = event.currentTarget; setWithdrawError(""); setWithdrawTarget(row) }}>Withdraw {row.rule.nlri.dst_prefix}</Button>}
           </div>
         })}
         <p className="text-xs text-muted-foreground">Local observation and peer export do not prove router installation or scrubber forwarding.</p>

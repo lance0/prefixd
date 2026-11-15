@@ -8,6 +8,7 @@ import { Ban, Eye, Search, ShieldPlus, Filter, RefreshCw, XCircle, Plus, Downloa
 import { Checkbox } from "@/components/ui/checkbox"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 import { OriginTag } from "@/components/dashboard/status-pill"
+import { DivertedIndicator, DiversionsUnknownNotice } from "@/components/dashboard/diverted-indicator"
 import { ActionBadge } from "@/components/dashboard/action-badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -433,6 +434,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
           <p className="border-b px-4 py-2 text-sm text-destructive">Some filter choices could not be loaded. Search still covers stored customer IDs.</p>
         )}
         {exportError && <p role="alert" className="border-b px-4 py-2 text-sm text-destructive">CSV export failed: {exportError}. No file was downloaded.</p>}
+        <DiversionsUnknownNotice className="border-b px-4 py-2 text-sm text-warning" />
         {error ? (
           <ErrorState
             title="Unable to load mitigations"
@@ -524,6 +526,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                         <span className="flex flex-wrap items-center justify-end gap-1 md:justify-start">
                           <StatusBadge status={mitigation.status} />
                           <OriginTag origin={mitigation.origin_mode} />
+                          <DivertedIndicator host={mitigation.victim_ip} scope={mitigation.vpn_scope?.identity ?? null} pop={mitigation.pop} />
                         </span>
                       </TableCell>
                       <TableCell className="order-3 p-0 md:px-3 md:py-2">

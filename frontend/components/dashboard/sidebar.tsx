@@ -13,7 +13,7 @@ import { useStats, useOpenSignalGroupCount } from "@/hooks/use-api"
 const navItems = [
   { href: "/", label: "Overview", icon: LayoutDashboard, adminOnly: false },
   { href: "/mitigations", label: "Mitigations", icon: Shield, adminOnly: false },
-  { href: "/scrubbers", label: "Scrubbers", icon: Split, adminOnly: true },
+  { href: "/scrubbers", label: "Scrubbers", icon: Split, adminOnly: false },
   { href: "/events", label: "Events", icon: Activity, adminOnly: false },
   { href: "/correlation", label: "Correlation", icon: Waypoints, adminOnly: false },
   { href: "/inventory", label: "Inventory", icon: Database, adminOnly: false },

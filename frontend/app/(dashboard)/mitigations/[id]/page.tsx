@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Check, Copy, FileText, AlertTriangle, Terminal, CheckCircle2, Info } from "lucide-react"
+import { DivertedIndicator } from "@/components/dashboard/diverted-indicator"
 import { PageHeader } from "@/components/dashboard/page-header"
 import { OriginTag, StatusPill, Tag } from "@/components/dashboard/status-pill"
 import { Field, FieldList } from "@/components/dashboard/field"
@@ -206,6 +207,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
             <>
               <StatusBadge status={mitigation.status} />
               <OriginTag origin={mitigation.origin_mode} showUnknown />
+              <DivertedIndicator host={mitigation.victim_ip} scope={mitigation.vpn_scope?.identity ?? null} pop={mitigation.pop} showUnknown />
               <ActionBadge actionType={mitigation.action_type} rateBps={mitigation.rate_bps} dscp={mitigation.dscp} />
               <Tag>{mitigation.vector.replace(/_/g, " ")}</Tag>
               <span className="text-muted-foreground">POP <span className="font-mono text-foreground">{mitigation.pop}</span></span>

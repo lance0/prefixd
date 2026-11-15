@@ -12389,6 +12389,91 @@ mod anonymous_auth {
         );
     }
 
+    /// Scrubber role matrix: every role reads diversions, and only Admin reaches a
+    /// mutation handler. The Admin row is the control that 403 comes from the role.
+    #[tokio::test]
+    async fn scrubber_reads_allow_every_role_and_mutations_require_admin() {
+        let diversion = serde_json::json!({
+            "profile": "scrubber-a",
+            "scope": {"dst_prefix": "203.0.113.20/32", "protocol": 6, "dst_ports": [443]},
+            "ttl_seconds": 60,
+            "reason": "role matrix"
+        });
+        let scoped = serde_json::json!({"scope": "TRANSIT", "diversion": diversion});
+        let id = uuid::Uuid::new_v4();
+        let withdraw = format!("/v1/diversions/{id}/withdraw");
+        let mutations = [
+            (
+                "/v1/scrubbers/scrubber-a/arm",
+                serde_json::json!({"revision": "v1"}),
+            ),
+            ("/v1/diversions/preview", diversion.clone()),
+            ("/v1/diversions", diversion.clone()),
+            ("/v1/vpn/diversions/preview", scoped.clone()),
+            ("/v1/vpn/diversions", scoped),
+            (
+                withdraw.as_str(),
+                serde_json::json!({"reason": "role matrix"}),
+            ),
+        ];
+        for role in [
+            OperatorRole::Viewer,
+            OperatorRole::Operator,
+            OperatorRole::Admin,
+        ] {
+            let repo = Arc::new(MockRepository::new());
+            let username = format!("scrubber-{role:?}").to_lowercase();
+            let hash = Argon2::default()
+                .hash_password_with_salt(PASSWORD.as_bytes(), b"anonymous-auth-test")
+                .unwrap()
+                .to_string();
+            repo.create_operator(&username, &hash, role.clone(), None)
+                .await
+                .unwrap();
+            let app = router(AuthMode::Credentials, repo.clone(), MemoryStore::default());
+            let cookie = login(&app, &username).await;
+            for path in ["/v1/scrubbers", "/v1/diversions"] {
+                let response = request(&app, "GET", path, Some(&cookie), None).await;
+                assert_eq!(response.status(), StatusCode::OK, "{role:?} reads {path}");
+            }
+            let response = request(
+                &app,
+                "GET",
+                &format!("/v1/diversions/{id}"),
+                Some(&cookie),
+                None,
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{role:?} reads one"
+            );
+            for (path, body) in &mutations {
+                let status = request(&app, "POST", path, Some(&cookie), Some(body.clone()))
+                    .await
+                    .status();
+                if role == OperatorRole::Admin {
+                    assert!(
+                        status != StatusCode::FORBIDDEN && status != StatusCode::UNAUTHORIZED,
+                        "Admin reaches {path}: {status}"
+                    );
+                } else {
+                    assert_eq!(status, StatusCode::FORBIDDEN, "{role:?} {path}");
+                }
+            }
+            for (path, body) in &mutations {
+                let status = request(&app, "POST", path, None, Some(body.clone()))
+                    .await
+                    .status();
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "anonymous {path}");
+            }
+            // Scrubbers are disabled in this fixture, so even Admin persists nothing;
+            // the 403s above, not this check, prove the role boundary.
+            assert!(repo.list_diversions("test1").await.unwrap().is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn bearer_operator_cannot_create_whole_vrf_rule() {
         let app = router(
