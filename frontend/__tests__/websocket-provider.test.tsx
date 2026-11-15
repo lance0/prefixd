@@ -6,7 +6,7 @@ import { WebSocketProvider, useWebSocketContext } from "@/components/websocket-p
 import { ConnectionStatus } from "@/components/connection-status"
 import { useEvents, useHealth, useMitigations, useSignalGroupsPaginated, useStats } from "@/hooks/use-api"
 import type { WsMessage } from "@/hooks/use-websocket-types"
-import type { NotificationPreferences } from "@/lib/api"
+import { getHealth, type NotificationPreferences } from "@/lib/api"
 import { appWrapper, json, settle, useFakeController } from "./support/fake-controller"
 
 const controller = useFakeController()
@@ -204,7 +204,11 @@ describe("WebSocketProvider server frames", () => {
     expect(FakeWebSocket.instances).toHaveLength(2)
     act(() => FakeWebSocket.instances[1].open())
     expect(result.current.isConnected).toBe(true)
+    // Live also needs a recent API response; the last one here is 16 seconds old.
     render(<ConnectionStatus state={result.current.connectionState} />)
+    expect(screen.getByText("Stale")).toBeVisible()
+    controller.route("GET", "/v1/health", () => json({ status: "ok" }))
+    await act(async () => { await getHealth() })
     expect(screen.getByText("Live")).toBeVisible()
     expect(screen.getByRole("status")).toHaveAccessibleName(/HTTP polling also remains active/)
   })

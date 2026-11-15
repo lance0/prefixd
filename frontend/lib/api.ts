@@ -1,4 +1,5 @@
 import { parseDestination } from "./destination"
+import { recordApiResponse } from "./freshness"
 
 // Use relative URL to proxy through Next.js API route
 // This allows the dashboard to work on any host without hardcoded URLs
@@ -477,7 +478,10 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
       return cached as Promise<T>
     }
     
-    const promise = doFetch<T>(url, { ...options, headers }).finally(() => {
+    const request = doFetch<T>(url, { ...options, headers })
+    request.then(() => recordApiResponse(true), () => recordApiResponse(false))
+
+    const promise = request.finally(() => {
       requestCache.delete(cacheKey)
     })
 

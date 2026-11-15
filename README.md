@@ -97,7 +97,8 @@ host loopback only. The sample peer uses a documentation address, so it stays
 Idle until you configure your edge router in `configs/rustbgpd.toml`.
 
 The dashboard shows **Live** through nginx and **Polling** when the realtime
-feed is unavailable, including direct Next.js servers. See
+feed is unavailable, including direct Next.js servers. It shows **Stale** or
+**Offline** when no API response has arrived for 15 seconds. See
 [realtime and polling](docs/how-to/deployment.md#realtime-and-polling) for refresh
 intervals and ingress requirements. Event history uses 20-row server pages,
 IP/UUID search and exact source/vector filters. CSV export walks all matching
