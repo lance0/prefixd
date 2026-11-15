@@ -21,9 +21,11 @@ open http://localhost
 ```
 
 Log in with that account. The shipped main config enables credentials,
-enforced operation and [leased FlowSpec](../reference/configuration.md#leased-flowspec):
-if prefixd stops while rustbgpd keeps running, rustbgpd withdraws its rules
-within one lease (60 seconds by default). The sample inventory/playbooks are examples: adapt them to
+enforced operation and [leased FlowSpec](../reference/configuration.md#leased-flowspec).
+What a stopped controller leaves at the speaker, including the different
+behavior of leased FlowSpec and unleased blackholes, is in
+[controller stop and failure behavior](../reference/speaker-backends.md#controller-stop-and-failure-behavior).
+The sample inventory/playbooks are examples: adapt them to
 your network before sending real attack events. A healthy local API or speaker
 is not proof of a BGP session or router enforcement.
 

@@ -54,14 +54,11 @@ exports. [Verified remote mTLS](../reference/speaker-backends.md#remote-mtls)
 is available when controller and speaker cannot share a private local socket.
 
 The running controller enforces TTLs. Stopping prefixd alone does not terminate
-the speaker's BGP sessions. The shipped rustbgpd config sets
-[`bgp.rustbgpd.leased_flowspec`](../reference/configuration.md#leased-flowspec),
-so rustbgpd removes the FlowSpec rules added under the lease within one lease
-after renewal stops; [`blackhole.leased`](../reference/configuration.md#leased-blackholes)
-does the same for blackholes. The code default is unleased, rules added before
-the lease was turned on stay unleased, and GoBGP has no lease. Restore
-reconciliation or explicitly withdraw unleased rules after controller failure;
-monitor controller availability independently from BGP session health.
+the speaker's BGP sessions. What the speaker keeps while prefixd is down depends
+on the rule kind, speaker and lease settings; the
+[controller stop and failure behavior table](../reference/speaker-backends.md#controller-stop-and-failure-behavior)
+compares them, including leased FlowSpec, unleased blackholes and the GoBGP
+profile. Monitor controller availability independently from BGP session health.
 
 For isolated released-container lifecycle, TTL and restart validation, run
 `scripts/test-rustbgpd.sh`; the [backend runbook](../reference/speaker-backends.md#released-controller-qualification)
@@ -734,19 +731,12 @@ sudo systemctl restart prefixd
 #### Restart behavior
 
 `Restart=on-failure` restarts prefixd five seconds after a crash or failed
-start. A `systemctl stop` stays stopped. While prefixd is down, nothing expires:
-TTL expiry, withdrawal and reconciliation need the running controller, and
-stopping prefixd does not withdraw speaker rules. When prefixd returns,
-reconciliation expires overdue mitigations.
-
-Leased rules are the exception. With
-[`bgp.rustbgpd.leased_flowspec`](../reference/configuration.md#leased-flowspec)
-or [`blackhole.leased`](../reference/configuration.md#leased-blackholes),
-rustbgpd removes the controller's leased FlowSpec rules and blackholes within
-`blackhole.lease_seconds` (60 by default) plus its RIB queue lag when prefixd
-dies and the speaker keeps running. Unleased rules stay announced until prefixd
-returns or an operator withdraws them. Monitor controller availability
-separately from BGP session health.
+start. A `systemctl stop` stays stopped. While prefixd is down, TTL expiry,
+reconciliation and unleased cleanup need the running controller; a rustbgpd
+lease can remove leased rules without it. What each rule kind, speaker and
+setting leaves at the speaker is in the
+[controller stop and failure behavior table](../reference/speaker-backends.md#controller-stop-and-failure-behavior).
+Monitor controller availability separately from BGP session health.
 
 ---
 

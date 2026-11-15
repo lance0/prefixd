@@ -56,13 +56,14 @@ for the limits and [API reference](../reference/api.md#create-mitigation) for
 manual input.
 
 Every rule has an application expiry. The running controller performs expiry
-cleanup. The shipped rustbgpd config also adds FlowSpec rules under the
-controller's [injection lease](../reference/configuration.md#leased-flowspec):
-if prefixd stops while rustbgpd remains up, rustbgpd withdraws them within one
-lease. Unleased rules, including every GoBGP rule, can outlive their deadlines
-while prefixd is down; recovering reconciliation and successful deletion are
-required for their cleanup. [ADR 003](../adr/003-fail-open-ttl.md) records this
-boundary.
+cleanup. The shipped rustbgpd config adds FlowSpec rules under the controller's
+[injection lease](../reference/configuration.md#leased-flowspec), so a speaker
+can remove them without the controller; unleased rules, including every GoBGP
+rule, can outlive their deadlines while prefixd is down. Recovering
+reconciliation and successful deletion are required for their cleanup.
+[Controller stop and failure behavior](../reference/speaker-backends.md#controller-stop-and-failure-behavior)
+compares each rule kind, speaker and setting. [ADR 003](../adr/003-fail-open-ttl.md)
+records this boundary.
 
 ### Separate routing runtime
 
@@ -258,8 +259,8 @@ at the actual ingress. See [API authentication](../reference/api.md#authenticati
 
 | Failure | Current behavior and limit |
 | --- | --- |
-| Controller stops | No new decisions or TTL cleanup. rustbgpd withdraws leased rules within one lease; the independent speaker can retain unleased advertisements. |
-| PostgreSQL unavailable | Persistence/ownership reads and dependent requests fail; cleanup and repair cannot safely proceed without their required state. |
+| Controller stops | No new decisions or TTL cleanup. What the speaker keeps depends on the rule kind, speaker and lease settings; see [controller stop and failure behavior](../reference/speaker-backends.md#controller-stop-and-failure-behavior). |
+| PostgreSQL unavailable | Persistence/ownership reads and dependent requests fail; cleanup and repair cannot safely proceed without their required state. Leased rules renew only to their TTL bound; the linked table has the per-kind detail. |
 | Speaker unavailable or reply lost | Persisted desired intent or deletion intent remains; outcomes are uncertain until successfully observed/retried on the same target. |
 | Router/session loss | Delivery depends on speaker/router policy, reconnection and restart-retention settings; prefixd health cannot prove forwarding recovery. |
 

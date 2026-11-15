@@ -472,6 +472,51 @@ the shipped rustbgpd config, let the speaker remove leased intent after renewal
 stops; enabling them does not convert existing unleased rules. Monitor
 controller availability and restore reconciliation after failure.
 
+## Controller stop and failure behavior
+
+What prefixd leaves at the speaker when it stops depends on the rule kind, the
+speaker and the lease setting, not only on the desired rows in PostgreSQL. This
+table is the single comparison. It describes speaker and controller state, not
+router enforcement: a removed local route does not prove that a router dropped
+the mitigation, and a retained one does not prove that traffic is filtered.
+
+| Rule kind | Speaker and setting | Controller stop | Controller crash loop | PostgreSQL outage | Speaker restart |
+| --- | --- | --- | --- | --- | --- |
+| FlowSpec | rustbgpd, shipped config (`bgp.rustbgpd.leased_flowspec: true`) | Leased. rustbgpd removes the rules within one lease after the last renewal. | Every start that reaches the lease re-adds the rules. A gap longer than one lease removes them, so mitigations can flap with the controller. | Renewal is unfenced and continues until the TTL bound: one lease after the latest leased `expires_at` from the last successful read. It then stops and rustbgpd removes the rules within one more lease. | The speaker's local routes are gone. A running controller detects the changed incarnation and wakes a full leased re-add; a stopped controller re-adds them at its next startup. |
+| FlowSpec | rustbgpd, `leased_flowspec: false` or the key omitted (code default) | Unleased. Rules stay announced; TTL expiry waits for the controller. | Same. Each successful start expires overdue rules, but nothing withdraws them while the controller is down. | Rules stay announced. Reconciliation, repair and TTL expiry wait for the database; new adds and withdrawals wait for the fence. | The speaker's local routes are gone. A running controller repairs them on its next inventory poll; a stopped controller leaves them absent until it returns. |
+| FlowSpec | GoBGP profile (no lease) | Unleased. Rules stay announced; TTL expiry waits for the controller. | Same. | Rules stay announced. Cleanup waits for the database and the controller. | The speaker's local routes are gone. A running controller re-announces them from persisted intent on the next reconciliation pass; a stopped controller leaves them absent until it returns. |
+| Blackhole | rustbgpd, `blackhole.leased: true` | Leased. rustbgpd removes the routes within one lease plus its RIB queue lag. | As leased FlowSpec: each start that reaches the lease re-adds the routes, and a gap longer than one lease removes them. | Uses the same owner lease and TTL bound as leased FlowSpec; renewal stops at the bound and rustbgpd removes the routes within one more lease. | The speaker's local routes are gone. A running controller detects the changed incarnation and wakes a full leased re-add; a stopped controller re-adds them at its next startup. |
+| Blackhole | rustbgpd, `blackhole.leased: false` (default) | Unleased. Routes stay announced; TTL expiry and overdue cleanup wait for the controller. | Same. Each successful start expires overdue rows; nothing withdraws them while the controller is down. | Routes stay announced. Expiry and repair wait for the database. | The speaker's local routes are gone. A running controller repairs them on the next pass; a stopped controller leaves them absent until it returns. |
+
+**The default is split.** `blackhole.leased` defaults to `false`, and the
+shipped `configs/prefixd.yaml` does not set it. Enabling blackholes on that
+install therefore puts unleased RTBH next to leased FlowSpec, with the different
+stop behavior in the table. Set `blackhole.leased: true` when you enable
+blackholes against rustbgpd so both rule kinds share one owner and lapse
+together within one lease. Existing unleased routes are not converted; they stay
+unleased until withdrawn or expired. GoBGP does not offer blackholes, and
+startup refuses `blackhole.enabled` without the speaker capability.
+
+**One lease covers both kinds.** Leased FlowSpec uses `blackhole.lease_seconds`
+(default 60, `5..=3600`) even when `blackhole.enabled` is false, and any leased
+add moves the owner's whole deadline. Before the first successful read,
+renewal is bounded to one lease after startup, so a controller that starts
+during an outage lets an adopted lease lapse; a later successful read
+refreshes the bound and renewal resumes. Renewal bounds, health fields
+(`renew_until`, `renewal_stopped: "ttl_bound"`) and the database-outage
+behavior are defined once for that owner in
+[ADR 003](../adr/003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls).
+
+Before changing a lease setting, an operation mode or a release, read the
+upgrade guide's [mitigation origin mode](../how-to/upgrading.md#mitigation-origin-mode)
+note (a dry-run controller never renews, and downgrading below that release
+drops its origin-mode protection), the
+[v0.26.0 → 0.27.0 note](../how-to/upgrading.md#v0260--0270) that shipped the
+FlowSpec lease, and the [0.26.0 downgrade](../how-to/upgrading.md#downgrading-to-0260)
+note (0.26.0 adopts the same live lease and renews the leased rules). A
+replacement controller must start inside the remaining lease, as
+[controller restart](../how-to/upgrading.md#controller-restart) describes.
+
 ## Withdrawal recovery
 
 Detector unban, operator single/bulk withdrawal and TTL expiry persist immutable
