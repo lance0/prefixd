@@ -141,6 +141,24 @@ impl AppConfig {
                     .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
             Err(error) => return Err(error.context(failed("correlation.yaml"))),
         }
+        // A present alerting.yaml replaces inline alerting. Either one gets the
+        // destination checks reload and the alerting editor apply.
+        let mut alerting_file = "prefixd.yaml";
+        match crate::alerting::AlertingConfig::load(path("alerting.yaml")) {
+            Ok(alerting) => {
+                settings.alerting = alerting;
+                alerting_file = "alerting.yaml";
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
+            Err(error) => return Err(error.context(failed("alerting.yaml"))),
+        }
+        let errors = settings.alerting.validate();
+        if !errors.is_empty() {
+            anyhow::bail!("{}: alerting: {}", failed(alerting_file), errors.join("; "));
+        }
         let inventory =
             Inventory::load(path("inventory.yaml")).with_context(|| failed("inventory.yaml"))?;
         let playbooks =
@@ -238,6 +256,64 @@ mod tests {
         let error = format!("{:#}", AppConfig::load(directory.path()).unwrap_err());
         assert!(error.contains("playbooks.yaml"), "{error}");
         assert!(error.contains("unknown field `source`"), "{error}");
+    }
+
+    fn alerting(url: &str) -> String {
+        format!("destinations:\n  - type: generic\n    url: \"{url}\"\n")
+    }
+
+    /// Startup applies reload's destination checks before contacting PostgreSQL
+    /// or the speaker, and the error names the key, never the URL.
+    #[test]
+    fn startup_rejects_unsafe_standalone_alerting_destinations() {
+        for (url, reason) in [
+            (
+                "http://example.com/hook?token=request-secret",
+                "url must use https",
+            ),
+            (
+                "https://10.0.0.1/hook?token=request-secret",
+                "url host IP is not allowed",
+            ),
+        ] {
+            let directory = fixture();
+            let path = directory.path().join("alerting.yaml");
+            std::fs::write(&path, alerting(url)).unwrap();
+            // Negative control: the loader alone, the old startup path, accepts it.
+            crate::alerting::AlertingConfig::load(&path).unwrap();
+            let error = format!("{:#}", AppConfig::load(directory.path()).unwrap_err());
+            assert!(error.contains("alerting.yaml"), "{error}");
+            assert!(error.contains(reason), "{error}");
+            assert!(!error.contains("request-secret"), "{error}");
+        }
+    }
+
+    #[test]
+    fn startup_rejects_unsafe_inline_alerting_destination() {
+        let directory = fixture();
+        let path = directory.path().join("prefixd.yaml");
+        let mut settings: Settings =
+            crate::config::parse_yaml(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        settings.alerting =
+            crate::config::parse_yaml(&alerting("http://example.com/hook?token=request-secret"))
+                .unwrap();
+        std::fs::write(&path, serde_saphyr::to_string(&settings).unwrap()).unwrap();
+        // Negative control: settings load alone accepts it.
+        Settings::load(&path).unwrap();
+        let error = format!("{:#}", AppConfig::load(directory.path()).unwrap_err());
+        assert!(error.contains("prefixd.yaml: alerting:"), "{error}");
+        assert!(error.contains("url must use https"), "{error}");
+        assert!(!error.contains("request-secret"), "{error}");
+
+        // A valid alerting.yaml replaces the inline section, so startup proceeds.
+        std::fs::write(
+            directory.path().join("alerting.yaml"),
+            alerting("https://example.com/hook"),
+        )
+        .unwrap();
+        let config = AppConfig::load(directory.path()).unwrap();
+        assert_eq!(config.settings.alerting.destinations.len(), 1);
+        assert!(config.settings.alerting.validate().is_empty());
     }
 
     #[test]

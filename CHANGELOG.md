@@ -51,6 +51,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `storage.connection_string: "${DATABASE_URL}"` while keeping `DATABASE_URL`
   set. See
   [configuration placeholders](docs/how-to/upgrading.md#configuration-placeholders).
+- **Breaking:** startup and reload now refuse an alerting destination that
+  only the alerting editor refused before: a URL that is not `https://`, or
+  whose host is `localhost` or a literal private, loopback, link-local or other
+  non-public address, in a Slack, Discord or Teams `webhook_url`, PagerDuty
+  `events_url` or generic `url`. Startup checks `alerting.yaml` or, without it,
+  the `alerting` section of `prefixd.yaml`; reload checks `alerting.yaml`.
+  0.26.0 accepted such a destination. Before upgrading, check that each
+  alerting destination uses https and a public host. The error names the file
+  and the key, never the URL; see
+  [alert destination URLs](docs/reference/configuration.md#alert-destination-urls).
+  A malformed `alerting.yaml` now stops startup before PostgreSQL and the
+  speaker are contacted.
 - **Breaking:** prefixd now requires rustbgpd v0.83.0 or later and refuses to
   start against v0.82.x or older with `rustbgpd 0.82.0 is older than the
   minimum 0.83.0; upgrade the speaker first`. Upgrade rustbgpd before prefixd.
@@ -187,7 +199,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `invalid IP address: '<value>'`. The status code is unchanged.
 - The dashboard's withdrawal confirmations for mitigations, bulk mitigations and
   scrubber diversions now share one dialog. Titles use sentence case, the reason
-  field reads "Withdrawal reason (optional)", a pending request cannot be
+  field reads "Withdrawal reason" and is required, a pending request cannot be
   repeated or dismissed, and focus returns to the opener after Cancel or Escape
   and to the page heading or another stable control after a completed withdrawal.
 - The dashboard's Scrubbers page now uses the shared page header, status pills
