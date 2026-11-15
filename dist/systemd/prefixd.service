@@ -31,7 +31,8 @@ PrivateTmp=yes
 
 # Environment
 Environment=RUST_LOG=sqlx::postgres::notice=warn,info
-EnvironmentFile=-/etc/prefixd/env
+# Root-owned secrets, outside the writable /etc/prefixd; systemd reads it as root.
+EnvironmentFile=-/etc/default/prefixd
 
 [Install]
 WantedBy=multi-user.target

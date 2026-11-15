@@ -622,8 +622,18 @@ describes, then:
 sudo mkdir -p /etc/prefixd
 sudo cp configs/*.yaml /etc/prefixd/
 sudo chown -R rustbgpd:rustbgpd /etc/prefixd
-# prefixd accepts the socket only in a directory that is 0700 and owned by its UID.
-sudo install -d -m 0700 -o rustbgpd -g rustbgpd /var/lib/rustbgpd
+```
+
+prefixd accepts rustbgpd's socket only in a directory that is mode 0700 and
+owned by its UID. rustbgpd's unit creates `/var/lib/rustbgpd` with
+`StateDirectory=`, and systemd resets it to `StateDirectoryMode=` (0755 by
+default) on every start, so a `chmod` does not last. Install the shipped
+[`prefixd.conf`](../../dist/systemd/rustbgpd.service.d/prefixd.conf) drop-in for
+rustbgpd, which sets `StateDirectoryMode=0700`:
+
+```bash
+sudo install -D -m 0644 dist/systemd/rustbgpd.service.d/prefixd.conf \
+  /etc/systemd/system/rustbgpd.service.d/prefixd.conf
 ```
 
 ### Systemd Service
@@ -657,21 +667,25 @@ bgp:
 The [UDS client](../reference/speaker-backends.md#rustbgpd-configuration)
 requires the socket and its directory to belong to the controller's own UID and
 the server to run as that UID, so the unit sets `User=rustbgpd`. A shared group
-does not pass these checks. prefixd therefore sees rustbgpd's state directory,
-read-only under `ProtectSystem=strict`. To keep separate users, use
-[remote mTLS](../reference/speaker-backends.md#remote-mtls) or loopback TCP with
-a bearer token instead of the socket. The implicit socket needs no bearer
+does not pass these checks. Running as the same user means prefixd can read
+rustbgpd's configuration, state and credentials; `ProtectSystem=strict` only
+keeps them read-only. Operators who need the two isolated should use the
+[remote mTLS](../reference/speaker-backends.md#remote-mtls) endpoint instead of
+the socket. The implicit socket needs no bearer
 token; a listener that declares `token_file` also needs `bearer_token_env` in
 prefixd.
 
-`/etc/prefixd/env`, read by systemd before it drops privileges:
+Secrets go in `/etc/default/prefixd`, outside the writable `/etc/prefixd`, so
+the service user cannot replace them. systemd reads the file as root before it
+drops privileges, so it can stay root-only:
 
 ```bash
 PREFIXD_API_TOKEN=your-secret-token
 ```
 
 ```bash
-sudo chmod 0600 /etc/prefixd/env
+sudo chown root:root /etc/default/prefixd
+sudo chmod 0600 /etc/default/prefixd
 sudo systemctl daemon-reload
 sudo systemctl enable --now rustbgpd prefixd
 ```
