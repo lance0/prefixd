@@ -95,7 +95,7 @@ async fn observe_vpn_families(state: &AppState) -> Vec<VpnFamilyCapability> {
                 Ok(snapshot) => {
                     state
                         .vpn_probes
-                        .observe(state.announcer.as_ref(), &snapshot.identity)
+                        .observe(state.announcer.clone(), &snapshot.identity)
                         .await
                 }
                 Err(_) => crate::bgp::VpnProbe::error(),
@@ -306,8 +306,11 @@ pub async fn health_detail(
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
-    let ((mut status, bgp_map, active, db_status, gobgp_health), daemon) =
-        tokio::join!(check_health_status(&state), observe_daemon_health(&state));
+    let ((mut status, bgp_map, active, db_status, gobgp_health), daemon, vpn_families) = tokio::join!(
+        check_health_status(&state),
+        observe_daemon_health(&state),
+        observe_vpn_families(&state)
+    );
     // Read from the reconciler's snapshot: health never reads export itself.
     let blackhole_exports = state.announcer.export_observer().map(|_| {
         state
@@ -349,7 +352,7 @@ pub async fn health_detail(
         database: db_status,
         gobgp: gobgp_health,
         speaker: SpeakerHealth {
-            vpn_families: observe_vpn_families(&state).await,
+            vpn_families,
             backend: state.announcer.backend(),
             capabilities: state.announcer.capabilities(),
             detector_unleased: crate::guardrails::detector_unleased(

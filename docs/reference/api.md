@@ -3680,10 +3680,17 @@ Authenticated `speaker.vpn_families` health entries report `family`, a
 read-only probe behind it finished. Health probes each configured family at most
 once per 10 s window and returns that result, including an error, until the
 window ends; concurrent requests share one in-flight probe, bounded at 2 s.
+The probe runs to completion even if the request that started it disconnects.
 A transport/auth error or timeout remains an error, never `unsupported` or an
 empty result. Admission pre-checks reuse a `supported` result from the same
 window; any other result is probed again, and the speaker still probes before
-every VPN mutation. Raw local inventory rules carry optional NLRI `scope` and rule
+every VPN mutation. So within 10 s of a cached `supported`, a speaker that has
+just gone down no longer refuses a VPN mitigation before its intent is saved:
+the intent is saved, the speaker's own probe fails, and creation reports
+`"announcement_outcome": "unconfirmed"` with the intent retained. A scoped
+scrubber diversion is admitted and then latched as failed. A failed VPN
+announcement or diversion clears that family's cached result, so the next
+health request or pre-check probes again. Raw local inventory rules carry optional NLRI `scope` and rule
 `route_targets`; these are local intent evidence, not router installation.
 
 Guarded VPN preview and creation use `POST /v1/vpn/diversions/preview` and

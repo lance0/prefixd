@@ -868,6 +868,9 @@ impl ScrubberController {
         };
         if !row.dry_run {
             if let Err(error) = self.drive(state, &mut runtime, &mut row).await {
+                if let Some(scope) = &row.rule.nlri.scope {
+                    state.vpn_probes.invalidate(scope.family);
+                }
                 if state.fence.with_observation_epoch(|epoch| epoch) != runtime.epoch {
                     return Err(PrefixdError::Standby);
                 }
