@@ -673,8 +673,7 @@ impl ScrubberController {
             ));
         }
         state
-            .announcer
-            .validate_scope(scope.as_ref().map(|scope| &scope.identity))
+            .precheck_scope(scope.as_ref().map(|scope| &scope.identity))
             .await?;
         let mut nlri = req.scope.clone();
         nlri.scope = scope.as_ref().map(|scope| scope.identity.clone());
@@ -869,6 +868,9 @@ impl ScrubberController {
         };
         if !row.dry_run {
             if let Err(error) = self.drive(state, &mut runtime, &mut row).await {
+                if let Some(scope) = &row.rule.nlri.scope {
+                    state.vpn_probes.invalidate(scope.family);
+                }
                 if state.fence.with_observation_epoch(|epoch| epoch) != runtime.epoch {
                     return Err(PrefixdError::Standby);
                 }

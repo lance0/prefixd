@@ -167,6 +167,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reload applies the alerting editor's validation to `alerting.yaml`, so an
   empty webhook URL or missing credential fails the reload instead of
   replacing working alerting.
+- `GET /v1/health/detail` probes each configured VPN family at most once per
+  10 s window instead of on every request, and concurrent requests share one
+  probe. Each `speaker.vpn_families` entry adds `observed_at`, when its probe
+  finished, so a result can be up to 10 s old; an error or 2 s timeout is held
+  for the same window. A probe finishes even if the request that started it
+  disconnects. Admission pre-checks reuse a `supported` result from that
+  window, and the speaker still probes before every VPN mutation. Within 10 s
+  of a cached `supported`, a speaker that has just gone down no longer refuses
+  a VPN mitigation up front: the intent is saved, the speaker's probe fails, and
+  creation reports `"announcement_outcome": "unconfirmed"` with the intent
+  retained; a scoped scrubber diversion is admitted and latched as failed. A
+  failed VPN announcement or diversion clears that family's cached result.
 
 ### Fixed
 

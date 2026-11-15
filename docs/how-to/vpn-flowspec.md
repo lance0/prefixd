@@ -214,8 +214,9 @@ router acceptance; controller encoding does not establish installation.
 ## Observe and upgrade
 
 API responses, CLI output, dashboard detail and local inventory show scope
-family, RD and RTs. Authenticated health reports fresh configured-family probes
-as supported, unsupported or error. A transport/authentication error is not
+family, RD and RTs. Authenticated health reports configured-family probes as
+supported, unsupported or error, with `observed_at`; each family is probed at
+most once per 10 s window. A transport/authentication error or timeout is not
 an unsupported answer. The bounded `prefixd_flowspec_active_by_family` gauge
 counts desired ordinary mitigations by routing family; it does not count
 installed router rules and has no arbitrary RD/RT labels. Speaker acceptance,
