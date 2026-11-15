@@ -102,13 +102,32 @@ async fn withdraw_covered_mitigations(
             return response;
         }
     };
+    // After one failure in this lock hold, later rows record their intent only:
+    // reconciliation completes them, so one wedged speaker costs one deadline.
+    let mut deferred = false;
     for mitigation in covered {
+        if deferred {
+            let recorded = crate::domain::request_safelisted_withdrawal(
+                state.repo.as_ref(),
+                state.is_dry_run(),
+                &mitigation,
+                binding,
+            )
+            .await;
+            if let Err(error) = recorded {
+                tracing::error!(target: "prefixd::api::handlers", %prefix,
+                    mitigation_id = %mitigation.mitigation_id, error = %error,
+                    "failed to record safelisted withdrawal");
+            }
+            continue;
+        }
         match crate::domain::withdraw_safelisted(
             state.repo.as_ref(),
             state.announcer.as_ref(),
             state.is_dry_run(),
             &mitigation,
             binding,
+            crate::bgp::RetryPolicy::Bounded,
         )
         .await
         {
@@ -134,6 +153,7 @@ async fn withdraw_covered_mitigations(
                 response.withdrawal_error = Some(
                     "an overlapping mitigation was not withdrawn; reconciliation retries it".into(),
                 );
+                deferred = true;
             }
         }
     }
@@ -576,6 +596,7 @@ mod tests {
             false,
             request,
             None,
+            crate::bgp::RetryPolicy::Durable,
         )
         .await
         .unwrap();
@@ -718,6 +739,59 @@ mod tests {
             request.operation_id.to_string()
         );
         assert_eq!(entry.details["reason"], SAFELISTED_AFTER_ADMISSION);
+    }
+
+    /// One lock hold spends at most one failed speaker call: after the first
+    /// failed delete the remaining rows record their intent only, and
+    /// reconciliation completes every one with its original operation.
+    #[tokio::test]
+    async fn after_one_failed_delete_the_rest_are_left_to_reconciliation() {
+        let fx = fixture(OperationMode::Enforced);
+        let victims = [
+            blackhole("203.0.113.1", "test", OperationMode::Enforced),
+            blackhole("203.0.113.2", "test", OperationMode::Enforced),
+            blackhole("203.0.113.3", "test", OperationMode::Enforced),
+        ];
+        for victim in &victims {
+            fx.live(victim).await;
+        }
+        fx.speaker.withdraw_fault.store(1, SeqCst);
+        let (status, body) = fx.safelist("203.0.113.0/24").await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(ids(&body).is_empty());
+        assert!(body["withdrawal_error"].is_string());
+        // Without the deferral every row would cost its own failed delete.
+        assert_eq!(fx.speaker.deletes.load(SeqCst), 1);
+        let pending = fx.repo.pending_withdrawals(None).await.unwrap();
+        assert_eq!(pending.len(), victims.len(), "every intent is recorded");
+        for victim in &victims {
+            assert!(fx.status(victim).await.is_active());
+        }
+
+        fx.speaker.withdraw_fault.store(0, SeqCst);
+        crate::scheduler::ReconciliationLoop::new(
+            fx.state.repo.clone(),
+            fx.state.announcer.clone(),
+            30,
+            false,
+        )
+        .with_app_state(fx.state.clone())
+        .reconcile()
+        .await
+        .unwrap();
+        for victim in &victims {
+            assert_eq!(fx.status(victim).await, MitigationStatus::Withdrawn);
+            let request = pending
+                .iter()
+                .find(|request| request.mitigation_id == victim.mitigation_id)
+                .unwrap();
+            assert_eq!(
+                fx.audit(victim).await.details["operation_id"],
+                request.operation_id.to_string()
+            );
+        }
+        assert!(fx.speaker.routes().await.is_empty());
+        assert_eq!(fx.speaker.adds.load(SeqCst), 0);
     }
 
     #[tokio::test]

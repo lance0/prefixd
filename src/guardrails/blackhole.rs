@@ -5,7 +5,7 @@ use std::net::IpAddr;
 
 use uuid::Uuid;
 
-use crate::bgp::{AddOutcome, FlowSpecAnnouncer};
+use crate::bgp::{AddOutcome, FlowSpecAnnouncer, RetryPolicy};
 use crate::config::{
     BlackholeConfig, Inventory, OperationMode, PlaybookAction, Playbooks, Settings,
 };
@@ -506,7 +506,16 @@ pub async fn admit_blackhole(
         });
     }
     Ok(
-        match announce_blackhole(repo, announcer, &mitigation, binding, lease).await {
+        match announce_blackhole(
+            repo,
+            announcer,
+            &mitigation,
+            binding,
+            lease,
+            RetryPolicy::Bounded,
+        )
+        .await
+        {
             Ok(BlackholeAnnouncement::Announced(outcome)) => {
                 // The unleased pre-read found no local route, so a replace means
                 // another tool's route at the prefix was overwritten (ADR 027 §5).
@@ -967,6 +976,46 @@ mod tests {
         assert_eq!(replacements.get(), before);
     }
 
+    /// The unleased pre-read runs under the lifecycle mutex. A speaker that
+    /// never answers it refuses the admission within the interactive deadline:
+    /// an unanswered read is never an empty inventory.
+    #[tokio::test(start_paused = true)]
+    async fn a_mute_pre_read_refuses_admission_within_the_deadline() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        speaker.mute_reads.store(true, SeqCst);
+        let started = tokio::time::Instant::now();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            admit_enforced(&repo, &speaker, intent("203.0.113.10/32")),
+        )
+        .await
+        .expect("the pre-read is bounded")
+        .unwrap_err();
+        assert!(
+            started.elapsed()
+                <= crate::bgp::GUARDED_RPC_DEADLINE + std::time::Duration::from_millis(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(&error, PrefixdError::BgpAnnouncementFailed(message)
+                if message.contains("nothing was added")),
+            "{error}"
+        );
+        assert_eq!(repo.count_active_global().await.unwrap(), 0);
+        assert_eq!(speaker.adds.load(SeqCst), 0);
+        // Control: the same speaker answering admits and adds the route.
+        speaker.mute_reads.store(false, SeqCst);
+        admit_enforced(&repo, &speaker, intent("203.0.113.10/32"))
+            .await
+            .unwrap();
+        assert_eq!(speaker.adds.load(SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn live_owner_and_pending_withdrawal_return_409_without_add() {
         let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
@@ -997,9 +1046,16 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            crate::domain::execute_withdrawal(&repo, &speaker, false, &request, None)
-                .await
-                .is_err()
+            crate::domain::execute_withdrawal(
+                &repo,
+                &speaker,
+                false,
+                &request,
+                None,
+                RetryPolicy::Durable,
+            )
+            .await
+            .is_err()
         );
         let error = admit_enforced(&repo, &speaker, intent("203.0.113.10/32"))
             .await
@@ -1439,10 +1495,17 @@ mod tests {
         assert_eq!(speaker.adds.load(SeqCst), 1);
         mitigation.action_params.blackhole.as_mut().unwrap().owner =
             "prefixd.pop-a.0123456789abcdef".into();
-        let error = announce_blackhole(&repo, &speaker, &mitigation, None, None)
-            .await
-            .unwrap_err()
-            .to_string();
+        let error = announce_blackhole(
+            &repo,
+            &speaker,
+            &mitigation,
+            None,
+            None,
+            RetryPolicy::Durable,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("leased"), "{error}");
         assert_eq!(speaker.adds.load(SeqCst), 1);
         assert_eq!(speaker.leased_adds.load(SeqCst), 0);
@@ -1550,9 +1613,16 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(request.blackhole_rule().unwrap().owner, OWNER);
-        crate::domain::execute_withdrawal(&repo, &speaker, false, &request, None)
-            .await
-            .unwrap();
+        crate::domain::execute_withdrawal(
+            &repo,
+            &speaker,
+            false,
+            &request,
+            None,
+            RetryPolicy::Durable,
+        )
+        .await
+        .unwrap();
         assert_eq!(*speaker.delete_owners.lock().unwrap(), [OWNER]);
     }
 
@@ -1592,7 +1662,9 @@ mod tests {
             .unwrap()
             .mitigation;
         for _ in 0..3 {
-            let readd = announce_blackhole(&repo, &speaker, &unleased, None, None).await;
+            let readd =
+                announce_blackhole(&repo, &speaker, &unleased, None, None, RetryPolicy::Durable)
+                    .await;
             assert!(matches!(
                 readd,
                 Ok(BlackholeAnnouncement::Announced(AddOutcome::Unchanged))
@@ -1605,7 +1677,15 @@ mod tests {
             .unwrap()
             .mitigation;
         for _ in 0..3 {
-            let readd = announce_blackhole(&repo, &speaker, &leased, None, Some(&lease)).await;
+            let readd = announce_blackhole(
+                &repo,
+                &speaker,
+                &leased,
+                None,
+                Some(&lease),
+                RetryPolicy::Durable,
+            )
+            .await;
             assert!(matches!(
                 readd,
                 Ok(BlackholeAnnouncement::Announced(AddOutcome::Unchanged))
@@ -1630,7 +1710,7 @@ mod tests {
         // A failed add audits nothing.
         speaker.fail_adds.store(true, SeqCst);
         assert!(
-            announce_blackhole(&repo, &speaker, &unleased, None, None)
+            announce_blackhole(&repo, &speaker, &unleased, None, None, RetryPolicy::Durable)
                 .await
                 .is_err()
         );
@@ -1778,9 +1858,16 @@ mod tests {
                 .await
                 .is_err()
         );
-        crate::domain::execute_withdrawal(&repo, &speaker, false, &request, None)
-            .await
-            .unwrap();
+        crate::domain::execute_withdrawal(
+            &repo,
+            &speaker,
+            false,
+            &request,
+            None,
+            RetryPolicy::Durable,
+        )
+        .await
+        .unwrap();
         check_lease_startup(&lease_settings(&disabled), &speaker, &repo, OWNER)
             .await
             .unwrap();

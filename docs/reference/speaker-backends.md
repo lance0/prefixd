@@ -492,7 +492,60 @@ Independent housekeeping and peer observations continue after failed mutations.
 Each scheduler mutation rechecks the current row and pending intent under the
 shared lifecycle mutex; the mutex is released before the next rule. Both gRPC adapters
 bound complete mutation responses, including body and trailers, to 30 seconds
-per attempt, with at most three attempts.
+per attempt, with at most three attempts, on the repair path: each reconciliation
+pass retries a failed announce or delete from the durable intent.
+
+### Interactive speaker deadline
+
+A caller holding the lifecycle mutex cannot wait for that budget, so admission,
+manual creation, operator single and bulk withdrawal, detector unban and the
+safelist withdrawal make one speaker attempt bounded by a fixed three-second
+deadline. The deadline is not configurable. A speaker that accepts connections
+and never answers therefore costs an accepted request one short wait instead of
+a retry storm that would freeze ingest, withdrawals and expiry for minutes.
+
+- A timed-out add keeps the persisted row and returns `202` with
+  `"announcement_outcome": "unconfirmed"`. Reconciliation repairs it from the
+  durable intent. It is never reported or counted as a successful install.
+- A timed-out delete returns the documented withdrawal `500` and stays pending
+  with its recorded actor, reason and operation ID. The pending request blocks
+  re-announcement, and reconciliation completes that original operation.
+- The unleased blackhole admission pre-read shares the same deadline. A read
+  that errors or does not answer in time refuses the admission and adds nothing;
+  it is never treated as an empty inventory.
+- After one failed delete, a safelist addition records withdrawal intent for the
+  remaining overlapping rules without calling the speaker, and reconciliation
+  completes them. A detector unban stops at its first failed withdrawal.
+
+A speaker that needs more than three seconds for one mutation now gets these
+outcomes on every interactive call, and its rules are installed or removed by
+reconciliation instead.
+
+TTL expiry, reconciliation repair, the safety rechecks and the lease re-add run
+in the scheduler and keep the durable retry budget. Each holds the lifecycle
+mutex for one rule at a time, so an interactive request that queues behind one
+of them against a wedged speaker can wait for that rule's whole budget: about
+90 seconds with GoBGP (three 30-second attempts) and about 30 seconds with
+rustbgpd, which does not retry an attempt that ran out its own deadline.
+
+A small window remains when an operator withdraws a rule within seconds of its
+timed-out add. If the delete reaches the speaker first and answers not found,
+the withdrawal completes; an add that the speaker applies afterward leaves a
+local route with no live owner. What happens next depends on the route kind:
+
+- A FlowSpec rule is reported as unknown and never removed. A leased FlowSpec
+  rule under this controller's owner is extended by its own lease renewal, so it
+  also stays while the controller runs and lapses only after renewal stops.
+  Remove it at the speaker after checking it is prefixd's.
+- A blackhole route, unleased or leased under this controller's owner, is
+  withdrawn by the next reconciliation pass and audited as orphaned when it
+  exactly matches the frozen route of a withdrawn or expired, enforced-origin
+  blackhole row of this POP, and no live row or pending withdrawal holds its
+  prefix. The match is searched among the newest 100 rows for that victim. Any
+  other blackhole route is reported as unknown and left in place.
+
+Health still reports the daemon's own state, so an unconfirmed add is never
+presented as a successful install.
 
 Active mitigation gauges count local database status, including expired or
 pending rows awaiting confirmed cleanup; they are not proof of enforcement.

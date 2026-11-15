@@ -10,7 +10,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::time::Instant;
 
-use crate::bgp::{FlowSpecAnnouncer, InjectionLeases, LeaseGeneration};
+use crate::bgp::{FlowSpecAnnouncer, InjectionLeases, LeaseGeneration, RetryPolicy};
 use crate::error::{PrefixdError, Result};
 
 use super::{ActionType, Mitigation, MitigationStatus};
@@ -582,13 +582,21 @@ fn recorded_owner(mitigation: &Mitigation) -> Option<&str> {
 /// Sends one FlowSpec rule by its recorded owner: `AddLeasedFlowSpec` under
 /// the controller's lease for an owned rule, `AddFlowSpec` for an unleased one.
 /// A failure never switches between them.
+///
+/// The caller states who is waiting. `RetryPolicy::Bounded` is for a caller
+/// holding the lifecycle mutex: one attempt inside the interactive deadline,
+/// with reconciliation repairing the durable intent from there.
 pub async fn announce_flowspec(
     announcer: &dyn FlowSpecAnnouncer,
     rule: &crate::domain::FlowSpecRule,
     lease: Option<&LeaseKeeper>,
+    policy: RetryPolicy,
 ) -> Result<()> {
     if rule.owner.is_empty() {
-        return announcer.announce(rule).await;
+        return match policy {
+            RetryPolicy::Bounded => announcer.announce_bounded(rule).await,
+            RetryPolicy::Durable => announcer.announce(rule).await,
+        };
     }
     let lease = lease
         .filter(|lease| lease.owner() == rule.owner)
@@ -599,9 +607,18 @@ pub async fn announce_flowspec(
                 rule.nlri.dst_prefix, rule.owner
             ))
         })?;
-    let generation = announcer
-        .announce_leased(rule, lease.lease_seconds())
-        .await?;
+    let generation = match policy {
+        RetryPolicy::Bounded => {
+            announcer
+                .announce_leased_bounded(rule, lease.lease_seconds())
+                .await?
+        }
+        RetryPolicy::Durable => {
+            announcer
+                .announce_leased(rule, lease.lease_seconds())
+                .await?
+        }
+    };
     lease.observe_add(generation);
     Ok(())
 }

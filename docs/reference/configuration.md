@@ -171,6 +171,12 @@ Existing YAML may omit the client identity fields. Rust callers constructing
 `RustBgpdConfig` literals must add the optional fields, including
 `leased_flowspec`, or use `..Default::default()` for omitted options.
 
+Speaker mutation budgets are fixed and have no configuration key. Requests that
+hold the lifecycle mutex, such as admission, manual creation, withdrawal, unban
+and safelist additions, make one attempt bounded by three seconds; the
+scheduler keeps three 30-second attempts. See the
+[interactive speaker deadline](speaker-backends.md#interactive-speaker-deadline).
+
 #### Leased FlowSpec
 
 ```yaml

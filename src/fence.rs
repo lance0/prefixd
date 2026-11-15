@@ -234,6 +234,29 @@ impl FlowSpecWriter for FencedAnnouncer {
         self.fence.ensure_active()?;
         self.inner.withdraw(rule).await
     }
+
+    // The bounded variants forward to the inner speaker's own overrides; the
+    // trait defaults would wrap the inner retrying path instead.
+    async fn announce_bounded(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.fence.ensure_active()?;
+        self.inner.announce_bounded(rule).await
+    }
+
+    async fn announce_leased_bounded(
+        &self,
+        rule: &FlowSpecRule,
+        lease_seconds: u32,
+    ) -> Result<LeaseGeneration> {
+        self.fence.ensure_active()?;
+        self.inner
+            .announce_leased_bounded(rule, lease_seconds)
+            .await
+    }
+
+    async fn withdraw_bounded(&self, rule: &FlowSpecRule) -> Result<()> {
+        self.fence.ensure_active()?;
+        self.inner.withdraw_bounded(rule).await
+    }
 }
 
 impl FlowSpecAnnouncer for FencedAnnouncer {
@@ -414,6 +437,31 @@ impl BlackholeSpeaker for FencedAnnouncer {
             .await
     }
 
+    async fn announce_blackhole_bounded(&self, route: &BlackholeRoute) -> Result<AddOutcome> {
+        self.fence.ensure_active()?;
+        self.inner_blackhole()?
+            .announce_blackhole_bounded(route)
+            .await
+    }
+
+    async fn announce_leased_blackhole_bounded(
+        &self,
+        route: &BlackholeRoute,
+        lease_seconds: u32,
+    ) -> Result<(LeaseGeneration, AddOutcome)> {
+        self.fence.ensure_active()?;
+        self.inner_blackhole()?
+            .announce_leased_blackhole_bounded(route, lease_seconds)
+            .await
+    }
+
+    async fn withdraw_blackhole_bounded(&self, prefix: &ipnet::IpNet, owner: &str) -> Result<()> {
+        self.fence.ensure_active()?;
+        self.inner_blackhole()?
+            .withdraw_blackhole_bounded(prefix, owner)
+            .await
+    }
+
     async fn list_blackholes(&self) -> Result<BlackholeInventory> {
         self.inner_blackhole()?.list_blackholes().await
     }
@@ -561,6 +609,160 @@ mod tests {
                 .renew_lease(leased.owner(), generation, 60)
                 .await
                 .unwrap()
+        );
+    }
+
+    /// Records which inner path ran. The retrying path is mute, as a wedged
+    /// daemon is; the bounded path answers inside the interactive deadline.
+    #[derive(Default)]
+    struct PathRecorder {
+        durable: std::sync::atomic::AtomicUsize,
+        bounded: std::sync::atomic::AtomicUsize,
+    }
+
+    impl PathRecorder {
+        async fn durable(&self) -> PrefixdError {
+            self.durable
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(90)).await;
+            PrefixdError::Internal("retry budget spent".into())
+        }
+
+        async fn bounded(&self) -> PrefixdError {
+            self.bounded
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(crate::bgp::GUARDED_RPC_DEADLINE).await;
+            PrefixdError::Internal("one bounded attempt".into())
+        }
+    }
+
+    #[async_trait]
+    impl FlowSpecWriter for PathRecorder {
+        async fn announce(&self, _: &FlowSpecRule) -> Result<()> {
+            Err(self.durable().await)
+        }
+        async fn announce_bounded(&self, _: &FlowSpecRule) -> Result<()> {
+            Err(self.bounded().await)
+        }
+        async fn announce_leased(&self, _: &FlowSpecRule, _: u32) -> Result<LeaseGeneration> {
+            Err(self.durable().await)
+        }
+        async fn announce_leased_bounded(
+            &self,
+            _: &FlowSpecRule,
+            _: u32,
+        ) -> Result<LeaseGeneration> {
+            Err(self.bounded().await)
+        }
+        async fn withdraw(&self, _: &FlowSpecRule) -> Result<()> {
+            Err(self.durable().await)
+        }
+        async fn withdraw_bounded(&self, _: &FlowSpecRule) -> Result<()> {
+            Err(self.bounded().await)
+        }
+    }
+
+    #[async_trait]
+    impl BlackholeSpeaker for PathRecorder {
+        async fn announce_blackhole(&self, _: &BlackholeRoute) -> Result<AddOutcome> {
+            Err(self.durable().await)
+        }
+        async fn announce_blackhole_bounded(&self, _: &BlackholeRoute) -> Result<AddOutcome> {
+            Err(self.bounded().await)
+        }
+        async fn announce_leased_blackhole(
+            &self,
+            _: &BlackholeRoute,
+            _: u32,
+        ) -> Result<(LeaseGeneration, AddOutcome)> {
+            Err(self.durable().await)
+        }
+        async fn announce_leased_blackhole_bounded(
+            &self,
+            _: &BlackholeRoute,
+            _: u32,
+        ) -> Result<(LeaseGeneration, AddOutcome)> {
+            Err(self.bounded().await)
+        }
+        async fn withdraw_blackhole(&self, _: &ipnet::IpNet, _: &str) -> Result<()> {
+            Err(self.durable().await)
+        }
+        async fn withdraw_blackhole_bounded(&self, _: &ipnet::IpNet, _: &str) -> Result<()> {
+            Err(self.bounded().await)
+        }
+        async fn list_blackholes(&self) -> Result<BlackholeInventory> {
+            Ok(BlackholeInventory::default())
+        }
+    }
+
+    impl FlowSpecAnnouncer for PathRecorder {
+        fn backend(&self) -> &'static str {
+            "mock"
+        }
+        fn blackhole(&self) -> Option<&dyn BlackholeSpeaker> {
+            Some(self)
+        }
+    }
+
+    /// Production wraps every backend in the fence, so the bounded variants must
+    /// reach the backend's own bounded path, not the trait default around the
+    /// retrying one, and must still refuse in standby without an RPC.
+    #[tokio::test(start_paused = true)]
+    async fn bounded_mutations_reach_the_inner_bounded_path_behind_the_fence() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let inner = Arc::new(PathRecorder::default());
+        let fence = Arc::new(ControllerFence::new(false));
+        let writer = FencedAnnouncer::new(inner.clone(), fence.clone());
+        let rule = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "192.0.2.1/32".into(),
+                protocol: Some(17),
+                dst_ports: vec![53],
+                ..Default::default()
+            },
+            crate::domain::FlowSpecAction::discard(),
+        );
+        let route = BlackholeRoute::new(
+            "192.0.2.1/32".parse().unwrap(),
+            "192.0.2.66".parse().unwrap(),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let prefix = route.prefix();
+        let blackhole = writer.blackhole().unwrap();
+        macro_rules! each_bounded {
+            () => {
+                vec![
+                    writer.announce_bounded(&rule).await.map(drop),
+                    writer.announce_leased_bounded(&rule, 60).await.map(drop),
+                    writer.withdraw_bounded(&rule).await,
+                    blackhole.announce_blackhole_bounded(&route).await.map(drop),
+                    blackhole
+                        .announce_leased_blackhole_bounded(&route, 60)
+                        .await
+                        .map(drop),
+                    blackhole.withdraw_blackhole_bounded(&prefix, "").await,
+                ]
+            };
+        }
+
+        for result in each_bounded!() {
+            assert!(matches!(result, Err(PrefixdError::Standby)), "{result:?}");
+        }
+        assert_eq!(inner.durable.load(SeqCst) + inner.bounded.load(SeqCst), 0);
+
+        fence.set(true);
+        let started = tokio::time::Instant::now();
+        let results = each_bounded!();
+        assert_eq!(results.len(), 6);
+        assert!(results.iter().all(Result::is_err));
+        assert_eq!(inner.bounded.load(SeqCst), 6, "one bounded attempt each");
+        assert_eq!(inner.durable.load(SeqCst), 0, "the retrying path never ran");
+        assert!(
+            started.elapsed() <= 6 * crate::bgp::GUARDED_RPC_DEADLINE + Duration::from_millis(10),
+            "{:?}",
+            started.elapsed()
         );
     }
 }
