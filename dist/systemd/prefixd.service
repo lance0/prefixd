@@ -1,0 +1,37 @@
+[Unit]
+Description=prefixd BGP FlowSpec policy daemon
+Documentation=https://github.com/lance0/prefixd/blob/main/docs/how-to/deployment.md#systemd-service
+# Ordering only. Enable the speaker unit separately: a Wants= here could not be
+# removed by the GoBGP drop-in and would start rustbgpd beside gobgpd.
+After=network-online.target postgresql.service rustbgpd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# prefixd reaches rustbgpd's owner-only gRPC socket, so it runs as the UID
+# rustbgpd's shipped unit uses. The client checks that the socket and its
+# directory belong to its own UID and that the server peer has that UID; a
+# group grant cannot satisfy it. ProtectSystem=strict keeps rustbgpd's state
+# directory read-only here; connecting to the socket needs no write mount.
+User=rustbgpd
+Group=rustbgpd
+ExecStart=/usr/local/bin/prefixd --config /etc/prefixd
+# TTL expiry, withdrawal and reconciliation need a running controller.
+Restart=on-failure
+RestartSec=5
+
+# Security
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+# Dashboard and API saves rewrite playbooks.yaml, alerting.yaml and
+# correlation.yaml in the configuration directory.
+ReadWritePaths=/etc/prefixd
+PrivateTmp=yes
+
+# Environment
+Environment=RUST_LOG=sqlx::postgres::notice=warn,info
+EnvironmentFile=-/etc/prefixd/env
+
+[Install]
+WantedBy=multi-user.target

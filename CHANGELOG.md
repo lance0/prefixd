@@ -102,6 +102,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   audit can't load, the timeline keeps the mitigation's own timestamps and
   shows the error with a retry. Viewers, who can't read the audit, see the
   timestamps only.
+- `dist/systemd/prefixd.service` ships the bare-metal unit, replacing the copy
+  inline in the deployment guide, which waited on `gobgpd.service`. It starts
+  after `network-online.target`, PostgreSQL and `rustbgpd.service`, and runs as
+  the `rustbgpd` user so it can reach rustbgpd's owner-only socket at
+  `unix:///var/lib/rustbgpd/grpc.sock`; that directory must be mode 0700.
+  `/etc/prefixd` is now its only writable path, so dashboard saves of playbooks,
+  alerting and correlation work under `ProtectSystem=strict`. The
+  `dist/systemd/prefixd.service.d/gobgp.conf` drop-in orders prefixd after
+  `gobgpd.service` and runs it as `prefixd`. If you installed the old unit,
+  replace it and set the owner of `/etc/prefixd` to match; see
+  [Systemd Service](docs/how-to/deployment.md#systemd-service).
 
 ### Changed
 
