@@ -115,7 +115,7 @@ export interface DiversionRule {
 
 export interface DiversionExportObservation {
   observed_at: string
-  peers: { peer_address: string; disposition: string; reason: string }[]
+  peers: PeerExport[]
   error?: string | null
 }
 
