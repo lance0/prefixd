@@ -850,6 +850,32 @@ fn return_leg_encodes_and_reads_back_exact_components_and_community() {
         }
         assert!(decode_guarded(bad, 3).is_err(), "case {case}");
     }
+    // Each unsupported return-leg path attribute refuses the leg on its own.
+    let mut scoped = return_route();
+    scoped.route_targets = vec!["44407:777".into()];
+    scoped
+        .extended_communities
+        .push(crate::domain::route_target_bytes("44407:777").unwrap());
+    let mut as_path = return_route();
+    as_path.as_path = vec![64496];
+    let mut peer = return_route();
+    peer.peer_address = "192.0.2.254".into();
+    let mut rd = return_route();
+    rd.rd = "44407:40".into();
+    for (name, bad) in [
+        ("scope route target", scoped),
+        ("AS path", as_path),
+        ("peer", peer),
+        ("rd", rd),
+    ] {
+        assert!(
+            decode_guarded(bad, 3)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported return-leg attributes"),
+            "{name}"
+        );
+    }
     // An inbound host rule never carries the community.
     let mut inbound = route();
     inbound.injection_owner = "guarded:prefixd.scrub.a".into();
