@@ -281,6 +281,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canceled mid-publish can no longer leave only some sections published, and
   a concurrent correlation edit can no longer be overwritten by the file it
   replaced.
+- `prefixdctl mitigations withdraw` and `prefixdctl safelist add` no longer
+  require `--operator`. The option defaulted from `USER`, which the container
+  image leaves unset, so both commands failed there before sending a request.
+  The server already took the actor from the authenticated identity and
+  ignored the value. `--operator` is still accepted, ignored and no longer
+  sent. The API reference no longer marks `operator_id` as required for bulk
+  withdraw and bulk acknowledge, which ignore it too.
+- `prefixdctl` names a bare 401 or 403 response as an authentication failure
+  or a permission denial instead of printing `unknown error`.
 
 ### Security
 

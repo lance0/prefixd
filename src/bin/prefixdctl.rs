@@ -227,9 +227,9 @@ enum MitigationCommands {
         #[arg(short, long, value_parser = parse_reason)]
         reason: String,
 
-        /// Operator ID
-        #[arg(short, long, env = "USER")]
-        operator: String,
+        /// Ignored and accepted for compatibility; the authenticated API identity is the actor
+        #[arg(short, long)]
+        operator: Option<String>,
     },
 }
 
@@ -348,9 +348,9 @@ enum SafelistCommands {
         #[arg(short, long)]
         reason: Option<String>,
 
-        /// Operator ID
-        #[arg(short, long, env = "USER")]
-        operator: String,
+        /// Ignored and accepted for compatibility; the authenticated API identity is the actor
+        #[arg(short, long)]
+        operator: Option<String>,
     },
 
     /// Remove prefix from safelist
@@ -600,6 +600,31 @@ struct ErrorResponse {
     error: String,
 }
 
+/// Formats a failed response, naming authentication and permission failures
+/// whose body carries no `{"error": ...}` message.
+async fn response_error(resp: reqwest::Response) -> String {
+    let status = resp.status();
+    let message = resp.json::<ErrorResponse>().await.ok().map(|e| e.error);
+    format_http_error(status, message)
+}
+
+fn format_http_error(status: reqwest::StatusCode, message: Option<String>) -> String {
+    let message = message.unwrap_or_else(|| {
+        match status {
+            reqwest::StatusCode::UNAUTHORIZED => {
+                "authentication failed: missing, invalid or expired credentials \
+                 (set --token/PREFIXD_API_TOKEN or --session-cookie)"
+            }
+            reqwest::StatusCode::FORBIDDEN => {
+                "permission denied: the authenticated identity's role does not allow this request"
+            }
+            _ => "unknown error",
+        }
+        .to_string()
+    });
+    format!("{status}: {message}")
+}
+
 struct Client {
     base_url: String,
     token: Option<String>,
@@ -637,11 +662,7 @@ impl Client {
             .map_err(|e| format!("request failed: {}", e))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let err: ErrorResponse = resp.json().await.unwrap_or(ErrorResponse {
-                error: "unknown error".to_string(),
-            });
-            return Err(format!("{}: {}", status, err.error));
+            return Err(response_error(resp).await);
         }
 
         resp.json().await.map_err(|e| format!("parse error: {}", e))
@@ -660,11 +681,7 @@ impl Client {
             .map_err(|e| format!("request failed: {}", e))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let err: ErrorResponse = resp.json().await.unwrap_or(ErrorResponse {
-                error: "unknown error".to_string(),
-            });
-            return Err(format!("{}: {}", status, err.error));
+            return Err(response_error(resp).await);
         }
 
         resp.json().await.map_err(|e| format!("parse error: {}", e))
@@ -679,11 +696,7 @@ impl Client {
             .map_err(|e| format!("request failed: {}", e))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let err: ErrorResponse = resp.json().await.unwrap_or(ErrorResponse {
-                error: "unknown error".to_string(),
-            });
-            return Err(format!("{}: {}", status, err.error));
+            return Err(response_error(resp).await);
         }
 
         Ok(())
@@ -697,11 +710,7 @@ impl Client {
             .map_err(|e| format!("request failed: {}", e))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let err: ErrorResponse = resp.json().await.unwrap_or(ErrorResponse {
-                error: "unknown error".to_string(),
-            });
-            return Err(format!("{}: {}", status, err.error));
+            return Err(response_error(resp).await);
         }
 
         Ok(())
@@ -1257,16 +1266,9 @@ async fn cmd_mitigations(
             }
         }
 
-        MitigationCommands::Withdraw {
-            id,
-            reason,
-            operator,
-        } => {
+        MitigationCommands::Withdraw { id, reason, .. } => {
             let path = format!("/v1/mitigations/{}/withdraw", id);
-            let body = serde_json::json!({
-                "operator_id": operator,
-                "reason": reason
-            });
+            let body = serde_json::json!({ "reason": reason });
 
             let m: MitigationResponse = client.post(&path, &body).await?;
             println!("Withdrawn mitigation {}", m.mitigation_id);
@@ -1315,13 +1317,8 @@ async fn cmd_safelist(
             }
         }
 
-        SafelistCommands::Add {
-            prefix,
-            reason,
-            operator,
-        } => {
+        SafelistCommands::Add { prefix, reason, .. } => {
             let body = serde_json::json!({
-                "operator_id": operator,
                 "prefix": prefix,
                 "reason": reason
             });
@@ -2252,6 +2249,7 @@ mod tests {
     fn withdrawals_require_a_nonblank_reason() {
         let id = "7f72a903-63d1-4a4a-a5db-0517e0a7df1d";
         for command in [
+            &["prefixdctl", "mitigations", "withdraw", id][..],
             &[
                 "prefixdctl",
                 "mitigations",
@@ -2259,7 +2257,7 @@ mod tests {
                 id,
                 "--operator",
                 "ops",
-            ][..],
+            ],
             &["prefixdctl", "diversions", "withdraw", id],
         ] {
             assert!(Cli::try_parse_from(command).is_err(), "{command:?}");
@@ -2270,6 +2268,81 @@ mod tests {
             let args = command.iter().copied().chain(["--reason", "attack ended"]);
             assert!(Cli::try_parse_from(args).is_ok(), "{command:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn actor_flags_are_optional_ignored_and_bare_auth_failures_are_named() {
+        use std::sync::{Arc, Mutex};
+        // Parsing must not depend on USER, which the container image leaves unset.
+        let id = "7f72a903-63d1-4a4a-a5db-0517e0a7df1d";
+        let commands: [&[&str]; 4] = [
+            &["mitigations", "withdraw", id, "--reason", "attack ended"],
+            &[
+                "mitigations",
+                "withdraw",
+                id,
+                "-r",
+                "attack ended",
+                "-o",
+                "legacy",
+            ],
+            &["safelist", "add", "10.0.0.1/32"],
+            &["safelist", "add", "10.0.0.1/32", "--operator", "legacy"],
+        ];
+        for status in [
+            axum::http::StatusCode::FORBIDDEN,
+            axum::http::StatusCode::UNAUTHORIZED,
+        ] {
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let requests = received.clone();
+            let app = axum::Router::new().fallback(
+                move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    requests.lock().unwrap().push(body);
+                    async move { status }
+                },
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = Client::new(format!("http://{}", listener.local_addr().unwrap()), None);
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            for args in commands {
+                let cli =
+                    Cli::try_parse_from(std::iter::once("prefixdctl").chain(args.iter().copied()))
+                        .unwrap_or_else(|e| panic!("{args:?}: {e}"));
+                let err = match cli.command {
+                    Commands::Mitigations(cmd) => cmd_mitigations(&client, cmd, cli.format).await,
+                    Commands::Safelist(cmd) => cmd_safelist(&client, cmd, cli.format).await,
+                    _ => unreachable!(),
+                }
+                .unwrap_err();
+                let expected = if status == axum::http::StatusCode::FORBIDDEN {
+                    "403 Forbidden: permission denied"
+                } else {
+                    "401 Unauthorized: authentication failed"
+                };
+                assert!(err.starts_with(expected), "{args:?}: {err}");
+                assert!(!err.contains("unknown error"), "{err}");
+            }
+            server.abort();
+            let _ = server.await;
+            let bodies = received.lock().unwrap();
+            assert_eq!(bodies.len(), commands.len());
+            assert!(
+                bodies.iter().all(|b| b.get("operator_id").is_none()),
+                "{bodies:?}"
+            );
+        }
+        // A server-supplied message is kept; other bare statuses stay generic.
+        assert_eq!(
+            format_http_error(
+                reqwest::StatusCode::FORBIDDEN,
+                Some("operator role required".into())
+            ),
+            "403 Forbidden: operator role required"
+        );
+        assert_eq!(
+            format_http_error(reqwest::StatusCode::BAD_GATEWAY, None),
+            "502 Bad Gateway: unknown error"
+        );
     }
 
     #[test]
