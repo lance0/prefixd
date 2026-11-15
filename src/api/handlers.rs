@@ -467,11 +467,8 @@ pub struct ErrorResponse {
 // Request types
 
 #[derive(Deserialize)]
-pub struct CursorQuery {
+pub struct LimitQuery {
     limit: Option<u32>,
-    cursor: Option<String>,
-    start: Option<String>,
-    end: Option<String>,
 }
 
 #[derive(Deserialize)]
