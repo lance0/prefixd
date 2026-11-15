@@ -259,7 +259,7 @@ impl CorrelationConfig {
     /// Load correlation config from a YAML file.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: CorrelationConfig = crate::config::parse_yaml(&content)?;
+        let config: CorrelationConfig = crate::config::parse_secret_yaml(&content)?;
         let errors = config.validate();
         if !errors.is_empty() {
             return Err(anyhow::anyhow!(

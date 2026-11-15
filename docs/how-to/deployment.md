@@ -629,57 +629,114 @@ sudo cp target/release/prefixdctl /usr/local/bin/
 
 ### Directory Structure
 
+The shipped unit runs prefixd as the `rustbgpd` user, the account rustbgpd's
+own `examples/systemd/rustbgpd.service` uses. Create that user as its unit
+describes, then:
+
 ```bash
-sudo mkdir -p /etc/prefixd /var/lib/prefixd /var/log/prefixd
+sudo mkdir -p /etc/prefixd
 sudo cp configs/*.yaml /etc/prefixd/
-sudo useradd -r -s /bin/false prefixd
-sudo chown -R prefixd:prefixd /etc/prefixd /var/lib/prefixd /var/log/prefixd
+sudo chown -R rustbgpd:rustbgpd /etc/prefixd
+```
+
+prefixd accepts rustbgpd's socket only in a directory that is mode 0700 and
+owned by its UID. rustbgpd's unit creates `/var/lib/rustbgpd` with
+`StateDirectory=`, and systemd resets it to `StateDirectoryMode=` (0755 by
+default) on every start, so a `chmod` does not last. Install the shipped
+[`prefixd.conf`](../../dist/systemd/rustbgpd.service.d/prefixd.conf) drop-in for
+rustbgpd, which sets `StateDirectoryMode=0700`:
+
+```bash
+sudo install -D -m 0644 dist/systemd/rustbgpd.service.d/prefixd.conf \
+  /etc/systemd/system/rustbgpd.service.d/prefixd.conf
 ```
 
 ### Systemd Service
 
-`/etc/systemd/system/prefixd.service`:
+The repository ships the unit as
+[`dist/systemd/prefixd.service`](../../dist/systemd/prefixd.service):
 
-```ini
-[Unit]
-Description=prefixd BGP FlowSpec policy daemon
-After=network.target postgresql.service gobgpd.service
-Wants=gobgpd.service
-
-[Service]
-Type=simple
-User=prefixd
-Group=prefixd
-ExecStart=/usr/local/bin/prefixd --config /etc/prefixd
-Restart=on-failure
-RestartSec=5
-
-# Security
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/var/lib/prefixd /var/log/prefixd
-PrivateTmp=yes
-
-# Environment
-Environment=RUST_LOG=sqlx::postgres::notice=warn,info
-EnvironmentFile=-/etc/prefixd/env
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo install -m 0644 dist/systemd/prefixd.service /etc/systemd/system/prefixd.service
 ```
 
-`/etc/prefixd/env`:
+It starts after `network-online.target`, `postgresql.service` and
+`rustbgpd.service`. The speaker is ordered, not pulled in, so enable
+`rustbgpd.service` as well. The unit keeps `NoNewPrivileges`,
+`ProtectSystem=strict`, `ProtectHome` and `PrivateTmp`. Only `/etc/prefixd` is
+writable, because dashboard and API saves rewrite `playbooks.yaml`,
+`alerting.yaml` and `correlation.yaml` there.
+
+rustbgpd's shipped unit uses `--runtime-state-dir /var/lib/rustbgpd`, so its
+implicit owner-only gRPC socket is `/var/lib/rustbgpd/grpc.sock`. Point prefixd
+at it before the first start; changing the socket path later changes the
+persistent speaker target (see the [upgrade guide](upgrading.md)):
+
+```yaml
+bgp:
+  backend: rustbgpd
+  rustbgpd:
+    endpoint: "unix:///var/lib/rustbgpd/grpc.sock"
+```
+
+The [UDS client](../reference/speaker-backends.md#rustbgpd-configuration)
+requires the socket and its directory to belong to the controller's own UID and
+the server to run as that UID, so the unit sets `User=rustbgpd`. A shared group
+does not pass these checks. Running as the same user means prefixd can read
+rustbgpd's configuration, state and credentials; `ProtectSystem=strict` only
+keeps them read-only. Operators who need the two isolated should use the
+[remote mTLS](../reference/speaker-backends.md#remote-mtls) endpoint instead of
+the socket. The implicit socket needs no bearer
+token; a listener that declares `token_file` also needs `bearer_token_env` in
+prefixd.
+
+Secrets go in `/etc/default/prefixd`, outside the writable `/etc/prefixd`, so
+the service user cannot replace them. systemd reads the file as root before it
+drops privileges, so it can stay root-only:
 
 ```bash
 PREFIXD_API_TOKEN=your-secret-token
 ```
 
 ```bash
+sudo chown root:root /etc/default/prefixd
+sudo chmod 0600 /etc/default/prefixd
+sudo systemctl daemon-reload
+sudo systemctl enable --now rustbgpd prefixd
+```
+
+For [GoBGP](#bare-metal-gobgp) (`bgp.backend: gobgp`), add the shipped
+[`gobgp.conf`](../../dist/systemd/prefixd.service.d/gobgp.conf) drop-in. It
+orders prefixd after `gobgpd.service` and runs it as a separate `prefixd`
+user, which then owns `/etc/prefixd`:
+
+```bash
+sudo useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin prefixd
+sudo chown -R prefixd:prefixd /etc/prefixd
+sudo install -D -m 0644 dist/systemd/prefixd.service.d/gobgp.conf \
+  /etc/systemd/system/prefixd.service.d/gobgp.conf
 sudo systemctl daemon-reload
 sudo systemctl enable prefixd
-sudo systemctl start prefixd
+# restart, not start: a running prefixd keeps its old user until restarted.
+sudo systemctl restart prefixd
 ```
+
+#### Restart behavior
+
+`Restart=on-failure` restarts prefixd five seconds after a crash or failed
+start. A `systemctl stop` stays stopped. While prefixd is down, nothing expires:
+TTL expiry, withdrawal and reconciliation need the running controller, and
+stopping prefixd does not withdraw speaker rules. When prefixd returns,
+reconciliation expires overdue mitigations.
+
+Leased rules are the exception. With
+[`bgp.rustbgpd.leased_flowspec`](../reference/configuration.md#leased-flowspec)
+or [`blackhole.leased`](../reference/configuration.md#leased-blackholes),
+rustbgpd removes the controller's leased FlowSpec rules and blackholes within
+`blackhole.lease_seconds` (60 by default) plus its RIB queue lag when prefixd
+dies and the speaker keeps running. Unleased rules stay announced until prefixd
+returns or an operator withdraws them. Monitor controller availability
+separately from BGP session health.
 
 ---
 
@@ -973,7 +1030,7 @@ curl -v http://localhost/v1/health 2>&1 | grep x-request-id
 ### Reliability
 
 - [ ] PostgreSQL high availability
-- [ ] Systemd restart policies
+- [ ] prefixd unit installed and enabled, with the [restart behavior](#restart-behavior) understood
 - [ ] Log rotation
 - [ ] Backup strategy for database (required for rollback, see [Upgrade Guide](upgrading.md))
 

@@ -94,10 +94,10 @@ use crate::AppState;
 use crate::config::EventScope;
 use crate::db::{ListCursor, ListParams, MitigationCursor, MitigationListParams};
 use crate::domain::{
-    ActionParams, ActionType, AttackEvent, AttackEventInput, FlowSpecAction, FragmentMatch,
-    MatchCriteria, Mitigation, MitigationIntent, MitigationRoute, MitigationStatus,
-    PacketLengthRange, TcpFlagsMatch, execute_withdrawal, find_mitigation_owner, mitigation_rule,
-    request_withdrawal, validate_confidence, validate_top_src_ports,
+    ActionParams, ActionType, AttackEvent, AttackEventInput, EventOutcome, EventOutcomeRecord,
+    FlowSpecAction, FragmentMatch, MatchCriteria, Mitigation, MitigationIntent, MitigationRoute,
+    MitigationStatus, PacketLengthRange, TcpFlagsMatch, execute_withdrawal, find_mitigation_owner,
+    mitigation_rule, request_withdrawal, validate_confidence, validate_top_src_ports,
 };
 use crate::error::{GuardrailError, PrefixdError};
 use crate::guardrails::Guardrails;
@@ -480,6 +480,7 @@ pub struct ListEventsQuery {
     q: Option<String>,
     source: Option<String>,
     vector: Option<String>,
+    outcome: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -831,10 +832,7 @@ async fn persist_new_mitigation(
     actor: &CreationActor,
 ) -> crate::error::Result<Option<AnnouncementOutcome>> {
     let rule = flowspec_rule_for_admission(state, mitigation)?;
-    state
-        .announcer
-        .validate_scope(rule.nlri.scope.as_ref())
-        .await?;
+    state.precheck_scope(rule.nlri.scope.as_ref()).await?;
     let mut quotas = state.settings.quotas.clone();
     if mitigation.match_criteria.dst_prefix.is_empty() {
         let policy = crate::guardrails::source_only_policy(state, &mitigation.match_criteria)?;
@@ -902,6 +900,9 @@ async fn persist_new_mitigation(
             )));
         }
         Err(error) => {
+            if let Some(scope) = &rule.nlri.scope {
+                state.vpn_probes.invalidate(scope.family);
+            }
             tracing::warn!(mitigation_id = %mitigation.mitigation_id, error = %error,
                 "mitigation intent retained after unconfirmed BGP announcement");
             return Ok(Some(AnnouncementOutcome::Unconfirmed));
@@ -1057,13 +1058,18 @@ async fn handle_unban(
     // Store the unban event
     let source = input.source.clone();
     let unban_event = AttackEvent::from_input(input);
-    if let Err(e) = state.repo.insert_event(&unban_event).await {
-        tracing::warn!(error = %e, "failed to insert unban event");
-    }
+    let stored = match state.repo.insert_event(&unban_event).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to insert unban event");
+            false
+        }
+    };
 
     let mut withdrawn = Vec::with_capacity(mitigations.len());
+    let mut failure = None;
     for mitigation in &mitigations {
-        let mitigation = withdraw_and_notify(
+        match withdraw_and_notify(
             &state,
             mitigation,
             "detector",
@@ -1071,13 +1077,38 @@ async fn handle_unban(
             format!("Detector unban: {}", source),
         )
         .await
-        .map_err(AppError)?;
-        tracing::info!(
-            mitigation_id = %mitigation.mitigation_id,
-            victim_ip = %mitigation.victim_ip,
-            "withdrew mitigation via detector unban"
-        );
-        withdrawn.push(mitigation.mitigation_id);
+        {
+            Ok(mitigation) => {
+                tracing::info!(
+                    mitigation_id = %mitigation.mitigation_id,
+                    victim_ip = %mitigation.victim_ip,
+                    "withdrew mitigation via detector unban"
+                );
+                withdrawn.push(mitigation.mitigation_id);
+            }
+            Err(error) => {
+                failure = Some((mitigation.mitigation_id, error));
+                break;
+            }
+        }
+    }
+    let failure = failure.map(|(failed_id, error)| {
+        // The failing mitigation is linked too: its status, not this outcome,
+        // says whether withdrawal intent was retained.
+        let mut ids = withdrawn.clone();
+        ids.push(failed_id);
+        (ids, error)
+    });
+    if stored {
+        let record = match &failure {
+            None => EventOutcomeRecord::new(EventOutcome::Withdrawn, None, withdrawn.clone()),
+            Some((ids, error)) => EventOutcomeRecord::from_error(error, ids.clone()),
+        };
+        record_event_outcome(&state, unban_event.event_id, &record).await;
+    }
+    if let Some((_, error)) = failure {
+        audit_refusal(&state, &unban_event, &error, None, stored).await;
+        return Err(AppError(error));
     }
 
     let mut response = EventResponse::new(
@@ -1115,10 +1146,92 @@ async fn reject_corroborating_source(
     ))))
 }
 
-/// Handle ban action - create or extend mitigation
+/// What a ban did, for recording its outcome after any return.
+#[derive(Default)]
+struct BanTrace {
+    event: Option<AttackEvent>,
+    stored: bool,
+    /// The guardrail label of a detector prefix refusal before storage.
+    refusal: Option<String>,
+    outcome: Option<EventOutcomeRecord>,
+}
+
+/// Handle ban action - create or extend mitigation, then record the outcome
+/// of a stored event and audit any refusal.
 async fn handle_ban(
     state: Arc<AppState>,
     input: AttackEventInput,
+) -> Result<(StatusCode, Json<EventResponse>), AppError> {
+    let mut trace = BanTrace::default();
+    let result = admit_ban(state.clone(), input, &mut trace).await;
+    let Some(event) = &trace.event else {
+        return result;
+    };
+    let error = result.as_ref().err().map(|AppError(error)| error);
+    if trace.stored {
+        let record = match (trace.outcome.take(), error) {
+            (Some(record), _) => Some(record),
+            (None, Some(error)) => Some(EventOutcomeRecord::from_error(error, Vec::new())),
+            (None, None) => None,
+        };
+        if let Some(record) = record {
+            record_event_outcome(&state, event.event_id, &record).await;
+        }
+    }
+    // A refusal before storage leaves no event row, so the detector may retry
+    // the same event ID (ADR 033); the audit entry is its only record.
+    if let Some(error) = error {
+        audit_refusal(&state, event, error, trace.refusal.as_deref(), trace.stored).await;
+    }
+    result
+}
+
+/// Audit a guardrail or conflict refusal of a detector event; other errors are
+/// not refusals. `label` is a detector prefix refusal's guardrail reason.
+async fn audit_refusal(
+    state: &AppState,
+    event: &AttackEvent,
+    error: &PrefixdError,
+    label: Option<&str>,
+    stored: bool,
+) {
+    let Some(outcome) = EventOutcome::of_refusal(error)
+        .or(label.is_some().then_some(EventOutcome::GuardrailRejected))
+    else {
+        return;
+    };
+    let guardrail = label.map_or_else(
+        || match error {
+            PrefixdError::GuardrailViolation(_) => guardrail_reason(error),
+            PrefixdError::UnsupportedFlowSpecScope { .. } => "UnsupportedFlowSpecScope".into(),
+            _ => "Conflict".into(),
+        },
+        str::to_string,
+    );
+    let entry = crate::observability::AuditEntry::guardrail_rejected(
+        event,
+        outcome.as_str(),
+        &guardrail,
+        &error.to_string(),
+        stored,
+    );
+    if let Err(audit_error) = state.repo.insert_audit(&entry).await {
+        tracing::error!(event_id = %event.event_id, error = %audit_error,
+            "failed to audit refused event");
+    }
+}
+
+async fn record_event_outcome(state: &AppState, event_id: Uuid, record: &EventOutcomeRecord) {
+    if let Err(error) = state.repo.record_event_outcome(event_id, record).await {
+        tracing::error!(%event_id, outcome = record.outcome.as_str(), %error,
+            "failed to record event outcome");
+    }
+}
+
+async fn admit_ban(
+    state: Arc<AppState>,
+    input: AttackEventInput,
+    trace: &mut BanTrace,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
     // Every ban path (single, batch, signal adapters) routes through here.
     reject_corroborating_source(&state, &input).await?;
@@ -1146,13 +1259,15 @@ async fn handle_ban(
 
     // Create internal event
     let event = AttackEvent::from_input(input);
+    trace.event = Some(event.clone());
 
     let destination = validate_event_destination(&event.victim_ip).map_err(AppError)?;
     let is_prefix = EventScope::for_destination(&destination) == EventScope::Prefix;
     // Every prefix refusal before persistence is logged and counted like the
     // host path's guardrail refusals.
-    let refuse = |error: PrefixdError, reason: Option<&str>| {
-        refuse_prefix_event(&event.source, &event.victim_ip, error, reason)
+    let refusal = &mut trace.refusal;
+    let mut refuse = |error: PrefixdError, reason: Option<&str>| {
+        refuse_prefix_event(&event.source, &event.victim_ip, error, reason, refusal)
     };
     if is_prefix {
         crate::guardrails::check_detector_prefix(&state.settings.guardrails, &event.source)
@@ -1334,6 +1449,7 @@ async fn handle_ban(
 
     // Store event
     state.repo.insert_event(&event).await.map_err(AppError)?;
+    trace.stored = true;
 
     crate::observability::metrics::EVENTS_INGESTED
         .with_label_values(&[&event.source, &event.attack_vector().to_string()])
@@ -1346,6 +1462,11 @@ async fn handle_ban(
 
     if !is_owned {
         tracing::warn!(victim_ip = %event.victim_ip, "event for unowned IP, skipping mitigation");
+        trace.outcome = Some(EventOutcomeRecord::new(
+            EventOutcome::NotOwned,
+            Some("destination is not in the inventory".into()),
+            Vec::new(),
+        ));
         return Ok((
             StatusCode::ACCEPTED,
             Json(EventResponse::new(
@@ -1572,6 +1693,13 @@ async fn handle_ban(
                 derived_confidence = derived_confidence,
                 "signal recorded, corroboration not met — no mitigation"
             );
+            trace.outcome = Some(EventOutcomeRecord::new(
+                EventOutcome::AwaitingCorroboration,
+                Some(format!(
+                    "corroboration not met: {source_count} source(s), derived confidence {derived_confidence:.2}"
+                )),
+                Vec::new(),
+            ));
             return Ok((
                 StatusCode::ACCEPTED,
                 Json(EventResponse::new(
@@ -1646,6 +1774,18 @@ async fn handle_ban(
         Ok(decision) => decision,
         Err(e) => {
             tracing::warn!(error = %e, "policy evaluation failed");
+            // The 202 `accepted_no_playbook` response predates outcomes and is
+            // kept; the recorded outcome says what actually happened.
+            if matches!(e, PrefixdError::NoPlaybookFound(_)) {
+                trace.outcome = Some(EventOutcomeRecord::new(
+                    EventOutcome::NoPlaybook,
+                    Some(e.to_string()),
+                    Vec::new(),
+                ));
+            } else {
+                trace.outcome = Some(EventOutcomeRecord::from_error(&e, Vec::new()));
+                audit_refusal(&state, &event, &e, None, true).await;
+            }
             return Ok((
                 StatusCode::ACCEPTED,
                 Json(EventResponse::new(
@@ -1881,6 +2021,21 @@ async fn handle_ban(
         return Err(AppError(error));
     }
 
+    trace.outcome = Some(EventOutcomeRecord::new(
+        if state.is_dry_run() {
+            EventOutcome::DryRun
+        } else if created_any {
+            EventOutcome::Mitigated
+        } else {
+            EventOutcome::Extended
+        },
+        // The first refused rule of a partial admission, summarized as for a refused event.
+        first_error
+            .as_ref()
+            .and_then(|error| EventOutcomeRecord::from_error(error, Vec::new()).outcome_reason),
+        mitigation_ids.clone(),
+    ));
+
     if let (true, Some(group_id)) = (created_any, signal_group_id) {
         if let Ok(Some(mut group)) = state.repo.get_signal_group(group_id).await {
             group.status = crate::correlation::SignalGroupStatus::Resolved;
@@ -1923,12 +2078,14 @@ fn refuse_prefix_event(
     destination: &str,
     error: PrefixdError,
     reason: Option<&str>,
+    refusal: &mut Option<String>,
 ) -> AppError {
     let reason = match (reason, &error) {
         (Some(reason), _) => reason.to_string(),
         (None, PrefixdError::GuardrailViolation(_)) => guardrail_reason(&error),
         (None, _) => return AppError(error),
     };
+    *refusal = Some(reason.clone());
     crate::observability::metrics::EVENTS_REJECTED
         .with_label_values(&[source, "guardrail"])
         .inc();
@@ -1992,6 +2149,7 @@ async fn rule_owner(
         ("q" = Option<String>, Query, description = "Literal case-insensitive substring of IP or event UUID; maximum 256 UTF-8 bytes, no NUL. Empty matches every row."),
         ("source" = Option<String>, Query, description = "Exact case-sensitive source, 1-256 UTF-8 bytes without NUL; omit for every source. All and all are literal identifiers."),
         ("vector" = Option<String>, Query, description = "Exact case-sensitive vector, 1-256 UTF-8 bytes without NUL; omit for every vector."),
+        ("outcome" = Option<String>, Query, description = "Comma-separated exact outcomes: mitigated, extended, dry_run, guardrail_rejected, safelisted, no_playbook, not_owned, awaiting_corroboration, conflict, failed, withdrawn, not_recorded; every token must be valid and nonempty"),
         ("limit" = Option<u32>, Query, description = "Max results (default 100, max 1000)"),
         ("cursor" = Option<String>, Query, description = "Opaque e1 continuation from next_cursor (max 128 bytes); superseded timestamp-only cursors are rejected"),
         ("start" = Option<String>, Query, description = "Inclusive RFC3339 start; empty or malformed supplied values are invalid"),
@@ -1999,7 +2157,7 @@ async fn rule_owner(
     ),
     responses(
         (status = 200, description = "List of events", body = EventsListResponse),
-        (status = 400, description = "Invalid search/source/vector/date filter or invalid/superseded event cursor", body = ErrorResponse)
+        (status = 400, description = "Invalid search/source/vector/outcome/date filter or invalid/superseded event cursor", body = ErrorResponse)
     )
 )]
 pub async fn list_events(
@@ -2032,6 +2190,26 @@ pub async fn list_events(
             .into_response());
         }
     }
+    let outcomes = match filters
+        .outcome
+        .as_deref()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::parse)
+                .collect::<std::result::Result<Vec<EventOutcome>, _>>()
+        })
+        .transpose()
+    {
+        Ok(outcomes) => outcomes,
+        Err(()) => {
+            return Ok(AppError(PrefixdError::InvalidRequest(format!(
+                "invalid event outcome filter; expected comma-separated {}",
+                EventOutcome::ALL.map(EventOutcome::as_str).join(", ")
+            )))
+            .into_response());
+        }
+    };
     let query = &filters;
     let limit = clamp_limit(query.limit.unwrap_or(100));
     let cursor = match query.cursor.as_deref() {
@@ -2061,6 +2239,7 @@ pub async fn list_events(
             query: filters.q,
             source: filters.source,
             vector: filters.vector,
+            outcomes,
         })
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -5399,6 +5578,24 @@ playbooks:
             .filter(|entry| entry.action == "reject_rule")
             .collect();
         assert_eq!(rejected.len(), 2);
+        // A partial admission still mitigated, and names the first refused rule.
+        let stored = f
+            .repo
+            .list_events(&crate::db::ListParams {
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            stored[0].outcome.outcome,
+            crate::domain::EventOutcome::Mitigated
+        );
+        assert_eq!(
+            stored[0].outcome.outcome_mitigation_ids,
+            response.mitigation_ids
+        );
+        assert_eq!(stored[0].outcome.outcome_reason, response.rules[2].reason);
         for rule in &response.rules[2..] {
             assert!(
                 rejected

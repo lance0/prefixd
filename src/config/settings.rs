@@ -809,7 +809,7 @@ impl Settings {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         reject_removed_keys(&content)?;
-        let settings: Settings = crate::config::parse_yaml(&content)?;
+        let settings: Settings = crate::config::parse_secret_yaml(&content)?;
         // Alerting reports in the alerting editor's form, under its section.
         let mut document = serde_json::to_value(&settings)?;
         if let Some(object) = document.as_object_mut() {

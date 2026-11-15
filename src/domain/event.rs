@@ -153,6 +153,164 @@ pub struct AttackEvent {
     pub confidence: Option<f32>,
     pub action: String,
     pub raw_details: Option<serde_json::Value>,
+    #[sqlx(flatten)]
+    #[serde(flatten)]
+    pub outcome: EventOutcomeRecord,
+}
+
+/// What ingestion did with a stored event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EventOutcome {
+    /// Created at least one mitigation in enforced mode; later rules may have
+    /// been refused. Not proof of speaker acceptance or router enforcement: the
+    /// linked mitigation's status and export evidence are authoritative.
+    Mitigated,
+    /// Only extended mitigations that already existed; as for `Mitigated`, the
+    /// linked mitigation is authoritative.
+    Extended,
+    /// Created or extended simulated mitigations in dry-run mode; nothing was announced.
+    DryRun,
+    /// Every rule was refused by a guardrail.
+    GuardrailRejected,
+    /// The destination is safelisted.
+    Safelisted,
+    /// No playbook matched the event.
+    NoPlaybook,
+    /// The destination is not in the inventory.
+    NotOwned,
+    /// Recorded in a signal group that has not met its corroboration threshold.
+    AwaitingCorroboration,
+    /// Refused because another rule, owner or speaker state holds the match.
+    Conflict,
+    /// The request failed after the event was stored. The linked mitigation's
+    /// status is authoritative: withdrawal intent may be retained and reconciled.
+    Failed,
+    /// A detector unban withdrew the ban's mitigations.
+    Withdrawn,
+    /// Stored before outcomes were recorded, or processing never finished.
+    #[default]
+    NotRecorded,
+}
+
+impl EventOutcome {
+    pub const ALL: [Self; 12] = [
+        Self::Mitigated,
+        Self::Extended,
+        Self::DryRun,
+        Self::GuardrailRejected,
+        Self::Safelisted,
+        Self::NoPlaybook,
+        Self::NotOwned,
+        Self::AwaitingCorroboration,
+        Self::Conflict,
+        Self::Failed,
+        Self::Withdrawn,
+        Self::NotRecorded,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mitigated => "mitigated",
+            Self::Extended => "extended",
+            Self::DryRun => "dry_run",
+            Self::GuardrailRejected => "guardrail_rejected",
+            Self::Safelisted => "safelisted",
+            Self::NoPlaybook => "no_playbook",
+            Self::NotOwned => "not_owned",
+            Self::AwaitingCorroboration => "awaiting_corroboration",
+            Self::Conflict => "conflict",
+            Self::Failed => "failed",
+            Self::Withdrawn => "withdrawn",
+            Self::NotRecorded => "not_recorded",
+        }
+    }
+
+    /// The outcome of a refusal, or `None` when the error is not a refusal.
+    pub fn of_refusal(error: &crate::error::PrefixdError) -> Option<Self> {
+        use crate::error::{GuardrailError, PrefixdError};
+        match error {
+            PrefixdError::GuardrailViolation(GuardrailError::Safelisted { .. }) => {
+                Some(Self::Safelisted)
+            }
+            PrefixdError::GuardrailViolation(_) | PrefixdError::UnsupportedFlowSpecScope { .. } => {
+                Some(Self::GuardrailRejected)
+            }
+            PrefixdError::Conflict(_) | PrefixdError::InjectionOwnerMismatch { .. } => {
+                Some(Self::Conflict)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl std::str::FromStr for EventOutcome {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|outcome| outcome.as_str() == value)
+            .ok_or(())
+    }
+}
+
+/// NULL is an event from before outcomes were recorded. A value this version
+/// does not know, such as one a newer controller wrote, also reads as
+/// `not_recorded` rather than failing the whole listing.
+impl From<Option<String>> for EventOutcome {
+    fn from(value: Option<String>) -> Self {
+        value
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_default()
+    }
+}
+
+/// The persisted outcome of an event, written once after ingestion decides it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, FromRow, ToSchema)]
+pub struct EventOutcomeRecord {
+    #[sqlx(try_from = "Option<String>")]
+    #[serde(default)]
+    pub outcome: EventOutcome,
+    /// Why the event did not mitigate, or the first refused rule of a partial
+    /// admission. Internal errors are summarized, never quoted.
+    #[serde(default)]
+    pub outcome_reason: Option<String>,
+    /// Mitigations the event created, extended or withdrew.
+    #[serde(default)]
+    pub outcome_mitigation_ids: Vec<Uuid>,
+}
+
+impl EventOutcomeRecord {
+    pub fn new(outcome: EventOutcome, reason: Option<String>, mitigation_ids: Vec<Uuid>) -> Self {
+        Self {
+            outcome,
+            outcome_reason: reason,
+            outcome_mitigation_ids: mitigation_ids,
+        }
+    }
+
+    /// The outcome of an error after the event was stored. A client error's
+    /// message is already returned to the caller and names the guardrail or
+    /// setting to change; a server error is summarized so storage or speaker
+    /// details never reach the event list.
+    pub fn from_error(error: &crate::error::PrefixdError, mitigation_ids: Vec<Uuid>) -> Self {
+        let status = error.status_code();
+        let reason = if status.is_server_error() {
+            format!(
+                "{} {}; see controller logs",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("error")
+            )
+        } else {
+            error.to_string()
+        };
+        Self::new(
+            EventOutcome::of_refusal(error).unwrap_or(EventOutcome::Failed),
+            Some(reason),
+            mitigation_ids,
+        )
+    }
 }
 
 impl AttackEvent {
@@ -197,6 +355,7 @@ impl AttackEvent {
             confidence: input.confidence,
             action: input.action,
             raw_details: input.raw_details,
+            outcome: EventOutcomeRecord::default(),
         }
     }
 
@@ -239,6 +398,66 @@ mod tests {
             ));
             assert_eq!(error.status_code(), axum::http::StatusCode::BAD_REQUEST);
         }
+    }
+
+    #[test]
+    fn outcomes_round_trip_and_server_errors_are_summarized() {
+        use crate::error::{GuardrailError, PrefixdError};
+        for outcome in EventOutcome::ALL {
+            assert_eq!(outcome.as_str().parse::<EventOutcome>(), Ok(outcome));
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                serde_json::json!(outcome.as_str())
+            );
+            assert_eq!(EventOutcome::from(Some(outcome.as_str().into())), outcome);
+        }
+        // NULL from before the migration, and a value a newer controller wrote.
+        assert_eq!(EventOutcome::from(None), EventOutcome::NotRecorded);
+        assert_eq!(
+            EventOutcome::from(Some("future_outcome".into())),
+            EventOutcome::NotRecorded
+        );
+        assert!("Mitigated".parse::<EventOutcome>().is_err());
+
+        let record = |error: PrefixdError| EventOutcomeRecord::from_error(&error, Vec::new());
+        let safelisted = record(PrefixdError::GuardrailViolation(
+            GuardrailError::Safelisted {
+                ip: "203.0.113.10".into(),
+            },
+        ));
+        assert_eq!(safelisted.outcome, EventOutcome::Safelisted);
+        assert_eq!(
+            safelisted.outcome_reason.as_deref(),
+            Some("guardrail violation: IP 203.0.113.10 is safelisted")
+        );
+        let quota = record(PrefixdError::GuardrailViolation(
+            GuardrailError::QuotaExceeded {
+                quota_type: "customer".into(),
+                current: 5,
+                max: 5,
+            },
+        ));
+        assert_eq!(quota.outcome, EventOutcome::GuardrailRejected);
+        assert_eq!(
+            record(PrefixdError::Conflict(
+                "owned by a dry-run simulation".into()
+            ))
+            .outcome,
+            EventOutcome::Conflict
+        );
+        // Server-side details never reach the event list.
+        let failed = record(PrefixdError::Internal(
+            "postgres://prefixd:secret@db/prefixd unreachable".into(),
+        ));
+        assert_eq!(failed.outcome, EventOutcome::Failed);
+        assert_eq!(
+            failed.outcome_reason.as_deref(),
+            Some("500 Internal Server Error; see controller logs")
+        );
+        assert_eq!(
+            record(PrefixdError::ShuttingDown).outcome_reason.as_deref(),
+            Some("503 Service Unavailable; see controller logs")
+        );
     }
 
     #[test]

@@ -439,8 +439,7 @@ async fn validate_manual_flowspec_on(
     let rule = super::flowspec_rule_for_admission(state, &mut mitigation)
         .map_err(AdmissionFailure::at(Capability))?;
     state
-        .announcer
-        .validate_scope(rule.nlri.scope.as_ref())
+        .precheck_scope(rule.nlri.scope.as_ref())
         .await
         .map_err(AdmissionFailure::at(Capability))?;
     Ok(mitigation)

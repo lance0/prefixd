@@ -3,7 +3,9 @@ mod gobgp;
 mod guarded;
 mod mock;
 mod proto;
+mod vpn_probe;
 mod vpn_scope;
+pub use vpn_probe::{VpnProbe, VpnProbeCache};
 pub use vpn_scope::check_vpn_startup;
 #[cfg(feature = "bgp-rustbgpd")]
 mod rustbgpd_proto;

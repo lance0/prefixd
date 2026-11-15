@@ -125,6 +125,11 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
             "scrubber_diversions",
             include_str!("../../migrations/019_scrubber_diversions.sql"),
         ),
+        (
+            20,
+            "event_outcomes",
+            include_str!("../../migrations/020_event_outcomes.sql"),
+        ),
     ];
 
     // Bootstrap: run all migrations first (they use IF NOT EXISTS)

@@ -161,15 +161,30 @@ impl AuditEntry {
         )
     }
 
-    /// Create entry for guardrail rejection
-    pub fn guardrail_rejected(event_id: Uuid, reason: &str) -> Self {
+    /// Entry for a refused detector event. `stored` is false when the refusal
+    /// came before the event was stored: `target_id` then names no event row.
+    pub fn guardrail_rejected(
+        event: &crate::domain::AttackEvent,
+        outcome: &str,
+        guardrail: &str,
+        reason: &str,
+        stored: bool,
+    ) -> Self {
         Self::new(
-            ActorType::System,
-            None,
+            ActorType::Detector,
+            Some(event.source.clone()),
             "reject",
             Some("event"),
-            Some(event_id.to_string()),
-            serde_json::json!({ "reason": reason }),
+            Some(event.event_id.to_string()),
+            serde_json::json!({
+                "external_event_id": event.external_event_id,
+                "victim_ip": event.victim_ip,
+                "vector": event.vector,
+                "outcome": outcome,
+                "guardrail": guardrail,
+                "reason": reason,
+                "stored": stored,
+            }),
         )
     }
 
