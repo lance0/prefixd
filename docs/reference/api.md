@@ -2484,6 +2484,11 @@ Full operational health using the configured authentication mode. The request
 and response below illustrate bearer mode. In credentials mode, send a session
 cookie; native mTLS requires a client certificate. `none` requires no credentials.
 
+A bearer token is checked independently of stored sessions: while PostgreSQL is
+down, a browser's stale session cookie cannot block the request, and `database`
+reports the failed health check. A session that cannot be loaded is treated as
+anonymous, so such requests still need a valid session or bearer token.
+
 **Illustrative response with rustbgpd:**
 
 ```json

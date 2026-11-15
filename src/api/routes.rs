@@ -4,12 +4,10 @@ use axum::{
     response::IntoResponse,
     routing::{any, get, post},
 };
-use axum_login::AuthManagerLayer;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
-use tower_sessions_sqlx_store::PostgresStore;
 use utoipa::OpenApi;
 
 use super::{
@@ -18,7 +16,7 @@ use super::{
     ratelimit::{RateLimiter, rate_limit_middleware},
 };
 use crate::AppState;
-use crate::auth::AuthBackend;
+use crate::auth::PostgresAuthLayer;
 use crate::ws;
 
 /// Public routes that never read the session. They sit outside the auth
@@ -224,10 +222,7 @@ fn common_layers(router: Router, state: &AppState) -> Router {
 }
 
 /// Create the production router with PostgreSQL session store
-pub fn create_router(
-    state: Arc<AppState>,
-    auth_layer: AuthManagerLayer<AuthBackend, PostgresStore>,
-) -> Router {
+pub fn create_router(state: Arc<AppState>, auth_layer: PostgresAuthLayer) -> Router {
     let router = public_routes()
         .merge(session_routes())
         .merge(api_routes(&state))

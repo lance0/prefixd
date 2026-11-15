@@ -1318,7 +1318,7 @@ async fn test_health_endpoint() {
 
 /// A browser keeps its session cookie after PostgreSQL goes down. Public routes
 /// that never read the session must answer as they do without the cookie, while
-/// routes that do read it still fail closed with an empty 500.
+/// routes that read it deny as anonymous.
 #[tokio::test]
 async fn sessionless_public_routes_ignore_cookie_when_session_store_is_down() {
     use std::time::Duration;
@@ -1375,14 +1375,156 @@ async fn sessionless_public_routes_ignore_cookie_when_session_store_is_down() {
     assert_eq!(json["status"], "ok");
     assert_eq!(json["auth_mode"], "credentials");
 
-    // Control: the cookie does reach the unreachable store on session routes,
-    // and the failure exposes nothing about the session or the database.
-    for path in ["/v1/health/detail", "/v1/auth/me", "/v1/mitigations"] {
+    // Control: the cookie does reach the unreachable store on session routes.
+    // A failed load cannot authenticate anyone, so those routes deny without
+    // exposing the session or the database, and the stale cookie is dropped.
+    for path in ["/v1/auth/me", "/v1/mitigations"] {
         let (status, body) = read(send(path, Some(&cookie)).await.unwrap()).await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
         assert!(body.is_empty(), "{path} leaked {body:?}");
         let (status, _) = read(send(path, None).await.unwrap()).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{path} without a cookie");
+    }
+    let response = send("/v1/health/detail", Some(&cookie)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        response
+            .headers()
+            .contains_key(axum::http::header::SET_COOKIE),
+        "the unloadable session cookie should be dropped"
+    );
+}
+
+/// A bearer token is independent of session storage. While PostgreSQL is down a
+/// stale cookie must not turn the operator's diagnostic endpoint into a 500 or
+/// stop the token from authenticating, an unknown path must stay a 404, and a
+/// failed session load must never authenticate anyone.
+#[tokio::test]
+async fn bearer_auth_survives_unloadable_session_cookie() {
+    use std::time::Duration;
+
+    const TOKEN: &str = "outage-bearer-token";
+
+    let mut settings = test_settings();
+    settings.http.auth.mode = AuthMode::Credentials;
+    // Nothing listens on port 1, so repository reads and session loads fail.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(500))
+        .connect_lazy("postgres://prefixd@127.0.0.1:1/prefixd")
+        .unwrap();
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(prefixd::db::Repository::new(pool.clone()));
+    let mut state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        Arc::new(MockAnnouncer::new()),
+        std::path::PathBuf::from("."),
+    )
+    .expect("failed to create app state");
+    {
+        let cached = Arc::get_mut(&mut state).expect("unshared test state");
+        cached.settings.http.auth.mode = AuthMode::Bearer;
+        cached.bearer_token = Some(TOKEN.into());
+    }
+    let auth_layer = prefixd::auth::create_auth_layer(pool, repo, AuthMode::Bearer, false).await;
+    let app = prefixd::api::create_router(state, auth_layer);
+    let cookie = format!("id={}", tower_sessions::session::Id::default());
+
+    let send = |path: &str, cookie: Option<&str>, bearer: Option<&str>| {
+        let mut request = Request::builder().uri(path);
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
+        }
+        if let Some(bearer) = bearer {
+            request = request.header("authorization", format!("Bearer {bearer}"));
+        }
+        app.clone().oneshot(request.body(Body::empty()).unwrap())
+    };
+    let read = |response: axum::response::Response| async move {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        (status, body)
+    };
+    let read_json = |response: axum::response::Response| async move {
+        let (status, body) = read(response).await;
+        (status, serde_json::from_slice::<serde_json::Value>(&body))
+    };
+    // Clock-dependent fields advance between requests; the claim is everything else.
+    fn without_time(json: &serde_json::Value) -> serde_json::Value {
+        let mut json = json.clone();
+        fn strip(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    map.remove("uptime_seconds");
+                    map.remove("observed_at");
+                    for child in map.values_mut() {
+                        strip(child);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        strip(item);
+                    }
+                }
+                _ => {}
+            }
+        }
+        strip(&mut json);
+        json
+    }
+
+    // The token authenticates with the database down, cookie or not.
+    let (bare_status, bare_json) =
+        read_json(send("/v1/health/detail", None, Some(TOKEN)).await.unwrap()).await;
+    let bare_json = bare_json.expect("health detail JSON");
+    assert_eq!(bare_status, StatusCode::OK);
+    let (cookie_status, cookie_json) = read_json(
+        send("/v1/health/detail", Some(&cookie), Some(TOKEN))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let cookie_json = cookie_json.expect("health detail JSON");
+    assert_eq!(cookie_status, StatusCode::OK, "{cookie_json}");
+    assert_eq!(
+        without_time(&bare_json),
+        without_time(&cookie_json),
+        "a stale cookie changed the bearer response"
+    );
+
+    // And it reports the outage instead of failing.
+    assert_eq!(cookie_json["status"], "degraded");
+    assert_eq!(cookie_json["auth_mode"], "bearer");
+    assert!(
+        cookie_json["database"]
+            .as_str()
+            .is_some_and(|status| status.starts_with("error:")),
+        "database should report the failed check: {cookie_json}"
+    );
+
+    // A failed session load is anonymous, so the token is still required.
+    for presented in [None, Some(cookie.as_str())] {
+        let (status, body) = read(send("/v1/health/detail", presented, None).await.unwrap()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "cookie={presented:?}");
+        assert!(body.is_empty(), "cookie={presented:?} leaked {body:?}");
+        let (status, _) = read(
+            send("/v1/health/detail", presented, Some("wrong-token"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "cookie={presented:?}");
+    }
+
+    // Routing still happens: an unknown path is a 404, not a session failure.
+    for path in ["/v1/does-not-exist", "/nope"] {
+        for bearer in [None, Some(TOKEN)] {
+            let (status, _) = read(send(path, Some(&cookie), bearer).await.unwrap()).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path} bearer={bearer:?}");
+        }
     }
 }
 
