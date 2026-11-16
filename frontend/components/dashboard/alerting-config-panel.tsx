@@ -593,6 +593,7 @@ export function AlertingConfigPanel() {
           ) : (
             destinations.map((dest, i) => {
               const isEditingThis = isEditing && editingIndex === i
+
               // Match the saved-configuration position the card came from:
               // filter skips shift the results array, and draft removals and
               // additions shift card positions, so neither names this card.

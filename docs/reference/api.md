@@ -2937,7 +2937,7 @@ variable name in its `*_env` key, such as `routing_key_env`. Variable names are
 not secret; their values are never returned. See
 [alert destination secrets](configuration.md#alert-destination-secrets).
 
-**Per-destination events:** Each destination may include an optional `events` array to override the global event filter. If present, only those event types are sent to that destination. If absent or empty, the destination inherits the global `events` list. The `test` alert from the test endpoint ignores every filter and reaches each destination. See ADR 017.
+**Per-destination events:** Each destination may include an optional `events` array to override the global event filter. If present, only those event types are sent to that destination. If absent or empty, the destination inherits the global `events` list. The `test` alert from the test endpoint ignores every filter and reaches each destination; `test` is not a filter value, and a save that lists it is refused. See ADR 017.
 
 ### Update Alerting Config
 

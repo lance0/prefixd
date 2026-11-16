@@ -43,6 +43,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   To clear the warnings, delete step 2 of each in the dashboard playbook editor
   or in `/etc/prefixd/playbooks.yaml`; see
   [multi-step playbooks](docs/how-to/upgrading.md#multi-step-playbooks).
+- Alert payloads change shape:
+  - The test alert's `event_type` is `test`, not `mitigation.created`. A
+    generic webhook consumer must accept `test` and must not treat a test as
+    a new mitigation. `test` is not a filter value; an `events` list that
+    names it is refused at startup, on reload and by the editor.
+  - The test alert's `mitigation_id` is `prefixd-test-<UUID>`, unique to each
+    test, not a UUID. Consumers that parse it as a UUID must accept it.
+  - Opsgenie `mitigation.withdrawn` and `mitigation.expired` close the
+    mitigation's alert by alias instead of creating a new alert. A destination
+    whose filter lists only those events now opens no alerts; add
+    `mitigation.created` to it if you relied on them.
+  - Dry-run mitigation alerts' titles start with `Dry Run: `, which also
+    appears in PagerDuty summaries and Opsgenie messages. Update routing or
+    suppression rules that match the title or summary exactly or by prefix.
 
 ### Known limitations
 
@@ -104,11 +118,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   destination's position in the running configuration. A generic webhook
   consumer that identified the test payload by `mitigation.created` should
   match `test` instead. The dashboard keys results by `index`, so a filtered
-  destination no longer shifts a result onto the wrong card.
+  destination no longer shifts a result onto the wrong card, and in the
+  editor a result stays on the saved destination it belongs to after cards are
+  removed or added.
 - Slack `channel` is legacy-only. An app's incoming webhook always posts to the
   channel it was created for; the editor labels the field accordingly. The
   payload still carries the key for older custom integrations.
-
 - Unknown configuration keys are reported with their full key path, including
   alert destination keys such as `alerting.destinations[0].chanel` and webhook
   adapter `auth` and `transforms` keys, and ignored
@@ -154,9 +169,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Opsgenie withdrawn and expired alerts close the mitigation's alert by alias
-  through Opsgenie's close API instead of creating a second alert. Both create
-  and close actions wait for asynchronous confirmation with bounded polling;
-  missing alerts and unconfirmed actions report failure.
+  through Opsgenie's close API instead of creating a second alert. Lifecycle
+  creates and closes trust Opsgenie's HTTP 202, so closing an alert already
+  closed by hand succeeds, and they retry only connection failures, 5xx and
+  429. Only the test alert polls request status, confirming its create before
+  closing and then confirming the close.
 - PagerDuty and Opsgenie test alerts clean up their incidents: prefixd
   resolves the PagerDuty incident and closes the Opsgenie alert
   after confirming creation, using unique test invocation IDs. Failed cleanup
@@ -168,7 +185,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dry-run`.
 - Platform HTTP failure bodies are omitted from logs and test results;
   Opsgenie confirmation JSON is bounded to 16 KiB and never echoed on failure.
-
 - Leased FlowSpec rules and leased blackholes are no longer renewed
   indefinitely during a PostgreSQL outage. Renewal stays independent of the
   database and the fence, but it now stops one margin after the latest leased
