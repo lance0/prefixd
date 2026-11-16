@@ -594,12 +594,12 @@ async fn scope_index_covers_only_live_statuses_after_fresh_and_020_starts() {
         .await
         .expect("migrate a database at 020");
     assert_live_scope_index(&scope_index(&setup).await);
-    assert_eq!(
+    // 021 is recorded again; later migrations were never removed.
+    assert!(
         recorded(&setup)
             .await
-            .last()
-            .map(|(version, name, _)| (*version, name.clone())),
-        Some((21, "live_scope_index".to_string()))
+            .iter()
+            .any(|(version, name, _)| (*version, name.as_str()) == (21, "live_scope_index"))
     );
 
     // 0.27.0 replays 001-020 on every start. Migration 001's IF NOT EXISTS
