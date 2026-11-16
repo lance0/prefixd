@@ -197,8 +197,11 @@ jobs:
         with:
           just-version: "1"
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install lint dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler shellcheck
+
+      - name: Lint shell scripts
+        run: just shell
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
