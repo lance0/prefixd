@@ -12083,7 +12083,7 @@ mod anonymous_auth {
                     } else {
                         StatusCode::BAD_REQUEST
                     },
-                    &[PASSWORD, &admin.password_hash],
+                    &[PASSWORD, admin.password_hash.expose_secret()],
                 )
                 .await;
                 let stored = repo.get_operator_by_username(&username).await.unwrap();
@@ -12096,7 +12096,7 @@ mod anonymous_auth {
                     assert_eq!(json["role"], role);
                     assert_eq!(json["created_by"], admin.username);
                     assert!(json["last_login_at"].is_null());
-                    assert!(!body.contains(&stored.password_hash));
+                    assert!(!body.contains(stored.password_hash.expose_secret()));
                 }
             }
         }
@@ -12132,7 +12132,7 @@ mod anonymous_auth {
                     } else {
                         StatusCode::BAD_REQUEST
                     },
-                    &[&password, &admin.password_hash],
+                    &[&password, admin.password_hash.expose_secret()],
                 )
                 .await;
                 let stored = repo.get_operator_by_username(&username).await.unwrap();
@@ -12149,7 +12149,7 @@ mod anonymous_auth {
                     let body = public_body(
                         response,
                         StatusCode::OK,
-                        &[&password, &stored.password_hash],
+                        &[&password, stored.password_hash.expose_secret()],
                     )
                     .await;
                     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -12180,7 +12180,12 @@ mod anonymous_auth {
                 ("login\0name".into(), false),
             ] {
                 let stored = repo
-                    .create_operator(&username, &seed.password_hash, OperatorRole::Viewer, None)
+                    .create_operator(
+                        &username,
+                        seed.password_hash.expose_secret(),
+                        OperatorRole::Viewer,
+                        None,
+                    )
                     .await
                     .unwrap();
                 let response = request(
@@ -12198,7 +12203,7 @@ mod anonymous_auth {
                     } else {
                         StatusCode::BAD_REQUEST
                     },
-                    &[PASSWORD, &seed.password_hash],
+                    &[PASSWORD, seed.password_hash.expose_secret()],
                 )
                 .await;
                 if accepted {
@@ -12278,7 +12283,8 @@ mod anonymous_auth {
                         .await
                         .unwrap()
                         .unwrap()
-                        .password_hash,
+                        .password_hash
+                        .expose_secret(),
                     hash
                 );
             }
@@ -12295,7 +12301,7 @@ mod anonymous_auth {
                 ("credential-management-operator", OperatorRole::Operator),
                 ("credential-management-viewer", OperatorRole::Viewer),
             ] {
-                repo.create_operator(username, &admin.password_hash, role, None)
+                repo.create_operator(username, admin.password_hash.expose_secret(), role, None)
                     .await
                     .unwrap();
                 callers.push((Some(login(&app, username).await), StatusCode::FORBIDDEN));
@@ -12304,7 +12310,12 @@ mod anonymous_auth {
                 let response = request(&app, "POST", "/v1/operators", cookie.as_deref(), Some(
                     serde_json::json!({"username":"credential-denied-create","password":PASSWORD,"role":"admin"})
                 )).await;
-                public_body(response, status, &[PASSWORD, &admin.password_hash]).await;
+                public_body(
+                    response,
+                    status,
+                    &[PASSWORD, admin.password_hash.expose_secret()],
+                )
+                .await;
                 assert!(
                     repo.get_operator_by_username("credential-denied-create")
                         .await
@@ -12319,14 +12330,18 @@ mod anonymous_auth {
                     None,
                 )
                 .await;
-                public_body(response, status, &[&admin.password_hash]).await;
+                public_body(response, status, &[admin.password_hash.expose_secret()]).await;
                 let response = request(&app, "PUT", &format!("/v1/operators/{}/password", admin.operator_id), cookie.as_deref(), Some(
                     serde_json::json!({"current_password":PASSWORD,"new_password":"denied-password-marker"})
                 )).await;
                 public_body(
                     response,
                     status,
-                    &[PASSWORD, "denied-password-marker", &admin.password_hash],
+                    &[
+                        PASSWORD,
+                        "denied-password-marker",
+                        admin.password_hash.expose_secret(),
+                    ],
                 )
                 .await;
                 assert_eq!(
@@ -12346,7 +12361,12 @@ mod anonymous_auth {
                 None,
             )
             .await;
-            public_body(response, StatusCode::BAD_REQUEST, &[&admin.password_hash]).await;
+            public_body(
+                response,
+                StatusCode::BAD_REQUEST,
+                &[admin.password_hash.expose_secret()],
+            )
+            .await;
             login(&app, &admin.username).await;
             let target = repo
                 .get_operator_by_username("credential-management-viewer")
@@ -12362,9 +12382,13 @@ mod anonymous_auth {
             )
             .await;
             assert!(
-                public_body(response, StatusCode::NO_CONTENT, &[&target.password_hash])
-                    .await
-                    .is_empty()
+                public_body(
+                    response,
+                    StatusCode::NO_CONTENT,
+                    &[target.password_hash.expose_secret()]
+                )
+                .await
+                .is_empty()
             );
             assert!(
                 repo.get_operator_by_id(target.operator_id)
@@ -12380,7 +12404,12 @@ mod anonymous_auth {
                 None,
             )
             .await;
-            public_body(response, StatusCode::NOT_FOUND, &[&target.password_hash]).await;
+            public_body(
+                response,
+                StatusCode::NOT_FOUND,
+                &[target.password_hash.expose_secret()],
+            )
+            .await;
         }
 
         #[tokio::test]
@@ -12393,7 +12422,12 @@ mod anonymous_auth {
                 ("credential-self-admin", OperatorRole::Admin),
             ] {
                 let target = repo
-                    .create_operator(username, &seed.password_hash, role.clone(), None)
+                    .create_operator(
+                        username,
+                        seed.password_hash.expose_secret(),
+                        role.clone(),
+                        None,
+                    )
                     .await
                     .unwrap();
                 let cookie = login(&app, username).await;
@@ -12421,7 +12455,7 @@ mod anonymous_auth {
                         &[
                             PASSWORD,
                             &new,
-                            &target.password_hash,
+                            target.password_hash.expose_secret(),
                             "wrong-current-marker",
                         ],
                     )
@@ -12452,7 +12486,7 @@ mod anonymous_auth {
                     public_body(
                         response,
                         StatusCode::NO_CONTENT,
-                        &[PASSWORD, &new, &target.password_hash]
+                        &[PASSWORD, &new, target.password_hash.expose_secret()]
                     )
                     .await
                     .is_empty()
@@ -12481,8 +12515,8 @@ mod anonymous_auth {
                         &[
                             PASSWORD,
                             &new,
-                            &target.password_hash,
-                            &changed.password_hash,
+                            target.password_hash.expose_secret(),
+                            changed.password_hash.expose_secret(),
                         ],
                     )
                     .await;
@@ -12499,7 +12533,10 @@ mod anonymous_auth {
                 public_body(
                     response,
                     StatusCode::UNAUTHORIZED,
-                    &[&target.password_hash, &changed.password_hash],
+                    &[
+                        target.password_hash.expose_secret(),
+                        changed.password_hash.expose_secret(),
+                    ],
                 )
                 .await;
             }
@@ -12512,7 +12549,7 @@ mod anonymous_auth {
             let target = repo
                 .create_operator(
                     "credential-reset-target",
-                    &admin.password_hash,
+                    admin.password_hash.expose_secret(),
                     OperatorRole::Operator,
                     None,
                 )
@@ -12524,7 +12561,7 @@ mod anonymous_auth {
                 ("credential-foreign-viewer", OperatorRole::Viewer),
                 ("credential-foreign-operator", OperatorRole::Operator),
             ] {
-                repo.create_operator(username, &admin.password_hash, role, None)
+                repo.create_operator(username, admin.password_hash.expose_secret(), role, None)
                     .await
                     .unwrap();
                 let cookie = login(&app, username).await;
@@ -12534,7 +12571,11 @@ mod anonymous_auth {
                 public_body(
                     response,
                     StatusCode::FORBIDDEN,
-                    &[PASSWORD, "foreign-change-marker", &target.password_hash],
+                    &[
+                        PASSWORD,
+                        "foreign-change-marker",
+                        target.password_hash.expose_secret(),
+                    ],
                 )
                 .await;
                 assert_eq!(
@@ -12562,7 +12603,7 @@ mod anonymous_auth {
                 public_body(
                     response,
                     StatusCode::NO_CONTENT,
-                    &[&new, &target.password_hash]
+                    &[&new, target.password_hash.expose_secret()]
                 )
                 .await
                 .is_empty()
@@ -12591,8 +12632,8 @@ mod anonymous_auth {
                     &[
                         PASSWORD,
                         &new,
-                        &target.password_hash,
-                        &changed.password_hash,
+                        target.password_hash.expose_secret(),
+                        changed.password_hash.expose_secret(),
                     ],
                 )
                 .await;
@@ -12608,7 +12649,10 @@ mod anonymous_auth {
             public_body(
                 response,
                 StatusCode::NOT_FOUND,
-                &["missing-reset-marker", &changed.password_hash],
+                &[
+                    "missing-reset-marker",
+                    changed.password_hash.expose_secret(),
+                ],
             )
             .await;
             assert_eq!(
