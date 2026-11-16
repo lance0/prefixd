@@ -1,6 +1,6 @@
 rule_files:
   - prometheus-alerts.yml
-evaluation_interval: 1m
+evaluation_interval: 15s
 tests:
   # Blackholes active, then prefixd goes down: all three relevant alerts fire.
   - interval: 1m
@@ -18,14 +18,14 @@ tests:
           - exp_labels: {severity: critical, job: prefixd, instance: a}
             exp_annotations:
               summary: "prefixd is down"
-              description: "a has failed scrapes for 2 minutes. TTL expiry and withdrawals stop while it is down, and announced routes stay on the speaker."
+              description: "a has failed scrapes for 2 minutes. TTL expiry and withdrawals stop while it is down. Leased routes may lapse; unleased routes can remain on the speaker."
       - eval_time: 20m
         alertname: PrefixdBlackholesWhileDegraded
         exp_alerts:
           - exp_labels: {severity: critical, job: prefixd}
             exp_annotations:
               summary: "Blackholes may outlive an inactive prefixd"
-              description: "prefixd had active blackholes when its last active controller stopped. They stay announced until prefixd returns or an operator withdraws them on the speaker. Restart prefixd: it expires overdue blackholes, and startup reconciliation removes routes left by terminal rows. If you withdraw by hand on the speaker, also withdraw in prefixd once it returns, or reconciliation re-announces blackholes whose TTL has not passed."
+              description: "prefixd had active blackholes when its last active controller stopped. Unleased blackholes can stay announced until prefixd returns or an operator withdraws them; leased blackholes may lapse. Restart prefixd: it expires overdue blackholes, and startup reconciliation removes routes left by terminal rows. If you withdraw by hand on the speaker, also withdraw in prefixd once it returns, or reconciliation re-announces blackholes whose TTL has not passed."
       - eval_time: 20m
         alertname: PrefixdNotReady
         exp_alerts: []
@@ -65,7 +65,7 @@ tests:
           - exp_labels: {severity: critical, job: prefixd}
             exp_annotations:
               summary: "Blackholes may outlive an inactive prefixd"
-              description: "prefixd had active blackholes when its last active controller stopped. They stay announced until prefixd returns or an operator withdraws them on the speaker. Restart prefixd: it expires overdue blackholes, and startup reconciliation removes routes left by terminal rows. If you withdraw by hand on the speaker, also withdraw in prefixd once it returns, or reconciliation re-announces blackholes whose TTL has not passed."
+              description: "prefixd had active blackholes when its last active controller stopped. Unleased blackholes can stay announced until prefixd returns or an operator withdraws them; leased blackholes may lapse. Restart prefixd: it expires overdue blackholes, and startup reconciliation removes routes left by terminal rows. If you withdraw by hand on the speaker, also withdraw in prefixd once it returns, or reconciliation re-announces blackholes whose TTL has not passed."
       - eval_time: 20m
         alertname: PrefixdDown
         exp_alerts: []
@@ -281,3 +281,168 @@ tests:
             value: 0.5
           - labels: '{backend="gobgp"}'
             value: 0.5
+
+  # Leased FlowSpec survives in the last complete inventory after target loss.
+  # Healthy instances in both the same and another POP cannot hide the outage;
+  # another job cannot cause one. The lookback ends exactly one hour after the
+  # last sample, while the generic down alert remains available.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x4 0x240'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="a",pop="pop-a"}'
+        values: '2x4 stale'
+      - series: 'prefixd_injection_lease_renewal_overdue{job="prefixd",instance="a"}'
+        values: '0x4 stale'
+      - series: 'up{job="prefixd",instance="b"}'
+        values: '1x245'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="b",pop="pop-b"}'
+        values: '3x245'
+      - series: 'prefixd_injection_lease_renewal_overdue{job="prefixd",instance="b"}'
+        values: '0x245'
+      - series: 'up{job="prefixd",instance="c"}'
+        values: '1x245'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="c",pop="pop-a"}'
+        values: '2x245'
+      - series: 'prefixd_injection_lease_renewal_overdue{job="prefixd",instance="c"}'
+        values: '0x245'
+      - series: 'up{job="other",instance="d"}'
+        values: '0x245'
+      - series: 'prefixd_leased_mitigations_active{job="other",instance="d",pop="pop-d"}'
+        values: '5x245'
+    alert_rule_test:
+      - eval_time: 75s
+        alertname: PrefixdLeasedMitigationsAtRisk
+        exp_alerts: []
+      - eval_time: 90s
+        alertname: PrefixdLeasedMitigationsAtRisk
+        exp_alerts:
+          - exp_labels: {severity: critical, job: prefixd, instance: a, pop: pop-a}
+            exp_annotations:
+              summary: "Leased mitigations may lapse"
+              description: "prefixd on a at POP pop-a last reported 2 active leased mitigation(s), but its scrape is failing or lease renewal is overdue. The speaker removes leased routes when their lease expires. Restore the controller and check its database, lease health and speaker state. This is retained intent and renewal evidence, not proof of router enforcement."
+      - eval_time: 60m
+        alertname: PrefixdLeasedMitigationsAtRisk
+        exp_alerts:
+          - exp_labels: {severity: critical, job: prefixd, instance: a, pop: pop-a}
+            exp_annotations:
+              summary: "Leased mitigations may lapse"
+              description: "prefixd on a at POP pop-a last reported 2 active leased mitigation(s), but its scrape is failing or lease renewal is overdue. The speaker removes leased routes when their lease expires. Restore the controller and check its database, lease health and speaker state. This is retained intent and renewal evidence, not proof of router enforcement."
+      - eval_time: 61m
+        alertname: PrefixdLeasedMitigationsAtRisk
+        exp_alerts: []
+
+  # Explicit zero after withdrawal prevents an older nonzero count from firing.
+  # Unleased-only, no active routes, and never-observed inventory also stay quiet.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x4 0x20'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="a",pop="pop-a"}'
+        values: '2x2 0x1 stale'
+      - series: 'up{job="prefixd",instance="b"}'
+        values: '1x4 0x20'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="b",pop="pop-b"}'
+        values: '0x4 stale'
+      - series: 'prefixd_mitigations_active{job="prefixd",instance="b",pop="pop-b",action_type="discard"}'
+        values: '5x4 stale'
+      - series: 'up{job="prefixd",instance="c"}'
+        values: '1x4 0x20'
+      - series: 'prefixd_injection_lease_renewal_overdue{job="prefixd",instance="c"}'
+        values: '1x4 stale'
+    alert_rule_test:
+      - eval_time: 90s
+        alertname: PrefixdLeasedMitigationsAtRisk
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PrefixdLeasedMitigationsAtRisk
+        exp_alerts: []
+
+  # The process remains reachable and its event-published state stays live, but
+  # scrape-time renewal evidence is overdue. Recovery clears immediately.
+  # A renewing standby and a controller with no leased intent do not fire.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x20'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="a",pop="pop-a"}'
+        values: '2x20'
+      - series: 'prefixd_injection_lease_state{job="prefixd",instance="a",state="live"}'
+        values: '1x20'
+      - series: 'prefixd_injection_lease_renewal_overdue{job="prefixd",instance="a"}'
+        values: '0x4 1x4 0x10'
+      - series: 'up{job="prefixd",instance="b"}'
+        values: '1x20'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="b",pop="pop-b"}'
+        values: '0x20'
+      - series: 'prefixd_injection_lease_renewal_overdue{job="prefixd",instance="b"}'
+        values: '1x20'
+      - series: 'up{job="prefixd",instance="c"}'
+        values: '1x20'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="c",pop="pop-c"}'
+        values: '4x20'
+      - series: 'prefixd_injection_lease_renewal_overdue{job="prefixd",instance="c"}'
+        values: '0x20'
+      - series: 'prefixd_controller_fence_active{job="prefixd",instance="c"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 75s
+        alertname: PrefixdLeasedMitigationsAtRisk
+        exp_alerts: []
+      - eval_time: 90s
+        alertname: PrefixdLeasedMitigationsAtRisk
+        exp_alerts:
+          - exp_labels: {severity: critical, job: prefixd, instance: a, pop: pop-a}
+            exp_annotations:
+              summary: "Leased mitigations may lapse"
+              description: "prefixd on a at POP pop-a last reported 2 active leased mitigation(s), but its scrape is failing or lease renewal is overdue. The speaker removes leased routes when their lease expires. Restore the controller and check its database, lease health and speaker state. This is retained intent and renewal evidence, not proof of router enforcement."
+      - eval_time: 135s
+        alertname: PrefixdLeasedMitigationsAtRisk
+        exp_alerts:
+          - exp_labels: {severity: critical, job: prefixd, instance: a, pop: pop-a}
+            exp_annotations:
+              summary: "Leased mitigations may lapse"
+              description: "prefixd on a at POP pop-a last reported 2 active leased mitigation(s), but its scrape is failing or lease renewal is overdue. The speaker removes leased routes when their lease expires. Restore the controller and check its database, lease health and speaker state. This is retained intent and renewal evidence, not proof of router enforcement."
+      - eval_time: 150s
+        alertname: PrefixdLeasedMitigationsAtRisk
+        exp_alerts: []
+
+  # A short failed scrape recovers before the hold expires.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x4 0 1x10'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="a",pop="pop-a"}'
+        values: '2x4 stale 2x10'
+      - series: 'prefixd_injection_lease_renewal_overdue{job="prefixd",instance="a"}'
+        values: '0x4 stale 0x10'
+    alert_rule_test:
+      - eval_time: 75s
+        alertname: PrefixdLeasedMitigationsAtRisk
+        exp_alerts: []
+      - eval_time: 90s
+        alertname: PrefixdLeasedMitigationsAtRisk
+        exp_alerts: []
+
+  # Restarted and reachable, but no new complete inventory: retain the old
+  # leased count rather than treating the absent metric as empty. A successful
+  # zero inventory clears it even while renewal stays overdue.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="prefixd",instance="a"}'
+        values: '1x20'
+      - series: 'prefixd_leased_mitigations_active{job="prefixd",instance="a",pop="pop-a"}'
+        values: '2x4 stale _x3 0x10'
+      - series: 'prefixd_injection_lease_renewal_overdue{job="prefixd",instance="a"}'
+        values: '0x4 1x15'
+    alert_rule_test:
+      - eval_time: 90s
+        alertname: PrefixdLeasedMitigationsAtRisk
+        exp_alerts:
+          - exp_labels: {severity: critical, job: prefixd, instance: a, pop: pop-a}
+            exp_annotations:
+              summary: "Leased mitigations may lapse"
+              description: "prefixd on a at POP pop-a last reported 2 active leased mitigation(s), but its scrape is failing or lease renewal is overdue. The speaker removes leased routes when their lease expires. Restore the controller and check its database, lease health and speaker state. This is retained intent and renewal evidence, not proof of router enforcement."
+      - eval_time: 150s
+        alertname: PrefixdLeasedMitigationsAtRisk
+        exp_alerts: []

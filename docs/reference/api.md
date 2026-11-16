@@ -48,7 +48,9 @@ credential, and it replaces the session:
 
 - The `Cookie` header of a Bearer request is removed before the session is
   loaded, so an invalid token gets 401 even beside a valid session cookie, and
-  a stale cookie during a database outage does not fail a valid token.
+  a stale cookie cannot replace the token lookup with a session-store failure.
+  Token authentication still needs a current database read; a database outage
+  returns 503 with or without the cookie.
 - Other schemes, such as `Basic` added by a proxy in front of the dashboard,
   are not token credentials; the session applies.
 - More than one `Authorization` header with a Bearer among them is refused
@@ -269,6 +271,15 @@ Automatic detector mitigation otherwise uses a canonical host destination:
 `/32` for IPv4 and `/128` for IPv6. `icmp_flood` selects protocol 1 for IPv4 and 58 for IPv6 in
 both event metadata and mitigation intent. TCP and UDP remain 6 and 17. Normal
 prefix, port, TTL, quota and safelist checks still apply.
+
+For UDP/TCP events without destination ports, a police playbook produces a
+protocol-only match. Service `allowed_ports` never supplies missing attack
+ports. A UDP/TCP detector discard without destination ports is refused with
+`422` and guardrail reason `DestinationPortsRequired`, including a detector
+request that would extend an existing protocol-only discard. Explicit
+multi-rule matches retain their own selectors. See
+[allowed ports](configuration.md#allowed-ports) for collateral effects and
+the explicit-port intersection.
 
 **Response (202 Accepted):**
 
@@ -2778,11 +2789,29 @@ and response below illustrate an API token in credentials mode, which a session
 cookie can replace; native mTLS requires a client certificate. `none` requires
 no credentials. An ingest token gets 403.
 
+In credentials mode, an unreadable token store returns `503` with
+`credential store unavailable; retry`, without operational details. A token
+can authenticate during an isolated session-store failure only if the token
+store remains readable. A failed cookie-only session load stays unauthenticated
+and returns `500`. Public liveness at `/v1/health` remains available; unknown
+paths return `404` without loading a session.
+
+`mode` is the configured controller operation mode, `dry-run` or `enforced`.
+Lease states `renewal_failing` and `expired`, or `renewal_overdue: true`, make
+the top-level `status` `degraded` unless a successful intent read confirmed
+that no owned leased mitigation remains. A lost controller fence takes
+precedence and reports `standby`. The dashboard uses this response for one top-bar warning:
+standby before dry-run before lease failure, expiry or overdue renewal. It subtracts local receipt age from
+the approximate countdown and replaces failed or stale reads (older than
+15 seconds) with an unavailable or stale warning. Public liveness remains
+unchanged.
+
 **Illustrative response with rustbgpd:**
 
 ```json
 {
   "status": "healthy",
+  "mode": "enforced",
   "version": "<prefixd-version>",
   "pop": "iad1",
   "uptime_seconds": 86400,
@@ -2822,6 +2851,9 @@ no credentials. An ingest token gets 403.
       "lease_seconds": 60,
       "state": "live",
       "generation": {"incarnation": 1311768467294899695, "sequence": 4},
+      "remaining_seconds": 40,
+      "renewal_overdue": false,
+      "has_leased_intent": true,
       "last_renewal_at": "2026-10-18T12:00:00Z",
       "last_renewal_result": "success",
       "renew_until": "2026-10-18T12:30:00Z"
@@ -2888,6 +2920,27 @@ PostgreSQL outage the active controller loses its fence within seconds, so it
 reports `standby` with `renewal_stopped: "ttl_bound"`, not `expired`, even
 after rustbgpd has removed the routes; detect that from `renewal_stopped`
 together with `prefixd_controller_fence_active`. `generation` is held in memory and changes after a speaker restart.
+`remaining_seconds` is a local monotonic estimate: whole seconds from the last
+live observation until one configured lease has elapsed, zero for `expired`,
+and null for `none`, `not_renewing` or `standby`. It counts down across failed
+renewals; `last_renewal_at` records attempts, including failures, and must not
+be used to reset a countdown. Startup adoption knows that a generation was
+live but not its remaining remote duration, and RPC delay also limits this
+estimate. It proves neither route installation nor router forwarding.
+`renewal_overdue` is true for a held `live` or `renewal_failing` lease when two
+renewal intervals have passed since the last live observation, or renewal
+stopped at the TTL bound. It is sampled when health is read, so a stalled
+renewal task cannot leave the dashboard silently showing its old live state.
+This warning does not change the lease state or prove remote expiry. A
+successful renewal or leased add refreshes the observation.
+`has_leased_intent` describes local desired leased intent, not remote routes:
+null before observation, true after a committed owned leased write or a
+successful inventory containing owned leased intent, and false after a
+successful empty inventory with no intervening leased write. A failed read
+keeps the previous value; a leased write overlapping an older empty read keeps
+true. Only explicit false suppresses lease-specific health degradation and
+banner warnings, so a historical expired generation does not alarm forever on
+an idle controller. Unknown intent does not suppress a lease warning.
 `last_renewal_result` is `success`, `not_live` or `error`. `renew_until` is the
 latest `expires_at` among the leased routes this owner holds: the read at the
 start of each reconciliation pass (on a timer in standby) sets it, and every
@@ -3754,6 +3807,24 @@ current state (`none`, `live`, `renewal_failing`, `expired`, `not_renewing`
 or `standby`) and `0` for
 the others, matching health detail's `speaker.lease.state` after each
 renewal tick and state change. Both series exist with zero values in every deployment.
+
+`prefixd_leased_mitigations_active{pop}` counts active enforced FlowSpec and
+blackhole intent recorded under this controller's injection owner in the last
+complete inventory. It is absent before the first successful read, explicitly
+zero after a successful empty read, and retained after a failed read. Pending,
+dry-run, unleased and foreign-owner rows are excluded. It counts database
+intent, which can include overdue rows awaiting cleanup, not installed routes.
+
+`prefixd_injection_lease_renewal_overdue` is refreshed on every metrics scrape
+without database or speaker calls. It is `1` when the keeper has no generation,
+renewal is disabled or stopped at its TTL bound, or two configured renewal
+intervals elapsed since the last successful add, renewal or live-lease adoption.
+Elapsed time uses the monotonic clock, including when the renewal task is
+stalled. It is `0` when no lease keeper is configured. A live-lease adoption
+proves the generation exists but does not measure its remote deadline; this
+metric reports local renewal risk, not remaining speaker lease time. The
+[leased outage alert](../how-to/grafana.md#availability-alerts) combines it with
+leased intent and scrape health, preserving instance and POP labels.
 
 Series labelled `action_type` (`prefixd_mitigations_active`,
 `prefixd_mitigations_created_total`, `prefixd_mitigations_expired_total` and

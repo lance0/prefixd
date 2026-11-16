@@ -778,9 +778,8 @@ async fn bearer_replaces_the_session_and_other_schemes_fall_through() {
     assert_eq!(status, StatusCode::OK);
 }
 
-/// A browser keeps a stale session cookie while PostgreSQL is down. A token
-/// request strips it before the session layer, so the token authenticates and
-/// the cookie is left alone; without the Bearer header the same cookie fails.
+/// A token authenticates while only the session store is unavailable. This
+/// mock token store remains readable; a total database outage is tested below.
 #[tokio::test]
 async fn bearer_with_a_stale_cookie_authenticates_during_a_session_store_outage() {
     let repo = Arc::new(MockRepository::new());
@@ -823,7 +822,43 @@ async fn bearer_with_a_stale_cookie_authenticates_during_a_session_store_outage(
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
-/// A storage error during the token lookup is 503, not 401.
+/// Unknown paths never need a session, even when its store is unavailable.
+#[tokio::test]
+async fn unknown_paths_ignore_cookies_during_a_session_store_outage() {
+    for mode in [AuthMode::Credentials, AuthMode::None, AuthMode::Mtls] {
+        let repo = Arc::new(MockRepository::new());
+        let state = state(mode, "test-pop", repo.clone());
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        pool.close().await;
+        let auth_layer = prefixd::auth::create_auth_layer(pool, repo, mode, false).await;
+        let apps = [
+            prefixd::api::create_router(state.clone(), auth_layer),
+            prefixd::api::create_test_router(state),
+        ];
+        let cookie = format!("id={}", tower_sessions::session::Id::default());
+        for app in apps {
+            for (method, path) in [("GET", "/missing"), ("POST", "/v1/missing")] {
+                for headers in [vec![], vec![("cookie", cookie.as_str())]] {
+                    let (status, response_headers, body) =
+                        send(&app, method, path, &headers, None).await;
+                    assert_eq!(
+                        status,
+                        StatusCode::NOT_FOUND,
+                        "{mode:?} {method} {path}: {body}"
+                    );
+                    assert!(body.is_empty(), "{body}");
+                    assert!(!response_headers.contains_key("set-cookie"));
+                    assert_eq!(response_headers["cache-control"], "no-store");
+                }
+            }
+        }
+    }
+}
+
+/// A token lookup failure denies health detail as well as other protected
+/// routes. Cookie stripping must not turn that 503 into a session-store 500.
 #[tokio::test]
 async fn a_token_store_outage_is_503_not_401() {
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -832,38 +867,54 @@ async fn a_token_store_outage_is_503_not_401() {
     pool.close().await;
     let mut settings = common::test_settings();
     settings.http.auth.mode = AuthMode::Credentials;
+    let repo: Arc<dyn RepositoryTrait> = Arc::new(prefixd::db::Repository::new(pool.clone()));
     let state = AppState::new(
         settings,
         common::test_inventory(),
         common::test_playbooks(),
-        Arc::new(prefixd::db::Repository::new(pool)),
+        repo.clone(),
         Arc::new(MockAnnouncer::new()),
         ".".into(),
     )
     .unwrap();
-    let app = prefixd::api::create_test_router(state);
+    let auth_layer =
+        prefixd::auth::create_auth_layer(pool, repo, AuthMode::Credentials, false).await;
+    let app = prefixd::api::create_router(state, auth_layer);
     let (token, _) = prefixd::auth::token::generate().unwrap();
-    let (status, _, body) = send(
-        &app,
-        "GET",
-        "/v1/mitigations",
-        &[("authorization", &bearer(&token))],
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert!(body.contains("credential store unavailable"), "{body}");
-    assert!(!body.contains(&token[8..]));
-    // A malformed value never reaches storage, so it is 401 even now.
-    let (status, _, _) = send(
-        &app,
-        "GET",
-        "/v1/mitigations",
-        &[("authorization", "Bearer not-a-token")],
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let authorization = bearer(&token);
+    let cookie = format!("id={}", tower_sessions::session::Id::default());
+    for path in ["/v1/health/detail", "/v1/mitigations"] {
+        for with_cookie in [false, true] {
+            let mut headers = vec![("authorization", authorization.as_str())];
+            if with_cookie {
+                headers.push(("cookie", cookie.as_str()));
+            }
+            let (status, response_headers, body) = send(&app, "GET", path, &headers, None).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}: {body}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&body).unwrap(),
+                json!({"error": "credential store unavailable; retry"}),
+                "{path} must not expose operational detail"
+            );
+            assert!(!body.contains(&token[8..]));
+            assert!(!response_headers.contains_key("set-cookie"));
+
+            // A malformed value never reaches storage, even beside a cookie.
+            headers[0] = ("authorization", "Bearer not-a-token");
+            let (status, _, _) = send(&app, "GET", path, &headers, None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        }
+        let (status, _, body) = send(&app, "GET", path, &[("cookie", &cookie)], None).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
+        assert!(body.is_empty(), "{path} leaked {body}");
+        let (status, _, _) = send(&app, "GET", path, &[], None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+    }
+    let (status, _, body) = send(&app, "GET", "/v1/health", &[("cookie", &cookie)], None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let health: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(health["status"], "ok");
+    assert!(health.get("database").is_none());
 }
 
 /// `none` mode is anonymous Admin and `mtls` mode is Admin for a verified
