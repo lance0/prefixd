@@ -46,7 +46,7 @@ send the complete configuration as JSON (the API does not accept YAML):
 python3 -c 'import json,sys,yaml; json.dump(yaml.safe_load(sys.stdin), sys.stdout)' \
   < configs/correlation.yaml \
 | curl -X PUT https://prefixd.example.com/v1/config/correlation \
-    -H 'Authorization: Bearer $PREFIXD_API_TOKEN' \
+    -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
     -H 'Content-Type: application/json' \
     --data-binary @-
 ```
@@ -68,7 +68,7 @@ Corroborators POST to a different endpoint from primary events:
 
 ```bash
 curl -X POST https://prefixd.example.com/v1/signals/corroborator \
-     -H 'Authorization: Bearer $PREFIXD_API_TOKEN' \
+     -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
      -H 'Content-Type: application/json' \
      -d '{
            "source": "router-cpu",

@@ -82,8 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- `prefixdctl --help` no longer prints the value of `PREFIXD_API_TOKEN`; it
-  names the variable only, as it already did for `PREFIXD_SESSION_COOKIE`.
+- `prefixdctl --help`, `-h` and `help` no longer print the values of
+  `PREFIXD_API_TOKEN` or `PREFIXD_API`, whose URL userinfo is sent as Basic
+  auth. They name the variables only, as they already did for
+  `PREFIXD_SESSION_COOKIE`.
 
 ### Added
 

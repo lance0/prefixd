@@ -43,11 +43,14 @@ export PREFIXD_API_TOKEN=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env)
 ### Command-Line Options
 
 ```bash
-prefixdctl -a http://localhost -t $TOKEN <command>
+prefixdctl -a http://localhost <command>
 
 # Direct daemon access (without nginx)
-prefixdctl -a http://127.0.0.1:8080 -t $TOKEN <command>
+prefixdctl -a http://127.0.0.1:8080 <command>
 ```
+
+Pass the token through `PREFIXD_API_TOKEN` rather than `--token`: other local
+users can read command-line arguments through `ps` and `/proc`.
 
 | Option | Env Var | Description |
 |--------|---------|-------------|
