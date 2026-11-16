@@ -91,14 +91,21 @@ fn write_directory(directory: &Path, prefixd: &str) {
     .unwrap();
 }
 
-fn check(directory: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_prefixd"))
+fn check_command(directory: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_prefixd"));
+    command
         .arg("--check")
         .arg("--config")
         .arg(directory)
         .env_remove("DATABASE_URL")
-        .output()
-        .unwrap()
+        // Exercise the unchanged shipped bearer config with a child-only token;
+        // never depend on or mutate the test runner's credential environment.
+        .env("PREFIXD_API_TOKEN", "config-check-fixture-token");
+    command
+}
+
+fn check(directory: &Path) -> Output {
+    check_command(directory).output().unwrap()
 }
 
 fn stderr_lines(output: &Output) -> Vec<String> {
@@ -166,6 +173,24 @@ fn check_accepts_the_shipped_configuration_and_names_skipped_checks() {
     }
     assert!(stdout.contains("skipped: playbook checks"), "{stdout}");
     assert!(stderr.is_empty(), "{stderr}");
+}
+
+/// The shipped bearer mode must still refuse startup without its token.
+#[test]
+fn check_rejects_the_shipped_configuration_without_a_token() {
+    let directory = tempfile::tempdir().unwrap();
+    write_directory(directory.path(), SHIPPED);
+    let output = check_command(directory.path())
+        .env_remove("PREFIXD_API_TOKEN")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("auth.mode=bearer but PREFIXD_API_TOKEN is not set"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// An unknown key is reported and the check still succeeds: this release warns,
@@ -271,10 +296,7 @@ fn check_requires_a_database_url_like_startup() {
         "{:?}",
         stderr_lines(&output)
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_prefixd"))
-        .arg("--check")
-        .arg("--config")
-        .arg(directory.path())
+    let output = check_command(directory.path())
         .env(
             "DATABASE_URL",
             "postgres://prefixd:secret@192.0.2.99:5432/prefixd",

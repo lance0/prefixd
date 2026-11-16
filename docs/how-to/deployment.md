@@ -1043,8 +1043,9 @@ The public response reports the configured authentication mode.
 curl http://localhost/v1/health
 # Example: {"status":"ok","version":"<prefixd-version>","auth_mode":"bearer"}
 
-# Full health with the Compose stack's bearer token from .env
-TOKEN=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env)
+# Full health with the running controller's resolved bearer token
+# For the GoBGP profile, use prefixd-gobgp instead.
+TOKEN=$(docker compose exec -T prefixd-rustbgpd printenv PREFIXD_API_TOKEN)
 curl -H "Authorization: Bearer $TOKEN" http://localhost/v1/health/detail
 
 # Credentials mode instead uses cookies saved by session login

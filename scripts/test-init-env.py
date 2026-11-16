@@ -61,6 +61,24 @@ class InitializeEnv(unittest.TestCase):
                     r"^# Keep this\nPREFIXD_API_TOKEN=[0-9a-f]{64}\nOTHER=keep\n$",
                 )
 
+    def test_commented_empty_values_are_initialized(self):
+        for value in (" # generate a token", "\t# generate a token", "   ", '  "" # empty'):
+            with self.subTest(value=value):
+                self.path.write_text(f"PREFIXD_API_TOKEN={value}\nOTHER=keep\n")
+                self.assertTrue(INIT.initialize(self.path))
+                self.assertRegex(
+                    self.path.read_text(), r"^PREFIXD_API_TOKEN=[0-9a-f]{64}\nOTHER=keep\n$"
+                )
+
+    def test_literal_hash_tokens_are_not_rotated(self):
+        for value in ("#literal", "#literal # comment", "'#literal'", ' "#literal" # comment'):
+            with self.subTest(value=value):
+                original = f"PREFIXD_API_TOKEN={value}\n"
+                self.path.write_text(original)
+                with patch.object(INIT.secrets, "token_hex", side_effect=AssertionError("rotated")):
+                    self.assertFalse(INIT.initialize(self.path))
+                self.assertEqual(self.path.read_text(), original)
+
     def test_append_preserves_variables_without_final_newline(self):
         self.path.write_bytes(b"OTHER=keep")
         INIT.initialize(self.path)

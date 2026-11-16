@@ -16,8 +16,10 @@ which already sets `PREFIXD_API` and the token. A deployment switched to
 [authentication setup](deployment.md#authentication-setup).
 
 ```bash
-# Host shell examples below read the token Compose uses
-export PREFIXD_API_TOKEN=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env)
+# Read the running controller's resolved token, including Compose quoting/overrides.
+# For the GoBGP profile, use prefixd-gobgp instead.
+PREFIXD_API_TOKEN=$(docker compose exec -T prefixd-rustbgpd printenv PREFIXD_API_TOKEN)
+export PREFIXD_API_TOKEN
 ```
 
 ## Quick Diagnostics

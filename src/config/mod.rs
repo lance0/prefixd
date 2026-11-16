@@ -952,8 +952,7 @@ mod tests {
     #[test]
     fn check_reports_all_errors_and_unknown_keys() {
         let directory = fixture();
-        let mut settings: Settings = parse_yaml(SHIPPED).unwrap();
-        settings.correlation.confidence_threshold = 0.5;
+        let mut settings = fixture_settings();
         settings.quotas.max_active_prefix_per_customer = 0;
         settings.blackhole.lease_seconds = 2;
         let mut document = serde_saphyr::to_string(&settings).unwrap();
@@ -1047,7 +1046,7 @@ mod tests {
     #[test]
     fn check_runs_settings_checks_when_another_file_fails() {
         let directory = fixture();
-        let mut settings: Settings = parse_yaml(SHIPPED).unwrap();
+        let mut settings = fixture_settings();
         settings.http.auth.mode = AuthMode::Bearer;
         settings.http.auth.bearer_token_env = Some("PREFIXD_TEST_UNSET_API_TOKEN".into());
         std::fs::write(
@@ -1183,10 +1182,18 @@ mod tests {
         assert!(config.preflight_errors(directory.path()).is_empty());
     }
 
+    fn fixture_settings() -> Settings {
+        let mut settings: Settings = parse_yaml(SHIPPED).unwrap();
+        // Configuration checks own their auth setup, independently of Compose's
+        // bearer token and the environment of the process running these tests.
+        settings.http.auth.mode = AuthMode::Credentials;
+        settings.correlation.confidence_threshold = 0.5;
+        settings
+    }
+
     fn fixture() -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
-        let mut settings: Settings = crate::config::parse_yaml(SHIPPED).unwrap();
-        settings.correlation.confidence_threshold = 0.5;
+        let settings = fixture_settings();
         std::fs::write(
             directory.path().join("prefixd.yaml"),
             serde_saphyr::to_string(&settings).unwrap(),

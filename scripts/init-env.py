@@ -8,9 +8,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?PREFIXD_API_TOKEN\s*=\s*(.*)$")
+# Keep whitespace after `=`: `= # comment` is empty, while `=#literal` is a token.
+ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?PREFIXD_API_TOKEN\s*=(.*)$")
 EMPTY_OR_PLACEHOLDER = re.compile(
-    r"^(?:|your-secret-token-here|\"\"|''|\"your-secret-token-here\"|'your-secret-token-here')"
+    r"^\s*(?:|your-secret-token-here|\"\"|''|\"your-secret-token-here\"|'your-secret-token-here')"
     r"(?:\s+#.*|\s*)$"
 )
 

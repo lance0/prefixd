@@ -5955,6 +5955,8 @@ mod wedged_speaker_tests {
     fn settings(mode: OperationMode) -> Settings {
         let mut settings: Settings =
             crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+        // This fixture tests speaker deadlines, not authentication.
+        settings.http.auth.mode = crate::config::AuthMode::None;
         settings.bgp.mode = BgpMode::Mock;
         settings.bgp.rustbgpd = None;
         settings.mode = mode;
