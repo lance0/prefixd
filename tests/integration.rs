@@ -165,6 +165,9 @@ async fn test_ambiguous_withdrawals_retry_without_reannouncement_or_consuming_ne
                 .unwrap();
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(json["failed"], 1);
+        } else if path_kind == "detector" {
+            // The detector retries a 503; its intent is pending.
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         } else {
             assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         }
@@ -8583,12 +8586,13 @@ async fn test_alertmanager_rejects_corroborating_source_ban() {
         corroborating_rejection("alertmanager")
     );
 
-    // Resolution still routes to withdrawal rather than the ban guard.
+    // Resolution still routes to withdrawal rather than the ban guard, and
+    // reports that there was nothing to withdraw.
     let resolved = make_alert("resolved", "203.0.113.30", "udp_flood", "critical", "am-1");
     let (status, json) = post_alertmanager(&app, &make_alertmanager_payload(&[resolved])).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["failed"], 0, "{json}");
-    assert_eq!(json["results"][0]["status"], "withdrawn");
+    assert_eq!(json["results"][0]["status"], "no_active_mitigation");
 
     let events = repo
         .list_events(&prefixd::db::ListParams::default())

@@ -34,8 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that victim on the controller's POP that the bound source created, and
   answers `no_active_mitigation` when there are none; `event_id` no longer
   selects them, and the statuses `not_found` and `ignored_no_event_id` are
-  gone. An Alertmanager `resolved` alert withdraws every live mitigation
-  `alertmanager` created for that victim.
+  gone. An unban with a vector other than `unknown` withdraws only that
+  vector's mitigations. With correlation, only the source whose event met the
+  threshold withdraws the mitigation by unban. A failed or ambiguous delete
+  answers `503` with every intent pending; Alertmanager and webhook adapters
+  report `withdrawn` or `no_active_mitigation` per unban and answer `503` when
+  one failed, and `withdrawn_noop` is gone.
 - **Detector audit actors name the credential.** Detector-created mitigations,
   their refusals and detector unban withdrawals record `token:<name>` for an
   ingest token and `webhook:<adapter>` for an HMAC adapter, with the source in
@@ -49,15 +53,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fields.source_id`; and an HMAC `auth.secret_env` must name a variable in
   the `PREFIXD_WEBHOOK_` namespace whose value is at least 32 bytes. Rename
   existing secret variables, for example `RADWARE_WEBHOOK_SECRET` to
-  `PREFIXD_WEBHOOK_RADWARE_SECRET`. `blackhole.detector_sources` and
+  `PREFIXD_WEBHOOK_RADWARE_SECRET`. Adapter names must match
+  `^[a-z0-9][a-z0-9-]{0,63}$`, and a disabled adapter skips these refusals
+  until enabled. An adapter named in either allowlist answers `400` to a
+  payload in which any ban has no event ID. `prefixd --check` reads adapter
+  secrets from its environment, so run it with the controller's.
+  `blackhole.detector_sources` and
   `guardrails.detector_prefix_sources` entries must match
   `^[a-z0-9][a-z0-9_-]{0,63}$`.
+- This release adds migration 024, a nullable `detector_source` column on
+  `withdrawal_requests` that keeps a detector unban's source for its
+  completion audit and metric. It rewrites no row and adds no rollback
+  constraint of its own.
 - **Reinstall the FastNetMon script** on every FastNetMon host. It posts ban
   and unban events with an ingest token bound to `fastnetmon`, read from
   `PREFIXD_TOKEN_FILE` or `PREFIXD_TOKEN` and passed to curl on stdin. It no
   longer reads `PREFIXD_OPERATOR`, `UNBAN_QUERY_*` or `WITHDRAW_*`;
   `BAN_POST_ATTEMPTS` and `BAN_POST_DELAY_SECONDS` are renamed
-  `EVENT_POST_ATTEMPTS` and `EVENT_POST_DELAY_SECONDS`. See
+  `EVENT_POST_ATTEMPTS` and `EVENT_POST_DELAY_SECONDS`. It refuses to run
+  without a token unless `PREFIXD_AUTH_MODE=none`. See
   [FastNetMon](docs/how-to/detectors/fastnetmon.md).
 - This release adds migration 022, the `api_tokens` table and a `CHECK` on
   `operators.username` (`^[A-Za-z0-9_-]{1,64}$`). The migration refuses to apply,

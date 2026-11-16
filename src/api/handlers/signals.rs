@@ -272,7 +272,7 @@ pub struct AlertmanagerAlertResult {
     pub announcement_outcome: Option<AnnouncementOutcome>,
     /// Index in the alerts array
     pub index: usize,
-    /// Processing status (processed, duplicate, withdrawn, error)
+    /// Processing status: a ban's status, `duplicate`, an unban's `withdrawn` or `no_active_mitigation`, or `error`
     pub status: String,
     /// Event ID created for this alert (if any)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -373,6 +373,7 @@ fn parse_optional_i64(annotations: &HashMap<String, String>, key: &str) -> Optio
     request_body = AlertmanagerWebhookPayload,
     responses(
         (status = 200, description = "Alerts processed", body = AlertmanagerWebhookResponse),
+        (status = 503, description = "An unban failed on the controller's side; the per-alert results say which, and a resend is safe", body = AlertmanagerWebhookResponse),
         (status = 400, description = "Malformed payload"),
         (status = 401, description = "Authentication required"),
         (status = 403, description = "The credential is not bound to `alertmanager`"),
@@ -419,9 +420,13 @@ async fn ingest_alertmanager_inner(
     let mut results = Vec::with_capacity(payload.alerts.len());
     let mut processed = 0u32;
     let mut failed = 0u32;
+    // An unban that failed on the controller's side is answered 503 so
+    // Alertmanager resends; a resent ban is a duplicate and a resent unban
+    // reuses the pending withdrawal intent.
+    let mut retry = false;
 
     for (index, alert) in payload.alerts.into_iter().enumerate() {
-        match process_alertmanager_alert(&state, &grant, &alert, index).await {
+        match process_alertmanager_alert(&state, &grant, &alert, index, &mut retry).await {
             Ok(result) => {
                 processed += 1;
                 results.push(result);
@@ -441,7 +446,11 @@ async fn ingest_alertmanager_inner(
     );
 
     Ok((
-        StatusCode::OK,
+        if retry {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::OK
+        },
         Json(AlertmanagerWebhookResponse {
             processed,
             failed,
@@ -457,6 +466,7 @@ async fn process_alertmanager_alert(
     grant: &SourceGrant,
     alert: &AlertmanagerAlert,
     index: usize,
+    retry: &mut bool,
 ) -> Result<AlertmanagerAlertResult, AlertmanagerAlertResult> {
     // Extract vector
     let vector_str = match extract_vector(&alert.labels) {
@@ -569,22 +579,26 @@ async fn process_alertmanager_alert(
     // Delegate to the existing event ingestion pipeline
     match input.action.as_str() {
         "unban" => match handle_unban(state.clone(), grant, input).await {
+            // `withdrawn` or `no_active_mitigation`, as the unban answered.
             Ok((_status, Json(resp))) => Ok(AlertmanagerAlertResult {
                 announcement_outcome: resp.announcement_outcome,
                 index,
-                status: "withdrawn".to_string(),
+                status: resp.status,
                 event_id: Some(resp.event_id),
                 mitigation_id: resp.mitigation_id,
                 error: None,
             }),
-            Err(AppError(e)) => Ok(AlertmanagerAlertResult {
-                announcement_outcome: None,
-                index,
-                status: "withdrawn_noop".to_string(),
-                event_id: None,
-                mitigation_id: None,
-                error: Some(e.to_string()),
-            }),
+            Err(AppError(e)) => {
+                *retry |= e.status_code().is_server_error();
+                Err(AlertmanagerAlertResult {
+                    announcement_outcome: None,
+                    index,
+                    status: "error".to_string(),
+                    event_id: None,
+                    mitigation_id: None,
+                    error: Some(e.to_string()),
+                })
+            }
         },
         _ => match handle_ban(state.clone(), grant, input).await {
             Ok((_status, Json(resp))) => Ok(AlertmanagerAlertResult {
@@ -819,6 +833,8 @@ fn classify_fastnetmon(
         (status = 202, description = "Event accepted", body = EventResponse),
         (status = 400, description = "Malformed payload"),
         (status = 401, description = "Authentication required"),
+        (status = 403, description = "The credential is not bound to `fastnetmon` (host alerts) or `fastnetmon-hostgroup` (any other `alert_scope`)"),
+        (status = 503, description = "An unban's delete failed or is ambiguous; the intent is pending and a resend is safe"),
     )
 )]
 pub async fn ingest_fastnetmon(
@@ -944,7 +960,7 @@ pub struct WebhookEventResult {
     pub announcement_outcome: Option<AnnouncementOutcome>,
     /// Position in the payload (0 for single-event adapters, 0..N for root_path).
     pub index: usize,
-    /// Processing status (processed, duplicate, withdrawn, withdrawn_noop, error).
+    /// Processing status: a ban's status, `duplicate`, an unban's `withdrawn` or `no_active_mitigation`, or `error`.
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_id: Option<Uuid>,
@@ -971,6 +987,7 @@ pub struct WebhookResponse {
     request_body(content = serde_json::Value, description = "Arbitrary JSON payload mapped via the adapter's JSONPath fields"),
     responses(
         (status = 200, description = "Events processed", body = WebhookResponse),
+        (status = 503, description = "An unban failed on the controller's side; the per-event results say which, and a resend is safe", body = WebhookResponse),
         (status = 400, description = "Malformed payload or no mappable events"),
         (status = 401, description = "HMAC/bearer verification failed"),
         (status = 403, description = "A bearer credential is not bound to the adapter name"),
@@ -1069,9 +1086,41 @@ async fn ingest_webhook_inner(
         )));
     }
 
+    // An adapter on an allowlist reaches blackholes or prefix rules, and a
+    // signed body carries no nonce: only its event ID makes a replay a
+    // duplicate. Refuse the payload before admission if any ban in it has no
+    // ID, whatever made `fields.source_id` miss (absent, null, wrong type or
+    // ambiguous).
+    if state
+        .settings
+        .blackhole
+        .detector_sources
+        .contains(&adapter.name)
+        || state
+            .settings
+            .guardrails
+            .detector_prefix_sources
+            .contains(&adapter.name)
+    {
+        let unidentified = mapped.iter().position(|event| {
+            event.as_ref().is_ok_and(|input| {
+                input.action != "unban" && input.event_id.as_deref().is_none_or(str::is_empty)
+            })
+        });
+        if let Some(index) = unidentified {
+            return Err(AppError(PrefixdError::InvalidRequest(format!(
+                "event {index}: adapter '{}' is on a detector allowlist, so every ban needs fields.source_id to resolve to an ID",
+                adapter.name
+            ))));
+        }
+    }
+
     let mut results = Vec::with_capacity(mapped.len());
     let mut processed = 0u32;
     let mut failed = 0u32;
+    // An unban that failed on the controller's side is answered 503 so the
+    // sender resends; see the Alertmanager adapter.
+    let mut retry = false;
 
     for (index, mapped_event) in mapped.into_iter().enumerate() {
         match mapped_event {
@@ -1093,18 +1142,19 @@ async fn ingest_webhook_inner(
                         results.push(WebhookEventResult {
                             announcement_outcome: resp.announcement_outcome,
                             index,
-                            status: "withdrawn".into(),
+                            status: resp.status,
                             event_id: Some(resp.event_id),
                             mitigation_id: resp.mitigation_id,
                             error: None,
                         });
                     }
                     Err(AppError(e)) => {
-                        processed += 1;
+                        failed += 1;
+                        retry |= e.status_code().is_server_error();
                         results.push(WebhookEventResult {
                             announcement_outcome: None,
                             index,
-                            status: "withdrawn_noop".into(),
+                            status: "error".into(),
                             event_id: None,
                             mitigation_id: None,
                             error: Some(e.to_string()),
@@ -1159,7 +1209,11 @@ async fn ingest_webhook_inner(
     );
 
     Ok((
-        StatusCode::OK,
+        if retry {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::OK
+        },
         Json(WebhookResponse {
             processed,
             failed,

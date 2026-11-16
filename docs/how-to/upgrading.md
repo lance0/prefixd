@@ -128,9 +128,14 @@ What changes:
   there are none. The unban's `event_id` no longer selects anything, and the
   statuses `not_found` and `ignored_no_event_id` are gone. Another source's
   mitigation for the same victim and manual mitigations are never touched. An
-  Alertmanager `resolved` alert therefore withdraws every live mitigation
-  `alertmanager` created for that victim, not only the one its fingerprint
-  created.
+  unban with a vector other than `unknown` withdraws only that vector's
+  mitigations; `unknown`, which the FastNetMon script sends, withdraws them
+  all. With correlation, only the source whose event met the threshold
+  withdraws the mitigation by unban. If any delete fails or its outcome is
+  unknown, the unban gets `503` with every intent recorded and pending; a
+  resend reuses them. Alertmanager and webhook adapters report each unban as
+  `withdrawn` or `no_active_mitigation` and answer `503` when one failed, so
+  the sender resends; `withdrawn_noop` is gone.
 - **Detector actor IDs.** Audit rows for detector-created mitigations, their
   refusals and detector unban withdrawals name the credential: `token:<name>`
   for an ingest token and `webhook:<adapter>` for an HMAC adapter, with the
@@ -148,10 +153,20 @@ What changes:
     or shorter than 32 bytes. Rename each secret variable, for example
     `RADWARE_WEBHOOK_SECRET` to `PREFIXD_WEBHOOK_RADWARE_SECRET`, in the
     controller environment and in `correlation.yaml` together.
+- **Adapter names and replays.** A webhook adapter's name must match
+  `^[a-z0-9][a-z0-9-]{0,63}$`, since it is the adapter's source. An adapter
+  named in either allowlist refuses, with `400`, a payload in which any ban
+  has no event ID, so a replayed signed ban cannot recreate a mitigation. A
+  disabled adapter skips the credential refusals until it is enabled.
 - **Allowlist names.** `blackhole.detector_sources` and
   `guardrails.detector_prefix_sources` entries must match the token source
   pattern `^[a-z0-9][a-z0-9_-]{0,63}$`, so every allowlisted source is one a
   credential can carry.
+- **Migration 024** adds a nullable `detector_source` column to
+  `withdrawal_requests`, so a detector unban's withdrawal keeps its source for
+  the audit and the `detector_unban` metric even when reconciliation completes
+  it. It rewrites no row, and `withdrawal_requests` is small, so its lock is
+  brief. Like 023, it adds no rollback constraint of its own.
 - **The bundled FastNetMon script** is an ingest client. Reinstall it on every
   FastNetMon host; see [FastNetMon](detectors/fastnetmon.md). It reads its
   token from `PREFIXD_TOKEN_FILE` (or `PREFIXD_TOKEN`), passes it to curl on
@@ -161,7 +176,10 @@ What changes:
   `BAN_POST_DELAY_SECONDS` are now `EVENT_POST_ATTEMPTS` and
   `EVENT_POST_DELAY_SECONDS`, which cover ban and unban. New:
   `EVENT_CONNECT_TIMEOUT_SECONDS` (5) and `EVENT_MAX_TIME_SECONDS` (15) bound
-  each attempt. It needs only bash and curl.
+  each attempt. It needs only bash and curl. It refuses to run without a
+  token unless `PREFIXD_AUTH_MODE=none` says the controller has no
+  authentication, and a retried ban that meets its own event ID as `409` was
+  delivered by an earlier attempt.
 
 ### Operator usernames
 
@@ -268,9 +286,13 @@ event, pending operation or audit row.
      `bearer`, map `fields.source_id` on allowlisted HMAC adapters, and rename
      each `secret_env` into the `PREFIXD_WEBHOOK_` namespace with a value of
      at least 32 bytes.
-   - Run `prefixd --check` with the new release's binary or image, for
-     example `docker run --rm -v /etc/prefixd:/etc/prefixd:ro <new image>
-     --check --config /etc/prefixd` (the image's entrypoint is `prefixd`). The old binary accepts a
+   - Run `prefixd --check` with the new release's binary or image and the
+     controller's environment, for example `docker run --rm --env-file
+     /etc/prefixd/prefixd.env -v /etc/prefixd:/etc/prefixd:ro <new image>
+     --check --config /etc/prefixd` (the image's entrypoint is `prefixd`).
+     The check reads webhook adapter secrets and other `*_env` values from
+     that environment, and refuses an HMAC adapter whose secret it cannot
+     see. The old binary accepts a
      configuration the new one refuses, such as `mode: bearer`. With leased
      FlowSpec, rustbgpd withdraws leased rules within one lease while no
      controller runs, so a refused configuration must not be discovered by a

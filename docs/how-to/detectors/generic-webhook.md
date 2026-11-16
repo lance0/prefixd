@@ -180,6 +180,8 @@ The adapter uses RFC 9535 JSONPath (`serde_json_path`):
 - **Constant-time comparison.** Signature verification uses `subtle::ConstantTimeEq` to prevent timing oracles.
 - **Secrets never leave the environment.** The YAML carries the env-var name, not the value. `GET /v1/config/correlation` returns the env-var name only.
 - **Path validation.** The adapter name is validated against `[a-z0-9-]{1,64}` on every request, so path traversal and injection are not possible via the URL.
+- **Names are sources.** The adapter name must match `^[a-z0-9][a-z0-9-]{0,63}$`, so a token can be bound to it.
+- **Unbans report their outcome.** An unban result is `withdrawn` or `no_active_mitigation`. One that failed on the controller's side is an `error` counted in `failed`, and the response is `503` so the sender resends; the withdrawal intent is pending, and a resend reuses it.
 - **No unauthenticated adapters.** `auth.type: none` would let anyone who reaches the controller claim the adapter's source, so it is refused unless `http.auth.mode` is `none`.
 
 ## Troubleshooting

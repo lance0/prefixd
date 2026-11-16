@@ -112,6 +112,9 @@ if [[ "$outcome" == refused ]]; then printf '\n000'; exit 7; fi
 code=${{outcome%%|*}}
 body=${{outcome#*|}}
 if [[ "$body" == "$outcome" ]]; then body='{{"status":"x"}}'; fi
+# EVENTID in a scripted body stands for the event_id this call sent.
+eid=$(printf '%s\n' "$@" | grep -o '"event_id":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+body=${{body//EVENTID/$eid}}
 printf '%s\n%s' "$body" "$code"
 "#,
         calls = calls.display(),
@@ -791,16 +794,50 @@ fn the_token_file_wins_and_a_bad_token_sends_nothing() {
         assert!(!run.log.contains("elsewhere"), "{name}: {}", run.log);
     }
 
-    // Auth mode none: no token, no header.
+    // No token at all stops the script before FastNetMon's one call is
+    // spent on a 401, unless the controller is explicitly in auth mode none,
+    // which sends no header.
+    let run = run_script(
+        "ban",
+        "203.0.113.10",
+        "",
+        &["202"],
+        &[("PREFIXD_TOKEN", "")],
+    );
+    assert!(!run.ok);
+    assert!(run.calls.is_empty(), "sent a request without a token");
+    assert!(run.log.contains("ERROR: no token"), "{}", run.log);
     let run = run_script(
         "ban",
         "203.0.113.10",
         "",
         &[&created("accepted")],
-        &[("PREFIXD_TOKEN", "")],
+        &[("PREFIXD_TOKEN", ""), ("PREFIXD_AUTH_MODE", "none")],
     );
     assert!(run.ok, "{}", run.log);
     assert_eq!(run.calls[0].config, "");
+}
+
+/// A retried ban whose earlier attempt reached prefixd meets its own event ID
+/// as a 409: it was delivered, so the script exits 0. A 409 on the first
+/// attempt, or for another event ID, stays an error.
+#[test]
+fn a_retried_ban_that_meets_its_own_event_id_was_delivered() {
+    let own = r#"409|{"error":"duplicate event from fastnetmon: EVENTID"}"#;
+    let run = run_script("ban", "203.0.113.10", "", &["refused", own], &[]);
+    assert!(run.ok, "{}", run.log);
+    assert_eq!(run.calls.len(), 2);
+    assert!(
+        run.log
+            .contains("NO_MITIGATION (409, status=delivered_by_earlier_attempt)"),
+        "{}",
+        run.log
+    );
+    let run = run_script("ban", "203.0.113.10", "", &[own], &[]);
+    assert!(!run.ok, "a first-attempt 409 is not a retry");
+    let other = r#"409|{"error":"duplicate event from fastnetmon: someone-else"}"#;
+    let run = run_script("ban", "203.0.113.10", "", &["503", other], &[]);
+    assert!(!run.ok, "another event's 409 is not this ban");
 }
 
 /// The script's ban and unban payloads pair on a controller: the unban, sent

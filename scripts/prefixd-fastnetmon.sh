@@ -32,6 +32,8 @@ fi
 PREFIXD_API="${PREFIXD_API:-http://localhost:8080}"
 PREFIXD_TOKEN_FILE="${PREFIXD_TOKEN_FILE:-}"
 PREFIXD_TOKEN="${PREFIXD_TOKEN:-}"
+# "none" only for a controller with http.auth.mode none, which needs no token.
+PREFIXD_AUTH_MODE="${PREFIXD_AUTH_MODE:-credentials}"
 LOG_FILE="${PREFIXD_LOG:-/var/log/prefixd-fastnetmon.log}"
 EVENT_POST_ATTEMPTS="${EVENT_POST_ATTEMPTS:-3}"
 EVENT_POST_DELAY_SECONDS="${EVENT_POST_DELAY_SECONDS:-1}"
@@ -83,6 +85,11 @@ fi
 # A token is prefixd_ and base64url; anything else could break the curl config.
 if [[ -n "$TOKEN" && ! "$TOKEN" =~ ^prefixd_[A-Za-z0-9_-]+$ ]]; then
     log "ERROR: the token is malformed"
+    exit 1
+fi
+# Without a token every event would get 401; say so before FastNetMon's one call.
+if [[ -z "$TOKEN" && "$PREFIXD_AUTH_MODE" != "none" ]]; then
+    log "ERROR: no token: set PREFIXD_TOKEN_FILE or PREFIXD_TOKEN (PREFIXD_AUTH_MODE=none only for a controller without authentication)"
     exit 1
 fi
 
@@ -254,6 +261,13 @@ while true; do
             exit 0
         fi
         log "SUCCESS ($HTTP_CODE, status=${STATUS:-unknown}): $BODY"
+        exit 0
+    fi
+    # A retried ban whose earlier attempt reached prefixd before timing out
+    # or getting 503 meets its own event ID: the ban was delivered.
+    if [[ "$API_ACTION" == "ban" && "$ATTEMPT" -gt 1 && "$HTTP_CODE" == "409" \
+        && "$BODY" == *"duplicate event from fastnetmon: $EVENT_ID"* ]]; then
+        log "NO_MITIGATION ($HTTP_CODE, status=delivered_by_earlier_attempt): $BODY"
         exit 0
     fi
     if [[ ( "$CURL_STATUS" -ne 0 || "$HTTP_CODE" == "503" ) && "$ATTEMPT" -lt "$EVENT_POST_ATTEMPTS" ]]; then

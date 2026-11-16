@@ -79,6 +79,12 @@ pub enum PrefixdError {
     )]
     Standby,
 
+    /// A detector unban recorded withdrawal intent for every mitigation it
+    /// selected, but at least one delete failed or its outcome is unknown.
+    /// The intents stay pending for reconciliation; a retry is idempotent.
+    #[error("withdrawal incomplete; the pending intent is retained and reconciled: {0}")]
+    WithdrawalIncomplete(String),
+
     /// The API token store could not be read. Distinct from 401 so a storage
     /// outage does not look like a credential problem.
     #[error("credential store unavailable; retry")]
@@ -259,9 +265,10 @@ impl PrefixdError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) | Self::SourceNotBound { .. } => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MitigationNotFound(_) => StatusCode::NOT_FOUND,
-            Self::ShuttingDown | Self::Standby | Self::CredentialStoreUnavailable => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            Self::ShuttingDown
+            | Self::Standby
+            | Self::CredentialStoreUnavailable
+            | Self::WithdrawalIncomplete(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::DuplicateEvent { .. }
             | Self::Conflict(_)
             | Self::InjectionOwnerMismatch { .. } => StatusCode::CONFLICT,

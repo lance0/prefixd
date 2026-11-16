@@ -187,6 +187,9 @@ PREFIXD_API="https://prefixd-host:8443"
 # The ingest token file (preferred), or PREFIXD_TOKEN with the token itself
 PREFIXD_TOKEN_FILE="/etc/prefixd/fastnetmon.token"
 
+# Only for a controller with http.auth.mode none: run without a token
+# PREFIXD_AUTH_MODE="none"
+
 # Log file location (optional)
 PREFIXD_LOG="/var/log/prefixd-fastnetmon.log"
 
@@ -210,7 +213,10 @@ FastNetMon runs the script once per ban and once per unban and never repeats
 it. The script therefore retries the same event, with the same `event_id`,
 when prefixd cannot be reached or answers `503` (a standby or draining
 controller). It stops after `EVENT_POST_ATTEMPTS` attempts in total, each
-bounded by the two timeouts. It never retries a `4xx`. A `403` means the token
+bounded by the two timeouts. It never retries a `4xx`, except that a retried
+ban meeting its own event ID as `409` was delivered by an earlier attempt and
+counts as sent. It refuses to run at all without a token, unless
+`PREFIXD_AUTH_MODE=none`. A `403` means the token
 is not bound to `fastnetmon`, or is bound to another POP. A `409` on a ban
 means the event ID already arrived, or the rule conflicts with speaker or
 injection ownership; read the error text. A `503` can be returned after the
@@ -305,7 +311,9 @@ controller (or use the dashboard editors). See the
    `fastnetmon` created, comparing the address in canonical form, and answers
    `withdrawn` with their IDs. With none left it answers
    `no_active_mitigation`, which the script logs as `NO_MITIGATION` and treats
-   as done.
+   as done. If a delete fails or its outcome is unknown, prefixd answers
+   `503` with the withdrawal intent recorded; the script resends the same
+   event, and prefixd reuses the pending intent.
 
 Other sources' mitigations for the same victim and manual mitigations are
 never touched. The script keeps no state: a re-ban that extended a mitigation,

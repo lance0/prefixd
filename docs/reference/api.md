@@ -189,7 +189,7 @@ Content-Type: application/json
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `timestamp` | datetime | yes | Event timestamp (ISO 8601) |
-| `source` | string | yes | Detector identifier (e.g. "fastnetmon", "dashboard") |
+| `source` | string | yes | Detector source, for example `fastnetmon`; it must be the source the credential is bound to (see [source binding](#source-binding)) |
 | `victim_ip` | string | yes | IPv4 or IPv6 address under attack, or a canonical CIDR for an opted-in detector prefix event. Stored in canonical form: IPv6 lowercase and zero-compressed, an IPv4-mapped IPv6 host as its IPv4 address. An IPv4-mapped prefix returns 400 |
 | `vector` | string | yes | Attack type: `udp_flood`, `syn_flood`, `ack_flood`, `icmp_flood`, `udp_amplification`, `unknown` |
 | `bps` | integer | no | Bits per second |
@@ -198,7 +198,7 @@ Content-Type: application/json
 | `top_dst_ports` | array | no | Destination ports involved (max 8) |
 | `top_src_ports` | array | no | UDP source ports, ranked by descending share by the detector; at most 64, otherwise 400. Used by `udp_amplification` playbooks |
 | `action` | string | no | `"ban"` (default) or `"unban"` |
-| `event_id` | string | no | External event ID (for dedup / unban correlation) |
+| `event_id` | string | no | External event ID; a ban's ID deduplicates retries and replays per source. An unban's ID is stored but selects nothing |
 | `raw_details` | object | no | Raw detector payload for forensics |
 
 Confidence validation applies to ban and unban events, including adapter-mapped
@@ -227,13 +227,17 @@ no source-port reflection match for prefixes. The controller's
 `bgp.default_scope` still applies. A host-length CIDR (`/32`, `/128`) is a host
 event and is stored as the bare address.
 
+An ingest token bound to `fastnetmon-hostgroup` sends it, with the header
+passed to curl on stdin so the token stays off the command line:
+
 ```bash
-curl -X POST http://localhost/v1/events \
+printf 'header = "Authorization: Bearer %s"\n' "$(cat /etc/prefixd/hostgroup.token)" |
+curl -K - -X POST http://localhost/v1/events \
   -H "Content-Type: application/json" \
   -d '{
     "event_id": "fnm-hostgroup-7781",
     "timestamp": "2026-11-14T09:00:00Z",
-    "source": "fastnetmon",
+    "source": "fastnetmon-hostgroup",
     "victim_ip": "203.0.113.0/24",
     "vector": "udp_flood",
     "pps": 4200000,
@@ -375,13 +379,33 @@ comparing the address in canonical form, so a zero-padded IPv6 unban matches a
 canonically stored mitigation. Mitigations other sources created for the same
 victim, and manual mitigations, are never touched. A re-ban that extended a
 mitigation and an unban after a lost earlier unban both pair, and the detector
-keeps no state. The unban's `event_id` and `vector` select nothing. The unban
-is stored as its own event with `"action": "unban"`; the response's `event_id`
-is that unban event, and `mitigation_ids` lists what it withdrew. With nothing
-to withdraw the answer is the definitive `"no_active_mitigation"` and nothing
-is stored. The withdrawal's audit actor is the credential, and its reason
-`Detector unban: <source>`. Only bans are deduplicated by source and
-`event_id`.
+keeps no state.
+
+- **Vector.** An unban with a vector other than `unknown` withdraws only that
+  vector's mitigations, so a resolved alert for one attack leaves the
+  source's others; `udp_amplification` also covers the `udp_flood` fallback
+  its ban may have produced. `unknown` withdraws every one for the victim, as
+  the FastNetMon script's unban, which carries no attack details, does.
+- **Creating source.** The source is the triggering event's: a source that
+  only extended another source's mitigation gets `no_active_mitigation`, and
+  the creator's unban withdraws it. With correlation, the triggering event is
+  whichever event met the group's threshold, so only that event's source
+  withdraws the mitigation by unban; the others use their own mitigations, or
+  an operator withdraws it.
+- **Partial failure.** Withdrawal intent is recorded for every selected
+  mitigation before any delete is attempted. If any delete fails or its
+  outcome is unknown, the answer is `503` and the intent stays pending for
+  reconciliation; a resend reuses it and never creates a second request.
+
+The unban's `event_id` selects nothing. The unban is stored as its own event
+with `"action": "unban"`; the response's `event_id` is that unban event, and
+`mitigation_ids` lists what it withdrew. With nothing to withdraw the answer is
+the definitive `"no_active_mitigation"` and nothing is stored. The
+withdrawal's audit actor is the credential, its details carry the bound
+`source` whether the request or reconciliation completes it, its reason is
+`Detector unban: <source>`, and it counts as
+`prefixd_mitigations_withdrawn_total{reason="detector_unban"}` whoever claimed
+the source. Only bans are deduplicated by source and `event_id`.
 
 When a new mitigation is needed, prefixd commits its Active desired row before
 calling the speaker. A persistence failure sends no announcement. If intent
@@ -1776,9 +1800,9 @@ it the same way. Resolved alerts ignore the annotation.
 | `accepted_no_mitigation` | Victim outside the effective inventory; no mitigation |
 | `accepted_no_playbook` | Policy produced no action |
 | `duplicate` | Fingerprint already seen (dedup) |
-| `withdrawn` | Unban request accepted; it may have withdrawn mitigations, or the fingerprint was unknown or already withdrawn |
-| `withdrawn_noop` | Unban failed before withdrawal (see `error`); nothing is known to be withdrawn |
-| `error` | Processing failed for this alert (see `error` field) |
+| `withdrawn` | A resolved alert withdrew the live mitigations `alertmanager` created for the victim and vector; `mitigation_id` is the first |
+| `no_active_mitigation` | A resolved alert found nothing live to withdraw |
+| `error` | Processing failed for this alert (see `error` field), and it counts in `failed` |
 
 **Error Responses:**
 
@@ -1786,6 +1810,8 @@ it the same way. Resolved alerts ignore the annotation.
 |--------|--------|
 | 400 | Malformed payload (invalid JSON, wrong version, empty alerts) |
 | 401 | Authentication required |
+| 403 | The credential is not bound to `alertmanager` |
+| 503 | A resolved alert's withdrawal failed on the controller's side or its outcome is unknown; the body still lists every alert. The intent is pending and reconciled, and Alertmanager's resend is safe |
 
 > **Note:** Alertmanager will not retry 4xx errors, so malformed payloads return 400 to prevent infinite retry loops.
 
@@ -1991,6 +2017,15 @@ The adapter's name is the events' `source`. An HMAC signature is the
 credential, so `Authorization` is ignored, and audit rows name
 `webhook:<adapter>`. `auth.secret_env` must name a `PREFIXD_WEBHOOK_` variable
 holding at least 32 bytes.
+
+An adapter named in `blackhole.detector_sources` or
+`guardrails.detector_prefix_sources` refuses a payload with `400` before
+admission when any ban in it has no event ID, because `fields.source_id` is
+absent, null, the wrong type or ambiguous in the body: a signed body has no
+nonce, and only the event ID makes a replay a duplicate. An unban reports
+`withdrawn` or `no_active_mitigation`; one that failed on the controller's side
+is an `error` counted in `failed`, and the response is `503` so the sender
+resends.
 
 **Response:**
 

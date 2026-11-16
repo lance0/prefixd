@@ -654,14 +654,33 @@ async fn detector_unban_withdraws_only_its_own_sources_mitigations() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     assert_eq!(body["status"], "no_active_mitigation", "{body}");
-    // The other source's unban for the victim withdraws its own.
-    let mut resolved = alertmanager(victim, "fp-1");
-    resolved["alerts"][0]["status"] = "resolved".into();
+    // The other source's unban for the victim withdraws its own, and only
+    // for the vector it names: a resolved udp_flood alert leaves its
+    // syn_flood mitigation.
+    let resolved = |vector: &str| {
+        let mut resolved = alertmanager(victim, "fp-1");
+        resolved["alerts"][0]["status"] = "resolved".into();
+        resolved["alerts"][0]["labels"]["vector"] = vector.into();
+        resolved
+    };
+    let (status, body) = send(
+        &f.app,
+        "/v1/signals/alertmanager",
+        Some(("authorization", &am)),
+        &resolved("udp_flood"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["results"][0]["status"], "no_active_mitigation",
+        "{body}"
+    );
+    assert_eq!(status_of(theirs).await, MitigationStatus::Active);
     let (_, body) = send(
         &f.app,
         "/v1/signals/alertmanager",
         Some(("authorization", &am)),
-        &resolved,
+        &resolved("syn_flood"),
     )
     .await;
     assert_eq!(body["results"][0]["status"], "withdrawn", "{body}");
@@ -945,6 +964,14 @@ fn refused_shapes() -> Vec<(&'static str, String, AuthMode, Vec<String>, &'stati
             "at least 32 bytes",
         ),
         (
+            "adapter name outside the source pattern",
+            adapter_yaml("    auth:\n      type: bearer\n")
+                .replace("name: radware", "name: -radware"),
+            AuthMode::Credentials,
+            vec![],
+            "name must match",
+        ),
+        (
             "unset secret",
             adapter_yaml(&hmac("PREFIXD_WEBHOOK_UNSET")),
             AuthMode::Credentials,
@@ -1155,4 +1182,613 @@ async fn the_prefix_allowlist_admits_only_its_bound_source_and_an_admin() {
         assert_eq!(status, StatusCode::ACCEPTED, "{response}");
         assert_eq!(response["status"], "accepted_no_playbook", "{response}");
     }
+}
+
+/// A speaker whose deletes of TCP rules fail while `failing` is set, after the
+/// delete may have reached it: an ambiguous outcome, as a timeout leaves.
+struct FailingTcpWithdrawals {
+    inner: MockAnnouncer,
+    failing: std::sync::atomic::AtomicBool,
+}
+
+impl prefixd::bgp::FlowSpecAnnouncer for FailingTcpWithdrawals {
+    fn backend(&self) -> &'static str {
+        "mock"
+    }
+    fn reader(&self) -> Option<&dyn prefixd::bgp::FlowSpecReader> {
+        Some(self)
+    }
+    fn peer_observer(&self) -> Option<&dyn prefixd::bgp::PeerObserver> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl prefixd::bgp::FlowSpecWriter for FailingTcpWithdrawals {
+    async fn announce(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+        self.inner.announce(rule).await
+    }
+    async fn withdraw(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+        if rule.nlri.protocol == Some(6) && self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(prefixd::error::PrefixdError::BgpWithdrawalFailed(
+                "seeded delete failure".into(),
+            ));
+        }
+        self.inner.withdraw(rule).await
+    }
+}
+
+#[async_trait::async_trait]
+impl prefixd::bgp::FlowSpecReader for FailingTcpWithdrawals {
+    async fn list_active(&self) -> prefixd::error::Result<Vec<prefixd::domain::FlowSpecRule>> {
+        self.inner.list_active().await
+    }
+}
+
+#[async_trait::async_trait]
+impl prefixd::bgp::PeerObserver for FailingTcpWithdrawals {
+    async fn session_status(&self) -> prefixd::error::Result<Vec<prefixd::bgp::PeerStatus>> {
+        self.inner.session_status().await
+    }
+}
+
+/// An enforced controller in credentials mode on the failing speaker.
+async fn failing_fixture() -> (Fixture, Arc<FailingTcpWithdrawals>) {
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(FailingTcpWithdrawals {
+        inner: MockAnnouncer::new(),
+        failing: std::sync::atomic::AtomicBool::new(true),
+    });
+    // Its own POP keeps its metric labels apart from concurrent tests.
+    let mut settings = settings(AuthMode::Credentials, "failing-pop", 1);
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    let inventory = Inventory::new(vec![Customer {
+        customer_id: "bound".into(),
+        name: "Source binding".into(),
+        prefixes: vec!["203.0.113.0/24".into()],
+        policy_profile: PolicyProfile::Normal,
+        services: vec![],
+    }]);
+    let state = AppState::new(
+        settings,
+        inventory,
+        common::test_playbooks(),
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    state.correlation_config.write().await.webhook_adapters =
+        vec![webhook_adapter("radware", WebhookAuth::Bearer)];
+    let app =
+        prefixd::api::create_test_router_with_session_store(state.clone(), MemoryStore::default());
+    (Fixture { app, repo, state }, speaker)
+}
+
+fn with_vector(mut event: Value, vector: &str) -> Value {
+    event["vector"] = vector.into();
+    event
+}
+
+async fn audit_for(repo: &MockRepository, action: &str, target: uuid::Uuid) -> Vec<Value> {
+    serde_json::to_value(
+        repo.list_audit(&ListParams {
+            limit: 1000,
+            ..Default::default()
+        })
+        .await
+        .unwrap(),
+    )
+    .unwrap()
+    .as_array()
+    .unwrap()
+    .iter()
+    .filter(|entry| entry["action"] == action && entry["target_id"] == target.to_string())
+    .cloned()
+    .collect()
+}
+
+/// An unban that names a real vector withdraws only that attack's
+/// mitigations for the victim; `unknown` keeps the whole victim, as the
+/// FastNetMon script's unban needs. Negative control: without the vector
+/// filter, the syn_flood unban also withdraws the udp_flood mitigation.
+#[tokio::test]
+async fn an_unban_vector_narrows_it_and_unknown_keeps_the_victim() {
+    let f = fixture(AuthMode::Credentials).await;
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let auth = Some(("authorization", fnm.as_str()));
+    let victim = "203.0.113.70";
+    let ban = |id: &str, vector: &str| with_vector(event("fastnetmon", victim, id), vector);
+    let mut ids = Vec::new();
+    for (id, vector) in [("u1", "udp_flood"), ("s1", "syn_flood")] {
+        let (_, body) = send(&f.app, "/v1/events", auth, &ban(id, vector)).await;
+        ids.push(
+            body["mitigation_id"]
+                .as_str()
+                .unwrap()
+                .parse::<uuid::Uuid>()
+                .unwrap(),
+        );
+    }
+    let (udp, syn) = (ids[0], ids[1]);
+    let status_of = |id| {
+        let repo = f.repo.clone();
+        async move { repo.get_mitigation(id).await.unwrap().unwrap().status }
+    };
+
+    let (_, body) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &with_vector(unban("fastnetmon", victim, "x1"), "syn_flood"),
+    )
+    .await;
+    assert_eq!(body["mitigation_ids"], json!([syn.to_string()]), "{body}");
+    assert_eq!(status_of(udp).await, MitigationStatus::Active);
+
+    let (_, again) = send(&f.app, "/v1/events", auth, &ban("s2", "syn_flood")).await;
+    let syn: uuid::Uuid = again["mitigation_id"].as_str().unwrap().parse().unwrap();
+    let (_, body) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &with_vector(unban("fastnetmon", victim, "x2"), "unknown"),
+    )
+    .await;
+    let mut withdrawn: Vec<String> =
+        serde_json::from_value(body["mitigation_ids"].clone()).unwrap();
+    withdrawn.sort();
+    let mut wanted = vec![udp.to_string(), syn.to_string()];
+    wanted.sort();
+    assert_eq!(withdrawn, wanted, "{body}");
+}
+
+/// One failed delete does not stop the others. Every selected mitigation's
+/// withdrawal intent is recorded first, each delete is attempted, and a
+/// failed or ambiguous one answers 503 with its intent pending. A retry
+/// reuses that intent and never creates a second request. Reconciliation
+/// completes it, and both the immediate and the reconciled withdrawal are
+/// audited with the bound source and counted as `detector_unban`.
+/// Negative control: stopping at the first failure leaves the second rule
+/// unwithdrawn.
+#[tokio::test]
+async fn a_failed_delete_leaves_its_intent_pending_and_the_rest_withdrawn() {
+    let (f, speaker) = failing_fixture().await;
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let auth = Some(("authorization", fnm.as_str()));
+    let victim = "203.0.113.71";
+    let mut ids = Vec::new();
+    // The TCP rule first, so a loop that stopped at a failure would never
+    // reach the UDP rule.
+    for (id, vector) in [("s1", "syn_flood"), ("u1", "udp_flood")] {
+        let (status, body) = send(
+            &f.app,
+            "/v1/events",
+            auth,
+            &with_vector(event("fastnetmon", victim, id), vector),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        ids.push(
+            body["mitigation_id"]
+                .as_str()
+                .unwrap()
+                .parse::<uuid::Uuid>()
+                .unwrap(),
+        );
+    }
+    let (syn, udp) = (ids[0], ids[1]);
+    let withdrawn_metric = |reason: &str| {
+        prefixd::observability::metrics::MITIGATIONS_WITHDRAWN
+            .with_label_values(&["police", "failing-pop", reason])
+            .get()
+    };
+    let before = withdrawn_metric("detector_unban");
+
+    for attempt in 0..2 {
+        let (status, body) = send(
+            &f.app,
+            "/v1/events",
+            auth,
+            // The script's unban: no vector, the whole victim.
+            &with_vector(
+                unban("fastnetmon", victim, &format!("unban-{attempt}")),
+                "unknown",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("withdrawal incomplete")
+        );
+        let pending = f.repo.pending_withdrawals(None).await.unwrap();
+        assert_eq!(pending.len(), 1, "attempt {attempt}: {pending:?}");
+        assert_eq!(pending[0].mitigation_id, syn);
+        assert_eq!(pending[0].detector_source.as_deref(), Some("fastnetmon"));
+    }
+    let status_of = |id| {
+        let repo = f.repo.clone();
+        async move { repo.get_mitigation(id).await.unwrap().unwrap().status }
+    };
+    assert_eq!(status_of(udp).await, MitigationStatus::Withdrawn);
+    assert_eq!(status_of(syn).await, MitigationStatus::Active);
+    assert_eq!(withdrawn_metric("detector_unban"), before + 1.0);
+    let immediate = audit_for(&f.repo, "withdraw", udp).await;
+    assert_eq!(immediate.len(), 1);
+    assert_eq!(immediate[0]["details"]["source"], "fastnetmon");
+    assert_eq!(immediate[0]["actor_id"], "token:fnm");
+
+    speaker
+        .failing
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let reconciler =
+        prefixd::scheduler::ReconciliationLoop::new(f.repo.clone(), speaker.clone(), 30, false)
+            .with_app_state(f.state.clone());
+    reconciler.reconcile().await.unwrap();
+    assert_eq!(status_of(syn).await, MitigationStatus::Withdrawn);
+    assert!(f.repo.pending_withdrawals(None).await.unwrap().is_empty());
+    let reconciled = audit_for(&f.repo, "withdraw", syn).await;
+    assert_eq!(reconciled.len(), 1, "{reconciled:?}");
+    assert_eq!(reconciled[0]["details"]["source"], "fastnetmon");
+    assert_eq!(reconciled[0]["actor_id"], "token:fnm");
+}
+
+/// An adapter unban reports what it did: `no_active_mitigation` is not
+/// `withdrawn`, and a failed delete is an error counted as failed with a 503
+/// the sender retries, never a 200 no-op. Negative control: the earlier
+/// `withdrawn` and `withdrawn_noop` reporting fails both checks.
+#[tokio::test]
+async fn adapter_unbans_report_their_outcome_and_retry_failures() {
+    let (f, _speaker) = failing_fixture().await;
+    let am = bearer(
+        &f.repo
+            .mint_token_for_test("am", TokenScope::Ingest, Some("alertmanager")),
+    );
+    let radware = bearer(
+        &f.repo
+            .mint_token_for_test("rw", TokenScope::Ingest, Some("radware")),
+    );
+    let resolved = |victim: &str| {
+        let mut alert = alertmanager(victim, "fp-r");
+        alert["alerts"][0]["status"] = "resolved".into();
+        alert["alerts"][0]["labels"]["vector"] = "syn_flood".into();
+        alert
+    };
+
+    // Nothing to withdraw: reported as such, 200.
+    let (status, body) = send(
+        &f.app,
+        "/v1/signals/alertmanager",
+        Some(("authorization", &am)),
+        &resolved("203.0.113.72"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["results"][0]["status"], "no_active_mitigation",
+        "{body}"
+    );
+
+    // A TCP rule whose delete fails: 503, counted as failed.
+    let mut firing = alertmanager("203.0.113.72", "fp-r");
+    firing["alerts"][0]["labels"]["vector"] = "syn_flood".into();
+    let (status, body) = send(
+        &f.app,
+        "/v1/signals/alertmanager",
+        Some(("authorization", &am)),
+        &firing,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = send(
+        &f.app,
+        "/v1/signals/alertmanager",
+        Some(("authorization", &am)),
+        &resolved("203.0.113.72"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["failed"], 1, "{body}");
+    assert_eq!(body["results"][0]["status"], "error", "{body}");
+
+    // The webhook adapter alike.
+    let ban = json!({"id": "w-1", "ip": "203.0.113.73", "vector": "syn_flood", "score": 0.9});
+    let (status, body) = send(
+        &f.app,
+        "/v1/signals/webhook/radware",
+        Some(("authorization", &radware)),
+        &ban,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut unban = ban.clone();
+    unban["action"] = "unban".into();
+    unban["id"] = "w-2".into();
+    let (status, body) = send(
+        &f.app,
+        "/v1/signals/webhook/radware",
+        Some(("authorization", &radware)),
+        &unban,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["failed"], 1, "{body}");
+    assert_eq!(body["results"][0]["status"], "error", "{body}");
+}
+
+/// The triggering event's source owns a mitigation. When another source
+/// extends it, that source's unban finds nothing, and the creator's unban
+/// withdraws it. Negative control: matching on `last_event_id` too lets the
+/// extender withdraw it.
+#[tokio::test]
+async fn an_extending_source_cannot_unban_the_creators_mitigation() {
+    let f = fixture(AuthMode::Credentials).await;
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let rw = bearer(
+        &f.repo
+            .mint_token_for_test("rw", TokenScope::Ingest, Some("radware")),
+    );
+    let victim = "203.0.113.74";
+    let (_, created) = send(
+        &f.app,
+        "/v1/events",
+        Some(("authorization", &fnm)),
+        &event("fastnetmon", victim, "a-1"),
+    )
+    .await;
+    let (_, extended) = send(
+        &f.app,
+        "/v1/events",
+        Some(("authorization", &rw)),
+        &event("radware", victim, "b-1"),
+    )
+    .await;
+    assert_eq!(extended["status"], "extended", "{extended}");
+    assert_eq!(extended["mitigation_id"], created["mitigation_id"]);
+
+    let (_, body) = send(
+        &f.app,
+        "/v1/events",
+        Some(("authorization", &rw)),
+        &unban("radware", victim, "b-2"),
+    )
+    .await;
+    assert_eq!(body["status"], "no_active_mitigation", "{body}");
+    let (_, body) = send(
+        &f.app,
+        "/v1/events",
+        Some(("authorization", &fnm)),
+        &unban("fastnetmon", victim, "a-2"),
+    )
+    .await;
+    assert_eq!(body["status"], "withdrawn", "{body}");
+    assert_eq!(body["mitigation_ids"], json!([created["mitigation_id"]]));
+}
+
+/// A disabled adapter serves no requests, so it is no credential and the
+/// ingest refusals skip it; enabled, the same adapter is refused.
+#[test]
+fn disabled_adapters_skip_the_ingest_refusals_until_enabled() {
+    let document = "enabled: true\nwebhook_adapters:\n  - name: radware\n    enabled: false\n    auth:\n      type: hmac\n      secret_env: PATH\n      header: X-Signature-SHA256\n    fields:\n      victim_ip: \"$.ip\"\n  - name: lab\n    enabled: false\n    auth:\n      type: none\n    fields:\n      victim_ip: \"$.ip\"\n";
+    let (mut config, _) = CorrelationConfig::from_yaml(document).unwrap();
+    let ingest = prefixd::correlation::IngestAuthorization {
+        auth_mode: AuthMode::Credentials,
+        detector_sources: &["radware".to_string()],
+        prefix_sources: &[],
+    };
+    assert!(
+        config.validate(&ingest).is_empty(),
+        "{:?}",
+        config.validate(&ingest)
+    );
+    for adapter in &mut config.webhook_adapters {
+        adapter.enabled = true;
+    }
+    let errors = config.validate(&ingest);
+    for wanted in ["PREFIXD_WEBHOOK_", "fields.source_id", "auth.type none"] {
+        assert!(
+            errors.iter().any(|error| error.contains(wanted)),
+            "{wanted}: {errors:?}"
+        );
+    }
+}
+
+/// Reload checks what it publishes against the next start's prefixd.yaml, not
+/// only the running one: a prefixd.yaml that puts an HMAC adapter without
+/// `fields.source_id` on an allowlist is refused, and the running
+/// configuration is kept. Control: without the allowlist the same reload
+/// publishes. Negative control: checking the running settings alone accepts
+/// the refused reload.
+#[tokio::test]
+async fn reload_checks_the_correlation_against_the_next_prefixd_yaml() {
+    if !rerun_with(
+        "reload_checks_the_correlation_against_the_next_prefixd_yaml",
+        &[("PREFIXD_WEBHOOK_GOOD", LONG_SECRET)],
+    ) {
+        return;
+    }
+    let document = adapter_yaml(
+        "    auth:\n      type: hmac\n      secret_env: PREFIXD_WEBHOOK_GOOD\n      header: X-Signature-SHA256\n",
+    );
+    for (allowlist, refused) in [(vec!["radware".to_string()], true), (vec![], false)] {
+        let mut running = settings(AuthMode::Credentials, "test-pop", 1);
+        running.correlation = CorrelationConfig::default();
+        let mut next = running.clone();
+        next.blackhole.detector_sources = allowlist;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("prefixd.yaml"),
+            serde_json::to_string(&next).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("correlation.yaml"), &document).unwrap();
+        let f = fixture_with(running, Arc::new(MockRepository::new())).await;
+        let mut state = f.state.clone();
+        drop(f);
+        Arc::get_mut(&mut state).unwrap().config_dir = dir.path().into();
+        let result = state.reload_config().await;
+        let adapters = state
+            .correlation_config
+            .read()
+            .await
+            .webhook_adapters
+            .clone();
+        if refused {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("fields.source_id"), "{error}");
+            assert!(
+                matches!(adapters[0].auth, WebhookAuth::Bearer),
+                "the running configuration is kept"
+            );
+        } else {
+            result.unwrap();
+            assert!(matches!(adapters[0].auth, WebhookAuth::Hmac { .. }));
+        }
+    }
+}
+
+/// An adapter on an allowlist reaches blackholes or prefix rules, and a
+/// signed body has no nonce: a ban whose `fields.source_id` resolves to no ID
+/// is refused with 400 before admission, so a replay cannot recreate the
+/// mitigation. With an ID, the replay is a duplicate. Negative control:
+/// without the check, the ID-less ban is admitted and its replay recreates
+/// the mitigation.
+#[tokio::test]
+async fn an_allowlisted_adapter_refuses_bans_without_an_event_id() {
+    const SECRET: &str = "0123456789abcdef0123456789abcdef-replay";
+    if !rerun_with(
+        "an_allowlisted_adapter_refuses_bans_without_an_event_id",
+        &[("PREFIXD_WEBHOOK_TEST_SIGNED", SECRET)],
+    ) {
+        return;
+    }
+    let mut settings = settings(AuthMode::Credentials, "test-pop", 1);
+    settings.blackhole.detector_sources = vec!["signed".into()];
+    let f = fixture_with(settings, Arc::new(MockRepository::new())).await;
+    f.state.correlation_config.write().await.webhook_adapters = vec![webhook_adapter(
+        "signed",
+        WebhookAuth::Hmac {
+            secret_env: "PREFIXD_WEBHOOK_TEST_SIGNED".into(),
+            header: "X-Signature-SHA256".into(),
+            algorithm: "sha256".into(),
+        },
+    )];
+    let post = |body: Value| {
+        let app = f.app.clone();
+        async move {
+            use hmac::{KeyInit, Mac};
+            let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(SECRET.as_bytes()).unwrap();
+            mac.update(body.to_string().as_bytes());
+            let response = app
+                .oneshot(
+                    Request::post("/v1/signals/webhook/signed")
+                        .header("content-type", "application/json")
+                        .header(
+                            "x-signature-sha256",
+                            hex::encode(mac.finalize().into_bytes()),
+                        )
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+        }
+    };
+    for (label, body) in [
+        (
+            "missing",
+            json!({"ip": "203.0.113.75", "vector": "udp_flood", "score": 0.9}),
+        ),
+        (
+            "null",
+            json!({"id": null, "ip": "203.0.113.75", "vector": "udp_flood", "score": 0.9}),
+        ),
+        (
+            "object",
+            json!({"id": {"x": 1}, "ip": "203.0.113.75", "vector": "udp_flood", "score": 0.9}),
+        ),
+    ] {
+        for replay in 0..2 {
+            let (status, response) = post(body.clone()).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{label} {replay}: {response}"
+            );
+            assert!(
+                response["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("fields.source_id")
+            );
+        }
+    }
+    assert_eq!(written(&f.repo).await, (0, 0, 0));
+
+    let identified =
+        json!({"id": "s-1", "ip": "203.0.113.75", "vector": "udp_flood", "score": 0.9});
+    let (status, first) = post(identified.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert!(first["results"][0]["mitigation_id"].is_string(), "{first}");
+    let (status, replayed) = post(identified).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(replayed["results"][0]["status"], "duplicate", "{replayed}");
+    assert_eq!(
+        written(&f.repo).await.1,
+        1,
+        "the replay made no second mitigation"
+    );
+}
+
+/// A detector unban is counted as `detector_unban` whoever claims the source:
+/// here the anonymous Admin of auth mode none, an operator actor.
+#[tokio::test]
+async fn an_admin_claimed_unban_counts_as_a_detector_unban() {
+    let f = fixture_with(
+        settings(AuthMode::None, "metric-pop", 1),
+        Arc::new(MockRepository::new()),
+    )
+    .await;
+    let counter = |reason: &str| {
+        prefixd::observability::metrics::MITIGATIONS_WITHDRAWN
+            .with_label_values(&["police", "metric-pop", reason])
+            .get()
+    };
+    let (detector, operator) = (counter("detector_unban"), counter("operator"));
+    let victim = "203.0.113.76";
+    let (status, body) = send(
+        &f.app,
+        "/v1/events",
+        None,
+        &event("fastnetmon", victim, "m-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let (_, body) = send(
+        &f.app,
+        "/v1/events",
+        None,
+        &unban("fastnetmon", victim, "m-2"),
+    )
+    .await;
+    assert_eq!(body["status"], "withdrawn", "{body}");
+    assert_eq!(counter("detector_unban"), detector + 1.0);
+    assert_eq!(counter("operator"), operator);
 }

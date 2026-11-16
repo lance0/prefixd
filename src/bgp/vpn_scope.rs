@@ -158,6 +158,7 @@ mod tests {
             requested_at: chrono::Utc::now(),
             completed_at: None,
             target_id: None,
+            detector_source: None,
         });
         assert!(
             check_vpn_startup(&config, "pop", &speaker, &repo)

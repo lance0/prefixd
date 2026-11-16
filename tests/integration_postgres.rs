@@ -8796,3 +8796,102 @@ async fn history_lookups_match_every_spelling_of_a_victim() {
         );
     }
 }
+
+/// On PostgreSQL, the triggering event's source owns a mitigation: a source
+/// that only extended it gets `no_active_mitigation` on unban, a token bound
+/// to another source cannot unban as the creator, and the creator's unban
+/// withdraws it. Negative control: joining on `last_event_id` as well lets the
+/// extender withdraw it.
+#[tokio::test]
+async fn an_extending_source_cannot_unban_the_creators_mitigation_on_postgres() {
+    use prefixd::domain::TokenScope;
+    use std::sync::Arc;
+
+    let ctx = TestContext::new().await;
+    let app = ctx.router().await;
+    let send = |app: axum::Router, body: serde_json::Value, token: Option<String>| async move {
+        let mut request = Request::post("/v1/events").header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let response = app
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+        )
+    };
+    let event = |source: &str, id: &str, action: &str| {
+        serde_json::json!({
+            "event_id": id, "timestamp": chrono::Utc::now(), "source": source,
+            "victim_ip": "203.0.113.10", "vector": "udp_flood", "confidence": 0.9,
+            "action": action,
+        })
+    };
+
+    // Auth mode none: the anonymous Admin claims each source.
+    let (_, created) = send(app.clone(), event("fastnetmon", "a-1", "ban"), None).await;
+    let id: uuid::Uuid = created["mitigation_id"].as_str().unwrap().parse().unwrap();
+    let (_, extended) = send(app.clone(), event("radware", "b-1", "ban"), None).await;
+    assert_eq!(extended["status"], "extended", "{extended}");
+    assert_eq!(extended["mitigation_id"], created["mitigation_id"]);
+    let (status, body) = send(app.clone(), event("radware", "b-2", "unban"), None).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["status"], "no_active_mitigation", "{body}");
+
+    // A token bound to the extender cannot unban as the creator.
+    let mut settings = ctx.state.settings.clone();
+    settings.http.auth.mode = prefixd::config::AuthMode::Credentials;
+    let credentials = prefixd::AppState::new(
+        settings,
+        common::test_inventory(),
+        common::test_playbooks(),
+        ctx.repo.clone(),
+        Arc::new(prefixd::bgp::MockAnnouncer::new()),
+        ".".into(),
+    )
+    .unwrap();
+    let (_, token) = prefixd::auth::token::create(
+        ctx.repo.as_ref(),
+        prefixd::auth::token::NewToken {
+            name: "radware-pop".into(),
+            scope: TokenScope::Ingest,
+            source: Some("radware".into()),
+            pop: None,
+            expires_at: None,
+        },
+        "admin",
+        chrono::Utc::now(),
+    )
+    .await
+    .unwrap();
+    let tokens = prefixd::api::create_test_router(credentials);
+    let (status, body) = send(
+        tokens.clone(),
+        event("fastnetmon", "b-3", "unban"),
+        Some(token.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, body) = send(tokens, event("radware", "b-4", "unban"), Some(token)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["status"], "no_active_mitigation", "{body}");
+    assert!(
+        ctx.repo
+            .get_mitigation(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+
+    let (_, body) = send(app, event("fastnetmon", "a-2", "unban"), None).await;
+    assert_eq!(body["status"], "withdrawn", "{body}");
+    assert_eq!(body["mitigation_ids"], serde_json::json!([id]));
+}

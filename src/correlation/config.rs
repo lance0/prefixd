@@ -376,7 +376,13 @@ impl CorrelationConfig {
     /// adapter secrets in the environment.
     pub fn ingest_errors(&self, ingest: &IngestAuthorization<'_>) -> Vec<String> {
         let mut errors = Vec::new();
-        for adapter in &self.webhook_adapters {
+        // A disabled adapter serves no requests, so it is no credential; reload
+        // and the editor check it again when it is enabled.
+        for adapter in self
+            .webhook_adapters
+            .iter()
+            .filter(|adapter| adapter.enabled)
+        {
             let name = &adapter.name;
             match &adapter.auth {
                 super::webhook::WebhookAuth::None
@@ -493,9 +499,13 @@ impl CorrelationConfig {
 
         let mut seen_names = std::collections::HashSet::new();
         for adapter in &self.webhook_adapters {
-            if !super::webhook::is_valid_name(&adapter.name) {
+            // The name is the adapter's source, so it must be one a token
+            // can be bound to as well as a URL path segment.
+            if !super::webhook::is_valid_name(&adapter.name)
+                || !crate::domain::is_valid_token_source(&adapter.name)
+            {
                 errors.push(format!(
-                    "webhook_adapter '{}': name must match [a-z0-9-]{{1,64}}",
+                    "webhook_adapter '{}': name must match ^[a-z0-9][a-z0-9-]{{0,63}}$",
                     adapter.name
                 ));
             }

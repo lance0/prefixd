@@ -402,8 +402,11 @@ async fn refused_unban_records_a_conflict_and_is_audited() {
     assert_eq!(audit[0]["details"]["outcome"], "conflict");
     assert_eq!(audit[0]["details"]["guardrail"], "Conflict");
     assert_eq!(audit[0]["details"]["stored"], true);
-    // The failing mitigation is linked, so its status can be checked.
-    assert_eq!(row["outcome_mitigation_ids"], json!([ban["mitigation_id"]]));
+    // Every selected mitigation is linked, so each one's status can be checked.
+    assert_eq!(
+        row["outcome_mitigation_ids"],
+        json!([ban["mitigation_id"], owner.mitigation_id])
+    );
 }
 
 /// A prefix playbook whose step has rules cannot produce a narrow prefix match.
