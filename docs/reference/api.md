@@ -557,7 +557,7 @@ Authorization: Bearer <token>
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `status` | string | Filter by one or more statuses (comma-separated): `pending`, `active`, `withdrawn`, `expired`, `rejected`. Legacy `escalated` is still accepted for stored rows; no code path produces it |
+| `status` | string | Filter by one or more statuses (comma-separated): `active`, `expired`, `withdrawn`. Legacy `pending`, `escalated` and `rejected` are still accepted and match stored rows, but this version produces none of them. `rejected` is no longer produced since 0.20.0; rows stored by 0.19 and earlier remain. Live intent is `active` and `escalated`; a stored `pending` row is not live and cannot be withdrawn |
 | `customer_id` | string | Filter by customer |
 | `q` | string | Literal case-insensitive substring of target, vector, customer ID or mitigation UUID; at most 256 UTF-8 bytes and no NUL. Empty matches every row; `%`, `_` and backslash have no wildcard meaning |
 | `victim_ip` | string | Filter by exact stored target: host IP or canonical manual CIDR; no containment matching |
@@ -1456,7 +1456,7 @@ Content-Type: application/json
 }
 ```
 
-Acknowledging marks a mitigation as reviewed by a human without changing its status. Re-acknowledging an already-acknowledged mitigation returns an error. Rejected mitigations cannot be acknowledged.
+Acknowledging marks a mitigation as reviewed by a human without changing its status. Re-acknowledging an already-acknowledged mitigation returns an error. A stored legacy `rejected` row cannot be acknowledged.
 
 Results preserve request order, including duplicate IDs. `acknowledged` and
 `failed` count request entries, matching the corresponding result statuses.
@@ -3190,7 +3190,6 @@ Requires session authentication (send session cookie).
 {"type": "mitigation_updated", "mitigation": {...}}
 {"type": "mitigation_expired", "mitigation_id": "mit_abc123"}
 {"type": "mitigation_withdrawn", "mitigation_id": "mit_abc123"}
-{"type": "event_ingested", "event": {...}}
 {"type": "diversion_updated", "diversion": {...}}
 {"type": "scrubber_updated", "profile": "scrubber-a", "state": {...}}
 {"type": "resync_required"}
@@ -3210,8 +3209,8 @@ sends nothing. `scrubber_updated` carries one profile's readiness and arm state,
 the same object as `GET /v1/scrubbers` `profiles`, after re-arm and each
 lifecycle pass. Neither replaces a refresh after `resync_required`.
 
-`event_ingested` is defined in the message schema but is not currently broadcast
-by event ingestion. Event lists retain their periodic API refresh.
+Event ingestion is not a frame type: the feed carries mitigation and scrubber
+lifecycle changes, and event lists retain their periodic API refresh.
 
 ---
 

@@ -1,11 +1,11 @@
-import type { EventResponse, ScrubberDiversion, ScrubberState } from "@/lib/api"
+import type { ScrubberDiversion, ScrubberState } from "@/lib/api"
 
+// Event ingestion is not a frame type: event lists keep their API refresh.
 export type WsMessageType =
   | "mitigation_created"
   | "mitigation_updated"
   | "mitigation_expired"
   | "mitigation_withdrawn"
-  | "event_ingested"
   | "diversion_updated"
   | "scrubber_updated"
   | "resync_required"
@@ -27,8 +27,6 @@ export interface WsMessage {
   }
   // mitigation_expired / mitigation_withdrawn
   mitigation_id?: string
-  // event_ingested
-  event?: EventResponse
   diversion?: ScrubberDiversion
   profile?: string
   state?: ScrubberState

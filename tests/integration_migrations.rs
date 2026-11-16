@@ -396,8 +396,8 @@ async fn empty_tracking_table_replays_idempotent_history() {
     assert_replayed(&fixture).await;
 }
 
-/// The newest migration, made pending again: its columns dropped and its row
-/// removed, as on a database one release behind.
+/// Migration 020, made pending again: its columns dropped and its row removed,
+/// as on a database that has not applied it.
 const PENDING: i32 = 20;
 
 async fn make_latest_pending(pool: &PgPool) {
@@ -547,4 +547,68 @@ async fn transient_blocker_released_mid_retry_lets_the_start_succeed() {
         "the start finished while the blocker was held"
     );
     assert_eq!(pending_state(&setup).await, (true, true));
+}
+
+async fn scope_index(pool: &PgPool) -> String {
+    sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_mitigations_active_scope'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read the scope index")
+}
+
+fn assert_live_scope_index(definition: &str) {
+    assert!(
+        definition.starts_with("CREATE UNIQUE INDEX"),
+        "{definition}"
+    );
+    assert!(definition.contains("(scope_hash, pop)"), "{definition}");
+    assert!(definition.contains("'active'"), "{definition}");
+    assert!(definition.contains("'escalated'"), "{definition}");
+    assert!(!definition.contains("'pending'"), "{definition}");
+}
+
+#[tokio::test]
+async fn scope_index_covers_only_live_statuses_after_fresh_and_020_starts() {
+    let fixture = start_postgres().await;
+    let setup = connect(&fixture).await;
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("migrate a fresh database");
+    assert_live_scope_index(&scope_index(&setup).await);
+
+    // A database at 020: the index from migration 001 and no row for 021.
+    sqlx::raw_sql(
+        "DROP INDEX idx_mitigations_active_scope;
+         CREATE UNIQUE INDEX idx_mitigations_active_scope ON mitigations(scope_hash, pop)
+             WHERE status IN ('pending', 'active', 'escalated');
+         DELETE FROM schema_migrations WHERE version = 21;",
+    )
+    .execute(&setup)
+    .await
+    .expect("put the database at 020");
+    // Control: the 020 definition is the one the assertion refuses.
+    assert!(scope_index(&setup).await.contains("'pending'"));
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("migrate a database at 020");
+    assert_live_scope_index(&scope_index(&setup).await);
+    assert_eq!(
+        recorded(&setup)
+            .await
+            .last()
+            .map(|(version, name, _)| (*version, name.clone())),
+        Some((21, "live_scope_index".to_string()))
+    );
+
+    // 0.27.0 replays 001-020 on every start. Migration 001's IF NOT EXISTS
+    // keeps the narrowed index, so starting it again is unaffected.
+    for (version, _, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= 20) {
+        sqlx::raw_sql(sql)
+            .execute(&setup)
+            .await
+            .unwrap_or_else(|error| panic!("replay migration {version}: {error}"));
+    }
+    assert_live_scope_index(&scope_index(&setup).await);
 }

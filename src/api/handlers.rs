@@ -274,7 +274,9 @@ pub struct MitigationResponse {
     pub announcement_outcome: Option<AnnouncementOutcome>,
     /// Unique mitigation identifier
     pub mitigation_id: Uuid,
-    /// Current status (pending, active, withdrawn, expired)
+    /// Current status: active, expired or withdrawn for rows this version
+    /// creates. Stored legacy rows may still return pending, escalated or
+    /// rejected; live intent is active and escalated.
     pub status: String,
     /// Customer ID from inventory
     pub customer_id: Option<String>,
@@ -2297,7 +2299,7 @@ pub async fn list_events(
     path = "/v1/mitigations",
     tag = "mitigations",
     params(
-        ("status" = Option<String>, Query, description = "Comma-separated exact statuses: pending, active, expired, withdrawn, rejected (legacy escalated is still accepted but never produced); every token must be valid and nonempty"),
+        ("status" = Option<String>, Query, description = "Comma-separated exact statuses: active, expired or withdrawn, the statuses this version stores. Legacy pending, escalated and rejected are accepted and match stored rows, but this version produces none of them; rejected is no longer produced since 0.20.0, and rows stored by 0.19 and earlier remain. Every token must be valid and nonempty"),
         ("customer_id" = Option<String>, Query, description = "Filter by customer ID"),
         ("q" = Option<String>, Query, description = "Literal case-insensitive substring of target, vector, customer ID or mitigation UUID; maximum 256 UTF-8 bytes, no NUL. Empty matches every row."),
         ("victim_ip" = Option<String>, Query, description = "Filter by exact stored host IP or canonical manual CIDR; no containment matching"),
@@ -2335,7 +2337,7 @@ pub async fn list_mitigations(
     {
         Ok(status) => status,
         Err(_) => return Ok(AppError(PrefixdError::InvalidRequest(
-            "invalid status filter; expected comma-separated pending, active, escalated, expired, withdrawn or rejected".into(),
+            "invalid status filter; expected comma-separated active, expired or withdrawn (legacy pending, escalated and rejected are accepted)".into(),
         )).into_response()),
     };
 
@@ -2477,11 +2479,7 @@ pub async fn get_mitigation(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let mut response = MitigationResponse::from(&mitigation);
-    if matches!(
-        mitigation.status,
-        MitigationStatus::Active | MitigationStatus::Escalated
-    ) && !mitigation.is_dry_run_origin()
-    {
+    if mitigation.is_active() && !mitigation.is_dry_run_origin() {
         use crate::domain::{BlackholeExportEvidence, ExportObservation};
         // The reconciler's last snapshot; this request never reads the speaker.
         let (observer, store) = if mitigation.action_type == ActionType::Blackhole {

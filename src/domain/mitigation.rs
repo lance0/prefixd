@@ -11,6 +11,11 @@ use crate::error::{PrefixdError, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MitigationStatus {
+    /// Pre-admission state inside the controller: `Mitigation::from_intent`
+    /// starts here and `activate()` runs before `admit_mitigation` stores the
+    /// row, and no release has persisted it. A stored row with this status is
+    /// not live intent: it parses for responses and exact filters, but quotas,
+    /// conflicts, ownership, expiry, reconciliation and withdrawal ignore it.
     Pending,
     Active,
     // Legacy state: no code path produces it. Kept so stored rows and old
@@ -18,6 +23,9 @@ pub enum MitigationStatus {
     Escalated,
     Expired,
     Withdrawn,
+    /// Legacy terminal state: no longer produced since 0.20.0, which stopped
+    /// storing a row when the initial announcement failed. Rows stored by 0.19
+    /// and earlier remain, so it still parses for responses and old filters.
     Rejected,
 }
 
@@ -34,7 +42,7 @@ impl MitigationStatus {
     }
 
     pub fn is_active(&self) -> bool {
-        matches!(self, Self::Pending | Self::Active | Self::Escalated)
+        matches!(self, Self::Active | Self::Escalated)
     }
 }
 
@@ -483,6 +491,8 @@ pub struct Mitigation {
     pub last_event_id: Uuid,
     pub escalated_from_id: Option<Uuid>,
     pub reason: String,
+    /// Legacy column and response field: set only on `rejected` rows stored by
+    /// 0.19 and earlier; current rows leave it null.
     pub rejection_reason: Option<String>,
     pub acknowledged_at: Option<DateTime<Utc>>,
     pub acknowledged_by: Option<String>,
@@ -667,12 +677,6 @@ impl Mitigation {
 
     pub fn activate(&mut self) {
         self.status = MitigationStatus::Active;
-        self.updated_at = Utc::now();
-    }
-
-    pub fn reject(&mut self, reason: String) {
-        self.status = MitigationStatus::Rejected;
-        self.rejection_reason = Some(reason);
         self.updated_at = Utc::now();
     }
 }

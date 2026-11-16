@@ -33,8 +33,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { formatRelative, formatTimeRemaining } from "@/lib/format"
 import { useTimeFormat } from "@/components/time-zone-provider"
 
-// Escalated is hidden: no code path produces it. Legacy rows still render with a danger pill.
-const STATUS_FILTERS = ["active", "pending", "expired", "withdrawn"] as const
+// Offer only statuses new admissions produce. Live rows are active and legacy
+// escalated; a stored pending row renders its pill without live controls.
+const STATUS_FILTERS = ["active", "expired", "withdrawn"] as const
 
 const PENDING_REASON_NOTE = "Cleanup may still be pending; a pending request retains its original recorded reason."
 
@@ -485,11 +486,11 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
               </TableHeader>
               <TableBody>
                 {mitigations.map((mitigation) => {
-                  const live = mitigation.status === "active" || mitigation.status === "escalated" || mitigation.status === "pending"
+                  const live = mitigation.status === "active" || mitigation.status === "escalated"
                   const remaining = Date.parse(mitigation.expires_at) - now
                   const vector = mitigation.vector.replace(/_/g, " ")
                   const match = describeMatch(mitigation)
-                  const isSelectable = mitigation.status === "active" || mitigation.status === "escalated"
+                  const isSelectable = live
 
                   return (
                     <TableRow

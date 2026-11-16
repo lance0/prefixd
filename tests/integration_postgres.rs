@@ -262,6 +262,171 @@ async fn test_full_event_to_mitigation_flow() {
 }
 
 #[tokio::test]
+async fn live_intent_is_exactly_active_and_escalated() {
+    // Live intent is `active` and legacy `escalated`. No release persisted
+    // `pending` (`activate()` runs before admission stores the row), so a stored
+    // `pending` row is not live: quota, conflict, ownership and withdrawal
+    // predicates ignore it like any terminal status.
+    let ctx = TestContext::new().await;
+    let app = ctx.router().await;
+
+    let event = || {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/events")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{
+                    "timestamp": "2026-01-17T10:00:00Z",
+                    "source": "integration_test",
+                    "victim_ip": "203.0.113.10",
+                    "vector": "udp_flood",
+                    "bps": 500000000,
+                    "pps": 100000,
+                    "top_dst_ports": [53, 123],
+                    "confidence": 0.95
+                }"#,
+            ))
+            .unwrap()
+    };
+    let response = app.clone().oneshot(event()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    for (status, live) in [
+        ("active", true),
+        ("escalated", true),
+        ("pending", false),
+        ("expired", false),
+        ("withdrawn", false),
+        ("rejected", false),
+    ] {
+        sqlx::query("UPDATE mitigations SET status = $1")
+            .bind(status)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        let inventory = ctx.repo.active_mitigation_inventory(None).await.unwrap();
+        assert_eq!(inventory.len(), usize::from(live), "{status}");
+        assert_eq!(
+            ctx.repo.count_active_global().await.unwrap(),
+            u32::from(live),
+            "{status}"
+        );
+    }
+
+    let withdraw = |id: uuid::Uuid| {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/v1/mitigations/{id}/withdraw"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"operator_id": "test_operator", "reason": "status set check"}"#,
+            ))
+            .unwrap()
+    };
+    let id: uuid::Uuid = sqlx::query_scalar("SELECT mitigation_id FROM mitigations")
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+
+    let rows = || async {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM mitigations")
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap()
+    };
+
+    // A stored pending row is not withdrawable and stays untouched.
+    sqlx::query("UPDATE mitigations SET status = 'pending'")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    let response = app.clone().oneshot(withdraw(id)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let row = ctx.repo.get_mitigation(id).await.unwrap().unwrap();
+    assert_eq!(row.status, MitigationStatus::Pending);
+    assert!(ctx.repo.pending_withdrawals(None).await.unwrap().is_empty());
+
+    // Control: the same row as active is extended by the same signal, not
+    // duplicated.
+    sqlx::query("UPDATE mitigations SET status = 'active'")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    let response = app.clone().oneshot(event()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(rows().await, 1);
+
+    // A stored pending row does not hold its scope: the same signal admits a
+    // new active row beside it.
+    sqlx::query("UPDATE mitigations SET status = 'pending'")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    let response = app.clone().oneshot(event()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(rows().await, 2);
+    let fresh: uuid::Uuid =
+        sqlx::query_scalar("SELECT mitigation_id FROM mitigations WHERE status = 'active'")
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+    assert_ne!(fresh, id);
+    let row = ctx.repo.get_mitigation(id).await.unwrap().unwrap();
+    assert_eq!(row.status, MitigationStatus::Pending);
+
+    // Control: the active row withdraws normally.
+    let response = app.oneshot(withdraw(fresh)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let row = ctx.repo.get_mitigation(fresh).await.unwrap().unwrap();
+    assert_eq!(row.status, MitigationStatus::Withdrawn);
+}
+
+#[tokio::test]
+async fn admission_refuses_a_never_activated_mitigation() {
+    // `from_intent` starts at `pending`; only `activate()` makes a row
+    // admissible. Both repositories refuse the row and persist nothing.
+    let context = TestContext::new().await;
+    let mock: std::sync::Arc<dyn prefixd::db::RepositoryTrait> =
+        std::sync::Arc::new(prefixd::db::MockRepository::new());
+    for repo in [&context.repo, &mock] {
+        let mut row = inventory_mitigation(
+            "203.0.113.30/32",
+            "test-pop",
+            chrono::Utc::now(),
+            MitigationStatus::Pending,
+        );
+        let quotas = common::test_settings().quotas;
+        let error = repo
+            .admit_mitigation(&row, &quotas, &Default::default(), &fixture_actor())
+            .await
+            .expect_err("a pending row is refused");
+        assert!(
+            matches!(error, prefixd::error::PrefixdError::Internal(_)),
+            "{error}"
+        );
+        assert!(
+            repo.get_mitigation(row.mitigation_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Control: the same row once activated is admitted.
+        row.activate();
+        repo.admit_mitigation(&row, &quotas, &Default::default(), &fixture_actor())
+            .await
+            .expect("an active row is admitted");
+        assert!(
+            repo.get_mitigation(row.mitigation_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_mitigation_withdrawal() {
     let ctx = TestContext::new().await;
     let app = ctx.router().await;

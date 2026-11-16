@@ -8,7 +8,7 @@ use crate::config::OperationMode;
 use crate::error::{GuardrailError, PrefixdError, Result};
 use crate::observability::{ActorType, AuditEntry};
 
-use super::{ActionType, Mitigation, MitigationIntent, MitigationRoute, MitigationStatus};
+use super::{ActionType, Mitigation, MitigationIntent, MitigationRoute};
 
 /// A checked snapshot and authenticated request for an atomic expiry update.
 #[derive(Debug, Clone)]
@@ -79,10 +79,7 @@ impl LifetimeExtension {
 
 fn validate_live(mitigation: &Mitigation, pop: &str, now: DateTime<Utc>) -> Result<()> {
     if mitigation.pop != pop
-        || !matches!(
-            mitigation.status,
-            MitigationStatus::Active | MitigationStatus::Escalated
-        )
+        || !mitigation.is_active()
         || !matches!(
             mitigation.action_type,
             ActionType::Discard | ActionType::Police
@@ -275,7 +272,7 @@ mod tests {
         bgp::{FlowSpecReader, FlowSpecWriter, MockAnnouncer},
         config::{AuthMode, BgpMode, Inventory, Playbooks, Settings},
         db::{ListParams, MockRepository, RepositoryTrait},
-        domain::{ActionParams, AttackVector, MatchCriteria, WithdrawalRequest},
+        domain::{ActionParams, AttackVector, MatchCriteria, MitigationStatus, WithdrawalRequest},
     };
     use std::sync::{Arc, atomic::Ordering::Relaxed};
 

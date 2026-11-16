@@ -291,26 +291,6 @@ describe("WebSocketProvider server frames", () => {
     await waitFor(() => expect(controller.calls("GET", "/v1/mitigations")).toHaveLength(3))
   })
 
-  it("refreshes event caches for the backend EventResponse frame", async () => {
-    const { socket, preferenceReads } = await mountProvider()
-
-    // The backend frame carries fields the dashboard does not read.
-    const frame = {
-      type: "event_ingested",
-      event: {
-        event_id: "2f585b3f-6878-4bde-a908-37739846b4a3",
-        external_event_id: "detector-1",
-        status: "accepted",
-        mitigation_id: mitigation.mitigation_id,
-      },
-    } as const
-
-    act(() => socket.receive(frame))
-    await settle()
-
-    expect(invalidatedKeys(preferenceReads)).toEqual([cacheKeys[2], cacheKeys[3], "stats"])
-  })
-
   it("refreshes live caches after a payload-free resync frame", async () => {
     const { socket, preferenceReads } = await mountProvider()
     act(() => socket.receive({ type: "resync_required" }))

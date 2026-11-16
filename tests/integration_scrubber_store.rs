@@ -92,6 +92,7 @@ fn ordinary(pop: &str, prefix: &str) -> Mitigation {
         AttackVector::Unknown,
     );
     row.origin_mode = Some(OperationMode::Enforced);
+    row.activate();
     row
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { fireEvent, screen, waitFor } from "@testing-library/react"
+import { fireEvent, screen, waitFor, within } from "@testing-library/react"
 import type { AuditEntry, Event, Mitigation } from "@/lib/api"
 import { formatTimestamp } from "@/lib/format"
 import { MitigationsContentLive } from "@/components/dashboard/mitigations-content-live"
@@ -67,13 +67,26 @@ describe("list states", () => {
     expect(screen.getByRole("button", { name: "expired" })).toHaveAttribute("aria-pressed", "false")
   })
 
-  it("shows the expiry countdown with its absolute UTC deadline as visible text", async () => {
+  it("offers only the statuses this version writes", async () => {
+    serveMitigations(loaded([]))
+    renderApp(<MitigationsContentLive />)
+    await screen.findByRole("button", { name: "active" })
+
+    const group = screen.getByRole("group", { name: "Status" })
+    expect(within(group).getAllByRole("button").map((button) => button.textContent?.trim().toLowerCase()))
+      .toEqual(["active", "expired", "withdrawn"])
+    expect(within(group).queryByRole("button", { name: "pending" })).not.toBeInTheDocument()
+    expect(within(group).queryByRole("button", { name: "rejected" })).not.toBeInTheDocument()
+    expect(within(group).queryByRole("button", { name: "escalated" })).not.toBeInTheDocument()
+  })
+
+  it.each(["active", "escalated"] as const)("keeps %s rows live with expiry and withdrawal controls", async (status) => {
     const expiresAt = new Date(Date.now() + 26 * 60_000 + 30_000).toISOString()
 
     const now = new Date().toISOString()
 
     const mitigation: Mitigation = {
-      mitigation_id: "m-1", scope_hash: "scope-1", status: "active", customer_id: null, service_id: null, pop: "iad1",
+      mitigation_id: "m-1", scope_hash: "scope-1", status, customer_id: null, service_id: null, pop: "iad1",
       victim_ip: "203.0.113.10", vector: "udp_flood", action_type: "police", rate_bps: 5_000_000,
       dst_prefix: "203.0.113.10/32", protocol: 17, dst_ports: [53], created_at: now, updated_at: now,
       expires_at: expiresAt, withdrawn_at: null, triggering_event_id: "e-1", last_event_id: "e-1",
@@ -84,8 +97,33 @@ describe("list states", () => {
     renderApp(<MitigationsContentLive />)
     const deadline = await screen.findByText(formatTimestamp(expiresAt))
     expect(deadline).toBeVisible()
-    expect(deadline.closest("td")).toHaveTextContent(/26m/)
+    expect(deadline.closest("td")).toHaveTextContent(/Expires in 26m/)
     expect(deadline.closest("td")?.querySelector("time")).toHaveAttribute("dateTime", expiresAt)
+    expect(screen.getByRole("button", { name: "Withdraw mitigation" })).toBeEnabled()
+    const checkbox = screen.getByRole("checkbox", { name: "Select mitigation 203.0.113.10" })
+    fireEvent.click(checkbox)
+    expect(checkbox).toBeChecked()
+  })
+
+  it("renders a stored pending row without live expiry or withdrawal controls", async () => {
+    const expiresAt = new Date(Date.now() + 26 * 60_000 + 30_000).toISOString()
+    const now = new Date().toISOString()
+
+    const mitigation: Mitigation = {
+      mitigation_id: "m-1", scope_hash: "scope-1", status: "pending", customer_id: null, service_id: null, pop: "iad1",
+      victim_ip: "203.0.113.10", vector: "udp_flood", action_type: "police", rate_bps: 5_000_000,
+      dst_prefix: "203.0.113.10/32", protocol: 17, dst_ports: [53], created_at: now, updated_at: now,
+      expires_at: expiresAt, withdrawn_at: null, triggering_event_id: "e-1", last_event_id: "e-1",
+      reason: "udp flood", acknowledged_at: null, acknowledged_by: null,
+    }
+
+    serveMitigations(loaded([mitigation]))
+    renderApp(<MitigationsContentLive />)
+    const deadline = await screen.findByText(formatTimestamp(expiresAt))
+    expect(deadline.closest("td")).not.toHaveTextContent(/Expires in/)
+    expect(screen.getAllByText("pending").length).toBeGreaterThan(0)
+    expect(screen.queryByRole("button", { name: "Withdraw mitigation" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("checkbox", { name: "Select mitigation 203.0.113.10" })).not.toBeInTheDocument()
   })
 
   it("tags only dry-run-origin rows as simulations", async () => {

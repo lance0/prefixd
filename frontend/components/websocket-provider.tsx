@@ -30,7 +30,6 @@ const WS_TO_ALERT_EVENT = new Map([
   ["mitigation_withdrawn", "mitigation.withdrawn"],
   ["mitigation_expired", "mitigation.expired"],
   ["resync_required", "config.reloaded"],
-  ["event_ingested", "mitigation.created"],
 ])
 
 /** The resource an SWR key names: a string key itself, or the first element of a tuple key. */
@@ -202,11 +201,6 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
 
             // Invalidate all mitigation-related keys (including those with params)
             mutate((key) => swrResource(key)?.startsWith("mitigations") ?? false)
-            mutate("stats")
-          }
-
-          if (message.type === "event_ingested") {
-            mutate((key) => swrResource(key)?.startsWith("events") ?? false)
             mutate("stats")
           }
 

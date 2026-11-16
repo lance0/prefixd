@@ -19,13 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   endpoint and its credentials, scrubber readiness credentials and the playbook
   checks against settings. A configuration startup refused after connecting is
   now refused earlier, with every error on its own line.
-- This release adds no migration: migration 020 is still the latest, as in
-  0.27.0, so a rolling replacement from 0.27.0, with the new controller started
-  in standby, is unaffected. From this release on, a controller refuses a
-  database that records a migration newer than it knows, but 0.27.0 and older
-  have no such check. A future release that adds a migration is one-way: its
-  upgrade notes state whether a rolling replacement is safe, and rolling it back
-  means restoring the pre-upgrade backup. See
+- This release adds migration 021, which narrows the unique scope index
+  `idx_mitigations_active_scope` to `active` and `escalated` rows. A narrower
+  predicate covers a subset of the rows the old index already kept unique, so
+  the migration cannot fail on existing data and rewrites no row. 0.27.0 runs
+  unchanged against the migrated database, so a rolling replacement from
+  0.27.0, with the new controller started in standby, is safe, and so is
+  starting 0.27.0 again. From this release on, a controller refuses a database
+  that records a migration newer than it knows, but 0.27.0 and older have no
+  such check. See
   [database schema version and downgrade](docs/how-to/upgrading.md#database-schema-version-and-downgrade).
 - The lease state adds `standby`. During a PostgreSQL outage the active
   controller loses its fence within seconds, so once renewal stops at the TTL
@@ -43,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   To clear the warnings, delete step 2 of each in the dashboard playbook editor
   or in `/etc/prefixd/playbooks.yaml`; see
   [multi-step playbooks](docs/how-to/upgrading.md#multi-step-playbooks).
+- A stored `pending` mitigation, which no release has written, is no longer
+  live intent. It stays as inert history: it no longer counts toward quotas or
+  conflicts, cannot be withdrawn, and no longer blocks a new mitigation for its
+  scope and POP.
 - Alert payloads change shape:
   - The test alert's `event_type` is `test`, not `mitigation.created`. A
     generic webhook consumer must accept `test` and must not treat a test as
@@ -177,6 +183,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns the documented `500` while the delete stays pending. Reconciliation
   completes both. See
   [troubleshooting](docs/how-to/troubleshooting.md#create-returns-announcement_outcome-unconfirmed).
+- Live mitigation intent is `active` and legacy `escalated` in every check.
+  A stored `pending` row, which no release has written, used to count toward
+  quotas, conflicts and route ownership and could be withdrawn, while expiry,
+  reconciliation, lease renewal, export evidence and lifetime extension skipped
+  it. Such a row, for example one inserted by hand, is no longer live intent:
+  every check ignores it, withdrawal returns `400`, and the dashboard shows its
+  status without a countdown or withdrawal control. `pending` still parses in
+  responses and exact status filters.
+- `GET /v1/mitigations` documents `status` as the statuses this version writes
+  (`active`, `expired` and `withdrawn`), and the CLI help and the dashboard
+  status filter offer the same set. Legacy `pending`, `escalated` and `rejected`
+  are still accepted and match stored rows. `rejected` is no longer produced
+  since 0.20.0; rows stored by 0.19 and earlier remain, and still cannot be
+  acknowledged.
+- The WebSocket feed no longer defines an `event_ingested` frame. No sender
+  existed, so the frame was never broadcast; event lists keep their API
+  refresh. The dashboard message type union and alert-event mapping drop it.
+- The architecture and upgrade documents describe `flowspec_announcements` as a
+  legacy table this version never writes, rather than a live announcement
+  schema.
 
 ### Fixed
 
