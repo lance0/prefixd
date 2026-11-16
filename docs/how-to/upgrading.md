@@ -258,8 +258,9 @@ demoting an operator does not revoke the tokens they created; list them with
 ## Canonical victims
 
 This release stores every victim address in one spelling: IPv6 lowercase and
-zero-compressed (RFC 5952), and an IPv4-mapped IPv6 host as its IPv4 address.
-Every ingest route, every signal adapter and manual mitigations apply it, and
+zero-compressed (RFC 5952), and, for a detector event, an IPv4-mapped IPv6 host
+as its IPv4 address; manual input refuses a mapped destination. Every ingest
+route, every signal adapter and manual mitigations apply it, and
 the `victim_ip` filter and IP history canonicalize their input. Earlier
 releases stored a host as the detector sent it, so FastNetMon's zero-padded
 IPv6 (`2001:0db8:0113::0010`) never correlated with, or was found by a search
@@ -268,7 +269,7 @@ for, the canonical `2001:db8:113::10`.
 Migration 023 rewrites the IPv6 victim of live state to that spelling: pending,
 active and escalated mitigations and open signal groups. It changes no rule,
 scope, withdrawal intent or schema, and implies no speaker or router change; an
-older controller reads the rewritten rows unchanged. Three cases keep their
+older controller reads the rewritten rows unchanged. Four cases keep their
 stored text:
 
 - History: events, audit rows and ended mitigations keep the spelling the
@@ -280,7 +281,14 @@ stored text:
   exist per victim and vector.
 - A live mitigation for an IPv4-mapped victim keeps its victim text and the
   IPv6 rule it was created with, which matches no IPv4 traffic, until it
-  expires or is withdrawn. New events for that address create an IPv4 rule.
+  expires or is withdrawn. The `victim_ip` filter, IP history and the bundled
+  FastNetMon unban lookup canonicalize to the IPv4 address and do not find it;
+  search with `q`, or withdraw it from its mitigation page. New detector
+  events for that address create an IPv4 rule, and manual input refuses the
+  mapped spelling.
+- A victim with a deprecated IPv4-compatible address (`::c000:201`) keeps its
+  text, because PostgreSQL prints it `::192.0.2.1` where prefixd prints
+  `::c000:201`; it keeps that spelling until it ends.
 
 ## rustbgpd v0.83
 

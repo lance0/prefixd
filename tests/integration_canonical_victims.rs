@@ -395,16 +395,7 @@ async fn unban_lookup_finds_a_canonical_mitigation_extended_by_a_padded_ban() {
 
 #[tokio::test]
 async fn manual_flowspec_stores_the_canonical_victim_and_prefix() {
-    for (sent, victim, prefix) in [
-        ("2001:0DB8:0113::0010", CANONICAL_V6, "2001:db8:113::10/128"),
-        (
-            "2001:0DB8:0113::0010/128",
-            CANONICAL_V6,
-            "2001:db8:113::10/128",
-        ),
-        ("::ffff:203.0.113.10", "203.0.113.10", "203.0.113.10/32"),
-        ("::ffff:203.0.113.10/128", "203.0.113.10", "203.0.113.10/32"),
-    ] {
+    for sent in ["2001:0DB8:0113::0010", "2001:0DB8:0113::0010/128"] {
         let fixture = fixture(1).await;
         let (status, body) = send(
             &fixture.app,
@@ -419,7 +410,61 @@ async fn manual_flowspec_stores_the_canonical_victim_and_prefix() {
         assert!(status.is_success(), "{sent}: {status} {body}");
         let created = mitigations(&fixture.repo).await;
         assert_eq!(created.len(), 1, "{sent}");
-        assert_eq!(created[0].victim_ip, victim, "{sent}");
-        assert_eq!(created[0].match_criteria.dst_prefix, prefix, "{sent}");
+        assert_eq!(created[0].victim_ip, CANONICAL_V6, "{sent}");
+        assert_eq!(
+            created[0].match_criteria.dst_prefix,
+            format!("{CANONICAL_V6}/128"),
+            "{sent}"
+        );
+    }
+}
+
+/// Detector events convert an IPv4-mapped victim, but manual input names the
+/// family it means: create, preview and blackhole refuse a mapped destination
+/// with the IPv4 form to use, and store nothing. A mapped blackhole would
+/// otherwise reach the IPv4 /32 RTBH path with an unconfirmed spelling.
+#[tokio::test]
+async fn manual_input_refuses_ipv4_mapped_destinations() {
+    let flowspec = |victim: &str| {
+        json!({
+            "victim_ip": victim, "protocol": "udp", "dst_ports": [53],
+            "action": "discard", "ttl_seconds": 600, "reason": "mapped manual",
+        })
+    };
+    let blackhole = json!({
+        "victim_ip": "::ffff:203.0.113.10", "confirm_victim_ip": "::ffff:203.0.113.10",
+        "action": "blackhole", "ttl_seconds": 600, "reason": "mapped blackhole",
+    });
+    for (path, body, suggestion) in [
+        (
+            "/v1/mitigations",
+            flowspec("::ffff:203.0.113.10"),
+            "use 203.0.113.10",
+        ),
+        (
+            "/v1/mitigations",
+            flowspec("::ffff:203.0.113.10/128"),
+            "use 203.0.113.10",
+        ),
+        (
+            "/v1/mitigations/preview",
+            flowspec("::ffff:203.0.113.10"),
+            "use 203.0.113.10",
+        ),
+        ("/v1/mitigations", blackhole, "use 203.0.113.10"),
+    ] {
+        let fixture = fixture(1).await;
+        let (status, response) = send(&fixture.app, "POST", path, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path} {body}: {response}");
+        // Preview answers with a refusal record, creation with an error.
+        let error = response["error"]
+            .as_str()
+            .or(response["reason"].as_str())
+            .unwrap_or_else(|| panic!("{path}: {response}"));
+        assert!(
+            error.contains("IPv4-mapped") && error.ends_with(suggestion),
+            "{error}"
+        );
+        assert!(mitigations(&fixture.repo).await.is_empty(), "{path} {body}");
     }
 }

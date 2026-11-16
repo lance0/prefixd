@@ -158,7 +158,7 @@ Content-Type: application/json
 |-------|------|----------|-------------|
 | `timestamp` | datetime | yes | Event timestamp (ISO 8601) |
 | `source` | string | yes | Detector identifier (e.g. "fastnetmon", "dashboard") |
-| `victim_ip` | string | yes | IPv4 or IPv6 address under attack, or a canonical CIDR for an opted-in detector prefix event. Stored in canonical form: IPv6 lowercase and zero-compressed, an IPv4-mapped IPv6 host as its IPv4 address |
+| `victim_ip` | string | yes | IPv4 or IPv6 address under attack, or a canonical CIDR for an opted-in detector prefix event. Stored in canonical form: IPv6 lowercase and zero-compressed, an IPv4-mapped IPv6 host as its IPv4 address. An unban with an invalid victim returns 400 |
 | `vector` | string | yes | Attack type: `udp_flood`, `syn_flood`, `ack_flood`, `icmp_flood`, `udp_amplification`, `unknown` |
 | `bps` | integer | no | Bits per second |
 | `pps` | integer | no | Packets per second |
@@ -613,7 +613,7 @@ Authorization: Bearer <token>
 | `status` | string | Filter by one or more statuses (comma-separated): `active`, `expired`, `withdrawn`. Legacy `pending`, `escalated` and `rejected` are still accepted and match stored rows, but this version produces none of them. `rejected` is no longer produced since 0.20.0; rows stored by 0.19 and earlier remain. Live intent is `active` and `escalated`; a stored `pending` row is not live and cannot be withdrawn |
 | `customer_id` | string | Filter by customer |
 | `q` | string | Literal case-insensitive substring of target, vector, customer ID or mitigation UUID; at most 256 UTF-8 bytes and no NUL. Empty matches every row; `%`, `_` and backslash have no wildcard meaning |
-| `victim_ip` | string | Filter by target: host IP or exact CIDR, compared in canonical form, so `2001:0db8::0010` matches `2001:db8::10` and `::ffff:203.0.113.10` matches `203.0.113.10`; no containment matching. A value that is not an address matches nothing |
+| `victim_ip` | string | Filter by target: host IP or exact CIDR, compared in canonical form, so `2001:0db8::0010` matches `2001:db8::10` and `::ffff:203.0.113.10` matches `203.0.113.10`; no containment matching. A value that is not an address is compared as sent, so `victim_ip=any` matches source-only rules |
 | `pop` | string | Exact case-sensitive POP identifier; omitted or literal `all` lists every POP |
 | `acknowledged` | boolean | Filter by acknowledged status (`true`/`false`) |
 | `limit` | integer | Max results (default 100, max 1000) |
@@ -988,8 +988,11 @@ lengths and malformed CIDRs also return `400`. Accepted CIDR target text is
 canonical in `dst_prefix`; non-host CIDRs are also canonical in `victim_ip`.
 Explicit `/32` and `/128` targets normalize to a bare canonical host in
 `victim_ip`, so equivalent host and CIDR spellings share duplicate detection.
-A bare IP is stored canonical too: IPv6 lowercase and zero-compressed, and an
-IPv4-mapped IPv6 host as its IPv4 address, whose rule is an IPv4 rule.
+A bare IP is stored canonical too: IPv6 lowercase and zero-compressed. An
+IPv4-mapped IPv6 destination (`::ffff:203.0.113.10`) is refused with `400`
+naming the IPv4 form to use, here, in the preview and for a blackhole: as IPv6
+its rule would match no IPv4 traffic, and converting it would create a rule
+the operator did not type.
 
 A subnet remains one precisely scoped rule. All protocol, port, source-match,
 capability, TTL, quota, dry-run and authorization checks still apply. Quotas

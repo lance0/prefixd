@@ -179,17 +179,16 @@ pub(super) async fn prepare_manual_flowspec(
                 .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?
                 .parse::<ipnet::IpNet>()
                 .map_err(|_| PrefixdError::InvalidRequest("invalid source prefix".into()))?
-        } else if req.victim_ip.contains('/') {
-            let destination = crate::domain::parse_flowspec_destination(&req.victim_ip)
-                .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
-            if destination.prefix_len() == destination.max_prefix_len() {
-                ipnet::IpNet::from(destination.addr().to_canonical())
-            } else {
-                destination
-            }
         } else {
-            // The canonical host, so the stored victim matches ingested events.
-            validate_ip(&req.victim_ip).map(|ip| ipnet::IpNet::from(ip.to_canonical()))?
+            let destination = if req.victim_ip.contains('/') {
+                crate::domain::parse_flowspec_destination(&req.victim_ip)
+                    .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?
+            } else {
+                validate_ip(&req.victim_ip).map(ipnet::IpNet::from)?
+            };
+            crate::domain::refuse_ipv4_mapped(&destination)
+                .map_err(PrefixdError::InvalidRequest)?;
+            destination
         };
         validate_string_len(&req.reason, "reason", MAX_STRING_LEN)?;
         if req.source_only && req.reason.trim().is_empty() {

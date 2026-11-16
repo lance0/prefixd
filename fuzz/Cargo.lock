@@ -1961,6 +1961,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "getrandom 0.4.2",
  "hex",
  "hmac 0.13.0",
  "hyper-util",
