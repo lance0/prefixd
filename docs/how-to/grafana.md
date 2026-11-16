@@ -106,9 +106,39 @@ holds its POP's fence, so monitor it independently of BGP health:
 
 | Alert | Fires when | Why it matters |
 | --- | --- | --- |
-| `PrefixdDown` | `up{job="prefixd"} == 0` for 2 minutes | Nothing expires or withdraws; announced routes stay on the speaker |
-| `PrefixdNotReady` | Every scraped process reports `prefixd_controller_fence_active` 0 for 2 minutes | All controllers are in standby, so none mutates the speaker |
-| `PrefixdBlackholesWhileDegraded` | No controller is up and active for 2 minutes, and `prefixd_mitigations_active{action_type="blackhole"}` was above zero when the last active controller was last seen (within 3 days, at 5-minute resolution) | Blackholes, including unleased detector blackholes, stay announced until prefixd returns or an operator withdraws them |
+| `PrefixdDown` | `up{job="prefixd"} == 0` for 2 minutes | Controller TTL cleanup stops; leased routes may lapse and unleased routes can remain |
+| `PrefixdLeasedMitigationsAtRisk` | A target is down or its renewal is overdue, with a positive last leased count from the past hour, for 15 seconds | Leased FlowSpec and blackholes may lapse while mitigation intent remains active |
+| `PrefixdNotReady` | Every scraped process reports `prefixd_controller_fence_active` 0 for 2 minutes | No controller admits, expires, withdraws or reconciles routes; bounded lease renewal may continue |
+| `PrefixdBlackholesWhileDegraded` | No controller is up and active for 2 minutes, and `prefixd_mitigations_active{action_type="blackhole"}` was above zero when the last active controller was last seen (within 3 days, at 5-minute resolution) | Unleased blackholes can stay announced until prefixd returns or an operator withdraws them; leased blackholes may lapse |
+
+The leased alert retains `job`, `instance` and `pop`: another healthy controller
+does not hide the affected instance. It uses the last successful leased-intent
+inventory, including explicit zero after the last leased mitigation ends. A
+database read failure retains the previous count; an unreadable inventory is
+never an empty one. Unleased rules, pending admissions, dry-run simulations and
+other injection owners do not count. There is no sample before the first
+successful inventory read, and an admission followed by an outage before that
+read is not covered. After a restart, the previous process's last count remains
+usable for one hour until a successful new inventory replaces it.
+
+Each metrics scrape computes whether renewal is overdue using the keeper's
+monotonic clock, so a stalled renewal task cannot hide behind a retained
+`live` state. The signal becomes true after two renewal intervals without a
+successful add, renewal or live-lease adoption, or when renewal is stopped or
+no generation is held. A renewing standby does not trigger it. With the default
+60-second lease, two intervals are 40 seconds; the 15-second hold and scrape
+and evaluation delays mean notification is not guaranteed before expiry.
+Shorter leases need correspondingly faster monitoring to warn before expiry.
+
+The shipped scrape and evaluation intervals are 15 seconds. A failed scrape
+can trigger after two failed samples; a single failed sample that recovers
+before the hold ends stays quiet. The down branch remembers the last leased
+count for one hour, then clears even if the outage continues; `PrefixdDown`
+still fires. Removing a target from Prometheus discovery is not a failed scrape
+and is not covered. Keep a stable target identity across controller restarts.
+This alert reports retained intent and renewal risk, not confirmed route loss
+or router enforcement. Restore the controller, then check database connectivity,
+lease health and current speaker state.
 
 The blackhole gauge counts database state, not routes on the speaker. Route
 these alerts to whoever can restart prefixd or withdraw a blackhole on the

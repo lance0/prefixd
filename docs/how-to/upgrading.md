@@ -67,6 +67,46 @@ the protection; drain affected rules or accept that policy change explicitly.
   [mitigation origin mode](#mitigation-origin-mode).
 - **Always back up the database** before upgrading.
 
+## Detector events without destination ports
+
+UDP/TCP detector police rules no longer substitute a service's `allowed_ports`
+when the event contains no destination ports. New rules match the victim and
+protocol without a destination-port component. This includes bans from the
+bundled FastNetMon script and covers floods to ports outside the service list.
+It also rate-limits legitimate traffic of that protocol to the victim.
+
+Review police rates before upgrading. If portless policing is unacceptable,
+set the playbook's `require_top_ports: true` and use a detector that reports
+destination ports; portless events then match no playbook. UDP/TCP detector
+discard without destination ports is refused, so it cannot silently become a
+protocol-wide discard. Prefix TCP police still requires ports. Explicit
+manual rules, ICMP, blackholes and multi-rule source-port matches are unchanged.
+
+Stored rules retain their original matches until expiry or withdrawal. Review
+and withdraw an ineffective old service-port rule when replacing it; installing
+the new binary does not rewrite active rules. Reported event ports still
+intersect `allowed_ports`, and a nonempty event list with no allowed match is
+refused. See [allowed ports](../reference/configuration.md#allowed-ports).
+
+## Password hashes in earlier debug logs
+
+Earlier releases wrote operator password hashes in login diagnostics when
+`debug` logging was enabled. This release redacts those values. Treat retained
+copies of those logs as credentials: restrict access and reset affected
+operators' passwords using an Admin session. Changing a password also invalidates
+that operator's existing sessions. Upgrading does not remove old log copies.
+
+## Leased mitigation outage alert
+
+Update and reload the bundled `grafana/prometheus-alerts.yml` in Prometheus,
+and route `PrefixdLeasedMitigationsAtRisk` to the on-call operator. The rule
+uses two new controller metrics and needs the upgraded controller. Keep the
+scrape job named `prefixd`, with a stable `instance` per target and the shipped
+15-second scrape and evaluation intervals. The alert distinguishes leased
+intent from unleased rules and warns about failed scrapes or overdue renewal;
+it does not prove router enforcement. See [availability alerts](grafana.md#availability-alerts)
+for its one-hour outage lookback and notification timing limits.
+
 ## Unknown configuration keys
 
 The release that introduces this check ignores keys it does not recognize after
@@ -151,6 +191,13 @@ What changes:
   cannot read; `operator` and `admin` tokens reach what those roles reach,
   except identity management. See
   [API tokens](../reference/api.md#api-tokens).
+- **Token checks need the database.** Every token request reads its current
+  record so revocation takes effect on the next request. If the database is
+  unavailable, `/v1/health/detail` and other protected routes return `503`
+  (`credential store unavailable; retry`), with or without a session cookie.
+  Treat this as an availability failure, not an invalid credential. In
+  credentials mode, detailed health requires authentication; `/v1/health`
+  remains public liveness and does not report database health.
 - **Identity management needs a session.** Token management, operator create
   and delete, and password set or reset need a signed-in session; tokens,
   mTLS clients and `none` mode get 403. Automation that managed operators with
@@ -815,6 +862,28 @@ prefixd runs holds replayed routes from selection after its restart; below
 0.80.0 it reports link-local export rows without interface scope, which fail
 export observation, and below 0.79.0 the lease RPCs are unsupported, so leased
 adds fail and create nothing. GoBGP is unaffected.
+
+## Controller health and lease warnings
+
+Detailed health now reports `degraded` when an injection lease is
+`renewal_failing`, `expired`, or has overdue renewal, even if the database
+and speaker probes succeed. A successful read confirming no owned leased
+intent suppresses only these lease warnings, avoiding an idle controller's
+historical expired generation. `standby` still takes precedence when this
+controller loses its fence. Monitors that read `GET /v1/health/detail` should
+treat `degraded` and `standby` as operational warnings; public liveness and readiness keep their existing meanings.
+
+The response adds the controller's `mode` and nullable
+`speaker.lease.remaining_seconds`, `renewal_overdue`, and nullable
+`has_leased_intent` (local desired intent, not remote route inventory). The countdown is an
+approximate local monotonic estimate, not an installation or forwarding
+guarantee. `renewal_overdue` detects an old live observation even when the
+renewal task stalls; it does not declare the remote lease expired. Failed
+renewal attempts do not reset the countdown; `last_renewal_at` is the time of
+the last attempt, successful or otherwise. The dashboard shows one warning for
+standby, dry-run, or lease failure/expiry/overdue renewal, in that order. Failed and stale health reads show their own
+warning and do not keep an old countdown. Deploy the matching dashboard to
+show these warnings; no configuration or database migration is required.
 
 ## Controller fence and rolling deploys
 

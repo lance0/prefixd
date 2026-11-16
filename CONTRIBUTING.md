@@ -14,6 +14,7 @@ Thanks for your interest in contributing!
 - [just](https://just.systems/), `cargo-audit` and `cargo-deny`
 - Bun 1.4.3 and native Node.js 26.12.0 for the dashboard
 - [uv](https://docs.astral.sh/uv/) for `just python`, which runs the pinned ruff
+- ShellCheck for `just shell`
 
 CI checks the locked dependency graph on Linux with Rust 1.89.0, including
 development dependencies, alongside the current stable tests and lints. To
@@ -72,7 +73,7 @@ scripts/test-gobgp.sh
 ### Local verification
 
 Run `just gate` before opening a PR with substantive code changes. It runs
-Rust and Python formatting, Python lint, the Prometheus alert rules and their
+Rust and Python formatting, Python and shell lint, the Prometheus alert rules and their
 promtool tests, the pinned rustbgpd proto
 checksum, both locked Rust test and Clippy feature combinations,
 minimum-compiler checks, the release build,
@@ -81,7 +82,7 @@ and rustbgpd 0.83.0 fixtures, sequentially. It needs Docker and the tools
 listed above; it does not install missing tools or Rust toolchains.
 Prose-only changes need affected-link checks and `git diff --check`.
 
-Use `just --list` for focused checks such as `just fmt`, `just python`,
+Use `just --list` for focused checks such as `just fmt`, `just python`, `just shell`,
 `just clippy`, `just test-fast`, `just msrv` or
 `just frontend`. Recipes expose ordinary commands, and CI shares them while
 retaining separate jobs and speaker versions.
@@ -384,8 +385,9 @@ Follow the [release checklist](docs/project/release-checklist.md). In short:
    prints.
 2. Open `chore(release): prepare vX.Y.Z`. It must pass `just gate`, both
    rustbgpd fixture pins and the upgrade proof, as recorded in its body.
-3. Merge it. When `ci.yml` passes on the merge commit, the release workflow
-   tags it `vX.Y.Z` and publishes the images and the GitHub Release.
+3. Merge it. `ci.yml` starts the release workflow, which requires the latest CI
+   and Interop push runs to pass on that merge commit before tagging `vX.Y.Z`
+   and publishing the images and the GitHub Release.
 4. Verify the image digests and the install contract.
 
 Never re-tag, move a tag or overwrite a release; fix forward with a patch

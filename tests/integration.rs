@@ -1426,6 +1426,265 @@ async fn test_health_detail_endpoint() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn health_reports_lease_failures_mode_and_standby_precedence() {
+    use prefixd::bgp::{BlackholeRoute, BlackholeSpeaker, InjectionLeases, LeaseGeneration};
+    use prefixd::config::OperationMode;
+    use prefixd::domain::LeaseKeeper;
+    use prefixd::fence::ControllerFence;
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct LeaseTransport {
+        inner: MockAnnouncer,
+        fail_renewals: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl InjectionLeases for LeaseTransport {
+        async fn incarnation(&self) -> prefixd::error::Result<Option<u64>> {
+            self.inner.incarnation().await
+        }
+        async fn live_lease(
+            &self,
+            owner: &str,
+        ) -> prefixd::error::Result<Option<Option<LeaseGeneration>>> {
+            self.inner.live_lease(owner).await
+        }
+        async fn renew_lease(
+            &self,
+            owner: &str,
+            generation: LeaseGeneration,
+            seconds: u32,
+        ) -> prefixd::error::Result<bool> {
+            if self.fail_renewals.load(SeqCst) {
+                return Err(prefixd::error::PrefixdError::Internal(
+                    "renewal failed".into(),
+                ));
+            }
+            self.inner.renew_lease(owner, generation, seconds).await
+        }
+        fn lease_confirmed(&self) -> bool {
+            self.inner.lease_confirmed()
+        }
+    }
+
+    for active in [true, false] {
+        for case in [
+            "absent",
+            "none",
+            "live",
+            "renewal_failing",
+            "expired",
+            "idle_expired",
+            "unknown_expired",
+            "overdue",
+            "overdue_lapsed",
+            "not_renewing",
+            "standby",
+            "dry_run_unleased",
+        ] {
+            if case == "standby" && active {
+                continue;
+            }
+            let dry_run = matches!(case, "not_renewing" | "dry_run_unleased");
+            let fence = Arc::new(ControllerFence::new(active));
+            let speaker = Arc::new(LeaseTransport::default());
+            let keeper = LeaseKeeper::new("test-owner".into(), 60).with_fence(fence.clone());
+            let keeper = Arc::new(if dry_run {
+                keeper.without_renewal()
+            } else {
+                keeper
+            });
+            let route = BlackholeRoute::new(
+                "192.0.2.1/32".parse().unwrap(),
+                "192.0.2.2".parse().unwrap(),
+                vec![],
+                vec![],
+            )
+            .unwrap()
+            .with_owner("test-owner");
+            if !matches!(case, "absent" | "none" | "dry_run_unleased") {
+                keeper.observe_add(
+                    speaker
+                        .inner
+                        .announce_leased_blackhole(&route, 60)
+                        .await
+                        .unwrap()
+                        .0,
+                );
+                if case == "standby" {
+                    tokio::time::advance(Duration::from_secs(41)).await;
+                } else if case != "unknown_expired" {
+                    keeper.observe_intent_expiry(Some(
+                        chrono::Utc::now() + chrono::Duration::minutes(10),
+                    ));
+                }
+                if matches!(case, "idle_expired" | "unknown_expired") {
+                    speaker.inner.restart().await;
+                    keeper.renew_once(speaker.as_ref()).await;
+                    assert_eq!(keeper.health().last_renewal_result, Some("not_live"));
+                    if case == "idle_expired" {
+                        keeper.observe_intent_expiry(None);
+                    }
+                }
+                if matches!(case, "renewal_failing" | "expired") {
+                    speaker.fail_renewals.store(true, SeqCst);
+                    keeper.renew_once(speaker.as_ref()).await;
+                }
+                if case == "overdue" {
+                    tokio::time::advance(Duration::from_secs(40)).await;
+                }
+                if matches!(case, "expired" | "overdue_lapsed") {
+                    tokio::time::advance(Duration::from_secs(60)).await;
+                }
+            }
+            let mut settings = test_settings();
+            settings.mode = if dry_run {
+                OperationMode::DryRun
+            } else {
+                OperationMode::Enforced
+            };
+            // Healthy independent observations isolate the lease status fold.
+            let mut state = AppState::new(
+                settings,
+                test_inventory(),
+                test_playbooks(),
+                Arc::new(MockRepository::new()),
+                Arc::new(MockAnnouncer::new()),
+                ".".into(),
+            )
+            .unwrap()
+            .with_fence(fence)
+            .unwrap();
+            if !matches!(case, "absent" | "dry_run_unleased") {
+                state = state.with_lease(keeper.clone()).unwrap();
+            }
+            let app = create_test_router(state);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/health/detail")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let expected = if !active {
+                "standby"
+            } else if matches!(
+                case,
+                "renewal_failing" | "expired" | "overdue" | "overdue_lapsed" | "unknown_expired"
+            ) {
+                "degraded"
+            } else {
+                "healthy"
+            };
+            assert_eq!(json["status"], expected, "{case}, fence active={active}");
+            assert_eq!(json["mode"], if dry_run { "dry-run" } else { "enforced" });
+            if matches!(case, "absent" | "dry_run_unleased") {
+                assert!(json["speaker"].get("lease").is_none());
+            } else {
+                let lease = &json["speaker"]["lease"];
+                assert_eq!(
+                    lease["state"],
+                    if case.starts_with("overdue") {
+                        "live"
+                    } else if matches!(case, "idle_expired" | "unknown_expired") {
+                        "expired"
+                    } else {
+                        case
+                    }
+                );
+                assert_eq!(
+                    lease["renewal_overdue"],
+                    case.starts_with("overdue"),
+                    "{case}"
+                );
+                let remaining = match case {
+                    "live" | "renewal_failing" => serde_json::json!(60),
+                    "expired" | "overdue_lapsed" | "idle_expired" | "unknown_expired" => {
+                        serde_json::json!(0)
+                    }
+                    "overdue" => serde_json::json!(20),
+                    _ => serde_json::Value::Null,
+                };
+                assert_eq!(lease["remaining_seconds"], remaining, "{case}");
+                let intent = match case {
+                    "none" | "standby" | "unknown_expired" => serde_json::Value::Null,
+                    "idle_expired" => serde_json::json!(false),
+                    _ => serde_json::json!(true),
+                };
+                assert_eq!(lease["has_leased_intent"], intent, "{case}");
+            }
+            if matches!(
+                case,
+                "renewal_failing" | "expired" | "overdue" | "overdue_lapsed"
+            ) {
+                speaker.fail_renewals.store(false, SeqCst);
+                if case == "overdue" {
+                    keeper.renew_once(speaker.as_ref()).await;
+                    assert_eq!(keeper.health().last_renewal_result, Some("success"));
+                } else {
+                    keeper.observe_add(
+                        speaker
+                            .inner
+                            .announce_leased_blackhole(&route, 60)
+                            .await
+                            .unwrap()
+                            .0,
+                    );
+                }
+                let recovered = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri("/v1/health/detail")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(recovered.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(recovered.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                let recovered: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    recovered["status"],
+                    if active { "healthy" } else { "standby" }
+                );
+                assert_eq!(recovered["speaker"]["lease"]["state"], "live");
+                assert_eq!(recovered["speaker"]["lease"]["renewal_overdue"], false);
+                assert_eq!(recovered["speaker"]["lease"]["remaining_seconds"], 60);
+            }
+            let public = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/health")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(public.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let public: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(public["status"], "ok");
+            assert!(public.get("mode").is_none());
+            assert!(public.get("speaker").is_none());
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn health_distinguishes_unsupported_failed_empty_and_populated_peer_observation() {
     use prefixd::bgp::{FlowSpecAnnouncer, PeerStatus, SessionState};
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
@@ -12088,7 +12347,7 @@ mod anonymous_auth {
                     } else {
                         StatusCode::BAD_REQUEST
                     },
-                    &[PASSWORD, &admin.password_hash],
+                    &[PASSWORD, admin.password_hash.expose_secret()],
                 )
                 .await;
                 let stored = repo.get_operator_by_username(&username).await.unwrap();
@@ -12101,7 +12360,7 @@ mod anonymous_auth {
                     assert_eq!(json["role"], role);
                     assert_eq!(json["created_by"], admin.username);
                     assert!(json["last_login_at"].is_null());
-                    assert!(!body.contains(&stored.password_hash));
+                    assert!(!body.contains(stored.password_hash.expose_secret()));
                 }
             }
         }
@@ -12137,7 +12396,7 @@ mod anonymous_auth {
                     } else {
                         StatusCode::BAD_REQUEST
                     },
-                    &[&password, &admin.password_hash],
+                    &[&password, admin.password_hash.expose_secret()],
                 )
                 .await;
                 let stored = repo.get_operator_by_username(&username).await.unwrap();
@@ -12154,7 +12413,7 @@ mod anonymous_auth {
                     let body = public_body(
                         response,
                         StatusCode::OK,
-                        &[&password, &stored.password_hash],
+                        &[&password, stored.password_hash.expose_secret()],
                     )
                     .await;
                     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -12185,7 +12444,12 @@ mod anonymous_auth {
                 ("login\0name".into(), false),
             ] {
                 let stored = repo
-                    .create_operator(&username, &seed.password_hash, OperatorRole::Viewer, None)
+                    .create_operator(
+                        &username,
+                        seed.password_hash.expose_secret(),
+                        OperatorRole::Viewer,
+                        None,
+                    )
                     .await
                     .unwrap();
                 let response = request(
@@ -12203,7 +12467,7 @@ mod anonymous_auth {
                     } else {
                         StatusCode::BAD_REQUEST
                     },
-                    &[PASSWORD, &seed.password_hash],
+                    &[PASSWORD, seed.password_hash.expose_secret()],
                 )
                 .await;
                 if accepted {
@@ -12283,7 +12547,8 @@ mod anonymous_auth {
                         .await
                         .unwrap()
                         .unwrap()
-                        .password_hash,
+                        .password_hash
+                        .expose_secret(),
                     hash
                 );
             }
@@ -12300,7 +12565,7 @@ mod anonymous_auth {
                 ("credential-management-operator", OperatorRole::Operator),
                 ("credential-management-viewer", OperatorRole::Viewer),
             ] {
-                repo.create_operator(username, &admin.password_hash, role, None)
+                repo.create_operator(username, admin.password_hash.expose_secret(), role, None)
                     .await
                     .unwrap();
                 callers.push((Some(login(&app, username).await), StatusCode::FORBIDDEN));
@@ -12309,7 +12574,12 @@ mod anonymous_auth {
                 let response = request(&app, "POST", "/v1/operators", cookie.as_deref(), Some(
                     serde_json::json!({"username":"credential-denied-create","password":PASSWORD,"role":"admin"})
                 )).await;
-                public_body(response, status, &[PASSWORD, &admin.password_hash]).await;
+                public_body(
+                    response,
+                    status,
+                    &[PASSWORD, admin.password_hash.expose_secret()],
+                )
+                .await;
                 assert!(
                     repo.get_operator_by_username("credential-denied-create")
                         .await
@@ -12324,14 +12594,18 @@ mod anonymous_auth {
                     None,
                 )
                 .await;
-                public_body(response, status, &[&admin.password_hash]).await;
+                public_body(response, status, &[admin.password_hash.expose_secret()]).await;
                 let response = request(&app, "PUT", &format!("/v1/operators/{}/password", admin.operator_id), cookie.as_deref(), Some(
                     serde_json::json!({"current_password":PASSWORD,"new_password":"denied-password-marker"})
                 )).await;
                 public_body(
                     response,
                     status,
-                    &[PASSWORD, "denied-password-marker", &admin.password_hash],
+                    &[
+                        PASSWORD,
+                        "denied-password-marker",
+                        admin.password_hash.expose_secret(),
+                    ],
                 )
                 .await;
                 assert_eq!(
@@ -12351,7 +12625,12 @@ mod anonymous_auth {
                 None,
             )
             .await;
-            public_body(response, StatusCode::BAD_REQUEST, &[&admin.password_hash]).await;
+            public_body(
+                response,
+                StatusCode::BAD_REQUEST,
+                &[admin.password_hash.expose_secret()],
+            )
+            .await;
             login(&app, &admin.username).await;
             let target = repo
                 .get_operator_by_username("credential-management-viewer")
@@ -12367,9 +12646,13 @@ mod anonymous_auth {
             )
             .await;
             assert!(
-                public_body(response, StatusCode::NO_CONTENT, &[&target.password_hash])
-                    .await
-                    .is_empty()
+                public_body(
+                    response,
+                    StatusCode::NO_CONTENT,
+                    &[target.password_hash.expose_secret()]
+                )
+                .await
+                .is_empty()
             );
             assert!(
                 repo.get_operator_by_id(target.operator_id)
@@ -12385,7 +12668,12 @@ mod anonymous_auth {
                 None,
             )
             .await;
-            public_body(response, StatusCode::NOT_FOUND, &[&target.password_hash]).await;
+            public_body(
+                response,
+                StatusCode::NOT_FOUND,
+                &[target.password_hash.expose_secret()],
+            )
+            .await;
         }
 
         #[tokio::test]
@@ -12398,7 +12686,12 @@ mod anonymous_auth {
                 ("credential-self-admin", OperatorRole::Admin),
             ] {
                 let target = repo
-                    .create_operator(username, &seed.password_hash, role.clone(), None)
+                    .create_operator(
+                        username,
+                        seed.password_hash.expose_secret(),
+                        role.clone(),
+                        None,
+                    )
                     .await
                     .unwrap();
                 let cookie = login(&app, username).await;
@@ -12426,7 +12719,7 @@ mod anonymous_auth {
                         &[
                             PASSWORD,
                             &new,
-                            &target.password_hash,
+                            target.password_hash.expose_secret(),
                             "wrong-current-marker",
                         ],
                     )
@@ -12457,7 +12750,7 @@ mod anonymous_auth {
                     public_body(
                         response,
                         StatusCode::NO_CONTENT,
-                        &[PASSWORD, &new, &target.password_hash]
+                        &[PASSWORD, &new, target.password_hash.expose_secret()]
                     )
                     .await
                     .is_empty()
@@ -12486,8 +12779,8 @@ mod anonymous_auth {
                         &[
                             PASSWORD,
                             &new,
-                            &target.password_hash,
-                            &changed.password_hash,
+                            target.password_hash.expose_secret(),
+                            changed.password_hash.expose_secret(),
                         ],
                     )
                     .await;
@@ -12504,7 +12797,10 @@ mod anonymous_auth {
                 public_body(
                     response,
                     StatusCode::UNAUTHORIZED,
-                    &[&target.password_hash, &changed.password_hash],
+                    &[
+                        target.password_hash.expose_secret(),
+                        changed.password_hash.expose_secret(),
+                    ],
                 )
                 .await;
             }
@@ -12517,7 +12813,7 @@ mod anonymous_auth {
             let target = repo
                 .create_operator(
                     "credential-reset-target",
-                    &admin.password_hash,
+                    admin.password_hash.expose_secret(),
                     OperatorRole::Operator,
                     None,
                 )
@@ -12529,7 +12825,7 @@ mod anonymous_auth {
                 ("credential-foreign-viewer", OperatorRole::Viewer),
                 ("credential-foreign-operator", OperatorRole::Operator),
             ] {
-                repo.create_operator(username, &admin.password_hash, role, None)
+                repo.create_operator(username, admin.password_hash.expose_secret(), role, None)
                     .await
                     .unwrap();
                 let cookie = login(&app, username).await;
@@ -12539,7 +12835,11 @@ mod anonymous_auth {
                 public_body(
                     response,
                     StatusCode::FORBIDDEN,
-                    &[PASSWORD, "foreign-change-marker", &target.password_hash],
+                    &[
+                        PASSWORD,
+                        "foreign-change-marker",
+                        target.password_hash.expose_secret(),
+                    ],
                 )
                 .await;
                 assert_eq!(
@@ -12567,7 +12867,7 @@ mod anonymous_auth {
                 public_body(
                     response,
                     StatusCode::NO_CONTENT,
-                    &[&new, &target.password_hash]
+                    &[&new, target.password_hash.expose_secret()]
                 )
                 .await
                 .is_empty()
@@ -12596,8 +12896,8 @@ mod anonymous_auth {
                     &[
                         PASSWORD,
                         &new,
-                        &target.password_hash,
-                        &changed.password_hash,
+                        target.password_hash.expose_secret(),
+                        changed.password_hash.expose_secret(),
                     ],
                 )
                 .await;
@@ -12613,7 +12913,10 @@ mod anonymous_auth {
             public_body(
                 response,
                 StatusCode::NOT_FOUND,
-                &["missing-reset-marker", &changed.password_hash],
+                &[
+                    "missing-reset-marker",
+                    changed.password_hash.expose_secret(),
+                ],
             )
             .await;
             assert_eq!(

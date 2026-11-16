@@ -256,6 +256,9 @@ pub enum GuardrailError {
     #[error("no allowed ports for service")]
     NoAllowedPorts,
 
+    #[error("UDP/TCP detector discard requires destination ports")]
+    DestinationPortsRequired,
+
     #[error("blackhole mitigations are disabled (blackhole.enabled=false)")]
     BlackholeDisabled,
 

@@ -1250,11 +1250,16 @@ may be selected for mitigation. The policy intersects detector-reported ports
 with the service's list for that protocol. Two nonempty lists with no common
 port are rejected with a guardrail error, rather than creating an all-ports rule.
 
-If the detector reports no ports, the service's list is used. An omitted or empty
-service list leaves the detector's ports unchanged. When both lists are empty,
-the rule intentionally has no destination-port restriction. UDP floods use
-`udp`; SYN/ACK floods use `tcp`. ICMP policy and explicit manual mitigations do
-not use this intersection.
+If the detector reports no ports, a police rule has no destination-port
+restriction. The service list never supplies missing attack ports. This
+polices all traffic of the selected protocol to the victim, including
+legitimate services. Set the playbook's `require_top_ports: true` to refuse
+portless events instead. A UDP/TCP detector discard without destination ports
+is refused; prefix TCP police also still requires ports.
+
+An omitted or empty service list leaves reported detector ports unchanged.
+UDP floods use `udp`; SYN/ACK floods use `tcp`. ICMP policy and explicit manual
+mitigations do not use this intersection.
 
 These are equality matches: the listed ports are mitigation candidates, not
 protected ports. For a DNS service with `udp: [53]`, a detector reporting port 53

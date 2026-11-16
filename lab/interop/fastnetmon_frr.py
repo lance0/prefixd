@@ -44,6 +44,13 @@ DETECT_SECONDS = 90
 CONF = Path(__file__).resolve().parent / "configs" / "fastnetmon.conf"
 
 
+def check_udp_flood_coverage(mitigation, port):
+    """A detected rule must include the synthetic flood's destination port."""
+    assert mitigation["protocol"] == 17 and (
+        not mitigation["dst_ports"] or port in mitigation["dst_ports"]
+    ), (f"rule misses the NetFlow flood's UDP destination port {port}", mitigation)
+
+
 def ban_time(conf_text):
     """FastNetMon's ban_time from the lane configuration."""
     match = re.search(r"^ban_time = (\d+)$", conf_text, re.M)
@@ -148,7 +155,8 @@ class FastNetMonLab(Lab):
             input=stdin,
             check=True,
             text=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             timeout=60,
         ).stdout
 
@@ -296,8 +304,8 @@ class FastNetMonLab(Lab):
         details = (
             Path(__file__).resolve().parent / "fixtures" / "fastnetmon" / "udp-flood.txt"
         ).read_text()
-        # A portless UDP flood takes the service's allowed UDP ports (inventory.yaml).
-        direct_rule = police(direct, 5_000_000, proto=17, dst_ports=(53, 123))
+        # A portless UDP flood must cover ports outside the service inventory.
+        direct_rule = police(direct, 5_000_000, proto=17)
 
         def run_script(action):
             return lambda: self.fnm(
@@ -349,7 +357,7 @@ class FastNetMonLab(Lab):
         # Detection: a NetFlow v5 UDP flood above threshold_pps. FastNetMon
         # collects ban_details_records_count flows, then runs the script with
         # its real attack details on stdin.
-        detected_rule = police(detected, 5_000_000, proto=17, dst_ports=(53, 123))
+        detected_rule = police(detected, 5_000_000, proto=17)
 
         def detect():
             senders = []
@@ -369,6 +377,7 @@ class FastNetMonLab(Lab):
                     sender.terminate()
                     sender.wait(timeout=10)
             self.check(m, "udp_flood", "police", 5_000_000)
+            check_udp_flood_coverage(m, 80)
             event = self.event(m["triggering_event_id"])
             raw = event["raw_details"]
             assert raw["direction"] == "incoming" and "Attack protocol: udp" in raw["raw"], raw

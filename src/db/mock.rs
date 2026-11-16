@@ -1831,7 +1831,7 @@ impl RepositoryTrait for MockRepository {
         let op = Operator {
             operator_id: Uuid::new_v4(),
             username: username.to_string(),
-            password_hash: password_hash.to_string(),
+            password_hash: password_hash.into(),
             role,
             created_at: Utc::now(),
             created_by: created_by.map(String::from),
@@ -1852,7 +1852,7 @@ impl RepositoryTrait for MockRepository {
     async fn update_operator_password(&self, id: Uuid, password_hash: &str) -> Result<()> {
         let mut operators = self.operators.lock().unwrap();
         if let Some(op) = operators.iter_mut().find(|o| o.operator_id == id) {
-            op.password_hash = password_hash.to_string();
+            op.password_hash = password_hash.into();
         }
         Ok(())
     }

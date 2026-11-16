@@ -211,6 +211,160 @@ async fn automatic_ipv4_controls_remain_host_scoped() {
 }
 
 #[tokio::test]
+async fn portless_manual_and_detector_police_have_the_same_match() {
+    use prefixd::config::{AllowedPorts, Asset, Service};
+
+    for (vector, protocol) in [
+        (AttackVector::UdpFlood, "udp"),
+        (AttackVector::SynFlood, "tcp"),
+        (AttackVector::AckFlood, "tcp"),
+    ] {
+        for victim in ["203.0.113.10", "2001:db8::10"] {
+            let mut matches = Vec::new();
+            for manual in [false, true] {
+                let (state, repo, speaker) = state(vector, false);
+                *state.inventory.write().await = Inventory::new(vec![Customer {
+                    customer_id: "family-test".into(),
+                    name: "Address family test".into(),
+                    prefixes: vec!["203.0.113.0/24".into(), "2001:db8::/32".into()],
+                    policy_profile: PolicyProfile::Normal,
+                    services: vec![Service {
+                        service_id: "dns-ntp".into(),
+                        name: "DNS and NTP".into(),
+                        assets: vec![Asset {
+                            ip: victim.into(),
+                            role: None,
+                            interface: None,
+                        }],
+                        allowed_ports: AllowedPorts {
+                            udp: vec![53, 123],
+                            tcp: vec![53, 123],
+                        },
+                    }],
+                }]);
+                let (status, body) = if manual {
+                    post(
+                        state.clone(),
+                        "/v1/mitigations",
+                        json!({
+                            "victim_ip": victim, "protocol": protocol, "action": "police",
+                            "rate_bps": 10_000_000, "ttl_seconds": 120, "reason": "portless police",
+                        }),
+                    )
+                    .await
+                } else {
+                    ingest_with_ports(state, victim, vector, "portless-police", &[]).await
+                };
+                assert!(status.is_success(), "{status}: {body}");
+                let id = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+                let mitigation = repo.get_mitigation(id).await.unwrap().unwrap();
+                if !manual {
+                    assert_eq!(mitigation.service_id.as_deref(), Some("dns-ntp"));
+                }
+                let routes = speaker.list_active().await.unwrap();
+                assert_eq!(routes.len(), 1);
+                let nlri = &routes[0].nlri;
+                assert_eq!(nlri.protocol, vector.to_protocol());
+                assert!(
+                    nlri.dst_ports.is_empty(),
+                    "must cover the flood's port 80: {nlri:?}"
+                );
+                matches.push(nlri.clone());
+            }
+            assert_eq!(
+                serde_json::to_value(&matches[0]).unwrap(),
+                serde_json::to_value(&matches[1]).unwrap()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn portless_detector_discard_is_refused_before_storage_or_announcement() {
+    for vector in [
+        AttackVector::UdpFlood,
+        AttackVector::SynFlood,
+        AttackVector::AckFlood,
+    ] {
+        for victim in ["203.0.113.10", "2001:db8::10"] {
+            let (state, repo, speaker) = state(vector, false);
+            {
+                let mut playbooks = state.playbooks.write().await;
+                playbooks.playbooks[0].steps[0].action =
+                    Some(prefixd::config::PlaybookAction::Discard);
+                playbooks.playbooks[0].steps[0].rate_bps = None;
+            }
+            let (status, body) =
+                ingest_with_ports(state, victim, vector, "portless-discard", &[]).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("detector discard requires destination ports"),
+                "{body}"
+            );
+            assert!(
+                repo.find_ban_event_by_external_id("family-test", "portless-discard")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(speaker.list_active().await.unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn portless_detector_police_never_extends_a_manual_discard() {
+    for (vector, protocol) in [
+        (AttackVector::UdpFlood, "udp"),
+        (AttackVector::SynFlood, "tcp"),
+        (AttackVector::AckFlood, "tcp"),
+    ] {
+        for victim in ["203.0.113.10", "2001:db8::10"] {
+            let (state, repo, speaker) = state(vector, false);
+            let (status, manual) = post(
+                state.clone(),
+                "/v1/mitigations",
+                json!({
+                    "victim_ip": victim, "protocol": protocol, "action": "discard",
+                    "ttl_seconds": 60, "reason": "explicit manual discard",
+                }),
+            )
+            .await;
+            assert!(status.is_success(), "{status}: {manual}");
+            let id = manual["mitigation_id"].as_str().unwrap().parse().unwrap();
+            let before = repo.get_mitigation(id).await.unwrap().unwrap();
+            let routes = speaker.list_active().await.unwrap();
+            let (status, body) =
+                ingest_with_ports(state, victim, vector, "portless-police", &[]).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("detector discard requires destination ports"),
+                "{body}"
+            );
+            let after = repo.get_mitigation(id).await.unwrap().unwrap();
+            assert_eq!(before.expires_at, after.expires_at);
+            assert_eq!(before.last_event_id, after.last_event_id);
+            assert!(
+                repo.find_ban_event_by_external_id("family-test", "portless-police")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                serde_json::to_value(routes).unwrap(),
+                serde_json::to_value(speaker.list_active().await.unwrap()).unwrap()
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn automatic_ipv6_events_announce_only_family_correct_hosts() {
     assert_automatic_host_rules(
         &[

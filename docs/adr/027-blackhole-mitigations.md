@@ -554,6 +554,17 @@ blackholes. The owner identity also keys the
 
 ### Controller fence
 
+Clarification 2026-11-16: the historical "Standby" and "Lease interaction"
+bullets below are superseded for renewal by the 2026-10-20 decision in this
+ADR's status notes. Standby keeps renewing the held generation without the
+controller fence; adds, deletes and re-adds remain fenced. The 2026-11-15
+[TTL-bound amendment](003-fail-open-ttl.md#amendment-the-lease-is-bounded-by-leased-ttls)
+limits that renewal using successful leased-intent reads and writes, so a
+database outage cannot renew forever. See the maintained
+[availability alerts](../how-to/grafana.md#availability-alerts) for detecting
+controller loss and stopped renewal without treating standby itself as lease
+loss.
+
 The lifecycle mutex is in-process, so it cannot stop a second controller
 process. Each controller therefore fences itself with a PostgreSQL session
 advisory lock keyed on its owner name (see

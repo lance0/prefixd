@@ -350,12 +350,14 @@ scripts and ignored; the CLI does not send it.
 Operator commands connect directly to PostgreSQL and require `DATABASE_URL`.
 They are the path for automation that manages operators: the API's operator
 routes need a signed-in session and refuse every API token.
-Omit `--password` for hidden input on a controlling terminal. Without a terminal,
-the prompt fails; `--password` requires an explicit value for noninteractive use.
+Omit `--password` to enter and confirm the password on a controlling terminal.
+Both entries are hidden. A mismatch asks again; cancellation creates no operator.
+Without a terminal, the prompt fails; `--password` requires an explicit value
+for noninteractive use.
 An explicit value can appear in shell history and process arguments.
 
 ```bash
-# Hidden interactive password prompt
+# Hidden interactive password and confirmation
 prefixdctl operators create --username admin --role admin
 
 # Explicit value (consider shell history and process visibility)

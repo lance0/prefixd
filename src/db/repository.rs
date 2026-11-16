@@ -2707,7 +2707,8 @@ pub struct TimeseriesBucket {
 struct OperatorRow {
     operator_id: Uuid,
     username: String,
-    password_hash: String,
+    #[sqlx(try_from = "String")]
+    password_hash: crate::domain::SecretString,
     role: String,
     #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     created_at: DateTime<Utc>,
