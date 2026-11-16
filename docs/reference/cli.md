@@ -335,8 +335,10 @@ prefixdctl operators create --username jsmith --role operator --password "$OPERA
 # Roles: admin, operator, viewer
 ```
 
-Usernames must match `^[A-Za-z0-9_-]{1,64}$`, the rule the API and the
-`operators` table enforce, so a username cannot look like a `token:` actor.
+Usernames must match `^[A-Za-z0-9_-]{1,64}$` and must not be `prefixdctl`,
+`anonymous` or `mtls-client` in any case, the rule the API and the `operators`
+table enforce, so a username cannot look like a `token:` actor or the actor
+prefixd records for the CLI, `none` mode or an mTLS client.
 
 ### List Operators
 
@@ -408,6 +410,8 @@ nothing; an unknown name exits 1.
 
 To rotate a token, create a new one under a new name, update the client, check
 that its last use advances, then revoke the old one.
+
+If a token leaked, revoke it first, then review `GET /v1/audit` for actor `token:<name>` to find what it did, including configuration changes such as alerting destinations, playbooks and correlation settings, and undo them.
 
 ---
 

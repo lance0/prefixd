@@ -106,8 +106,8 @@ validation applies when constructing application state programmatically.
 
 The native TLS listener verifies client certificates against `ca_path`; a trusted
 client retains administrator access. TLS termination at a reverse proxy and
-forwarded identity headers do not satisfy this mode. Use the appropriate bearer
-or credentials mode when the proxy connects to prefixd over plaintext. Other
+forwarded identity headers do not satisfy this mode. Use `credentials` mode
+(sessions and API tokens) when the proxy connects to prefixd over plaintext. Other
 authentication modes may use TLS without a client CA.
 
 ### Rate Limiting

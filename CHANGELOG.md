@@ -52,6 +52,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A token cannot pass through a proxy that adds `Authorization: Basic`: two
   `Authorization` headers are refused with 401. `prefixdctl` refuses a token
   together with `user:password` in `--api` (exit 2).
+- Identity proxies that inject `Authorization: Bearer` (oauth2-proxy
+  `--set-authorization-header`, nginx `auth_request` forwarding
+  `Authorization`, Traefik forward-auth) must stop forwarding it to prefixd:
+  the header replaces the dashboard session, so the dashboard signs in and
+  then gets 401 everywhere. A logout sent with a Bearer header ends no
+  session. See
+  [Bearer headers from identity proxies](docs/how-to/upgrading.md#bearer-headers-from-identity-proxies).
+- Migration 022 also reserves the usernames `prefixdctl`, `anonymous` and
+  `mtls-client` in any case, which prefixd records as actors for the local
+  CLI, `none` mode and mTLS clients, and adds a `CHECK` that an operator's role
+  is `admin`, `operator` or `viewer`. It refuses to apply over such rows; run
+  the [username](docs/how-to/upgrading.md#operator-usernames) and
+  [role](docs/how-to/upgrading.md#operator-roles) pre-checks first. An
+  operator with an unknown role, formerly read as `operator`, is now refused.
 - A request with `Authorization: Bearer` is authenticated by its token alone:
   its session cookie is ignored, and an invalid token gets 401 even beside a
   valid session. Clients that sent both now act as the token.
@@ -186,7 +200,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `prefixdctl operators create` refuses usernames outside
-  `^[A-Za-z0-9_-]{1,64}$`, the rule the API already applied.
+  `^[A-Za-z0-9_-]{1,64}$`, the rule the API already applied, and both refuse
+  the reserved names `prefixdctl`, `anonymous` and `mtls-client`.
+- `prefixdctl tokens create --expires-in` and `POST /v1/tokens` `expires_at`
+  accept at most about 100 years (36525 days).
 - `prefixdctl`'s 401 hint names `PREFIXD_TOKEN`.
 - The Compose file and `.env.example` no longer pass `PREFIXD_API_TOKEN`.
   `scripts/chaos-test.sh` reads an operator token from `PREFIXD_TOKEN` and an

@@ -2454,7 +2454,7 @@ Content-Type: application/json
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `username` | string | yes | Unique username matching `^[A-Za-z0-9_-]{1,64}$` |
+| `username` | string | yes | Unique username matching `^[A-Za-z0-9_-]{1,64}$`, other than the reserved `prefixdctl`, `anonymous` and `mtls-client` (any case) |
 | `password` | string | yes | 8–256 UTF-8 bytes |
 | `role` | string | yes | `admin`, `operator`, or `viewer` |
 

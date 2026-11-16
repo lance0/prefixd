@@ -925,8 +925,17 @@ TLS listener requires a client certificate trusted by this CA; trusted clients
 retain administrator access.
 
 Do not select `mtls` when nginx terminates client TLS and forwards plaintext to
-prefixd: proxy identity headers are not authentication. Use bearer or credentials
-authentication for that internal connection, or configure native mTLS on prefixd.
+prefixd: proxy identity headers are not authentication. Use credentials
+authentication (sessions and API tokens) for that internal connection, or
+configure native mTLS on prefixd.
+
+Do not let an identity proxy forward an `Authorization: Bearer` header to
+prefixd (oauth2-proxy `--set-authorization-header`, nginx `auth_request`
+forwarding `Authorization`, Traefik forward-auth passing `Authorization`). A
+Bearer header replaces the dashboard session, so the dashboard signs in and
+then gets 401 on every request. A proxy that adds `Authorization: Basic` cannot
+carry an API token either: two `Authorization` headers get 401. See
+[Bearer headers from identity proxies](upgrading.md#bearer-headers-from-identity-proxies).
 
 ---
 

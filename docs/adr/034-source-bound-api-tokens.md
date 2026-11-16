@@ -500,6 +500,10 @@ this decision removes. The Compose file and `.env.example` drop
 Several tokens may share a source, so the old and new tokens overlap without a
 gap.
 
+After a leak, revoke the token first, then review `GET /v1/audit` for actor
+`token:<name>`, including configuration changes, and revert what the token
+changed.
+
 ### 10. Mitigate-now is retired
 
 The dashboard no longer posts events. The mitigate-now action opens the
@@ -1153,8 +1157,10 @@ request is refused rather than resolved.
 ### Consequences
 
 - A stolen admin token can no longer create an Admin operator, reset a
-  password or mint a token. Once it is revoked, nothing it could do survives
-  it.
+  password or mint a token. Once it is revoked, no credential it could create
+  survives it. Configuration it changed while valid, such as an alerting
+  destination, stays until an operator reverts it, so the response to a leak
+  includes an audit review.
 - Automation that managed operators with a token, an mTLS certificate or
   `none` mode moves to `prefixdctl operators` or an Admin session.
 - `none` mode loses operator management through the API; operators there are

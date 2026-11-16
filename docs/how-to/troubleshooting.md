@@ -443,11 +443,29 @@ The error names the cause:
 | 401 `API token revoked` or `API token expired` | The token was revoked or reached `expires_at` | Rotate: create a new token and update the client |
 | 403 `API token is bound to POP ...` | The token's `pop` is another controller's | Use a token for this POP, or one with no POP |
 | 403 on a read or a manual rule | An ingest token reaches only the ingest routes | Use an operator token |
+| 401 `send exactly one Authorization header` | Two `Authorization` headers, such as a proxy's `Basic` beside a client's token, or `user:password` in the URL beside a token | Send only the token; do not add a second header in front of prefixd |
+| 403 on token management, operators, passwords or preferences | These need a signed-in session | Use an Admin session or `prefixdctl` |
 | 503 `credential store unavailable` | The controller could not read PostgreSQL | Check the database, not the token |
 
 `http.auth.mode` must be `credentials`; `none` ignores tokens and `mtls` does not
 consult them. A Bearer header replaces the session, so a request that sends both
 acts as the token.
+
+### Dashboard Signs In, Then Everything Returns 401
+
+**Symptoms:** Sign-in succeeds, then every dashboard request, including
+`/v1/auth/me`, returns 401; logging out appears to do nothing.
+
+**Cause:** something between the browser and prefixd adds an
+`Authorization: Bearer` header, usually an identity proxy such as oauth2-proxy
+with `--set-authorization-header`, nginx `auth_request` forwarding
+`Authorization`, or Traefik forward-auth. prefixd treats any Bearer header as an
+API token and removes the session cookie before it loads the session, so the
+proxy's token gets 401 and the session is never used. A logout sent with that
+header ends no session.
+
+**Fix:** stop forwarding the proxy's `Authorization` header to prefixd. See
+[Bearer headers from identity proxies](upgrading.md#bearer-headers-from-identity-proxies).
 
 ### CORS Errors (Dashboard)
 

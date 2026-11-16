@@ -626,8 +626,8 @@ for commands and mode-specific authentication.
 
 **Permission hierarchy:** `admin > operator > viewer`
 
-Creating a [manual blackhole](#manual-blackholes) requires `admin`; bearer
-tokens act as `operator` and cannot create one.
+Creating a [manual blackhole](#manual-blackholes) requires `admin`: an Admin
+session or an `admin` API token. `operator` tokens and Operator sessions get 403.
 
 Account administration and self-service password changes are described in the
 [operator API](docs/reference/api.md#operators-admin-only).
