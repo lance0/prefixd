@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   police still requires ports. Existing rules keep their saved matches until
   expiry or withdrawal. See
   [detector port selection](docs/how-to/upgrading.md#detector-events-without-destination-ports).
+
+- If earlier versions ran with debug logging, treat retained login logs as
+  credentials and reset affected operator passwords; those logs can contain
+  password hashes. See [earlier debug logs](docs/how-to/upgrading.md#password-hashes-in-earlier-debug-logs).
 - **Compose needs `POSTGRES_PASSWORD`.** `docker-compose.yml` no longer falls
   back to the published `prefixd_secret`; every Compose command refuses to run
   until the variable is set. Before upgrading an existing Compose stack, put
@@ -292,6 +296,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Operator password hashes and incoming passwords are redacted from debug
+  output, including login and session diagnostics. Token creation responses,
+  database configuration and alert destination configuration also hide secrets
+  when formatted for debugging; their intended API and storage formats stay
+  unchanged.
+
 - The Compose stack has no default database password, and the repository's
   `.gitignore` covers `.env` and the bootstrap's `.prefixd/` token directory,
   so neither secret is committed by accident.
@@ -528,6 +538,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lane now checks that the generated rule covers its synthetic flood's port.
   Detector police events also cannot prolong a saved protocol-only UDP/TCP
   discard.
+
+- Releases require the latest CI and Interop push runs to pass on the exact
+  release commit before tagging or publishing. A missing, pending or failed
+  Interop run, including the FastNetMon lane, blocks publication even when CI
+  passes. The FastNetMon lab now catches API refusals written only to stderr,
+  including during readiness, instead of accepting their zero exit status.
 - `prefixdctl` works in the Compose controller. Both controller services set
   `PREFIXD_API=http://127.0.0.1:8080`, so `docker compose exec` runs no longer
   fail against the CLI's default port 80.

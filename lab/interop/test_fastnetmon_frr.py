@@ -5,11 +5,18 @@ Runs without a lab: python3 -m unittest discover -s lab/interop -p 'test_*.py'
 The log lines are prefixd-fastnetmon.sh output from a 2026-11-16 lane run.
 """
 
+import os
 import socket
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastnetmon_frr import (
     CONF,
+    FastNetMonLab,
     ban_outcome,
     ban_time,
     check_udp_flood_coverage,
@@ -32,6 +39,73 @@ WITHDREW = (
     f'SUCCESS (202, status=withdrawn): {{"status":"withdrawn","mitigation_id":"{MID}",'
     f'"mitigation_ids":["{MID}"]}}'
 )
+
+
+class ApiClientTests(unittest.TestCase):
+    def test_stderr_refusal_with_success_exit_is_not_a_successful_ban(self):
+        lab = FastNetMonLab.__new__(FastNetMonLab)
+        lab.args = SimpleNamespace(fastnetmon="fixture")
+        lab.log = lambda _: None
+        execute = subprocess.run
+
+        def fake_docker(command, **kwargs):
+            self.assertEqual(command[:4], ["docker", "exec", "-i", "fixture"])
+            return execute(["bash", "-c", "echo 'Query failed' >&2; exit 0"], **kwargs)
+
+        with (
+            patch("fastnetmon_frr.subprocess.run", side_effect=fake_docker),
+            self.assertRaisesRegex(AssertionError, "Query failed"),
+        ):
+            lab.api_client("ban", "203.0.113.10")
+
+    def probe_readiness(self, succeeds):
+        # Run the script's readiness block with a fake API and controlled time.
+        script = Path(__file__).with_name("fastnetmon-probe.sh").read_text()
+        block = script[script.index("deadline=$((SECONDS + 30))") :]
+        block = block[: block.index("\nin_probe 'flock --version'")]
+        with tempfile.TemporaryDirectory() as directory:
+            count = Path(directory) / "count"
+            count.write_text("0")
+            shell = (
+                r"""
+set -euo pipefail
+name=fixture
+client=fixture
+timeout() { [ "$1" = 5 ]; shift; "$@"; }
+docker() {
+    local count
+    count=$(cat "$TEST_COUNT")
+    echo $((count + 1)) > "$TEST_COUNT"
+    if [ "$TEST_SUCCEEDS" = 1 ] && [ "$count" -gt 0 ]; then return 0; fi
+    echo 'Query failed: fixture API unavailable' >&2
+}
+sleep() { SECONDS=$deadline; }
+"""
+                + block
+                + "\necho READY\n"
+            )
+            result = subprocess.run(
+                ["bash", "-c", shell],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=5,
+                env={**os.environ, "TEST_COUNT": str(count), "TEST_SUCCEEDS": str(int(succeeds))},
+            )
+            return result, int(count.read_text())
+
+    def test_probe_retries_exit_zero_query_failure_before_ready(self):
+        result, calls = self.probe_readiness(succeeds=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, 2)
+        self.assertIn("READY", result.stdout)
+
+    def test_probe_query_failure_expires_with_diagnostics(self):
+        result, calls = self.probe_readiness(succeeds=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(calls, 2)
+        self.assertNotIn("READY", result.stdout)
+        self.assertIn("Query failed: fixture API unavailable", result.stderr)
 
 
 class ScriptLogTests(unittest.TestCase):

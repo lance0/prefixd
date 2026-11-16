@@ -27,6 +27,9 @@ on:
       - "!lab/**/*.md"
       - "scripts/prefixd-fastnetmon.sh"
       - ".github/workflows/interop.yml"
+      - ".github/workflows/release*.yml"
+      - "scripts/release-*"
+      - "scripts/test-release-*.py"
       - ".github/actions/install-containerlab/**"
   pull_request:
     paths:
@@ -43,6 +46,9 @@ on:
       - "!lab/**/*.md"
       - "scripts/prefixd-fastnetmon.sh"
       - ".github/workflows/interop.yml"
+      - ".github/workflows/release*.yml"
+      - "scripts/release-*"
+      - "scripts/test-release-*.py"
       - ".github/actions/install-containerlab/**"
   schedule:
     - cron: "23 4 * * *"

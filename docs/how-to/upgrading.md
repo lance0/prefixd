@@ -67,6 +67,14 @@ the new binary does not rewrite active rules. Reported event ports still
 intersect `allowed_ports`, and a nonempty event list with no allowed match is
 refused. See [allowed ports](../reference/configuration.md#allowed-ports).
 
+## Password hashes in earlier debug logs
+
+Earlier releases wrote operator password hashes in login diagnostics when
+`debug` logging was enabled. This release redacts those values. Treat retained
+copies of those logs as credentials: restrict access and reset affected
+operators' passwords using an Admin session. Changing a password also invalidates
+that operator's existing sessions. Upgrading does not remove old log copies.
+
 ## Unknown configuration keys
 
 The release that introduces this check ignores keys it does not recognize after

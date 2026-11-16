@@ -94,7 +94,7 @@ fn synthetic(username: &str) -> Operator {
     Operator {
         operator_id: uuid::Uuid::nil(),
         username: username.to_string(),
-        password_hash: String::new(),
+        password_hash: Default::default(),
         role: OperatorRole::Admin,
         created_at: chrono::Utc::now(),
         created_by: None,
@@ -121,7 +121,7 @@ fn token_principal(token: ApiToken) -> Result<Principal, PrefixdError> {
         Operator {
             operator_id: token.token_id,
             username: token.actor_id(),
-            password_hash: String::new(),
+            password_hash: Default::default(),
             role,
             created_at: token.created_at,
             created_by: Some(token.created_by),
