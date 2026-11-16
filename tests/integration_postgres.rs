@@ -191,12 +191,17 @@ async fn test_cli_operator_password_terminal() {
         let operator = backend
             .authenticate(Credentials {
                 username: username.to_string(),
-                password: "pty-test-password".to_string(),
+                password: "pty-test-password".into(),
             })
             .await
             .unwrap()
             .expect("CLI-created operator authenticates through the real backend");
-        assert!(operator.password_hash.starts_with("$argon2id$"));
+        assert!(
+            operator
+                .password_hash
+                .expose_secret()
+                .starts_with("$argon2id$")
+        );
     }
     for username in ["pty-empty", "pty-interrupt", "pty-eof", "pty-no-terminal"] {
         assert!(

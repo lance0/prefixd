@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- If earlier versions ran with debug logging, treat retained login logs as
+  credentials and reset affected operator passwords; those logs can contain
+  password hashes. See [earlier debug logs](docs/how-to/upgrading.md#password-hashes-in-earlier-debug-logs).
+
 - **Compose needs `POSTGRES_PASSWORD`.** `docker-compose.yml` no longer falls
   back to the published `prefixd_secret`; every Compose command refuses to run
   until the variable is set. Before upgrading an existing Compose stack, put
@@ -283,6 +287,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the lifecycle mutex for up to N × 3 seconds for an event with N rules.
 
 ### Security
+
+- Operator password hashes and incoming passwords are redacted from debug
+  output, including login and session diagnostics. Token creation responses,
+  database configuration and alert destination configuration also hide secrets
+  when formatted for debugging; their intended API and storage formats stay
+  unchanged.
 
 - The Compose stack has no default database password, and the repository's
   `.gitignore` covers `.env` and the bootstrap's `.prefixd/` token directory,

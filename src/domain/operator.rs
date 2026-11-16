@@ -2,12 +2,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::SecretString;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Operator {
     pub operator_id: Uuid,
     pub username: String,
     #[serde(skip_serializing)]
-    pub password_hash: String,
+    pub password_hash: SecretString,
     pub role: OperatorRole,
     pub created_at: DateTime<Utc>,
     pub created_by: Option<String>,
