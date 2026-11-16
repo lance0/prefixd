@@ -42,7 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   naming another victim gets `409`. With correlation, only the source whose
   event met the threshold withdraws the mitigation by unban. The first failed
   delete of any kind stops the unban with `503` and the rest of its intents
-  pending. An unban with nothing to withdraw records the new event outcome
+  pending, and a storage failure on the unban path is `503`, not `500`. A
+  `mode: corroborating` source's unban is now refused on the batch route and
+  every adapter too, as on `/v1/events`, and stores nothing. An unban with nothing to withdraw records the new event outcome
   `no_active_mitigation`; event filters that counted such unbans as
   `withdrawn` must add it; Alertmanager and webhook adapters
   report `withdrawn` or `no_active_mitigation` per unban and answer `503` when

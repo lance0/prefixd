@@ -2415,7 +2415,7 @@ async fn an_unban_whose_record_cannot_be_stored_touches_nothing() {
         body["error"]
             .as_str()
             .unwrap()
-            .contains("could not be stored"),
+            .contains("storage unavailable"),
         "{body}"
     );
     assert!(f.repo.pending_withdrawals(None).await.unwrap().is_empty());
@@ -2693,4 +2693,93 @@ async fn a_resent_unban_for_another_victim_is_a_conflict() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     assert_eq!(body["mitigation_ids"], json!(first), "{body}");
+}
+
+/// An intent that could not be recorded for a reason other than a definitive
+/// refusal, such as a storage error, keeps its target in the replay record
+/// and deletes nothing: the unban answers 503 and a resend records the intent
+/// and withdraws both targets. Negative control: narrowing out every failed
+/// intent drops the target, and the resend leaves it live.
+#[tokio::test]
+async fn an_unrecorded_intent_keeps_its_target_for_the_resend() {
+    let f = fixture(AuthMode::Credentials).await;
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let auth = Some(("authorization", fnm.as_str()));
+    let victim = "203.0.113.92";
+    let ids = ban_vectors(
+        &f,
+        auth,
+        victim,
+        &[("s1", "syn_flood"), ("u1", "udp_flood")],
+    )
+    .await;
+    *f.repo.fail_withdrawal_begin.lock().unwrap() = Some(ids[1]);
+
+    let unban = with_vector(unban("fastnetmon", victim, "store-unban"), "unknown");
+    let (status, body) = send(&f.app, "/v1/events", auth, &unban).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let record = f
+        .repo
+        .find_unban_replay("test-pop", "fastnetmon", "store-unban")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.target_ids, ids);
+    assert_eq!(
+        live_for(&f.repo, victim).await.len(),
+        2,
+        "nothing was deleted"
+    );
+
+    *f.repo.fail_withdrawal_begin.lock().unwrap() = None;
+    let (status, body) = send(&f.app, "/v1/events", auth, &unban).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["mitigation_ids"], json!(ids), "{body}");
+    assert!(live_for(&f.repo, victim).await.is_empty());
+    assert!(f.repo.pending_withdrawals(None).await.unwrap().is_empty());
+}
+
+/// A failed storage read on the unban path is a 503 the script and adapters
+/// retry, never a 500, and stores nothing: the replay lookup with an event
+/// ID, and the live-mitigation read without one. Negative control: passing
+/// the storage error through answers 500.
+#[tokio::test]
+async fn unban_storage_read_failures_are_retryable() {
+    let f = fixture(AuthMode::Credentials).await;
+    let fnm = bearer(
+        &f.repo
+            .mint_token_for_test("fnm", TokenScope::Ingest, Some("fastnetmon")),
+    );
+    let auth = Some(("authorization", fnm.as_str()));
+    let victim = "203.0.113.93";
+    ban_vectors(&f, auth, victim, &[("b-1", "udp_flood")]).await;
+    let stored = written(&f.repo).await;
+    f.repo
+        .fail_unban_reads
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut without_id = unban("fastnetmon", victim, "x");
+    without_id.as_object_mut().unwrap().remove("event_id");
+    for body in [unban("fastnetmon", victim, "read-unban"), without_id] {
+        let (status, response) = send(&f.app, "/v1/events", auth, &body).await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{body}: {response}"
+        );
+        assert!(
+            response["error"]
+                .as_str()
+                .unwrap()
+                .contains("storage unavailable"),
+            "{response}"
+        );
+    }
+    assert_eq!(written(&f.repo).await, stored);
+    f.repo
+        .fail_unban_reads
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(live_for(&f.repo, victim).await.len(), 1);
 }

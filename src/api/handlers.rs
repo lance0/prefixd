@@ -1065,6 +1065,8 @@ pub(crate) async fn handle_unban(
     mut input: AttackEventInput,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
     input.source = grant.source().to_string();
+    // Every unban path (single, batch, signal adapters) routes through here.
+    reject_corroborating_source(&state, &input.source, &input.action).await?;
     validate_event_destination(&input.victim_ip).map_err(AppError)?;
     validate_confidence(input.confidence).map_err(AppError)?;
     validate_top_src_ports(input.top_src_ports.as_deref()).map_err(AppError)?;
@@ -1074,6 +1076,11 @@ pub(crate) async fn handle_unban(
     let _mitigation_guard = state.mitigation_lock.lock().await;
     state.verified_speaker_binding().map_err(AppError)?;
     let pop = state.settings.pop.as_str();
+    // A failed read is not an empty one: the sender retries the 503.
+    let unavailable = |error: PrefixdError| {
+        tracing::warn!(%error, source = %grant.source(), "detector unban storage read failed");
+        AppError(PrefixdError::UnbanStorageUnavailable)
+    };
     let answer = |event_id, external_event_id, ids: Vec<Uuid>| {
         let status = if ids.is_empty() {
             "no_active_mitigation"
@@ -1091,7 +1098,7 @@ pub(crate) async fn handle_unban(
             .repo
             .find_unban_replay(pop, grant.source(), external_id)
             .await
-            .map_err(AppError)?
+            .map_err(unavailable)?
     {
         if crate::domain::canonical_destination(&original.victim_ip)
             .ok()
@@ -1104,7 +1111,7 @@ pub(crate) async fn handle_unban(
         }
         let mut live = Vec::new();
         for id in &original.target_ids {
-            if let Some(mitigation) = state.repo.get_mitigation(*id).await.map_err(AppError)?
+            if let Some(mitigation) = state.repo.get_mitigation(*id).await.map_err(unavailable)?
                 && mitigation.is_active()
                 && mitigation.pop == pop
             {
@@ -1146,7 +1153,7 @@ pub(crate) async fn handle_unban(
         .repo
         .list_live_by_victim_and_source(&victim, pop, grant.source())
         .await
-        .map_err(AppError)?
+        .map_err(unavailable)?
         .into_iter()
         .filter(|mitigation| {
             vector == crate::domain::AttackVector::Unknown
@@ -1166,7 +1173,7 @@ pub(crate) async fn handle_unban(
         .await
     {
         tracing::warn!(%error, source = %grant.source(), "failed to store detector unban");
-        return Err(AppError(PrefixdError::UnbanNotStored));
+        return Err(AppError(PrefixdError::UnbanStorageUnavailable));
     }
     if targets.is_empty() {
         tracing::debug!(source = %grant.source(), victim_ip = %victim,
@@ -1189,13 +1196,16 @@ pub(crate) async fn handle_unban(
 /// Caller holds the lifecycle mutex and has stored the unban's replay record
 /// with `stored`. Record withdrawal intent for every `live` target before any
 /// delete, so a failed delete cannot leave the others unrecorded, then narrow
-/// the record to the targets whose intent was recorded: a refused target is
-/// never part of the unban. Then delete, stopping at the first failure of any
+/// the record to drop the targets whose intent was definitively refused (a
+/// client error such as another live owner's 409): those are never part of
+/// the unban. An intent that could not be recorded for any other reason, such
+/// as a storage error, keeps its target in the record and deletes nothing, so
+/// a resend retries it. Then delete, stopping at the first failure of any
 /// kind, so a wedged or failing speaker holds the mutex for one bounded
 /// attempt and the rest stay pending for reconciliation and the resend.
 /// Records the unban's outcome and returns its targets with the first error:
-/// a failed delete or record write is a 503, otherwise a refused intent is
-/// reported as itself.
+/// a failed delete, intent or record write is a 503, otherwise a refused
+/// intent is reported as itself.
 async fn withdraw_unban_targets(
     state: &AppState,
     grant: &crate::api::auth::SourceGrant,
@@ -1211,6 +1221,7 @@ async fn withdraw_unban_targets(
     let mut requests = Vec::with_capacity(live.len());
     let mut refused = Vec::new();
     let mut refusal = None;
+    let mut unrecorded = false;
     for mitigation in live {
         match crate::domain::request_detector_withdrawal(
             state.repo.as_ref(),
@@ -1225,9 +1236,14 @@ async fn withdraw_unban_targets(
         .await
         {
             Ok(request) => requests.push(request),
-            Err(error) => {
+            Err(error) if error.status_code().is_client_error() => {
                 refused.push(mitigation.mitigation_id);
                 refusal.get_or_insert(error);
+            }
+            Err(error) => {
+                tracing::warn!(mitigation_id = %mitigation.mitigation_id, %error,
+                    "detector unban could not record withdrawal intent; it stays a target");
+                unrecorded = true;
             }
         }
     }
@@ -1241,7 +1257,10 @@ async fn withdraw_unban_targets(
         && let Err(error) = state.repo.set_unban_targets(event_id, &ids).await
     {
         tracing::warn!(%event_id, %error, "failed to narrow a detector unban's targets");
-        failure = Some(PrefixdError::UnbanNotStored);
+        failure = Some(PrefixdError::UnbanStorageUnavailable);
+    }
+    if unrecorded {
+        failure.get_or_insert(PrefixdError::UnbanStorageUnavailable);
     }
     if failure.is_none() {
         let mut completed = 0;

@@ -33,6 +33,11 @@ pub struct MockRepository {
     pub fail_unban_records: std::sync::atomic::AtomicBool,
     /// Every event outcome write fails.
     pub fail_event_outcomes: std::sync::atomic::AtomicBool,
+    /// Every unban replay lookup and live-by-victim read fails.
+    pub fail_unban_reads: std::sync::atomic::AtomicBool,
+    /// Recording withdrawal intent for this mitigation fails, as a storage
+    /// error does.
+    pub fail_withdrawal_begin: Mutex<Option<Uuid>>,
     #[cfg(test)]
     mitigation_reads: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -166,6 +171,8 @@ impl MockRepository {
             unban_replays: Mutex::new(HashMap::new()),
             fail_unban_records: Default::default(),
             fail_event_outcomes: Default::default(),
+            fail_unban_reads: Default::default(),
+            fail_withdrawal_begin: Mutex::new(None),
             #[cfg(test)]
             mitigation_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -644,6 +651,12 @@ impl RepositoryTrait for MockRepository {
         source: &str,
         external_id: &str,
     ) -> Result<Option<super::UnbanReplay>> {
+        if self
+            .fail_unban_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PrefixdError::Internal("seeded unban read failure".into()));
+        }
         let events = self.events.lock().unwrap();
         let replays = self.unban_replays.lock().unwrap();
         Ok(events.iter().find_map(|e| {
@@ -814,6 +827,9 @@ impl RepositoryTrait for MockRepository {
     }
 
     async fn begin_withdrawal(&self, request: &WithdrawalRequest) -> Result<WithdrawalRequest> {
+        if *self.fail_withdrawal_begin.lock().unwrap() == Some(request.mitigation_id) {
+            return Err(PrefixdError::Internal("seeded intent write failure".into()));
+        }
         let bindings = self.speaker_bindings.lock().unwrap();
         if bindings.pops.get(&request.pop).copied() != request.target_id {
             return Err(crate::domain::binding_mismatch());
@@ -1312,6 +1328,12 @@ impl RepositoryTrait for MockRepository {
         pop: &str,
         source: &str,
     ) -> Result<Vec<Mitigation>> {
+        if self
+            .fail_unban_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PrefixdError::Internal("seeded unban read failure".into()));
+        }
         // One lock at a time, so no lock order can deadlock another method.
         let from_source: std::collections::HashSet<Uuid> = self
             .events

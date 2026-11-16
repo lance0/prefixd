@@ -8555,16 +8555,16 @@ async fn test_batch_rejects_corroborating_ban_per_item() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["accepted"], 2, "{json}");
-    assert_eq!(json["rejected"], 1, "{json}");
+    assert_eq!(json["accepted"], 1, "{json}");
+    assert_eq!(json["rejected"], 2, "{json}");
     let results = json["results"].as_array().unwrap();
     assert_eq!(results[0]["status"], "rejected");
     assert_eq!(results[0]["error"], corroborating_rejection("router-cpu"));
     assert!(results[1]["mitigation_id"].is_string(), "{json}");
-    // Unban stays on the withdrawal path; nothing to withdraw here.
-    assert_eq!(results[2]["status"], "no_active_mitigation");
+    // A corroborating source posts no events, unbans included (ADR 021).
+    assert_eq!(results[2]["status"], "rejected");
+    assert_eq!(results[2]["error"], corroborating_rejection("router-cpu"));
 
-    // The unban is stored as its replay record; the ban is not.
     let events = repo
         .list_events(&prefixd::db::ListParams {
             limit: 1000,
@@ -8572,12 +8572,10 @@ async fn test_batch_rejects_corroborating_ban_per_item() {
         })
         .await
         .unwrap();
-    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(events.len(), 1, "{events:?}");
     assert!(
-        events
-            .iter()
-            .all(|e| e.source != "router-cpu" || e.action == "unban"),
-        "corroborating ban must not be persisted"
+        events.iter().all(|e| e.source != "router-cpu"),
+        "corroborating ban and unban must not be persisted"
     );
     assert_eq!(mitigation_count(&repo).await, 1);
     assert_eq!(announcer.announced_count().await, 1);
@@ -8596,15 +8594,17 @@ async fn test_alertmanager_rejects_corroborating_source_ban() {
         corroborating_rejection("alertmanager")
     );
 
-    // Resolution still routes to withdrawal rather than the ban guard, and
-    // reports that there was nothing to withdraw.
+    // A corroborating source posts no events, resolutions included (ADR 021).
     let resolved = make_alert("resolved", "203.0.113.30", "udp_flood", "critical", "am-1");
     let (status, json) = post_alertmanager(&app, &make_alertmanager_payload(&[resolved])).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["failed"], 0, "{json}");
-    assert_eq!(json["results"][0]["status"], "no_active_mitigation");
+    assert_eq!(json["failed"], 1, "{json}");
+    assert_eq!(json["results"][0]["status"], "error");
+    assert_eq!(
+        json["results"][0]["error"],
+        corroborating_rejection("alertmanager")
+    );
 
-    // The resolution is stored as its replay record; the ban is not.
     let events = repo
         .list_events(&prefixd::db::ListParams {
             limit: 1000,
@@ -8612,10 +8612,9 @@ async fn test_alertmanager_rejects_corroborating_source_ban() {
         })
         .await
         .unwrap();
-    assert_eq!(events.len(), 1, "{events:?}");
-    assert_eq!(
-        events[0].action, "unban",
-        "corroborating ban must not be persisted"
+    assert!(
+        events.is_empty(),
+        "corroborating ban and resolution must not be persisted: {events:?}"
     );
     assert_eq!(mitigation_count(&repo).await, 0);
     assert_eq!(announcer.announced_count().await, 0);
@@ -8624,10 +8623,20 @@ async fn test_alertmanager_rejects_corroborating_source_ban() {
 #[tokio::test]
 async fn test_fastnetmon_rejects_corroborating_source_ban() {
     let (app, repo, announcer) = setup_corroborating_ban_paths();
-    let payload = make_fastnetmon_payload("ban", "203.0.113.40", Some("fnm-1"));
-    let (status, json) = post_fastnetmon(&app, &payload).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"], corroborating_rejection("fastnetmon"));
+    for action in ["ban", "unban"] {
+        let payload = make_fastnetmon_payload(action, "203.0.113.40", Some("fnm-1"));
+        let (status, json) = post_fastnetmon(&app, &payload).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{action}");
+        assert_eq!(json["error"], corroborating_rejection("fastnetmon"));
+    }
+    let events = repo
+        .list_events(&prefixd::db::ListParams {
+            limit: 1000,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(events.is_empty(), "{events:?}");
     assert_eq!(mitigation_count(&repo).await, 0);
     assert_eq!(announcer.announced_count().await, 0);
 }

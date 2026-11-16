@@ -1272,8 +1272,9 @@ host-only token never reaches hostgroup ingestion.
 - The unban is stored with its POP and selected targets (migration 025)
   before any withdrawal intent, and a failed write answers 503 having touched
   nothing. Intent is then recorded for every target before any delete, the
-  stored set keeps only the targets whose intent was recorded, and the first
-  failed delete of any kind stops the unban with a 503 and the rest pending,
+  stored set drops only the targets whose intent was definitively refused (a
+  target whose intent could not be stored stays, and the unban deletes
+  nothing and answers 503), and the first failed delete of any kind stops the unban with a 503 and the rest pending,
   so one failure cannot strand the rest and a resend is idempotent. The
   request keeps the bound source (migration 024) for the completion audit and
   the `detector_unban` metric, whoever completes it.

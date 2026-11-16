@@ -395,10 +395,13 @@ keeps no state.
   withdraws the mitigation by unban; the others use their own mitigations, or
   an operator withdraws it.
 - **Partial failure.** The unban is stored first, with the POP and the
-  mitigations it selected. If that write fails, the answer is `503` and
-  nothing is touched. Withdrawal intent is then recorded for every selected
-  mitigation before any delete is attempted, and the stored set keeps only
-  the mitigations whose intent was recorded. The first delete that fails,
+  mitigations it selected. If that write, or a storage read before it,
+  fails, the answer is `503` and nothing is touched. Withdrawal intent is
+  then recorded for every selected mitigation before any delete is
+  attempted. The stored set drops only the mitigations whose intent was
+  definitively refused; an intent that could not be recorded for another
+  reason, such as a storage error, keeps its mitigation in the set, and the
+  unban answers `503` without deleting anything, so a resend retries it. The first delete that fails,
   whether the speaker refused it, it timed out or its outcome is otherwise
   unknown, stops the unban, so a failing or wedged speaker holds the
   lifecycle lock for one bounded attempt. The answer is then `503`, and every
@@ -414,7 +417,8 @@ keeps no state.
   a later ban created. A resend that names another victim gets `409`. The
   same `event_id` on another POP is that POP's own unban. An unban without an
   `event_id` selects each time. An HMAC webhook adapter's unban needs an
-  event ID.
+  event ID. A `mode: corroborating` source's unban is refused on every
+  route, as its bans are, and stores nothing.
 
 The unban is stored as its own event with `"action": "unban"`, even when
 nothing matched, so a resend finds its empty set; the response's `event_id` is

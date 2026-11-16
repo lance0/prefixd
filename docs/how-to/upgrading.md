@@ -138,7 +138,9 @@ What changes:
   correlation, only the source whose event met the threshold withdraws the
   mitigation by unban. The first delete that fails, whatever the error, stops
   the unban with `503` and the rest of its intents pending; a resend reuses
-  them. Unbans with nothing to withdraw record the new event outcome
+  them. A storage failure on the unban path is also `503`. A
+  `mode: corroborating` source's unban is refused on every route, as its bans
+  are, and stores nothing. Unbans with nothing to withdraw record the new event outcome
   `no_active_mitigation` rather than `withdrawn`, so event filters that
   counted them as `withdrawn` must add it. Alertmanager and webhook adapters report each unban as
   `withdrawn` or `no_active_mitigation` and answer `503` when one failed, so
