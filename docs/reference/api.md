@@ -128,6 +128,38 @@ concrete POP names still match no rows.
 
 ## Events
 
+### Source binding
+
+Every ingest route (`POST /v1/events`, `POST /v1/events/batch`, every
+`/v1/signals/*` adapter and `POST /v1/signals/corroborator`) grants the
+request one source, and stores the event or signal under it
+([ADR 034](../adr/034-source-bound-api-tokens.md)):
+
+| Credential | Source granted |
+|------------|----------------|
+| Ingest token | Only the source it is bound to |
+| Admin session, admin token, mTLS client, `none` mode | Any source the request claims |
+| HMAC webhook adapter signature | The adapter's name |
+| Operator session or operator token, Viewer | None: 403 |
+
+A request claiming a source its credential is not bound to gets `403`, for
+example `forbidden: source "fastnetmon" is not bound to this credential (bound
+to "radware")`, and writes no event, mitigation or audit row. The error echoes
+no other request field. Each route's claimed source is the body `source` for
+`/v1/events`, each batch item and the corroborator; `fastnetmon` for a host
+alert on `/v1/signals/fastnetmon` and `fastnetmon-hostgroup` for any other
+`alert_scope`; `alertmanager`; and the adapter name on
+`/v1/signals/webhook/{name}`. The blackhole and prefix allowlists, correlation
+weights, `min_sources`, corroborating mode and the detector unban all read the
+granted source. Refusals count in
+`prefixd_events_rejected_total{reason="source_not_bound"}`, labeled with the
+bound source (`unbound` for an Operator), never the claimed one.
+
+Audit rows for what an ingest request does name the credential: `token:<name>`
+for an ingest token and `webhook:<adapter>` for an HMAC adapter, as actor type
+`detector`, with the source in `details.source`. An Admin's claim is recorded
+as that Admin, actor type `operator`.
+
 ### Ingest Attack Event
 
 ```http
@@ -178,9 +210,11 @@ retries can use the same ID. Batch ingestion keeps per-item rejection results.
 
 When `guardrails.allow_detector_prefix` is true and the event `source` appears
 in `guardrails.detector_prefix_sources`, `victim_ip` may be a canonical CIDR.
-The allowlist filters the `source` label the caller supplies; it does not
-authenticate a detector, so every caller authorized to ingest events is trusted
-to supply that label.
+The source is the one the credential is bound to (see
+[source binding](#source-binding)), so the allowlist is authorization: an
+Operator cannot reach it, and an ingest token reaches it only when bound to an
+allowlisted source. FastNetMon hostgroup events use their own source,
+`fastnetmon-hostgroup`.
 Host bits are rejected rather than cleared. The prefix must fit the configured
 `dst_prefix_minlen`/`dst_prefix_maxlen` (the default remains host-only), belong
 entirely to one inventory customer, and have no safelist overlap. A prefix
@@ -210,10 +244,10 @@ curl -X POST http://localhost/v1/events \
 
 Treat `400` and `422` as final: the prefix was malformed, unowned, too broad,
 safelisted, over quota or not authorized. Never resend a refused prefix as a
-host event. An unban uses the same `source` and `event_id` and is not subject to
-the prefix admission checks, so it still withdraws after the opt-in is disabled
-or ownership, safelist or bounds change; an unknown event ID returns `202` with
-`status: "not_found"`, as for a host. A re-sent prefix with a
+host event. An unban names the same `source` and `victim_ip` and is not subject
+to the prefix admission checks, so it still withdraws after the opt-in is
+disabled or ownership, safelist or bounds change; with nothing live it returns
+`202` with `status: "no_active_mitigation"`, as for a host. A re-sent prefix with a
 new event ID extends the same rule. A host event for an address inside an
 active prefix creates its own host rule, which takes precedence for that host
 (RFC 8955 §5.1); prefixd does not reconcile the overlap.
@@ -333,11 +367,21 @@ rule was created and `extended` otherwise, and `announcement_outcome` is
 When no reported port is in the library, or no `udp_amplification` playbook is
 configured, the event is evaluated exactly as `udp_flood`: the mitigation's
 vector is `udp_flood` and its reason ends with
-`[udp_amplification fallback: ...]`. An unban by `event_id` withdraws every
-live mitigation the original ban created. The unban is stored as its own event
-with `"action": "unban"` and the ban's source and `external_event_id`; the
-response's `event_id` is that unban event. An unban with no active mitigation
-stores nothing. Only bans are deduplicated by source and `event_id`.
+`[udp_amplification fallback: ...]`.
+
+An unban names its victim. It withdraws every live mitigation for that victim
+on the controller's POP whose triggering event came from the granted source,
+comparing the address in canonical form, so a zero-padded IPv6 unban matches a
+canonically stored mitigation. Mitigations other sources created for the same
+victim, and manual mitigations, are never touched. A re-ban that extended a
+mitigation and an unban after a lost earlier unban both pair, and the detector
+keeps no state. The unban's `event_id` and `vector` select nothing. The unban
+is stored as its own event with `"action": "unban"`; the response's `event_id`
+is that unban event, and `mitigation_ids` lists what it withdrew. With nothing
+to withdraw the answer is the definitive `"no_active_mitigation"` and nothing
+is stored. The withdrawal's audit actor is the credential, and its reason
+`Detector unban: <source>`. Only bans are deduplicated by source and
+`event_id`.
 
 When a new mitigation is needed, prefixd commits its Active desired row before
 calling the speaker. A persistence failure sends no announcement. If intent
@@ -369,13 +413,14 @@ Common status values:
   `"accepted_no_mitigation"` means the victim is outside the effective
   inventory; `"accepted_no_playbook"` means policy produced no action. Check
   `mitigation_id`, not `status` alone.
-- Unban path: `"withdrawn"`, `"ignored_no_event_id"`, `"not_found"`, `"no_active_mitigation"`
+- Unban path: `"withdrawn"` or `"no_active_mitigation"`
 
 When the matching playbook's step is `action: blackhole`
 ([blackhole steps](configuration.md#blackhole-steps)), the ban creates or
 extends a blackhole through the same admission as a
-[manual blackhole](#manual-blackhole), recorded with the detector as actor. An
-event whose `source` is not in `blackhole.detector_sources` gets `422` before
+[manual blackhole](#manual-blackhole), recorded with the ingest credential as
+actor. An event whose granted source is not in `blackhole.detector_sources`
+gets `422` before
 it is stored, whether it would create or extend the blackhole. An extension is
 capped at now plus `blackhole.max_ttl_seconds`. In enforced mode an unconfirmed
 add reports `"announcement_outcome": "unconfirmed"` as above.
@@ -1939,8 +1984,13 @@ X-Signature-SHA256: <hex-encoded HMAC-SHA256 of request body>
 **Authentication:**
 
 - `hmac` — HMAC-SHA256 over the raw request body. Header name is configurable (default `X-Signature-SHA256`). The hex digest may be prefixed with `sha256=` (GitHub-style). Secret is read from the env var named in `auth.secret_env`.
-- `bearer` — An API token in `Authorization: Bearer`, verified like every other ingest route; an ingest token reaches it.
-- `none` — No auth enforced (intended for lab use only).
+- `bearer` — An ingest token bound to the adapter's name in `Authorization: Bearer`, or an Admin; a token bound to another source, an operator token and an Operator session get `403`.
+- `none` — The request's own credentials decide, which only `http.auth.mode: none` admits; an adapter with `auth.type: none` is refused at load in any other mode.
+
+The adapter's name is the events' `source`. An HMAC signature is the
+credential, so `Authorization` is ignored, and audit rows name
+`webhook:<adapter>`. `auth.secret_env` must name a `PREFIXD_WEBHOOK_` variable
+holding at least 32 bytes.
 
 **Response:**
 
@@ -1963,7 +2013,7 @@ webhook_adapters:
     enabled: true
     auth:
       type: hmac
-      secret_env: RADWARE_WEBHOOK_SECRET
+      secret_env: PREFIXD_WEBHOOK_RADWARE_SECRET
       header: X-Signature-SHA256
       algorithm: sha256
     root_path: "$.alerts[*]"
@@ -3225,7 +3275,7 @@ Returns the correlation engine configuration with secrets redacted. See the [Cor
         "enabled": true,
         "auth": {
           "type": "hmac",
-          "secret_env": "RADWARE_WEBHOOK_SECRET",
+          "secret_env": "PREFIXD_WEBHOOK_RADWARE_SECRET",
           "header": "X-Signature-SHA256",
           "algorithm": "sha256"
         },
@@ -3755,7 +3805,7 @@ Some handlers intentionally return status-only errors (no JSON body), especially
 |--------|-------------|
 | 400 | Invalid request payload or validation failure |
 | 401 | Missing or invalid authentication, including an unknown, malformed, revoked or expired API token |
-| 403 | Insufficient permissions, an API token bound to another POP, or an ingest token outside the ingest routes |
+| 403 | Insufficient permissions, an API token bound to another POP, an ingest token outside the ingest routes, or an ingest request claiming a source its credential is not bound to |
 | 404 | Resource not found |
 | 409 | Conflict (duplicate resource/event) |
 | 422 | Guardrail rejection |

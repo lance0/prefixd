@@ -40,7 +40,7 @@ default_weight: 1.0
 #     enabled: false
 #     auth:
 #       type: hmac                        # hmac | bearer | none
-#       secret_env: EXAMPLE_WEBHOOK_SECRET
+#       secret_env: PREFIXD_WEBHOOK_EXAMPLE_SECRET
 #       header: X-Signature-SHA256
 #       algorithm: sha256
 #     # root_path iterates an array of alerts in one payload (omit for single-event POSTs)

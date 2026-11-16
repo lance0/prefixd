@@ -15,11 +15,14 @@ Community notify script are host-only: they require a single `ip` and do not
 map a hostgroup payload. Do not point a hostgroup action at this adapter yet.
 
 prefixd's `/v1/events` endpoint can accept a canonical CIDR when
-`guardrails.allow_detector_prefix` is true and the event's `source` label is in
-`detector_prefix_sources`. That list filters the label the caller supplies; it
-does not authenticate FastNetMon, so any caller holding event-ingestion
-credentials can use an allowlisted label. A hostgroup with one network can be
-mapped to that event by an external shim. The published total-hostgroup
+`guardrails.allow_detector_prefix` is true and the event's `source` is in
+`detector_prefix_sources`. The source is the one the caller's ingest token is
+bound to, so the allowlist is authorization: list `fastnetmon-hostgroup`, and
+give the shim its own token bound to that source. A host token bound to
+`fastnetmon` then cannot send prefix events, and revoking prefix authority
+never touches host mitigation
+([ADR 034](../../adr/034-source-bound-api-tokens.md)). A hostgroup with one
+network can be mapped to that event by an external shim. The published total-hostgroup
 payload carries no port list, so a prefix discard playbook is not usable and
 only a portless `udp_flood` prefix police playbook applies. TCP prefix police
 needs a destination port.
@@ -30,25 +33,28 @@ qualified for prefix rules.
 Multiple networks in one hostgroup need separate events with distinct event
 IDs. See [ADR 033](../../adr/033-detector-prefix-mitigations.md).
 
-A shim posts one event per attacked network:
+A shim posts one event per attacked network, reading its token from a file
+and handing the header to curl on stdin so it never appears in `ps`:
 
 ```bash
-curl -X POST "${PREFIXD_API}/v1/events" \
-  -H "Authorization: Bearer ${PREFIXD_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "event_id": "fnm-hostgroup-customer-a-1731574800",
-    "timestamp": "2026-11-14T09:00:00Z",
-    "source": "fastnetmon",
-    "victim_ip": "203.0.113.0/24",
-    "vector": "udp_flood",
-    "pps": 4200000,
-    "confidence": 0.9
-  }'
+printf 'header = "Authorization: Bearer %s"\n' "$(cat /etc/prefixd/hostgroup.token)" |
+  curl -K - -X POST "${PREFIXD_API}/v1/events" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "event_id": "fnm-hostgroup-customer-a-1731574800",
+      "timestamp": "2026-11-14T09:00:00Z",
+      "source": "fastnetmon-hostgroup",
+      "victim_ip": "203.0.113.0/24",
+      "vector": "udp_flood",
+      "pps": 4200000,
+      "confidence": 0.9
+    }'
 ```
 
-Treat `400` and `422` as final and never resend a refused prefix as a host
-event. Send the unban with the same `source` and `event_id`.
+Treat `400`, `403` and `422` as final and never resend a refused prefix as a
+host event. An IPv4-mapped prefix is refused with `400`. To unban, post an
+event with `"action": "unban"` and the same `source` and `victim_ip`; prefixd
+withdraws the live mitigations that source created for that prefix.
 
 Portless UDP police is an owner-approved exception, not an operator-confirmed
 requirement. It is one shared rate bucket for all UDP to the whole prefix,
@@ -59,7 +65,7 @@ qualification before relying on it.
 
 ## Overview
 
-FastNetMon detects DDoS attacks via NetFlow/sFlow analysis and calls a notify script when attacks are detected. The `prefixd-fastnetmon.sh` script bridges FastNetMon to prefixd's HTTP APIs (event ingest + mitigation withdraw).
+FastNetMon detects DDoS attacks via NetFlow/sFlow analysis and calls a notify script when attacks are detected. The `prefixd-fastnetmon.sh` script posts each ban and unban to prefixd as an event, with an ingest token bound to the `fastnetmon` source.
 
 ```
 FastNetMon → notify script → prefixd → BGP speaker → routers
@@ -139,77 +145,81 @@ rustbgpd `v0.80.1`; it does not qualify a shared-target deployment:
 
 - FastNetMon Community or Advanced installed and configured
 - prefixd running with API accessible
-- `curl` installed (`jq` and/or `python3` are recommended for richer JSON handling)
+- `bash` and `curl` on the FastNetMon host; nothing else
 - Network connectivity from FastNetMon to prefixd API
 
 ## Installation
 
 1. Copy the notify script to the FastNetMon host. The host needs `bash` and
-   `curl`; `jq` is optional (the script falls back to `grep`/`cut`):
+   `curl` only:
 
 ```bash
 sudo cp scripts/prefixd-fastnetmon.sh /usr/local/bin/
 sudo chmod +x /usr/local/bin/prefixd-fastnetmon.sh
 ```
 
-2. Configure environment variables in `/etc/default/prefixd`:
+2. Create an ingest token bound to `fastnetmon` on the controller. The secret
+   is printed once, on stdout, so write it straight to a file:
+
+```bash
+(umask 077; prefixdctl tokens create --name fnm-pop1 --scope ingest --source fastnetmon --pop iad1 > fnm-pop1.token)
+```
+
+   Copy the file to the FastNetMon host, install it where only the FastNetMon
+   user can read it, and delete the copies:
+
+```bash
+sudo install -d -m 0755 /etc/prefixd
+sudo install -m 0400 -o fastnetmon fnm-pop1.token /etc/prefixd/fastnetmon.token
+rm fnm-pop1.token
+```
+
+   An ingest token cannot read data or withdraw anything; it can post events
+   only as `fastnetmon`. See [API tokens](../../reference/cli.md#api-tokens)
+   for rotation and revocation.
+
+3. Configure the script in `/etc/default/prefixd`:
 
 ```bash
 # prefixd API endpoint
-PREFIXD_API="http://prefixd-host:8080"
+PREFIXD_API="https://prefixd-host:8443"
 
-# API token, created with prefixdctl tokens create (see below)
-PREFIXD_TOKEN=""
-
-# Operator request field (optional; audit actor comes from authentication)
-PREFIXD_OPERATOR="fastnetmon"
+# The ingest token file (preferred), or PREFIXD_TOKEN with the token itself
+PREFIXD_TOKEN_FILE="/etc/prefixd/fastnetmon.token"
 
 # Log file location (optional)
 PREFIXD_LOG="/var/log/prefixd-fastnetmon.log"
 
-# Unban lookup retries to handle ban/unban race windows (optional)
-UNBAN_QUERY_RETRIES="5"
-UNBAN_QUERY_DELAY_SECONDS="1"
+# Delivery attempts for a ban or unban on a connection error or 503 (optional)
+EVENT_POST_ATTEMPTS="3"
+EVENT_POST_DELAY_SECONDS="1"
 
-# Ban delivery attempts on a connection error or 503 (optional)
-BAN_POST_ATTEMPTS="3"
-BAN_POST_DELAY_SECONDS="1"
-
-# Withdrawal delivery attempts on a connection error or 503 (optional)
-WITHDRAW_ATTEMPTS="3"
-WITHDRAW_DELAY_SECONDS="1"
+# Per-attempt bounds in seconds (optional)
+EVENT_CONNECT_TIMEOUT_SECONDS="5"
+EVENT_MAX_TIME_SECONDS="15"
 ```
 
 The script sources `/etc/default/prefixd` when it exists; variables set there
-override the process environment.
+override the process environment. `PREFIXD_TOKEN_FILE` wins over
+`PREFIXD_TOKEN`; if you keep the token in `/etc/default/prefixd` instead, make
+that file mode 0600. The script hands the `Authorization` header to curl in a
+config on stdin (`curl -K -`), so the token never appears in `ps` or
+`/proc/*/cmdline`, and it refuses a malformed token without logging it.
 
-The script authenticates with an API token in `Authorization: Bearer`, in
-`credentials` mode, the shipped default. Create the token on the controller and
-put its secret in `PREFIXD_TOKEN`; it is shown once:
-
-```bash
-prefixdctl tokens create --name fnm-pop1 --scope operator --pop iad1
-```
-
-The script's unban looks up the victim's mitigations in `/v1/mitigations` and
-withdraws them, which an ingest token cannot do, so this script needs an
-operator token. A shim that only posts events can use an ingest token bound to
-the detector's source (`--scope ingest --source fastnetmon`). See
-[API tokens](../../reference/cli.md#api-tokens) for rotation and revocation.
-
-
-FastNetMon runs the script once per ban and never repeats it. The script
-therefore retries the same event, with the same `event_id`, when prefixd cannot
-be reached or answers `503` (a standby or draining controller). It stops after
-`BAN_POST_ATTEMPTS` attempts in total. It never retries a `4xx`. A `409` means
-the event ID already arrived, or the rule conflicts with speaker or injection
-ownership; read the error text. A `503` can be returned after the event row was
-stored, so a retry can then get `409` with no mitigation: check
+FastNetMon runs the script once per ban and once per unban and never repeats
+it. The script therefore retries the same event, with the same `event_id`,
+when prefixd cannot be reached or answers `503` (a standby or draining
+controller). It stops after `EVENT_POST_ATTEMPTS` attempts in total, each
+bounded by the two timeouts. It never retries a `4xx`. A `403` means the token
+is not bound to `fastnetmon`, or is bound to another POP. A `409` on a ban
+means the event ID already arrived, or the rule conflicts with speaker or
+injection ownership; read the error text. A `503` can be returned after the
+event row was stored, so a retry can then get `409` with no mitigation: check
 `GET /v1/mitigations`, not just the event. Point `PREFIXD_API` at the active
 controller, or at a load balancer that routes by `GET /v1/ready`; see
 [controller fence and rolling deploys](../upgrading.md#controller-fence-and-rolling-deploys).
 
-3. Configure FastNetMon to use the script. Edit `/etc/fastnetmon.conf`:
+4. Configure FastNetMon to use the script. Edit `/etc/fastnetmon.conf`:
 
 ```ini
 notify_script_path = /usr/local/bin/prefixd-fastnetmon.sh
@@ -217,7 +227,7 @@ notify_script_path = /usr/local/bin/prefixd-fastnetmon.sh
 
 `notify_script_path` is the only notify-script setting in FastNetMon Community. The script file must exist when FastNetMon starts, or notifications are disabled.
 
-4. Restart FastNetMon:
+5. Restart FastNetMon:
 
 ```bash
 sudo systemctl restart fastnetmon
@@ -229,9 +239,11 @@ sudo systemctl restart fastnetmon
 
 1. FastNetMon detects attack on victim IP
 2. Calls script with args: `$1=IP $2=direction $3=pps $4=ban` and writes the attack details to its stdin
-3. Script generates a unique UUID `event_id` for each ban occurrence
+3. Script generates a unique UUID `event_id` for each ban occurrence. The
+   victim always comes from `$1`: a manual IPv6 ban's stdin says
+   `IP: 0.0.0.0`.
 4. Sends `POST /v1/events` with `action: "ban"` and numeric `confidence: 0.9`, retrying a connection error or
-   `503` up to `BAN_POST_ATTEMPTS` times with the same `event_id`
+   `503` up to `EVENT_POST_ATTEMPTS` times with the same `event_id`
 5. prefixd stores the event, applies ownership, correlation and playbook gates,
    then admits a mitigation and attempts the announcement; any gate can stop the
    ban without a mitigation
@@ -260,6 +272,7 @@ instead of `SUCCESS (<code>, status=...)`. Read the response body:
 | 202 | `accepted_no_mitigation` | victim not in the effective inventory | `/etc/prefixd/inventory.yaml` in the controller |
 | 202 | `accepted_no_playbook` | policy produced no rule: no playbook matched, or its initial step has no action | effective `playbooks.yaml` |
 | 400 | `error` | invalid event, or a VPN default scope refused a blackhole | error text; `default_scope`/`vpn_scopes` |
+| 403 | `error` | the token is not bound to `fastnetmon`, or is bound to another POP | `prefixdctl tokens list` |
 | 422 | `error` | guardrail or VPN scope refused; the event may still be recorded | error text: safelist, quota, `l3vpn` capability |
 | 429 | `error` | event rate limit | `http.rate_limit`; wait |
 | 409 | `error` | duplicate event, speaker binding or owner conflict | event ID; a `503`-then-`409` retry may have stored an event without a mitigation |
@@ -286,15 +299,23 @@ controller (or use the dashboard editors). See the
 
 1. FastNetMon attack subsides
 2. Calls script with args: `$1=IP $2=direction $3=pps $4=unban`; no attack details are sent
-3. Script queries `GET /v1/mitigations?status=pending,active,escalated&victim_ip=<ip>`
-4. Script withdraws each matching mitigation via `POST /v1/mitigations/{id}/withdraw`
-5. Script retries lookup briefly to handle ban/unban races
+3. Script sends `POST /v1/events` with `action: "unban"`, `source: "fastnetmon"`
+   and the victim from `$1`, retrying a connection error or `503` like a ban
+4. prefixd withdraws every live mitigation for that victim on its POP that
+   `fastnetmon` created, comparing the address in canonical form, and answers
+   `withdrawn` with their IDs. With none left it answers
+   `no_active_mitigation`, which the script logs as `NO_MITIGATION` and treats
+   as done.
+
+Other sources' mitigations for the same victim and manual mitigations are
+never touched. The script keeps no state: a re-ban that extended a mitigation,
+an unban after a lost earlier unban, and a ban sent before an upgrade all pair
+by victim. The withdrawal is audited as the token, `token:<name>`, with the
+reason `Detector unban: fastnetmon`.
 
 ### Idempotency
 
 Each ban uses a unique `event_id`, which prevents permanent duplicate collisions after a ban→withdraw→re-ban cycle and allows ongoing attacks to extend TTL through scope matching.
-
-Unban correlation is done by querying active mitigations for the victim IP and withdrawing them directly.
 
 ### Blackholes (RTBH)
 
@@ -333,11 +354,11 @@ playbooks:
 ```
 
 A blackhole step takes no `rate_bps` and matches only the victim's `/32` or
-`/128`. A ban from any other source, such as the dashboard's mitigate-now
-dialog (`source: "dashboard"`), gets `422` instead of a blackhole. A repeated
-ban extends the blackhole, capped at `blackhole.max_ttl_seconds` from now. The
-script's unban withdraws blackholes like any other mitigation: it lists the
-victim's live mitigations and withdraws each one.
+`/128`. The allowlist is authorization: only a token bound to `fastnetmon`
+(or an Admin) can post as that source, and a ban from any other source gets
+`422` instead of a blackhole. A repeated ban extends the blackhole, capped at
+`blackhole.max_ttl_seconds` from now. The script's unban withdraws blackholes
+like any other mitigation that `fastnetmon` created for the victim.
 
 **Rehearse in dry-run first.** In `mode: dry-run`, the same configuration
 creates and audits the blackhole, shows it in the dashboard and API, and sends
@@ -480,18 +501,14 @@ only library ports. See the
 Test the script manually:
 
 ```bash
-# Load the same settings the notify script uses.
-. /etc/default/prefixd 2>/dev/null || true
-
 # Simulate ban for an address the effective inventory owns.
 echo "Attack details: UDP flood" | /usr/local/bin/prefixd-fastnetmon.sh 203.0.113.10 incoming 1000000 ban
 
-# Check prefixd (same host and token the script uses).
-curl -H "Authorization: Bearer ${PREFIXD_TOKEN}" \
-  "${PREFIXD_API}/v1/mitigations?status=active&victim_ip=203.0.113.10"
+# The outcome, with the mitigation ID, is in the script log.
+tail -n 2 /var/log/prefixd-fastnetmon.log
 
 # Simulate unban
-echo "" | /usr/local/bin/prefixd-fastnetmon.sh 203.0.113.10 incoming 0 unban
+/usr/local/bin/prefixd-fastnetmon.sh 203.0.113.10 incoming 0 unban </dev/null
 ```
 
 ### Interop lane
@@ -523,9 +540,12 @@ tail -f /var/log/prefixd-fastnetmon.log
 1. **Connection refused**: Verify `PREFIXD_API` is reachable
 1. **503 Service Unavailable**: `PREFIXD_API` reaches a standby controller; route
    it to the controller whose `GET /v1/ready` returns `200`
-2. **401 Unauthorized**: `PREFIXD_TOKEN` is not a valid API token, or it was
+2. **401 Unauthorized**: the token is not a valid API token, or it was
    revoked or expired; the error names which. A value from the removed
    `PREFIXD_API_TOKEN` is refused as malformed
+3. **403 Forbidden**: the token is not an ingest token bound to `fastnetmon`
+   (the error names the bound source), or it is bound to another POP. An
+   operator token cannot post events
 3. **422 Unprocessable**: A guardrail refused the mitigation, for example a
    safelisted victim, a quota, an unsupported VPN scope, or a blackhole
    playbook whose `source` is not in `blackhole.detector_sources`. An unowned
@@ -535,8 +555,9 @@ tail -f /var/log/prefixd-fastnetmon.log
    A `202` with no `mitigation_id` can mean correlation is not met, the victim
    is unowned, or no playbook matched; update older scripts that omit
    confidence.
-5. **400 on withdraw**: Check the error text. The request needs a non-empty
-   `reason`; the audit actor comes from authentication, not `PREFIXD_OPERATOR`.
+5. **Unban says `NO_MITIGATION`**: nothing that `fastnetmon` created for the
+   victim is live on this POP; it may have expired, been withdrawn, or been
+   created by another source.
 
 ### Debug mode
 
@@ -552,10 +573,10 @@ per-protocol name; the script already does this from the packet dump.
 
 ## Security Considerations
 
-1. **Token security**: Store `PREFIXD_TOKEN` in `/etc/default/prefixd` with restricted permissions:
-   ```bash
-   sudo chmod 600 /etc/default/prefixd
-   ```
+1. **Token security**: Keep the ingest token in a 0400 file owned by the
+   FastNetMon user and point `PREFIXD_TOKEN_FILE` at it. The token can post
+   events only as `fastnetmon`; revoke it with `prefixdctl tokens revoke` if
+   the host is compromised.
 
 2. **Network security**: Use TLS for production deployments (configure `PREFIXD_API=https://...`)
 

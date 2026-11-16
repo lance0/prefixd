@@ -5,6 +5,9 @@
 Proposed 2026-11-15 and accepted 2026-11-15. Amended 2026-11-16: identity
 management needs a session, and three resolution details are settled; see
 [Amendment: identity management needs a session](#amendment-identity-management-needs-a-session).
+Amended again 2026-11-16: a detector unban names its victim, and adapter
+secrets live in a fixed namespace; see
+[Amendment: unban by victim](#amendment-unban-by-victim).
 
 This ADR amends [ADR 008](008-session-auth-plus-bearer.md): named, hashed,
 revocable API tokens replace the shared bearer token, and the `bearer` auth mode
@@ -266,7 +269,9 @@ Several effects follow from that one rule:
   credential or an Admin claim, so `min_sources: 2` now needs two credentials
   bound to different sources. Weights and corroborating mode apply to the bound
   source.
-- **Unban.** `handle_unban` resolves the ban event by `(granted source,
+- **Unban.** *Replaced by
+  [unban by victim](#amendment-unban-by-victim) on 2026-11-16.*
+  `handle_unban` resolves the ban event by `(granted source,
   event_id)`. It then withdraws the active mitigations whose
   `triggering_event_id` or `last_event_id` is that event. Matching on
   `last_event_id` covers a mitigation that a later ban extended. A mitigation
@@ -598,6 +603,10 @@ The bundled script becomes an `ingest` client.
   default 5) and `--max-time` (`EVENT_MAX_TIME_SECONDS`, default 15). Each
   attempt is therefore bounded, and so is the time a ban holds its lock. The
   current script sets neither.
+
+*The state file and lock below are replaced by
+[unban by victim](#amendment-unban-by-victim) on 2026-11-16; the token
+handling above stands.*
 
 #### Ban
 
@@ -1165,3 +1174,80 @@ request is refused rather than resolved.
   `none` mode moves to `prefixdctl operators` or an Admin session.
 - `none` mode loses operator management through the API; operators there are
   managed with `prefixdctl`.
+
+## Amendment: unban by victim
+
+Amended 2026-11-16.
+
+### Context
+
+Section 4's unban resolved the ban event by `(granted source, event_id)`, so
+the bundled FastNetMon script had to remember each ban's `event_id` until its
+unban. Section 12 built that memory out of a per-victim state file, a `flock`
+held across the ban's retries, a wait budget for the unban, rules for when to
+keep or delete the file, and a documented race in which an unban started at
+nearly the same moment as its ban could run first and leave the rule to its
+TTL. The state was also lost whenever the FastNetMon host was rebuilt, and a
+ban sent before the upgrade could never pair.
+
+The security property the event ID provided does not need it. What must hold
+is that an ingest token cannot read data and cannot withdraw anything outside
+its own source. Scoping the unban to the bound source keeps that.
+
+Implementation also found that `PUT /v1/config/correlation`, which an admin
+token reaches, could point an HMAC adapter's `secret_env` at a guessable
+variable such as `PATH`. A stolen admin token could then keep posting signed
+events as that adapter after the token was revoked.
+
+### Decision
+
+**A detector unban names its victim.** The server withdraws the live
+mitigations for that victim on the controller's POP whose triggering event came
+from the granted source. It compares the victim in canonical form, so a
+zero-padded IPv6 unban matches a canonically stored mitigation. It replaces the
+unban bullet in section 4 and the state file and lock in section 12.
+
+- Mitigations another source created for the same victim, and manual
+  mitigations, are never touched.
+- An unban after an extending re-ban withdraws the mitigation, and so does an
+  unban after a lost earlier unban. No client state is needed.
+- With nothing to withdraw the answer is the definitive
+  `no_active_mitigation`; `not_found` and `ignored_no_event_id` are gone.
+- The unban's `event_id` and `vector` select nothing. The unban is still
+  stored as an event, and the withdrawal is audited as the credential with the
+  reason `Detector unban: <source>`.
+- A POP-bound token cannot unban another POP's mitigation: it is refused on
+  that POP's controller, and a controller's unban considers only its own POP.
+
+The bundled script posts ban and unban to `/v1/events` with its ingest token,
+read from `PREFIXD_TOKEN_FILE` or `PREFIXD_TOKEN` and passed to curl on stdin.
+It keeps the per-attempt timeouts and retries on 503 and transport errors, and
+it has no state directory and no `flock`. It takes the victim from `$1`, never
+from stdin, because a manual IPv6 ban's stdin says `IP: 0.0.0.0`. It needs only
+bash and curl, since the FastNetMon Community image ships neither `jq` nor
+`python3`.
+
+**Adapter secrets live in a fixed namespace.** An HMAC adapter's `secret_env`
+must name a variable starting with `PREFIXD_WEBHOOK_` whose value is at least
+32 bytes. Section 5's refusals apply it at startup, on reload and through
+`PUT /v1/config/correlation`. Config tuning stays automatable, and a changed
+configuration can only reach secrets an operator put in that namespace.
+
+**The native FastNetMon adapter claims by scope.** A host alert claims
+`fastnetmon`; any other `alert_scope` claims `fastnetmon-hostgroup`, so a
+host-only token never reaches hostgroup ingestion.
+
+### Consequences
+
+- The threat model's cross-source extension case narrows: if source A creates
+  a mitigation and source B extends it, only A's unban withdraws it.
+- An Alertmanager `resolved` alert withdraws every live mitigation
+  `alertmanager` created for that victim, not only the one its fingerprint
+  created. A source that needs finer unbans uses separate sources.
+- Bans sent before the upgrade pair with the new unban, because the mitigation
+  records its triggering event and that event its source.
+- Not delivered with this amendment: the section 12 hostgroup script and the
+  JSON mode for FastNetMon Advanced's host script. Advanced's hostgroup notify
+  contract is not yet qualified (section 13's open checks). Until it is, a
+  hostgroup shim posts prefix events with its own `fastnetmon-hostgroup` token,
+  as the FastNetMon guide shows.

@@ -407,12 +407,14 @@ and the [downgrade procedure](../how-to/upgrading.md#source-prefix-matches-and-d
 `allow_detector_prefix` admits a canonical detector event destination that is
 not a host. It defaults to `false`; `detector_prefix_sources` must also list
 the exact event `source` label, and an empty list refuses every prefix event.
-`detector_prefix_sources` filters the event's `source` label; it does not
-authenticate a detector. The event endpoint authenticates the caller, and the
-caller supplies `source`, so every caller authorized to ingest events is trusted
-to supply that label and can send a prefix event under an allowlisted `source`.
-Restrict who holds event-ingestion credentials if that matters. The
-destination still passes the same prefix bounds, whole-prefix ownership and
+`detector_prefix_sources` is authorization: the event's `source` is the one
+its credential is bound to ([source binding](api.md#source-binding)), so only
+an ingest token bound to a listed source, an HMAC webhook adapter of that name
+or an Admin can send a prefix event. List `fastnetmon-hostgroup` for
+FastNetMon hostgroup events rather than `fastnetmon`, so the host token keeps
+no prefix authority. Entries must match `^[a-z0-9][a-z0-9_-]{0,63}$`, the
+token source pattern, or the configuration is refused at load. An HMAC
+adapter named here must map `fields.source_id`. The destination still passes the same prefix bounds, whole-prefix ownership and
 safelist checks as a manual CIDR. A prefix event selects only a
 `scope: prefix` playbook; a prefix discard needs a destination port, while a
 `udp_flood` prefix police step may match protocol only. Detector events cannot
@@ -743,7 +745,7 @@ correlation:
       enabled: true
       auth:
         type: hmac                        # hmac | bearer | none
-        secret_env: RADWARE_WEBHOOK_SECRET
+        secret_env: PREFIXD_WEBHOOK_RADWARE_SECRET
         header: X-Signature-SHA256
         algorithm: sha256                 # sha256 only in v1
       root_path: "$.alerts[*]"            # optional: iterate an array
@@ -829,9 +831,18 @@ For `confidence`, the order of operations is: JSONPath extract → transform →
 
 | `auth.type` | Meaning |
 |-------------|---------|
-| `hmac` | HMAC-SHA256 over the raw body. `auth.header` is the request header (default `X-Signature-SHA256`). `auth.secret_env` is the env var holding the secret. Comparison is constant-time. Hex digest may be prefixed with `sha256=`. |
-| `bearer` | An API token in `Authorization: Bearer`, verified as on the other ingest routes; an ingest token reaches the route. |
-| `none` | No auth (lab use only). |
+| `hmac` | HMAC-SHA256 over the raw body. `auth.header` is the request header (default `X-Signature-SHA256`). `auth.secret_env` names the env var holding the secret: it must start with `PREFIXD_WEBHOOK_` and hold at least 32 bytes. Comparison is constant-time. Hex digest may be prefixed with `sha256=`. The verified signature grants the adapter's name as source; `Authorization` is ignored. |
+| `bearer` | An ingest token bound to the adapter's name in `Authorization: Bearer`, or an Admin. |
+| `none` | No credential of its own; refused unless `http.auth.mode` is `none`. |
+
+The adapter's name is the source of every event it maps. These refusals hold
+at startup, on reload and through `PUT /v1/config/correlation`, and read the
+auth mode and both allowlists from `prefixd.yaml`: `auth.type: none` outside
+`none` mode; an HMAC adapter named in `blackhole.detector_sources` or
+`guardrails.detector_prefix_sources` without `fields.source_id`, since HMAC
+carries no nonce and the event ID is what makes a replayed signed ban a
+duplicate; and a `secret_env` outside the namespace, unset or shorter than 32
+bytes. The error names the variable, never its value.
 
 **JSONPath quick reference** (RFC 9535 via `serde_json_path`):
 
@@ -883,7 +894,9 @@ Remotely triggered blackhole (RTBH) host routes, a second mitigation kind
 and optional. An Admin's manual request through
 [`POST /v1/mitigations`](api.md#manual-blackhole) creates a blackhole, and so
 does a [playbook `blackhole` step](#blackhole-steps) for an event whose
-`source` is listed in `detector_sources`.
+`source` is listed in `detector_sources`. That source is the one the event's
+credential is bound to ([source binding](api.md#source-binding)), so the list
+is authorization: an Operator never reaches a detector blackhole.
 
 ```yaml
 blackhole:
@@ -929,7 +942,7 @@ blackhole:
 | `max_ttl_seconds` | `3600` | Nonzero |
 | `max_active_per_pop` | `10` | Counted at the configured `pop` |
 | `max_active_global` | `50` | Counted across every POP sharing the database |
-| `detector_sources` | `[]` | Nonempty strings, matched exactly against an event's `source` |
+| `detector_sources` | `[]` | Sources matching `^[a-z0-9][a-z0-9_-]{0,63}$`, matched exactly against an event's bound `source`. An HMAC webhook adapter named here must map `fields.source_id` |
 | `leased` | `false` | Startup refuses `true` unless the speaker answers the rustbgpd injection lease probe, which every supported rustbgpd answers, and refuses `false` while leased blackholes are active or awaiting withdrawal |
 | `lease_seconds` | `60` | `5..=3600`, validated even while `leased` is false. Every leased add and renewal uses it |
 

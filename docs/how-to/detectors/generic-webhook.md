@@ -23,10 +23,10 @@ Generate a random HMAC key, store it wherever you already store prefixd secrets 
 
 ```bash
 openssl rand -hex 32   # 64-character hex string
-# export RADWARE_WEBHOOK_SECRET="<paste>"
+# export PREFIXD_WEBHOOK_RADWARE_SECRET="<paste>"
 ```
 
-The secret must be present at prefixd startup; it is read from the environment, **not** from YAML. The API will never return it.
+The secret must be present at prefixd startup; it is read from the environment, **not** from YAML. The API will never return it. The variable must start with `PREFIXD_WEBHOOK_` and hold at least 32 bytes; startup, reload and the correlation editor refuse anything else, so a configuration change cannot point an adapter at a guessable variable such as `PATH`.
 
 ### 2. Add the adapter to the correlation config
 
@@ -53,7 +53,7 @@ webhook_adapters:
     enabled: true
     auth:
       type: hmac
-      secret_env: RADWARE_WEBHOOK_SECRET
+      secret_env: PREFIXD_WEBHOOK_RADWARE_SECRET
       header: X-Signature-SHA256
       algorithm: sha256
     root_path: "$.alerts[*]"
@@ -103,7 +103,7 @@ Point Radware at:
 ```
 POST https://prefixd.example.com/v1/signals/webhook/radware
 Content-Type: application/json
-X-Signature-SHA256: <hex HMAC-SHA256 of the raw body, computed with RADWARE_WEBHOOK_SECRET>
+X-Signature-SHA256: <hex HMAC-SHA256 of the raw body, computed with PREFIXD_WEBHOOK_RADWARE_SECRET>
 ```
 
 A sample payload, after Radware-side HMAC:
@@ -175,11 +175,12 @@ The adapter uses RFC 9535 JSONPath (`serde_json_path`):
 
 ## Security
 
-- **HMAC is the default.** Bearer and none modes are offered for existing infrastructure where HMAC isn't available, but HMAC is strongly preferred for internet-reachable endpoints.
+- **The credential binds the source.** Every event an adapter maps is stored under the adapter's name as its `source`, so the blackhole and prefix allowlists, correlation weights and `min_sources` read a source the credential proves ([ADR 034](../../adr/034-source-bound-api-tokens.md)). With `auth.type: hmac` the verified signature is the credential, `Authorization` is ignored, and audit rows name `webhook:<adapter>`. With `auth.type: bearer` the sender needs an ingest token bound to the adapter's name (`prefixdctl tokens create --scope ingest --source radware ...`); a token bound to another source, or an operator token, gets 403, and audit rows name `token:<name>`.
+- **HMAC is the default.** Bearer is offered for senders that cannot sign. HMAC carries no timestamp or nonce, so an adapter named in `blackhole.detector_sources` or `guardrails.detector_prefix_sources` must map `fields.source_id`: a replayed signed ban then reuses its event ID and gets 409 instead of recreating the mitigation.
 - **Constant-time comparison.** Signature verification uses `subtle::ConstantTimeEq` to prevent timing oracles.
 - **Secrets never leave the environment.** The YAML carries the env-var name, not the value. `GET /v1/config/correlation` returns the env-var name only.
 - **Path validation.** The adapter name is validated against `[a-z0-9-]{1,64}` on every request, so path traversal and injection are not possible via the URL.
-- **Lab-only mode.** `auth.type: none` is allowed for lab setups but emits a warning at config-load time.
+- **No unauthenticated adapters.** `auth.type: none` would let anyone who reaches the controller claim the adapter's source, so it is refused unless `http.auth.mode` is `none`.
 
 ## Troubleshooting
 
@@ -187,7 +188,8 @@ The adapter uses RFC 9535 JSONPath (`serde_json_path`):
 |---|---|
 | HTTP 404 | Adapter name mismatch, or `enabled: false` |
 | HTTP 401 with `"missing HMAC signature header"` | Sender didn't include the signature header named in `auth.header` |
-| HTTP 401 with `"HMAC signature verification failed"` | Shared secret differs between sender and `RADWARE_WEBHOOK_SECRET`, or the sender hashed a different byte range (e.g. after `Content-Encoding: gzip`) — ensure HMAC is computed over the raw request body prefixd receives |
+| HTTP 403 with `"is not bound to this credential"` | A bearer adapter's token is bound to another source, or is an operator token; mint an ingest token bound to the adapter name |
+| HTTP 401 with `"HMAC signature verification failed"` | Shared secret differs between sender and `PREFIXD_WEBHOOK_RADWARE_SECRET`, or the sender hashed a different byte range (e.g. after `Content-Encoding: gzip`) — ensure HMAC is computed over the raw request body prefixd receives |
 | HTTP 400 with `"invalid JSON"` | Payload isn't valid JSON at all |
 | HTTP 400 with `"no events extracted from payload"` | `root_path` matched zero nodes — verify the expression against a real payload |
 | HTTP 200 with per-event `results[].status="error"` and `"required field 'victim_ip' missing from payload"` | JSONPath for `victim_ip` didn't match; verify with `jq` locally |
