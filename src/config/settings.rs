@@ -964,6 +964,20 @@ impl Settings {
         if let Err(error) = self.blackhole.validate() {
             errors.push(error.to_string());
         }
+        // A mapped safelist entry would never protect the IPv4 host it names.
+        for prefix in &self.safelist.prefixes {
+            let parsed = prefix
+                .parse::<ipnet::IpNet>()
+                .or_else(|_| prefix.parse::<std::net::IpAddr>().map(ipnet::IpNet::from));
+            match parsed {
+                Err(_) => errors.push(format!("safelist.prefixes: invalid prefix {prefix:?}")),
+                Ok(network) => {
+                    if let Err(message) = crate::domain::refuse_ipv4_mapped(&network) {
+                        errors.push(format!("safelist.prefixes: {message}"));
+                    }
+                }
+            }
+        }
         if let Err(error) = self.amplification.validate() {
             errors.push(error.to_string());
         }

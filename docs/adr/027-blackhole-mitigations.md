@@ -262,6 +262,13 @@ new mitigations, never live routes.
   FlowSpec today. Infrastructure addresses (router loopbacks, peering
   addresses, speaker, resolvers) belong in the safelist, which is why an empty
   safelist blocks enablement.
+  *Amended 2026-11-16:* a detector event's IPv4-mapped host is converted to its
+  IPv4 address at ingestion, before these checks, so it is checked, owned and
+  blackholed as that IPv4 host, and the source allowlist decides as for the
+  IPv4 spelling. Manual input refuses a mapped destination with 400 naming the
+  IPv4 address to use. The IPv4-mapped refusal above stays as defense in
+  depth. A mapped detector prefix event is refused as well
+  ([ADR 033](033-detector-prefix-mitigations.md)).
 - **Dry-run.** Preserved exactly as in [ADR 013](013-dry-run-mode.md). A
   dry-run blackhole is persisted with `origin_mode = dry-run` and audited, sends
   no RPC, and is never desired speaker state. It is never extended in enforced

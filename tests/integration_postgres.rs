@@ -8624,3 +8624,160 @@ mod api_tokens {
         }
     }
 }
+
+/// History keeps the spelling a detector sent, so IP history, incident reports
+/// and the `victim_ip` filter compare addresses, not text: zero-padded,
+/// canonical and IPv4-mapped spellings of one address all match, in
+/// PostgreSQL and the mock alike. A migrated mitigation's report still lists
+/// its pre-upgrade events, and a non-address target still matches as text.
+#[tokio::test]
+async fn history_lookups_match_every_spelling_of_a_victim() {
+    use prefixd::db::{MitigationListParams, MockRepository, RepositoryTrait};
+    use prefixd::domain::{
+        ActionParams, ActionType, AttackEvent, AttackEventInput, AttackVector, MatchCriteria,
+        Mitigation, MitigationIntent,
+    };
+    use std::sync::Arc;
+
+    let ctx = TestContext::new().await;
+    let event = |victim: &str, id: &str| {
+        let input: AttackEventInput = serde_json::from_value(serde_json::json!({
+            "event_id": id, "timestamp": chrono::Utc::now(), "source": "history",
+            "victim_ip": victim, "vector": "udp_flood",
+        }))
+        .unwrap();
+        let mut event = AttackEvent::from_input(input);
+        // As an earlier release stored it.
+        event.victim_ip = victim.into();
+        event
+    };
+    let mitigation = |victim: &str, prefix: &str, trigger: uuid::Uuid, live: bool| {
+        let mut m = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: trigger,
+                customer_id: None,
+                service_id: None,
+                pop: "test-pop".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: prefix.into(),
+                    protocol: Some(17),
+                    ..Default::default()
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams::default(),
+                ttl_seconds: 600,
+                reason: "history".into(),
+            },
+            victim.into(),
+            AttackVector::UdpFlood,
+        );
+        if live {
+            m.activate();
+        } else {
+            m.status = MitigationStatus::Withdrawn;
+        }
+        m
+    };
+    let repositories: [Arc<dyn RepositoryTrait>; 2] =
+        [ctx.repo.clone(), Arc::new(MockRepository::new())];
+    let mut live_id = None;
+    for repo in repositories {
+        let padded = event("2001:0db8:0113::0010", "padded");
+        for e in [
+            padded.clone(),
+            event("2001:db8:113::10", "canonical"),
+            event("2001:db8:113::11", "neighbor"),
+            event("::ffff:203.0.113.10", "mapped"),
+            event("203.0.113.10", "ipv4"),
+        ] {
+            repo.insert_event(&e).await.unwrap();
+        }
+        // Migrated: live and canonical, created by the padded event. Ended
+        // and still spelled as sent. A source-only target is not an address.
+        let live = mitigation(
+            "2001:db8:113::10",
+            "2001:db8:113::10/128",
+            padded.event_id,
+            true,
+        );
+        // PostgreSQL is first; the report below reads it.
+        live_id.get_or_insert(live.mitigation_id);
+        for m in [
+            live,
+            mitigation(
+                "2001:0DB8:113::10",
+                "2001:db8:113::10/128",
+                uuid::Uuid::new_v4(),
+                false,
+            ),
+            mitigation("any", "203.0.113.99/32", uuid::Uuid::new_v4(), false),
+        ] {
+            repo.insert_mitigation(&m).await.unwrap();
+        }
+
+        for (ip, events, mitigations) in [
+            ("2001:db8:113::10", 2, 2),
+            ("2001:0db8:0113::0010", 2, 2),
+            ("203.0.113.10", 2, 0),
+        ] {
+            assert_eq!(
+                repo.list_events_by_ip(ip, 100).await.unwrap().len(),
+                events,
+                "{ip}"
+            );
+            assert_eq!(
+                repo.list_mitigations_by_ip(ip, 100).await.unwrap().len(),
+                mitigations,
+                "{ip}"
+            );
+        }
+        for (victim, expected) in [("2001:db8:113::10", 2), ("any", 1)] {
+            let found = repo
+                .list_mitigations(
+                    None,
+                    None,
+                    Some(victim),
+                    None,
+                    &MitigationListParams {
+                        limit: 100,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(found.len(), expected, "{victim}");
+        }
+    }
+
+    // The incident report on PostgreSQL, by a padded selector and by the
+    // migrated mitigation, includes the pre-upgrade events.
+    let app = ctx.router().await;
+    for query in [
+        "ip=2001:0db8:0113::0010".to_string(),
+        format!("mitigation_id={}", live_id.unwrap()),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/reports/incident?{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{query}");
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let report = String::from_utf8_lossy(&body);
+        assert!(report.contains("| Total Events | 2 |"), "{query}: {report}");
+        assert!(
+            report.contains("| Total Mitigations | 2 |"),
+            "{query}: {report}"
+        );
+        assert!(
+            report.contains("# Incident Report — 2001:db8:113::10"),
+            "{report}"
+        );
+    }
+}

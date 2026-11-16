@@ -448,10 +448,11 @@ pub async fn generate_incident_report(
             )
         }
         (None, Some(ip_str)) => {
-            if validate_ip(ip_str).is_err() {
-                return StatusCode::BAD_REQUEST.into_response();
+            // History lookups match every spelling; report the canonical one.
+            match validate_ip(ip_str) {
+                Ok(address) => (address.to_canonical().to_string(), None),
+                Err(_) => return StatusCode::BAD_REQUEST.into_response(),
             }
-            (ip_str.clone(), None)
         }
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };

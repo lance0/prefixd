@@ -259,36 +259,58 @@ demoting an operator does not revoke the tokens they created; list them with
 
 This release stores every victim address in one spelling: IPv6 lowercase and
 zero-compressed (RFC 5952), and, for a detector event, an IPv4-mapped IPv6 host
-as its IPv4 address; manual input refuses a mapped destination. Every ingest
-route, every signal adapter and manual mitigations apply it, and
-the `victim_ip` filter and IP history canonicalize their input. Earlier
-releases stored a host as the detector sent it, so FastNetMon's zero-padded
-IPv6 (`2001:0db8:0113::0010`) never correlated with, or was found by a search
-for, the canonical `2001:db8:113::10`.
+as its IPv4 address. Every ingest route and every signal adapter apply it, and
+manual mitigations store the same spelling. Earlier releases stored a host as
+the detector sent it, so FastNetMon's zero-padded IPv6
+(`2001:0db8:0113::0010`) never correlated with, or was found by a search for,
+the canonical `2001:db8:113::10`.
 
-Migration 023 rewrites the IPv6 victim of live state to that spelling: pending,
-active and escalated mitigations and open signal groups. It changes no rule,
-scope, withdrawal intent or schema, and implies no speaker or router change; an
-older controller reads the rewritten rows unchanged. Four cases keep their
-stored text:
+Alert payloads, WebSocket messages, audit details and API responses now carry
+the canonical victim. Update SIEM rules, alert routing and scripts that match
+a detector's raw spelling to match the canonical form.
 
-- History: events, audit rows and ended mitigations keep the spelling the
-  detector sent. A canonical `victim_ip` filter no longer finds such a row by
-  its old spelling; search with `q`, which matches a substring of the stored
-  text.
+An IPv4-mapped address names IPv4 traffic in IPv6 form. A detector event's
+mapped host is converted; anything else that would act on the mapped form is
+refused with 400, naming the IPv4 form to use:
+
+- manual FlowSpec creation and preview, and manual blackholes;
+- a detector prefix event, which would be an IPv6 rule matching no IPv4
+  traffic;
+- the safelist API and `safelist.prefixes`, where a mapped entry never
+  protected the IPv4 host, and inventory prefixes and assets, where it never
+  owned one.
+
+Fix any mapped entry in `prefixd.yaml` or `inventory.yaml` before upgrading:
+startup and `prefixd --check` refuse it. A safelist entry already in the
+database keeps working as before; replace it with the IPv4 form.
+
+Migration 023 rewrites the IPv6 victim of live state to the canonical
+spelling: pending, active and escalated mitigations and open signal groups,
+which correlation and the detector unban key on. It changes no rule, scope or
+withdrawal intent and implies no speaker or router change. It adds no rollback
+constraint of its own; the release is one-way because of migration 022.
+
+History keeps the spelling the detector sent: events, audit rows and ended
+mitigations are evidence and are not rewritten. Lookups by address compare
+addresses instead of text, so the `victim_ip` filter, IP history and incident
+reports find every spelling of one address, including an IPv4-mapped one for
+its IPv4 address. Migration 023 adds a `prefixd_victim_inet` function and
+indexes `events` and `mitigations` by it; building the events index takes time
+proportional to the stored events, during which ingest waits, so expect a
+longer first start on a large history.
+
+The migration leaves three kinds of live row as stored:
+
 - An open signal group whose canonical key already has an open group keeps
   its old spelling until its window closes, because only one open group may
   exist per victim and vector.
 - A live mitigation for an IPv4-mapped victim keeps its victim text and the
   IPv6 rule it was created with, which matches no IPv4 traffic, until it
-  expires or is withdrawn. The `victim_ip` filter, IP history and the bundled
-  FastNetMon unban lookup canonicalize to the IPv4 address and do not find it;
-  search with `q`, or withdraw it from its mitigation page. New detector
-  events for that address create an IPv4 rule, and manual input refuses the
-  mapped spelling.
+  expires or is withdrawn. Lookups by address find it; new detector events for
+  that address create an IPv4 rule.
 - A victim with a deprecated IPv4-compatible address (`::c000:201`) keeps its
   text, because PostgreSQL prints it `::192.0.2.1` where prefixd prints
-  `::c000:201`; it keeps that spelling until it ends.
+  `::c000:201`.
 
 ## rustbgpd v0.83
 

@@ -6,7 +6,8 @@
 -- a zero-padded IPv6 victim no longer matches the canonical filter, unban
 -- lookup or correlation key.
 --
--- Only live rows are rewritten: pending, active and escalated mitigations and
+-- Only live rows are rewritten, because they are what correlation and the
+-- detector unban key on: pending, active and escalated mitigations and
 -- open signal groups. Events, audit rows and ended mitigations are history and
 -- keep the spelling the detector sent. The rewrite touches only victim_ip,
 -- never match_json, scope_hash or any withdrawal intent, and it implies no
@@ -61,3 +62,22 @@ BEGIN
     END LOOP;
 END
 $$;
+
+-- History keeps the detector's spelling, so lookups by address compare in
+-- inet form instead: one address matches whatever text spelled it. The
+-- function is NULL for text that is not an address (`any`, an empty target),
+-- so a lookup never fails on such a row. The indexes keep IP history and
+-- incident reports from scanning all history; building the events index takes
+-- time proportional to the stored events, during which ingest waits.
+CREATE OR REPLACE FUNCTION prefixd_victim_inet(victim TEXT) RETURNS inet
+LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
+BEGIN
+    RETURN victim::inet;
+EXCEPTION WHEN invalid_text_representation THEN
+    RETURN NULL;
+END
+$$;
+CREATE INDEX IF NOT EXISTS idx_events_victim_inet
+    ON events (prefixd_victim_inet(victim_ip), ingested_at);
+CREATE INDEX IF NOT EXISTS idx_mitigations_victim_inet
+    ON mitigations (prefixd_victim_inet(victim_ip), created_at);

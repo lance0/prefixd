@@ -32,9 +32,26 @@ const FORMS: [(&str, &str); 3] = [
 struct Fixture {
     app: axum::Router,
     repo: Arc<MockRepository>,
+    state: Arc<AppState>,
 }
 
 async fn fixture(min_sources: u32) -> Fixture {
+    fixture_with(min_sources, |_| {}).await
+}
+
+/// Blackholes on for detectors in `sources`, with a safelist that does not
+/// cover the victims, so a mapped request can reach the RTBH path.
+fn enable_blackhole(settings: &mut prefixd::config::Settings, sources: &[&str]) {
+    settings.blackhole.enabled = true;
+    settings.blackhole.next_hop_ipv4 = Some("192.0.2.66".parse().unwrap());
+    settings.blackhole.detector_sources = sources.iter().map(|s| s.to_string()).collect();
+    settings.safelist.prefixes = vec!["10.0.0.0/8".into()];
+}
+
+async fn fixture_with(
+    min_sources: u32,
+    edit: impl FnOnce(&mut prefixd::config::Settings),
+) -> Fixture {
     let repo = Arc::new(MockRepository::new());
     let mut settings = common::test_settings();
     let source = |weight| SourceConfig {
@@ -63,6 +80,7 @@ async fn fixture(min_sources: u32) -> Fixture {
         policy_profile: PolicyProfile::Normal,
         services: vec![],
     }]);
+    edit(&mut settings);
     let state = AppState::new(
         settings,
         inventory,
@@ -97,8 +115,9 @@ async fn fixture(min_sources: u32) -> Fixture {
         transforms: Default::default(),
     }];
     Fixture {
-        app: create_test_router(state),
+        app: create_test_router(state.clone()),
         repo,
+        state,
     }
 }
 
@@ -435,6 +454,9 @@ async fn manual_input_refuses_ipv4_mapped_destinations() {
         "victim_ip": "::ffff:203.0.113.10", "confirm_victim_ip": "::ffff:203.0.113.10",
         "action": "blackhole", "ttl_seconds": 600, "reason": "mapped blackhole",
     });
+    // Also over the TTL maximum: the family refusal runs before any guardrail.
+    let mut over_ttl = flowspec("::ffff:203.0.113.10");
+    over_ttl["ttl_seconds"] = json!(86_400);
     for (path, body, suggestion) in [
         (
             "/v1/mitigations",
@@ -452,8 +474,11 @@ async fn manual_input_refuses_ipv4_mapped_destinations() {
             "use 203.0.113.10",
         ),
         ("/v1/mitigations", blackhole, "use 203.0.113.10"),
+        ("/v1/mitigations", over_ttl, "use 203.0.113.10"),
     ] {
-        let fixture = fixture(1).await;
+        // Blackholes are on and the victim is owned and not safelisted, so a
+        // converted mapped blackhole would be admitted as an IPv4 /32.
+        let fixture = fixture_with(1, |settings| enable_blackhole(settings, &[])).await;
         let (status, response) = send(&fixture.app, "POST", path, Some(body.clone())).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{path} {body}: {response}");
         // Preview answers with a refusal record, creation with an error.
@@ -466,5 +491,123 @@ async fn manual_input_refuses_ipv4_mapped_destinations() {
             "{error}"
         );
         assert!(mitigations(&fixture.repo).await.is_empty(), "{path} {body}");
+    }
+}
+
+/// A detector event's mapped host is its IPv4 address before any victim check,
+/// so the blackhole allowlist decides as for the IPv4 spelling: a listed
+/// source gets an IPv4 /32 blackhole, an unlisted one `BlackholeSourceNotAllowed`.
+#[tokio::test]
+async fn a_mapped_detector_event_is_an_ipv4_victim_for_the_blackhole_allowlist() {
+    for (source, admitted) in [("fastnetmon", true), ("radware", false)] {
+        let fixture = fixture_with(1, |settings| enable_blackhole(settings, &["fastnetmon"])).await;
+        let mut playbooks = common::test_playbooks();
+        playbooks.playbooks[0].steps[0].action = Some(prefixd::config::PlaybookAction::Blackhole);
+        playbooks.playbooks[0].steps[0].rate_bps = None;
+        *fixture.state.playbooks.write().await = playbooks;
+        let (status, body) = send(
+            &fixture.app,
+            "POST",
+            "/v1/events",
+            Some(event(source, "::ffff:203.0.113.10", "mapped-1", "ban")),
+        )
+        .await;
+        let created = mitigations(&fixture.repo).await;
+        if admitted {
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(created.len(), 1);
+            assert_eq!(created[0].victim_ip, "203.0.113.10");
+            assert_eq!(created[0].match_criteria.dst_prefix, "203.0.113.10/32");
+            assert_eq!(
+                created[0].action_type,
+                prefixd::domain::ActionType::Blackhole
+            );
+        } else {
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("blackhole.detector_sources"),
+                "{body}"
+            );
+            assert!(created.is_empty());
+        }
+    }
+}
+
+/// A detector prefix in IPv4-mapped form would be an IPv6 rule matching no
+/// IPv4 traffic, so it is refused before anything is stored.
+#[tokio::test]
+async fn a_mapped_detector_prefix_is_refused() {
+    let fixture = fixture_with(1, |settings| {
+        settings.guardrails.allow_detector_prefix = true;
+        settings.guardrails.detector_prefix_sources = vec!["fastnetmon".into()];
+        settings.guardrails.dst_prefix_minlen_v6 = Some(96);
+    })
+    .await;
+    let (status, body) = send(
+        &fixture.app,
+        "POST",
+        "/v1/events",
+        Some(event(
+            "fastnetmon",
+            "::ffff:203.0.113.0/120",
+            "mapped-prefix",
+            "ban",
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("use 203.0.113.0/24"),
+        "{body}"
+    );
+    assert!(stored_victims(&fixture.repo).await.is_empty());
+    assert!(mitigations(&fixture.repo).await.is_empty());
+}
+
+/// A mapped address never protects or owns the IPv4 host it names, so the
+/// safelist API, the configured safelist and the inventory refuse it.
+#[tokio::test]
+async fn mapped_safelist_and_inventory_entries_are_refused() {
+    let fixture = fixture(1).await;
+    let (status, body) = send(
+        &fixture.app,
+        "POST",
+        "/v1/safelist",
+        Some(json!({"prefix": "::ffff:203.0.113.10/128", "reason": "mapped"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .ends_with("use 203.0.113.10"),
+        "{body}"
+    );
+    assert!(!fixture.repo.is_safelisted("203.0.113.10").await.unwrap());
+
+    let mut settings = common::test_settings();
+    settings.safelist.prefixes = vec!["::ffff:203.0.113.0/120".into()];
+    let errors = settings.validate_errors();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.starts_with("safelist.prefixes") && e.ends_with("use 203.0.113.0/24")),
+        "{errors:?}"
+    );
+
+    for inventory in [
+        r#"{"customers":[{"customer_id":"c","name":"C","prefixes":["::ffff:203.0.113.0/120"]}]}"#,
+        r#"{"customers":[{"customer_id":"c","name":"C","prefixes":["203.0.113.0/24"],
+            "services":[{"service_id":"s","name":"S","assets":[{"ip":"::ffff:203.0.113.10"}]}]}]}"#,
+    ] {
+        let error = Inventory::from_yaml(inventory).unwrap_err().to_string();
+        assert!(error.contains("IPv4-mapped"), "{error}");
     }
 }
