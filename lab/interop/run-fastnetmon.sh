@@ -51,7 +51,9 @@ finish() {
     destroy
     rm -rf "$run"
     # The receipt is uploaded from CI: refuse it if any per-run secret leaked.
-    if grep -rqF -e "$speaker_token" -e "$db_password" "$receipt"; then
+    local patterns=() value
+    for value in "${lab_secrets[@]}"; do patterns+=(-e "$value"); done
+    if grep -rqF "${patterns[@]}" "$receipt"; then
         echo "a lab secret reached the receipt; deleting it" >&2
         rm -rf "$receipt"
         status=1
@@ -67,7 +69,8 @@ finish() {
 # `none` auth mode for now, so the script's defaults file carries no token and
 # the driver's token file is empty. Once source-bound ingest tokens land, this
 # mints an ingest token bound to source `fastnetmon` for the script and an
-# operator token for the driver, and prefixd-fastnetmon.yaml switches modes.
+# operator token for the driver, appends both to lab_secrets so the receipt
+# guard checks them, and prefixd-fastnetmon.yaml switches modes.
 ingest_credential() {
     {
         printf 'PREFIXD_API=http://127.0.0.1:8080\n'
@@ -84,10 +87,12 @@ mkdir -p "$run" "$receipt"
 chmod 0700 "$run"
 
 # Per-run lab secrets. They stay in the run directory and container
-# environment, are removed on exit and are never written to the receipt.
+# environment, are removed on exit and are never written to the receipt; every
+# one goes in lab_secrets, which finish() checks the receipt against.
 secret() { python3 -c 'import secrets; print(secrets.token_hex(32))'; }
 db_password="$(secret)"
 speaker_token="$(secret)"
+lab_secrets=("$db_password" "$speaker_token")
 printf 'POSTGRES_PASSWORD=%s\n' "$db_password" >"$run/postgres.env"
 {
     printf 'DATABASE_URL=postgres://prefixd:%s@127.0.0.1:5432/prefixd\n' "$db_password"
@@ -110,8 +115,13 @@ for image in $(awk '$1 == "image:" { print $2 }' "$topology" | sort -u) \
         sleep $((attempt * 10))
     done
 done
-# No build context: the Dockerfile copies nothing.
-timeout 600 docker build -q -t prefixd-fastnetmon:interop - <lab/interop/fastnetmon.Dockerfile >/dev/null
+# No build context: the Dockerfile copies nothing. Its apt step reaches the
+# Ubuntu archive, so retry like the pulls.
+for attempt in 1 2 3; do
+    timeout 600 docker build -q -t prefixd-fastnetmon:interop - <lab/interop/fastnetmon.Dockerfile >/dev/null && break
+    [ "$attempt" = 3 ] && { echo "FastNetMon image build failed" >&2; exit 1; }
+    sleep $((attempt * 10))
+done
 
 $clab deploy -t "$topology"
 # Containers do not inherit this script's affinity, and `sudo containerlab`
@@ -119,8 +129,9 @@ $clab deploy -t "$topology"
 cpus="$(taskset -pc $$ | sed 's/.*: //')"
 docker ps -q --filter "label=containerlab=${lab}" | xargs docker update --cpuset-cpus "$cpus" >/dev/null
 
-for _ in $(seq 60); do
+for attempt in $(seq 60); do
     docker exec "$(node postgres)" pg_isready -q -h 127.0.0.1 -U prefixd && break
+    [ "$attempt" = 60 ] && { echo "PostgreSQL not ready within 60s" >&2; exit 1; }
     sleep 1
 done
 docker exec -d "$(node controller)" sh -c 'exec prefixd --config /etc/prefixd >>/tmp/prefixd.log 2>&1'

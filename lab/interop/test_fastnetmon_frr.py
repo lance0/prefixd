@@ -8,7 +8,7 @@ The log lines are prefixd-fastnetmon.sh output from a 2026-11-16 lane run.
 import socket
 import unittest
 
-from fastnetmon_frr import ban_outcome, messages, police, unban_outcome
+from fastnetmon_frr import CONF, ban_outcome, ban_time, messages, police, unban_outcome
 from netflow_v5 import HEADER, RECORD, RECORDS, datagram
 
 MID = "a55fc086-8db5-495a-8021-2867853142ca"
@@ -51,11 +51,15 @@ class ScriptLogTests(unittest.TestCase):
                     self.outcome(ban_outcome, [SENT, RETRY, line], "203.0.113.10")["result"],
                     "SUCCESS",
                 )
-        # A script that cannot run curl fails before it logs the send.
-        self.assertEqual(
-            self.outcome(ban_outcome, ["ERROR: curl is required"], "203.0.113.10")["result"],
-            "ERROR",
-        )
+        # Checks that fail before the script sends end the call at once.
+        for line in ("ERROR: curl is required", "ERROR: PREFIXD_OPERATOR must not be empty"):
+            with self.subTest(line=line):
+                self.assertEqual(
+                    self.outcome(ban_outcome, [line], "203.0.113.10")["result"], "ERROR"
+                )
+                self.assertEqual(
+                    self.outcome(unban_outcome, [line], "203.0.113.10")["result"], "ERROR"
+                )
 
     def test_another_victims_ban_is_not_this_outcome(self):
         other = SENT.replace("203.0.113.10", "203.0.113.1")
@@ -78,6 +82,14 @@ class ScriptLogTests(unittest.TestCase):
             self.outcome(unban_outcome, [QUERY, failed], "203.0.113.10")["result"], "ERROR"
         )
         self.assertIsNone(unban_outcome([WITHDREW], "203.0.113.10"), "no query, no outcome")
+
+
+class BanTimeTests(unittest.TestCase):
+    def test_reads_the_lane_setting(self):
+        self.assertEqual(ban_time("ban_time = 1900\nban_time_x = 3\n"), 1900)
+        self.assertGreater(ban_time(CONF.read_text()), 0)
+        with self.assertRaises(AssertionError):
+            ban_time("# ban_time = 20\n")
 
 
 class RuleTests(unittest.TestCase):

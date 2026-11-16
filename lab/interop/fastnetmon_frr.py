@@ -4,8 +4,9 @@
 Invoked by run-fastnetmon.sh against a deployed fastnetmon-rustbgpd.clab.yml
 lab. FastNetMon Community 1.2.9 runs the bundled scripts/prefixd-fastnetmon.sh
 as its notify script. Each ban or unban comes from FastNetMon itself
-(`fastnetmon_api_client`, or detection of a NetFlow v5 flood) except the
-extending re-ban, which runs the script directly with two bans and an unban.
+(`fastnetmon_api_client`, detection of a NetFlow v5 flood, or its ban timer)
+except the extending re-ban, which runs the script directly with two bans and
+an unban.
 
 Every trigger waits for the script's own outcome line in its log before the
 next one: FastNetMon starts ban and unban scripts independently, so an unban
@@ -38,6 +39,20 @@ SCRIPT_LOG = "/var/log/prefixd-fastnetmon.log"
 NETFLOW = Path(__file__).resolve().parent / "netflow_v5.py"
 OUTCOME_SECONDS = 60
 DETECT_SECONDS = 90
+CONF = Path(__file__).resolve().parent / "configs" / "fastnetmon.conf"
+
+
+def ban_time(conf_text):
+    """FastNetMon's ban_time from the lane configuration."""
+    match = re.search(r"^ban_time = (\d+)$", conf_text, re.M)
+    if match is None:
+        raise AssertionError(f"{CONF.name} sets no ban_time")
+    return int(match.group(1))
+
+
+# The cleanup thread wakes every ban_time / 2 s and unbans only once the
+# attack has finished, so allow two wakeups past ban_time plus a margin.
+UNBAN_SECONDS = 2 * ban_time(CONF.read_text()) + 60
 
 # Terminal lines of prefixd-fastnetmon.sh, after its timestamp.
 BAN_OUTCOME = re.compile(
@@ -66,7 +81,9 @@ def ban_outcome(lines, victim):
         if line.startswith(f"Sending ban for {victim} "):
             started = True
             continue
-        if line.startswith("ERROR: curl is required") or line.startswith("ERROR: No victim"):
+        # "ERROR: ..." lines come before the script sends anything (no curl,
+        # no victim, an empty PREFIXD_OPERATOR), so the call is already over.
+        if line.startswith("ERROR: "):
             return {"result": "ERROR", "http": None, "status": None, "body": line}
         if not started:
             continue
@@ -89,6 +106,8 @@ def unban_outcome(lines, victim):
     started = False
     withdrawn = []
     for line in lines:
+        if line.startswith("ERROR: "):
+            return {"result": "ERROR", "mitigation_ids": [], "body": line}
         if line.startswith(f"Querying active mitigations for {victim} "):
             started = True
             continue
@@ -159,9 +178,9 @@ class FastNetMonLab(Lab):
         output = self.fnm(API_CLIENT, action, victim)
         assert "Query failed" not in output, f"fastnetmon_api_client {action} {victim}: {output}"
 
-    def wait_outcome(self, parse, victim, before, label):
+    def wait_outcome(self, parse, victim, before, label, seconds=OUTCOME_SECONDS):
         """Wait for the script's outcome line for victim after the first `before` log lines."""
-        deadline = time.monotonic() + OUTCOME_SECONDS
+        deadline = time.monotonic() + seconds
         while True:
             lines = self.script_log()[before:]
             outcome = parse(lines, victim)
@@ -185,7 +204,7 @@ class FastNetMonLab(Lab):
                     timeout=30,
                 ).stdout
                 raise AssertionError(
-                    f"{label}: no script outcome for {victim} within {OUTCOME_SECONDS}s\n"
+                    f"{label}: no script outcome for {victim} within {seconds}s\n"
                     f"script log since trigger: {lines}\nFastNetMon log tail:\n{tail}"
                 )
             time.sleep(1)
@@ -203,10 +222,11 @@ class FastNetMonLab(Lab):
         assert mitigation["status"] == "active", (label, mitigation)
         return mitigation
 
-    def unbanned(self, trigger, victim, mitigation_id, label):
-        before = len(self.script_log())
+    def unbanned(self, trigger, victim, mitigation_id, label, before=None, seconds=OUTCOME_SECONDS):
+        if before is None:
+            before = len(self.script_log())
         trigger()
-        outcome = self.wait_outcome(unban_outcome, victim, before, label)
+        outcome = self.wait_outcome(unban_outcome, victim, before, label, seconds)
         assert outcome == {
             "result": "WITHDRAWN",
             "mitigation_ids": [mitigation_id],
@@ -367,18 +387,41 @@ class FastNetMonLab(Lab):
             assert raw["direction"] == "incoming" and "Attack protocol: udp" in raw["raw"], raw
             assert event["pps"] > 1000, event
             state["detected"] = m
+            # FastNetMon's timer cannot unban before ban_time, so nothing
+            # after this point in the log belongs to the ban.
+            state["detected_log"] = len(self.script_log())
 
         self.step("netflow-detected-ban", detect, [detected_rule], seconds=DETECT_SECONDS)
-        self.step(
-            "detected-api-unban",
-            lambda: self.unbanned(
-                lambda: self.api_client("unban", detected),
+
+        # FastNetMon's own unban: once ban_time has passed and the flood has
+        # stopped, its cleanup thread runs the script with the ban's direction
+        # and pps. The script puts the direction in the withdrawal reason.
+        def timer_unban():
+            mitigation_id = state["detected"]["mitigation_id"]
+            self.unbanned(
+                lambda: None,
                 detected,
-                state["detected"]["mitigation_id"],
-                "10-detected-api-unban",
-            ),
-            [],
-        )
+                mitigation_id,
+                "10-detected-timer-unban",
+                before=state["detected_log"],
+                seconds=UNBAN_SECONDS,
+            )
+            audit = self.api("GET", f"/v1/audit?target_type=mitigation&target_id={mitigation_id}")[
+                "entries"
+            ]
+            # prefixd prefixes the reason with the actor ("anonymous: " in none mode).
+            reasons = [e["details"].get("reason", "") for e in audit if e["action"] == "withdraw"]
+            wanted = f"FastNetMon unban for {detected} (direction=incoming)"
+            assert len(reasons) == 1 and reasons[0].endswith(wanted), audit
+            self.steps[-1]["withdraw_reason"] = reasons[0]
+            bans = [
+                line
+                for line in self.script_log()
+                if line.startswith(f"Sending ban for {detected} ")
+            ]
+            assert len(bans) == 1, f"FastNetMon banned {detected} again: {bans}"
+
+        self.step("detected-timer-unban", timer_unban, [])
 
     def event(self, event_id):
         events = self.api("GET", "/v1/events?source=fastnetmon&limit=100")["events"]
