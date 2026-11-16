@@ -234,17 +234,19 @@ another database or another tool writing to the same physical speaker. See
 Authentication is selected by deployment mode:
 
 - `credentials`: PostgreSQL-backed operator sessions with viewer/operator/admin
-  role checks. Session cookies are HttpOnly and SameSite=Lax. They are Secure
-  unless [`http.secure_cookies`](../reference/configuration.md#http-server) is
+  role checks, and named API tokens for detectors and automation. Session
+  cookies are HttpOnly and SameSite=Lax. They are Secure unless
+  [`http.secure_cookies`](../reference/configuration.md#http-server) is
   `false`, including behind a TLS-terminating proxy. Session expiry is based on
-  inactivity.
-- `bearer`: the configured token provides operator-level API access; existing
-  authenticated sessions retain their own roles.
+  inactivity. A token is stored as its SHA-256, has an `ingest`, `operator` or
+  `admin` scope and can be bound to a POP; an `Authorization: Bearer` request
+  is authenticated by its token alone, never by a session
+  ([ADR 034](../adr/034-source-bound-api-tokens.md)).
 - `mtls`: startup requires native TLS with client verification; accepted clients
   receive the current administrative trust level, not per-certificate roles.
 - `none`: bypasses authentication and role checks for development/test use.
 
-The WebSocket feed requires a browser session unless auth is disabled; a bearer
+The WebSocket feed requires a browser session unless auth is disabled; an API
 token is not a WebSocket login. Account/session and protected handlers enforce
 their own requirements. Unauthenticated liveness, metrics and OpenAPI handlers do
 not imply access to operational health or mutations. Metrics remain on the

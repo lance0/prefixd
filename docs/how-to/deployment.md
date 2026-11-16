@@ -141,6 +141,25 @@ prefixdctl operators create --username readonly --role viewer
 prefixdctl operators list
 ```
 
+Usernames match `^[A-Za-z0-9_-]{1,64}$`.
+
+### Create API Tokens
+
+Detectors and automation authenticate with named API tokens, created the same
+way after the first start. Each secret is printed once; there is no shared or
+default token:
+
+```bash
+# A detector: ingest only, bound to its source and POP
+prefixdctl tokens create --name fnm-pop1 --scope ingest --source fastnetmon --pop iad1
+
+# Automation that manages mitigations
+prefixdctl tokens create --name ci-deploy --scope operator
+```
+
+See [API tokens](../reference/cli.md#api-tokens) for listing, revocation and
+rotation.
+
 ### Auth Modes
 
 Configure in `prefixd.yaml`:
@@ -148,16 +167,14 @@ Configure in `prefixd.yaml`:
 ```yaml
 http:
   auth:
-    mode: credentials      # none, bearer, credentials, mtls
-    bearer_token_env: "PREFIXD_API_TOKEN"  # required for mode=bearer
+    mode: credentials      # credentials, mtls or none
 ```
 
 | Mode | Dashboard | API/CLI |
 |------|-----------|---------|
-| `none` | No login | No auth |
-| `bearer` | Existing session cookies continue to work | Bearer token |
-| `credentials` | Session login | Session cookie |
+| `credentials` | Session login | API tokens or a session cookie |
 | `mtls` | Client-certificate trusted browser/API access | Client certificate |
+| `none` | No login | No auth |
 
 ---
 
@@ -325,10 +342,11 @@ notify_script_path = /usr/bin/curl
 notify_script_args = -X POST -H "Content-Type: application/json" -H "Authorization: Bearer <token>" -d @- http://prefixd.internal/v1/signals/fastnetmon
 ```
 
-The webhook and the Community notify script authenticate with a bearer
-token, so the controller must run `http.auth.mode: bearer` (or `mtls`/`none`);
-`credentials` mode rejects `Authorization: Bearer`. The Community script
-provides additional retry, logging and unban behavior.
+The webhook and the Community notify script authenticate with an API token in
+`Authorization: Bearer`, created with `prefixdctl tokens create`. The Community
+script provides additional retry, logging and unban behavior; its unban looks
+up and withdraws mitigations, which needs an operator token rather than an
+ingest token.
 
 The adapter classifies the attack vector from the traffic breakdown (UDP/SYN/ICMP/TCP) and maps `action` to confidence:
 
@@ -731,10 +749,12 @@ prefixd.
 
 Secrets go in `/etc/default/prefixd`, outside the writable `/etc/prefixd`, so
 the service user cannot replace them. systemd reads the file as root before it
-drops privileges, so it can stay root-only. Append a random API token to it:
+drops privileges, so it can stay root-only. Create it empty; API tokens are
+minted in the database after the first start, not passed through the
+environment:
 
 ```bash
-sudo sh -c 'umask 077; printf "PREFIXD_API_TOKEN=%s\n" "$(openssl rand -hex 32)" >> /etc/default/prefixd'
+sudo sh -c 'umask 077; touch /etc/default/prefixd'
 ```
 
 Alert destination variables named by `*_env` keys go in the same file; see
@@ -1028,12 +1048,13 @@ curl http://localhost/v1/health
 # Full health in the default credentials mode (cookies saved by session login)
 curl -b cookies.txt http://localhost/v1/health/detail
 
-# Or, when configured for bearer mode
-curl -H "Authorization: Bearer $TOKEN" http://localhost/v1/health/detail
+# Or with an operator API token, kept off the command line
+printf 'header = "Authorization: Bearer %s"\n' "$PREFIXD_TOKEN" |
+  curl -K - http://localhost/v1/health/detail
 # Reports database, peer observation, selected speaker/daemon metadata,
 # controller uptime and active mitigations; not router enforcement.
 
-# CLI status in bearer mode, with PREFIXD_API_TOKEN configured
+# CLI status, with an operator token in PREFIXD_TOKEN
 prefixdctl status
 prefixdctl peers
 ```

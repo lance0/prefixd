@@ -84,11 +84,13 @@ no effect. Apply the change with **Config → Correlation** in the dashboard, or
 send the complete configuration as JSON:
 
 ```bash
-curl -X PUT http://prefixd.example.com/v1/config/correlation \
-  -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
+printf 'header = "Authorization: Bearer %s"\n' "$PREFIXD_TOKEN" |
+curl -K - -X PUT http://prefixd.example.com/v1/config/correlation \
   -H 'Content-Type: application/json' \
   --data-binary @correlation.json
 ```
+
+The route needs an Admin session or an admin API token in `PREFIXD_TOKEN`.
 
 No restart is required, and the request replaces the whole file rather than
 merging with it. If you edit the file in the volume directly,

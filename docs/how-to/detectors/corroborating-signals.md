@@ -40,13 +40,15 @@ sources:
 ```
 
 Apply the change through the dashboard's **Config → Correlation** editor, or
-send the complete configuration as JSON (the API does not accept YAML):
+send the complete configuration as JSON (the API does not accept YAML). The
+route needs an Admin session or an admin API token; the header is read from a
+file descriptor (`-H @<(...)`, bash), so the token stays off the command line:
 
 ```bash
 python3 -c 'import json,sys,yaml; json.dump(yaml.safe_load(sys.stdin), sys.stdout)' \
   < configs/correlation.yaml \
 | curl -X PUT https://prefixd.example.com/v1/config/correlation \
-    -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
+    -H @<(printf 'Authorization: Bearer %s\n' "$PREFIXD_TOKEN") \
     -H 'Content-Type: application/json' \
     --data-binary @-
 ```
@@ -64,11 +66,16 @@ The validator rejects:
 
 ## 2. Emit a signal
 
-Corroborators POST to a different endpoint from primary events:
+Corroborators POST to a different endpoint from primary events, with an
+ingest token bound to the corroborating source:
 
 ```bash
-curl -X POST https://prefixd.example.com/v1/signals/corroborator \
-     -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
+prefixdctl tokens create --name router-cpu-iad1 --scope ingest --source router-cpu
+```
+
+```bash
+printf 'header = "Authorization: Bearer %s"\n' "$PREFIXD_TOKEN" |
+curl -K - -X POST https://prefixd.example.com/v1/signals/corroborator \
      -H 'Content-Type: application/json' \
      -d '{
            "source": "router-cpu",
@@ -122,7 +129,7 @@ SNMP/Prometheus source and forwards high-signal samples):
 import os, requests, datetime
 
 API   = os.environ["PREFIXD_API"]
-TOKEN = os.environ["PREFIXD_API_TOKEN"]
+TOKEN = os.environ["PREFIXD_TOKEN"]  # ingest token bound to router-cpu
 
 def post_cpu_alert(pop: str, utilization: float):
     if utilization < 0.85:

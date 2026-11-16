@@ -10,14 +10,61 @@ prefixd exposes a REST API for event ingestion, mitigation management, and opera
 
 ## Authentication
 
-### Bearer Token
+### API tokens
 
-For API and CLI access:
+Detectors, automation and `prefixdctl` authenticate with a named API token in
+`credentials` mode. Keep the token off the command line: curl reads the header
+from a config on stdin with `-K -`, so it never appears in `ps` or shell
+history.
 
 ```bash
-curl -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
-  http://localhost/v1/mitigations
+printf 'header = "Authorization: Bearer %s"\n' "$PREFIXD_TOKEN" |
+  curl -K - http://localhost/v1/mitigations
 ```
+
+A token is `prefixd_` followed by 43 base64url characters. The controller stores
+only its SHA-256 and shows the plaintext once, in the response that creates it.
+Each token has a name, one scope and optional bindings:
+
+| Scope | Reaches |
+|-------|---------|
+| `ingest` | Only `POST /v1/events`, `POST /v1/events/batch`, `POST /v1/signals/fastnetmon`, `POST /v1/signals/alertmanager`, `POST /v1/signals/webhook/{name}` for `auth.type: bearer` adapters and `POST /v1/signals/corroborator`. It requires a bound `source` and has no read access. Every other route refuses it with 403 before reading the request body. |
+| `operator` | Every route the Operator role reaches |
+| `admin` | Every route the Admin role reaches, except [token management](#api-token-management) |
+
+- **Name.** `^[a-z0-9][a-z0-9-]{0,57}$`, unique across every token ever
+  created, revoked ones included. Operator and admin tokens act as
+  `token:<name>`: that is the audit actor, `acknowledged_by` and the safelist's
+  `added_by`.
+- **POP.** A token with a `pop` authenticates only on controllers whose `pop`
+  matches, and gets `403` naming the bound POP elsewhere. A null `pop` works on
+  every POP that shares the database.
+- **Expiry.** `expires_at` is optional; tokens do not expire by default.
+- **Last used.** The active controller records `last_used_at` at most once a
+  minute per token. A standby records nothing.
+
+Only `Authorization: Bearer` (the scheme is case-insensitive) is a token
+credential, and it replaces the session:
+
+- The `Cookie` header of a Bearer request is removed before the session is
+  loaded, so an invalid token gets 401 even beside a valid session cookie, and
+  a stale cookie during a database outage does not fail a valid token.
+- Other schemes, such as `Basic` added by a proxy in front of the dashboard,
+  are not token credentials; the session applies.
+- More than one `Authorization` header with a Bearer among them is refused
+  with 401.
+- HMAC webhook adapters ignore `Authorization`; the signature is their
+  credential.
+- `GET /v1/ws/feed` and `/v1/auth/*` stay session-only.
+
+| Status | Token failure |
+|--------|---------------|
+| 401 | Unknown, malformed, revoked or expired; the error names `revoked` or `expired` |
+| 403 | Bound to another POP, or a scope the route does not accept |
+| 503 | The token store could not be read (`credential store unavailable; retry`) |
+
+Error bodies and logs never carry the token or its hash; a revoked or expired
+token is logged at warn level with its name.
 
 ### Session Cookie
 
@@ -41,16 +88,17 @@ Configure in `prefixd.yaml`:
 ```yaml
 http:
   auth:
-    mode: credentials  # none, bearer, credentials, or mtls
-    bearer_token_env: "PREFIXD_API_TOKEN" # required for mode=bearer
+    mode: credentials  # credentials, mtls or none
 ```
 
 | Mode | Description |
 |------|-------------|
-| `none` | No authentication (development only) |
-| `bearer` | Bearer token auth for API/CLI; existing dashboard sessions remain valid |
-| `credentials` | Username/password login with session cookies |
-| `mtls` | Client certificate auth at TLS layer |
+| `credentials` | Username/password login with session cookies, and API tokens |
+| `mtls` | Client certificate auth at TLS layer; every client is Admin and tokens are not consulted |
+| `none` | No authentication (development only); credentials are ignored |
+
+The `bearer` mode and its shared token were removed in 0.28.0; see
+[Source-bound ingest tokens](../how-to/upgrading.md#source-bound-ingest-tokens).
 
 > Unless explicitly marked "Public", `/v1/*` endpoints require authentication.
 
@@ -1085,7 +1133,7 @@ TTL while the controller is stopped.
 |--------|--------|
 | 400 | Invalid request (bad IP, invalid protocol or protocol/address-family mismatch, missing/zero/inexact police rate, discard with a rate, a match component the speaker cannot encode, blackhole confirmation mismatch or match fields, etc.) |
 | 401 | Authentication required |
-| 403 | A blackhole was requested without the Admin role, including every bearer token |
+| 403 | A blackhole was requested without the Admin role, including by an operator or ingest token |
 | 409 | Scope already has an active canonical owner or pending withdrawal, or an untracked local route holds a blackhole's prefix, or another injection owner, or none, holds a FlowSpec rule's match |
 | 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length, amplification match invariants and opt-ins, blackhole disabled, victim, TTL and quota checks, etc.) |
 
@@ -1107,8 +1155,8 @@ route ([ADR 027](../adr/027-blackhole-mitigations.md)). It drops **all**
 traffic to the victim, including legitimate traffic, so it has stricter rules
 than FlowSpec:
 
-- **Admin only.** Operator and Viewer sessions get `403`. Bearer tokens map to
-  Operator, so `prefixdctl` and other token clients get `403` too. The role is
+- **Admin only.** Operator and Viewer sessions, operator tokens and ingest
+  tokens get `403`; an Admin session or an admin token is required. The role is
   checked before anything else.
 - **Typed confirmation.** `confirm_victim_ip` must equal `victim_ip` exactly,
   character for character, and `reason` must be nonempty. Otherwise the request
@@ -1699,8 +1747,8 @@ receivers:
         http_config:
           authorization:
             type: Bearer
-            # The controller's PREFIXD_API_TOKEN, in a file readable by the
-            # Alertmanager user only (owned by it, mode 0400)
+            # An ingest token bound to source alertmanager, in a file
+            # readable by the Alertmanager user only (owned by it, mode 0400)
             credentials_file: /etc/alertmanager/prefixd-token
         send_resolved: true
 ```
@@ -1882,7 +1930,7 @@ X-Signature-SHA256: <hex-encoded HMAC-SHA256 of request body>
 **Authentication:**
 
 - `hmac` — HMAC-SHA256 over the raw request body. Header name is configurable (default `X-Signature-SHA256`). The hex digest may be prefixed with `sha256=` (GitHub-style). Secret is read from the env var named in `auth.secret_env`.
-- `bearer` — Reuses the global session/bearer auth backend.
+- `bearer` — An API token in `Authorization: Bearer`, verified like every other ingest route; an ingest token reaches it.
 - `none` — No auth enforced (intended for lab use only).
 
 **Response:**
@@ -2241,6 +2289,112 @@ Anonymous access does not create an authenticated operator profile.
 
 ---
 
+## API token management
+
+Token routes need an Admin session. Every token is refused with 403, admin
+tokens included, because a stolen admin token that could mint replacements
+would survive its own revocation. mTLS clients and `none` mode get 403 too;
+manage tokens there with `prefixdctl tokens`. Each create and revoke writes an
+audit row in the same transaction: action `api_token.create` or
+`api_token.revoke`, target type `api_token`, target ID the token name, details
+`scope`, `source`, `pop` and `expires_at`, and the Admin's username as actor.
+
+### Create API Token
+
+```http
+POST /v1/tokens
+Content-Type: application/json
+```
+
+**Request:**
+
+```json
+{
+  "name": "fnm-pop1",
+  "scope": "ingest",
+  "source": "fastnetmon",
+  "pop": "iad1",
+  "expires_at": null
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | `^[a-z0-9][a-z0-9-]{0,57}$`; never reused |
+| `scope` | string | yes | `ingest`, `operator` or `admin` |
+| `source` | string | for `ingest` | `^[a-z0-9][a-z0-9_-]{0,63}$`; refused for other scopes |
+| `pop` | string | no | Accept the token only on controllers with this POP |
+| `expires_at` | RFC 3339 | no | In the future; omit for no expiry |
+
+**Response (201 Created):** the [token record](#token-record) plus `token`, the
+only time the secret appears.
+
+```json
+{
+  "token_id": "uuid",
+  "name": "fnm-pop1",
+  "scope": "ingest",
+  "source": "fastnetmon",
+  "pop": "iad1",
+  "created_at": "2026-11-15T12:00:00Z",
+  "created_by": "admin",
+  "expires_at": null,
+  "last_used_at": null,
+  "revoked_at": null,
+  "revoked_by": null,
+  "token": "prefixd_<43 base64url characters>"
+}
+```
+
+**Error Responses:**
+
+| Status | Reason |
+|--------|--------|
+| 400 | Invalid name, scope, source, POP or expiry |
+| 401 | Not authenticated |
+| 403 | Not an Admin session |
+| 409 | Name already used, by a revoked token too |
+
+### List API Tokens
+
+```http
+GET /v1/tokens
+```
+
+**Response:** `{"tokens": [<token record>, ...], "count": 1}`, every token,
+revoked ones included, oldest first. No secret or hash is returned.
+
+#### Token record
+
+| Field | Description |
+|-------|-------------|
+| `token_id` | UUID |
+| `name` | Token name; operator and admin tokens act as `token:<name>` |
+| `scope` | `ingest`, `operator` or `admin` |
+| `source` | Bound source of an ingest token, otherwise null |
+| `pop` | Bound POP, or null for every POP sharing the database |
+| `created_at`, `created_by` | Creation time and the Admin username or `prefixdctl` |
+| `expires_at` | Expiry, or null |
+| `last_used_at` | Last successful use, written at most once a minute |
+| `revoked_at`, `revoked_by` | Revocation time and actor, or null |
+
+### Revoke API Token
+
+```http
+POST /v1/tokens/{name}/revoke
+```
+
+Revokes the token and returns its record. Revocation takes effect on the next
+request on every controller sharing the database. Revoking an already revoked
+token returns the same record and writes no second audit row.
+
+| Status | Reason |
+|--------|--------|
+| 200 | Revoked, or already revoked |
+| 401 | Not authenticated |
+| 403 | Not an Admin session |
+| 404 | No token has that name |
+
 ## Operators (Admin Only)
 
 ### List Operators
@@ -2286,7 +2440,7 @@ Content-Type: application/json
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `username` | string | yes | Unique username |
+| `username` | string | yes | Unique username matching `^[A-Za-z0-9_-]{1,64}$` |
 | `password` | string | yes | 8–256 UTF-8 bytes |
 | `role` | string | yes | `admin`, `operator`, or `viewer` |
 
@@ -2307,7 +2461,7 @@ Content-Type: application/json
 
 | Status | Reason |
 |--------|--------|
-| 400 | Invalid role or password outside 8–256 UTF-8 bytes |
+| 400 | Invalid username or role, or password outside 8–256 UTF-8 bytes |
 | 403 | Caller is not admin |
 | 409 | Username already exists |
 
@@ -2452,7 +2606,7 @@ mode.
 |-------|-------------|
 | `status` | Always `"ok"` if the daemon is running |
 | `version` | Controller (prefixd) version |
-| `auth_mode` | Authentication mode: `none`, `bearer`, `credentials`, `mtls` |
+| `auth_mode` | Authentication mode: `none`, `credentials`, `mtls` |
 
 ### Readiness (Public)
 
@@ -2485,8 +2639,9 @@ Authorization: Bearer <token>
 ```
 
 Full operational health using the configured authentication mode. The request
-and response below illustrate bearer mode. In credentials mode, send a session
-cookie; native mTLS requires a client certificate. `none` requires no credentials.
+and response below illustrate an API token in credentials mode, which a session
+cookie can replace; native mTLS requires a client certificate. `none` requires
+no credentials. An ingest token gets 403.
 
 **Illustrative response with rustbgpd:**
 
@@ -2769,7 +2924,7 @@ Returns the running daemon configuration with sensitive fields redacted (allowli
   "settings": {
     "pop": "iad1",
     "mode": "enforced",
-    "http": { "listen": "0.0.0.0:8080", "auth": { "mode": "bearer" }, "rate_limit": { "events_per_second": 100, "burst": 500 } },
+    "http": { "listen": "0.0.0.0:8080", "auth": { "mode": "credentials" }, "rate_limit": { "events_per_second": 100, "burst": 500 } },
     "bgp": { "mode": "sidecar", "local_asn": 65010, "default_scope": "global", "vpn_scopes": { "TRANSIT": { "family": "ipv4", "rd": "64500:40", "route_targets": ["64500:777"], "allow_source_only": false } }, "neighbors": [{ "name": "172.30.30.3", "address": "172.30.30.3", "peer_asn": 65001, "afi_safi": ["ipv4-flowspec"] }] },
     "guardrails": { "require_ttl": true, "dst_prefix_minlen": 32, "dst_prefix_maxlen": 32, "max_ports": 5 },
     "quotas": { "max_active_per_customer": 20, "max_active_global": 500 },
@@ -3575,14 +3730,14 @@ Some handlers intentionally return status-only errors (no JSON body), especially
 | Status | Description |
 |--------|-------------|
 | 400 | Invalid request payload or validation failure |
-| 401 | Missing or invalid authentication |
-| 403 | Insufficient permissions |
+| 401 | Missing or invalid authentication, including an unknown, malformed, revoked or expired API token |
+| 403 | Insufficient permissions, an API token bound to another POP, or an ingest token outside the ingest routes |
 | 404 | Resource not found |
 | 409 | Conflict (duplicate resource/event) |
 | 422 | Guardrail rejection |
 | 429 | Too many requests (includes `retry_after_seconds`) |
 | 500 | Internal server error |
-| 503 | Service unavailable, including a standby controller |
+| 503 | Service unavailable, including a standby controller and an unreadable token store |
 
 ### Standby controller
 

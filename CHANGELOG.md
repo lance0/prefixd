@@ -9,25 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **The shared bearer token is removed.** `http.auth.mode: bearer` and
+  `http.auth.bearer_token_env` are refused at startup, on reload and by
+  `prefixd --check`, each naming its removal release, and the controller no
+  longer reads `PREFIXD_API_TOKEN`; it logs a warning naming the variable when
+  it is still set and starts normally. Before upgrading, inventory every client
+  of the shared token, set `http.auth.mode: credentials`, remove
+  `bearer_token_env` and the variable, and run `prefixd --check`. After the
+  upgrade, mint one token per detector and automation with
+  `prefixdctl tokens create` and install it; detectors get 401 until then. An
+  ingest token cannot read, so a custom detector script that looks up and
+  withdraws mitigations needs an operator token for that step. See
+  [source-bound ingest tokens](docs/how-to/upgrading.md#source-bound-ingest-tokens).
+- This release adds migration 022, the `api_tokens` table and a `CHECK` on
+  `operators.username` (`^[A-Za-z0-9_-]{1,64}$`). The migration refuses to apply,
+  and the controller does not start, while any username falls outside the
+  pattern; run the
+  [pre-check query](docs/how-to/upgrading.md#operator-usernames) and rename
+  those operators first. The release is one-way and rules out a rolling
+  replacement: controllers sharing a database upgrade together, and detectors
+  switch credentials when the active controller changes. Rollback is a restore
+  of the pre-upgrade backup. Starting 0.27.0 or older against the migrated
+  database is a security regression, because it reads the shared token again.
+- `prefixdctl` reads its token from `PREFIXD_TOKEN`, not `PREFIXD_API_TOKEN`,
+  and warns when only the old variable is set. A token and a session cookie
+  together are a usage error (exit 2).
+- Requests made with an operator or admin token are attributed to
+  `token:<name>` instead of `bearer-token`, in audit rows, `acknowledged_by`,
+  mitigation creators and safelist `added_by`. Update audit log filters,
+  `GET /v1/audit` consumers and dashboards that match `bearer-token`.
+- A request with `Authorization: Bearer` is authenticated by its token alone:
+  its session cookie is ignored, and an invalid token gets 401 even beside a
+  valid session. Clients that sent both now act as the token.
 - Unknown configuration keys in `prefixd.yaml`, `correlation.yaml` and
   `alerting.yaml` are ignored in this release with a warning, and the next
   release refuses them at startup and on reload. Run `prefixd --check` against
   your configuration and remove every key it reports before that upgrade. See
   [unknown configuration keys](docs/how-to/upgrading.md#unknown-configuration-keys).
 - Startup now runs its configuration-only checks before it opens the database:
-  the database URL, the API bearer token, the `http.tls` files, the speaker
-  endpoint and its credentials, scrubber readiness credentials and the playbook
-  checks against settings. A configuration startup refused after connecting is
+  the database URL, the `http.tls` files, the speaker endpoint and its
+  credentials, scrubber readiness credentials and the playbook checks against
+  settings. A configuration startup refused after connecting is
   now refused earlier, with every error on its own line.
 - This release adds migration 021, which narrows the unique scope index
   `idx_mitigations_active_scope` to `active` and `escalated` rows. A narrower
   predicate covers a subset of the rows the old index already kept unique, so
-  the migration cannot fail on existing data and rewrites no row. 0.27.0 runs
-  unchanged against the migrated database, so a rolling replacement from
-  0.27.0, with the new controller started in standby, is safe, and so is
-  starting 0.27.0 again. From this release on, a controller refuses a database
-  that records a migration newer than it knows, but 0.27.0 and older have no
-  such check. See
+  the migration cannot fail on existing data and rewrites no row. Migration 022
+  in the same release rules out a rolling replacement and starting 0.27.0
+  again, as its item above describes. From this release on, a controller
+  refuses a database that records a migration newer than it knows, but 0.27.0
+  and older have no such check. See
   [database schema version and downgrade](docs/how-to/upgrading.md#database-schema-version-and-downgrade).
 - The lease state adds `standby`. During a PostgreSQL outage the active
   controller loses its fence within seconds, so once renewal stops at the TTL
@@ -102,13 +133,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Named, hashed, revocable API tokens replace the shared bearer token. Only the
+  SHA-256 is stored, the secret is shown once, and revocation takes effect on
+  the next request. A token's scope limits what it reaches: an ingest token is
+  refused with 403 on every route but the ingest routes, before its body is
+  read, and no token, admin tokens included, can manage tokens. A token bound
+  to a POP is refused on another POP's controller on a shared database.
+- A Bearer request has its session cookie removed before the session is
+  loaded, so a bad token never falls back to a session and a stale cookie
+  cannot fail a valid token during a database outage. Token secrets and hashes
+  stay out of logs, errors, API and WebSocket payloads, health detail,
+  `prefixd --check` output and CLI help.
 - `prefixdctl --help`, `-h` and `help` no longer print the values of
-  `PREFIXD_API_TOKEN` or `PREFIXD_API`, whose URL userinfo is sent as Basic
+  `PREFIXD_TOKEN` or `PREFIXD_API`, whose URL userinfo is sent as Basic
   auth. They name the variables only, as they already did for
   `PREFIXD_SESSION_COOKIE`.
 
 ### Added
 
+- API tokens: `POST /v1/tokens`, `GET /v1/tokens` and
+  `POST /v1/tokens/{name}/revoke`, from an Admin session, and
+  `prefixdctl tokens create|list|revoke` on the local database. Tokens have an
+  `ingest`, `operator` or `admin` scope, an optional source, POP and expiry,
+  and a last-used time; creation and revocation are audited as
+  `api_token.create` and `api_token.revoke`. See
+  [API tokens](docs/reference/api.md#api-tokens).
 - `prefixd --check` validates the configuration directory and exits before
   connecting to PostgreSQL or the speaker. It shares startup's loader and its
   pre-database checks, prints every error on its own line with the full path
@@ -120,6 +169,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `prefixdctl operators create` refuses usernames outside
+  `^[A-Za-z0-9_-]{1,64}$`, the rule the API already applied.
+- `prefixdctl`'s 401 hint names `PREFIXD_TOKEN`.
+- The Compose file and `.env.example` no longer pass `PREFIXD_API_TOKEN`.
+  `scripts/chaos-test.sh` reads an operator token from `PREFIXD_TOKEN` and an
+  ingest token from `PREFIXD_INGEST_TOKEN` and keeps both off curl's command
+  line, and the FRR interop lab mints its tokens with `prefixdctl`.
 - Alert destinations and the editor offer only the events prefixd sends:
   `mitigation.created`, `mitigation.withdrawn` and `mitigation.expired`.
   `config.reloaded` and `guardrail.rejected` remain accepted in stored filters

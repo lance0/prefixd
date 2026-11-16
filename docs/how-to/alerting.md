@@ -128,8 +128,8 @@ added a variable, recreate the controller instead.
 
 ### Pass variables with Compose
 
-The shipped Compose file forwards only `RUST_LOG`, `PREFIXD_API_TOKEN` and
-`DATABASE_URL` to the controller. Other `.env` entries reach it only when you
+The shipped Compose file forwards only `RUST_LOG` and `DATABASE_URL` to the
+controller. Other `.env` entries reach it only when you
 name them in the controller's `environment`, as in step 3 of the
 [quick path](#quick-path-slack-in-five-steps). Add one line per variable:
 
@@ -147,8 +147,8 @@ Run `docker compose --profile rustbgpd up -d` after each change.
 
 ### Pass variables with systemd
 
-The shipped unit reads `/etc/default/prefixd`, the root-only file that also
-holds `PREFIXD_API_TOKEN`; see [Systemd Service](deployment.md#systemd-service).
+The shipped unit reads `/etc/default/prefixd`, the root-only controller
+environment file; see [Systemd Service](deployment.md#systemd-service).
 Add one line per variable:
 
 ```bash
@@ -443,8 +443,10 @@ curl -sS -c cookies.txt -X POST http://localhost/v1/auth/login \
 curl -sS -b cookies.txt -X POST http://localhost/v1/config/alerting/test | jq
 ```
 
-In `bearer` mode, send `-H "Authorization: Bearer $PREFIXD_API_TOKEN"` instead
-of the cookie. `prefixdctl` has no test command.
+An admin API token works instead of the cookie; pipe
+`printf 'header = "Authorization: Bearer %s"\n' "$PREFIXD_TOKEN"` to
+`curl -K -` so the token stays off the command line. `prefixdctl` has no test
+command.
 
 ```json
 {
