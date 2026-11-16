@@ -70,8 +70,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its session cookie is ignored, and an invalid token gets 401 even beside a
   valid session. Clients that sent both now act as the token.
 - Victim addresses are stored in canonical form on every ingest route and in
-  manual mitigations: IPv6 lowercase and zero-compressed, and an IPv4-mapped
-  IPv6 host as its IPv4 address, whose rules are IPv4 rules. Migration 023
+  manual mitigations: IPv6 lowercase and zero-compressed. A detector event's
+  IPv4-mapped IPv6 host is its IPv4 address, so such an event now mitigates as
+  an IPv4 victim where it was skipped as unowned before. Manual input names
+  the family it means: `POST /v1/mitigations`, its preview and a manual
+  blackhole refuse an IPv4-mapped destination with 400 naming the IPv4 form to
+  use. A detector unban whose victim is not an address or CIDR is refused with
+  400 on every route, as a ban is. Migration 023
   rewrites the IPv6 victim of live mitigations and open signal groups the same
   way, leaving an IPv4-mapped victim with the IPv6 rule it was created with;
   events, audit rows and ended mitigations keep the spelling the detector sent.

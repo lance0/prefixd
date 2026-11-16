@@ -10872,8 +10872,6 @@ mod manual_protocol {
         let cases: &[(&str, &str, Option<u8>, &[u16])] = &[
             ("203.0.113.10", "icmp", Some(1), &[]),
             ("2001:db8::10", "icmpv6", Some(58), &[]),
-            // An IPv4-mapped host is its IPv4 address.
-            ("::ffff:203.0.113.10", "icmp", Some(1), &[]),
             (
                 "203.0.113.10",
                 "udp",
@@ -10932,11 +10930,10 @@ mod manual_protocol {
                     .unwrap();
                 assert_eq!(rows.len(), 1);
                 let saved = &rows[0];
-                let host = prefixd::domain::canonical_destination(ip).unwrap();
-                assert_eq!(saved.victim_ip, host);
+                assert_eq!(saved.victim_ip, ip);
                 assert_eq!(
                     saved.match_criteria.dst_prefix,
-                    format!("{host}/{}", if host.contains(':') { 128 } else { 32 })
+                    format!("{ip}/{}", if ip.contains(':') { 128 } else { 32 })
                 );
                 assert_eq!(saved.match_criteria.protocol, expected_protocol);
                 assert_eq!(saved.match_criteria.dst_ports, ports);
@@ -10961,7 +10958,16 @@ mod manual_protocol {
         for (ip, protocol, error) in [
             ("2001:db8::10", "icmp", "address family"),
             ("203.0.113.10", "icmpv6", "address family"),
-            ("::ffff:203.0.113.10", "icmpv6", "address family"),
+            (
+                "::ffff:203.0.113.10",
+                "icmp",
+                "IPv4-mapped IPv6 address; use 203.0.113.10",
+            ),
+            (
+                "::ffff:203.0.113.10",
+                "icmpv6",
+                "IPv4-mapped IPv6 address; use 203.0.113.10",
+            ),
             ("2001:db8::10", "icmp6", "invalid protocol"),
             ("2001:db8::10", "ICMPv6", "invalid protocol"),
             ("203.0.113.10", "gre", "invalid protocol"),

@@ -31,6 +31,27 @@ pub fn canonical_destination(value: &str) -> Result<String, DestinationError> {
     )
 }
 
+/// Manual input names the family it means. An IPv4-mapped IPv6 destination
+/// would be an IPv6 rule that never matches IPv4 traffic, or, converted, an
+/// IPv4 rule the operator did not type, so it is refused with the IPv4 form to
+/// use instead. Detector events are converted ([`canonical_destination`]).
+pub fn refuse_ipv4_mapped(destination: &IpNet) -> Result<(), String> {
+    let IpNet::V6(network) = destination else {
+        return Ok(());
+    };
+    let Some(ipv4) = network.addr().to_ipv4_mapped() else {
+        return Ok(());
+    };
+    let (shown, suggestion) = match network.prefix_len() {
+        128 => (network.addr().to_string(), format!("; use {ipv4}")),
+        len if len >= 96 => (network.to_string(), format!("; use {ipv4}/{}", len - 96)),
+        _ => (network.to_string(), String::new()),
+    };
+    Err(format!(
+        "destination {shown} is an IPv4-mapped IPv6 address{suggestion}"
+    ))
+}
+
 /// Parse a literal address or an exact network, rejecting implicit widening.
 /// Admission still needs prefix-length, whole-prefix ownership and safelist checks.
 pub fn parse_flowspec_destination(value: &str) -> Result<IpNet, DestinationError> {
@@ -77,6 +98,26 @@ mod tests {
         }
         for invalid in ["", "203.0.113.010", "203.0.113.1/24", "example.com"] {
             assert!(canonical_destination(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn manual_input_refuses_ipv4_mapped_destinations_with_the_ipv4_form() {
+        for (input, suggestion) in [
+            ("::ffff:203.0.113.10", "; use 203.0.113.10"),
+            ("::ffff:203.0.113.10/128", "; use 203.0.113.10"),
+            ("::ffff:203.0.113.0/120", "; use 203.0.113.0/24"),
+        ] {
+            let error =
+                refuse_ipv4_mapped(&parse_flowspec_destination(input).unwrap()).unwrap_err();
+            assert!(error.contains("IPv4-mapped"), "{error}");
+            assert!(error.ends_with(suggestion), "{input}: {error}");
+        }
+        for allowed in ["203.0.113.10", "2001:db8::10", "::1", "::c000:201", "::/0"] {
+            assert_eq!(
+                refuse_ipv4_mapped(&parse_flowspec_destination(allowed).unwrap()),
+                Ok(())
+            );
         }
     }
 

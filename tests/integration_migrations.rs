@@ -962,6 +962,11 @@ async fn canonical_victim_migration_rewrites_only_live_rows_to_the_rust_spelling
         "2001:0:0:1:0:0:0:1",
         "FE80::",
         "::1",
+        "2001:0:0:1:0:0:1:1",
+        "::",
+        "2001:db8::192.0.2.1",
+        // IPv4-compatible: PostgreSQL prints `::192.0.2.1`, so it is skipped.
+        "::C000:201",
         "::ffff:203.0.113.10",
         "::FFFF:CB00:710B",
     ];
@@ -1007,16 +1012,17 @@ async fn canonical_victim_migration_rewrites_only_live_rows_to_the_rust_spelling
         .await
         .expect("apply migration 023");
 
-    // An embedded-IPv4 victim keeps the IPv6 rule it was created with, so its
-    // text is left alone rather than split from that rule.
+    // An IPv4-mapped victim keeps the IPv6 rule it was created with, so its
+    // text is left alone rather than split from that rule; an IPv4-compatible
+    // one is left alone because PostgreSQL spells it differently.
     let mut expected: Vec<String> = addresses
         .iter()
-        .map(
-            |victim| match victim.to_ascii_lowercase().starts_with("::ffff:") {
+        .map(|victim| {
+            match victim.to_ascii_lowercase().starts_with("::ffff:") || *victim == "::C000:201" {
                 true => victim.to_string(),
                 false => prefixd::domain::canonical_destination(victim).unwrap(),
-            },
-        )
+            }
+        })
         .chain(untouched.map(String::from))
         .collect();
     expected.sort();
