@@ -5,7 +5,7 @@ pub async fn send(
     webhook_url: &str,
     channel: Option<&str>,
     alert: &Alert,
-) -> Result<(), String> {
+) -> Result<(), super::Failure> {
     let payload = build_payload(alert, channel);
 
     let response = client
@@ -13,12 +13,11 @@ pub async fn send(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| format!("slack request failed: {}", e.without_url()))?;
+        .map_err(|e| super::request_failure("slack", e))?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("slack returned {} — {}", status, body));
+        return Err(super::platform_failure("slack", status));
     }
 
     Ok(())
@@ -35,6 +34,13 @@ pub fn build_payload(alert: &Alert, channel: Option<&str>) -> serde_json::Value 
             "text": format!("*Event:* {}", alert.event_type)
         }),
     ];
+
+    if alert.dry_run {
+        fields.push(serde_json::json!({
+            "type": "mrkdwn",
+            "text": "*Mode:* dry run, not announced"
+        }));
+    }
 
     if let Some(ref ip) = alert.victim_ip {
         fields.push(serde_json::json!({

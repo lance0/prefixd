@@ -5,8 +5,17 @@ pub async fn send(
     bot_token: &str,
     chat_id: &str,
     alert: &Alert,
-) -> Result<(), String> {
+) -> Result<(), super::Failure> {
     let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+    send_to(client, &url, chat_id, alert).await
+}
+
+pub(super) async fn send_to(
+    client: &reqwest::Client,
+    url: &str,
+    chat_id: &str,
+    alert: &Alert,
+) -> Result<(), super::Failure> {
     let text = build_message(alert);
 
     let payload = serde_json::json!({
@@ -17,16 +26,15 @@ pub async fn send(
     });
 
     let response = client
-        .post(&url)
+        .post(url)
         .json(&payload)
         .send()
         .await
-        .map_err(|e| format!("telegram request failed: {}", e.without_url()))?;
+        .map_err(|e| super::request_failure("telegram", e))?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("telegram returned {} — {}", status, body));
+        return Err(super::platform_failure("telegram", status));
     }
 
     Ok(())
@@ -46,6 +54,9 @@ pub fn build_message(alert: &Alert) -> String {
         String::new(),
     ];
 
+    if alert.dry_run {
+        lines.push("<b>Mode:</b> dry run, not announced".to_string());
+    }
     if let Some(ref ip) = alert.victim_ip {
         lines.push(format!(
             "<b>Victim IP:</b> <code>{}</code>",

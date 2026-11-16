@@ -1699,7 +1699,9 @@ receivers:
         http_config:
           authorization:
             type: Bearer
-            credentials: '<your-api-token>'
+            # The controller's PREFIXD_API_TOKEN, in a file readable by the
+            # Alertmanager user only (owned by it, mode 0400)
+            credentials_file: /etc/alertmanager/prefixd-token
         send_resolved: true
 ```
 
@@ -2937,7 +2939,7 @@ variable name in its `*_env` key, such as `routing_key_env`. Variable names are
 not secret; their values are never returned. See
 [alert destination secrets](configuration.md#alert-destination-secrets).
 
-**Per-destination events:** Each destination may include an optional `events` array to override the global event filter. If present, only those event types are sent to that destination. If absent or empty, the destination inherits the global `events` list. See ADR 017.
+**Per-destination events:** Each destination may include an optional `events` array to override the global event filter. If present, only those event types are sent to that destination. If absent or empty, the destination inherits the global `events` list. The `test` alert from the test endpoint ignores every filter and reaches each destination; `test` is not a filter value, and a save that lists it is refused. See ADR 017.
 
 ### Update Alerting Config
 
@@ -2987,9 +2989,14 @@ POST /v1/config/alerting/test
 Authorization: Bearer <token>
 ```
 
-Sends a test `mitigation.created` alert, titled `Test Alert`, to each destination
-whose event filter includes `mitigation.created`, and returns one result per
-destination it sent to, in configuration order. Requires admin role. See
+Sends a test `test` event, titled `Test Alert`, to every configured destination
+whatever its event filter, and returns one result per destination. Each result's
+`index` is the destination's position in the running configuration, counted
+from 0; clients key results by it rather than by array position. Requires admin
+role. PagerDuty and Opsgenie incidents the test opens are resolved or closed
+using a unique `prefixd-test-<UUID>` ID. Opsgenie confirms asynchronous
+creation before cleanup and confirms closure; failed cleanup is a test error.
+HTTP error bodies are omitted; errors contain only the destination and status. See
 [send a test alert](../how-to/alerting.md#send-a-test-alert).
 
 **Response:**
@@ -2997,8 +3004,8 @@ destination it sent to, in configuration order. Requires admin role. See
 ```json
 {
   "results": [
-    {"destination": "slack", "status": "ok", "error": null},
-    {"destination": "pagerduty", "status": "error", "error": "pagerduty returned 403"}
+    {"index": 0, "destination": "slack", "status": "ok", "error": null},
+    {"index": 1, "destination": "pagerduty", "status": "error", "error": "pagerduty returned HTTP 403 (response body omitted)"}
   ]
 }
 ```
@@ -3655,7 +3662,7 @@ Updates the current operator's notification preferences. `muted_events` contains
 **Validation:**
 - `quiet_hours_start` and `quiet_hours_end` must both be present or both be `null` (no half-configured state)
 - `quiet_hours_start`/`quiet_hours_end` must be 0-23 if present
-- `muted_events` entries must be valid event types (`mitigation.created`, `mitigation.withdrawn`, `mitigation.expired`, `config.reloaded`, `guardrail.rejected`). Legacy `mitigation.escalated` is still accepted so saved preferences load; it is never emitted
+- `muted_events` entries must be valid event types (`mitigation.created`, `mitigation.withdrawn`, `mitigation.expired`, `config.reloaded`, `guardrail.rejected`). Legacy `mitigation.escalated` is still accepted so saved preferences load. `mitigation.escalated` and `guardrail.rejected` never fire and the dashboard offers neither; `config.reloaded` mutes the dashboard's websocket resync toast, which fires when the client falls behind, not a controller configuration reload
 
 ---
 

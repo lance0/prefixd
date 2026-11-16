@@ -49,6 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   live intent. It stays as inert history: it no longer counts toward quotas or
   conflicts, cannot be withdrawn, and no longer blocks a new mitigation for its
   scope and POP.
+- Alert payloads change shape:
+  - The test alert's `event_type` is `test`, not `mitigation.created`. A
+    generic webhook consumer must accept `test` and must not treat a test as
+    a new mitigation. `test` is not a filter value; an `events` list that
+    names it is refused at startup, on reload and by the editor.
+  - The test alert's `mitigation_id` is `prefixd-test-<UUID>`, unique to each
+    test, not a UUID. Consumers that parse it as a UUID must accept it.
+  - Opsgenie `mitigation.withdrawn` and `mitigation.expired` close the
+    mitigation's alert by alias instead of creating a new alert. A destination
+    whose filter lists only those events now opens no alerts; add
+    `mitigation.created` to it if you relied on them.
+  - Dry-run mitigation alerts' titles start with `Dry Run: `, which also
+    appears in PagerDuty summaries and Opsgenie messages. Update routing or
+    suppression rules that match the title or summary exactly or by prefix.
 
 ### Known limitations
 
@@ -86,6 +100,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and still makes one bounded attempt per rule, so a wedged speaker can hold
   the lifecycle mutex for up to N × 3 seconds for an event with N rules.
 
+### Security
+
+- `prefixdctl --help`, `-h` and `help` no longer print the values of
+  `PREFIXD_API_TOKEN` or `PREFIXD_API`, whose URL userinfo is sent as Basic
+  auth. They name the variables only, as they already did for
+  `PREFIXD_SESSION_COOKIE`.
+
 ### Added
 
 - `prefixd --check` validates the configuration directory and exits before
@@ -99,6 +120,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Alert destinations and the editor offer only the events prefixd sends:
+  `mitigation.created`, `mitigation.withdrawn` and `mitigation.expired`.
+  `config.reloaded` and `guardrail.rejected` remain accepted in stored filters
+  and notification mutes, but neither is offered any more and the unused
+  configuration-reload alert constructor is gone. A `config.reloaded` mute
+  still suppresses the dashboard's websocket resync toast.
+- A test alert is sent as event type `test` to every configured destination,
+  whatever its event filter, and each test result gains `index`, the
+  destination's position in the running configuration. A generic webhook
+  consumer that identified the test payload by `mitigation.created` should
+  match `test` instead. The dashboard keys results by `index`, so a filtered
+  destination no longer shifts a result onto the wrong card, and in the
+  editor a result stays on the saved destination it belongs to after cards are
+  removed or added.
+- Alert delivery no longer retries 4xx failures other than 429. A connection
+  failure, a 5xx or a 429 is still retried twice; any other rejection, and a
+  secret whose environment variable is unset or empty, fails on the first
+  attempt for every destination type, so it no longer holds an alert worker
+  for about 6 seconds or delays later destinations.
+- Slack `channel` is legacy-only. An app's incoming webhook always posts to the
+  channel it was created for; the editor labels the field accordingly. The
+  payload still carries the key for older custom integrations.
 - Unknown configuration keys are reported with their full key path, including
   alert destination keys such as `alerting.destinations[0].chanel` and webhook
   adapter `auth` and `transforms` keys, and ignored
@@ -163,6 +206,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Opsgenie withdrawn and expired alerts close the mitigation's alert by alias
+  through Opsgenie's close API instead of creating a second alert. Lifecycle
+  creates and closes trust Opsgenie's HTTP 202, so closing an alert already
+  closed by hand succeeds. Only the test alert polls request status, confirming its create before
+  closing and then confirming the close.
+- PagerDuty and Opsgenie test alerts clean up their incidents: prefixd
+  resolves the PagerDuty incident and closes the Opsgenie alert
+  after confirming creation, using unique test invocation IDs. Failed cleanup
+  is reported and may require manual cleanup.
+- Alerts for dry-run mitigations are marked as simulations. The title starts
+  with `Dry Run: `, the message ends with `— dry run, not announced`, generic
+  webhook JSON and PagerDuty custom details add `dry_run: true`, Slack, Discord,
+  Teams and Telegram payloads carry a mode field, and Opsgenie tags the alert
+  `dry-run`.
+- Platform HTTP failure bodies are omitted from logs and test results;
+  Opsgenie confirmation JSON is bounded to 16 KiB and never echoed on failure.
 - Leased FlowSpec rules and leased blackholes are no longer renewed
   indefinitely during a PostgreSQL outage. Renewal stays independent of the
   database and the fence, but it now stops one margin after the latest leased

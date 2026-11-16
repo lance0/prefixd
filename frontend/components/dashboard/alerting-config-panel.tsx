@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useMemo, useState, useId } from "react"
+import { useCallback, useMemo, useState, useId, useRef, useEffect } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { StatusPill } from "@/components/dashboard/status-pill"
@@ -21,14 +21,13 @@ const DEST_TYPES = ["slack", "discord", "teams", "telegram", "pagerduty", "opsge
 
 type DestType = (typeof DEST_TYPES)[number]
 
-// mitigation.escalated is never emitted, so it is not offered. A stored filter
-// that still lists it is kept on save and shown as a badge.
+// mitigation.escalated, config.reloaded and guardrail.rejected are never sent
+// as alerts, so they are not offered. Stored filters that still list them are
+// kept on save and shown as badges.
 const EVENT_TYPES = [
   "mitigation.created",
   "mitigation.withdrawn",
   "mitigation.expired",
-  "config.reloaded",
-  "guardrail.rejected",
 ] as const
 
 const DEST_LABELS: Record<DestType, string> = {
@@ -54,6 +53,10 @@ const DEST_COLORS: Record<DestType, string> = {
 
 interface DraftDestination extends AlertingDestination {
   _id: string
+  // Position in the saved configuration, which Test runs and its results name.
+  // Absent for a card added in this draft: the saved configuration has no
+  // such destination, so no result belongs to it.
+  _source?: number
 }
 
 function newId(): string {
@@ -74,12 +77,12 @@ function emptyDest(type: DestType): DraftDestination {
   }
 }
 
-function toDraft(d: AlertingDestination): DraftDestination {
-  return { ...d, _id: newId() }
+function toDraft(d: AlertingDestination, source: number): DraftDestination {
+  return { ...d, _id: newId(), _source: source }
 }
 
 function stripDraftId(d: DraftDestination): AlertingDestination {
-  const { _id, ...rest } = d
+  const { _id, _source, ...rest } = d
 
   return rest
 }
@@ -150,8 +153,11 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
             />
           </div>
           <div className="space-y-1">
-            <Label htmlFor={`${id}-channel`} className="text-muted-foreground">Channel (optional)</Label>
-            <Input id={`${id}-channel`} value={dest.channel ?? ""} onChange={(e) => update("channel", e.target.value)} placeholder="#ddos-alerts" className="h-8 text-xs font-mono" />
+            <Label htmlFor={`${id}-channel`} className="text-muted-foreground">Channel (legacy only)</Label>
+            <Input id={`${id}-channel`} value={dest.channel ?? ""} onChange={(e) => update("channel", e.target.value)} placeholder="#ddos-alerts" aria-describedby={`${id}-channel-help`} className="h-8 text-xs font-mono" />
+            <p id={`${id}-channel-help`} className="text-xs text-muted-foreground">
+              Kept for legacy Slack integrations. An app&apos;s incoming webhook always posts to the channel it was created for and ignores this.
+            </p>
           </div>
         </>
       )}
@@ -312,12 +318,24 @@ export function AlertingConfigPanel() {
   const [testResults, setTestResults] = useState<AlertingTestResult[] | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const testGeneration = useRef(0)
 
   // Draft state for editing
   const [draft, setDraft] = useState<DraftDestination[] | null>(null)
   const [draftEvents, setDraftEvents] = useState<string[] | null>(null)
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
   const [addingType, setAddingType] = useState<DestType | null>(null)
+
+  const configIdentity = JSON.stringify(data)
+  useEffect(() => {
+    testGeneration.current += 1
+    setTestResults(null)
+    setTestError(null)
+    // The saved configuration changed under an open draft, so its cards'
+    // saved positions may now name other destinations. Keep the edits, but
+    // treat every card like an added one: no result until a new draft.
+    setDraft((prev) => prev?.map((dest) => ({ ...dest, _source: undefined })) ?? null)
+  }, [configIdentity])
 
   const isEditing = draft !== null
 
@@ -345,6 +363,9 @@ export function AlertingConfigPanel() {
   const handleSave = useCallback(async () => {
     if (!draft || !draftEvents) return
     setSaving(true)
+    testGeneration.current += 1
+    setTestResults(null)
+    setTestError(null)
 
     try {
       await updateAlertingConfig({
@@ -352,6 +373,8 @@ export function AlertingConfigPanel() {
         events: draftEvents,
       })
       await mutateAlerting()
+      // Results name positions in the configuration that was just replaced.
+      setTestResults(null)
       discardDraft()
       toast.success("Alerting config saved and reloaded")
     } catch (e) {
@@ -362,15 +385,17 @@ export function AlertingConfigPanel() {
   }, [draft, draftEvents, mutateAlerting, discardDraft])
 
   const handleTest = async () => {
+    const generation = ++testGeneration.current
     setTesting(true)
     setTestResults(null)
     setTestError(null)
 
     try {
       const response = await testAlerting()
-      setTestResults(response.results)
+
+      if (generation === testGeneration.current) setTestResults(response.results)
     } catch (e) {
-      setTestError(e instanceof Error ? e.message : "Test failed")
+      if (generation === testGeneration.current) setTestError(e instanceof Error ? e.message : "Test failed")
     } finally {
       setTesting(false)
     }
@@ -412,6 +437,7 @@ export function AlertingConfigPanel() {
     return data.destinations.map((dest, i) => ({
       ...dest,
       _id: `readonly-${dest.type}-${destSummary(dest)}-${i}`,
+      _source: i,
     }))
   }, [data])
 
@@ -452,7 +478,7 @@ export function AlertingConfigPanel() {
             <div className="flex items-center justify-between">
               <CardTitle>Alert destinations</CardTitle>
               {canReloadConfig ? (
-                <Button variant="outline" size="sm" onClick={handleTest} disabled={testing}>
+                <Button variant="outline" size="sm" onClick={handleTest} disabled={testing || saving}>
                   {testing ? <Loader2 className="h-3 w-3 mr-1.5 animate-spin" /> : <Send className="h-3 w-3 mr-1.5" />}
                   Send test alert
                 </Button>
@@ -466,8 +492,9 @@ export function AlertingConfigPanel() {
             />
           ) : (
             <CardContent className="space-y-2">
+              {/* Results are keyed by configuration position, not result order. */}
               {data.destinations.map((dest, i) => (
-                <ReadOnlyDestCard key={`${dest.type}-${i}`} dest={dest} testResult={testResults?.[i]} />
+                <ReadOnlyDestCard key={`${dest.type}-${i}`} dest={dest} testResult={testResults?.find((result) => result.index === i)} />
               ))}
             </CardContent>
           )}
@@ -533,7 +560,7 @@ export function AlertingConfigPanel() {
               ) : null}
             </>
           )}
-          <Button variant="outline" size="sm" onClick={handleTest} disabled={testing}>
+          <Button variant="outline" size="sm" onClick={handleTest} disabled={testing || saving}>
             {testing ? <Loader2 className="h-3 w-3 mr-1.5 animate-spin" /> : <Send className="h-3 w-3 mr-1.5" />}
             Test
           </Button>
@@ -572,6 +599,13 @@ export function AlertingConfigPanel() {
             destinations.map((dest, i) => {
               const isEditingThis = isEditing && editingIndex === i
 
+              // Match the saved-configuration position the card came from:
+              // filter skips shift the results array, and draft removals and
+              // additions shift card positions, so neither names this card.
+              const result = dest._source === undefined
+                ? undefined
+                : testResults?.find((entry) => entry.index === dest._source)
+
               if (isEditingThis) {
                 return (
                   <Card key={dest._id} className="border-primary/30 ring-1 ring-primary/10">
@@ -601,6 +635,20 @@ export function AlertingConfigPanel() {
                     <span className="text-xs font-medium">{DEST_LABELS[dest.type] ?? dest.type}</span>
                     {destSummary(dest) ? <span className="text-xs font-mono text-muted-foreground ml-2">{destSummary(dest)}</span> : null}
                   </div>
+                  {result && (
+                    result.status === "ok" ? (
+                      <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
+                    ) : (
+                      <div className="flex items-center gap-1 shrink-0">
+                        <XCircle className="h-4 w-4 text-destructive" />
+                        {result.error ? (
+                          <span className="text-xs text-destructive max-w-[150px] truncate">
+                            {result.error}
+                          </span>
+                        ) : null}
+                      </div>
+                    )
+                  )}
                   {isEditing ? (
                     <div className="flex items-center gap-1 shrink-0">
                       <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setEditingIndex(i)} aria-label={`Edit ${DEST_LABELS[dest.type] ?? dest.type} destination ${i + 1}`}>
@@ -610,22 +658,7 @@ export function AlertingConfigPanel() {
                         <Trash2 className="h-3.5 w-3.5" />
                       </Button>
                     </div>
-                  ) : (
-                    testResults?.[i] && (
-                      testResults[i]!.status === "ok" ? (
-                        <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
-                      ) : (
-                        <div className="flex items-center gap-1 shrink-0">
-                          <XCircle className="h-4 w-4 text-destructive" />
-                          {testResults[i]!.error ? (
-                            <span className="text-xs text-destructive max-w-[150px] truncate">
-                              {testResults[i]!.error}
-                            </span>
-                          ) : null}
-                        </div>
-                      )
-                    )
-                  )}
+                  ) : null}
                 </div>
               )
             })

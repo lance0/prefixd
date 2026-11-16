@@ -1541,6 +1541,9 @@ controller's environment, such as `DATABASE_URL`, to a URL of their choosing.
 
 Startup, reload and the alerting configuration editor require HTTPS for
 Slack, Discord, Teams, PagerDuty `events_url` and generic webhook URLs.
+Event filters, test alerts and delivery behavior are described in the
+[alerting guide](../how-to/alerting.md#choose-events-per-destination).
+
 Startup and reload check `alerting.yaml` or, without it, the `alerting`
 section of `prefixd.yaml`. A refusal names the file and the key but not the
 URL. Validation rejects `localhost` and its subdomains,

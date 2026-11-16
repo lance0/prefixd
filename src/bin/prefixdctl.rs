@@ -10,11 +10,17 @@ use std::process::ExitCode;
 #[command(name = "prefixdctl", about = "Control CLI for prefixd", version)]
 struct Cli {
     /// prefixd API endpoint
-    #[arg(short, long, default_value = "http://127.0.0.1", env = "PREFIXD_API")]
+    #[arg(
+        short,
+        long,
+        default_value = "http://127.0.0.1",
+        env = "PREFIXD_API",
+        hide_env_values = true
+    )]
     api: String,
 
     /// Bearer token for authentication
-    #[arg(short, long, env = "PREFIXD_API_TOKEN")]
+    #[arg(short, long, env = "PREFIXD_API_TOKEN", hide_env_values = true)]
     token: Option<String>,
 
     /// Cookie header from an authenticated administrator session
