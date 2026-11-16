@@ -366,6 +366,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `https://github.com/<repo>/blob/vX.Y.Z/<path>`.
 - The Administration page no longer shows Reload configuration to viewers and
   operators; the server already refused them with 403.
+- Refresh the separate fuzz lockfile for the controller's new `getrandom`
+  dependency. The CI Lint job now checks that lockfile on every pull request
+  and main push; the Quality smoke workflow, which failed on the stale
+  lockfile, is path-filtered, skips main pushes and is separate from CI.
 
 ## [0.27.0] - 2026-11-15
 

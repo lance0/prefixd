@@ -222,6 +222,10 @@ jobs:
       - name: Check pinned rustbgpd proto
         run: just proto
 
+      # Quality smoke is path-filtered, skips main pushes and is not CI, so check here too.
+      - name: Check fuzz lockfile is current
+        run: just fuzz-lock
+
       # setup-uv publishes no floating major tag, so pin its exact release.
       - name: Install uv
         uses: astral-sh/setup-uv@v10.3.3
