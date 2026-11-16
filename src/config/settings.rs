@@ -163,6 +163,19 @@ impl HttpConfig {
     }
 }
 
+/// Example API tokens that prefixd's documentation and `.env.example` have
+/// shipped. They are public, so a bearer deployment refuses them; only exact
+/// matches are refused.
+const PLACEHOLDER_TOKENS: &[&str] = &[
+    "your-secret-token-here",
+    "your-secret-token",
+    "your-token-here",
+    "your-api-token",
+    "<your-api-token>",
+    "<token>",
+    "changeme",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     pub mode: AuthMode,
@@ -178,17 +191,24 @@ impl AuthConfig {
             .unwrap_or("PREFIXD_API_TOKEN")
     }
 
-    /// The API bearer token when `mode` is `bearer`, which then must be set and
-    /// nonempty. Startup reads it once; the error names the variable, never a value.
+    /// The API bearer token when `mode` is `bearer`, which then must be set,
+    /// nonempty and not a placeholder from the documentation. Startup and
+    /// `--check` read it here; the error names the variable, never a value.
     pub fn bearer_token(&self) -> crate::error::Result<Option<String>> {
         if self.mode != AuthMode::Bearer {
             return Ok(None);
         }
-        match std::env::var(self.bearer_token_env()) {
+        let name = self.bearer_token_env();
+        match std::env::var(name) {
+            Ok(token) if PLACEHOLDER_TOKENS.contains(&token.as_str()) => {
+                Err(crate::error::PrefixdError::Config(format!(
+                    "auth.mode=bearer but {name} is a documented placeholder; \
+                     generate a random token, for example with openssl rand -hex 32"
+                )))
+            }
             Ok(token) if !token.is_empty() => Ok(Some(token)),
             _ => Err(crate::error::PrefixdError::Config(format!(
-                "auth.mode=bearer but {} is not set or empty",
-                self.bearer_token_env()
+                "auth.mode=bearer but {name} is not set or empty"
             ))),
         }
     }

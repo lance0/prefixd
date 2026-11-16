@@ -14,7 +14,7 @@ struct Cli {
     api: String,
 
     /// Bearer token for authentication
-    #[arg(short, long, env = "PREFIXD_API_TOKEN")]
+    #[arg(short, long, env = "PREFIXD_API_TOKEN", hide_env_values = true)]
     token: Option<String>,
 
     /// Cookie header from an authenticated administrator session

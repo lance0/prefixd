@@ -354,6 +354,77 @@ fn run(directory: &Path, check: bool) -> Output {
         .unwrap()
 }
 
+/// A bearer token copied from the documentation is refused by startup and the
+/// check alike, naming the variable without echoing the value. A random or
+/// merely short token passes the check (the negative control).
+#[test]
+fn bearer_mode_refuses_documented_placeholder_tokens() {
+    let directory = tempfile::tempdir().unwrap();
+    write_directory(
+        directory.path(),
+        &variant(&[(
+            "auth: {mode: none}",
+            "auth: {mode: bearer, bearer_token_env: PREFIXD_PLACEHOLDER_TOKEN}",
+        )]),
+    );
+    let run_with = |token: &str, check: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_prefixd"));
+        if check {
+            command.arg("--check");
+        }
+        command
+            .arg("--config")
+            .arg(directory.path())
+            .env_remove("DATABASE_URL")
+            .env("PREFIXD_PLACEHOLDER_TOKEN", token)
+            .output()
+            .unwrap()
+    };
+    let reason = "auth.mode=bearer but PREFIXD_PLACEHOLDER_TOKEN is a documented placeholder";
+    for token in ["5f0c9e1d7a3b", "abc"] {
+        let output = run_with(token, true);
+        assert!(
+            output.status.success(),
+            "{token}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for token in [
+        "your-secret-token-here",
+        "your-secret-token",
+        "your-token-here",
+        "your-api-token",
+        "<your-api-token>",
+        "<token>",
+        "changeme",
+    ] {
+        let check = run_with(token, true);
+        assert_eq!(check.status.code(), Some(1), "{token}");
+        assert!(
+            stderr_lines(&check)
+                .iter()
+                .any(|line| line.contains(reason)),
+            "{token}: {:?}",
+            stderr_lines(&check)
+        );
+        let startup = run_with(token, false);
+        let stderr = String::from_utf8_lossy(&startup.stderr);
+        assert!(!startup.status.success(), "{token}: startup accepted it");
+        assert!(stderr.contains(reason), "{token}: {stderr}");
+        for output in [
+            &check.stdout,
+            &check.stderr,
+            &startup.stdout,
+            &startup.stderr,
+        ] {
+            assert!(
+                !String::from_utf8_lossy(output).contains(token),
+                "{token}: echoed the token"
+            );
+        }
+    }
+}
+
 /// Every configuration startup refuses before it contacts PostgreSQL or the
 /// speaker also fails the check, with the same reason. Each fixture changes
 /// one thing in a base the check accepts (the negative control), and both

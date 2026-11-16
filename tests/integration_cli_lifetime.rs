@@ -115,3 +115,21 @@ async fn cli_extends_with_authenticated_request_and_reports_saved_noop_and_refus
         assert!(server.await.unwrap_err().is_cancelled());
     }
 }
+
+/// Help names the token and cookie variables but never prints their values.
+#[test]
+fn cli_help_hides_credential_environment_values() {
+    const SENTINEL: &str = "hunter2-help-canary";
+    for flag in ["--help", "-h"] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_prefixdctl"))
+            .arg(flag)
+            .env("PREFIXD_API_TOKEN", SENTINEL)
+            .env("PREFIXD_SESSION_COOKIE", SENTINEL)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(output.status.success(), "{flag}");
+        assert!(stdout.contains("PREFIXD_API_TOKEN"), "{flag}: {stdout}");
+        assert!(!stdout.contains(SENTINEL), "{flag}: {stdout}");
+    }
+}
