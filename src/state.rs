@@ -25,8 +25,6 @@ pub struct AppState {
     pub shutdown_tx: broadcast::Sender<()>,
     /// WebSocket broadcast channel for real-time updates
     pub ws_broadcast: broadcast::Sender<WsMessage>,
-    /// Cached bearer token (loaded at startup to avoid per-request env lookups)
-    pub bearer_token: Option<String>,
     /// Server start time for uptime calculation
     pub start_time: Instant,
     /// Timestamp when inventory was last loaded/reloaded
@@ -91,12 +89,6 @@ impl AppState {
         let ws_broadcast = crate::ws::create_broadcast();
         let alerting = AlertingService::new(settings.alerting.clone());
 
-        // Load bearer token at startup (avoids per-request env lookups)
-        let bearer_token = settings.http.auth.bearer_token()?;
-        if bearer_token.is_some() {
-            tracing::info!(env_var = %settings.http.auth.bearer_token_env(), "loaded bearer token from environment");
-        }
-
         let correlation_config = settings.correlation.clone();
         let scrubber = crate::scrubber::ScrubberController::new(&settings)?;
 
@@ -108,7 +100,6 @@ impl AppState {
             announcer,
             shutdown_tx,
             ws_broadcast,
-            bearer_token,
             alerting: Arc::new(RwLock::new(alerting)),
             alerting_loaded_at: RwLock::new(Utc::now()),
             correlation_config: RwLock::new(correlation_config),

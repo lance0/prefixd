@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::correlation::engine::{SignalGroup, SignalGroupEvent, SignalGroupFilter};
 use crate::domain::{
-    AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole, WithdrawalRequest,
+    ApiToken, AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole, WithdrawalRequest,
 };
 use crate::error::Result;
 use crate::observability::AuditEntry;
@@ -371,6 +371,40 @@ pub trait RepositoryTrait: Send + Sync {
     async fn update_operator_password(&self, id: Uuid, password_hash: &str) -> Result<()>;
     async fn delete_operator(&self, id: Uuid) -> Result<bool>;
     async fn list_operators(&self) -> Result<Vec<Operator>>;
+
+    // API tokens (ADR 034). The plaintext is never stored; rows hold its SHA-256.
+    /// Store a token and its creation audit entry in one transaction. A name
+    /// already used, by a revoked token too, is a `Conflict`.
+    async fn create_api_token(
+        &self,
+        token: &ApiToken,
+        token_hash: &[u8; 32],
+        audit: &AuditEntry,
+    ) -> Result<()>;
+    /// The token whose SHA-256 is `token_hash`, revoked and expired ones included.
+    async fn get_api_token_by_hash(&self, token_hash: &[u8; 32]) -> Result<Option<ApiToken>>;
+    /// Every token, revoked ones included, optionally only those `created_by`
+    /// created, oldest first.
+    async fn list_api_tokens(&self, created_by: Option<&str>) -> Result<Vec<ApiToken>>;
+    /// Revoke the named token, writing `audit` in the same transaction only
+    /// when this call revoked it. An already revoked token is returned as
+    /// stored. `None` when no token has that name.
+    async fn revoke_api_token(
+        &self,
+        name: &str,
+        revoked_by: &str,
+        now: DateTime<Utc>,
+        audit: &AuditEntry,
+    ) -> Result<Option<ApiToken>>;
+    /// Stamp `last_used_at = now` unless the stored stamp is later than
+    /// `stale_before`, so concurrent requests write at most once per interval.
+    /// Never waits on a locked row and never stamps a revoked token.
+    async fn touch_api_token(
+        &self,
+        token_id: Uuid,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+    ) -> Result<()>;
 
     // Notification preferences
     async fn get_notification_preferences(

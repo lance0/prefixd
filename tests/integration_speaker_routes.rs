@@ -21,7 +21,7 @@ use std::sync::{
 };
 use tower::ServiceExt;
 
-const TOKEN: &str = "speaker-inventory-token";
+const TOKEN: &str = "prefixd_speakerinventorytokenAAAAAAAAAAAAAAAAAAAAAA";
 
 struct InventorySpeaker {
     backend: &'static str,
@@ -130,11 +130,18 @@ fn rules() -> Vec<FlowSpecRule> {
 }
 
 fn state(speaker: Arc<InventorySpeaker>) -> Arc<AppState> {
+    let repo = Arc::new(MockRepository::new());
+    repo.insert_token(
+        TOKEN,
+        "speaker-inventory",
+        prefixd::domain::TokenScope::Operator,
+        None,
+    );
     AppState::new(
         common::test_settings(),
         common::test_inventory(),
         common::test_playbooks(),
-        Arc::new(MockRepository::new()),
+        repo,
         speaker,
         ".".into(),
     )
@@ -153,8 +160,7 @@ async fn route_inventory_authenticates_before_reading_the_speaker() {
     let speaker = InventorySpeaker::new("mock", 0);
     let mut state = state(speaker.clone());
     let settings = Arc::get_mut(&mut state).unwrap();
-    settings.settings.http.auth.mode = AuthMode::Bearer;
-    settings.bearer_token = Some(TOKEN.into());
+    settings.settings.http.auth.mode = AuthMode::Credentials;
     let app = create_test_router(state);
     for token in [None, Some("wrong-token")] {
         let mut request = Request::builder().uri("/v1/speaker/routes");
@@ -328,7 +334,15 @@ fn openapi_documents_read_scope_and_failure_outcomes() {
     for code in ["200", "401", "501", "502"] {
         assert!(operation["responses"].get(code).is_some(), "{code}");
     }
-    assert!(operation["responses"].get("503").is_none());
+    // Available in standby: the only 503 is a token store outage.
+    let unavailable = operation["responses"]["503"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        unavailable.contains("API token store unavailable"),
+        "{unavailable}"
+    );
+    assert!(!unavailable.contains("standby"), "{unavailable}");
     assert!(
         operation["description"]
             .as_str()
@@ -354,8 +368,7 @@ async fn cli_reports_local_rules_and_never_turns_failed_observation_into_empty_j
     let speaker = InventorySpeaker::new("rustbgpd", 1);
     let mut state = state(speaker.clone());
     let config = Arc::get_mut(&mut state).unwrap();
-    config.settings.http.auth.mode = AuthMode::Bearer;
-    config.bearer_token = Some(TOKEN.into());
+    config.settings.http.auth.mode = AuthMode::Credentials;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {

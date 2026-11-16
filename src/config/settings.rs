@@ -166,32 +166,24 @@ impl HttpConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     pub mode: AuthMode,
-    #[serde(default)]
-    pub bearer_token_env: Option<String>,
 }
 
-impl AuthConfig {
-    /// The environment variable that holds the API bearer token.
-    pub fn bearer_token_env(&self) -> &str {
-        self.bearer_token_env
-            .as_deref()
-            .unwrap_or("PREFIXD_API_TOKEN")
-    }
+/// The controller no longer reads this variable; `prefixdctl` reads
+/// `PREFIXD_TOKEN` instead.
+pub const REMOVED_TOKEN_ENV: &str = "PREFIXD_API_TOKEN";
 
-    /// The API bearer token when `mode` is `bearer`, which then must be set and
-    /// nonempty. Startup reads it once; the error names the variable, never a value.
-    pub fn bearer_token(&self) -> crate::error::Result<Option<String>> {
-        if self.mode != AuthMode::Bearer {
-            return Ok(None);
-        }
-        match std::env::var(self.bearer_token_env()) {
-            Ok(token) if !token.is_empty() => Ok(Some(token)),
-            _ => Err(crate::error::PrefixdError::Config(format!(
-                "auth.mode=bearer but {} is not set or empty",
-                self.bearer_token_env()
-            ))),
-        }
+/// Warn, naming only the variable, when the removed shared-token variable is
+/// still set. Refusing would crash-loop the controller over a stale variable
+/// and drop leased mitigations.
+pub fn warn_removed_token_env() -> bool {
+    let set = std::env::var_os(REMOVED_TOKEN_ENV).is_some();
+    if set {
+        tracing::warn!(
+            env_var = REMOVED_TOKEN_ENV,
+            "the shared bearer token was removed and this variable is ignored; remove it from the controller's environment and use API tokens (see docs/how-to/upgrading.md#source-bound-ingest-tokens)"
+        );
     }
+    set
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,9 +191,7 @@ impl AuthConfig {
 pub enum AuthMode {
     /// Mutual TLS - client certificates required
     Mtls,
-    /// Bearer token authentication (from environment variable)
-    Bearer,
-    /// Username/password authentication with PostgreSQL-backed sessions
+    /// Operator sessions and API tokens (`Authorization: Bearer prefixd_...`)
     Credentials,
     /// No authentication (development only)
     None,
@@ -884,18 +874,23 @@ fn default_drain_timeout() -> u32 {
     30
 }
 
-/// Keys v0.19.1 shipped or documented that 0.20.0 removed. Settings fail to
-/// load while any is present. Any other unknown key keeps its section's
-/// existing behavior.
-pub const REMOVED_KEYS: &[&str] = &[
-    "escalation",
-    "http.auth.ldap",
-    "http.auth.radius",
-    "timers.correlation_window_seconds",
-    "observability.audit_log_path",
-    "observability.metrics_listen",
-    "shutdown.preserve_announcements",
+/// Removed keys and the release that removed each. Settings fail to load while
+/// any is present, at startup, on reload and in `prefixd --check`. Any other
+/// unknown key keeps its section's existing behavior.
+pub const REMOVED_KEYS: &[(&str, &str)] = &[
+    ("escalation", "0.20.0"),
+    ("http.auth.ldap", "0.20.0"),
+    ("http.auth.radius", "0.20.0"),
+    ("timers.correlation_window_seconds", "0.20.0"),
+    ("observability.audit_log_path", "0.20.0"),
+    ("observability.metrics_listen", "0.20.0"),
+    ("shutdown.preserve_announcements", "0.20.0"),
+    ("http.auth.bearer_token_env", TOKENS_RELEASE),
 ];
+
+/// The release that replaced the shared bearer token with API tokens. It must
+/// match the version this change ships in; check it when cutting the release.
+pub const TOKENS_RELEASE: &str = "0.28.0";
 
 impl Settings {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -995,26 +990,45 @@ impl Settings {
     }
 }
 
-/// Names each removed key present, never its value. Content that isn't valid
-/// YAML is left to typed parsing to report.
+/// Names each removed key present, and the removed `bearer` auth mode, never
+/// a value. Content that isn't valid YAML is left to typed parsing to report.
 fn reject_removed_keys(content: &str) -> Result<()> {
     let Ok(document) = crate::config::parse_yaml::<serde_json::Value>(content) else {
         return Ok(());
     };
-    let present: Vec<_> = REMOVED_KEYS
-        .iter()
-        .filter(|key| {
-            document
-                .pointer(&format!("/{}", key.replace('.', "/")))
-                .is_some()
+    // One message per release, naming its keys in list order.
+    let mut by_release: Vec<(&str, Vec<String>)> = Vec::new();
+    for (key, release) in REMOVED_KEYS {
+        if document
+            .pointer(&format!("/{}", key.replace('.', "/")))
+            .is_none()
+        {
+            continue;
+        }
+        match by_release.iter_mut().find(|(seen, _)| seen == release) {
+            Some((_, keys)) => keys.push(format!("`{key}`")),
+            None => by_release.push((release, vec![format!("`{key}`")])),
+        }
+    }
+    let mut errors: Vec<_> = by_release
+        .into_iter()
+        .map(|(release, keys)| {
+            format!(
+                "remove {}: configuration keys removed in {release} are no longer accepted",
+                keys.join(", ")
+            )
         })
-        .map(|key| format!("`{key}`"))
         .collect();
-    anyhow::ensure!(
-        present.is_empty(),
-        "remove {}: configuration keys removed in 0.20.0 are no longer accepted",
-        present.join(", ")
-    );
+    if document
+        .pointer("/http/auth/mode")
+        .and_then(serde_json::Value::as_str)
+        == Some("bearer")
+    {
+        errors.push(format!(
+            "`http.auth.mode: bearer` was removed in {TOKENS_RELEASE}: set `credentials` and use API tokens; see docs/how-to/upgrading.md#source-bound-ingest-tokens"
+        ));
+    }
+    anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
     Ok(())
 }
 
@@ -1098,7 +1112,7 @@ mod tests {
         let http = |yaml: &str| crate::config::parse_yaml::<HttpConfig>(yaml).unwrap();
         let base = "listen: \"0.0.0.0:8080\"\n";
         assert!(http(&format!("{base}auth: {{mode: credentials}}\n")).secure_cookies());
-        assert!(http(&format!("{base}auth: {{mode: bearer}}\n")).secure_cookies());
+        assert!(http(&format!("{base}auth: {{mode: mtls}}\n")).secure_cookies());
         assert!(!http(&format!("{base}auth: {{mode: none}}\n")).secure_cookies());
         assert!(
             http(&format!(
@@ -1353,20 +1367,73 @@ observability:
                 "shutdown:\n  drain_timeout_seconds: 7\n  preserve_announcements: false\nstorage:\n"
                     .to_owned(),
             ),
+            (
+                "http.auth.bearer_token_env",
+                "    mode: none\n",
+                format!("    mode: none\n    bearer_token_env: {SECRET}\n"),
+            ),
         ];
-        assert_eq!(cases.each_ref().map(|case| case.0), REMOVED_KEYS);
-        for (key, anchor, replacement) in cases {
+        assert_eq!(
+            cases.each_ref().map(|case| case.0),
+            std::array::from_fn::<_, 8, _>(|index| REMOVED_KEYS[index].0)
+        );
+        for ((key, anchor, replacement), (_, release)) in cases.into_iter().zip(REMOVED_KEYS) {
             assert!(MINIMAL_SETTINGS_YAML.contains(anchor), "{key}");
             let yaml = MINIMAL_SETTINGS_YAML.replacen(anchor, &replacement, 1);
             let error = load_yaml(&yaml).unwrap_err().to_string();
-            assert!(
-                error.starts_with(&format!("remove `{key}`: ")) && error.contains("0.20.0"),
-                "{key}: {error}"
+            assert_eq!(
+                error,
+                format!(
+                    "remove `{key}`: configuration keys removed in {release} are no longer accepted"
+                ),
             );
             assert!(!error.contains(SECRET), "{key}: configuration value leaked");
         }
+        assert_eq!(
+            REMOVED_KEYS
+                .iter()
+                .find(|(key, _)| *key == "http.auth.bearer_token_env"),
+            Some(&("http.auth.bearer_token_env", TOKENS_RELEASE))
+        );
         // Control: the same file without the key loads.
         load_yaml(MINIMAL_SETTINGS_YAML).unwrap();
+    }
+
+    #[test]
+    fn bearer_mode_is_refused_with_its_removal_release() {
+        let bearer = MINIMAL_SETTINGS_YAML.replacen("    mode: none\n", "    mode: bearer\n", 1);
+        let error = load_yaml(&bearer).unwrap_err().to_string();
+        assert!(
+            error.starts_with("`http.auth.mode: bearer` was removed in 0.28.0"),
+            "{error}"
+        );
+        assert!(
+            error.contains("upgrading.md#source-bound-ingest-tokens"),
+            "{error}"
+        );
+        // Both removals are reported together, never a value.
+        let both = MINIMAL_SETTINGS_YAML.replacen(
+            "    mode: none\n",
+            "    mode: bearer\n    bearer_token_env: PREFIXD_SEEDED_SECRET_NAME\n",
+            1,
+        );
+        let error = load_yaml(&both).unwrap_err().to_string();
+        assert!(
+            error.contains("remove `http.auth.bearer_token_env`"),
+            "{error}"
+        );
+        assert!(
+            error.contains("`http.auth.mode: bearer` was removed"),
+            "{error}"
+        );
+        assert!(!error.contains("PREFIXD_SEEDED_SECRET_NAME"), "{error}");
+        // Control: credentials mode loads.
+        load_yaml(&MINIMAL_SETTINGS_YAML.replacen(
+            "    mode: none\n",
+            "    mode: credentials\n",
+            1,
+        ))
+        .unwrap();
     }
 
     #[test]

@@ -406,7 +406,7 @@ class FastNetMonLab(Lab):
             audit = self.api("GET", f"/v1/audit?target_type=mitigation&target_id={mitigation_id}")[
                 "entries"
             ]
-            # prefixd prefixes the reason with the actor ("anonymous: " in none mode).
+            # prefixd prefixes the reason with the actor ("token:fnm-script: ").
             reasons = [e["details"].get("reason", "") for e in audit if e["action"] == "withdraw"]
             wanted = f"FastNetMon unban for {detected} (direction=incoming)"
             assert len(reasons) == 1 and reasons[0].endswith(wanted), audit

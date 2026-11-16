@@ -158,8 +158,7 @@ sudo chmod +x /usr/local/bin/prefixd-fastnetmon.sh
 # prefixd API endpoint
 PREFIXD_API="http://prefixd-host:8080"
 
-# Bearer token for authentication (if auth.mode=bearer): the controller's
-# PREFIXD_API_TOKEN value
+# API token, created with prefixdctl tokens create (see below)
 PREFIXD_TOKEN=""
 
 # Operator request field (optional; audit actor comes from authentication)
@@ -184,10 +183,19 @@ WITHDRAW_DELAY_SECONDS="1"
 The script sources `/etc/default/prefixd` when it exists; variables set there
 override the process environment.
 
-The script authenticates with a bearer token only. Set `http.auth.mode: bearer`
-with `bearer_token_env: PREFIXD_API_TOKEN` (or use `mtls`/`none`) before pointing
-FastNetMon at it. `credentials` mode rejects `Authorization: Bearer`, so the
-script cannot log in; the shipped Compose configuration uses `credentials`.
+The script authenticates with an API token in `Authorization: Bearer`, in
+`credentials` mode, the shipped default. Create the token on the controller and
+put its secret in `PREFIXD_TOKEN`; it is shown once:
+
+```bash
+prefixdctl tokens create --name fnm-pop1 --scope operator --pop iad1
+```
+
+The script's unban looks up the victim's mitigations in `/v1/mitigations` and
+withdraws them, which an ingest token cannot do, so this script needs an
+operator token. A shim that only posts events can use an ingest token bound to
+the detector's source (`--scope ingest --source fastnetmon`). See
+[API tokens](../../reference/cli.md#api-tokens) for rotation and revocation.
 
 
 FastNetMon runs the script once per ban and never repeats it. The script
@@ -515,7 +523,9 @@ tail -f /var/log/prefixd-fastnetmon.log
 1. **Connection refused**: Verify `PREFIXD_API` is reachable
 1. **503 Service Unavailable**: `PREFIXD_API` reaches a standby controller; route
    it to the controller whose `GET /v1/ready` returns `200`
-2. **401 Unauthorized**: Bearer mode is not enabled, or `PREFIXD_TOKEN` does not match the controller token
+2. **401 Unauthorized**: `PREFIXD_TOKEN` is not a valid API token, or it was
+   revoked or expired; the error names which. A value from the removed
+   `PREFIXD_API_TOKEN` is refused as malformed
 3. **422 Unprocessable**: A guardrail refused the mitigation, for example a
    safelisted victim, a quota, an unsupported VPN scope, or a blackhole
    playbook whose `source` is not in `blackhole.detector_sources`. An unowned

@@ -451,7 +451,7 @@ impl AppConfig {
 
     /// The configuration-only checks startup runs after loading and before it
     /// opens the database, each of which startup would otherwise reach only
-    /// after connecting: the database URL, the API bearer token and TLS files,
+    /// after connecting: the database URL, the HTTP TLS files,
     /// the speaker endpoint, credentials and TLS files, scrubber readiness
     /// credentials, and the playbook checks against settings. The playbook
     /// checks assume a speaker that supports every FlowSpec match component
@@ -471,9 +471,6 @@ impl AppConfig {
         let mut errors = Vec::new();
         let mut push = |error: String| errors.push(format!("{}: {error}", prefixd.display()));
         if let Err(error) = settings.storage.database_url() {
-            push(error.to_string());
-        }
-        if let Err(error) = settings.http.auth.bearer_token() {
             push(error.to_string());
         }
         if let Some(tls) = &settings.http.tls
@@ -1043,16 +1040,13 @@ mod tests {
     }
 
     /// A file that fails to load does not hide the settings checks: an
-    /// invalid inventory and an unset API token are both reported.
+    /// invalid inventory and the removed `bearer` mode are both reported.
     #[test]
     fn check_runs_settings_checks_when_another_file_fails() {
         let directory = fixture();
-        let mut settings: Settings = parse_yaml(SHIPPED).unwrap();
-        settings.http.auth.mode = AuthMode::Bearer;
-        settings.http.auth.bearer_token_env = Some("PREFIXD_TEST_UNSET_API_TOKEN".into());
         std::fs::write(
             directory.path().join("prefixd.yaml"),
-            serde_saphyr::to_string(&settings).unwrap(),
+            SHIPPED.replacen("mode: credentials", "mode: bearer", 1),
         )
         .unwrap();
         std::fs::write(
@@ -1063,7 +1057,7 @@ mod tests {
         let errors = AppConfig::check(directory.path()).errors.join("\n");
         assert!(errors.contains("inventory.yaml"), "{errors}");
         assert!(
-            errors.contains("auth.mode=bearer but PREFIXD_TEST_UNSET_API_TOKEN is not set"),
+            errors.contains("`http.auth.mode: bearer` was removed"),
             "{errors}"
         );
     }

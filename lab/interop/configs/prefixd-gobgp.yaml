@@ -7,8 +7,7 @@ mode: enforced
 http:
   listen: "0.0.0.0:8080"
   auth:
-    mode: bearer
-    bearer_token_env: "PREFIXD_API_TOKEN"
+    mode: credentials
   # The lab serves plain HTTP; urllib's cookie jar would withhold a Secure session.
   secure_cookies: false
 

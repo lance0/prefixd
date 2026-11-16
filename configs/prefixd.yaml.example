@@ -10,10 +10,9 @@ mode: dry-run
 http:
   listen: "0.0.0.0:8080"
   auth:
-    # Auth modes: none, bearer, mtls, credentials
+    # Auth modes: credentials (operator sessions and API tokens), mtls, none.
+    # Mint API tokens with `prefixdctl tokens create`; there is no shared token.
     mode: credentials
-    # For bearer mode, set env var name containing the token
-    # bearer_token_env: "PREFIXD_API_TOKEN"
   rate_limit:
     events_per_second: 100
     burst: 500

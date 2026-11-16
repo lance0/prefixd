@@ -57,29 +57,34 @@ See [Secure session cookies](../how-to/upgrading.md#secure-session-cookies).
 ```yaml
 http:
   auth:
-    # Mode: none, bearer, mtls, or credentials
+    # Mode: credentials, mtls or none
     mode: credentials
-    
-    # Bearer token (use env var for security)
-    bearer_token_env: "PREFIXD_API_TOKEN"
 ```
 
 | Mode | Dashboard | API/CLI | Notes |
 |------|-----------|---------|-------|
+| `credentials` | Session login | API tokens or a session cookie | Recommended |
+| `mtls` | N/A | Client certificates | Machine-to-machine; every client is Admin |
 | `none` | Anonymous; login returns 403 | No auth | Development only |
-| `bearer` | N/A | Bearer token | API-only access |
-| `mtls` | N/A | Client certificates | Machine-to-machine |
-| `credentials` | Session login | Session cookie | Recommended |
 
-In `none` mode, requests have anonymous administrator permissions. Named sessions
+In `none` mode, requests have anonymous administrator permissions and every
+credential, API tokens included, is ignored. Named sessions
 are ignored before request tracing, `/v1/auth/me` returns 401, and WebSocket
 connections use the anonymous identity. The dashboard hides named preferences and
 sign-out controls. `/v1/auth/logout` still deletes a retained session and clears
-its cookie. Credential sessions and bearer-mode hybrid sessions are unchanged.
+its cookie. Credential sessions are unchanged. In `mtls` mode every verified
+client certificate is Admin and API tokens are not consulted.
 
 Credentials authentication uses PostgreSQL operator accounts, Argon2 password
-verification and PostgreSQL-backed browser sessions. Session cookie attributes
-are set by [`http.secure_cookies`](#http-server).
+verification and PostgreSQL-backed browser sessions, plus named API tokens for
+detectors and automation. Session cookie attributes are set by
+[`http.secure_cookies`](#http-server). Tokens are created with
+`prefixdctl tokens create` or `POST /v1/tokens` from an Admin session; see
+[API tokens](api.md#api-tokens). There is no shared token: the `bearer` mode and
+`http.auth.bearer_token_env` were removed in 0.28.0, and a configuration that
+sets either is refused at startup, on reload and by `prefixd --check` (see
+[Removed keys](#removed-keys) and
+[Source-bound ingest tokens](../how-to/upgrading.md#source-bound-ingest-tokens)).
 
 ### TLS
 
@@ -101,8 +106,8 @@ validation applies when constructing application state programmatically.
 
 The native TLS listener verifies client certificates against `ca_path`; a trusted
 client retains administrator access. TLS termination at a reverse proxy and
-forwarded identity headers do not satisfy this mode. Use the appropriate bearer
-or credentials mode when the proxy connects to prefixd over plaintext. Other
+forwarded identity headers do not satisfy this mode. Use `credentials` mode
+(sessions and API tokens) when the proxy connects to prefixd over plaintext. Other
 authentication modes may use TLS without a client CA.
 
 ### Rate Limiting
@@ -821,7 +826,7 @@ For `confidence`, the order of operations is: JSONPath extract → transform →
 | `auth.type` | Meaning |
 |-------------|---------|
 | `hmac` | HMAC-SHA256 over the raw body. `auth.header` is the request header (default `X-Signature-SHA256`). `auth.secret_env` is the env var holding the secret. Comparison is constant-time. Hex digest may be prefixed with `sha256=`. |
-| `bearer` | Reuses global session/bearer auth. |
+| `bearer` | An API token in `Authorization: Bearer`, verified as on the other ingest routes; an ingest token reaches the route. |
 | `none` | No auth (lab use only). |
 
 **JSONPath quick reference** (RFC 9535 via `serde_json_path`):
@@ -1131,20 +1136,24 @@ meets it. The Community notify script takes the same default from
 
 ### Removed keys
 
-These v0.19.1 keys had no effect and were removed in 0.20.0, which ignored them
-with a warning. Settings now fail to load while any of them is present. The
-error names each key found, not its value, for example
-``remove `escalation`, `observability.audit_log_path`: configuration keys
-removed in 0.20.0 are no longer accepted``. Delete them:
+Settings fail to load while any of these keys is present, at startup, on reload
+and in `prefixd --check`. The error names each key found, not its value, with
+one message per removal release, for example ``remove `escalation`,
+`observability.audit_log_path`: configuration keys removed in 0.20.0 are no
+longer accepted``. Delete them:
 
-| Key | Notes |
-| --- | --- |
-| `escalation` | Playbooks select their first step |
-| `http.auth.ldap`, `http.auth.radius` | Never implemented; credentials mode uses PostgreSQL operators |
-| `timers.correlation_window_seconds` | The correlation engine uses `correlation.window_seconds` |
-| `observability.audit_log_path` | Audit records are stored in PostgreSQL |
-| `observability.metrics_listen` | Metrics are served on `http.listen` |
-| `shutdown.preserve_announcements` | Shutdown always leaves speaker rules in place |
+| Key | Removed in | Notes |
+| --- | --- | --- |
+| `http.auth.bearer_token_env` | 0.28.0 | The shared bearer token was removed; use [API tokens](api.md#api-tokens) |
+| `escalation` | 0.20.0 | Playbooks select their first step |
+| `http.auth.ldap`, `http.auth.radius` | 0.20.0 | Never implemented; credentials mode uses PostgreSQL operators |
+| `timers.correlation_window_seconds` | 0.20.0 | The correlation engine uses `correlation.window_seconds` |
+| `observability.audit_log_path` | 0.20.0 | Audit records are stored in PostgreSQL |
+| `observability.metrics_listen` | 0.20.0 | Metrics are served on `http.listen` |
+| `shutdown.preserve_announcements` | 0.20.0 | Shutdown always leaves speaker rules in place |
+
+The value `http.auth.mode: bearer` is refused the same way, with an error that
+points to the [upgrade guide](../how-to/upgrading.md#source-bound-ingest-tokens).
 
 Other unknown keys keep their existing handling: `bgp`, `observability`,
 `shutdown`, `blackhole`, `amplification` and `scrubber` reject them; the other
@@ -1511,7 +1520,7 @@ destinations:
 ```
 
 The variable must be in the controller's own environment. The shipped Compose
-stack forwards only `RUST_LOG`, `PREFIXD_API_TOKEN` and `DATABASE_URL` to the
+stack forwards only `RUST_LOG` and `DATABASE_URL` to the
 controller, not other `.env` entries, so add each variable to the controller
 service in `docker-compose.override.yml`:
 
@@ -1564,23 +1573,23 @@ to alert destinations as needed.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PREFIXD_API_TOKEN` | Bearer token for auth | Required if mode=bearer |
+| `PREFIXD_TOKEN` | API token for prefixdctl | None |
 | `PREFIXD_API` | API URL for prefixdctl | `http://127.0.0.1` |
+| `PREFIXD_API_TOKEN` | No longer read. The controller logs a warning naming it, `prefixd --check` prints one, and prefixdctl warns when it is set without `PREFIXD_TOKEN`; none of them refuses | None |
 | `RUST_LOG` | Complete tracing filter override | Configured filter; default `info` quiets PostgreSQL notices |
 | `DATABASE_URL` | PostgreSQL connection | Config value |
 
 ### Using Environment Variables in Config
 
 prefixd does not expand `${VAR}` placeholders. Keys ending in `_env` name an
-environment variable instead, such as `http.auth.bearer_token_env`,
-`bgp.rustbgpd.bearer_token_env` and the
+environment variable instead, such as `bgp.rustbgpd.bearer_token_env` and the
 [alert destination secrets](#alert-destination-secrets). `DATABASE_URL`
 overrides `storage.connection_string`.
 
 ```yaml
-http:
-  auth:
-    bearer_token_env: "PREFIXD_API_TOKEN"
+bgp:
+  rustbgpd:
+    bearer_token_env: "PREFIXD_RUSTBGPD_TOKEN"
 ```
 
 Startup and reload refuse any `prefixd.yaml` or `alerting.yaml` string value
@@ -1653,9 +1662,8 @@ startup also runs at that point:
   scrubber profiles, guardrails, quotas and correlation settings.
 - The database URL, from `DATABASE_URL` or `storage.connection_string`: present
   and a valid PostgreSQL URL. The error never repeats the URL.
-- The API bearer token variable when `http.auth.mode` is `bearer`, and the
-  `http.tls` certificate, key and (for mTLS) CA files: readable, parseable and
-  matching.
+- The `http.tls` certificate, key and (for mTLS) CA files: readable, parseable
+  and matching.
 - The speaker endpoint: the `bgp.rustbgpd` section for the rustbgpd backend, a
   nonempty `bgp.gobgp_grpc` without userinfo or a path for GoBGP, and the
   rustbgpd transport rules (plaintext only to a literal loopback address, a set
@@ -1717,7 +1725,7 @@ Errors name the file and the key they refuse, for example:
 - `failed to load /etc/prefixd/prefixd.yaml: configuration error: amplification.reflector_ports: port 53 is listed twice`
 - `failed to load /etc/prefixd/inventory.yaml: configuration error: inventory customer acme: invalid prefix "203.0.113.0/33"`
 - `failed to load /etc/prefixd/prefixd.yaml: mode: unknown variant, expected one of dry-run, enforced at line 2 column 7`
-- `/etc/prefixd/prefixd.yaml: auth.mode=bearer but PREFIXD_API_TOKEN is not set or empty`
+- ``failed to load /etc/prefixd/prefixd.yaml: `http.auth.mode: bearer` was removed in 0.28.0: set `credentials` and use API tokens; see docs/how-to/upgrading.md#source-bound-ingest-tokens``
 - `/etc/prefixd/playbooks.yaml: configuration error: playbook "bh" has a blackhole step, but blackhole.enabled is false`
 
 ### Unknown keys

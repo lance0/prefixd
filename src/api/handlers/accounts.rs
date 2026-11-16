@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,11 +12,9 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::api::auth::require_role;
-use crate::auth::AuthSession;
+use crate::api::auth::AuthPrincipal;
 use crate::db::NotificationPreferences;
-
-use super::MAX_USERNAME_LEN;
+use crate::domain::is_valid_username;
 
 const LOGIN_MAX_ATTEMPTS: u32 = 5;
 
@@ -69,13 +67,6 @@ async fn clear_login_attempts(key: &str) {
     attempts.remove(key);
 }
 
-fn is_valid_username(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
 const MAX_PASSWORD_LEN: usize = 256;
 
 // Authentication handlers
@@ -117,8 +108,7 @@ pub async fn login(
     }
 
     // Validate input lengths and username format
-    if req.username.len() > MAX_USERNAME_LEN
-        || !is_valid_username(&req.username)
+    if !is_valid_username(&req.username)
         || req.password.is_empty()
         || req.password.len() > MAX_PASSWORD_LEN
     {
@@ -238,15 +228,12 @@ pub struct ChangePasswordRequest {
 )]
 pub async fn list_operators(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    auth_session: crate::auth::AuthSession,
+    principal: AuthPrincipal,
 ) -> Result<Json<OperatorListResponse>, StatusCode> {
     use crate::api::auth::require_role;
     use crate::domain::OperatorRole;
 
-    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-
-    require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    require_role(&principal, OperatorRole::Admin)?;
 
     let operators = state
         .repo
@@ -282,29 +269,27 @@ pub async fn list_operators(
         (status = 201, description = "Operator created", body = OperatorInfo),
         (status = 400, description = "Invalid input"),
         (status = 401, description = "Not authenticated"),
-        (status = 403, description = "Insufficient permissions"),
+        (status = 403, description = "Requires a signed-in session (Admin, or the operator itself for its own password); tokens, mTLS clients and auth mode none are refused"),
         (status = 409, description = "Username already exists")
     )
 )]
 pub async fn create_operator(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    auth_session: crate::auth::AuthSession,
+    principal: AuthPrincipal,
     Json(req): Json<CreateOperatorRequest>,
 ) -> Result<(StatusCode, Json<OperatorInfo>), StatusCode> {
-    use crate::api::auth::require_role;
     use crate::domain::OperatorRole;
     use argon2::{Argon2, PasswordHasher};
 
-    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-
-    let admin = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    // Identity management: an Admin session only, never a token.
+    let admin =
+        crate::api::auth::require_admin_session(&principal).map_err(|error| error.status_code())?;
 
     // Validate role
     let role: OperatorRole = req.role.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // Validate username
-    if req.username.len() > MAX_USERNAME_LEN || !is_valid_username(&req.username) {
+    if !is_valid_username(&req.username) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -370,22 +355,18 @@ pub async fn create_operator(
     responses(
         (status = 204, description = "Operator deleted"),
         (status = 401, description = "Not authenticated"),
-        (status = 403, description = "Insufficient permissions"),
+        (status = 403, description = "Requires a signed-in session (Admin, or the operator itself for its own password); tokens, mTLS clients and auth mode none are refused"),
         (status = 404, description = "Operator not found")
     )
 )]
 pub async fn delete_operator(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    auth_session: crate::auth::AuthSession,
+    principal: AuthPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode> {
-    use crate::api::auth::require_role;
-    use crate::domain::OperatorRole;
-
-    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-
-    let admin = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    // Identity management: an Admin session only, never a token.
+    let admin =
+        crate::api::auth::require_admin_session(&principal).map_err(|error| error.status_code())?;
 
     // Prevent self-deletion
     if admin.operator_id == id {
@@ -419,25 +400,23 @@ pub async fn delete_operator(
         (status = 204, description = "Password changed"),
         (status = 400, description = "Invalid password"),
         (status = 401, description = "Not authenticated"),
-        (status = 403, description = "Insufficient permissions"),
+        (status = 403, description = "Requires a signed-in session (Admin, or the operator itself for its own password); tokens, mTLS clients and auth mode none are refused"),
         (status = 404, description = "Operator not found")
     )
 )]
 pub async fn change_password(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    auth_session: crate::auth::AuthSession,
+    principal: AuthPrincipal,
     Path(id): Path<Uuid>,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    use crate::api::auth::require_role;
     use crate::domain::OperatorRole;
     use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 
-    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-
-    // Allow self or admin to change password
-    let caller = require_role(&state, &auth_session, auth_header, OperatorRole::Viewer)?;
+    // Allow self or admin to change password, from a session only: no token,
+    // mTLS client or `none` mode sets or resets a password.
+    let caller = crate::api::auth::require_session(&principal, OperatorRole::Viewer)
+        .map_err(|error| error.status_code())?;
 
     let is_self = caller.operator_id == id;
     let is_admin = caller.role == OperatorRole::Admin;
@@ -512,21 +491,19 @@ pub async fn change_password(
     responses(
         (status = 200, description = "Notification preferences", body = NotificationPreferences),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Not a signed-in session: tokens, mTLS clients and auth mode none have no preferences"),
     ),
     tag = "preferences"
 )]
 pub async fn get_notification_preferences(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> Result<Json<NotificationPreferences>, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    let operator = require_role(
-        &state,
-        &auth_session,
-        auth_header,
-        crate::domain::OperatorRole::Viewer,
-    )?;
+    // Preferences belong to an operator account, so only a signed-in session
+    // has them: a token, mTLS client or `none` mode gets 403.
+    let operator =
+        crate::api::auth::require_session(&principal, crate::domain::OperatorRole::Viewer)
+            .map_err(|error| error.status_code())?;
 
     let prefs = state
         .repo
@@ -546,22 +523,20 @@ pub async fn get_notification_preferences(
         (status = 200, description = "Preferences updated"),
         (status = 400, description = "Invalid preferences"),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Not a signed-in session: tokens, mTLS clients and auth mode none have no preferences"),
     ),
     tag = "preferences"
 )]
 pub async fn update_notification_preferences(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(prefs): Json<NotificationPreferences>,
 ) -> Result<StatusCode, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    let operator = require_role(
-        &state,
-        &auth_session,
-        auth_header,
-        crate::domain::OperatorRole::Viewer,
-    )?;
+    // Preferences belong to an operator account, so only a signed-in session
+    // has them: a token, mTLS client or `none` mode gets 403.
+    let operator =
+        crate::api::auth::require_session(&principal, crate::domain::OperatorRole::Viewer)
+            .map_err(|error| error.status_code())?;
 
     match (prefs.quiet_hours_start, prefs.quiet_hours_end) {
         (Some(_), None) | (None, Some(_)) => return Err(StatusCode::BAD_REQUEST),
@@ -594,15 +569,6 @@ pub async fn update_notification_preferences(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test_is_valid_username() {
-        assert!(super::is_valid_username("alice_1"));
-        assert!(super::is_valid_username("ops-admin"));
-        assert!(!super::is_valid_username(""));
-        assert!(!super::is_valid_username("bad space"));
-        assert!(!super::is_valid_username("no/slash"));
-    }
-
     #[tokio::test]
     async fn test_login_throttle_blocks_after_limit() {
         let user = "throttle_test_user";

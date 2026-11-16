@@ -63,6 +63,12 @@ async fn main() -> anyhow::Result<()> {
         for warning in &check.warnings {
             eprintln!("{warning}");
         }
+        if std::env::var_os(prefixd::config::REMOVED_TOKEN_ENV).is_some() {
+            eprintln!(
+                "{} is set but no longer read: the shared bearer token was removed; remove it from the controller's environment and use API tokens",
+                prefixd::config::REMOVED_TOKEN_ENV
+            );
+        }
         if check.is_ok() {
             println!("{}", check.summary());
             for skipped in prefixd::config::CHECK_SKIPPED {
@@ -100,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
             "unknown configuration key ignored; the next release refuses it"
         );
     }
+    prefixd::config::warn_removed_token_env();
     prefixd::observability::init_metrics(&config.settings.pop);
     // Refuse what `--check` refuses before opening the database, so a bad edit
     // fails fast instead of after a speaker connection. Maintenance commands

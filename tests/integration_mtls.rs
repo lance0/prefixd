@@ -129,12 +129,7 @@ async fn invalid_mtls_settings_are_rejected_by_both_state_constructors() {
 #[tokio::test]
 async fn valid_auth_transport_combinations_preserve_existing_modes() {
     let directory = tempfile::tempdir().unwrap();
-    for mode in [
-        AuthMode::None,
-        AuthMode::Bearer,
-        AuthMode::Credentials,
-        AuthMode::Mtls,
-    ] {
+    for mode in [AuthMode::None, AuthMode::Credentials, AuthMode::Mtls] {
         for tls_enabled in [false, true] {
             if mode == AuthMode::Mtls && !tls_enabled {
                 continue;
@@ -146,8 +141,6 @@ async fn valid_auth_transport_combinations_preserve_existing_modes() {
             } else if mode != AuthMode::Mtls {
                 settings.http.tls.as_mut().unwrap().ca_path = None;
             }
-            // Reuse an existing nonempty process variable without mutating global env.
-            settings.http.auth.bearer_token_env = Some("PATH".into());
             write_settings(directory.path(), &settings);
             Settings::load(directory.path().join("prefixd.yaml")).unwrap();
             for with_pool in [false, true] {

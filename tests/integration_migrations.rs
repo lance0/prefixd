@@ -594,12 +594,12 @@ async fn scope_index_covers_only_live_statuses_after_fresh_and_020_starts() {
         .await
         .expect("migrate a database at 020");
     assert_live_scope_index(&scope_index(&setup).await);
-    assert_eq!(
+    // 021 is recorded again; later migrations were never removed.
+    assert!(
         recorded(&setup)
             .await
-            .last()
-            .map(|(version, name, _)| (*version, name.clone())),
-        Some((21, "live_scope_index".to_string()))
+            .iter()
+            .any(|(version, name, _)| (*version, name.as_str()) == (21, "live_scope_index"))
     );
 
     // 0.27.0 replays 001-020 on every start. Migration 001's IF NOT EXISTS
@@ -611,4 +611,311 @@ async fn scope_index_covers_only_live_statuses_after_fresh_and_020_starts() {
             .unwrap_or_else(|error| panic!("replay migration {version}: {error}"));
     }
     assert_live_scope_index(&scope_index(&setup).await);
+}
+
+/// Whether the API token table and both operator constraints exist. One
+/// transaction adds all three, so the constraints count as one.
+async fn token_schema(pool: &PgPool) -> (bool, bool) {
+    let (table, constraints): (bool, i64) = sqlx::query_as(
+        "SELECT to_regclass('api_tokens') IS NOT NULL,
+                (SELECT count(*) FROM pg_constraint
+                 WHERE conname IN ('operators_username_format', 'operators_role_known'))",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read the token schema");
+    assert!(constraints == 0 || constraints == 2, "{constraints}");
+    (table, constraints == 2)
+}
+
+/// The `sql` blocks of an upgrade-guide section, so the tests run the exact
+/// pre-check queries operators are told to run.
+fn guide_queries(heading: &str) -> Vec<String> {
+    let guide = include_str!("../docs/how-to/upgrading.md");
+    let start = guide
+        .find(&format!("\n{heading}\n"))
+        .unwrap_or_else(|| panic!("upgrade guide lacks {heading}"));
+    let section = &guide[start + heading.len() + 2..];
+    let section = &section[..section.find("\n### ").unwrap_or(section.len())];
+    let queries: Vec<String> = section
+        .split("```sql\n")
+        .skip(1)
+        .map(|block| block.split("```").next().unwrap().trim().to_owned())
+        .collect();
+    assert!(!queries.is_empty(), "{heading} has no sql block");
+    queries
+}
+
+/// Put a migrated database back at 021: no token table, no username check and
+/// no row for 022.
+async fn put_at_021(pool: &PgPool) {
+    sqlx::raw_sql(
+        "DROP TABLE api_tokens;
+         ALTER TABLE operators DROP CONSTRAINT operators_username_format;
+         ALTER TABLE operators DROP CONSTRAINT operators_role_known;
+         DELETE FROM schema_migrations WHERE version = 22;",
+    )
+    .execute(pool)
+    .await
+    .expect("put the database at 021");
+    assert_eq!(token_schema(pool).await, (false, false));
+}
+
+const TOKEN_MIGRATION: &str = include_str!("../migrations/022_api_tokens.sql");
+
+#[tokio::test]
+async fn api_token_migration_applies_fresh_and_at_021_and_replays_cleanly() {
+    let fixture = start_postgres().await;
+    let setup = connect(&fixture).await;
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("migrate a fresh database");
+    assert_eq!(token_schema(&setup).await, (true, true));
+
+    put_at_021(&setup).await;
+    sqlx::raw_sql(
+        "INSERT INTO operators (username, password_hash, role) VALUES ('ops_admin-1', 'x', 'admin');
+         INSERT INTO audit_log (audit_id, timestamp, actor_type, action, details_json)
+         VALUES (gen_random_uuid(), now(), 'system', 'withdrawal_requested', '{}');",
+    )
+    .execute(&setup)
+    .await
+    .expect("seed state at 021");
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("migrate a database at 021");
+    assert_eq!(token_schema(&setup).await, (true, true));
+    assert_eq!(
+        recorded(&setup)
+            .await
+            .last()
+            .map(|(version, name, _)| (*version, name.clone())),
+        Some((22, "api_tokens".to_string()))
+    );
+    let kept: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM operators WHERE username = 'ops_admin-1'),
+                (SELECT count(*) FROM audit_log)",
+    )
+    .fetch_one(&setup)
+    .await
+    .unwrap();
+    assert_eq!(
+        kept,
+        (1, 1),
+        "the migration rewrote no operator or audit row"
+    );
+
+    // Replaying the file on the migrated database changes nothing.
+    sqlx::raw_sql(TOKEN_MIGRATION)
+        .execute(&setup)
+        .await
+        .expect("replay migration 022");
+    assert_eq!(token_schema(&setup).await, (true, true));
+
+    // The constraints hold the storage rules the application also checks.
+    let hash = vec![7u8; 32];
+    for (name, scope, source, accepted) in [
+        ("a".repeat(58), "ingest", Some("fastnetmon"), true),
+        ("a".repeat(59), "operator", None, false),
+        ("Upper".to_string(), "operator", None, false),
+        ("ingest-without-source".to_string(), "ingest", None, false),
+        (
+            "operator-with-source".to_string(),
+            "operator",
+            Some("fastnetmon"),
+            false,
+        ),
+        ("bad-scope".to_string(), "viewer", None, false),
+        ("bad-source".to_string(), "ingest", Some("Fast.Net"), false),
+    ] {
+        let inserted = sqlx::query(
+            "INSERT INTO api_tokens (name, token_hash, scope, source, created_by)
+             VALUES ($1, $2, $3, $4, 'test')",
+        )
+        .bind(&name)
+        .bind(if accepted {
+            hash.clone()
+        } else {
+            vec![8u8; 32]
+        })
+        .bind(scope)
+        .bind(source)
+        .execute(&setup)
+        .await;
+        assert_eq!(inserted.is_ok(), accepted, "{name} {scope} {source:?}");
+    }
+    let short_hash = sqlx::query(
+        "INSERT INTO api_tokens (name, token_hash, scope, created_by) VALUES ('short', $1, 'admin', 't')",
+    )
+    .bind(vec![1u8; 31])
+    .execute(&setup)
+    .await;
+    assert!(short_hash.is_err(), "a hash must be 32 bytes");
+    let bad_username = sqlx::query(
+        "INSERT INTO operators (username, password_hash, role) VALUES ('token:admin', 'x', 'admin')",
+    )
+    .execute(&setup)
+    .await;
+    assert!(
+        bad_username.is_err(),
+        "the username check refuses token: actors"
+    );
+}
+
+/// Migration 022 refuses to add the username check over usernames outside the
+/// pattern. It names the count and the upgrade guide, rolls back without
+/// rewriting anything, and applies once the operators are renamed.
+#[tokio::test]
+async fn api_token_migration_refuses_invalid_usernames_without_rewriting_them() {
+    let fixture = start_postgres().await;
+    let setup = connect(&fixture).await;
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("migrate a fresh database");
+    put_at_021(&setup).await;
+    sqlx::raw_sql(
+        "INSERT INTO operators (username, password_hash, role) VALUES
+             ('ops admin', 'x', 'admin'), ('ops@example', 'x', 'operator'), ('fine', 'x', 'viewer');",
+    )
+    .execute(&setup)
+    .await
+    .expect("seed invalid usernames");
+
+    let error = prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect_err("invalid usernames must refuse the migration");
+    assert!(
+        matches!(
+            error,
+            PrefixdError::MigrationFailed {
+                version: 22,
+                name: "api_tokens",
+                ..
+            }
+        ),
+        "{error}"
+    );
+    let cause = std::error::Error::source(&error)
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    assert!(cause.contains("2 operator username(s)"), "{cause}");
+    assert!(cause.contains("upgrading.md#operator-usernames"), "{cause}");
+    // Rolled back: no table, no check, no row for 022, usernames unchanged.
+    assert_eq!(token_schema(&setup).await, (false, false));
+    assert!(
+        recorded(&setup)
+            .await
+            .iter()
+            .all(|(version, _, _)| *version < 22)
+    );
+    let mut usernames: Vec<String> =
+        sqlx::query_scalar("SELECT username FROM operators ORDER BY username")
+            .fetch_all(&setup)
+            .await
+            .unwrap();
+    usernames.sort();
+    assert_eq!(usernames, ["fine", "ops admin", "ops@example"]);
+
+    // The upgrade guide's pre-check query finds exactly these rows.
+    let [query] = &guide_queries("### Operator usernames")[..] else {
+        panic!("one username query");
+    };
+    let mut flagged: Vec<String> = sqlx::query_scalar(query).fetch_all(&setup).await.unwrap();
+    flagged.sort();
+    assert_eq!(flagged, ["ops admin", "ops@example"]);
+
+    sqlx::raw_sql(
+        "UPDATE operators SET username = 'ops_admin' WHERE username = 'ops admin';
+         UPDATE operators SET username = 'ops-example' WHERE username = 'ops@example';",
+    )
+    .execute(&setup)
+    .await
+    .unwrap();
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("migrate after renaming");
+    assert_eq!(token_schema(&setup).await, (true, true));
+}
+
+/// Usernames prefixd records for other principals are reserved in any case,
+/// and roles must be known. Migration 022 refuses each over existing rows with
+/// its own message, and the upgrade guide's queries find exactly those rows.
+#[tokio::test]
+async fn api_token_migration_refuses_reserved_usernames_and_unknown_roles() {
+    let fixture = start_postgres().await;
+    let setup = connect(&fixture).await;
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("migrate a fresh database");
+    put_at_021(&setup).await;
+    sqlx::raw_sql(
+        "INSERT INTO operators (username, password_hash, role) VALUES
+             ('prefixdctl', 'x', 'admin'), ('Anonymous', 'x', 'operator'),
+             ('mtls-client', 'x', 'viewer'), ('root-user', 'x', 'root'), ('fine', 'x', 'admin');",
+    )
+    .execute(&setup)
+    .await
+    .unwrap();
+    let cause = |error: PrefixdError| {
+        std::error::Error::source(&error)
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    };
+
+    let error = prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect_err("reserved usernames refuse the migration");
+    let message = cause(error);
+    assert!(message.contains("3 operator username(s)"), "{message}");
+    assert!(message.contains("reserved name"), "{message}");
+    assert_eq!(token_schema(&setup).await, (false, false));
+    let [query] = &guide_queries("### Operator usernames")[..] else {
+        panic!("one username query");
+    };
+    let mut flagged: Vec<String> = sqlx::query_scalar(query).fetch_all(&setup).await.unwrap();
+    flagged.sort();
+    assert_eq!(flagged, ["Anonymous", "mtls-client", "prefixdctl"]);
+
+    sqlx::raw_sql(
+        "UPDATE operators SET username = 'cli-admin' WHERE username = 'prefixdctl';
+         UPDATE operators SET username = 'anon-ops' WHERE username = 'Anonymous';
+         UPDATE operators SET username = 'cert-viewer' WHERE username = 'mtls-client';",
+    )
+    .execute(&setup)
+    .await
+    .unwrap();
+    let error = prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect_err("an unknown role refuses the migration");
+    let message = cause(error);
+    assert!(
+        message.contains("1 operator(s) have a role other than"),
+        "{message}"
+    );
+    assert!(message.contains("upgrading.md#operator-roles"), "{message}");
+    assert_eq!(token_schema(&setup).await, (false, false));
+    let [query] = &guide_queries("### Operator roles")[..] else {
+        panic!("one role query");
+    };
+    let flagged: Vec<(String, String)> = sqlx::query_as(query).fetch_all(&setup).await.unwrap();
+    assert_eq!(flagged, [("root-user".to_string(), "root".to_string())]);
+
+    sqlx::raw_sql("UPDATE operators SET role = 'operator' WHERE username = 'root-user';")
+        .execute(&setup)
+        .await
+        .unwrap();
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("migrate after correcting the rows");
+    assert_eq!(token_schema(&setup).await, (true, true));
+    for (username, role) in [("ANONYMOUS", "admin"), ("ok-name", "superuser")] {
+        let inserted = sqlx::query(
+            "INSERT INTO operators (username, password_hash, role) VALUES ($1, 'x', $2)",
+        )
+        .bind(username)
+        .bind(role)
+        .execute(&setup)
+        .await;
+        assert!(inserted.is_err(), "{username} {role}");
+    }
 }

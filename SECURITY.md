@@ -41,8 +41,8 @@ We consider security research conducted in accordance with this policy to be:
 
 When deploying prefixd:
 
-1. **Configure authentication** - Use operator credentials, a strong bearer token
-   (for example, `openssl rand -hex 32`), or native client-certificate mTLS.
+1. **Configure authentication** - Use operator credentials with named API tokens
+   (`prefixdctl tokens create`), or native client-certificate mTLS.
 2. **Enable TLS** - Never expose HTTP API without encryption
 3. **Network isolation** - Place prefixd on a management network
 4. **Least privilege** - Use operator roles appropriately (admin/operator/viewer)
@@ -74,11 +74,10 @@ stops; GoBGP and unleased rules have no such cleanup. See
 | Mode | Behavior |
 |------|----------|
 | `none` | Bypasses authentication and role checks. Use only in an isolated development or test environment. |
-| `credentials` | Operator passwords and PostgreSQL-backed sessions with viewer, operator and administrator roles. |
-| `bearer` | A shared token grants operator-level API access. Password-authenticated sessions retain their own roles. |
+| `credentials` | Operator passwords and PostgreSQL-backed sessions with viewer, operator and administrator roles, plus named API tokens stored as hashes, scoped to `ingest`, `operator` or `admin`, optionally bound to a POP and revocable at once. |
 | `mtls` | Requires native TLS and verified client certificates; accepted clients receive administrator access. Forwarded certificate headers do not authenticate a client. |
 
-Use TLS for credentials, session cookies and bearer tokens. See the
+Use TLS for credentials, session cookies and API tokens. See the
 [authentication reference](docs/reference/configuration.md#authentication) and
 [security model](docs/explanation/architecture.md#security-model) for deployment
 details.

@@ -2,14 +2,14 @@ use super::*;
 use crate::api::handlers::ErrorResponse;
 use crate::{
     AppState,
-    auth::AuthSession,
+    api::auth::AuthPrincipal,
     domain::OperatorRole,
     error::{PrefixdError, Result},
 };
 use axum::{
     Json,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -106,29 +106,11 @@ pub struct DiversionPreview {
     pub evidence: &'static str,
 }
 
-fn admin(
-    state: &AppState,
-    session: &AuthSession,
-    headers: &HeaderMap,
-) -> std::result::Result<String, StatusCode> {
-    crate::api::auth::require_role(
-        state,
-        session,
-        headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok()),
-        OperatorRole::Admin,
-    )
-    .map(|user| user.username)
+fn admin(principal: &AuthPrincipal) -> std::result::Result<String, StatusCode> {
+    crate::api::auth::require_role(principal, OperatorRole::Admin).map(|user| user.username)
 }
-fn reader(
-    state: &AppState,
-    session: &AuthSession,
-    headers: &HeaderMap,
-) -> std::result::Result<(), StatusCode> {
-    crate::api::require_auth(
-        state,
-        session,
-        headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok()),
-    )
+fn reader(principal: &AuthPrincipal) -> std::result::Result<(), StatusCode> {
+    crate::api::require_auth(principal)
 }
 /// Run a mutation to completion even if the client disconnects, so an
 /// ambiguous speaker outcome is always recorded and latched.
@@ -162,10 +144,9 @@ fn response<T: Serialize>(result: Result<T>, status: StatusCode) -> Response {
 ))]
 pub async fn profiles(
     State(state): State<Arc<AppState>>,
-    session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> std::result::Result<Response, StatusCode> {
-    reader(&state, &session, &headers)?;
+    reader(&principal)?;
     let body = ScrubberProfiles {
         enabled: state.settings.scrubber.enabled,
         profiles: state.scrubber.profiles().await,
@@ -199,12 +180,11 @@ pub async fn profiles(
 ))]
 pub async fn arm(
     State(state): State<Arc<AppState>>,
-    session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Path(profile): Path<String>,
     Json(req): Json<ArmProfile>,
 ) -> std::result::Result<Response, StatusCode> {
-    let actor = admin(&state, &session, &headers)?;
+    let actor = admin(&principal)?;
     Ok(response(
         state
             .scrubber
@@ -225,11 +205,10 @@ pub async fn arm(
 ))]
 pub async fn preview(
     State(state): State<Arc<AppState>>,
-    session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(req): Json<CreateDiversion>,
 ) -> std::result::Result<Response, StatusCode> {
-    let actor = admin(&state, &session, &headers)?;
+    let actor = admin(&principal)?;
     let result=async {
         let candidate=state.scrubber.prepare(&state,&req,&actor).await?;
         let confirmation=ScrubberController::confirmation(&candidate)?;
@@ -251,11 +230,10 @@ pub async fn preview(
 ))]
 pub async fn create(
     State(state): State<Arc<AppState>>,
-    session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(req): Json<CreateDiversion>,
 ) -> std::result::Result<Response, StatusCode> {
-    let actor = admin(&state, &session, &headers)?;
+    let actor = admin(&principal)?;
     let result = detached(&state, move |state| async move {
         state.scrubber.create(&state, &req, &actor).await
     })
@@ -274,16 +252,15 @@ pub async fn create(
 ))]
 pub async fn preview_vpn(
     State(state): State<Arc<AppState>>,
-    session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(req): Json<VpnDiversionRequest>,
 ) -> std::result::Result<Response, StatusCode> {
-    admin(&state, &session, &headers)?;
+    admin(&principal)?;
     let req = match req.into_diversion(&state) {
         Ok(req) => req,
         Err(error) => return Ok(response::<()>(Err(error), StatusCode::BAD_REQUEST)),
     };
-    preview(State(state), session, headers, Json(req)).await
+    preview(State(state), principal, Json(req)).await
 }
 
 #[utoipa::path(post,path="/v1/vpn/diversions",tag="scrubbers",request_body=VpnDiversionRequest,responses(
@@ -298,16 +275,15 @@ pub async fn preview_vpn(
 ))]
 pub async fn create_vpn(
     State(state): State<Arc<AppState>>,
-    session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(req): Json<VpnDiversionRequest>,
 ) -> std::result::Result<Response, StatusCode> {
-    admin(&state, &session, &headers)?;
+    admin(&principal)?;
     let req = match req.into_diversion(&state) {
         Ok(req) => req,
         Err(error) => return Ok(response::<()>(Err(error), StatusCode::BAD_REQUEST)),
     };
-    create(State(state), session, headers, Json(req)).await
+    create(State(state), principal, Json(req)).await
 }
 
 #[utoipa::path(get,path="/v1/diversions",tag="scrubbers",responses(
@@ -317,10 +293,9 @@ pub async fn create_vpn(
 ))]
 pub async fn list(
     State(state): State<Arc<AppState>>,
-    session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> std::result::Result<Response, StatusCode> {
-    reader(&state, &session, &headers)?;
+    reader(&principal)?;
     Ok(response(
         state.repo.list_diversions(&state.settings.pop).await,
         StatusCode::OK,
@@ -333,11 +308,10 @@ pub async fn list(
 ))]
 pub async fn get(
     State(state): State<Arc<AppState>>,
-    session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Path(id): Path<Uuid>,
 ) -> std::result::Result<Response, StatusCode> {
-    reader(&state, &session, &headers)?;
+    reader(&principal)?;
     let result = async {
         state
             .repo
@@ -363,12 +337,11 @@ pub async fn get(
 ))]
 pub async fn withdraw(
     State(state): State<Arc<AppState>>,
-    session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Path(id): Path<Uuid>,
     Json(WithdrawDiversion { reason }): Json<WithdrawDiversion>,
 ) -> std::result::Result<Response, StatusCode> {
-    let actor = admin(&state, &session, &headers)?;
+    let actor = admin(&principal)?;
     let result = detached(&state, move |state| async move {
         state.scrubber.withdraw(&state, id, &actor, reason).await
     })

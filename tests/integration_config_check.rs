@@ -97,8 +97,76 @@ fn check(directory: &Path) -> Output {
         .arg("--config")
         .arg(directory)
         .env_remove("DATABASE_URL")
+        .env_remove("PREFIXD_API_TOKEN")
         .output()
         .unwrap()
+}
+
+/// The controller no longer reads the shared-token variable. When it is still
+/// set, `--check` and startup warn by name, neither refuses, and neither prints
+/// the value.
+#[test]
+fn the_removed_token_variable_warns_without_its_value() {
+    const SECRET: &str = "prefixd_removedvariablecanaryAAAAAAAAAAAAAAAAAAAAAA";
+    // The shipped file passes the check; the startup file has no database URL,
+    // so startup stops at the database gate without connecting.
+    let shipped = tempfile::tempdir().unwrap();
+    write_directory(shipped.path(), SHIPPED);
+    let startup = tempfile::tempdir().unwrap();
+    write_directory(startup.path(), STARTUP);
+    let run = |check: bool, set: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_prefixd"));
+        if check {
+            command.arg("--check");
+        }
+        command
+            .arg("--config")
+            .arg(if check {
+                shipped.path()
+            } else {
+                startup.path()
+            })
+            .env_remove("DATABASE_URL")
+            .env_remove("PREFIXD_API_TOKEN")
+            .env("PREFIXD_TOKEN", SECRET);
+        if set {
+            command.env("PREFIXD_API_TOKEN", SECRET);
+        }
+        let output = command.output().unwrap();
+        (
+            output.status.success(),
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+    let (ok, stdout, stderr) = run(true, true);
+    assert!(ok, "a stale variable must not fail the check: {stderr}");
+    assert!(
+        stderr.contains("PREFIXD_API_TOKEN is set but no longer read"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains(SECRET) && !stderr.contains(SECRET));
+    // Startup warns, then stops only at the database gate.
+    let (ok, stdout, stderr) = run(false, true);
+    assert!(!ok);
+    assert!(
+        stdout.contains("the shared bearer token was removed")
+            && stdout.contains("PREFIXD_API_TOKEN"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("set DATABASE_URL or storage.connection_string"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains(SECRET) && !stderr.contains(SECRET));
+    // Control: without the variable, neither warns.
+    let (ok, stdout, stderr) = run(true, false);
+    assert!(ok && !stderr.contains("no longer read"), "{stdout}{stderr}");
+    let (_, stdout, _) = run(false, false);
+    assert!(
+        !stdout.contains("shared bearer token was removed"),
+        "{stdout}"
+    );
 }
 
 fn stderr_lines(output: &Output) -> Vec<String> {
@@ -349,6 +417,7 @@ fn run(directory: &Path, check: bool) -> Output {
         .arg(directory)
         .env_remove("DATABASE_URL")
         .env_remove("PREFIXD_PARITY_UNSET")
+        .env_remove("PREFIXD_API_TOKEN")
         .env("PREFIXD_PARITY_TOKEN", "parity-token")
         .output()
         .unwrap()
@@ -374,13 +443,13 @@ fn check_refuses_what_startup_refuses_before_any_connection() {
             "has a blackhole step, but blackhole.enabled is false",
         ),
         (
-            "API bearer token",
+            "removed bearer mode",
             variant(&[(
                 "auth: {mode: none}",
                 "auth: {mode: bearer, bearer_token_env: PREFIXD_PARITY_UNSET}",
             )]),
             None,
-            "auth.mode=bearer but PREFIXD_PARITY_UNSET is not set or empty",
+            "`http.auth.mode: bearer` was removed in 0.28.0",
         ),
         (
             "speaker endpoint userinfo",

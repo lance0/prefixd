@@ -19,8 +19,9 @@ struct Cli {
     )]
     api: String,
 
-    /// Bearer token for authentication
-    #[arg(short, long, env = "PREFIXD_API_TOKEN", hide_env_values = true)]
+    /// API token (prefixd_...); prefer PREFIXD_TOKEN, since a flag lands in
+    /// shell history and process listings
+    #[arg(short, long, env = "PREFIXD_TOKEN", hide_env_values = true)]
     token: Option<String>,
 
     /// Cookie header from an authenticated administrator session
@@ -64,6 +65,10 @@ enum Commands {
     /// Manage operators (direct DB access, for initial setup)
     #[command(subcommand)]
     Operators(OperatorCommands),
+
+    /// Manage API tokens (direct DB access; requires DATABASE_URL)
+    #[command(subcommand)]
+    Tokens(TokenCommands),
 
     /// Show BGP peer status
     Peers,
@@ -170,6 +175,71 @@ enum OperatorCommands {
 
     /// List operators (requires DATABASE_URL env var)
     List,
+}
+
+#[derive(Subcommand)]
+enum TokenCommands {
+    /// Create a token and print its secret once
+    Create {
+        /// Name, ^[a-z0-9][a-z0-9-]{0,57}$; never reused
+        #[arg(long)]
+        name: String,
+
+        /// ingest, operator or admin
+        #[arg(long)]
+        scope: prefixd::domain::TokenScope,
+
+        /// Detector source an ingest token is bound to (required for ingest)
+        #[arg(long)]
+        source: Option<String>,
+
+        /// Accept the token only on controllers with this POP
+        #[arg(long)]
+        pop: Option<String>,
+
+        /// Expire after this long, such as 90d, 12h, 30m or 45s (default: never)
+        #[arg(long, value_parser = parse_expires_in)]
+        expires_in: Option<chrono::TimeDelta>,
+    },
+
+    /// List tokens, revoked ones included, without secrets
+    List {
+        /// Only tokens this username (or prefixdctl) created
+        #[arg(long)]
+        created_by: Option<String>,
+    },
+
+    /// Revoke a token; revoking a revoked token changes nothing
+    Revoke {
+        /// Token name
+        name: String,
+    },
+}
+
+/// `<number><unit>`, unit one of s, m, h or d.
+fn parse_expires_in(value: &str) -> Result<chrono::TimeDelta, String> {
+    let invalid =
+        || format!("invalid duration {value:?}: use a number and s, m, h or d, such as 90d");
+    // The unit is the last character, which may be multibyte in a typo.
+    let split = value
+        .char_indices()
+        .last()
+        .map(|(index, _)| index)
+        .ok_or_else(invalid)?;
+    let (amount, unit) = value.split_at(split);
+    let amount: i64 = amount.parse().map_err(|_| invalid())?;
+    let seconds = match unit {
+        "s" => Some(amount),
+        "m" => amount.checked_mul(60),
+        "h" => amount.checked_mul(3_600),
+        "d" => amount.checked_mul(86_400),
+        _ => None,
+    }
+    .filter(|seconds| *seconds > 0)
+    .ok_or_else(invalid)?;
+    chrono::TimeDelta::try_seconds(seconds)
+        .filter(|lifetime| *lifetime <= prefixd::auth::token::max_lifetime())
+        .ok_or_else(|| format!("invalid duration {value:?}: at most 36525d (about 100 years)"))
 }
 
 #[derive(Subcommand)]
@@ -618,8 +688,8 @@ fn format_http_error(status: reqwest::StatusCode, message: Option<String>) -> St
     let message = message.unwrap_or_else(|| {
         match status {
             reqwest::StatusCode::UNAUTHORIZED => {
-                "authentication failed: missing, invalid or expired credentials \
-                 (set --token/PREFIXD_API_TOKEN or --session-cookie)"
+                "authentication failed: missing, invalid, revoked or expired credentials \
+                 (set PREFIXD_TOKEN to an API token, or --session-cookie)"
             }
             reqwest::StatusCode::FORBIDDEN => {
                 "permission denied: the authenticated identity's role does not allow this request"
@@ -723,9 +793,38 @@ impl Client {
     }
 }
 
+/// The client variable the controller's shared token used to live in.
+const REMOVED_TOKEN_ENV: &str = "PREFIXD_API_TOKEN";
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
+    // Never send both credentials: the controller would use only the token.
+    if cli.token.is_some() && cli.session_cookie.is_some() {
+        eprintln!(
+            "error: pass an API token (--token or PREFIXD_TOKEN) or --session-cookie \
+             (PREFIXD_SESSION_COOKIE), not both"
+        );
+        return ExitCode::from(2);
+    }
+    // reqwest sends URL userinfo as `Authorization: Basic`, and the controller
+    // refuses a request with two Authorization headers.
+    if cli.token.is_some()
+        && reqwest::Url::parse(&cli.api)
+            .is_ok_and(|url| !url.username().is_empty() || url.password().is_some())
+    {
+        eprintln!(
+            "error: an API token cannot be combined with user:password in --api (PREFIXD_API); \
+             the userinfo becomes a second Authorization header, which the controller refuses"
+        );
+        return ExitCode::from(2);
+    }
+    if std::env::var_os(REMOVED_TOKEN_ENV).is_some() && std::env::var_os("PREFIXD_TOKEN").is_none()
+    {
+        eprintln!(
+            "warning: {REMOVED_TOKEN_ENV} is set but no longer read; set PREFIXD_TOKEN to an API token"
+        );
+    }
     let mut client = Client::new(cli.api, cli.token);
     client.session_cookie = cli.session_cookie;
 
@@ -736,6 +835,7 @@ async fn main() -> ExitCode {
         Commands::Mitigations(cmd) => cmd_mitigations(&client, cmd, cli.format).await,
         Commands::Safelist(cmd) => cmd_safelist(&client, cmd, cli.format).await,
         Commands::Operators(cmd) => cmd_operators(cmd, cli.format).await,
+        Commands::Tokens(cmd) => cmd_tokens(cmd, cli.format).await,
         Commands::Peers => cmd_peers(&client, cli.format).await,
         Commands::Speaker(SpeakerCommands::ListRoutes) => {
             cmd_speaker_routes(&client, cli.format).await
@@ -1561,6 +1661,13 @@ async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<()
             password,
             role,
         } => {
+            if !prefixd::domain::is_valid_username(&username) {
+                return Err(
+                    "username must be 1 to 64 characters of A-Z, a-z, 0-9, _ or -, \
+                     and not prefixdctl, anonymous or mtls-client"
+                        .to_string(),
+                );
+            }
             // Validate role
             let role_lower = role.to_lowercase();
             if role_lower != "admin" && role_lower != "operator" && role_lower != "viewer" {
@@ -1690,6 +1797,131 @@ async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<()
     Ok(())
 }
 
+async fn cmd_tokens(cmd: TokenCommands, format: OutputFormat) -> Result<(), String> {
+    use prefixd::db::RepositoryTrait;
+
+    let database_url =
+        std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL environment variable not set")?;
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .map_err(|e| format!("failed to connect to database: {}", e))?;
+    let repo = prefixd::db::Repository::new(pool);
+    let now = chrono::Utc::now();
+    let when = |at: Option<chrono::DateTime<chrono::Utc>>, none: &str| {
+        at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| none.to_string())
+    };
+
+    match cmd {
+        TokenCommands::Create {
+            name,
+            scope,
+            source,
+            pop,
+            expires_in,
+        } => {
+            let request = prefixd::auth::token::NewToken {
+                name,
+                scope,
+                source,
+                pop,
+                expires_at: expires_in
+                    .map(|lifetime| {
+                        now.checked_add_signed(lifetime)
+                            .ok_or("--expires-in is outside the timestamp range")
+                    })
+                    .transpose()?,
+            };
+            // Database access already outranks Admin, as for `operators create`.
+            let (token, secret) = prefixd::auth::token::create(&repo, request, "prefixdctl", now)
+                .await
+                .map_err(|e| e.to_string())?;
+            match format {
+                OutputFormat::Json => {
+                    let mut value = serde_json::to_value(&token).map_err(|e| e.to_string())?;
+                    value["token"] = secret.into();
+                    println!("{}", serde_json::to_string_pretty(&value).unwrap());
+                }
+                OutputFormat::Table => {
+                    // Details on stderr; stdout carries only the secret, so
+                    // `TOKEN=$(prefixdctl tokens create ...)` captures it.
+                    eprintln!(
+                        "Created token '{}' (scope: {}, source: {}, pop: {}, expires: {}). \
+                         The token below is shown once.",
+                        token.name,
+                        token.scope,
+                        token.source.as_deref().unwrap_or("-"),
+                        token.pop.as_deref().unwrap_or("any"),
+                        when(token.expires_at, "never"),
+                    );
+                    println!("{secret}");
+                }
+            }
+        }
+        TokenCommands::List { created_by } => {
+            let tokens = repo
+                .list_api_tokens(created_by.as_deref())
+                .await
+                .map_err(|e| format!("database error: {}", e))?;
+            match format {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&tokens).unwrap());
+                }
+                OutputFormat::Table => {
+                    if tokens.is_empty() {
+                        println!("No tokens found.");
+                        return Ok(());
+                    }
+                    println!(
+                        "{:<24}  {:<8}  {:<20}  {:<8}  {:<16}  {:<19}  {:<19}  {:<19}  REVOKED",
+                        "NAME",
+                        "SCOPE",
+                        "SOURCE",
+                        "POP",
+                        "CREATED BY",
+                        "CREATED",
+                        "LAST USED",
+                        "EXPIRES"
+                    );
+                    for token in &tokens {
+                        println!(
+                            "{:<24}  {:<8}  {:<20}  {:<8}  {:<16}  {:<19}  {:<19}  {:<19}  {}",
+                            token.name,
+                            token.scope,
+                            token.source.as_deref().unwrap_or("-"),
+                            token.pop.as_deref().unwrap_or("any"),
+                            token.created_by,
+                            when(Some(token.created_at), "-"),
+                            when(token.last_used_at, "never"),
+                            when(token.expires_at, "never"),
+                            when(token.revoked_at, "-"),
+                        );
+                    }
+                }
+            }
+        }
+        TokenCommands::Revoke { name } => {
+            let token = prefixd::auth::token::revoke(&repo, &name, "prefixdctl", now)
+                .await
+                .map_err(|e| e.to_string())?;
+            match format {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&token).unwrap());
+                }
+                OutputFormat::Table => {
+                    println!(
+                        "Revoked token '{}' at {} by {}",
+                        token.name,
+                        when(token.revoked_at, "-"),
+                        token.revoked_by.as_deref().unwrap_or("-"),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn cmd_migrations(format: OutputFormat) -> Result<(), String> {
     let database_url =
         std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL environment variable not set")?;
@@ -1753,6 +1985,35 @@ async fn cmd_migrations(format: OutputFormat) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expires_in_parses_units_and_refuses_everything_else() {
+        assert_eq!(parse_expires_in("90d"), Ok(chrono::TimeDelta::days(90)));
+        assert_eq!(parse_expires_in("12h"), Ok(chrono::TimeDelta::hours(12)));
+        assert_eq!(parse_expires_in("30m"), Ok(chrono::TimeDelta::minutes(30)));
+        assert_eq!(parse_expires_in("45s"), Ok(chrono::TimeDelta::seconds(45)));
+        // A multibyte last character is an error, not a panic.
+        for invalid in [
+            "",
+            "d",
+            "5",
+            "0d",
+            "-1d",
+            "5µ",
+            "5日",
+            "µ",
+            "1.5h",
+            "99999999999999999d",
+            // Parses as a duration but overflows a timestamp once added.
+            "100000000000000s",
+            "36526d",
+        ] {
+            assert!(parse_expires_in(invalid).is_err(), "{invalid:?}");
+        }
+        // The cap itself is accepted and adds without overflow.
+        let cap = parse_expires_in("36525d").unwrap();
+        assert!(chrono::Utc::now().checked_add_signed(cap).is_some());
+    }
 
     fn diversion_cli_fixture(family: &str) -> (serde_json::Value, serde_json::Value) {
         let (prefix, target) = if family == "ipv4" {

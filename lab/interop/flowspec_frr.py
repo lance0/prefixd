@@ -104,8 +104,17 @@ class Lab:
         self.args = args
         self.receipt = Path(args.receipt)
         (self.receipt / "frr").mkdir(parents=True, exist_ok=True)
+        # An operator token for the operator API and an ingest token for event
+        # ingestion: an ingest token cannot read, and an operator token cannot
+        # be used where the ingest token is required.
         self.token = Path(args.token_file).read_text().strip()
-        # Keeps a session cookie for subclasses that log in; bearer requests set none.
+        # Drivers that post no events themselves (FastNetMon's script does)
+        # take no ingest token.
+        ingest = getattr(args, "ingest_token_file", None)
+        self.ingest_token = Path(ingest).read_text().strip() if ingest else None
+        # A subclass that logs in sets this; a Bearer header would replace the
+        # session, so session requests send none.
+        self.use_session = False
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
         self.commands = (self.receipt / "commands.log").open("a")
         self.steps = []
@@ -125,7 +134,11 @@ class Lab:
     def api(self, method, path, body=None, expect=(200, 201, 202)):
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(self.args.api + path, data=data, method=method)
-        request.add_header("Authorization", f"Bearer {self.token}")
+        if method == "POST" and path.startswith("/v1/events"):
+            assert self.ingest_token, "this lab posts events without an ingest token"
+            request.add_header("Authorization", f"Bearer {self.ingest_token}")
+        elif not self.use_session:
+            request.add_header("Authorization", f"Bearer {self.token}")
         request.add_header("Content-Type", "application/json")
         try:
             with self.opener.open(request, timeout=30) as response:
@@ -426,7 +439,16 @@ class Lab:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    for name in ("speaker", "api", "token-file", "frr", "speaker-container", "topology", "receipt"):
+    for name in (
+        "speaker",
+        "api",
+        "token-file",
+        "ingest-token-file",
+        "frr",
+        "speaker-container",
+        "topology",
+        "receipt",
+    ):
         parser.add_argument(f"--{name}", required=True)
     raise SystemExit(0 if Lab(parser.parse_args()).main() else 1)
 

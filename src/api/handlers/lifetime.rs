@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::StatusCode,
     response::IntoResponse,
 };
 use chrono::{DateTime, Utc};
@@ -12,8 +12,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::api::auth::AuthPrincipal;
 use crate::api::auth::require_role;
-use crate::auth::AuthSession;
 use crate::domain::OperatorRole;
 use crate::error::PrefixdError;
 
@@ -58,19 +58,11 @@ pub struct ExtendMitigationResponse {
 )]
 pub async fn extend_mitigation(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Path(id): Path<Uuid>,
     Json(request): Json<ExtendMitigationRequest>,
 ) -> Result<axum::response::Response, StatusCode> {
-    let actor = require_role(
-        &state,
-        &auth_session,
-        headers
-            .get(AUTHORIZATION)
-            .and_then(|value| value.to_str().ok()),
-        OperatorRole::Operator,
-    )?;
+    let actor = require_role(&principal, OperatorRole::Operator)?;
     if let Err(error) = validate_string_len(&actor.username, "operator_id", MAX_USERNAME_LEN) {
         return Ok(AppError(error).into_response());
     }

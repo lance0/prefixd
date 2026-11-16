@@ -68,7 +68,7 @@ async fn test_cli_operator_list_matches_shipped_schema() {
                     "DATABASE_URL",
                     &ctx.state.settings.storage.connection_string,
                 )
-                .env_remove("PREFIXD_API_TOKEN")
+                .env_remove("PREFIXD_TOKEN")
                 .stdin(std::process::Stdio::null())
                 .kill_on_drop(true)
                 .output(),
@@ -7283,16 +7283,22 @@ async fn duplicate_acknowledgements_count_entries_and_update_each_postgres_row_o
     let speaker = Arc::new(CreationSpeaker::new(context.repo.clone(), 0));
     let mut state = creation_state(&context, speaker.clone(), false);
     let cached = Arc::get_mut(&mut state).unwrap();
-    cached.settings.http.auth.mode = AuthMode::Bearer;
-    cached.bearer_token = Some("duplicate-ack-token".into());
+    cached.settings.http.auth.mode = AuthMode::Credentials;
+    let token = common::mint_token(
+        context.repo.as_ref(),
+        "duplicate-ack",
+        prefixd::domain::TokenScope::Operator,
+        None,
+    )
+    .await;
+    let authorization = axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap();
     let app = prefixd::api::create_test_router(state);
     let mut targets = Vec::new();
     for ip in ["203.0.113.10", "203.0.113.11", "203.0.113.12"] {
         let mut request = creation_request("manual", ip, "duplicate-ack-seed");
-        request.headers_mut().insert(
-            "authorization",
-            axum::http::HeaderValue::from_static("Bearer duplicate-ack-token"),
-        );
+        request
+            .headers_mut()
+            .insert("authorization", authorization.clone());
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let json = creation_json(response).await;
@@ -7358,7 +7364,7 @@ async fn duplicate_acknowledgements_count_entries_and_update_each_postgres_row_o
             .oneshot(
                 Request::post("/v1/mitigations/acknowledge")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer duplicate-ack-token")
+                    .header("authorization", authorization.clone())
                     .body(Body::from(
                         serde_json::json!({"mitigation_ids":ids, "operator_id":"forged-actor"})
                             .to_string(),
@@ -7404,7 +7410,7 @@ async fn duplicate_acknowledgements_count_entries_and_update_each_postgres_row_o
                 assert!(previous.acknowledged_at.is_none());
                 assert!(row.acknowledged_at.is_some());
                 expected.acknowledged_at = row.acknowledged_at;
-                expected.acknowledged_by = Some("bearer-token".into());
+                expected.acknowledged_by = Some("token:duplicate-ack".into());
             }
             assert_eq!(
                 serde_json::to_value(row).unwrap(),
@@ -7982,5 +7988,639 @@ async fn test_event_outcomes_replay_filter_and_write_once_postgres_mock_parity()
         refused_or_legacy.sort();
         assert_eq!(refused_or_legacy, ["future", "legacy", "refused"]);
         assert!(list(Some(vec![EventOutcome::Safelisted])).await.is_empty());
+    }
+}
+
+mod api_tokens {
+    use super::*;
+    use chrono::{DateTime, Duration, Utc};
+    use prefixd::auth::token::{NewToken, create, hash, revoke};
+    use prefixd::db::{ListParams, RepositoryTrait};
+    use prefixd::domain::TokenScope;
+    use std::sync::Arc;
+
+    fn request(name: &str, scope: TokenScope, source: Option<&str>, pop: Option<&str>) -> NewToken {
+        NewToken {
+            name: name.into(),
+            scope,
+            source: source.map(Into::into),
+            pop: pop.map(Into::into),
+            expires_at: None,
+        }
+    }
+
+    async fn last_used(repo: &dyn RepositoryTrait, secret: &str) -> Option<DateTime<Utc>> {
+        repo.get_api_token_by_hash(&hash(secret))
+            .await
+            .unwrap()
+            .unwrap()
+            .last_used_at
+    }
+
+    async fn token_audits(repo: &dyn RepositoryTrait) -> Vec<(String, Option<String>)> {
+        repo.list_audit(&ListParams {
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.target_type.as_deref() == Some("api_token"))
+        .map(|entry| (entry.action, entry.actor_id))
+        .collect()
+    }
+
+    /// The PostgreSQL repository stores only the hash, writes each management
+    /// audit row with its change, never reuses a name, revokes idempotently and
+    /// throttles `last_used_at` in SQL.
+    #[tokio::test]
+    async fn tokens_round_trip_through_postgres() {
+        let ctx = TestContext::new().await;
+        let repo = ctx.repo.as_ref();
+        let now: DateTime<Utc> = "2026-11-15T12:00:00Z".parse().unwrap();
+        let (token, secret) = create(
+            repo,
+            request(
+                "fnm-pop1",
+                TokenScope::Ingest,
+                Some("fastnetmon"),
+                Some("pop-a"),
+            ),
+            "admin",
+            now,
+        )
+        .await
+        .unwrap();
+        let stored: Vec<u8> = sqlx::query_scalar("SELECT token_hash FROM api_tokens")
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, hash(&secret));
+        let columns: String = sqlx::query_scalar(
+            "SELECT string_agg(column_name, ',') FROM information_schema.columns WHERE table_name = 'api_tokens'",
+        )
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        assert!(!columns.contains("secret") && !columns.contains("plaintext"));
+        assert_eq!(
+            repo.get_api_token_by_hash(&hash(&secret)).await.unwrap(),
+            Some(token.clone())
+        );
+        assert_eq!(repo.get_api_token_by_hash(&[0; 32]).await.unwrap(), None);
+        create(
+            repo,
+            request("automation", TokenScope::Operator, None, None),
+            "other",
+            now,
+        )
+        .await
+        .unwrap();
+        let names = |tokens: Vec<prefixd::domain::ApiToken>| -> Vec<String> {
+            tokens.into_iter().map(|token| token.name).collect()
+        };
+        assert_eq!(
+            names(repo.list_api_tokens(None).await.unwrap()),
+            ["automation", "fnm-pop1"]
+        );
+        assert_eq!(
+            names(repo.list_api_tokens(Some("admin")).await.unwrap()),
+            ["fnm-pop1"]
+        );
+
+        // The SQL throttle: a stamp within the interval is not rewritten.
+        let stale = |at: DateTime<Utc>| at - Duration::seconds(60);
+        repo.touch_api_token(token.token_id, now, stale(now))
+            .await
+            .unwrap();
+        repo.touch_api_token(
+            token.token_id,
+            now + Duration::seconds(59),
+            stale(now + Duration::seconds(59)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(last_used(repo, &secret).await, Some(now));
+        repo.touch_api_token(
+            token.token_id,
+            now + Duration::seconds(60),
+            stale(now + Duration::seconds(60)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            last_used(repo, &secret).await,
+            Some(now + Duration::seconds(60))
+        );
+
+        let first = revoke(repo, "fnm-pop1", "admin", now + Duration::seconds(90))
+            .await
+            .unwrap();
+        let second = revoke(repo, "fnm-pop1", "other", now + Duration::seconds(95))
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.revoked_by.as_deref(), Some("admin"));
+        // A stamp for a request verified just before the revocation is not
+        // written after it, even when the stored stamp is stale.
+        let later = now + Duration::seconds(600);
+        repo.touch_api_token(token.token_id, later, stale(later))
+            .await
+            .unwrap();
+        assert_eq!(
+            last_used(repo, &secret).await,
+            Some(now + Duration::seconds(60)),
+            "a revoked token is never stamped"
+        );
+        let error = create(
+            repo,
+            request("fnm-pop1", TokenScope::Operator, None, None),
+            "admin",
+            now,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, prefixd::error::PrefixdError::Conflict(_)),
+            "{error}"
+        );
+        let mut audits = token_audits(repo).await;
+        audits.sort();
+        assert_eq!(
+            audits,
+            [
+                ("api_token.create".to_string(), Some("admin".to_string())),
+                ("api_token.create".to_string(), Some("other".to_string())),
+                ("api_token.revoke".to_string(), Some("admin".to_string())),
+            ]
+        );
+        let details: String = sqlx::query_scalar(
+            "SELECT string_agg(details_json, ' ') FROM audit_log WHERE target_type = 'api_token'",
+        )
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        assert!(details.contains("fastnetmon") && details.contains("pop-a"));
+        assert!(!details.contains(&secret[8..]) && !details.contains(&hex::encode(hash(&secret))));
+    }
+
+    fn controller(ctx: &TestContext, pop: &str, active: bool) -> axum::Router {
+        controller_on(ctx, ctx.pool.clone(), pop, active)
+    }
+
+    fn controller_on(
+        ctx: &TestContext,
+        pool: sqlx::PgPool,
+        pop: &str,
+        active: bool,
+    ) -> axum::Router {
+        let mut settings = ctx.state.settings.clone();
+        settings.pop = pop.into();
+        settings.http.auth.mode = prefixd::config::AuthMode::Credentials;
+        let state = prefixd::AppState::new(
+            settings,
+            common::test_inventory(),
+            common::test_playbooks(),
+            Arc::new(prefixd::db::Repository::new(pool)),
+            Arc::new(prefixd::bgp::MockAnnouncer::new()),
+            ".".into(),
+        )
+        .unwrap()
+        .with_fence(Arc::new(prefixd::fence::ControllerFence::new(active)))
+        .unwrap();
+        prefixd::api::create_test_router(state)
+    }
+
+    async fn get(app: &axum::Router, secret: &str) -> (StatusCode, String) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/mitigations")
+                    .header("authorization", format!("Bearer {secret}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// Two POPs share one database. A POP-A token is refused on POP B's
+    /// controller with 403 naming its POP, a null-POP token works on both, and
+    /// only the active controller stamps `last_used_at`.
+    #[tokio::test]
+    async fn pop_binding_holds_across_controllers_on_a_shared_database() {
+        let ctx = TestContext::new().await;
+        let now = Utc::now();
+        let (_, pop_a) = create(
+            ctx.repo.as_ref(),
+            request("pop-a-only", TokenScope::Operator, None, Some("pop-a")),
+            "admin",
+            now,
+        )
+        .await
+        .unwrap();
+        let (_, any) = create(
+            ctx.repo.as_ref(),
+            request("any-pop", TokenScope::Operator, None, None),
+            "admin",
+            now,
+        )
+        .await
+        .unwrap();
+        let a = controller(&ctx, "pop-a", true);
+        // POP B's repository has one connection. A stamp spawned by a request
+        // queues for it before any later query on the same pool, and the pool
+        // hands connections out in order, so a query that returns after the
+        // request proves no stamp is still in flight.
+        let b_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&ctx.state.settings.storage.connection_string)
+            .await
+            .unwrap();
+        let b = controller_on(&ctx, b_pool.clone(), "pop-b", false);
+        assert_eq!(get(&a, &pop_a).await.0, StatusCode::OK);
+        let (status, body) = get(&b, &pop_a).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            body.contains("bound to POP") && body.contains("pop-a"),
+            "{body}"
+        );
+        assert!(!body.contains(&pop_a[8..]));
+        // The standby POP B reads the null-POP token but writes nothing.
+        assert_eq!(get(&b, &any).await.0, StatusCode::OK);
+        let stamped = |name: &'static str| {
+            let pool = ctx.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+                    "SELECT last_used_at FROM api_tokens WHERE name = $1",
+                )
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        // Handshake: let any spawned stamp start, then wait behind it.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        sqlx::query("SELECT 1").execute(&b_pool).await.unwrap();
+        assert_eq!(stamped("any-pop").await, None, "a standby mutates nothing");
+        // The active controller stamps in a background task.
+        assert_eq!(get(&a, &any).await.0, StatusCode::OK);
+        let wait = |name: &'static str| {
+            let stamped = &stamped;
+            async move {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        if let Some(at) = stamped(name).await {
+                            return at;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the active controller stamps last_used_at")
+            }
+        };
+        wait("any-pop").await;
+        wait("pop-a-only").await;
+        // Revocation takes effect on the next request on every controller.
+        revoke(ctx.repo.as_ref(), "any-pop", "admin", Utc::now())
+            .await
+            .unwrap();
+        for app in [&a, &b] {
+            let (status, body) = get(app, &any).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert!(body.contains("revoked"), "{body}");
+        }
+    }
+
+    /// A row lock held on a token, by a revocation in flight or an operator's
+    /// open transaction, must not make stamps queue behind it. Each queued
+    /// stamp would hold a pool connection, so a few requests would pin the
+    /// whole pool and stall ingestion and mitigation writes while the fence
+    /// stays held. The stamp skips a locked row instead.
+    #[tokio::test]
+    async fn a_locked_token_row_never_pins_the_pool() {
+        let ctx = TestContext::new().await;
+        let (token, secret) = create(
+            ctx.repo.as_ref(),
+            request("automation", TokenScope::Operator, None, None),
+            "admin",
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(3)
+            .acquire_timeout(std::time::Duration::from_secs(2))
+            .connect(&ctx.state.settings.storage.connection_string)
+            .await
+            .unwrap();
+        let app = controller_on(&ctx, pool.clone(), "pop-a", true);
+        let mut holder = ctx.pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM api_tokens WHERE token_id = $1 FOR UPDATE")
+            .bind(token.token_id)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        // last_used_at stays NULL while the row is locked, so every request
+        // is due a stamp.
+        for request in 0..10 {
+            let (status, body) = get(&app, &secret).await;
+            assert_eq!(status, StatusCode::OK, "request {request}: {body}");
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+        }
+        // An unrelated read on the same pool still gets a connection.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            sqlx::query("SELECT count(*) FROM mitigations").execute(&pool),
+        )
+        .await
+        .expect("an unrelated read waited on the pool")
+        .unwrap();
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity
+             WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        assert_eq!(waiting, 0, "a stamp is waiting on the locked row");
+        holder.rollback().await.unwrap();
+        // Control: once the lock is gone, the next request stamps.
+        assert_eq!(get(&app, &secret).await.0, StatusCode::OK);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while last_used(ctx.repo.as_ref(), &secret).await.is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the stamp lands after the lock is released");
+    }
+
+    /// An operator row with a role the controller does not know is refused,
+    /// never read as a default role. Migration 022 forbids such rows; this
+    /// covers one written around the constraint.
+    #[tokio::test]
+    async fn an_unknown_operator_role_fails_closed() {
+        use argon2::{Argon2, PasswordHasher};
+        let ctx = TestContext::new().await;
+        let hash = Argon2::default()
+            .hash_password_with_salt(b"unknown-role-password", b"unknown-role-salt")
+            .unwrap()
+            .to_string();
+        sqlx::raw_sql("ALTER TABLE operators DROP CONSTRAINT operators_role_known")
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO operators (username, password_hash, role) VALUES ('root-user', $1, 'root')",
+        )
+        .bind(&hash)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+        assert!(
+            ctx.repo
+                .get_operator_by_username("root-user")
+                .await
+                .is_err()
+        );
+        let response = controller(&ctx, "pop-a", true)
+            .oneshot(
+                Request::post("/v1/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"username": "root-user", "password": "unknown-role-password"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn cli(ctx: &TestContext, args: &[&str]) -> std::process::Output {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixdctl"))
+                .args(args)
+                .env(
+                    "DATABASE_URL",
+                    &ctx.state.settings.storage.connection_string,
+                )
+                .env_remove("PREFIXD_TOKEN")
+                .env_remove("PREFIXD_API_TOKEN")
+                .env_remove("PREFIXD_SESSION_COOKIE")
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("CLI completes within 15 seconds")
+        .expect("run the CLI")
+    }
+
+    /// `prefixdctl tokens` manages tokens on the local database with actor
+    /// `prefixdctl`, prints the secret once, lists and revokes by name, and
+    /// filters by creator for offboarding. `operators create` uses the
+    /// API's username rule.
+    #[tokio::test]
+    async fn cli_manages_tokens_and_validates_usernames() {
+        let ctx = TestContext::new().await;
+        let output = cli(
+            &ctx,
+            &[
+                "tokens",
+                "create",
+                "--name",
+                "fnm-pop1",
+                "--scope",
+                "ingest",
+                "--source",
+                "fastnetmon",
+                "--pop",
+                "pop-a",
+                "--expires-in",
+                "90d",
+            ],
+        )
+        .await;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let secret = String::from_utf8(output.stdout)
+            .unwrap()
+            .trim_end()
+            .to_owned();
+        assert!(
+            secret.starts_with("prefixd_") && secret.len() == 51,
+            "{secret}"
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("fnm-pop1") && !stderr.contains(&secret),
+            "{stderr}"
+        );
+        let token = ctx
+            .repo
+            .get_api_token_by_hash(&hash(&secret))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(token.created_by, "prefixdctl");
+        assert_eq!(token.pop.as_deref(), Some("pop-a"));
+        let lifetime = token.expires_at.unwrap() - token.created_at;
+        assert_eq!(lifetime, Duration::days(90));
+
+        let output = cli(
+            &ctx,
+            &[
+                "--format",
+                "json",
+                "tokens",
+                "create",
+                "--name",
+                "automation",
+                "--scope",
+                "operator",
+            ],
+        )
+        .await;
+        assert!(output.status.success());
+        let created: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(created["name"], "automation");
+        let second = created["token"].as_str().unwrap().to_owned();
+        assert!(second.starts_with("prefixd_"));
+
+        for refused in [
+            vec![
+                "tokens",
+                "create",
+                "--name",
+                &"a".repeat(59),
+                "--scope",
+                "operator",
+            ],
+            vec!["tokens", "create", "--name", "x", "--scope", "ingest"],
+            vec![
+                "tokens", "create", "--name", "fnm-pop1", "--scope", "operator",
+            ],
+            vec![
+                "tokens",
+                "create",
+                "--name",
+                "y",
+                "--scope",
+                "operator",
+                "--expires-in",
+                "0d",
+            ],
+        ] {
+            let output = cli(&ctx, &refused).await;
+            assert!(!output.status.success(), "{refused:?}");
+        }
+
+        let output = cli(
+            &ctx,
+            &[
+                "--format",
+                "json",
+                "tokens",
+                "list",
+                "--created-by",
+                "prefixdctl",
+            ],
+        )
+        .await;
+        assert!(output.status.success());
+        let listed = String::from_utf8(output.stdout).unwrap();
+        assert!(listed.contains("fnm-pop1") && listed.contains("automation"));
+        for leaked in [&secret[8..], &second[8..], "token_hash"] {
+            assert!(!listed.contains(leaked), "list leaked {leaked}");
+        }
+        let output = cli(
+            &ctx,
+            &[
+                "--format",
+                "json",
+                "tokens",
+                "list",
+                "--created-by",
+                "nobody",
+            ],
+        )
+        .await;
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "[]");
+        let output = cli(&ctx, &["tokens", "list"]).await;
+        let table = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            table.contains("fnm-pop1") && table.contains("fastnetmon"),
+            "{table}"
+        );
+
+        let output = cli(&ctx, &["tokens", "revoke", "fnm-pop1"]).await;
+        assert!(output.status.success());
+        let output = cli(&ctx, &["tokens", "revoke", "fnm-pop1"]).await;
+        assert!(output.status.success(), "revoking twice is not an error");
+        let output = cli(&ctx, &["tokens", "revoke", "missing"]).await;
+        assert!(!output.status.success());
+        let revoked = ctx
+            .repo
+            .get_api_token_by_hash(&hash(&secret))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(revoked.revoked_by.as_deref(), Some("prefixdctl"));
+        let mut audits = token_audits(ctx.repo.as_ref()).await;
+        audits.sort();
+        let prefixdctl = Some("prefixdctl".to_string());
+        assert_eq!(
+            audits,
+            [
+                ("api_token.create".to_string(), prefixdctl.clone()),
+                ("api_token.create".to_string(), prefixdctl.clone()),
+                ("api_token.revoke".to_string(), prefixdctl),
+            ]
+        );
+
+        // `operators create` refuses what the API and the table check refuse.
+        for (username, accepted) in [
+            ("bad name", false),
+            ("token:x", false),
+            ("ops_admin-1", true),
+        ] {
+            let output = cli(
+                &ctx,
+                &[
+                    "operators",
+                    "create",
+                    "--username",
+                    username,
+                    "--password",
+                    "pw-123456",
+                    "--role",
+                    "admin",
+                ],
+            )
+            .await;
+            assert_eq!(output.status.success(), accepted, "{username}");
+            if !accepted {
+                let stderr = String::from_utf8(output.stderr).unwrap();
+                assert!(stderr.contains("username must be"), "{stderr}");
+            }
+        }
     }
 }

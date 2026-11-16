@@ -1,5 +1,9 @@
 # Upgrade Guide
 
+Upgrading from 0.27.0? Read [source-bound ingest tokens](#source-bound-ingest-tokens)
+first: the next release removes the shared bearer token, and every detector and
+automation needs a new credential.
+
 Upgrading a v0.26.0 deployment? Follow
 [v0.26.0 → 0.27.0](#v0260--0270); it gives the order of the steps from the
 sections below. From v0.25.0, follow [v0.25.0 → 0.26.0](#v0250--0260) first;
@@ -64,6 +68,192 @@ release, so a deployment that starts today has none there. See
 [unknown keys](../reference/configuration.md#unknown-keys) for the exact list,
 and [configuration validation](../reference/configuration.md#validation) for the
 Compose one-liner and what the check skips.
+
+## Source-bound ingest tokens
+
+The shared bearer token is removed. Named, hashed, revocable API tokens replace
+it ([ADR 034](../adr/034-source-bound-api-tokens.md)), and `credentials` mode
+now covers operator sessions and API tokens. There is no bridge release: every
+detector and automation needs a new credential when its controller is upgraded.
+
+What changes:
+
+- **Refused configuration.** `http.auth.mode: bearer` and
+  `http.auth.bearer_token_env` are refused at startup, on reload and by
+  `prefixd --check`:
+
+  ```text
+  `http.auth.mode: bearer` was removed in 0.28.0: set `credentials` and use API tokens; see docs/how-to/upgrading.md#source-bound-ingest-tokens
+  remove `http.auth.bearer_token_env`: configuration keys removed in 0.28.0 are no longer accepted
+  ```
+
+  The speaker credential `bgp.rustbgpd.bearer_token_env` is unrelated and
+  unchanged.
+- **`PREFIXD_API_TOKEN` is not read.** If it is still set, startup logs a
+  warning naming the variable, never its value, and starts normally;
+  `prefixd --check` prints the same warning. Refusing would crash-loop the
+  controller over a stale variable and drop leased mitigations.
+- **The client variable is `PREFIXD_TOKEN`.** prefixdctl warns when only
+  `PREFIXD_API_TOKEN` is set, and refuses a token together with a session
+  cookie.
+- **Tokens have scopes.** An `ingest` token reaches only the ingest routes and
+  cannot read; `operator` and `admin` tokens reach what those roles reach,
+  except identity management. See
+  [API tokens](../reference/api.md#api-tokens).
+- **Identity management needs a session.** Token management, operator create
+  and delete, and password set or reset need a signed-in session; tokens,
+  mTLS clients and `none` mode get 403. Automation that managed operators with
+  the shared token, mTLS or `none` mode moves to `prefixdctl operators` on the
+  local database or an Admin session.
+- **Actor IDs.** Mitigations, acknowledgements, safelist entries and audit rows
+  created with an operator or admin token record `token:<name>`, where the
+  shared token recorded `bearer-token`. Update audit filters and dashboards
+  that match `bearer-token`.
+- **Bearer replaces the session.** A request with `Authorization: Bearer` is
+  authenticated only by its token; its session cookie is ignored. Other schemes,
+  such as proxy `Basic` auth, leave the session in charge.
+
+### Operator usernames
+
+Migration 022 adds a `CHECK` to `operators.username`: the name matches
+`^[A-Za-z0-9_-]{1,64}$`, the rule the API and `prefixdctl operators create`
+now share, and is not `prefixdctl`, `anonymous` or `mtls-client` in any case.
+prefixd records those names as actors for the local CLI, `none` mode and mTLS
+clients, so an operator holding one would be indistinguishable from them in
+the audit log and in `created_by`, and a username cannot look like a `token:`
+actor. Before adding the check, the migration counts the usernames that fail
+it. If any exist, it fails with
+
+```text
+N operator username(s) fall outside [A-Za-z0-9_-], 1 to 64 characters, or use a reserved name (prefixdctl, anonymous, mtls-client); rename them before upgrading (docs/how-to/upgrading.md#operator-usernames)
+```
+
+and rolls back; the controller does not start and no username is rewritten.
+Run this query before the upgrade and rename every operator it returns:
+
+```sql
+SELECT username FROM operators WHERE username !~ '^[A-Za-z0-9_-]{1,64}$' OR lower(username) IN ('prefixdctl', 'anonymous', 'mtls-client');
+```
+
+Rename with `UPDATE operators SET username = 'new_name' WHERE username = 'old name';`.
+The operator signs in with the new name; audit rows keep the old one.
+
+### Bearer headers from identity proxies
+
+A Bearer header replaces the session: prefixd removes the `Cookie` header of
+any request carrying `Authorization: Bearer` before it loads the session. An
+identity proxy in front of the dashboard that injects its own Bearer header
+therefore breaks sign-in: the dashboard signs in, then every request gets 401
+because the proxy's token is not a prefixd API token. Common sources are
+oauth2-proxy `--set-authorization-header`, nginx `auth_request` with
+`proxy_set_header Authorization`, and Traefik forward-auth with
+`authResponseHeaders: [Authorization]`. Do not forward such a header to
+prefixd. A proxy that adds `Authorization: Basic` beside a client's token also
+fails: two `Authorization` headers get 401 (`send exactly one Authorization
+header`). A logout sent with a Bearer header ends no session, because the
+cookie was removed.
+
+### Operator roles
+
+Migration 022 also adds `CHECK (role IN ('admin', 'operator', 'viewer'))` to
+`operators`. Earlier releases read any other stored role as `operator`; this
+release refuses such an operator instead. The migration fails with
+
+```text
+N operator(s) have a role other than admin, operator or viewer; correct them before upgrading (docs/how-to/upgrading.md#operator-roles)
+```
+
+when a row would violate the check. Run this query before the upgrade and set
+each returned operator's role to `admin`, `operator` or `viewer`:
+
+```sql
+SELECT username, role FROM operators WHERE role NOT IN ('admin', 'operator', 'viewer');
+```
+
+### One-way release
+
+Migration 022 also adds the `api_tokens` table. It touches no mitigation,
+event, pending operation or audit row.
+
+- **No rolling replacement.** The first upgraded controller migrates the
+  database for every controller sharing it, so controllers on one database
+  upgrade together: one maintenance window per database, not per POP. An old
+  controller accepts only the shared token, or no bearer credential at all in
+  `credentials` mode, and the new one accepts only database tokens, so
+  detectors switch credentials when the active controller changes.
+- **Rollback is a restore.** Restore the pre-upgrade backup, which also discards
+  every token minted since. A 0.27.0 or older controller has no schema check:
+  started against the migrated database, it would read `PREFIXD_API_TOKEN`
+  again and reopen the source spoof this release closes. A downgrade is a
+  security regression, not only a schema question.
+- **Tokens are global to the database.** Bind each detector token to its POP
+  with `--pop`, unless the detector really serves every POP on that database.
+
+### Migration steps
+
+1. **Before the window.**
+   - Back up the database.
+   - Run the [username query](#operator-usernames) and rename what it finds.
+   - Inventory every client that holds the shared token: detector hosts and
+     shims, Alertmanager and Grafana contact points, CI jobs and scripts.
+   - Custom detector scripts that read `/v1/mitigations` or call `/withdraw`
+     cannot do that with an ingest token, which has no read access. Give that
+     step to an operator token, or rewrite the unban as an event `unban` with
+     the ban's `event_id`.
+   - Test harnesses need two tokens each, one ingest and one operator. The
+     bundled `scripts/chaos-test.sh` reads `PREFIXD_TOKEN` and
+     `PREFIXD_INGEST_TOKEN` (bound to source `chaos-test`).
+   - Decide one token name, source and POP per detector, and one operator token
+     per automation.
+   - Record the planned cutover time.
+2. **Configuration.**
+   - Set `http.auth.mode: credentials` and delete `bearer_token_env`.
+   - Remove `PREFIXD_API_TOKEN` from the controller's environment. The shipped
+     Compose file and `.env.example` no longer pass it.
+   - Run `prefixd --check` with the new release's binary or image, for
+     example `docker run --rm -v /etc/prefixd:/etc/prefixd:ro <new image>
+     --check --config /etc/prefixd` (the image's entrypoint is `prefixd`). The old binary accepts a
+     configuration the new one refuses, such as `mode: bearer`. With leased
+     FlowSpec, rustbgpd withdraws leased rules within one lease while no
+     controller runs, so a refused configuration must not be discovered by a
+     restart.
+   - Stop forwarding any `Authorization: Bearer` header that an identity
+     proxy injects (see [Bearer headers from identity proxies](#bearer-headers-from-identity-proxies)).
+3. **Cutover.**
+   1. Stop every old controller on the database.
+   2. Start the new ones. The first to start applies migration 022, after any
+      earlier migration this release adds.
+   3. If no admin account exists, create one in the controller service
+      (`prefixd-rustbgpd` or `prefixd-gobgp`):
+
+      ```bash
+      docker compose exec prefixd-rustbgpd prefixdctl operators create --username admin --role admin
+      ```
+
+   4. Mint one ingest token per detector and the operator tokens for
+      automation and harnesses. Each secret is printed once:
+
+      ```bash
+      docker compose exec prefixd-rustbgpd prefixdctl tokens create --name fnm-pop1 --scope ingest --source fastnetmon --pop iad1
+      docker compose exec prefixd-rustbgpd prefixdctl tokens create --name ci-deploy --scope operator
+      ```
+
+4. **Detectors.** Install each token. Detectors get 401 until their token is in
+   place, and FastNetMon does not repeat a ban it failed to deliver, so keep this
+   step short. Store a token file with mode 0400, owned by the client's user,
+   and keep tokens off command lines (`curl -K -` reads the header from stdin).
+5. **Verification.** Check that each token's last use advances
+   (`prefixdctl tokens list`), and that the controller's startup log has no
+   `PREFIXD_API_TOKEN` warning.
+6. **Bans from before the cutover.** Their unbans may not pair with the new
+   credentials. List them with `GET /v1/events?source=fastnetmon&end=<cutover time>`;
+   each event's outcome names the mitigations it created. Withdraw those still
+   active, or let them expire.
+
+Rotation afterward needs no window: create a token under a new name, update the
+client, confirm its last use advances, then revoke the old token. If a token leaked, revoke it first, then review `GET /v1/audit` for actor `token:<name>` to find what it did, including configuration changes such as alerting destinations, playbooks and correlation settings, and undo them. Deleting or
+demoting an operator does not revoke the tokens they created; list them with
+`prefixdctl tokens list --created-by <username>` and revoke or rotate each one.
 
 ## rustbgpd v0.83
 
@@ -900,7 +1090,7 @@ responds:
 Update scripts and clients to send the header and a nonblank reason. Diversion
 withdrawal needs an administrator session cookie, as in
 [scrubber diversion](scrubber-diversion.md#preview-confirm-and-withdraw); the
-mitigation endpoints take the same body with an Operator bearer token:
+mitigation endpoints take the same body with an operator API token:
 
 ```bash
 curl -X POST "$PREFIXD_API/v1/diversions/$ID/withdraw" \
@@ -1086,9 +1276,9 @@ boundary for those releases.
 Version skew matters only across a release that adds a migration. The release
 after 0.27.0 adds migration 021, which only narrows the unique scope index
 `idx_mitigations_active_scope` to `active` and `escalated` rows. It cannot fail
-on existing data, and 0.27.0 runs unchanged against it, so a
-[rolling replacement](#controller-fence-and-rolling-deploys) from 0.27.0, with
-the new controller waiting in standby, is safe, and so is starting 0.27.0 again.
+on existing data, and 0.27.0 runs unchanged against it. The same release adds
+migration 022, the API token table, which rules out a rolling replacement and
+starting 0.27.0 again: see [one-way release](#one-way-release).
 For any other release that adds a migration:
 
 - The first upgraded controller to start migrates the database, even in

@@ -70,6 +70,12 @@ pub use manual_flowspec::{
 };
 pub use vpn_flowspec::*;
 
+mod tokens;
+pub use tokens::{
+    __path_create_token, __path_list_tokens, __path_revoke_token, CreatedToken, TokenListResponse,
+    create_token, list_tokens, revoke_token,
+};
+
 mod speaker;
 pub use speaker::{
     __path_list_speaker_routes, FlowSpecObservationScope, SpeakerRoutesResponse,
@@ -79,7 +85,7 @@ pub use speaker::{
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::StatusCode,
     response::IntoResponse,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -104,8 +110,7 @@ use crate::guardrails::Guardrails;
 use crate::observability::CreationActor;
 use crate::policy::PolicyEngine;
 
-use super::auth::{require_auth, require_role};
-use crate::auth::AuthSession;
+use super::auth::{AuthPrincipal, require_auth, require_role};
 
 fn encode_list_cursor(timestamp: DateTime<Utc>, id: Uuid, prefix: &str) -> String {
     let position = format!("{}\n{}", timestamp.to_rfc3339(), id);
@@ -529,7 +534,7 @@ fn clamp_limit(limit: u32) -> u32 {
 }
 
 const MAX_STRING_LEN: usize = 1024;
-const MAX_USERNAME_LEN: usize = 64;
+use crate::domain::MAX_USERNAME_LEN;
 fn validate_string_len(value: &str, field: &str, max: usize) -> Result<(), PrefixdError> {
     if value.len() > max {
         Err(PrefixdError::InvalidRequest(format!(
@@ -759,13 +764,11 @@ pub struct WithdrawRequest {
 )]
 pub async fn ingest_event(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    crate::api::auth::IngestPrincipal(principal): crate::api::auth::IngestPrincipal,
     Json(input): Json<DetectorEventRequest>,
 ) -> impl IntoResponse {
     let input = input.0;
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    crate::api::auth::require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
+    crate::api::auth::require_ingest(&principal).map_err(AppError)?;
 
     // Validate input
     validate_event_destination(&input.victim_ip).map_err(AppError)?;
@@ -2190,12 +2193,10 @@ async fn rule_owner(
 )]
 pub async fn list_events(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Query(filters): Query<ListEventsQuery>,
 ) -> Result<axum::response::Response, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     if filters
         .q
@@ -2317,12 +2318,10 @@ pub async fn list_events(
 )]
 pub async fn list_mitigations(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Query(query): Query<ListMitigationsQuery>,
 ) -> Result<axum::response::Response, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let status_filter = match query
         .status
@@ -2464,12 +2463,10 @@ pub async fn list_mitigations(
 )]
 pub async fn get_mitigation(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<Json<MitigationResponse>, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let mitigation = state
         .repo
@@ -2571,15 +2568,14 @@ pub async fn get_mitigation(
         (status = 201, description = "Mitigation intent created", body = MitigationResponse),
         (status = 202, description = "Intent created; announcement unconfirmed for this request", body = MitigationResponse),
         (status = 400, description = "Invalid input, including malformed or unaligned destination CIDRs, ambiguous or incomplete subnet ownership, an unsupported action/rate, protocol/address-family mismatch, a match component the selected speaker cannot encode, or a blackhole whose confirmation differs or that carries match fields"),
-        (status = 403, description = "A blackhole requires the Admin role; bearer tokens map to Operator"),
+        (status = 403, description = "A blackhole requires the Admin role; operator tokens map to Operator"),
         (status = 409, description = "Conflicting owner, pending withdrawal, an untracked local blackhole route at the prefix, or a FlowSpec match held at the speaker by another injection owner or by none"),
         (status = 422, description = "Guardrail rejection, including destination prefix bounds, any safelist overlap, match invariants, source-prefix/fragment/packet-length opt-ins, port-list limits, blackhole eligibility, TTL and quota checks"),
     )
 )]
 pub async fn create_mitigation(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(req): Json<CreateMitigationRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Only a blackhole may omit protocol. A discard or police request without it
@@ -2593,17 +2589,16 @@ pub async fn create_mitigation(
             .into_response());
     }
     // Check auth first
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
     // A blackhole drops traffic to one victim and a source-only rule drops every
-    // destination in a VRF. Both need Admin; bearer tokens map to Operator and
+    // destination in a VRF. Both need Admin; operator tokens map to Operator and
     // get 403 before anything is read or saved.
     let required = if req.action == "blackhole" || req.source_only {
         OperatorRole::Admin
     } else {
         OperatorRole::Operator
     };
-    let operator = require_role(&state, &auth_session, auth_header, required)?;
+    let operator = require_role(&principal, required)?;
     let operator_id = operator.username.clone();
     if req.vpn_scope.is_some()
         && (req.action == "blackhole"
@@ -2864,15 +2859,13 @@ fn blackhole_rejection_reason(violation: &GuardrailError) -> &'static str {
 )]
 pub async fn withdraw_mitigation(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Path(id): Path<Uuid>,
     Json(req): Json<WithdrawRequest>,
 ) -> Result<axum::response::Response, StatusCode> {
     // Check auth
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
-    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
+    let operator = require_role(&principal, OperatorRole::Operator)?;
     let operator_id = operator.username;
     state
         .verified_speaker_binding()
@@ -2961,13 +2954,11 @@ pub struct BulkWithdrawResponse {
 )]
 pub async fn bulk_withdraw_mitigations(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(req): Json<BulkWithdrawRequest>,
 ) -> Result<axum::response::Response, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
-    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
+    let operator = require_role(&principal, OperatorRole::Operator)?;
     let operator_id = operator.username;
     state
         .verified_speaker_binding()
@@ -3109,13 +3100,11 @@ pub struct BulkAcknowledgeResponse {
 )]
 pub async fn bulk_acknowledge_mitigations(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(req): Json<BulkAcknowledgeRequest>,
 ) -> Result<Json<BulkAcknowledgeResponse>, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
-    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
+    let operator = require_role(&principal, OperatorRole::Operator)?;
     let operator_id = operator.username;
 
     if req.mitigation_ids.is_empty() || req.mitigation_ids.len() > MAX_BULK_ACKNOWLEDGE {
@@ -3217,12 +3206,10 @@ pub struct BatchEventResponse {
 )]
 pub async fn ingest_events_batch(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    crate::api::auth::IngestPrincipal(principal): crate::api::auth::IngestPrincipal,
     Json(req): Json<BatchEventRequest>,
 ) -> impl IntoResponse {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    crate::api::auth::require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
+    crate::api::auth::require_ingest(&principal).map_err(AppError)?;
 
     if req.events.is_empty() || req.events.len() > MAX_BATCH_EVENTS {
         return Err(AppError(PrefixdError::InvalidRequest(format!(
@@ -3356,7 +3343,7 @@ pub async fn require_active_controller(
 
 // Error handling
 
-struct AppError(PrefixdError);
+pub(crate) struct AppError(pub(crate) PrefixdError);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
@@ -3658,7 +3645,6 @@ mod tests {
             .unwrap();
             let cached = Arc::get_mut(&mut state).unwrap();
             cached.settings.http.auth.mode = auth;
-            cached.bearer_token = Some("operator-bearer-token".into());
             state
         }
 
@@ -3753,15 +3739,21 @@ mod tests {
                 OperationMode::DryRun,
                 repo.clone(),
                 speaker.clone(),
-                AuthMode::Bearer,
+                AuthMode::Credentials,
             );
             let mut feed = state.ws_broadcast.subscribe();
             let app = crate::api::create_test_router(state);
             let admin = login(&app, &repo, "bh-admin", OperatorRole::Admin).await;
             let operator = login(&app, &repo, "bh-operator", OperatorRole::Operator).await;
+            let token = repo.mint_token_for_test(
+                "bh-operator-token",
+                crate::domain::TokenScope::Operator,
+                None,
+            );
+            let authorization = format!("Bearer {token}");
             let before = audit_len(&repo).await;
             let victim = "203.0.113.10";
-            let bearer = ("authorization", "Bearer operator-bearer-token");
+            let bearer = ("authorization", authorization.as_str());
             for (auth, body, expected) in [
                 (bearer, create(victim, Some(victim)), StatusCode::FORBIDDEN),
                 (
@@ -3813,7 +3805,7 @@ mod tests {
             let message = serde_json::to_value(feed.try_recv().unwrap()).unwrap();
             assert_eq!(message["type"], "mitigation_created");
             assert_eq!(message["mitigation"]["blackhole"], response["blackhole"]);
-            // The bearer token keeps Operator access to FlowSpec creation.
+            // An operator token keeps Operator access to FlowSpec creation.
             let (status, _) = send(
                 &app,
                 "/v1/mitigations",

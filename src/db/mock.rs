@@ -13,9 +13,9 @@ use crate::correlation::engine::{
     SignalGroupStatus,
 };
 use crate::domain::{
-    AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole, WithdrawalRequest,
+    ApiToken, AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole, WithdrawalRequest,
 };
-use crate::error::Result;
+use crate::error::{PrefixdError, Result};
 use crate::observability::AuditEntry;
 
 #[derive(Default)]
@@ -50,6 +50,12 @@ pub struct MockRepository {
     pub fail_diversion_reads: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     pub fail_diversion_saves: std::sync::atomic::AtomicBool,
+    /// Every API token read fails, as an unavailable database does.
+    #[cfg(test)]
+    pub fail_token_reads: std::sync::atomic::AtomicBool,
+    /// Every `last_used_at` stamp fails.
+    #[cfg(test)]
+    pub fail_token_touches: std::sync::atomic::AtomicBool,
     mitigations: Mutex<Vec<Mitigation>>,
     diversions: Mutex<Vec<crate::scrubber::Diversion>>,
     diversion_revision: std::sync::atomic::AtomicU64,
@@ -57,6 +63,7 @@ pub struct MockRepository {
     safelist: Mutex<Vec<SafelistEntry>>,
     audit: Mutex<Vec<AuditEntry>>,
     operators: Mutex<Vec<Operator>>,
+    api_tokens: Mutex<Vec<(ApiToken, [u8; 32])>>,
     notification_prefs: Mutex<HashMap<Uuid, NotificationPreferences>>,
     signal_groups: Mutex<Vec<SignalGroup>>,
     signal_group_events: Mutex<Vec<MockGroupEventLink>>,
@@ -100,6 +107,47 @@ impl MockRepository {
         )
     }
 
+    /// Store a token with the given secret and no audit entry, so fixtures
+    /// that count audit rows are unaffected. The secret must have the token
+    /// format to verify.
+    pub fn insert_token(
+        &self,
+        secret: &str,
+        name: &str,
+        scope: crate::domain::TokenScope,
+        source: Option<&str>,
+    ) {
+        let token = ApiToken {
+            token_id: Uuid::new_v4(),
+            name: name.into(),
+            scope,
+            source: source.map(Into::into),
+            pop: None,
+            created_at: Utc::now(),
+            created_by: "fixture".into(),
+            expires_at: None,
+            last_used_at: None,
+            revoked_at: None,
+            revoked_by: None,
+        };
+        self.api_tokens
+            .lock()
+            .unwrap()
+            .push((token, crate::auth::token::hash(secret)));
+    }
+
+    /// [`MockRepository::insert_token`] with a fresh secret, which it returns.
+    pub fn mint_token_for_test(
+        &self,
+        name: &str,
+        scope: crate::domain::TokenScope,
+        source: Option<&str>,
+    ) -> String {
+        let (secret, _) = crate::auth::token::generate().unwrap();
+        self.insert_token(&secret, name, scope, source);
+        secret
+    }
+
     #[cfg(test)]
     pub fn insert_withdrawal_for_test(&self, request: crate::domain::WithdrawalRequest) {
         self.withdrawals.lock().unwrap().push(request);
@@ -127,6 +175,10 @@ impl MockRepository {
             fail_diversion_reads: Default::default(),
             #[cfg(test)]
             fail_diversion_saves: Default::default(),
+            #[cfg(test)]
+            fail_token_reads: Default::default(),
+            #[cfg(test)]
+            fail_token_touches: Default::default(),
             mitigations: Mutex::new(Vec::new()),
             diversions: Mutex::new(Vec::new()),
             diversion_revision: std::sync::atomic::AtomicU64::new(1),
@@ -134,6 +186,7 @@ impl MockRepository {
             safelist: Mutex::new(Vec::new()),
             audit: Mutex::new(Vec::new()),
             operators: Mutex::new(Vec::new()),
+            api_tokens: Mutex::new(Vec::new()),
             notification_prefs: Mutex::new(HashMap::new()),
             signal_groups: Mutex::new(Vec::new()),
             signal_group_events: Mutex::new(Vec::new()),
@@ -1599,6 +1652,102 @@ impl RepositoryTrait for MockRepository {
 
     async fn list_operators(&self) -> Result<Vec<Operator>> {
         Ok(self.operators.lock().unwrap().clone())
+    }
+
+    async fn create_api_token(
+        &self,
+        token: &ApiToken,
+        token_hash: &[u8; 32],
+        audit: &AuditEntry,
+    ) -> Result<()> {
+        let mut tokens = self.api_tokens.lock().unwrap();
+        if tokens.iter().any(|(stored, _)| stored.name == token.name) {
+            return Err(PrefixdError::Conflict(format!(
+                "token name {:?} is already used; names are never reused",
+                token.name
+            )));
+        }
+        if tokens.iter().any(|(_, hash)| hash == token_hash) {
+            return Err(PrefixdError::Internal("duplicate token hash".into()));
+        }
+        tokens.push((token.clone(), *token_hash));
+        self.audit.lock().unwrap().push(audit.clone());
+        Ok(())
+    }
+
+    async fn get_api_token_by_hash(&self, token_hash: &[u8; 32]) -> Result<Option<ApiToken>> {
+        #[cfg(test)]
+        if self
+            .fail_token_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PrefixdError::Internal("token store unavailable".into()));
+        }
+        Ok(self
+            .api_tokens
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, hash)| hash == token_hash)
+            .map(|(token, _)| token.clone()))
+    }
+
+    async fn list_api_tokens(&self, created_by: Option<&str>) -> Result<Vec<ApiToken>> {
+        Ok(self
+            .api_tokens
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(token, _)| token)
+            .filter(|token| created_by.is_none_or(|creator| token.created_by == creator))
+            .cloned()
+            .collect())
+    }
+
+    async fn revoke_api_token(
+        &self,
+        name: &str,
+        revoked_by: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        audit: &AuditEntry,
+    ) -> Result<Option<ApiToken>> {
+        let mut tokens = self.api_tokens.lock().unwrap();
+        let Some((token, _)) = tokens.iter_mut().find(|(token, _)| token.name == name) else {
+            return Ok(None);
+        };
+        if token.revoked_at.is_none() {
+            token.revoked_at = Some(now);
+            token.revoked_by = Some(revoked_by.to_owned());
+            self.audit.lock().unwrap().push(audit.clone());
+        }
+        Ok(Some(token.clone()))
+    }
+
+    async fn touch_api_token(
+        &self,
+        token_id: Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        stale_before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_token_touches
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PrefixdError::Internal("token store unavailable".into()));
+        }
+        if let Some((token, _)) = self
+            .api_tokens
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|(token, _)| token.token_id == token_id)
+            && token.revoked_at.is_none()
+            && token.last_used_at.is_none_or(|used| used <= stale_before)
+        {
+            token.last_used_at = Some(now);
+        }
+        Ok(())
     }
 
     async fn get_notification_preferences(

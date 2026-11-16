@@ -8,10 +8,12 @@ Profile selection does not change the database's
 [speaker ownership binding](upgrading.md#speaker-ownership-upgrade).
 
 The dashboard and API share `http://localhost` through nginx; the controller's
-port 8080 is not published. Protected curl examples below assume a deployment
-configured for bearer authentication with `PREFIXD_API_TOKEN` set. The shipped
-credentials-mode stack uses a logged-in browser session instead; see
-[authentication setup](deployment.md#authentication-setup).
+port 8080 is not published. Protected curl examples below assume an operator
+API token in `PREFIXD_TOKEN` and, for event ingestion, an ingest token in
+`PREFIXD_INGEST_TOKEN`, both created with `prefixdctl tokens create`; see
+[API tokens](../reference/cli.md#api-tokens). curl reads the header from stdin
+(`-K -`), so the token stays off the command line. A logged-in browser session
+works for the dashboard.
 
 ## Quick Diagnostics
 
@@ -45,9 +47,9 @@ at `127.0.0.1:3001` instead.
 
 **Check the response:**
 ```bash
-curl --fail-with-body --silent --show-error -X POST http://localhost/v1/events \
+printf 'header = "Authorization: Bearer %s"\n' "$PREFIXD_INGEST_TOKEN" |
+curl -K - --fail-with-body --silent --show-error -X POST http://localhost/v1/events \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
   -d "{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"source\":\"test\",\"victim_ip\":\"203.0.113.10\",\"vector\":\"udp_flood\",\"bps\":5000000000,\"confidence\":0.95}"
 ```
 
@@ -55,7 +57,8 @@ curl --fail-with-body --silent --show-error -X POST http://localhost/v1/events \
 
 | Response | Cause | Fix |
 |----------|-------|-----|
-| 403 Forbidden | Missing or invalid credentials, or a role that cannot ingest | Check `PREFIXD_API_TOKEN` and the auth mode |
+| 401 Unauthorized | Missing, unknown, malformed, revoked or expired token | Check `PREFIXD_INGEST_TOKEN` and `prefixdctl tokens list` |
+| 403 Forbidden | A role that cannot ingest, or a token bound to another POP | Check the token's scope and POP |
 | 422 Unprocessable | Guardrail rejection, including safelist, quota or unsupported VPN scope | Check the error message; `prefixdctl safelist list` |
 | 202 `accepted_no_mitigation` | IP not in the effective inventory | Read `/etc/prefixd/inventory.yaml` in the controller |
 | 202 `accepted` without `mitigation_id` | Correlation threshold or source count not met | Check effective `correlation.yaml`, confidence and source count |
@@ -418,26 +421,51 @@ installations must set that variable for the deployment's database.
 - Ensure the `id` session cookie is set after login
 - If login returns 200 but `/v1/auth/me` returns 401 and the dashboard loops back to sign-in over plain HTTP, the browser is withholding the `Secure` cookie. Serve HTTPS or set `http.secure_cookies: false`; see [Secure session cookies](upgrading.md#secure-session-cookies)
 
-### API Bearer Token Rejected
+### API Token Rejected
 
-**Check token is set:**
+**Check the token is set:**
 ```bash
-test -n "$PREFIXD_API_TOKEN" && echo "token is set"
+test -n "$PREFIXD_TOKEN" && echo "token is set"
 ```
 
 **Test authentication:**
 ```bash
-curl --fail-with-body --silent --show-error -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
-  http://localhost/v1/health/detail
+printf 'header = "Authorization: Bearer %s"\n' "$PREFIXD_TOKEN" |
+  curl -K - --fail-with-body --silent --show-error http://localhost/v1/health/detail
 ```
 
-**Check config:**
-```yaml
-http:
-  auth:
-    mode: bearer
-    bearer_token_env: "PREFIXD_API_TOKEN"
-```
+The error names the cause:
+
+| Response | Cause | Fix |
+|----------|-------|-----|
+| 401 `malformed API token` | Not `prefixd_` and 43 base64url characters, such as a value from the removed `PREFIXD_API_TOKEN` | Create a token with `prefixdctl tokens create` |
+| 401 `invalid API token` | No token has that secret | Check the client's copy; secrets cannot be retrieved later |
+| 401 `API token revoked` or `API token expired` | The token was revoked or reached `expires_at` | Rotate: create a new token and update the client |
+| 403 `API token is bound to POP ...` | The token's `pop` is another controller's | Use a token for this POP, or one with no POP |
+| 403 on a read or a manual rule | An ingest token reaches only the ingest routes | Use an operator token |
+| 401 `send exactly one Authorization header` | Two `Authorization` headers, such as a proxy's `Basic` beside a client's token, or `user:password` in the URL beside a token | Send only the token; do not add a second header in front of prefixd |
+| 403 on token management, operators, passwords or preferences | These need a signed-in session | Use an Admin session or `prefixdctl` |
+| 503 `credential store unavailable` | The controller could not read PostgreSQL | Check the database, not the token |
+
+`http.auth.mode` must be `credentials`; `none` ignores tokens and `mtls` does not
+consult them. A Bearer header replaces the session, so a request that sends both
+acts as the token.
+
+### Dashboard Signs In, Then Everything Returns 401
+
+**Symptoms:** Sign-in succeeds, then every dashboard request, including
+`/v1/auth/me`, returns 401; logging out appears to do nothing.
+
+**Cause:** something between the browser and prefixd adds an
+`Authorization: Bearer` header, usually an identity proxy such as oauth2-proxy
+with `--set-authorization-header`, nginx `auth_request` forwarding
+`Authorization`, or Traefik forward-auth. prefixd treats any Bearer header as an
+API token and removes the session cookie before it loads the session, so the
+proxy's token gets 401 and the session is never used. A logout sent with that
+header ends no session.
+
+**Fix:** stop forwarding the proxy's `Authorization` header to prefixd. See
+[Bearer headers from identity proxies](upgrading.md#bearer-headers-from-identity-proxies).
 
 ### CORS Errors (Dashboard)
 
@@ -643,11 +671,11 @@ ERROR GoBGP announcement failed error="connection refused"
 ### Audit Log Queries
 
 Audit entries are stored in PostgreSQL. Use the dashboard Audit Log or
-`GET /v1/audit` with an authorized session or bearer token. For bearer mode:
+`GET /v1/audit` with an authorized session or an operator token:
 
 ```bash
-curl -fsS -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
-  'http://localhost/v1/audit?limit=100' | jq '.entries[]'
+printf 'header = "Authorization: Bearer %s"\n' "$PREFIXD_TOKEN" |
+  curl -K - -fsS 'http://localhost/v1/audit?limit=100' | jq '.entries[]'
 ```
 
 Use `next_cursor` to retrieve additional pages; see the

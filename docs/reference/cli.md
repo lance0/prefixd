@@ -14,7 +14,7 @@ cargo build --release
 Or use the Docker image:
 
 ```bash
-docker run --rm ghcr.io/lance0/prefixd:0.27.0 prefixdctl --help
+docker run --rm --entrypoint prefixdctl ghcr.io/lance0/prefixd:0.27.0 --help
 ```
 
 Use the release tag that matches your controller. `latest` and `main` follow
@@ -36,9 +36,15 @@ Scripts and container commands continue to use the installed `prefixdctl` binary
 
 ```bash
 export PREFIXD_API=http://localhost         # API endpoint (nginx entrypoint)
-# Bearer token: the controller's PREFIXD_API_TOKEN, read here from the Compose .env
-export PREFIXD_API_TOKEN=$(sed -n 's/^PREFIXD_API_TOKEN=//p' .env)
+# An operator API token, minted once in the controller service
+export PREFIXD_TOKEN=$(docker compose exec -T prefixd-rustbgpd \
+    prefixdctl tokens create --name ops-cli --scope operator)
 ```
+
+`tokens create` prints only the secret on stdout, so the command substitution
+captures it; the token is shown once and cannot be retrieved later. Use
+`prefixd-gobgp` with the `gobgp` profile. For automation, store the token in
+the client's own secret store rather than a shell profile.
 
 ### Command-Line Options
 
@@ -49,18 +55,31 @@ prefixdctl -a http://localhost <command>
 prefixdctl -a http://127.0.0.1:8080 <command>
 ```
 
-Pass the token through `PREFIXD_API_TOKEN` rather than `--token`: other local
-users can read command-line arguments through `ps` and `/proc`.
+Pass the token through `PREFIXD_TOKEN` rather than `--token`: other local
+users can read command-line arguments through `ps` and `/proc`, and a flag
+lands in shell history.
 
 | Option | Env Var | Description |
 |--------|---------|-------------|
 | `-a, --api` | `PREFIXD_API` | API endpoint URL |
-| `-t, --token` | `PREFIXD_API_TOKEN` | Bearer token for authentication |
+| `-t, --token` | `PREFIXD_TOKEN` | API token (`prefixd_...`), sent as `Authorization: Bearer` |
+| `--session-cookie` | `PREFIXD_SESSION_COOKIE` | Cookie header from an authenticated Admin session |
 | `-f, --format` | - | Output format: `table` (default) or `json` |
 
-HTTP command examples below assume bearer mode with a configured token. The CLI
-does not perform session login; the default Compose credentials mode needs a
-session-capable client such as curl.
+Help output names these variables but never prints their values. prefixdctl
+never sends both credentials: a token and a session cookie together, from flags
+or the environment, is a usage error (exit 2) before any request. The
+controller would use only the token. A token together with `user:password` in
+`--api` (`PREFIXD_API`) is a usage error too: the userinfo would become an
+`Authorization: Basic` header beside the token, which the controller refuses.
+
+`PREFIXD_API_TOKEN` is no longer read. When it is set and `PREFIXD_TOKEN` is
+not, prefixdctl warns `PREFIXD_API_TOKEN is set but no longer read; set
+PREFIXD_TOKEN to an API token`, so a stale shell gets a clear message instead of
+a bare 401.
+
+HTTP command examples below assume an operator token in `PREFIXD_TOKEN`. The
+CLI does not perform session login.
 
 ---
 
@@ -252,7 +271,7 @@ prefixdctl mitigations get <id>
 The next hop and communities are the route prefixd saved at admission, not
 evidence that a router enforces it. `-f json` output includes the same
 `blackhole` object as the API. The CLI cannot create a blackhole: creation
-requires an Admin session, and bearer tokens act as Operator.
+requires the Admin role, and an operator token acts as Operator.
 
 ### Extend Mitigation Lifetime
 
@@ -300,6 +319,8 @@ scripts and ignored; the CLI does not send it.
 ### Create Operator
 
 Operator commands connect directly to PostgreSQL and require `DATABASE_URL`.
+They are the path for automation that manages operators: the API's operator
+routes need a signed-in session and refuse every API token.
 Omit `--password` for hidden input on a controlling terminal. Without a terminal,
 the prompt fails; `--password` requires an explicit value for noninteractive use.
 An explicit value can appear in shell history and process arguments.
@@ -314,6 +335,11 @@ prefixdctl operators create --username jsmith --role operator --password "$OPERA
 # Roles: admin, operator, viewer
 ```
 
+Usernames must match `^[A-Za-z0-9_-]{1,64}$` and must not be `prefixdctl`,
+`anonymous` or `mtls-client` in any case, the rule the API and the `operators`
+table enforce, so a username cannot look like a `token:` actor or the actor
+prefixd records for the CLI, `none` mode or an mTLS client.
+
 ### List Operators
 
 ```bash
@@ -324,6 +350,68 @@ prefixdctl operators list
 # admin       admin     2026-01-15T08:00:00Z
 # jsmith      operator  2026-01-16T14:30:00Z
 ```
+
+---
+
+## API Tokens
+
+Token commands connect directly to PostgreSQL and require `DATABASE_URL`, like
+`operators`. Database access already outranks Admin. Each command writes its
+audit row (`api_token.create` or `api_token.revoke`) in the same transaction,
+with actor `prefixdctl`. Tokens are global to the database; see
+[API tokens](api.md#api-tokens) for scopes, POP binding and expiry.
+
+### Create Token
+
+```bash
+# Detector token bound to a source and a POP
+prefixdctl tokens create --name fnm-pop1 --scope ingest --source fastnetmon --pop iad1
+
+# Automation token that expires
+prefixdctl tokens create --name ci-deploy --scope operator --expires-in 90d
+```
+
+| Option | Description |
+|--------|-------------|
+| `--name` | `^[a-z0-9][a-z0-9-]{0,57}$`; never reused, revoked tokens included |
+| `--scope` | `ingest`, `operator` or `admin` |
+| `--source` | Required for `ingest`, refused otherwise |
+| `--pop` | Accept the token only on controllers with this POP |
+| `--expires-in` | A number and `s`, `m`, `h` or `d`, such as `90d`; default never |
+
+The token is shown once. In table format the details go to stderr and only the
+secret to stdout, so `TOKEN=$(prefixdctl tokens create ...)` captures just the
+token. `-f json` prints the token record with a `token` field.
+
+### List Tokens
+
+```bash
+prefixdctl tokens list
+prefixdctl tokens list --created-by jsmith
+```
+
+Lists every token, revoked ones included, with scope, source, POP, creator,
+creation, last use, expiry and revocation. No secret or hash is printed.
+`--created-by` filters by creator: the Admin username for tokens created through
+the API, or `prefixdctl`.
+
+Deleting or demoting an operator does not revoke the tokens they created. To
+offboard someone, list their tokens with `--created-by` and revoke or rotate
+each one.
+
+### Revoke Token
+
+```bash
+prefixdctl tokens revoke fnm-pop1
+```
+
+Revocation takes effect on the next request. Revoking a revoked token changes
+nothing; an unknown name exits 1.
+
+To rotate a token, create a new one under a new name, update the client, check
+that its last use advances, then revoke the old one.
+
+If a token leaked, revoke it first, then review `GET /v1/audit` for actor `token:<name>` to find what it did, including configuration changes such as alerting destinations, playbooks and correlation settings, and undo them.
 
 ---
 
@@ -409,7 +497,8 @@ At least one of `--customer-id`, `--pop`, `--service-id`, `--interface`
 is required. The source's configured `match_dimensions` determine which
 of these the server actually accepts. JSON output mode
 (`prefixdctl -f json send-corroborator …`) returns the raw response
-including `signal_id` and `attached_group_ids`.
+including `signal_id` and `attached_group_ids`. The command posts to an ingest
+route, so `PREFIXD_TOKEN` may be an ingest token for the source.
 
 ---
 
@@ -455,12 +544,12 @@ prefixdctl -f json mitigations list
 |------|---------|
 | 0 | Success |
 | 1 | Any command failure, including connection, authentication, not-found, validation and safety refusals; stderr carries the error |
-| 2 | Invalid command-line usage, such as an unknown command or missing argument |
+| 2 | Invalid command-line usage, such as an unknown command, a missing argument, or a token and a session cookie together |
 
 Scripts that need the failure kind should read the stderr message, which
 includes the HTTP status for API errors. When a 401 or 403 response carries no
-error message, stderr names it as an authentication failure or a permission
-denial.
+error message, stderr names it as an authentication failure, with the hint `set
+PREFIXD_TOKEN to an API token, or --session-cookie`, or a permission denial.
 
 ---
 
@@ -543,8 +632,8 @@ Plain global request files retain their existing format and endpoint.
 Writes require an administrator. Supply an authenticated administrator session
 through `--session-cookie` or `PREFIXD_SESSION_COOKIE`; the value is a complete
 Cookie header and is hidden from help output. Sign in with
-[`POST /v1/auth/login`](api.md#login) and copy the session cookie it sets. Ordinary bearer tokens retain the
-Operator role. See [manual scrubber diversion](../how-to/scrubber-diversion.md).
+[`POST /v1/auth/login`](api.md#login) and copy the session cookie it sets, and
+unset `PREFIXD_TOKEN` for the command. Operator tokens keep the Operator role. See [manual scrubber diversion](../how-to/scrubber-diversion.md).
 
 ## Manual VPN FlowSpec
 

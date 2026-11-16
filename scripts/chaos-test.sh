@@ -2,6 +2,15 @@
 # Chaos testing for prefixd
 # Requires: docker compose stack running, curl, jq
 #
+# Authentication (credentials mode) uses two API tokens, because an ingest
+# token cannot read and only an ingest token reaches event ingestion:
+#   PREFIXD_TOKEN         operator token, for reads
+#   PREFIXD_INGEST_TOKEN  ingest token bound to source chaos-test, for events
+# Mint them with prefixdctl inside the controller service, for example:
+#   docker compose exec prefixd-rustbgpd prefixdctl tokens create --name chaos-operator --scope operator
+#   docker compose exec prefixd-rustbgpd prefixdctl tokens create --name chaos-ingest --scope ingest --source chaos-test
+# curl reads the Authorization header from stdin (-K -), never from argv.
+#
 # Usage:
 #   ./scripts/chaos-test.sh              # run all tests
 #   ./scripts/chaos-test.sh postgres     # run only postgres tests
@@ -14,11 +23,17 @@ API="http://localhost"
 PASS=0
 FAIL=0
 SKIP=0
-AUTH_ARGS=()
+OPERATOR_TOKEN="${PREFIXD_TOKEN:-}"
+INGEST_TOKEN="${PREFIXD_INGEST_TOKEN:-}"
 
-if [ -n "${PREFIXD_API_TOKEN:-}" ]; then
-    AUTH_ARGS=(-H "Authorization: Bearer ${PREFIXD_API_TOKEN}")
-fi
+# curl config on stdin: the token never appears in the process arguments.
+auth_config() {
+    if [ -n "$1" ]; then
+        printf 'header = "Authorization: Bearer %s"\n' "$1"
+    fi
+}
+op_curl() { auth_config "$OPERATOR_TOKEN" | curl -K - "$@"; }
+ingest_curl() { auth_config "$INGEST_TOKEN" | curl -K - "$@"; }
 
 # --- helpers ---
 
@@ -30,7 +45,7 @@ skip() { printf "\033[1;33m  SKIP\033[0m %s\n" "$*"; SKIP=$((SKIP + 1)); }
 wait_healthy() {
     local retries=${1:-30}
     for i in $(seq 1 "$retries"); do
-        if curl -sf "${AUTH_ARGS[@]}" "$API/v1/health" >/dev/null 2>&1; then
+        if op_curl -sf "$API/v1/health" >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
@@ -54,8 +69,7 @@ inject_event() {
     local ip=${1:-"203.0.113.$((RANDOM % 254 + 1))"}
     local ts
     ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    curl -sf -X POST "$API/v1/events" \
-        "${AUTH_ARGS[@]}" \
+    ingest_curl -sf -X POST "$API/v1/events" \
         -H "Content-Type: application/json" \
         -d "{
             \"source\": \"chaos-test\",
@@ -70,14 +84,14 @@ inject_event() {
 }
 
 get_active_count() {
-    curl -sf "${AUTH_ARGS[@]}" "$API/v1/stats" 2>/dev/null | jq -r '.total_active // 0'
+    op_curl -sf "$API/v1/stats" 2>/dev/null | jq -r '.total_active // 0'
 }
 
 # --- pre-flight ---
 
 log "Pre-flight checks"
 
-if ! curl -sf "${AUTH_ARGS[@]}" "$API/v1/health" >/dev/null 2>&1; then
+if ! op_curl -sf "$API/v1/health" >/dev/null 2>&1; then
     echo "ERROR: prefixd not reachable at $API. Start docker compose first."
     exit 1
 fi
@@ -105,7 +119,7 @@ run_postgres_tests() {
     sleep 2
 
     # API should still respond (health at least)
-    if curl -sf "${AUTH_ARGS[@]}" "$API/v1/health" >/dev/null 2>&1; then
+    if op_curl -sf "$API/v1/health" >/dev/null 2>&1; then
         pass "Health endpoint responds with postgres down"
     else
         fail "Health endpoint unreachable with postgres down"
@@ -114,10 +128,9 @@ run_postgres_tests() {
     # Event ingestion should fail gracefully (not crash the daemon)
     local ts_now
     ts_now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    http_code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/v1/events" \
-        "${AUTH_ARGS[@]}" \
+    http_code=$(ingest_curl -s -o /dev/null -w '%{http_code}' -X POST "$API/v1/events" \
         -H "Content-Type: application/json" \
-        -d "{\"source\":\"chaos\",\"timestamp\":\"$ts_now\",\"victim_ip\":\"203.0.113.99\",\"vector\":\"udp_flood\",\"bps\":1000000,\"pps\":1000,\"top_dst_ports\":[53],\"confidence\":0.9}" 2>/dev/null || echo "000")
+        -d "{\"source\":\"chaos-test\",\"timestamp\":\"$ts_now\",\"victim_ip\":\"203.0.113.99\",\"vector\":\"udp_flood\",\"bps\":1000000,\"pps\":1000,\"top_dst_ports\":[53],\"confidence\":0.9}" 2>/dev/null || echo "000")
 
     if [ "$http_code" = "000" ] || [ "$http_code" -ge 400 ] 2>/dev/null; then
         pass "Event ingestion fails gracefully with postgres down (HTTP $http_code)"
@@ -202,7 +215,7 @@ run_gobgp_tests() {
     fi
 
     # Health should still respond
-    if curl -sf "${AUTH_ARGS[@]}" "$API/v1/health" >/dev/null 2>&1; then
+    if op_curl -sf "$API/v1/health" >/dev/null 2>&1; then
         pass "Health endpoint responds with GoBGP down"
     else
         fail "Health endpoint unreachable with GoBGP down"
@@ -225,7 +238,7 @@ run_gobgp_tests() {
     sleep 35
 
     # Check metrics for reconciliation activity
-    recon_count=$(curl -sf "${AUTH_ARGS[@]}" "$API/metrics" 2>/dev/null | grep 'prefixd_reconciliation_active_count' | grep -v '^#' | awk '{print $2}' || echo "0")
+    recon_count=$(op_curl -sf "$API/metrics" 2>/dev/null | grep 'prefixd_reconciliation_active_count' | grep -v '^#' | awk '{print $2}' || echo "0")
     if [ "${recon_count%.*}" -gt 0 ] 2>/dev/null; then
         pass "Reconciliation loop detected active mitigations ($recon_count)"
     else
@@ -313,7 +326,7 @@ run_network_tests() {
     sleep 2
 
     # Direct API should still work on internal network (but not from host through nginx)
-    if curl -sf "${AUTH_ARGS[@]}" "$API/v1/health" >/dev/null 2>&1; then
+    if op_curl -sf "$API/v1/health" >/dev/null 2>&1; then
         fail "API reachable through nginx after nginx stop (unexpected)"
     else
         pass "API unreachable through nginx after nginx stop (expected)"

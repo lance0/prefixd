@@ -67,20 +67,39 @@ finish() {
     exit "$status"
 }
 
-# The one place the lane's detector credential is decided. prefixd runs in
-# `none` auth mode for now, so the script's defaults file carries no token and
-# the driver's token file is empty. Once source-bound ingest tokens land, this
-# mints an ingest token bound to source `fastnetmon` for the script and an
-# operator token for the driver, appends both to lab_secrets so the receipt
-# guard checks them, and prefixd-fastnetmon.yaml switches modes.
+# The one place the lane's detector credential is decided. Both files exist
+# before deploy so their bind mounts resolve; mint_credentials fills them in
+# place once the controller has applied its migrations.
 ingest_credential() {
-    {
-        printf 'PREFIXD_API=http://127.0.0.1:8080\n'
-        printf 'PREFIXD_TOKEN=\n'
-        printf 'PREFIXD_LOG=/var/log/prefixd-fastnetmon.log\n'
-    } >"$run/fastnetmon.defaults"
+    write_defaults ""
     chmod 0644 "$run/fastnetmon.defaults"
     : >"$run/api.token"
+}
+write_defaults() {
+    {
+        printf 'PREFIXD_API=http://127.0.0.1:8080\n'
+        printf 'PREFIXD_TOKEN=%s\n' "$1"
+        printf 'PREFIXD_LOG=/var/log/prefixd-fastnetmon.log\n'
+    } >"$run/fastnetmon.defaults"
+}
+# The bundled script's unban still reads and withdraws mitigations, which an
+# ingest token cannot do, so it holds an operator token until unban by event
+# lands; the driver holds its own operator token. Both join lab_secrets, which
+# finish() checks the receipt against. A create fails until migration 022 ran.
+mint_credentials() {
+    local script_token="" driver_token=""
+    for _ in $(seq 60); do
+        script_token="$(docker exec "$(node controller)" prefixdctl tokens create \
+            --name fnm-script --scope operator 2>/dev/null)" && break
+        sleep 1
+    done
+    [ -n "$script_token" ] || { echo "could not mint the script token" >&2; exit 1; }
+    driver_token="$(docker exec "$(node controller)" prefixdctl tokens create \
+        --name fnm-driver --scope operator)"
+    lab_secrets+=("$script_token" "$driver_token")
+    # In place, so the bind-mounted files keep their inodes.
+    write_defaults "$script_token"
+    printf '%s\n' "$driver_token" >"$run/api.token"
 }
 
 destroy
@@ -137,6 +156,7 @@ for attempt in $(seq 60); do
     sleep 1
 done
 docker exec -d "$(node controller)" sh -c 'exec prefixd --config /etc/prefixd >>/tmp/prefixd.log 2>&1'
+mint_credentials
 
 python3 -I lab/interop/fastnetmon_frr.py \
     --speaker rustbgpd \

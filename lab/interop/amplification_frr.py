@@ -447,6 +447,7 @@ def main():
         "speaker",
         "api",
         "token-file",
+        "ingest-token-file",
         "frr",
         "speaker-container",
         "topology",

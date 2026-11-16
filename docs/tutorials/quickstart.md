@@ -218,8 +218,10 @@ Adapt the sample policy to your network, then connect a signal source:
 4. **Connect a detector.** Use the [FastNetMon](../how-to/detectors/fastnetmon.md)
    notify script, [Alertmanager](../how-to/deployment.md#alertmanager-setup), or a
    [generic webhook adapter](../how-to/detectors/generic-webhook.md). Detectors
-   usually authenticate with a bearer token; choose a mode in
-   [authentication](../how-to/deployment.md#authentication-setup).
+   authenticate with an API token you create in the controller service with
+   `prefixdctl tokens create`; see
+   [create API tokens](../how-to/deployment.md#create-api-tokens) and each
+   detector's guide for the scope it needs.
 5. **Peer with your routers.** Replace the documentation peer in
    `configs/rustbgpd.toml` (or `configs/gobgp.conf`) and configure FlowSpec
    import on the router. See [router configuration](../how-to/deployment.md#router-configuration)

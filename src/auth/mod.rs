@@ -1,4 +1,5 @@
 mod backend;
+pub mod token;
 
 pub use backend::{AuthBackend, Credentials};
 

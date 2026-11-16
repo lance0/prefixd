@@ -236,7 +236,7 @@ drops all traffic to the victim. Current limits:
   rustbgpd, the speaker removes it within one lease.
 - **rustbgpd only.** GoBGP has no blackhole capability, and startup refuses
   `blackhole.enabled` without it or with an empty safelist.
-- **Admin and typed confirmation.** Operators and bearer tokens get `403`; the
+- **Admin and typed confirmation.** Operators and operator or ingest tokens get `403`; the
   victim IP must be typed twice and match exactly.
 - **Stricter guardrails.** IPv4 `/32` or IPv6 `/128` only, a TTL capped at
   `blackhole.max_ttl_seconds` (3600 s by default), separate quotas, victim
@@ -603,18 +603,18 @@ for commands and mode-specific authentication.
 | Mode | Use Case | Configuration |
 |------|----------|---------------|
 | `none` | Development/testing | `http.auth.mode: none` |
-| `bearer` | API/CLI access | `auth.mode: bearer` + `http.auth.bearer_token_env` |
-| `credentials` | Dashboard login | `auth.mode: credentials` with operators table |
+| `credentials` | Dashboard login and API tokens | `auth.mode: credentials` with operators and API tokens |
 | `mtls` | Machine-to-machine | `auth.mode: mtls` + TLS client certs |
 
 ### Mode-Aware Model
 
-- **Credentials mode** - Session cookies only
-- **Bearer mode** - Bearer token accepted; existing dashboard session cookies also work
+- **Credentials mode** - Session cookies and named, hashed, revocable API
+  tokens with `ingest`, `operator` or `admin` scope and optional POP binding; a
+  Bearer request is authenticated by its token alone
 - **mTLS mode** - Native TLS client verification is required; accepted clients
   currently receive administrative API privileges, not per-certificate roles
 - **WebSocket feed** - Requires a browser session unless auth is disabled;
-  bearer authentication alone is not a WebSocket login
+  an API token alone is not a WebSocket login
 
 ### Role-Based Access Control
 
@@ -626,8 +626,8 @@ for commands and mode-specific authentication.
 
 **Permission hierarchy:** `admin > operator > viewer`
 
-Creating a [manual blackhole](#manual-blackholes) requires `admin`; bearer
-tokens act as `operator` and cannot create one.
+Creating a [manual blackhole](#manual-blackholes) requires `admin`: an Admin
+session or an `admin` API token. `operator` tokens and Operator sessions get 403.
 
 Account administration and self-service password changes are described in the
 [operator API](docs/reference/api.md#operators-admin-only).
