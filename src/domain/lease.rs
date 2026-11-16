@@ -13,7 +13,7 @@ use tokio::time::Instant;
 use crate::bgp::{FlowSpecAnnouncer, InjectionLeases, LeaseGeneration, RetryPolicy};
 use crate::error::{PrefixdError, Result};
 
-use super::{ActionType, Mitigation, MitigationStatus};
+use super::{ActionType, Mitigation};
 
 const RESTART_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -559,10 +559,8 @@ pub fn leased_expiry(mitigations: &[Mitigation], owner: &str) -> Option<DateTime
 }
 
 fn leased_by(mitigation: &Mitigation, owner: &str) -> bool {
-    matches!(
-        mitigation.status,
-        MitigationStatus::Active | MitigationStatus::Escalated
-    ) && !mitigation.is_dry_run_origin()
+    mitigation.is_active()
+        && !mitigation.is_dry_run_origin()
         && recorded_owner(mitigation) == Some(owner)
 }
 

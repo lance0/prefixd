@@ -459,7 +459,7 @@ quotas:
 ```
 
 FlowSpec admission checks customer, POP, then global quotas atomically in
-PostgreSQL across controllers sharing the database. Only FlowSpec pending, active and escalated
+PostgreSQL across controllers sharing the database. Only FlowSpec active and escalated
 rows count, including active rows whose TTL has passed but whose lifecycle has not
 yet completed. A mitigation without a customer skips the customer quota. Existing
 owner extensions do not consume a new slot. Detector-created prefix rules also

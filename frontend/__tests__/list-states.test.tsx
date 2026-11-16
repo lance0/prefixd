@@ -80,7 +80,7 @@ describe("list states", () => {
     expect(within(group).queryByRole("button", { name: "escalated" })).not.toBeInTheDocument()
   })
 
-  it.each(["active", "pending", "escalated"] as const)("keeps %s rows live with expiry and withdrawal controls", async (status) => {
+  it.each(["active", "escalated"] as const)("keeps %s rows live with expiry and withdrawal controls", async (status) => {
     const expiresAt = new Date(Date.now() + 26 * 60_000 + 30_000).toISOString()
 
     const now = new Date().toISOString()
@@ -97,12 +97,33 @@ describe("list states", () => {
     renderApp(<MitigationsContentLive />)
     const deadline = await screen.findByText(formatTimestamp(expiresAt))
     expect(deadline).toBeVisible()
-    expect(deadline.closest("td")).toHaveTextContent(/26m/)
+    expect(deadline.closest("td")).toHaveTextContent(/Expires in 26m/)
     expect(deadline.closest("td")?.querySelector("time")).toHaveAttribute("dateTime", expiresAt)
     expect(screen.getByRole("button", { name: "Withdraw mitigation" })).toBeEnabled()
     const checkbox = screen.getByRole("checkbox", { name: "Select mitigation 203.0.113.10" })
     fireEvent.click(checkbox)
     expect(checkbox).toBeChecked()
+  })
+
+  it("renders a stored pending row without live expiry or withdrawal controls", async () => {
+    const expiresAt = new Date(Date.now() + 26 * 60_000 + 30_000).toISOString()
+    const now = new Date().toISOString()
+
+    const mitigation: Mitigation = {
+      mitigation_id: "m-1", scope_hash: "scope-1", status: "pending", customer_id: null, service_id: null, pop: "iad1",
+      victim_ip: "203.0.113.10", vector: "udp_flood", action_type: "police", rate_bps: 5_000_000,
+      dst_prefix: "203.0.113.10/32", protocol: 17, dst_ports: [53], created_at: now, updated_at: now,
+      expires_at: expiresAt, withdrawn_at: null, triggering_event_id: "e-1", last_event_id: "e-1",
+      reason: "udp flood", acknowledged_at: null, acknowledged_by: null,
+    }
+
+    serveMitigations(loaded([mitigation]))
+    renderApp(<MitigationsContentLive />)
+    const deadline = await screen.findByText(formatTimestamp(expiresAt))
+    expect(deadline.closest("td")).not.toHaveTextContent(/Expires in/)
+    expect(screen.getAllByText("pending").length).toBeGreaterThan(0)
+    expect(screen.queryByRole("button", { name: "Withdraw mitigation" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("checkbox", { name: "Select mitigation 203.0.113.10" })).not.toBeInTheDocument()
   })
 
   it("tags only dry-run-origin rows as simulations", async () => {

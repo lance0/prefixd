@@ -791,9 +791,9 @@ mode that admitted it, `dry-run` or `enforced`. The value describes intent, not
 speaker acceptance, and the migration writes no announcement records.
 
 Rows created before the migration have no recorded origin. On the first start
-after it, prefixd tags this POP's pending, active and escalated rows with the
+after it, prefixd tags this POP's active and escalated rows with the
 configured `mode` and writes one system `tag_origin_mode` audit entry with the
-count. Withdrawn, expired and rejected rows keep an unknown origin, and tagging
+count. Pending, withdrawn, expired and rejected rows keep an unknown origin, and tagging
 doesn't change a row's revision, so pending withdrawals still complete. The tag
 assumes those rows were created in the mode you start with. That's why you
 upgrade without changing `mode`. If you can't, withdraw live rehearsal

@@ -262,62 +262,102 @@ async fn test_full_event_to_mitigation_flow() {
 }
 
 #[tokio::test]
-async fn legacy_pending_status_still_counts_as_live_intent() {
-    // `pending` is the controller's pre-admission state: `activate()` runs before
-    // `admit_mitigation` stores the row, so this version never writes it. A stored
-    // row that carries it anyway (an older version, another writer or a manual
-    // insert) must still count as live intent, so quota, conflict and withdrawal
-    // predicates cannot be bypassed by changing only the status column.
+async fn live_intent_is_exactly_active_and_escalated() {
+    // Live intent is `active` and legacy `escalated`. No release persisted
+    // `pending` (`activate()` runs before admission stores the row), so a stored
+    // `pending` row is not live: quota, conflict, ownership and withdrawal
+    // predicates ignore it like any terminal status.
     let ctx = TestContext::new().await;
     let app = ctx.router().await;
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/events")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{
-                        "timestamp": "2026-01-17T10:00:00Z",
-                        "source": "integration_test",
-                        "victim_ip": "203.0.113.10",
-                        "vector": "udp_flood",
-                        "bps": 500000000,
-                        "pps": 100000,
-                        "top_dst_ports": [53, 123],
-                        "confidence": 0.95
-                    }"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let event = || {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/events")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{
+                    "timestamp": "2026-01-17T10:00:00Z",
+                    "source": "integration_test",
+                    "victim_ip": "203.0.113.10",
+                    "vector": "udp_flood",
+                    "bps": 500000000,
+                    "pps": 100000,
+                    "top_dst_ports": [53, 123],
+                    "confidence": 0.95
+                }"#,
+            ))
+            .unwrap()
+    };
+    let response = app.clone().oneshot(event()).await.unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 
+    for (status, live) in [
+        ("active", true),
+        ("escalated", true),
+        ("pending", false),
+        ("expired", false),
+        ("withdrawn", false),
+        ("rejected", false),
+    ] {
+        sqlx::query("UPDATE mitigations SET status = $1")
+            .bind(status)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        let inventory = ctx.repo.active_mitigation_inventory(None).await.unwrap();
+        assert_eq!(inventory.len(), usize::from(live), "{status}");
+        assert_eq!(
+            ctx.repo.count_active_global().await.unwrap(),
+            u32::from(live),
+            "{status}"
+        );
+    }
+
+    let withdraw = |id: uuid::Uuid| {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/v1/mitigations/{id}/withdraw"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"operator_id": "test_operator", "reason": "status set check"}"#,
+            ))
+            .unwrap()
+    };
+    let id: uuid::Uuid = sqlx::query_scalar("SELECT mitigation_id FROM mitigations")
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+
+    // A stored pending row is not withdrawable and stays untouched.
     sqlx::query("UPDATE mitigations SET status = 'pending'")
         .execute(&ctx.pool)
         .await
         .unwrap();
+    let response = app.clone().oneshot(withdraw(id)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let row = ctx.repo.get_mitigation(id).await.unwrap().unwrap();
+    assert_eq!(row.status, MitigationStatus::Pending);
+    assert!(ctx.repo.pending_withdrawals(None).await.unwrap().is_empty());
+    // The unique scope index from migration 001 still covers `pending`, so the
+    // row keeps its scope: a new admission for it fails rather than duplicating.
+    let response = app.clone().oneshot(event()).await.unwrap();
+    assert!(response.status().is_server_error(), "{}", response.status());
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations")
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
 
-    let inventory = ctx.repo.active_mitigation_inventory(None).await.unwrap();
-    assert_eq!(inventory.len(), 1);
-    assert_eq!(inventory[0].status, MitigationStatus::Pending);
-    assert_eq!(ctx.repo.count_active_global().await.unwrap(), 1);
-
-    // Negative control: a terminal status leaves the same predicates empty.
-    sqlx::query("UPDATE mitigations SET status = 'withdrawn'")
+    // Control: the same row as active withdraws normally.
+    sqlx::query("UPDATE mitigations SET status = 'active'")
         .execute(&ctx.pool)
         .await
         .unwrap();
-    assert!(
-        ctx.repo
-            .active_mitigation_inventory(None)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(ctx.repo.count_active_global().await.unwrap(), 0);
+    let response = app.oneshot(withdraw(id)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let row = ctx.repo.get_mitigation(id).await.unwrap().unwrap();
+    assert_eq!(row.status, MitigationStatus::Withdrawn);
 }
 
 #[tokio::test]

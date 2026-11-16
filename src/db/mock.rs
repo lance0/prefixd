@@ -1171,16 +1171,7 @@ impl RepositoryTrait for MockRepository {
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
             .iter()
-            .find(|m| {
-                m.scope_hash == scope_hash
-                    && m.pop == pop
-                    && matches!(
-                        m.status,
-                        MitigationStatus::Pending
-                            | MitigationStatus::Active
-                            | MitigationStatus::Escalated
-                    )
-            })
+            .find(|m| m.scope_hash == scope_hash && m.pop == pop && m.is_active())
             .cloned())
     }
 
@@ -1188,15 +1179,7 @@ impl RepositoryTrait for MockRepository {
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
             .iter()
-            .filter(|m| {
-                m.triggering_event_id == event_id
-                    && matches!(
-                        m.status,
-                        MitigationStatus::Pending
-                            | MitigationStatus::Active
-                            | MitigationStatus::Escalated
-                    )
-            })
+            .filter(|m| m.triggering_event_id == event_id && m.is_active())
             .cloned()
             .collect())
     }
@@ -1282,15 +1265,7 @@ impl RepositoryTrait for MockRepository {
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
             .iter()
-            .filter(|m| {
-                m.customer_id.as_deref() == Some(customer_id)
-                    && matches!(
-                        m.status,
-                        MitigationStatus::Pending
-                            | MitigationStatus::Active
-                            | MitigationStatus::Escalated
-                    )
-            })
+            .filter(|m| m.customer_id.as_deref() == Some(customer_id) && m.is_active())
             .count() as u32)
     }
 
@@ -1298,31 +1273,13 @@ impl RepositoryTrait for MockRepository {
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
             .iter()
-            .filter(|m| {
-                m.pop == pop
-                    && matches!(
-                        m.status,
-                        MitigationStatus::Pending
-                            | MitigationStatus::Active
-                            | MitigationStatus::Escalated
-                    )
-            })
+            .filter(|m| m.pop == pop && m.is_active())
             .count() as u32)
     }
 
     async fn count_active_global(&self) -> Result<u32> {
         let mitigations = self.mitigations.lock().unwrap();
-        Ok(mitigations
-            .iter()
-            .filter(|m| {
-                matches!(
-                    m.status,
-                    MitigationStatus::Pending
-                        | MitigationStatus::Active
-                        | MitigationStatus::Escalated
-                )
-            })
-            .count() as u32)
+        Ok(mitigations.iter().filter(|m| m.is_active()).count() as u32)
     }
 
     async fn count_active_flowspec_by_customer(&self, customer_id: &str) -> Result<u32> {
@@ -1342,12 +1299,7 @@ impl RepositoryTrait for MockRepository {
             .filter(|m| {
                 m.action_type != crate::domain::ActionType::Blackhole
                     && m.customer_id.as_deref() == Some(customer_id)
-                    && matches!(
-                        m.status,
-                        MitigationStatus::Pending
-                            | MitigationStatus::Active
-                            | MitigationStatus::Escalated
-                    )
+                    && m.is_active()
             })
             .count() as u32
             + self.diversion_rules(|row| row.customer_id == customer_id))
@@ -1370,12 +1322,7 @@ impl RepositoryTrait for MockRepository {
             .filter(|m| {
                 m.action_type != crate::domain::ActionType::Blackhole
                     && m.pop == pop
-                    && matches!(
-                        m.status,
-                        MitigationStatus::Pending
-                            | MitigationStatus::Active
-                            | MitigationStatus::Escalated
-                    )
+                    && m.is_active()
             })
             .count() as u32
             + self.diversion_rules(|row| row.pop == pop))
@@ -1395,15 +1342,7 @@ impl RepositoryTrait for MockRepository {
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
             .iter()
-            .filter(|m| {
-                m.action_type != crate::domain::ActionType::Blackhole
-                    && matches!(
-                        m.status,
-                        MitigationStatus::Pending
-                            | MitigationStatus::Active
-                            | MitigationStatus::Escalated
-                    )
-            })
+            .filter(|m| m.action_type != crate::domain::ActionType::Blackhole && m.is_active())
             .count() as u32
             + self.diversion_rules(|_| true))
     }
@@ -1439,13 +1378,7 @@ impl RepositoryTrait for MockRepository {
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
             .iter()
-            .filter(|m| {
-                matches!(
-                    m.status,
-                    MitigationStatus::Active | MitigationStatus::Escalated
-                ) && m.expires_at < now
-                    && pop.is_none_or(|pop| m.pop == pop)
-            })
+            .filter(|m| m.is_active() && m.expires_at < now && pop.is_none_or(|pop| m.pop == pop))
             .cloned()
             .collect())
     }

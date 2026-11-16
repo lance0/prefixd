@@ -50,6 +50,7 @@ fn ordinary(state: &AppState, dst_prefix: &str, src_prefix: Option<&str>) -> Mit
         AttackVector::Unknown,
     );
     row.origin_mode = Some(OperationMode::Enforced);
+    row.activate();
     row
 }
 

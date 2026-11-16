@@ -299,8 +299,8 @@ export interface Mitigation {
   announcement_outcome?: AnnouncementOutcome
   mitigation_id: string
   scope_hash: string
-  // Legacy stored rows may return pending, escalated or rejected. New admissions
-  // never persist them; the dashboard offers only current statuses as filters.
+  // Live statuses are active and legacy escalated. Stored pending and legacy
+  // rejected rows still parse but are not live; filters offer current statuses.
   status: "pending" | "active" | "escalated" | "expired" | "withdrawn" | "rejected"
   customer_id: string | null
   service_id: string | null

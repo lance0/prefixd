@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   To clear the warnings, delete step 2 of each in the dashboard playbook editor
   or in `/etc/prefixd/playbooks.yaml`; see
   [multi-step playbooks](docs/how-to/upgrading.md#multi-step-playbooks).
+- A stored `pending` mitigation is no longer live intent. No release has
+  written one, so
+  `SELECT mitigation_id, pop, victim_ip FROM mitigations WHERE status = 'pending';`
+  should return no rows. Withdraw any row it returns, for example one inserted
+  by hand, before upgrading: this release refuses to withdraw it, and the row
+  still holds its scope in the unique scope index, so a new mitigation for the
+  same scope and POP fails until it is removed.
 
 ### Known limitations
 
@@ -134,6 +141,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns the documented `500` while the delete stays pending. Reconciliation
   completes both. See
   [troubleshooting](docs/how-to/troubleshooting.md#create-returns-announcement_outcome-unconfirmed).
+- Live mitigation intent is `active` and legacy `escalated` in every check.
+  A stored `pending` row, which no release has written, used to count toward
+  quotas, conflicts and route ownership and could be withdrawn, while expiry,
+  reconciliation, lease renewal, export evidence and lifetime extension skipped
+  it. Such a row, for example one inserted by hand, is no longer live intent:
+  every check ignores it, withdrawal returns `400`, and the dashboard shows its
+  status without a countdown or withdrawal control. `pending` still parses in
+  responses and exact status filters.
+- `GET /v1/mitigations` documents `status` as the statuses this version writes
+  (`active`, `expired` and `withdrawn`), and the CLI help and the dashboard
+  status filter offer the same set. Legacy `pending`, `escalated` and `rejected`
+  are still accepted and match stored rows. `rejected` is no longer produced
+  since 0.20.0; rows stored by 0.19 and earlier remain, and still cannot be
+  acknowledged.
+- The WebSocket feed no longer defines an `event_ingested` frame. No sender
+  existed, so the frame was never broadcast; event lists keep their API
+  refresh. The dashboard message type union and alert-event mapping drop it.
+- The architecture and upgrade documents describe `flowspec_announcements` as a
+  legacy table this version never writes, rather than a live announcement
+  schema.
 
 ### Fixed
 
@@ -174,27 +201,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps relative links such as `docs/how-to/upgrading.md`, which broke on the
   GitHub Release page; the release body now points them at
   `https://github.com/<repo>/blob/vX.Y.Z/<path>`.
-
-### Compatibility surfaces
-
-- `GET /v1/mitigations` documents `status` as the statuses this version writes
-  (`active`, `expired` and `withdrawn`), and the CLI help lists the same set.
-  Legacy `pending`, `escalated` and `rejected` are still accepted and still match
-  a stored row written by an older version or another writer: `pending` is only
-  the controller's pre-admission state, so the live-intent predicates keep
-  covering it rather than a stored row slipping past quota, conflict and
-  withdrawal checks. The dashboard status filter no longer offers `pending`, and
-  legacy rows retain live expiry treatment and withdrawal controls on that status.
-- The architecture and upgrade documents describe `flowspec_announcements` as a
-  legacy table this version never writes, rather than a live announcement
-  schema.
-
-- The WebSocket feed no longer defines an `event_ingested` frame. No sender
-  existed, so the frame was never broadcast; event lists keep their API refresh.
-  The dashboard message type union and alert-event mapping drop it.
-- `Mitigation::reject()` is removed. It had no caller, so `rejected` was never
-  produced; the status still deserializes for stored rows and old filters, and
-  the acknowledgment guard keeps excluding such rows.
 
 ## [0.27.0] - 2026-11-15
 

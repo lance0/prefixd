@@ -672,10 +672,7 @@ impl ReconciliationLoop {
                 .or_default() += 1;
         }
         active.retain(|mitigation| {
-            matches!(
-                mitigation.status,
-                MitigationStatus::Active | MitigationStatus::Escalated
-            ) && pop.is_none_or(|pop| mitigation.pop == pop)
+            mitigation.is_active() && pop.is_none_or(|pop| mitigation.pop == pop)
         });
 
         {
@@ -865,10 +862,7 @@ impl ReconciliationLoop {
                 Ok(Some(mitigation))
                     if mitigation.mitigation_id == candidate.mitigation_id
                         && mitigation.pop == candidate.pop
-                        && matches!(
-                            mitigation.status,
-                            MitigationStatus::Active | MitigationStatus::Escalated
-                        )
+                        && mitigation.is_active()
                         && mitigation.expires_at > chrono::Utc::now()
                         && pop.is_none_or(|pop| mitigation.pop == pop) =>
                 {
@@ -1247,11 +1241,7 @@ impl ReconciliationLoop {
             let key = MitigationRoute::of(&mitigation).ownership_key();
             owned.insert(key.clone());
             *owner_counts.entry(key.clone()).or_default() += 1;
-            if matches!(
-                mitigation.status,
-                MitigationStatus::Active | MitigationStatus::Escalated
-            ) && mitigation.expires_at > now
-                && !pending_keys.contains(&key)
+            if mitigation.is_active() && mitigation.expires_at > now && !pending_keys.contains(&key)
             {
                 desired.push((key, mitigation));
             }
@@ -1404,10 +1394,7 @@ impl ReconciliationLoop {
             let mitigation = match self.repo.get_mitigation(candidate.mitigation_id).await {
                 Ok(Some(mitigation))
                     if mitigation.pop == candidate.pop
-                        && matches!(
-                            mitigation.status,
-                            MitigationStatus::Active | MitigationStatus::Escalated
-                        )
+                        && mitigation.is_active()
                         && mitigation.expires_at > chrono::Utc::now()
                         && !mitigation.is_dry_run_origin()
                         && pop.is_none_or(|pop| mitigation.pop == pop) =>
@@ -1683,10 +1670,7 @@ impl ReconciliationLoop {
             .into_iter()
             .filter(|mitigation| {
                 mitigation.action_type != ActionType::Blackhole
-                    && matches!(
-                        mitigation.status,
-                        MitigationStatus::Active | MitigationStatus::Escalated
-                    )
+                    && mitigation.is_active()
                     && !mitigation.is_dry_run_origin()
                     && mitigation.expires_at > chrono::Utc::now()
                     && pop.is_none_or(|pop| mitigation.pop == pop)
@@ -3478,7 +3462,7 @@ mod tests {
     #[tokio::test]
     async fn ambiguous_or_invalid_desired_key_leaves_independent_repairs_available() {
         let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
-        for sibling in ["active", "pending", "expired", "invalid"] {
+        for sibling in ["active", "escalated", "expired", "invalid"] {
             let repo = Arc::new(MockRepository::new());
             let speaker = action_speaker(0);
             let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
@@ -3492,8 +3476,8 @@ mod tests {
                 other.match_criteria.dst_prefix = "2001:0DB8:0:0:0:0:0:1/128".into();
                 other.match_criteria.dst_ports = vec![53, 53];
                 other.scope_hash = "legacy duplicate owner".into();
-                if sibling == "pending" {
-                    other.status = MitigationStatus::Pending;
+                if sibling == "escalated" {
+                    other.status = MitigationStatus::Escalated;
                 }
                 if sibling == "expired" {
                     other.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);

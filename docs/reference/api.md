@@ -557,7 +557,7 @@ Authorization: Bearer <token>
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `status` | string | Filter by one or more statuses (comma-separated): `active`, `expired`, `withdrawn`. Legacy `pending`, `escalated` and `rejected` are still accepted and match a stored row written by an older or external writer, but no code path produces them: `pending` is only the controller's pre-admission state and `rejected` had no producer |
+| `status` | string | Filter by one or more statuses (comma-separated): `active`, `expired`, `withdrawn`. Legacy `pending`, `escalated` and `rejected` are still accepted and match stored rows, but this version produces none of them. `rejected` is no longer produced since 0.20.0; rows stored by 0.19 and earlier remain. Live intent is `active` and `escalated`; a stored `pending` row is not live and cannot be withdrawn |
 | `customer_id` | string | Filter by customer |
 | `q` | string | Literal case-insensitive substring of target, vector, customer ID or mitigation UUID; at most 256 UTF-8 bytes and no NUL. Empty matches every row; `%`, `_` and backslash have no wildcard meaning |
 | `victim_ip` | string | Filter by exact stored target: host IP or canonical manual CIDR; no containment matching |
