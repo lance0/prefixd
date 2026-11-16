@@ -745,6 +745,9 @@ async fn the_blackhole_allowlist_admits_a_bound_token_and_an_admin_only() {
     let operator_token = f
         .repo
         .mint_token_for_test("automation", TokenScope::Operator, None);
+    // Both spoofs are tried before asserting, so a regression shows each
+    // route's outcome: through the event body and through the adapter route.
+    let mut outcomes = Vec::new();
     for (auth, path, body) in [
         (
             ("cookie", operator.clone()),
@@ -754,12 +757,19 @@ async fn the_blackhole_allowlist_admits_a_bound_token_and_an_admin_only() {
         (
             ("authorization", bearer(&operator_token)),
             "/v1/signals/fastnetmon",
-            fastnetmon("203.0.113.50", "op-2", "host"),
+            fastnetmon("203.0.113.51", "op-2", "host"),
         ),
     ] {
         let (status, response) = send(&f.app, path, Some((auth.0, &auth.1)), &body).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {response}");
+        outcomes.push((path, status, response["mitigation_id"].clone()));
     }
+    assert_eq!(
+        outcomes,
+        [
+            ("/v1/events", StatusCode::FORBIDDEN, Value::Null),
+            ("/v1/signals/fastnetmon", StatusCode::FORBIDDEN, Value::Null),
+        ]
+    );
     assert_eq!(written(&f.repo).await, (0, 0, 0));
 
     let fnm = f
