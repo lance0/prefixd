@@ -644,14 +644,16 @@ impl Client {
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{}", self.base_url, path);
-        let mut req = self.http.request(method, &url);
-        if let Some(ref token) = self.token {
-            req = req.header("Authorization", format!("Bearer {}", token));
-        }
+        let req = self.http.request(method, &url);
+        // Send one credential. A bearer request does not read the session, so an
+        // administrator session would otherwise drop to the token's Operator role.
         if let Some(cookie) = &self.session_cookie {
-            req = req.header(reqwest::header::COOKIE, cookie);
+            req.header(reqwest::header::COOKIE, cookie)
+        } else if let Some(token) = &self.token {
+            req.header("Authorization", format!("Bearer {}", token))
+        } else {
+            req
         }
-        req
     }
 
     async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, String> {
@@ -1747,6 +1749,34 @@ async fn cmd_migrations(format: OutputFormat) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_cookie_replaces_the_bearer_token() {
+        let headers = |token: Option<&str>, cookie: Option<&str>| {
+            let mut client = Client::new("http://controller".into(), token.map(Into::into));
+            client.session_cookie = cookie.map(Into::into);
+            let request = client
+                .request(reqwest::Method::GET, "/v1/health/detail")
+                .build()
+                .unwrap();
+            let header = |name| {
+                request
+                    .headers()
+                    .get(name)
+                    .map(|value: &reqwest::header::HeaderValue| value.to_str().unwrap().to_owned())
+            };
+            (header("authorization"), header("cookie"))
+        };
+        assert_eq!(
+            headers(Some("token"), Some("id=session")),
+            (None, Some("id=session".into()))
+        );
+        assert_eq!(
+            headers(Some("token"), None),
+            (Some("Bearer token".into()), None)
+        );
+        assert_eq!(headers(None, None), (None, None));
+    }
 
     fn diversion_cli_fixture(family: &str) -> (serde_json::Value, serde_json::Value) {
         let (prefix, target) = if family == "ipv4" {

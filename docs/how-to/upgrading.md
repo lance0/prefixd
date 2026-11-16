@@ -865,6 +865,28 @@ Fix it in one of two ways:
 The controller logs the effective value at startup as `secure_cookies` on the
 `session cookies` event.
 
+## Bearer requests ignore session cookies
+
+In bearer mode, a request that sends `Authorization: Bearer` now authenticates
+by the token alone. The controller does not read its session cookie, so a
+PostgreSQL outage no longer turns a valid token into an empty 500 when a stale
+cookie rides along. The dashboard and detectors send one or the other and need
+no change. `prefixdctl` now sends only the session cookie when
+`--session-cookie` or `PREFIXD_SESSION_COOKIE` is set, even with a token
+configured. Upgrade it with the controller: an older `prefixdctl` with both
+configured sends both, so its administrator requests in bearer mode get the
+token's Operator role and a 403.
+
+A client that sends both is affected:
+
+- It gets the token's Operator role, not the session's role.
+- A wrong or expired token is a 401 even beside a valid session.
+- The WebSocket feed at `/v1/ws/feed` accepts sessions only, so a bearer header
+  there is a 401.
+
+Send either the session cookie or the bearer header, not both. Credentials mode
+is unchanged: it ignores bearer headers and reads the session.
+
 ## Per-class rate limits
 
 `http.rate_limit.events_per_second` and `burst` used to size one bucket for the

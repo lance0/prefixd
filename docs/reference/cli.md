@@ -534,7 +534,9 @@ Plain global request files retain their existing format and endpoint.
 Writes require an administrator. Supply an authenticated administrator session
 through `--session-cookie` or `PREFIXD_SESSION_COOKIE`; the value is a complete
 Cookie header and is hidden from help output. Sign in with
-[`POST /v1/auth/login`](api.md#login) and copy the session cookie it sets. Ordinary bearer tokens retain the
+[`POST /v1/auth/login`](api.md#login) and copy the session cookie it sets. When a
+session cookie is set, `prefixdctl` sends it instead of the bearer token, because
+a bearer request does not read the session. Ordinary bearer tokens retain the
 Operator role. See [manual scrubber diversion](../how-to/scrubber-diversion.md).
 
 ## Manual VPN FlowSpec

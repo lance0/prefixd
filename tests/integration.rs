@@ -1318,7 +1318,7 @@ async fn test_health_endpoint() {
 
 /// A browser keeps its session cookie after PostgreSQL goes down. Public routes
 /// that never read the session must answer as they do without the cookie, while
-/// routes that read it deny as anonymous.
+/// routes that do read it still fail closed with an empty 500 and keep the cookie.
 #[tokio::test]
 async fn sessionless_public_routes_ignore_cookie_when_session_store_is_down() {
     use std::time::Duration;
@@ -1375,30 +1375,29 @@ async fn sessionless_public_routes_ignore_cookie_when_session_store_is_down() {
     assert_eq!(json["status"], "ok");
     assert_eq!(json["auth_mode"], "credentials");
 
-    // Control: the cookie does reach the unreachable store on session routes.
-    // A failed load cannot authenticate anyone, so those routes deny without
-    // exposing the session or the database, and the stale cookie is dropped.
-    for path in ["/v1/auth/me", "/v1/mitigations"] {
-        let (status, body) = read(send(path, Some(&cookie)).await.unwrap()).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+    // Control: the cookie does reach the unreachable store on session routes,
+    // and the failure exposes nothing about the session or the database. A
+    // transient outage must not log the browser out, so the cookie is kept.
+    for path in ["/v1/health/detail", "/v1/auth/me", "/v1/mitigations"] {
+        let response = send(path, Some(&cookie)).await.unwrap();
+        assert!(
+            !response
+                .headers()
+                .contains_key(axum::http::header::SET_COOKIE),
+            "{path} removed the session cookie: {:?}",
+            response.headers().get(axum::http::header::SET_COOKIE)
+        );
+        let (status, body) = read(response).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
         assert!(body.is_empty(), "{path} leaked {body:?}");
         let (status, _) = read(send(path, None).await.unwrap()).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{path} without a cookie");
     }
-    let response = send("/v1/health/detail", Some(&cookie)).await.unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert!(
-        response
-            .headers()
-            .contains_key(axum::http::header::SET_COOKIE),
-        "the unloadable session cookie should be dropped"
-    );
 }
 
 /// A bearer token is independent of session storage. While PostgreSQL is down a
 /// stale cookie must not turn the operator's diagnostic endpoint into a 500 or
-/// stop the token from authenticating, an unknown path must stay a 404, and a
-/// failed session load must never authenticate anyone.
+/// stop the token from authenticating, and an unknown path must stay a 404.
 #[tokio::test]
 async fn bearer_auth_survives_unloadable_session_cookie() {
     use std::time::Duration;
@@ -1505,25 +1504,39 @@ async fn bearer_auth_survives_unloadable_session_cookie() {
         "database should report the failed check: {cookie_json}"
     );
 
-    // A failed session load is anonymous, so the token is still required.
+    // The token alone decides: a wrong token is denied even with a cookie, and
+    // the session store is never consulted, so the cookie is left in place.
     for presented in [None, Some(cookie.as_str())] {
-        let (status, body) = read(send("/v1/health/detail", presented, None).await.unwrap()).await;
+        let response = send("/v1/health/detail", presented, Some("wrong-token"))
+            .await
+            .unwrap();
+        assert!(
+            !response
+                .headers()
+                .contains_key(axum::http::header::SET_COOKIE)
+        );
+        let (status, body) = read(response).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "cookie={presented:?}");
         assert!(body.is_empty(), "cookie={presented:?} leaked {body:?}");
-        let (status, _) = read(
-            send("/v1/health/detail", presented, Some("wrong-token"))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "cookie={presented:?}");
     }
+    let (status, _) = read(send("/v1/health/detail", None, None).await.unwrap()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    // Routing still happens: an unknown path is a 404, not a session failure.
+    // Without a token the cookie is loaded as before: the outage fails closed.
+    let (status, body) = read(
+        send("/v1/health/detail", Some(&cookie), None)
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(body.is_empty(), "leaked {body:?}");
+
+    // Routing still happens for token requests: an unknown path is a 404.
     for path in ["/v1/does-not-exist", "/nope"] {
-        for bearer in [None, Some(TOKEN)] {
-            let (status, _) = read(send(path, Some(&cookie), bearer).await.unwrap()).await;
-            assert_eq!(status, StatusCode::NOT_FOUND, "{path} bearer={bearer:?}");
+        for presented in [None, Some(cookie.as_str())] {
+            let (status, _) = read(send(path, presented, Some(TOKEN)).await.unwrap()).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path} cookie={presented:?}");
         }
     }
 }
@@ -11960,27 +11973,34 @@ mod anonymous_auth {
         }
     }
 
+    /// In bearer mode a bearer request never touches the session store, so a
+    /// session outage cannot fail it and the token alone decides its role.
+    /// Cookie-only requests, and every request in credentials mode, still load
+    /// the session: an outage fails them closed and keeps the cookie.
     #[tokio::test]
-    async fn session_load_failure_uses_bearer_role_only_in_bearer_mode() {
-        use prefixd::auth::AnonymousOnLoadError;
+    async fn bearer_requests_skip_the_session_store_only_in_bearer_mode() {
         use std::sync::atomic::Ordering::SeqCst;
+
+        const TOKEN: &str = "session-control-token";
+        // A missing mitigation distinguishes Operator authorization (404) from a
+        // Viewer session's permission denial (403).
+        let withdraw = format!("/v1/mitigations/{}/withdraw", uuid::Uuid::new_v4());
 
         for mode in [AuthMode::Bearer, AuthMode::Credentials] {
             let repo = Arc::new(MockRepository::new());
             let viewer = viewer(&repo, "outage-viewer").await;
             let store = FailingLoadStore::default();
-            let app = router(mode, repo, AnonymousOnLoadError::new(store.clone()));
+            let app = router(mode, repo, store.clone());
             let cookie = login(&app, &viewer.username).await;
             let id: Id = cookie.split_once('=').unwrap().1.parse().unwrap();
-            // A missing mitigation distinguishes successful operator authorization
-            // (404) from the healthy Viewer session's permission denial (403).
-            let path = format!("/v1/mitigations/{}/withdraw", uuid::Uuid::new_v4());
-            let send = |path: String, method: &str, token: Option<&str>| {
+            let send = |path: &str, method: &str, cookie: Option<&str>, token: Option<&str>| {
                 let mut req = Request::builder()
                     .method(method)
                     .uri(path)
-                    .header("cookie", &cookie)
                     .header("content-type", "application/json");
+                if let Some(cookie) = cookie {
+                    req = req.header("cookie", cookie);
+                }
                 if let Some(token) = token {
                     req = req.header("authorization", format!("Bearer {token}"));
                 }
@@ -11989,57 +12009,81 @@ mod anonymous_auth {
                         .unwrap(),
                 )
             };
-            assert_eq!(
-                send(path.clone(), "POST", Some("session-control-token"))
-                    .await
-                    .unwrap()
-                    .status(),
-                StatusCode::FORBIDDEN
-            );
-            store.fail.store(true, SeqCst);
-            for token in [None, Some("wrong-token")] {
-                assert_eq!(
-                    send(path.clone(), "POST", token).await.unwrap().status(),
-                    StatusCode::UNAUTHORIZED
-                );
+            let bearer = mode == AuthMode::Bearer;
+            let pick = |bearer_status, credentials_status| {
+                if bearer {
+                    bearer_status
+                } else {
+                    credentials_status
+                }
+            };
+
+            for fail in [false, true] {
+                store.fail.store(fail, SeqCst);
+                let outage = |status| {
+                    if fail {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    } else {
+                        status
+                    }
+                };
+                let cases = [
+                    // A cookie alone always loads the session.
+                    (None, outage(StatusCode::FORBIDDEN)),
+                    // In bearer mode the token decides and the cookie is unread;
+                    // credentials mode ignores the token and reads the session.
+                    (
+                        Some(TOKEN),
+                        pick(StatusCode::NOT_FOUND, outage(StatusCode::FORBIDDEN)),
+                    ),
+                    (
+                        Some("wrong-token"),
+                        pick(StatusCode::UNAUTHORIZED, outage(StatusCode::FORBIDDEN)),
+                    ),
+                ];
+                for (token, expected) in cases {
+                    let response = send(&withdraw, "POST", Some(&cookie), token).await.unwrap();
+                    assert_eq!(
+                        response.status(),
+                        expected,
+                        "mode={mode:?} fail={fail} token={token:?}"
+                    );
+                    assert!(
+                        !response.headers().contains_key("set-cookie"),
+                        "mode={mode:?} fail={fail} token={token:?} touched the cookie: {:?}",
+                        response.headers().get("set-cookie")
+                    );
+                }
+                // The token grants Operator, never Admin, and never a session.
+                for (path, method, expected) in [
+                    (
+                        withdraw.as_str(),
+                        "POST",
+                        pick(StatusCode::NOT_FOUND, StatusCode::UNAUTHORIZED),
+                    ),
+                    (
+                        "/v1/operators",
+                        "GET",
+                        pick(StatusCode::FORBIDDEN, StatusCode::UNAUTHORIZED),
+                    ),
+                    ("/v1/auth/me", "GET", StatusCode::UNAUTHORIZED),
+                ] {
+                    assert_eq!(
+                        send(path, method, None, Some(TOKEN))
+                            .await
+                            .unwrap()
+                            .status(),
+                        expected,
+                        "mode={mode:?} fail={fail} {path}"
+                    );
+                }
             }
-            let response = send(path.clone(), "POST", Some("session-control-token"))
-                .await
-                .unwrap();
-            assert_eq!(
-                response.status(),
-                if mode == AuthMode::Bearer {
-                    StatusCode::NOT_FOUND
-                } else {
-                    StatusCode::UNAUTHORIZED
-                }
-            );
-            let removal = response.headers()["set-cookie"].to_str().unwrap();
-            assert!(removal.starts_with("id=;"), "{removal}");
-            assert!(removal.contains("Max-Age=0"), "{removal}");
-            assert_eq!(
-                send("/v1/operators".into(), "GET", Some("session-control-token"))
-                    .await
-                    .unwrap()
-                    .status(),
-                if mode == AuthMode::Bearer {
-                    StatusCode::FORBIDDEN
-                } else {
-                    StatusCode::UNAUTHORIZED
-                }
-            );
-            assert_eq!(
-                send("/v1/auth/me".into(), "GET", Some("session-control-token"))
-                    .await
-                    .unwrap()
-                    .status(),
-                StatusCode::UNAUTHORIZED
-            );
-            // A transient read error must not delete the server-side session.
+
+            // Neither the outage nor the bearer requests deleted the session.
             assert!(store.inner.load(&id).await.unwrap().is_some());
             store.fail.store(false, SeqCst);
             assert_eq!(
-                send(path, "POST", Some("session-control-token"))
+                send(&withdraw, "POST", Some(&cookie), None)
                     .await
                     .unwrap()
                     .status(),

@@ -43,6 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   To clear the warnings, delete step 2 of each in the dashboard playbook editor
   or in `/etc/prefixd/playbooks.yaml`; see
   [multi-step playbooks](docs/how-to/upgrading.md#multi-step-playbooks).
+- In bearer mode, a request that sends `Authorization: Bearer` now
+  authenticates by the token alone and its session cookie is not read. A client
+  that sends both a session cookie and a bearer header gets the token's Operator
+  role instead of the session's role, and a wrong token is now a 401 even beside
+  a valid session. The WebSocket feed accepts sessions only, so send it no
+  bearer header. `prefixdctl` now sends only the session cookie when one is
+  set; upgrade it with the controller, because an older `prefixdctl` with both a
+  token and `--session-cookie` gets a 403 on administrator requests. See
+  [bearer requests ignore session cookies](docs/how-to/upgrading.md#bearer-requests-ignore-session-cookies).
 
 ### Known limitations
 
@@ -137,6 +146,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- In bearer mode, a valid bearer token sent with a stale session cookie now
+  authenticates during a PostgreSQL outage. The controller no longer loads the
+  session for a bearer request, so `GET /v1/health/detail` with a token returns
+  200 and reports the failed `database` check instead of an empty 500. Requests
+  without a bearer header still fail with an empty 500 during the outage and
+  keep their session cookie.
 - Leased FlowSpec rules and leased blackholes are no longer renewed
   indefinitely during a PostgreSQL outage. Renewal stays independent of the
   database and the fence, but it now stops one margin after the latest leased

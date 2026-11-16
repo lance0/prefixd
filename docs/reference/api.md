@@ -52,6 +52,14 @@ http:
 | `credentials` | Username/password login with session cookies |
 | `mtls` | Client certificate auth at TLS layer |
 
+In bearer mode, a request that sends `Authorization: Bearer` authenticates by the
+token alone, with the Operator role. The controller does not read its session
+cookie, so a session-store outage cannot fail the request and a wrong token is
+denied even beside a valid session. Requests without a bearer header use the
+session as before; during a session-store outage they fail with an empty 500 and
+keep the cookie. The WebSocket feed accepts sessions only, so send it no bearer
+header. Credentials mode ignores bearer headers and always reads the session.
+
 > Unless explicitly marked "Public", `/v1/*` endpoints require authentication.
 
 ## List Filters
@@ -2486,14 +2494,9 @@ Full operational health using the configured authentication mode. The request
 and response below illustrate bearer mode. In credentials mode, send a session
 cookie; native mTLS requires a client certificate. `none` requires no credentials.
 
-In bearer mode, a failed session-store load falls back to independently checking
-the bearer token, so a stale cookie does not block outage diagnostics and
-`database` reports the failed health check. Healthy sessions still take precedence
-over tokens. If a session cannot load, a valid token authenticates with its
-Operator role, which can differ from the session's role (for example, Viewer).
-Without a valid token the request is denied; credentials mode requires a session
-and does not enable bearer fallback. Session create, save and delete failures
-still propagate as errors.
+In bearer mode, a request with a bearer token does not read the session, so a
+stale cookie does not block outage diagnostics and `database` reports the failed
+health check. See [Auth Modes](#auth-modes).
 
 **Illustrative response with rustbgpd:**
 

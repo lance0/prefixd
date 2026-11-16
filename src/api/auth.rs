@@ -21,6 +21,29 @@ pub fn require_operator(
     }
 }
 
+/// In bearer mode, a request that presents a bearer token authenticates by the
+/// token alone, so its session cookie is dropped before the session layer.
+/// The session store is never consulted: a stale cookie cannot fail the request
+/// during a database outage, and the session is neither loaded nor removed.
+pub async fn bearer_skips_session(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<AppState>>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::header::{AUTHORIZATION, COOKIE};
+
+    if matches!(state.settings.http.auth.mode, AuthMode::Bearer)
+        && request
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("Bearer "))
+    {
+        request.headers_mut().remove(COOKIE);
+    }
+    next.run(request).await
+}
+
 /// Check if request is authenticated via session cookie or bearer token (hybrid auth)
 /// Returns Ok(()) if authenticated, Err(StatusCode) if not
 /// When auth mode is None, always returns Ok
