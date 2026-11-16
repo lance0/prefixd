@@ -1,3 +1,4 @@
+mod api_token;
 mod blackhole;
 mod destination;
 mod event;
@@ -11,6 +12,7 @@ mod speaker_target;
 mod vpn_scope;
 mod withdrawal;
 
+pub use api_token::*;
 pub use blackhole::*;
 pub use destination::*;
 pub use event::*;

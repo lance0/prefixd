@@ -73,3 +73,40 @@ impl From<Operator> for OperatorResponse {
         }
     }
 }
+
+/// Longest username, and longest audit actor ID, that every Operator mutation
+/// accepts.
+pub const MAX_USERNAME_LEN: usize = 64;
+
+/// Usernames match `^[A-Za-z0-9_-]{1,64}$`, the rule the API, `prefixdctl
+/// operators create` and the `operators` table CHECK share. `token:` and
+/// `webhook:` actor IDs therefore cannot collide with a username.
+pub fn is_valid_username(value: &str) -> bool {
+    (1..=MAX_USERNAME_LEN).contains(&value.len())
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usernames_match_the_shared_pattern() {
+        for valid in ["alice_1", "ops-admin", "A", &"a".repeat(64)] {
+            assert!(is_valid_username(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            "bad space",
+            "no/slash",
+            "token:name",
+            "webhook:name",
+            "caf\u{e9}",
+            &"a".repeat(65),
+        ] {
+            assert!(!is_valid_username(invalid), "{invalid}");
+        }
+    }
+}

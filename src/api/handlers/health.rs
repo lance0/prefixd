@@ -1,16 +1,11 @@
-use axum::{
-    Json,
-    extract::State,
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
-    response::IntoResponse,
-};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 use std::sync::Arc;
 use utoipa::ToSchema;
 
 use crate::AppState;
+use crate::api::auth::AuthPrincipal;
 use crate::api::auth::require_auth;
-use crate::auth::AuthSession;
 
 #[derive(Serialize, ToSchema)]
 pub struct PublicHealthResponse {
@@ -301,11 +296,9 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 )]
 pub async fn health_detail(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let ((mut status, bgp_map, active, db_status, gobgp_health), daemon, vpn_families) = tokio::join!(
         check_health_status(&state),

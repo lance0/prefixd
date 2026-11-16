@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use chrono::{DateTime, Utc};
@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::api::auth::{require_auth, require_operator, require_role};
+use crate::api::auth::{AuthPrincipal, require_auth, require_ingest, require_role};
 use crate::auth::AuthSession;
 use crate::db::ListParams;
 use crate::domain::{AttackEventInput, AttackVector, validate_confidence};
@@ -87,12 +87,10 @@ pub struct ListSignalGroupsQuery {
 )]
 pub async fn list_signal_groups(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Query(query): Query<ListSignalGroupsQuery>,
 ) -> Result<axum::response::Response, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let status_filter = match query.status.as_deref().map(str::parse).transpose() {
         Ok(status) => status,
@@ -176,12 +174,10 @@ pub async fn list_signal_groups(
 )]
 pub async fn get_signal_group(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SignalGroupDetailResponse>, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let group = state
         .repo
@@ -380,21 +376,18 @@ fn parse_optional_i64(annotations: &HashMap<String, String>, key: &str) -> Optio
 )]
 pub async fn ingest_alertmanager(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    ingest_alertmanager_inner(state, auth_session, headers, body).await
+    ingest_alertmanager_inner(state, principal, body).await
 }
 
 async fn ingest_alertmanager_inner(
     state: Arc<AppState>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<AlertmanagerWebhookResponse>), AppError> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
+    require_ingest(&principal).map_err(AppError)?;
 
     // Parse body as JSON — return 400 for malformed payloads
     let payload: AlertmanagerWebhookPayload = serde_json::from_slice(&body).map_err(|e| {
@@ -825,21 +818,18 @@ fn classify_fastnetmon(
 )]
 pub async fn ingest_fastnetmon(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    ingest_fastnetmon_inner(state, auth_session, headers, body).await
+    ingest_fastnetmon_inner(state, principal, body).await
 }
 
 async fn ingest_fastnetmon_inner(
     state: Arc<AppState>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
+    require_ingest(&principal).map_err(AppError)?;
 
     // Parse body as JSON — return 400 for malformed payloads
     let payload: FastNetMonPayload = serde_json::from_slice(&body).map_err(|e| {
@@ -1057,8 +1047,11 @@ async fn ingest_webhook_inner(
             }
         }
         crate::correlation::WebhookAuth::Bearer => {
-            let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-            require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
+            // Resolved only here: an HMAC adapter ignores `Authorization`.
+            let principal = AuthPrincipal::resolve(&state, &headers, Some(&auth_session))
+                .await
+                .map_err(AppError)?;
+            require_ingest(&principal).map_err(AppError)?;
         }
         crate::correlation::WebhookAuth::None => {
             // No-auth is caller's responsibility; logged once at startup.
@@ -1237,12 +1230,10 @@ pub struct CorroboratorResponse {
 )]
 pub async fn ingest_corroborator(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(input): Json<CorroboratorInput>,
 ) -> impl IntoResponse {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_operator(&state, &auth_session, auth_header).map_err(AppError)?;
+    require_ingest(&principal).map_err(AppError)?;
     ingest_corroborator_inner(state, input).await
 }
 
@@ -1444,12 +1435,10 @@ pub struct CorroboratorActivityQuery {
 )]
 pub async fn get_corroborator_activity(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     axum::extract::Query(query): axum::extract::Query<CorroboratorActivityQuery>,
 ) -> impl IntoResponse {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    if require_auth(&state, &auth_session, auth_header).is_err() {
+    if require_auth(&principal).is_err() {
         return Err(AppError(PrefixdError::Unauthorized(
             "authentication required".into(),
         )));
@@ -1519,13 +1508,11 @@ pub struct CachedCorroboratorBySource {
 )]
 pub async fn list_cached_corroborators_handler(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     axum::extract::Query(query): axum::extract::Query<CachedCorroboratorsQuery>,
 ) -> Result<Json<CachedCorroboratorsResponse>, StatusCode> {
     use crate::domain::OperatorRole;
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    require_role(&principal, OperatorRole::Admin)?;
 
     let limit = query.limit.unwrap_or(100).clamp(1, 1000) as i64;
     let now = chrono::Utc::now();

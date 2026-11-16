@@ -939,10 +939,11 @@ async fn manual_api_refuses_arbitrary_targets_and_operator_role() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(fake.writes.load(SeqCst), 0);
-    let (mut state, _repo, fake) = fixture(OperationMode::DryRun).await;
+    let (mut state, repo, fake) = fixture(OperationMode::DryRun).await;
     let inner = Arc::get_mut(&mut state).unwrap();
-    inner.settings.http.auth.mode = crate::config::AuthMode::Bearer;
-    inner.bearer_token = Some("fixture-token".into());
+    inner.settings.http.auth.mode = crate::config::AuthMode::Credentials;
+    let token =
+        repo.mint_token_for_test("fixture-token", crate::domain::TokenScope::Operator, None);
     let router = crate::api::create_test_router(state);
     let mut body = body;
     body.as_object_mut().unwrap().remove("target");
@@ -950,7 +951,7 @@ async fn manual_api_refuses_arbitrary_targets_and_operator_role() {
         .clone()
         .oneshot(
             Request::post("/v1/diversions/preview")
-                .header("authorization", "Bearer fixture-token")
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),
@@ -960,7 +961,7 @@ async fn manual_api_refuses_arbitrary_targets_and_operator_role() {
     assert_eq!(
         response.status(),
         StatusCode::FORBIDDEN,
-        "detector/operator tokens cannot divert traffic"
+        "operator tokens cannot divert traffic"
     );
     assert_eq!(fake.writes.load(SeqCst), 0);
     for path in [
@@ -1578,8 +1579,9 @@ async fn vpn_diversion_routes_authenticate_before_scope_lookup_and_refuse_mismat
     for authorized in [false, true] {
         let (mut state, repo, fake) = fixture(OperationMode::DryRun).await;
         let inner = Arc::get_mut(&mut state).unwrap();
-        inner.settings.http.auth.mode = crate::config::AuthMode::Bearer;
-        inner.bearer_token = Some("fixture-token".into());
+        inner.settings.http.auth.mode = crate::config::AuthMode::Credentials;
+        let token =
+            repo.mint_token_for_test("fixture-token", crate::domain::TokenScope::Operator, None);
         let router = crate::api::create_test_router(state.clone());
         for path in ["/v1/vpn/diversions", "/v1/vpn/diversions/preview"] {
             let body = serde_json::json!({"scope":"MISSING","diversion":{
@@ -1588,7 +1590,7 @@ async fn vpn_diversion_routes_authenticate_before_scope_lookup_and_refuse_mismat
             }});
             let mut req = Request::post(path).header("content-type", "application/json");
             if authorized {
-                req = req.header("authorization", "Bearer fixture-token");
+                req = req.header("authorization", format!("Bearer {token}"));
             }
             let response = router
                 .clone()

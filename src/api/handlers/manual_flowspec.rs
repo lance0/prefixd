@@ -3,7 +3,7 @@
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
@@ -13,8 +13,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::api::auth::AuthPrincipal;
 use crate::api::auth::require_role;
-use crate::auth::AuthSession;
 use crate::domain::{
     ActionParams, ActionType, AttackVector, FlowSpecAction, FlowSpecNlri, MatchCriteria,
     Mitigation, MitigationIntent, MitigationRoute, OperatorRole, find_mitigation_owner,
@@ -464,14 +464,10 @@ async fn validate_manual_flowspec_on(
 )]
 pub async fn preview_manual_flowspec(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(req): Json<CreateMitigationRequest>,
 ) -> Result<Response, StatusCode> {
-    let auth_header = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
-    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
+    let operator = require_role(&principal, OperatorRole::Operator)?;
     let mut candidate = None;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     // A read-only snapshot needs no lifecycle mutex: it mutates nothing, and
@@ -1331,8 +1327,12 @@ mod tests {
         settings.http.auth.mode = AuthMode::None;
         let mut fixture = Fixture::new(settings, FlowSpecMatchSupport::ALL);
         let state = Arc::get_mut(&mut fixture.state).unwrap();
-        state.settings.http.auth.mode = AuthMode::Bearer;
-        state.bearer_token = Some("preview-test-token".into());
+        state.settings.http.auth.mode = AuthMode::Credentials;
+        let token = fixture.repo.mint_token_for_test(
+            "preview-test-token",
+            crate::domain::TokenScope::Operator,
+            None,
+        );
         let (status, _) = fixture
             .post("/v1/mitigations/preview", &request("203.0.112.0/22"))
             .await;
@@ -1342,7 +1342,7 @@ mod tests {
             .post_with_auth(
                 "/v1/mitigations/preview",
                 &request("203.0.112.0/22"),
-                Some(("authorization", "Bearer preview-test-token")),
+                Some(("authorization", &format!("Bearer {token}"))),
             )
             .await;
         assert_eq!(status, StatusCode::OK);

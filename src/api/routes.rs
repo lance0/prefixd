@@ -47,7 +47,8 @@ fn session_routes() -> Router<Arc<AppState>> {
         .route("/v1/ws/feed", any(ws::ws_handler))
 }
 
-/// API routes - hybrid auth (session OR bearer) enforced via require_auth().
+/// API routes. Each handler authorizes its principal (session, API token, mTLS
+/// or `none` mode); ingest tokens reach only the ingest routes.
 /// State-changing requests return 503 while the controller is in standby.
 fn api_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
@@ -149,6 +150,11 @@ fn api_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
             axum::routing::delete(handlers::delete_operator),
         )
         .route(
+            "/v1/tokens",
+            get(handlers::list_tokens).post(handlers::create_token),
+        )
+        .route("/v1/tokens/{name}/revoke", post(handlers::revoke_token))
+        .route(
             "/v1/operators/{id}/password",
             axum::routing::put(handlers::change_password),
         )
@@ -232,6 +238,10 @@ pub fn create_router(
         .merge(session_routes())
         .merge(api_routes(&state))
         .layer(auth_layer)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            super::auth::strip_cookie_for_bearer,
+        ))
         .merge(sessionless_routes())
         .with_state(state.clone());
 
@@ -277,6 +287,10 @@ pub fn create_test_router_with_session_store(
         .merge(session_routes())
         .merge(api_routes(&state))
         .layer(auth_layer)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            super::auth::strip_cookie_for_bearer,
+        ))
         .merge(sessionless_routes())
         .with_state(state.clone());
 

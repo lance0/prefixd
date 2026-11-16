@@ -3,7 +3,7 @@
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use utoipa::ToSchema;
 
 use super::{CreateMitigationRequest, FlowSpecAdmissionPreview, MitigationResponse};
-use crate::{AppState, auth::AuthSession};
+use crate::{AppState, api::auth::AuthPrincipal};
 
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -81,11 +81,10 @@ impl SourceOnlyVpnRequest {
     (status=422,description="Guardrail or scope refusal"),(status=503,description="Speaker capability could not be established")))]
 pub async fn create_vpn_mitigation(
     State(state): State<Arc<AppState>>,
-    auth: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(request): Json<VpnMitigationRequest>,
 ) -> Result<Response, StatusCode> {
-    super::create_mitigation(State(state), auth, headers, Json(request.into_request()))
+    super::create_mitigation(State(state), principal, Json(request.into_request()))
         .await
         .map(IntoResponse::into_response)
 }
@@ -96,11 +95,10 @@ pub async fn create_vpn_mitigation(
     (status=409,description="Conflicting intent"),(status=422,description="Guardrail refusal"),(status=503,description="Safety reads unavailable")))]
 pub async fn preview_vpn_mitigation(
     State(state): State<Arc<AppState>>,
-    auth: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(request): Json<VpnMitigationRequest>,
 ) -> Result<Response, StatusCode> {
-    super::preview_manual_flowspec(State(state), auth, headers, Json(request.into_request())).await
+    super::preview_manual_flowspec(State(state), principal, Json(request.into_request())).await
 }
 
 #[utoipa::path(post, path = "/v1/vpn/source-rules", tag = "mitigations", request_body = SourceOnlyVpnRequest,
@@ -109,11 +107,10 @@ pub async fn preview_vpn_mitigation(
     (status=409,description="Conflicting intent"),(status=422,description="Safelist or quota refusal"),(status=503,description="Capability unavailable")))]
 pub async fn create_source_only_vpn(
     State(state): State<Arc<AppState>>,
-    auth: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(request): Json<SourceOnlyVpnRequest>,
 ) -> Result<Response, StatusCode> {
-    super::create_mitigation(State(state), auth, headers, Json(request.into_request()))
+    super::create_mitigation(State(state), principal, Json(request.into_request()))
         .await
         .map(IntoResponse::into_response)
 }
@@ -124,9 +121,8 @@ pub async fn create_source_only_vpn(
     (status=409,description="Conflicting intent"),(status=422,description="Safelist or quota refusal"),(status=503,description="Safety reads unavailable")))]
 pub async fn preview_source_only_vpn(
     State(state): State<Arc<AppState>>,
-    auth: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(request): Json<SourceOnlyVpnRequest>,
 ) -> Result<Response, StatusCode> {
-    super::preview_manual_flowspec(State(state), auth, headers, Json(request.into_request())).await
+    super::preview_manual_flowspec(State(state), principal, Json(request.into_request())).await
 }

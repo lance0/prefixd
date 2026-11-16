@@ -68,7 +68,7 @@ async fn test_cli_operator_list_matches_shipped_schema() {
                     "DATABASE_URL",
                     &ctx.state.settings.storage.connection_string,
                 )
-                .env_remove("PREFIXD_API_TOKEN")
+                .env_remove("PREFIXD_TOKEN")
                 .stdin(std::process::Stdio::null())
                 .kill_on_drop(true)
                 .output(),
@@ -7283,16 +7283,22 @@ async fn duplicate_acknowledgements_count_entries_and_update_each_postgres_row_o
     let speaker = Arc::new(CreationSpeaker::new(context.repo.clone(), 0));
     let mut state = creation_state(&context, speaker.clone(), false);
     let cached = Arc::get_mut(&mut state).unwrap();
-    cached.settings.http.auth.mode = AuthMode::Bearer;
-    cached.bearer_token = Some("duplicate-ack-token".into());
+    cached.settings.http.auth.mode = AuthMode::Credentials;
+    let token = common::mint_token(
+        context.repo.as_ref(),
+        "duplicate-ack",
+        prefixd::domain::TokenScope::Operator,
+        None,
+    )
+    .await;
+    let authorization = axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap();
     let app = prefixd::api::create_test_router(state);
     let mut targets = Vec::new();
     for ip in ["203.0.113.10", "203.0.113.11", "203.0.113.12"] {
         let mut request = creation_request("manual", ip, "duplicate-ack-seed");
-        request.headers_mut().insert(
-            "authorization",
-            axum::http::HeaderValue::from_static("Bearer duplicate-ack-token"),
-        );
+        request
+            .headers_mut()
+            .insert("authorization", authorization.clone());
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let json = creation_json(response).await;
@@ -7358,7 +7364,7 @@ async fn duplicate_acknowledgements_count_entries_and_update_each_postgres_row_o
             .oneshot(
                 Request::post("/v1/mitigations/acknowledge")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer duplicate-ack-token")
+                    .header("authorization", authorization.clone())
                     .body(Body::from(
                         serde_json::json!({"mitigation_ids":ids, "operator_id":"forged-actor"})
                             .to_string(),
@@ -7404,7 +7410,7 @@ async fn duplicate_acknowledgements_count_entries_and_update_each_postgres_row_o
                 assert!(previous.acknowledged_at.is_none());
                 assert!(row.acknowledged_at.is_some());
                 expected.acknowledged_at = row.acknowledged_at;
-                expected.acknowledged_by = Some("bearer-token".into());
+                expected.acknowledged_by = Some("token:duplicate-ack".into());
             }
             assert_eq!(
                 serde_json::to_value(row).unwrap(),

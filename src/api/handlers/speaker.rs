@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -9,8 +9,8 @@ use std::sync::Arc;
 use utoipa::ToSchema;
 
 use crate::AppState;
+use crate::api::auth::AuthPrincipal;
 use crate::api::auth::require_auth;
-use crate::auth::AuthSession;
 use crate::domain::FlowSpecRule;
 
 use super::ErrorResponse;
@@ -47,13 +47,9 @@ pub struct SpeakerRoutesResponse {
 )]
 pub async fn list_speaker_routes(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> Result<Response, StatusCode> {
-    let auth_header = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let Some(reader) = state.announcer.reader() else {
         return Ok((

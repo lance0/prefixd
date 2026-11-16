@@ -11,8 +11,8 @@ use crate::correlation::engine::{
     CorroboratingSignal, EventDimensions, SignalGroup, SignalGroupEvent, SignalGroupFilter,
 };
 use crate::domain::{
-    ActionType, AttackEvent, Mitigation, MitigationRow, MitigationStatus, Operator, OperatorRole,
-    WithdrawalRequest,
+    ActionType, ApiToken, AttackEvent, Mitigation, MitigationRow, MitigationStatus, Operator,
+    OperatorRole, WithdrawalRequest,
 };
 use crate::error::{GuardrailError, PrefixdError, Result};
 use crate::observability::{ActorType, AuditEntry, CreationActor, metrics::ROW_PARSE_ERRORS};
@@ -1603,6 +1603,125 @@ impl RepositoryTrait for Repository {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    async fn create_api_token(
+        &self,
+        token: &ApiToken,
+        token_hash: &[u8; 32],
+        audit: &AuditEntry,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO api_tokens (token_id, name, token_hash, scope, source, pop,
+                created_at, created_by, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "#,
+        )
+        .bind(token.token_id)
+        .bind(&token.name)
+        .bind(&token_hash[..])
+        .bind(token.scope.as_str())
+        .bind(token.source.as_deref())
+        .bind(token.pop.as_deref())
+        .bind(token.created_at)
+        .bind(&token.created_by)
+        .bind(token.expires_at)
+        .execute(&mut *tx)
+        .await;
+        match inserted {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(error))
+                if error.code().as_deref() == Some("23505")
+                    && error.constraint() == Some("api_tokens_name_key") =>
+            {
+                return Err(PrefixdError::Conflict(format!(
+                    "token name {:?} is already used; names are never reused",
+                    token.name
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Self::insert_audit_on(&mut tx, audit).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn get_api_token_by_hash(&self, token_hash: &[u8; 32]) -> Result<Option<ApiToken>> {
+        let row = sqlx::query_as::<_, ApiTokenRow>(&format!(
+            "SELECT {API_TOKEN_COLUMNS} FROM api_tokens WHERE token_hash = $1"
+        ))
+        .bind(&token_hash[..])
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(TryInto::try_into).transpose()
+    }
+
+    async fn list_api_tokens(&self, created_by: Option<&str>) -> Result<Vec<ApiToken>> {
+        let rows = sqlx::query_as::<_, ApiTokenRow>(&format!(
+            "SELECT {API_TOKEN_COLUMNS} FROM api_tokens
+             WHERE $1::text IS NULL OR created_by = $1
+             ORDER BY created_at ASC, name ASC"
+        ))
+        .bind(created_by)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    async fn revoke_api_token(
+        &self,
+        name: &str,
+        revoked_by: &str,
+        now: DateTime<Utc>,
+        audit: &AuditEntry,
+    ) -> Result<Option<ApiToken>> {
+        let mut tx = self.pool.begin().await?;
+        let revoked = sqlx::query_as::<_, ApiTokenRow>(&format!(
+            "UPDATE api_tokens SET revoked_at = $2, revoked_by = $3
+             WHERE name = $1 AND revoked_at IS NULL
+             RETURNING {API_TOKEN_COLUMNS}"
+        ))
+        .bind(name)
+        .bind(now)
+        .bind(revoked_by)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let row = match revoked {
+            Some(row) => {
+                Self::insert_audit_on(&mut tx, audit).await?;
+                Some(row)
+            }
+            None => {
+                sqlx::query_as::<_, ApiTokenRow>(&format!(
+                    "SELECT {API_TOKEN_COLUMNS} FROM api_tokens WHERE name = $1"
+                ))
+                .bind(name)
+                .fetch_optional(&mut *tx)
+                .await?
+            }
+        };
+        tx.commit().await?;
+        row.map(TryInto::try_into).transpose()
+    }
+
+    async fn touch_api_token(
+        &self,
+        token_id: Uuid,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE api_tokens SET last_used_at = $2
+             WHERE token_id = $1 AND (last_used_at IS NULL OR last_used_at <= $3)",
+        )
+        .bind(token_id)
+        .bind(now)
+        .bind(stale_before)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn get_notification_preferences(
         &self,
         operator_id: Uuid,
@@ -2420,6 +2539,52 @@ struct OperatorRow {
     created_by: Option<String>,
     #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     last_login_at: Option<DateTime<Utc>>,
+}
+
+const API_TOKEN_COLUMNS: &str = "token_id, name, scope, source, pop, created_at, created_by, \
+    expires_at, last_used_at, revoked_at, revoked_by";
+
+#[derive(Debug, FromRow)]
+struct ApiTokenRow {
+    token_id: Uuid,
+    name: String,
+    scope: String,
+    source: Option<String>,
+    pop: Option<String>,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
+    created_at: DateTime<Utc>,
+    created_by: String,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
+    expires_at: Option<DateTime<Utc>>,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
+    last_used_at: Option<DateTime<Utc>>,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
+    revoked_at: Option<DateTime<Utc>>,
+    revoked_by: Option<String>,
+}
+
+impl TryFrom<ApiTokenRow> for ApiToken {
+    type Error = PrefixdError;
+
+    /// A scope this binary does not know fails closed instead of defaulting.
+    fn try_from(row: ApiTokenRow) -> Result<Self> {
+        let scope = row.scope.parse().map_err(|_| {
+            PrefixdError::Internal(format!("token {:?} has an unknown scope", row.name))
+        })?;
+        Ok(Self {
+            token_id: row.token_id,
+            name: row.name,
+            scope,
+            source: row.source,
+            pop: row.pop,
+            created_at: row.created_at,
+            created_by: row.created_by,
+            expires_at: row.expires_at,
+            last_used_at: row.last_used_at,
+            revoked_at: row.revoked_at,
+            revoked_by: row.revoked_by,
+        })
+    }
 }
 
 impl From<OperatorRow> for Operator {

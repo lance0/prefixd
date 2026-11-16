@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::StatusCode,
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -11,8 +11,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::api::auth::AuthPrincipal;
 use crate::api::auth::{require_auth, require_role};
-use crate::auth::AuthSession;
 use crate::error::PrefixdError;
 
 use super::{MAX_STRING_LEN, MAX_USERNAME_LEN, validate_string_len};
@@ -173,11 +173,9 @@ async fn withdraw_covered_mitigations(
 )]
 pub async fn list_safelist(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let entries = state
         .repo
@@ -202,13 +200,11 @@ pub async fn list_safelist(
 )]
 pub async fn add_safelist(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(req): Json<AddSafelistRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
-    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    let operator = require_role(&principal, OperatorRole::Admin)?;
     let operator_id = operator.username;
 
     let prefix = validate_cidr(&req.prefix).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -251,13 +247,11 @@ pub async fn add_safelist(
 )]
 pub async fn remove_safelist(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Path(prefix): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
-    let _operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    let _operator = require_role(&principal, OperatorRole::Admin)?;
 
     let removed = state.repo.remove_safelist(&prefix).await.map_err(|e| {
         tracing::error!(target: "prefixd::api::handlers", error = %e, "remove_safelist failed");

@@ -374,13 +374,13 @@ fn check_refuses_what_startup_refuses_before_any_connection() {
             "has a blackhole step, but blackhole.enabled is false",
         ),
         (
-            "API bearer token",
+            "removed bearer mode",
             variant(&[(
                 "auth: {mode: none}",
                 "auth: {mode: bearer, bearer_token_env: PREFIXD_PARITY_UNSET}",
             )]),
             None,
-            "auth.mode=bearer but PREFIXD_PARITY_UNSET is not set or empty",
+            "`http.auth.mode: bearer` was removed in 0.28.0",
         ),
         (
             "speaker endpoint userinfo",

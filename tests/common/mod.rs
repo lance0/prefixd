@@ -24,6 +24,26 @@ use prefixd::domain::AttackVector;
 use sqlx::PgPool;
 use std::collections::HashMap;
 
+/// Mint an API token through the shared creation path and return its secret.
+pub async fn mint_token(
+    repo: &dyn RepositoryTrait,
+    name: &str,
+    scope: prefixd::domain::TokenScope,
+    source: Option<&str>,
+) -> String {
+    let request = prefixd::auth::token::NewToken {
+        name: name.into(),
+        scope,
+        source: source.map(Into::into),
+        pop: None,
+        expires_at: None,
+    };
+    prefixd::auth::token::create(repo, request, "fixture", chrono::Utc::now())
+        .await
+        .expect("mint a fixture token")
+        .1
+}
+
 pub struct TestContext {
     pub state: Arc<AppState>,
     pub repo: Arc<dyn RepositoryTrait>,
@@ -165,7 +185,6 @@ pub fn test_settings() -> Settings {
             listen: "127.0.0.1:0".to_string(),
             auth: AuthConfig {
                 mode: AuthMode::None,
-                bearer_token_env: None,
             },
             rate_limit: RateLimitConfig::default(),
             tls: None,

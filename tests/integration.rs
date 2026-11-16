@@ -20,7 +20,7 @@ use prefixd::config::{
     ShutdownConfig, StorageConfig, TimersConfig,
 };
 use prefixd::db::{MockRepository, RepositoryTrait};
-use prefixd::domain::AttackVector;
+use prefixd::domain::{AttackVector, TokenScope};
 
 struct RecoveringWithdrawal {
     inner: MockAnnouncer,
@@ -1123,7 +1123,6 @@ fn test_settings() -> Settings {
             listen: "127.0.0.1:0".to_string(),
             auth: AuthConfig {
                 mode: AuthMode::None,
-                bearer_token_env: None,
             },
             rate_limit: RateLimitConfig::default(),
             tls: None,
@@ -1256,12 +1255,13 @@ async fn setup_app() -> axum::Router {
 }
 
 async fn setup_app_bearer_with_config_dir(config_dir: std::path::PathBuf) -> axum::Router {
-    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let mock = Arc::new(MockRepository::new());
+    mock.insert_token(TEST_TOKEN, "test-operator", TokenScope::Operator, None);
+    let repo: Arc<dyn RepositoryTrait> = mock;
     let announcer = Arc::new(MockAnnouncer::new());
-    let mut settings = test_settings_with_bearer();
-    settings.http.auth.mode = AuthMode::Credentials;
+    let settings = test_settings_with_bearer();
 
-    let mut state = AppState::new(
+    let state = AppState::new(
         settings,
         test_inventory(),
         test_playbooks(),
@@ -1271,9 +1271,6 @@ async fn setup_app_bearer_with_config_dir(config_dir: std::path::PathBuf) -> axu
     )
     .expect("failed to create app state");
 
-    let cached = Arc::get_mut(&mut state).expect("unshared test state");
-    cached.settings.http.auth.mode = AuthMode::Bearer;
-    cached.bearer_token = Some("test-secret-token-123".into());
     create_test_router(state)
 }
 
@@ -1638,9 +1635,10 @@ async fn test_config_settings_endpoint() {
         json["settings"]["storage"]["connection_string"],
         "[redacted]"
     );
-    assert!(
-        json["settings"]["http"]["auth"]["bearer_token_env"].is_null(),
-        "bearer_token_env should not be in allowlist"
+    assert_eq!(
+        json["settings"]["http"]["auth"],
+        serde_json::json!({ "mode": "none" }),
+        "auth exposes only its mode"
     );
     assert!(
         json["settings"]["bgp"]["gobgp_grpc"].is_null(),
@@ -1672,8 +1670,7 @@ async fn metrics_remain_unauthenticated_on_the_private_api_listener() {
     )
     .unwrap();
     let config = Arc::get_mut(&mut state).unwrap();
-    config.settings.http.auth.mode = AuthMode::Bearer;
-    config.bearer_token = Some("private-metrics-control-token".into());
+    config.settings.http.auth.mode = AuthMode::Credentials;
     let app = create_test_router(state);
 
     let protected = app
@@ -2051,10 +2048,16 @@ async fn test_bulk_withdraw_mitigations() {
 }
 
 // Auth tests with bearer token
+/// An ingest token bound to `fastnetmon`.
+const FNM_TOKEN: &str = "prefixd_fnmtesttoken456AAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+/// An operator token every `setup_app_with_bearer` fixture accepts. Only the
+/// format matters: `prefixd_` and 43 canonical base64url characters.
+const TEST_TOKEN: &str = "prefixd_testsecrettoken123AAAAAAAAAAAAAAAAAAAAAAAAA";
+
 fn test_settings_with_bearer() -> Settings {
     let mut settings = test_settings();
-    settings.http.auth.mode = AuthMode::Bearer;
-    settings.http.auth.bearer_token_env = Some("TEST_PREFIXD_TOKEN".to_string());
+    settings.http.auth.mode = AuthMode::Credentials;
     settings
 }
 
@@ -2062,93 +2065,69 @@ async fn setup_app_with_bearer() -> axum::Router {
     setup_app_bearer_with_config_dir(std::path::PathBuf::from(".")).await
 }
 
+/// The controller no longer reads `PREFIXD_API_TOKEN`: with the variable set to
+/// a well-formed token, startup succeeds, startup warns by name, and the value
+/// authenticates nothing. The child process owns the environment.
 #[tokio::test]
-async fn test_bearer_startup_environment_boundary() {
-    const CHILD: &str = "PREFIXD_BEARER_STARTUP_CASE";
-    const TOKEN_ENV: &str = "PREFIXD_TEST_BEARER_STARTUP_TOKEN";
-    const TOKEN: &str = "startup-boundary-token";
-    if let Ok(case) = std::env::var(CHILD) {
-        assert!(matches!(case.as_str(), "present" | "missing" | "empty"));
-        let mut settings = test_settings_with_bearer();
-        settings.http.auth.bearer_token_env = Some(TOKEN_ENV.into());
+async fn removed_shared_token_variable_is_ignored_with_a_warning() {
+    const CHILD: &str = "PREFIXD_REMOVED_TOKEN_CASE";
+    const TOKEN: &str = "prefixd_removedsharedtokenAAAAAAAAAAAAAAAAAAAAAAAAA";
+    if std::env::var_os(CHILD).is_some() {
+        assert!(prefixd::config::warn_removed_token_env());
         let state = AppState::new(
-            settings,
+            test_settings_with_bearer(),
             test_inventory(),
             test_playbooks(),
             Arc::new(MockRepository::new()),
             Arc::new(MockAnnouncer::new()),
             ".".into(),
-        );
-        if case == "present" {
-            let state = state.expect("present startup token must construct state");
-            assert!(state.bearer_token.as_deref() == Some(TOKEN));
-            let app = create_test_router(state);
-            let response = app
-                .clone()
-                .oneshot(Request::get("/v1/mitigations").body(Body::empty()).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-            let response = app
-                .oneshot(
-                    Request::get("/v1/mitigations")
-                        .header("authorization", format!("Bearer {TOKEN}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-        } else {
-            let expected = format!("auth.mode=bearer but {TOKEN_ENV} is not set or empty");
-            assert!(
-                matches!(state, Err(prefixd::error::PrefixdError::Config(message)) if message == expected),
-                "missing or empty startup token must reject state construction before serving"
-            );
-        }
-        println!("\nprefixd-bearer-startup-completed:{case}");
+        )
+        .expect("a stale variable must not refuse startup");
+        let response = create_test_router(state)
+            .oneshot(
+                Request::get("/v1/mitigations")
+                    .header("authorization", format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        println!("\nprefixd-removed-token-completed");
         return;
     }
-
-    for case in ["present", "missing", "empty"] {
-        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
-        command
+    // Control: without the variable, no warning.
+    if std::env::var_os("PREFIXD_API_TOKEN").is_none() {
+        assert!(!prefixd::config::warn_removed_token_env());
+    }
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "test_bearer_startup_environment_boundary",
+                "removed_shared_token_variable_is_ignored_with_a_warning",
                 "--test-threads=1",
                 "--nocapture",
             ])
-            .env(CHILD, case)
-            .env_remove(TOKEN_ENV)
+            .env(CHILD, "1")
+            .env("PREFIXD_API_TOKEN", TOKEN)
             .stdin(std::process::Stdio::null())
-            .kill_on_drop(true);
-        match case {
-            "present" => {
-                command.env(TOKEN_ENV, TOKEN);
-            }
-            "empty" => {
-                command.env(TOKEN_ENV, "");
-            }
-            _ => {}
-        }
-        let output = tokio::time::timeout(std::time::Duration::from_secs(15), command.output())
-            .await
-            .expect("bearer startup child exceeded fifteen seconds")
-            .expect("bearer startup child output");
-        let stdout = String::from_utf8_lossy(&output.stdout).replace(TOKEN, "[redacted]");
-        let stderr = String::from_utf8_lossy(&output.stderr).replace(TOKEN, "[redacted]");
-        assert!(
-            output.status.success(),
-            "bearer startup {case} child failed ({:?})\n{stdout}\n{stderr}",
-            output.status.code()
-        );
-        let completion = format!("prefixd-bearer-startup-completed:{case}");
-        assert!(
-            stdout.lines().any(|line| line == completion),
-            "bearer startup {case} child did not complete its assertions\n{stdout}\n{stderr}"
-        );
-    }
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("child exceeded fifteen seconds")
+    .expect("child output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "prefixd-removed-token-completed"),
+        "{stdout}\n{stderr}"
+    );
+    assert!(!stdout.contains(&TOKEN[8..]) && !stderr.contains(&TOKEN[8..]));
 }
 
 #[tokio::test]
@@ -2194,7 +2173,7 @@ async fn test_bearer_auth_valid_token_returns_200() {
         .oneshot(
             Request::builder()
                 .uri("/v1/mitigations")
-                .header("Authorization", "Bearer test-secret-token-123")
+                .header("Authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2510,7 +2489,7 @@ async fn test_update_playbooks_bearer_operator_forbidden() {
             Request::builder()
                 .method("PUT")
                 .uri("/v1/config/playbooks")
-                .header("Authorization", "Bearer test-secret-token-123")
+                .header("Authorization", format!("Bearer {TEST_TOKEN}"))
                 .header("content-type", "application/json")
                 .body(Body::from(body))
                 .unwrap(),
@@ -2632,7 +2611,7 @@ async fn test_update_alerting_operator_forbidden() {
             Request::builder()
                 .method("PUT")
                 .uri("/v1/config/alerting")
-                .header("Authorization", "Bearer test-secret-token-123")
+                .header("Authorization", format!("Bearer {TEST_TOKEN}"))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&body).unwrap()))
                 .unwrap(),
@@ -5198,16 +5177,19 @@ async fn test_signal_group_detail_not_found() {
 #[tokio::test]
 async fn test_signal_groups_auth_required() {
     // Create app with bearer auth
-    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let mock = Arc::new(MockRepository::new());
+    mock.insert_token(
+        TEST_TOKEN,
+        "test-signal-groups-auth-required",
+        TokenScope::Operator,
+        None,
+    );
+    let repo: Arc<dyn RepositoryTrait> = mock;
     let announcer = Arc::new(MockAnnouncer::new());
     let mut settings = test_settings_with_correlation(true, 1, 0.5);
-    settings.http.auth = prefixd::config::AuthConfig {
-        mode: prefixd::config::AuthMode::Bearer,
-        bearer_token_env: Some("TEST_PREFIXD_TOKEN".to_string()),
-    };
     settings.http.auth.mode = AuthMode::Credentials;
 
-    let mut state = AppState::new(
+    let state = AppState::new(
         settings,
         test_inventory(),
         test_playbooks(),
@@ -5217,9 +5199,6 @@ async fn test_signal_groups_auth_required() {
     )
     .expect("failed to create app state");
 
-    let cached = Arc::get_mut(&mut state).expect("unshared test state");
-    cached.settings.http.auth.mode = AuthMode::Bearer;
-    cached.bearer_token = Some("test-secret-token-123".into());
     let app = create_test_router(state);
 
     // GET /v1/signal-groups without auth → 401
@@ -5255,7 +5234,7 @@ async fn test_signal_groups_auth_required() {
         .oneshot(
             Request::builder()
                 .uri("/v1/signal-groups")
-                .header("authorization", "Bearer test-secret-token-123")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -5969,16 +5948,19 @@ async fn test_alertmanager_malformed_payload_returns_400() {
 /// VAL-ADAPT-010: Authentication required (401 without auth)
 #[tokio::test]
 async fn test_alertmanager_auth_required() {
-    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let mock = Arc::new(MockRepository::new());
+    mock.insert_token(
+        TEST_TOKEN,
+        "test-alertmanager-auth-required",
+        TokenScope::Ingest,
+        Some("alertmanager"),
+    );
+    let repo: Arc<dyn RepositoryTrait> = mock;
     let announcer = Arc::new(MockAnnouncer::new());
     let mut settings = test_settings_with_correlation(true, 1, 0.5);
-    settings.http.auth = prefixd::config::AuthConfig {
-        mode: prefixd::config::AuthMode::Bearer,
-        bearer_token_env: Some("TEST_PREFIXD_TOKEN".to_string()),
-    };
     settings.http.auth.mode = AuthMode::Credentials;
 
-    let mut state = AppState::new(
+    let state = AppState::new(
         settings,
         test_inventory(),
         test_playbooks(),
@@ -5988,9 +5970,6 @@ async fn test_alertmanager_auth_required() {
     )
     .expect("failed to create app state");
 
-    let cached = Arc::get_mut(&mut state).expect("unshared test state");
-    cached.settings.http.auth.mode = AuthMode::Bearer;
-    cached.bearer_token = Some("test-secret-token-123".into());
     let app = create_test_router(state);
 
     let alert = make_alert("firing", "203.0.113.10", "udp_flood", "critical", "auth_fp");
@@ -6019,7 +5998,7 @@ async fn test_alertmanager_auth_required() {
                 .method("POST")
                 .uri("/v1/signals/alertmanager")
                 .header("content-type", "application/json")
-                .header("authorization", "Bearer test-secret-token-123")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(Body::from(payload))
                 .unwrap(),
         )
@@ -6403,16 +6382,19 @@ async fn test_fastnetmon_malformed_payload_returns_400() {
 /// VAL-ADAPT-017: Authentication required for FastNetMon endpoint
 #[tokio::test]
 async fn test_fastnetmon_auth_required() {
-    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    let mock = Arc::new(MockRepository::new());
+    mock.insert_token(
+        FNM_TOKEN,
+        "test-fastnetmon-auth-required",
+        TokenScope::Ingest,
+        Some("fastnetmon"),
+    );
+    let repo: Arc<dyn RepositoryTrait> = mock;
     let announcer = Arc::new(MockAnnouncer::new());
     let mut settings = test_settings_with_correlation(true, 1, 0.5);
-    settings.http.auth = prefixd::config::AuthConfig {
-        mode: prefixd::config::AuthMode::Bearer,
-        bearer_token_env: Some("TEST_PREFIXD_FNM_TOKEN".to_string()),
-    };
     settings.http.auth.mode = AuthMode::Credentials;
 
-    let mut state = AppState::new(
+    let state = AppState::new(
         settings,
         test_inventory(),
         test_playbooks(),
@@ -6422,9 +6404,6 @@ async fn test_fastnetmon_auth_required() {
     )
     .expect("failed to create app state");
 
-    let cached = Arc::get_mut(&mut state).expect("unshared test state");
-    cached.settings.http.auth.mode = AuthMode::Bearer;
-    cached.bearer_token = Some("fnm-test-token-456".into());
     let app = create_test_router(state);
 
     let payload = make_fastnetmon_payload("ban", "203.0.113.10", Some("auth-uuid"));
@@ -6452,7 +6431,7 @@ async fn test_fastnetmon_auth_required() {
                 .method("POST")
                 .uri("/v1/signals/fastnetmon")
                 .header("content-type", "application/json")
-                .header("authorization", "Bearer fnm-test-token-456")
+                .header("authorization", format!("Bearer {FNM_TOKEN}"))
                 .body(Body::from(payload))
                 .unwrap(),
         )
@@ -6764,7 +6743,7 @@ async fn test_update_correlation_config_operator_forbidden() {
             Request::builder()
                 .method("PUT")
                 .uri("/v1/config/correlation")
-                .header("Authorization", "Bearer test-secret-token-123")
+                .header("Authorization", format!("Bearer {TEST_TOKEN}"))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&body).unwrap()))
                 .unwrap(),
@@ -10805,15 +10784,23 @@ mod manual_protocol {
         use uuid::Uuid;
         let (mut app_state, repo, speaker) = state(AuthMode::None);
         let cached = Arc::get_mut(&mut app_state).unwrap();
-        cached.settings.http.auth.mode = AuthMode::Bearer;
-        cached.bearer_token = Some("duplicate-ack-token".into());
+        cached.settings.http.auth.mode = AuthMode::Credentials;
+        repo.insert_token(
+            "prefixd_duplicateacktokenAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "duplicate-ack",
+            TokenScope::Operator,
+            None,
+        );
         let mut targets = Vec::new();
         for ip in ["203.0.113.10", "203.0.113.11", "203.0.113.12"] {
             let response = create_test_router(app_state.clone())
                 .oneshot(
                     Request::post("/v1/mitigations")
                         .header("content-type", "application/json")
-                        .header("authorization", "Bearer duplicate-ack-token")
+                        .header(
+                            "authorization",
+                            "Bearer prefixd_duplicateacktokenAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        )
                         .body(Body::from(payload(ip, "udp").to_string()))
                         .unwrap(),
                 )
@@ -10867,7 +10854,10 @@ mod manual_protocol {
                 .oneshot(
                     Request::post("/v1/mitigations/acknowledge")
                         .header("content-type", "application/json")
-                        .header("authorization", "Bearer duplicate-ack-token")
+                        .header(
+                            "authorization",
+                            "Bearer prefixd_duplicateacktokenAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        )
                         .body(Body::from(
                             serde_json::json!({"mitigation_ids":ids, "operator_id":"forged-actor"})
                                 .to_string(),
@@ -10912,7 +10902,7 @@ mod manual_protocol {
                     assert!(previous.acknowledged_at.is_none());
                     assert!(row.acknowledged_at.is_some());
                     expected.acknowledged_at = row.acknowledged_at;
-                    expected.acknowledged_by = Some("bearer-token".into());
+                    expected.acknowledged_by = Some("token:duplicate-ack".into());
                 }
                 assert_eq!(
                     serde_json::to_value(row).unwrap(),
@@ -11686,16 +11676,16 @@ mod anonymous_auth {
     use tracing::instrument::WithSubscriber;
 
     const PASSWORD: &str = "anonymous-transition-password";
+    const SESSION_TOKEN: &str = "prefixd_sessioncontroltokenAAAAAAAAAAAAAAAAAAAAAAAA";
 
     fn router(mode: AuthMode, repo: Arc<MockRepository>, store: MemoryStore) -> Router {
         let mut settings = test_settings();
-        // This fixture tests hybrid sessions, independently of host token variables.
-        settings.http.auth.mode = if mode == AuthMode::Bearer {
-            AuthMode::Credentials
-        } else {
-            mode
-        };
-        let mut state = AppState::new(
+        settings.http.auth.mode = mode;
+        // Sessions and an operator token share credentials mode.
+        if mode == AuthMode::Credentials {
+            repo.insert_token(SESSION_TOKEN, "session-control", TokenScope::Operator, None);
+        }
+        let state = AppState::new(
             settings,
             test_inventory(),
             test_playbooks(),
@@ -11704,11 +11694,6 @@ mod anonymous_auth {
             ".".into(),
         )
         .unwrap();
-        if mode == AuthMode::Bearer {
-            let state = Arc::get_mut(&mut state).expect("unshared test state");
-            state.settings.http.auth.mode = mode;
-            state.bearer_token = Some("session-control-token".into());
-        }
         create_test_router_with_session_store(state, store)
     }
 
@@ -12632,11 +12617,8 @@ mod anonymous_auth {
     }
 
     #[tokio::test]
-    async fn credential_and_bearer_hybrid_sessions_keep_named_identity_and_logout() {
-        for (mode, username) in [
-            (AuthMode::Credentials, "credentials-control"),
-            (AuthMode::Bearer, "bearer-session-control"),
-        ] {
+    async fn credential_sessions_keep_named_identity_and_logout() {
+        for (mode, username) in [(AuthMode::Credentials, "credentials-control")] {
             let repo = Arc::new(MockRepository::new());
             let operator = operator(&repo, username).await;
             let store = MemoryStore::default();
@@ -12946,9 +12928,9 @@ mod anonymous_auth {
     }
 
     #[tokio::test]
-    async fn bearer_operator_cannot_create_whole_vrf_rule() {
+    async fn operator_token_cannot_create_whole_vrf_rule() {
         let app = router(
-            AuthMode::Bearer,
+            AuthMode::Credentials,
             Arc::new(MockRepository::new()),
             MemoryStore::default(),
         );
@@ -12966,7 +12948,7 @@ mod anonymous_auth {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/vpn/source-rules")
-                    .header("authorization", "Bearer session-control-token")
+                    .header("authorization", format!("Bearer {SESSION_TOKEN}"))
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -13106,12 +13088,8 @@ mod list_filter_validation {
 
     fn router(repo: Arc<dyn RepositoryTrait>, mode: AuthMode) -> Router {
         let mut settings = test_settings();
-        settings.http.auth.mode = if mode == AuthMode::Bearer {
-            AuthMode::None
-        } else {
-            mode
-        };
-        let mut state = AppState::new(
+        settings.http.auth.mode = mode;
+        let state = AppState::new(
             settings,
             test_inventory(),
             test_playbooks(),
@@ -13120,11 +13098,6 @@ mod list_filter_validation {
             ".".into(),
         )
         .unwrap();
-        if mode == AuthMode::Bearer {
-            let state = Arc::get_mut(&mut state).unwrap();
-            state.settings.http.auth.mode = mode;
-            state.bearer_token = Some("list-filter-token".into());
-        }
         create_test_router(state)
     }
 
@@ -13478,7 +13451,14 @@ mod list_filter_validation {
 
     #[tokio::test]
     async fn authentication_and_audit_role_precede_filter_validation() {
-        let app = router(Arc::new(MockRepository::new()), AuthMode::Bearer);
+        let tokens = Arc::new(MockRepository::new());
+        tokens.insert_token(
+            "prefixd_listfiltertokenAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "list-filter",
+            TokenScope::Operator,
+            None,
+        );
+        let app = router(tokens, AuthMode::Credentials);
         for (endpoint, _, _) in ENDPOINTS {
             let mut queries = vec!["start=invalid", "end="];
             if endpoint == "mitigations" || endpoint == "signal-groups" {
@@ -13496,7 +13476,10 @@ mod list_filter_validation {
                     get(
                         &app,
                         &path,
-                        Some(("authorization", "Bearer list-filter-token")),
+                        Some((
+                            "authorization",
+                            "Bearer prefixd_listfiltertokenAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        )),
                     )
                     .await,
                     field,
@@ -13805,7 +13788,7 @@ mod reason_and_bulk_validation {
     use uuid::Uuid;
 
     const OPERATIONS: [&str; 4] = ["manual", "single", "bulk", "safelist"];
-    const TOKEN: &str = "reason-bulk-validation-token";
+    const TOKEN: &str = "prefixd_reasonbulkvalidationtokenAAAAAAAAAAAAAAAAAA";
 
     struct Fixture {
         app: Router,
@@ -13828,10 +13811,11 @@ mod reason_and_bulk_validation {
                 ".".into(),
             )
             .unwrap();
-            // Set this fixture's cached bearer token without touching process environment.
             let state_mut = Arc::get_mut(&mut state).unwrap();
             state_mut.settings.http.auth.mode = mode;
-            state_mut.bearer_token = (mode == AuthMode::Bearer).then(|| TOKEN.into());
+            if mode == AuthMode::Credentials {
+                repo.insert_token(TOKEN, "reason-bulk", TokenScope::Operator, None);
+            }
             Self {
                 app: create_test_router(state),
                 repo,
@@ -14278,7 +14262,7 @@ mod reason_and_bulk_validation {
 
     #[tokio::test]
     async fn semantic_validation_and_extractor_errors_preserve_auth_precedence() {
-        let fixture = Fixture::new(AuthMode::Bearer);
+        let fixture = Fixture::new(AuthMode::Credentials);
         let targets = fixture.seed(2).await;
         let before = fixture.snapshot().await;
         for operation in OPERATIONS {
@@ -14553,7 +14537,7 @@ mod query_router_validator_boundaries {
                 .clone()
                 .oneshot(
                     Request::put("/v1/preferences")
-                        .header("authorization", "Bearer test-secret-token-123")
+                        .header("authorization", format!("Bearer {TEST_TOKEN}"))
                         .header("content-type", "application/json")
                         .body(Body::from(prefs.to_string()))
                         .unwrap(),
@@ -14565,7 +14549,7 @@ mod query_router_validator_boundaries {
                 .clone()
                 .oneshot(
                     Request::get("/v1/preferences")
-                        .header("authorization", "Bearer test-secret-token-123")
+                        .header("authorization", format!("Bearer {TEST_TOKEN}"))
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -14626,7 +14610,7 @@ mod query_router_validator_boundaries {
                 let mut request =
                     Request::put("/v1/preferences").header("content-type", "application/json");
                 if authenticated {
-                    request = request.header("authorization", "Bearer test-secret-token-123");
+                    request = request.header("authorization", format!("Bearer {TEST_TOKEN}"));
                 }
                 let response = app
                     .clone()
@@ -14648,7 +14632,7 @@ mod query_router_validator_boundaries {
                 .clone()
                 .oneshot(
                     Request::get("/v1/preferences")
-                        .header("authorization", "Bearer test-secret-token-123")
+                        .header("authorization", format!("Bearer {TEST_TOKEN}"))
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -14664,7 +14648,7 @@ mod query_router_validator_boundaries {
             let mut request =
                 Request::put("/v1/preferences").header("content-type", "application/json");
             if authenticated {
-                request = request.header("authorization", "Bearer test-secret-token-123");
+                request = request.header("authorization", format!("Bearer {TEST_TOKEN}"));
             }
             let response = app
                 .clone()
@@ -14716,7 +14700,7 @@ mod query_router_validator_boundaries {
             for authenticated in [false, true] {
                 let mut request = Request::get(format!("/v1/reports/incident?{query}"));
                 if authenticated {
-                    request = request.header("authorization", "Bearer test-secret-token-123");
+                    request = request.header("authorization", format!("Bearer {TEST_TOKEN}"));
                 }
                 let response = app
                     .clone()
@@ -15188,7 +15172,7 @@ async fn test_timeseries_duration_overflow_preserves_auth_and_shape() {
                 .clone()
                 .oneshot(
                     Request::get(&uri)
-                        .header("authorization", "Bearer test-secret-token-123")
+                        .header("authorization", format!("Bearer {TEST_TOKEN}"))
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -15546,7 +15530,7 @@ async fn prefixdctl_lists_gets_and_withdraws_a_blackhole() {
     use prefixd::domain::{
         ActionParams, ActionType, MatchCriteria, MitigationIntent, MitigationStatus,
     };
-    const TOKEN: &str = "cli-blackhole-token";
+    const TOKEN: &str = "prefixd_cliblackholetokenAAAAAAAAAAAAAAAAAAAAAAAAAA";
     let repo = Arc::new(MockRepository::new());
     let speaker = Arc::new(MockAnnouncer::new());
     let mut settings = test_settings();
@@ -15565,8 +15549,8 @@ async fn prefixdctl_lists_gets_and_withdraws_a_blackhole() {
     )
     .unwrap();
     let cached = Arc::get_mut(&mut state).unwrap();
-    cached.settings.http.auth.mode = AuthMode::Bearer;
-    cached.bearer_token = Some(TOKEN.into());
+    cached.settings.http.auth.mode = AuthMode::Credentials;
+    repo.insert_token(TOKEN, "cli-blackhole", TokenScope::Operator, None);
     let mitigation = prefixd::guardrails::admit_blackhole(
         repo.as_ref(),
         &state.settings,

@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header, header::AUTHORIZATION},
+    http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
 };
 use chrono::{DateTime, Utc};
@@ -12,8 +12,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::api::auth::AuthPrincipal;
 use crate::api::auth::{require_auth, require_role};
-use crate::auth::AuthSession;
 use crate::db::ListParams;
 use crate::error::PrefixdError;
 
@@ -64,13 +64,11 @@ pub struct ListAuditQuery {
 )]
 pub async fn list_audit(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Query(query): Query<ListAuditQuery>,
 ) -> Result<axum::response::Response, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
-    let _operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
+    let _operator = require_role(&principal, OperatorRole::Operator)?;
 
     for (name, value) in [
         ("target_type", &query.target_type),
@@ -163,11 +161,9 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 )]
 pub async fn get_stats(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let stats = state
         .repo
@@ -188,11 +184,9 @@ pub async fn get_stats(
 )]
 pub async fn list_pops(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let mut pops = state
         .repo
@@ -265,12 +259,10 @@ fn parse_duration_minutes(s: &str) -> Option<u32> {
 )]
 pub async fn get_timeseries(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Query(query): Query<TimeseriesQuery>,
 ) -> Result<Json<TimeseriesResponse>, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let metric = query.metric.as_deref().unwrap_or("mitigations");
     let range_hours = query
@@ -333,13 +325,11 @@ pub struct IpHistoryResponse {
 )]
 pub async fn get_ip_history(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Path(ip): Path<String>,
     Query(query): Query<LimitQuery>,
 ) -> Result<Json<IpHistoryResponse>, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     if ip.parse::<IpAddr>().is_err() {
         return Err(StatusCode::BAD_REQUEST);
@@ -433,12 +423,10 @@ pub struct IncidentReportQuery {
 )]
 pub async fn generate_incident_report(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Query(query): Query<IncidentReportQuery>,
 ) -> impl IntoResponse {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    if let Err(status) = require_auth(&state, &auth_session, auth_header) {
+    if let Err(status) = require_auth(&principal) {
         return (status, HeaderMap::new(), String::new()).into_response();
     }
 

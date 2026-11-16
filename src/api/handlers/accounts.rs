@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,11 +12,9 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::api::auth::AuthPrincipal;
 use crate::api::auth::require_role;
-use crate::auth::AuthSession;
 use crate::db::NotificationPreferences;
-
-use super::MAX_USERNAME_LEN;
 
 const LOGIN_MAX_ATTEMPTS: u32 = 5;
 
@@ -69,12 +67,7 @@ async fn clear_login_attempts(key: &str) {
     attempts.remove(key);
 }
 
-fn is_valid_username(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
+use crate::domain::is_valid_username;
 
 const MAX_PASSWORD_LEN: usize = 256;
 
@@ -117,8 +110,7 @@ pub async fn login(
     }
 
     // Validate input lengths and username format
-    if req.username.len() > MAX_USERNAME_LEN
-        || !is_valid_username(&req.username)
+    if !is_valid_username(&req.username)
         || req.password.is_empty()
         || req.password.len() > MAX_PASSWORD_LEN
     {
@@ -238,15 +230,12 @@ pub struct ChangePasswordRequest {
 )]
 pub async fn list_operators(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    auth_session: crate::auth::AuthSession,
+    principal: AuthPrincipal,
 ) -> Result<Json<OperatorListResponse>, StatusCode> {
     use crate::api::auth::require_role;
     use crate::domain::OperatorRole;
 
-    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-
-    require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    require_role(&principal, OperatorRole::Admin)?;
 
     let operators = state
         .repo
@@ -288,23 +277,20 @@ pub async fn list_operators(
 )]
 pub async fn create_operator(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    auth_session: crate::auth::AuthSession,
+    principal: AuthPrincipal,
     Json(req): Json<CreateOperatorRequest>,
 ) -> Result<(StatusCode, Json<OperatorInfo>), StatusCode> {
     use crate::api::auth::require_role;
     use crate::domain::OperatorRole;
     use argon2::{Argon2, PasswordHasher};
 
-    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-
-    let admin = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    let admin = require_role(&principal, OperatorRole::Admin)?;
 
     // Validate role
     let role: OperatorRole = req.role.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // Validate username
-    if req.username.len() > MAX_USERNAME_LEN || !is_valid_username(&req.username) {
+    if !is_valid_username(&req.username) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -376,16 +362,13 @@ pub async fn create_operator(
 )]
 pub async fn delete_operator(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    auth_session: crate::auth::AuthSession,
+    principal: AuthPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode> {
     use crate::api::auth::require_role;
     use crate::domain::OperatorRole;
 
-    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-
-    let admin = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    let admin = require_role(&principal, OperatorRole::Admin)?;
 
     // Prevent self-deletion
     if admin.operator_id == id {
@@ -425,8 +408,7 @@ pub async fn delete_operator(
 )]
 pub async fn change_password(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    auth_session: crate::auth::AuthSession,
+    principal: AuthPrincipal,
     Path(id): Path<Uuid>,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, StatusCode> {
@@ -434,10 +416,8 @@ pub async fn change_password(
     use crate::domain::OperatorRole;
     use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 
-    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-
     // Allow self or admin to change password
-    let caller = require_role(&state, &auth_session, auth_header, OperatorRole::Viewer)?;
+    let caller = require_role(&principal, OperatorRole::Viewer)?;
 
     let is_self = caller.operator_id == id;
     let is_admin = caller.role == OperatorRole::Admin;
@@ -517,16 +497,9 @@ pub async fn change_password(
 )]
 pub async fn get_notification_preferences(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> Result<Json<NotificationPreferences>, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    let operator = require_role(
-        &state,
-        &auth_session,
-        auth_header,
-        crate::domain::OperatorRole::Viewer,
-    )?;
+    let operator = require_role(&principal, crate::domain::OperatorRole::Viewer)?;
 
     let prefs = state
         .repo
@@ -551,17 +524,10 @@ pub async fn get_notification_preferences(
 )]
 pub async fn update_notification_preferences(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     Json(prefs): Json<NotificationPreferences>,
 ) -> Result<StatusCode, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    let operator = require_role(
-        &state,
-        &auth_session,
-        auth_header,
-        crate::domain::OperatorRole::Viewer,
-    )?;
+    let operator = require_role(&principal, crate::domain::OperatorRole::Viewer)?;
 
     match (prefs.quiet_hours_start, prefs.quiet_hours_end) {
         (Some(_), None) | (None, Some(_)) => return Err(StatusCode::BAD_REQUEST),
@@ -594,15 +560,6 @@ pub async fn update_notification_preferences(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test_is_valid_username() {
-        assert!(super::is_valid_username("alice_1"));
-        assert!(super::is_valid_username("ops-admin"));
-        assert!(!super::is_valid_username(""));
-        assert!(!super::is_valid_username("bad space"));
-        assert!(!super::is_valid_username("no/slash"));
-    }
-
     #[tokio::test]
     async fn test_login_throttle_blocks_after_limit() {
         let user = "throttle_test_user";

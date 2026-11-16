@@ -64,6 +64,11 @@ pub enum PrefixdError {
     )]
     Standby,
 
+    /// The API token store could not be read. Distinct from 401 so a storage
+    /// outage does not look like a credential problem.
+    #[error("credential store unavailable; retry")]
+    CredentialStoreUnavailable,
+
     // Domain errors
     #[error("duplicate event from {detector_source}: {external_id}")]
     DuplicateEvent {
@@ -239,7 +244,9 @@ impl PrefixdError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MitigationNotFound(_) => StatusCode::NOT_FOUND,
-            Self::ShuttingDown | Self::Standby => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ShuttingDown | Self::Standby | Self::CredentialStoreUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::DuplicateEvent { .. }
             | Self::Conflict(_)
             | Self::InjectionOwnerMismatch { .. } => StatusCode::CONFLICT,

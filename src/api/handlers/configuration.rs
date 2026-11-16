@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -10,8 +10,8 @@ use utoipa::ToSchema;
 
 use super::ErrorResponse;
 use crate::AppState;
+use crate::api::auth::AuthPrincipal;
 use crate::api::auth::{require_auth, require_role};
-use crate::auth::AuthSession;
 use crate::state::ReloadError;
 
 #[derive(Serialize, ToSchema)]
@@ -39,12 +39,10 @@ pub struct ReloadResponse {
 )]
 pub async fn reload_config(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> Result<Response, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
-    let _operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    let _operator = require_role(&principal, OperatorRole::Admin)?;
 
     match state.reload_config().await {
         Ok(report) => {
@@ -97,11 +95,9 @@ pub struct ConfigSettingsResponse {
 )]
 pub async fn get_config_settings(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let s = &state.settings;
 
@@ -179,11 +175,9 @@ pub struct ConfigInventoryResponse {
 )]
 pub async fn get_config_inventory(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let inventory = state.inventory.read().await;
     let customers = inventory.customers.clone();
@@ -224,11 +218,9 @@ pub struct ConfigPlaybooksResponse {
 )]
 pub async fn get_config_playbooks(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let playbooks_guard = state.playbooks.read().await;
     let playbooks = playbooks_guard.playbooks.clone();
@@ -264,8 +256,7 @@ pub struct UpdatePlaybooksRequest {
 )]
 pub async fn update_playbooks(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     body: Result<Json<UpdatePlaybooksRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<impl IntoResponse, StatusCode> {
     use crate::api::auth::require_role;
@@ -273,8 +264,7 @@ pub async fn update_playbooks(
     use crate::domain::OperatorRole;
     use crate::observability::{ActorType, AuditEntry};
 
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    let operator = require_role(&principal, OperatorRole::Admin)?;
 
     let Json(body) = match body {
         Ok(payload) => payload,
@@ -362,11 +352,9 @@ pub async fn update_playbooks(
 )]
 pub async fn get_alerting_config(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let alerting = state.alerting.read().await;
     let config = alerting.config();
@@ -394,16 +382,14 @@ pub async fn get_alerting_config(
 )]
 pub async fn update_alerting_config(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     body: Result<Json<crate::alerting::AlertingConfig>, axum::extract::rejection::JsonRejection>,
 ) -> Result<impl IntoResponse, StatusCode> {
     use crate::api::auth::require_role;
     use crate::domain::OperatorRole;
     use crate::observability::{ActorType, AuditEntry};
 
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    let operator = require_role(&principal, OperatorRole::Admin)?;
 
     let Json(mut new_config) = match body {
         Ok(payload) => payload,
@@ -492,14 +478,12 @@ pub async fn update_alerting_config(
 )]
 pub async fn test_alerting(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> Result<impl IntoResponse, StatusCode> {
     use crate::api::auth::require_role;
     use crate::domain::OperatorRole;
 
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    require_role(&principal, OperatorRole::Admin)?;
 
     let alert = crate::alerting::Alert::test_alert();
     let alerting = state.alerting.read().await.clone();
@@ -536,11 +520,9 @@ pub async fn test_alerting(
 )]
 pub async fn get_correlation_config(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    require_auth(&state, &auth_session, auth_header)?;
+    require_auth(&principal)?;
 
     let config = state.correlation_config.read().await;
     let loaded_at = state.correlation_loaded_at.read().await;
@@ -566,8 +548,7 @@ pub async fn get_correlation_config(
 )]
 pub async fn update_correlation_config(
     State(state): State<Arc<AppState>>,
-    auth_session: AuthSession,
-    headers: HeaderMap,
+    principal: AuthPrincipal,
     body: Result<
         Json<crate::correlation::CorrelationConfig>,
         axum::extract::rejection::JsonRejection,
@@ -576,8 +557,7 @@ pub async fn update_correlation_config(
     use crate::domain::OperatorRole;
     use crate::observability::{ActorType, AuditEntry};
 
-    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
-    let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Admin)?;
+    let operator = require_role(&principal, OperatorRole::Admin)?;
 
     let Json(new_config) = match body {
         Ok(payload) => payload,
