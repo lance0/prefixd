@@ -20,9 +20,9 @@ router enforcement.
 
 | Item | Value |
 | --- | --- |
-| Runs | rustbgpd 2026-11-16T10:31:08Z to 10:33:40Z; GoBGP 10:34:30Z to 10:37:02Z. Local Linux host, Docker Compose v5.1.0 |
-| Tree | `98e5682`: this change merged with main `ed830a6` |
-| Controller | `prefixd:onboard-local` (`sha256:ce37eeb36188…`), built from that tree with the repository's `Dockerfile`, version 0.27.0. The change alters `prefixdctl`, so the published image could not stand in |
+| Runs | rustbgpd 2026-11-16T11:01:39Z to 11:04:12Z; GoBGP 11:04:55Z to 11:07:28Z. Local Linux host, Docker Compose v5.1.0 |
+| Tree | `15c7e80`: this change merged with main `ed830a6` |
+| Controller | `prefixd:onboard-local` (`sha256:e5a861abe37b…`), built from that tree with the repository's `Dockerfile`, version 0.27.0. The change alters `prefixdctl`, so the published image could not stand in |
 | Dashboard | `ghcr.io/lance0/prefixd-dashboard:main@sha256:5a78aa480e25fab015e406aa3a8c73ca5e50b43dd3404b967cbfff2d06b5111a`, revision `88e3f1d`; not under test |
 | Speakers | rustbgpd 0.83.0 and the GoBGP image, both as pinned in `docker-compose.yml` |
 | Configuration | Shipped `configs/` and the seeded inventory, playbooks and correlation; `http.auth.mode: credentials`, leased FlowSpec on for rustbgpd |
@@ -53,6 +53,7 @@ prefixdctl ... < .prefixd/cli.token`.
 | Step | Command | Result |
 | --- | --- | --- |
 | No password | `docker compose --profile <p> up -d` with no `.env` | Exit 1, `required variable POSTGRES_PASSWORD is missing a value: set POSTGRES_PASSWORD in .env; scripts/compose-bootstrap.sh env generates one`; no container created |
+| Exported password | `POSTGRES_PASSWORD=override-canary scripts/compose-bootstrap.sh env` | Exit 1, `POSTGRES_PASSWORD is set in your environment, and it overrides .env for every Compose command; run 'unset POSTGRES_PASSWORD' ...`; no `.env` written, and the value is not echoed |
 | Password | `scripts/compose-bootstrap.sh env` | `.env` `-rw-------` (600), one line `POSTGRES_PASSWORD=` and 64 hex characters |
 | Start | `docker compose --profile <p> up -d --no-build` | Every service up; `GET /v1/health` `{"status":"ok","version":"0.27.0","auth_mode":"credentials"}` |
 | Password over a live database | `.env` moved aside, then `scripts/compose-bootstrap.sh env` | Exit 1, `Compose project ... already has a PostgreSQL volume, created with an earlier password`; no `.env` written. With `.env` back, the same command keeps the password |
@@ -60,7 +61,9 @@ prefixdctl ... < .prefixd/cli.token`.
 | CLI without a token | `docker compose exec prefixd-<p> prefixdctl status` | Exit 1, `error: 401 Unauthorized: authentication failed: missing, invalid, revoked or expired credentials (set PREFIXD_TOKEN or PREFIXD_TOKEN_FILE to an API token, or --session-cookie)`. Controller running, 0 restarts |
 | Bootstrap | `scripts/compose-bootstrap.sh <p>` | Admin `admin` created at the hidden prompt; ingest token `fastnetmon-<stamp>` bound to `fastnetmon` and operator token `cli-<stamp>` minted, `CREATED BY prefixdctl`. No token printed |
 | File modes | `stat` | `.env`, `cli.token`, `cli.token.name`, `fastnetmon.token` and `fastnetmon.token.name` `-rw-------` (600) and `.prefixd` `drwx------` (700), all owned by the invoking user; `git check-ignore` matches `/.env` and `/.prefixd/` |
-| Live rerun | `chmod 0644 .prefixd/cli.token`, then `scripts/compose-bootstrap.sh <p>` with no terminal | `An Admin operator already exists; skipping operator creation.` Both tokens kept and checked by name against `tokens list`; `cli.token` back to 600; no new token in `tokens list` |
+| Live rerun | `chmod 0644 .prefixd/cli.token`, then `scripts/compose-bootstrap.sh <p>` with no terminal | `An Admin operator already exists; skipping operator creation.` Both tokens kept after `prefixdctl tokens verify` matched each file's secret to its recorded name, scope and source; `cli.token` back to 600; no new token in `tokens list` |
+| Verify | `docker compose exec -T prefixd-<p> prefixdctl tokens verify < .prefixd/<file>.token` | `Token 'cli-<stamp>': scope operator, source -, pop any, active` and `Token 'fastnetmon-<stamp>': scope ingest, source fastnetmon, pop any, active` |
+| Swapped files | The secrets of `cli.token` and `fastnetmon.token` swapped, then the bootstrap rerun | Exit 1, `.../fastnetmon.token holds token 'cli-<stamp>', which is not an ingest token bound to fastnetmon; were the token files swapped?`. With the files restored, the rerun keeps both again |
 | CLI with the token | `cli status` | Exit 0, `Status: healthy`, `Mode: enforced`; rustbgpd reports daemon 0.83.0 ready, GoBGP `Daemon metadata: unsupported` |
 | Help | `prefixdctl --help` with the token file in the environment | The token occurs 0 times |
 | Dry-run | `mode: dry-run`, `up -d --no-build --force-recreate --no-deps prefixd-<p>`, `cli status` | `Mode: dry-run`; 0 restarts |
@@ -100,22 +103,30 @@ under umask 022, from a scratch copy of the repository. It covers:
   stderr or any `docker` argument;
 - a rerun that keeps live tokens, resets modes and skips an Admin listed with
   unusual JSON spacing;
-- a kept token the database lost or revoked;
+- a kept token the database lost or revoked, and kept files that were
+  swapped (secrets alone, or with their name files), emptied, truncated or
+  renamed;
 - garbled, two-line and noncanonical mint output, each refused with the
   minted token named for revocation;
 - a failed `operators list`, and a failure of only the second mint followed by
   a rerun that mints only the missing token;
 - a second run while the first holds the lock, through an explicit handshake;
+- a `.lock` that is not a held lock, reported as its own error;
 - a relative `PREFIXD_TOKEN_DIR` taken from the caller's directory;
 - `env`: a fresh `.env`, appending to an existing one, keeping a set password,
-  and refusing the example placeholder, duplicates, a symbolic link and an
-  existing PostgreSQL volume.
+  keeping a published example value with a warning, and refusing an empty
+  value, duplicates, a symbolic link, an exported `POSTGRES_PASSWORD` on both
+  paths, an existing PostgreSQL volume and a failed volume listing.
 
 `scripts/test-compose.py` checks `PREFIXD_API` on both controller services
 and that both profiles refuse to render without `POSTGRES_PASSWORD`.
 `tests/integration_cli_lifetime.rs` checks the token file from a path, the
-environment and `/dev/stdin`, the `Mode` line, the usage errors and hidden
-help values. `tests/fastnetmon_vector.rs` checks that the script posts
+environment and `/dev/stdin`, the 1 KiB cap, the `Mode` line, `Mode:
+unavailable` when settings answer 403 or 500, the usage errors and hidden help
+values. `tests/integration_postgres.rs` checks `tokens verify` against
+PostgreSQL: active, unknown, malformed, noncanonical, empty, revoked and
+expired secrets, from stdin and `--token-file`, with no secret or hash in any
+output. `tests/fastnetmon_vector.rs` checks that the script posts
 nothing without `PREFIXD_API`.
 
 Negative controls, each reverted:
@@ -133,6 +144,11 @@ Negative controls, each reverted:
 | `hide_env_values` removed from the token file option | Help prints the seeded path |
 | No `Mode` line in `status` | The status output lacks `Mode: dry-run` |
 | The script's `http://localhost:8080` default restored | The script no longer refuses a missing endpoint |
+| The volume listing back inside `[[ -n "$(...)" ]]` | A failed listing writes a new password |
+| No refusal of an exported `POSTGRES_PASSWORD` | `env` writes `.env` while the export overrides it |
+| No scope and source check of kept files | Swapped files pass the rerun |
+| `status` failing on an unreadable mode again | `status` exits 1 on a settings 403 or 500 |
+| `tokens verify` echoing an unknown secret | The no-echo check fails |
 
 ## Not covered
 
@@ -142,6 +158,7 @@ Negative controls, each reverted:
   [FastNetMon Community interop](fastnetmon-community-2026-11-16.md) covers
   the notify path.
 - Upgrading an existing stack to the required `POSTGRES_PASSWORD`; only the
-  refusal to replace a live database's password was run.
+  refusals to replace a live database's password, and to run with an exported
+  one, were run.
 - Host port 80 and the fixed container names; the isolation override replaced
   both.
