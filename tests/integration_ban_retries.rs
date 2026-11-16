@@ -171,7 +171,10 @@ async fn postgres_cancelled_event_before_admission_recovers_once() {
     .await
     .expect("request reached the safelist read after storing the event");
     let before = stored(&ctx, "interrupted").await;
-    assert!(before.ban_retryable);
+    assert_eq!(
+        before.ban_admission_pop.as_deref(),
+        Some(ctx.state.settings.pop.as_str())
+    );
     assert_eq!(before.outcome.outcome, EventOutcome::NotRecorded);
     assert_eq!(ctx.repo.count_active_global().await.unwrap(), 0);
     running.abort();
@@ -301,7 +304,7 @@ async fn postgres_migration_preserves_ambiguous_legacy_extension_after_withdrawa
         .len();
 
     sqlx::raw_sql(
-        "ALTER TABLE events DROP COLUMN ban_retryable;
+        "ALTER TABLE events DROP COLUMN ban_admission_pop;
         DELETE FROM schema_migrations WHERE version = 26;",
     )
     .execute(&ctx.pool)
@@ -315,7 +318,7 @@ async fn postgres_migration_preserves_ambiguous_legacy_extension_after_withdrawa
             .await;
     }
     let legacy = stored(&ctx, "legacy-interrupted").await;
-    assert!(!legacy.ban_retryable);
+    assert!(legacy.ban_admission_pop.is_none());
     assert_eq!(legacy.event_id, before.event_id);
     assert_eq!(legacy.outcome, before.outcome);
     let (status, refused) = post(ctx.state.clone(), event("legacy-interrupted")).await;
@@ -355,17 +358,21 @@ async fn postgres_migration_preserves_ambiguous_legacy_extension_after_withdrawa
     assert!(
         serde_json::to_value(&legacy)
             .unwrap()
-            .get("ban_retryable")
+            .get("ban_admission_pop")
             .is_none()
     );
     let schema = serde_json::to_value(<AttackEvent as utoipa::PartialSchema>::schema()).unwrap();
-    assert!(!schema.to_string().contains("ban_retryable"));
+    assert!(!schema.to_string().contains("ban_admission_pop"));
 
-    let fresh = AttackEvent::from_input(
+    let mut fresh = AttackEvent::from_input(
         serde_json::from_value::<AttackEventInput>(event("fresh-interrupted")).unwrap(),
     );
+    fresh.ban_admission_pop = Some(ctx.state.settings.pop.clone());
     ctx.repo.insert_event(&fresh).await.unwrap();
-    assert!(stored(&ctx, "fresh-interrupted").await.ban_retryable);
+    assert_eq!(
+        stored(&ctx, "fresh-interrupted").await.ban_admission_pop,
+        fresh.ban_admission_pop
+    );
     let (status, resumed) = post(ctx.state.clone(), event("fresh-interrupted")).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{resumed}");
     assert_eq!(resumed["event_id"], fresh.event_id.to_string());
@@ -791,4 +798,175 @@ async fn postgres_duplicate_lookup_bounds_pool_acquisition() {
     tokio::time::timeout(Duration::from_secs(5), ctx.pool.close())
         .await
         .expect("detached BEGIN result is cleaned up after cancellation");
+}
+
+#[tokio::test]
+async fn postgres_unfinished_ban_stays_on_its_original_pop_across_restart() {
+    let ctx = context().await;
+    let speaker_a = Arc::new(prefixd::bgp::MockAnnouncer::new());
+    let speaker_b = Arc::new(prefixd::bgp::MockAnnouncer::new());
+    let state = |pop: &str, speaker: Arc<prefixd::bgp::MockAnnouncer>| {
+        let mut settings = ctx.state.settings.clone();
+        settings.pop = pop.into();
+        AppState::new(
+            settings,
+            common::test_inventory(),
+            common::test_playbooks(),
+            ctx.repo.clone(),
+            speaker,
+            ".".into(),
+        )
+        .unwrap()
+    };
+    let initial_a = state("retry-a", speaker_a.clone());
+    let b = state("retry-b", speaker_b.clone());
+    install_journal_failure(&ctx).await;
+    let (status, body) = post(initial_a, event("two-pop")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    let before = stored(&ctx, "two-pop").await;
+    assert_eq!(before.ban_admission_pop.as_deref(), Some("retry-a"));
+    assert_eq!(before.outcome.outcome, EventOutcome::Failed);
+    assert_eq!(speaker_a.announced_count().await, 0);
+    remove_journal_failure(&ctx).await;
+    // Restart the original POP with an independent lifecycle mutex.
+    let a = state("retry-a", speaker_a.clone());
+    let mut held = ctx.pool.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    sqlx::query("LOCK TABLE safelist IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let pool = &ctx.pool;
+    let wait_for = |count: i64| async move {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM safelist%'")
+                    .bind(blocker).fetch_one(pool).await.unwrap();
+                if waiting >= count { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("HTTP request reached safelist after loading the original event");
+    };
+    let retry_a = tokio::spawn(post(a, event("two-pop")));
+    wait_for(1).await;
+    let mut retry_b = tokio::spawn(post(b.clone(), event("two-pop")));
+    // The broken implementation reaches the same gate from the foreign POP;
+    // the fixed implementation refuses it while the original POP stays gated.
+    let foreign = tokio::select! {
+        response = &mut retry_b => Some(response.unwrap()),
+        () = wait_for(2) => None,
+    };
+    if foreign.is_some() {
+        assert_eq!(
+            stored(&ctx, "two-pop").await.outcome,
+            before.outcome,
+            "foreign refusal must not record an outcome for the original event"
+        );
+    }
+    held.rollback().await.unwrap();
+    let (status, accepted) = retry_a.await.unwrap();
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    assert_eq!(accepted["event_id"], before.event_id.to_string());
+    let (status, rejected) = match foreign {
+        Some(response) => response,
+        None => retry_b.await.unwrap(),
+    };
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert!(rejected.get("event_outcome").is_none(), "{rejected}");
+    assert_eq!(ctx.repo.count_active_global().await.unwrap(), 1);
+    assert_eq!(speaker_a.announced_count().await, 1);
+    assert_eq!(speaker_b.announced_count().await, 0);
+    let owners: Vec<String> = sqlx::query_scalar("SELECT pop FROM mitigations")
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap();
+    assert_eq!(owners, ["retry-a"]);
+    let after = stored(&ctx, "two-pop").await;
+    assert_eq!(after.outcome.outcome_mitigation_ids.len(), 1);
+    let (status, rejected) = post(b, event("two-pop")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert!(rejected.get("event_outcome").is_none(), "{rejected}");
+    assert_eq!(stored(&ctx, "two-pop").await.outcome, after.outcome);
+    assert_eq!(speaker_b.announced_count().await, 0);
+}
+
+#[tokio::test]
+async fn postgres_concurrent_fresh_bans_reserve_one_global_event_and_pop() {
+    let ctx = context().await;
+    let speaker_a = Arc::new(prefixd::bgp::MockAnnouncer::new());
+    let speaker_b = Arc::new(prefixd::bgp::MockAnnouncer::new());
+    let state = |pop: &str, speaker: Arc<prefixd::bgp::MockAnnouncer>| {
+        let mut settings = ctx.state.settings.clone();
+        settings.pop = pop.into();
+        AppState::new(
+            settings,
+            common::test_inventory(),
+            common::test_playbooks(),
+            ctx.repo.clone(),
+            speaker,
+            ".".into(),
+        )
+        .unwrap()
+    };
+    let a = state("fresh-a", speaker_a.clone());
+    let b = state("fresh-b", speaker_b.clone());
+    let mut held = ctx.pool.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(77284, 3374)")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE FUNCTION hold_new_ban_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN PERFORM pg_advisory_xact_lock(77284, 3374); RETURN NEW; END $$;
+        CREATE TRIGGER hold_new_ban_insert BEFORE INSERT ON events
+        FOR EACH ROW WHEN (NEW.action = 'ban') EXECUTE FUNCTION hold_new_ban_insert();",
+    )
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
+    let first = tokio::spawn(post(a, event("concurrent-first")));
+    let second = tokio::spawn(post(b, event("concurrent-first")));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiters: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%INSERT INTO events%'")
+                .bind(blocker).fetch_one(&ctx.pool).await.unwrap();
+            if waiters == 2 { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("both fresh requests saw no event and reached the initial INSERT");
+    held.rollback().await.unwrap();
+    let responses = [first.await.unwrap(), second.await.unwrap()];
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|(status, _)| status.is_success())
+            .count(),
+        1,
+        "{responses:?}"
+    );
+    let events: Vec<(uuid::Uuid, Option<String>)> = sqlx::query_as(
+        "SELECT event_id, ban_admission_pop FROM events WHERE source = 'retry-test' AND external_event_id = 'concurrent-first'")
+        .fetch_all(&ctx.pool).await.unwrap();
+    assert_eq!(events.len(), 1);
+    let mitigations: Vec<(uuid::Uuid, String)> =
+        sqlx::query_as("SELECT last_event_id, pop FROM mitigations")
+            .fetch_all(&ctx.pool)
+            .await
+            .unwrap();
+    assert_eq!(mitigations, [(events[0].0, events[0].1.clone().unwrap())]);
+    assert_eq!(
+        speaker_a.announced_count().await + speaker_b.announced_count().await,
+        1
+    );
+    let saved = stored(&ctx, "concurrent-first").await;
+    assert_eq!(saved.outcome.outcome_mitigation_ids.len(), 1);
 }

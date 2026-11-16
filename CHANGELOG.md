@@ -9,13 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
-- **Interrupted detector bans.** Migration 026 preserves a retry boundary:
-  new incomplete or failed bans with no admitted intent can resume using the
-  same event ID. Historical ambiguous attempts return an explicit unknown
+- **Interrupted detector bans.** Migration 026 preserves the original admission
+  POP: new incomplete or failed bans with no admitted intent can resume using
+  the same event ID on that POP. Another POP refuses the replay; use separate
+  event IDs for separate intended POP admissions. Historical ambiguous attempts return an explicit unknown
   outcome conflict; inspect their event, mitigation and audit before
-  authorizing a new admission with a new ID. Reinstall the FastNetMon script:
-  it requires a recorded admitted outcome before treating a retried `409` as
-  local intent, and logs `INTENT_RECORDED`. See
+  authorizing a new admission with a new ID. Install `jq` on FastNetMon hosts
+  before reinstalling the script: it requires successful curl completion and
+  valid JSON with a recorded admitted outcome and mitigation UUIDs before
+  treating a retried `409` as local intent, and logs `INTENT_RECORDED`. See
   [interrupted detector bans](docs/how-to/upgrading.md#interrupted-detector-bans).
 
 - **Portless detector police rules match the whole protocol.** UDP/TCP events

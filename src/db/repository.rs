@@ -162,7 +162,7 @@ impl Repository {
             INSERT INTO events (
                 event_id, external_event_id, source, event_timestamp, ingested_at,
                 victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                action, raw_details, unban_pop, unban_target_ids, ban_retryable
+                action, raw_details, unban_pop, unban_target_ids, ban_admission_pop
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             "#,
         )
@@ -183,7 +183,7 @@ impl Repository {
         .bind(&event.raw_details)
         .bind(unban.map(|(pop, _)| pop))
         .bind(unban.map(|(_, targets)| targets))
-        .bind(event.ban_retryable)
+        .bind(&event.ban_admission_pop)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -683,7 +683,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids, ban_retryable
+                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids, ban_admission_pop
             FROM events
             WHERE source = $1 AND external_event_id = $2 AND action = 'ban'
             ORDER BY ingested_at DESC, event_id DESC
@@ -711,7 +711,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids, ban_retryable
+                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids, ban_admission_pop
             FROM events
             WHERE ($2::timestamptz IS NULL OR (ingested_at, event_id) < ($2, $5))
               AND ($3::timestamptz IS NULL OR ingested_at >= $3)
@@ -1661,7 +1661,7 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, top_src_ports_json, confidence,
-                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids, ban_retryable
+                   action, raw_details, outcome, outcome_reason, outcome_mitigation_ids, ban_admission_pop
             FROM events WHERE prefixd_victim_inet(victim_ip) = ANY($1::inet[])
             ORDER BY ingested_at DESC LIMIT $2
             "#,
@@ -2872,7 +2872,7 @@ mod checked_timestamp_rows {
         }
         check_row!(
             AttackEvent,
-            "gen_random_uuid() AS event_id, NULL::text AS external_event_id, 'test'::text AS source, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, 17::integer AS protocol, NULL::bigint AS bps, NULL::bigint AS pps, '[]'::text AS top_dst_ports_json, NULL::text AS top_src_ports_json, NULL::real AS confidence, 'ban'::text AS action, NULL::jsonb AS raw_details, NULL::text AS outcome, NULL::text AS outcome_reason, '{}'::uuid[] AS outcome_mitigation_ids, false AS ban_retryable",
+            "gen_random_uuid() AS event_id, NULL::text AS external_event_id, 'test'::text AS source, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, 17::integer AS protocol, NULL::bigint AS bps, NULL::bigint AS pps, '[]'::text AS top_dst_ports_json, NULL::text AS top_src_ports_json, NULL::real AS confidence, 'ban'::text AS action, NULL::jsonb AS raw_details, NULL::text AS outcome, NULL::text AS outcome_reason, '{}'::uuid[] AS outcome_mitigation_ids, NULL::text AS ban_admission_pop",
             [event_timestamp, ingested_at],
             []
         );

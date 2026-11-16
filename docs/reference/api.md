@@ -217,15 +217,19 @@ any durably admitted mitigation returns `409` on resend. That response adds
 current speaker or router state.
 
 A new event whose request stops after storage but before admission can resume
-with the same ID. It keeps its original UUID and payload and rechecks current
-policy and guardrails. A failed attempt with no admitted mitigation can retry;
+with the same ID on its original POP. It keeps its original UUID and payload
+and rechecks current policy and guardrails. Another POP returns a scope-conflict
+`409` without `event_outcome`, even after completion, and changes no saved
+outcome or intent. Use different event IDs for separate intended admissions on
+different POPs. A failed attempt with no admitted mitigation can retry;
 a final refusal cannot. If the selected mitigation changes or starts withdrawal
 while extension waits on storage, the response is `503` and the unapplied event
 can retry. Once any rule commits, a partial multi-rule admission
 is terminal for that ID, and retries neither extend those rules nor create
 remaining ones. Unconfirmed announcements belong to reconciliation.
 
-Migration 026 marks only new events as safe to resume. A historical incomplete
+Migration 026 stores the original admission POP only for new bans. The field
+is internal and immutable; it is never inferred for historical rows. A historical incomplete
 or failed attempt without committed mitigation IDs returns a distinct `409`
 conflict: its admission outcome is unknown. Inspect the event, mitigations and
 audit before authorizing any new admission with a new ID; that response has no

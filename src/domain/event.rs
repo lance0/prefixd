@@ -156,9 +156,9 @@ pub struct AttackEvent {
     #[sqlx(flatten)]
     #[serde(flatten)]
     pub outcome: EventOutcomeRecord,
-    /// Only new admissions atomically retain every mitigation association.
+    /// Immutable owner of a current ban; historical admission ownership is unknown.
     #[serde(skip)]
-    pub ban_retryable: bool,
+    pub ban_admission_pop: Option<String>,
 }
 
 /// What ingestion did with a stored event.
@@ -354,7 +354,7 @@ impl AttackEvent {
             action: input.action,
             raw_details: input.raw_details,
             outcome: EventOutcomeRecord::default(),
-            ban_retryable: true,
+            ban_admission_pop: None,
         }
     }
 

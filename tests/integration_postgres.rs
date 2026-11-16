@@ -1357,7 +1357,7 @@ async fn test_timeseries_non_hour_bucket_alignment() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
-        ban_retryable: true,
+        ban_admission_pop: None,
     };
 
     let event_two = AttackEvent {
@@ -1377,7 +1377,7 @@ async fn test_timeseries_non_hour_bucket_alignment() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
-        ban_retryable: true,
+        ban_admission_pop: None,
     };
 
     ctx.repo
@@ -1859,7 +1859,7 @@ async fn test_signal_group_add_events_and_list() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
-        ban_retryable: true,
+        ban_admission_pop: None,
     };
     let event2 = AttackEvent {
         event_id: uuid::Uuid::new_v4(),
@@ -1878,7 +1878,7 @@ async fn test_signal_group_add_events_and_list() {
         action: "ban".to_string(),
         raw_details: None,
         outcome: Default::default(),
-        ban_retryable: true,
+        ban_admission_pop: None,
     };
 
     ctx.repo.insert_event(&event1).await.unwrap();
@@ -4248,7 +4248,7 @@ async fn invalid_manual_actions_never_reach_postgres_or_the_speaker() {
 }
 
 #[tokio::test]
-async fn test_creation_insert_failure_sends_no_rpc_and_retains_detector_id_gap() {
+async fn test_creation_insert_failure_sends_no_rpc_and_retry_recovers_original_event() {
     use std::sync::{Arc, atomic::Ordering::SeqCst};
     let context = TestContext::new().await;
     let version: String = sqlx::query_scalar("SELECT version()")
@@ -4281,19 +4281,39 @@ async fn test_creation_insert_failure_sends_no_rpc_and_retains_detector_id_gap()
             ));
         }
     }
-    assert!(
-        context
-            .repo
-            .find_ban_event_by_external_id("creation-test", "failed-prepare")
-            .await
-            .unwrap()
-            .is_some()
-    );
+    let original = context
+        .repo
+        .find_ban_event_by_external_id("creation-test", "failed-prepare")
+        .await
+        .unwrap()
+        .unwrap();
     sqlx::query("DROP TRIGGER reject_creation ON mitigations")
         .execute(&context.pool)
         .await
         .unwrap();
-    // This pre-existing ingestion gap is deliberately not repaired by deleting/replaying the event.
+    // Recovery resumes the saved event after the preparation fault is removed.
+    let response = app
+        .clone()
+        .oneshot(creation_request(
+            "detector",
+            "203.0.113.10",
+            "failed-prepare",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let recovered = creation_json(response).await;
+    assert_eq!(recovered["event_id"], original.event_id.to_string());
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+    assert_eq!(context.repo.count_active_global().await.unwrap(), 1);
+    let completed = context
+        .repo
+        .find_ban_event_by_external_id("creation-test", "failed-prepare")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.event_id, original.event_id);
+    assert_eq!(completed.outcome.outcome_mitigation_ids.len(), 1);
     let response = app
         .clone()
         .oneshot(creation_request(
@@ -4304,8 +4324,13 @@ async fn test_creation_insert_failure_sends_no_rpc_and_retains_detector_id_gap()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(speaker.adds.load(SeqCst), 0);
-    for (kind, ip) in [("manual", "203.0.113.10"), ("detector", "203.0.113.11")] {
+    assert_eq!(
+        speaker.adds.load(SeqCst),
+        1,
+        "completed retry sends no additional RPC"
+    );
+    assert_eq!(context.repo.count_active_global().await.unwrap(), 1);
+    for (kind, ip) in [("manual", "203.0.113.12"), ("detector", "203.0.113.11")] {
         let response = app
             .clone()
             .oneshot(creation_request(kind, ip, "fresh-prepare"))

@@ -1454,6 +1454,15 @@ async fn admit_ban(
         None
     };
     let event = if let Some(event) = previous {
+        if event
+            .ban_admission_pop
+            .as_deref()
+            .is_some_and(|pop| pop != state.settings.pop)
+        {
+            return Err(AppError(PrefixdError::Conflict(
+                "ban event belongs to another POP; retry on its original POP or use a new event ID for a separate admission".into(),
+            )));
+        }
         if !matches!(
             event.outcome.outcome,
             EventOutcome::NotRecorded | EventOutcome::Failed
@@ -1468,7 +1477,7 @@ async fn admit_ban(
                 outcome: event.outcome,
             }));
         }
-        if !event.ban_retryable {
+        if event.ban_admission_pop.is_none() {
             return Err(AppError(PrefixdError::Conflict(
                 "historical ban admission outcome is unknown; inspect the event and mitigations before authorizing a new event ID".into(),
             )));
@@ -1477,7 +1486,9 @@ async fn admit_ban(
         trace.stored = true;
         event
     } else {
-        AttackEvent::from_input(input)
+        let mut event = AttackEvent::from_input(input);
+        event.ban_admission_pop = Some(state.settings.pop.clone());
+        event
     };
     trace.event = Some(event.clone());
 
