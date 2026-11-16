@@ -251,9 +251,8 @@ fi
 log "Sending $API_ACTION for $IP ($VECTOR, ${PPS} pps, event_id=$EVENT_ID)"
 
 # FastNetMon runs the script once per ban and once per unban and never repeats
-# it. Retry the same event (same event_id) only when it never reached prefixd
-# or a standby or draining controller answered 503; any 4xx is final. Each
-# attempt is bounded by the connect and total timeouts.
+# it. Retry transport failures and retryable 503 responses with the same event_id;
+# any 4xx is final. Each attempt is bounded by the connect and total timeouts.
 ATTEMPT=1
 while true; do
     CURL_STATUS=0

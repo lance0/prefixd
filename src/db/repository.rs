@@ -732,35 +732,37 @@ impl RepositoryTrait for Repository {
             .ok_or(PrefixdError::MitigationNotFound(request.mitigation_id))?;
             locked.push(Mitigation::from_row(row)?);
         }
-        let binding: Option<Uuid> =
-            sqlx::query_scalar("SELECT target_id FROM speaker_pop_bindings WHERE pop = $1")
-                .bind(pop)
-                .fetch_optional(&mut *tx)
-                .await?;
-        let rows = sqlx::query_as::<_, MitigationRow>(
-            "SELECT * FROM mitigations WHERE pop = $1 AND status IN ('active', 'escalated')",
-        )
-        .bind(pop)
-        .fetch_all(&mut *tx)
-        .await?;
-        let owners = rows
-            .into_iter()
-            .map(Mitigation::from_row)
-            .collect::<Result<Vec<_>>>()?;
-        for (target, current) in ordered.iter().zip(&locked) {
-            let request = &target.request;
-            if request.target_id != binding {
-                return Err(crate::domain::binding_mismatch());
+        if !targets.is_empty() {
+            let binding: Option<Uuid> =
+                sqlx::query_scalar("SELECT target_id FROM speaker_pop_bindings WHERE pop = $1")
+                    .bind(pop)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            let rows = sqlx::query_as::<_, MitigationRow>(
+                "SELECT * FROM mitigations WHERE pop = $1 AND status IN ('active', 'escalated')",
+            )
+            .bind(pop)
+            .fetch_all(&mut *tx)
+            .await?;
+            let owners = rows
+                .into_iter()
+                .map(Mitigation::from_row)
+                .collect::<Result<Vec<_>>>()?;
+            for (target, current) in ordered.iter().zip(&locked) {
+                let request = &target.request;
+                if request.target_id != binding {
+                    return Err(crate::domain::binding_mismatch());
+                }
+                if current != &target.expected
+                    || request.pop != pop
+                    || request.detector_source.as_deref() != Some(event.source.as_str())
+                {
+                    return Err(PrefixdError::Conflict(
+                        "detector withdrawal target changed".into(),
+                    ));
+                }
+                crate::domain::validate_withdrawal_owner(request, current, &owners)?;
             }
-            if current != &target.expected
-                || request.pop != pop
-                || request.detector_source.as_deref() != Some(event.source.as_str())
-            {
-                return Err(PrefixdError::Conflict(
-                    "detector withdrawal target changed".into(),
-                ));
-            }
-            crate::domain::validate_withdrawal_owner(request, current, &owners)?;
         }
         let mut requests = Vec::with_capacity(targets.len());
         for target in targets {
