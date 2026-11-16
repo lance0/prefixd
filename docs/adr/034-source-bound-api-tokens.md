@@ -1382,3 +1382,34 @@ old incomplete or failed ban without committed IDs therefore returns a
 conflict saying its historical admission outcome is unknown. Inspect its event,
 mitigations and audit before authorizing a new admission with a new ID. No
 historical success or failure is inferred by the migration.
+
+### Amendment: an interrupted ban stays on its admitting POP
+
+A ban's `(source, external_event_id)` remains a database-wide identity. The
+partial unique index from migration 018 reserves that identity when the event
+is inserted. The still-unreleased migration 026 records `ban_admission_pop`
+instead of a separate retry flag: a non-null value is the immutable POP that
+stored a current ban under the atomic admission protocol; null identifies
+historical events whose unfinished admission cannot be reconstructed safely.
+
+Only the original POP may resume an unfinished ban. A different POP receives a
+scope-conflict `409` with no `event_outcome`, including after the original ban
+completed. This check runs before assigning the event to the request's outcome
+trace, so a foreign retry changes neither intent nor the saved outcome. Separate
+intended admissions on different POPs use different external IDs. The original
+POP's restart still resumes the same event UUID and payload with current guards.
+Completed historical outcomes retain their existing deduplication behavior;
+unfinished historical events stay unknown. Migration never infers an owner from
+mutable mitigation rows, and a retry never claims or changes the owner.
+
+
+### Amendment: validate duplicate responses before reporting intent
+
+The bundled FastNetMon script now requires `jq` alongside bash and curl. This
+supersedes the earlier bash-and-curl-only prerequisite. A retried duplicate
+confirms local intent only after curl succeeds and jq validates exactly one
+JSON response with this event's duplicate identity, an admitted outcome and a
+nonempty array of complete mitigation UUIDs. Truncated bodies, transport errors,
+malformed responses and unknown outcomes remain errors. The existing 2xx event
+acceptance behavior is unchanged. Install jq before replacing the script; the
+shipped FastNetMon lab image includes it.

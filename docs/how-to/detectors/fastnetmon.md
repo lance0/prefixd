@@ -145,13 +145,13 @@ rustbgpd `v0.80.1`; it does not qualify a shared-target deployment:
 
 - FastNetMon Community or Advanced installed and configured
 - prefixd running with API accessible
-- `bash` and `curl` on the FastNetMon host; nothing else
+- `bash`, `curl` and `jq` on the FastNetMon host
 - Network connectivity from FastNetMon to prefixd API
 
 ## Installation
 
-1. Copy the notify script to the FastNetMon host. The host needs `bash` and
-   `curl` only:
+1. Copy the notify script to the FastNetMon host. Install `bash`, `curl` and
+   `jq` first; the script refuses to send if curl or jq is missing:
 
 ```bash
 sudo cp scripts/prefixd-fastnetmon.sh /usr/local/bin/
@@ -561,8 +561,8 @@ against prefixd, rustbgpd and FRR, and CI runs it on every change to the
 script. The [dated receipt](../../reference/qualification/fastnetmon-community-2026-11-16.md)
 lists what it covers. Two of its findings matter for an install:
 
-- The official `fastnetmon-community` container image has no `curl`; add it,
-  as the lane's image does.
+- The official `fastnetmon-community` container image has neither `curl` nor
+  `jq`; add both, as the lane's image does.
 - A manual `fastnetmon_api_client ban` sends all-zero counters, so the script
   sends vector `unknown`. It creates a mitigation only if a playbook matches
   `unknown`, as the shipped `unknown_conservative` does.

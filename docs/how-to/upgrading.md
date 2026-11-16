@@ -20,10 +20,11 @@ From v0.23.0, follow [v0.23.0 → 0.23.1](#v0230--0231) first; from v0.22.1,
 
 ## Interrupted detector bans
 
-Migration 026 adds an internal retry boundary to `events`, using a constant
-false default without rewriting existing rows. New detector bans retain their
-admitted mitigation IDs atomically and can resume an interrupted attempt with
-the same event ID. The schema version becomes 26. Stop every older controller
+Migration 026 adds a nullable internal admission POP to `events` without
+rewriting existing rows. New detector bans retain their admitted mitigation IDs
+atomically and can resume an interrupted attempt with the same event ID on the
+original POP. Another POP returns a scope-conflict `409` without a recorded
+outcome; use different IDs for separate intended admissions on different POPs. The schema version becomes 26. Stop every older controller
 before migration and keep it off the upgraded database; v0.27.0 has no
 newer-schema guard. Follow the
 [database downgrade procedure](#database-schema-version-and-downgrade).
@@ -36,9 +37,11 @@ authorizing a new admission with a new event ID. The upgrade does not fabricate
 an outcome or replay historical events. Completed outcomes retain ordinary
 deduplication.
 
-Reinstall the bundled FastNetMon script. It no longer treats every same-ID
+Install `jq` on each FastNetMon host before reinstalling the bundled script.
+It refuses to send without `curl` and `jq`. It no longer treats every same-ID
 `409` after a connection error or `503` as delivery success: it requires a
-recorded admitted outcome and mitigation IDs, and logs `INTENT_RECORDED`.
+successful curl completion and a valid JSON response with a recorded admitted
+outcome and complete mitigation UUIDs, and logs `INTENT_RECORDED`.
 Refused or interrupted outcomes remain errors. This log proves historical local
 intent only; inspect mitigation and export evidence for current enforcement.
 
@@ -307,10 +310,11 @@ What changes:
   `BAN_POST_DELAY_SECONDS` are now `EVENT_POST_ATTEMPTS` and
   `EVENT_POST_DELAY_SECONDS`, which cover ban and unban. New:
   `EVENT_CONNECT_TIMEOUT_SECONDS` (5) and `EVENT_MAX_TIME_SECONDS` (15) bound
-  each attempt. It needs only bash and curl. It refuses to run without a
+  each attempt. It needs bash, curl and jq. It refuses to run without a
   token unless `PREFIXD_AUTH_MODE=none` says the controller has no
-  authentication, and a retried ban that meets its own event ID as `409` was
-  delivered by an earlier attempt.
+  authentication. A retried `409` confirms historical local intent only when
+  curl completed and the valid response identifies this event and a recorded
+  admitted outcome with mitigation UUIDs.
 
 ### Operator usernames
 
