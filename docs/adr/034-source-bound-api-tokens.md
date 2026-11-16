@@ -1413,3 +1413,26 @@ nonempty array of complete mitigation UUIDs. Truncated bodies, transport errors,
 malformed responses and unknown outcomes remain errors. The existing 2xx event
 acceptance behavior is unchanged. Install jq before replacing the script; the
 shipped FastNetMon lab image includes it.
+
+
+### Amendment: transient ban refusals remain retryable
+
+Pending withdrawal is a typed ownership result. Manual admission and lifetime
+operations still report it as `409`; detector admission maps it to the existing
+retryable `503` at both its initial ownership lookup and its later blackhole
+admission check. This keeps an already-stored, unapplied ban in `failed` while
+immutable withdrawal intent is pending. Cleanup allows the same event UUID and
+original payload to resume. Other ownership and policy conflicts stay final.
+
+When no rule was admitted, any server error takes precedence over a permanent
+refusal from an earlier rule. Otherwise that refusal would consume an event
+whose later rule could recover. Once any rule commits, the partial admission
+remains terminal and retains its first refusal diagnostic.
+
+Alertmanager and generic webhook responses use `503` when any ban or unban
+encounters a server error. They continue processing the remaining items and
+report every result. With stable event IDs, completed items deduplicate and
+unapplied items retry on resend. Generic webhook senders configure
+`fields.source_id` for that guarantee; a ban without an ID is evaluated as a
+new event on every resend. Client and policy refusals keep their existing aggregate response;
+`/v1/events/batch` retains `207` with per-item results for any rejected item.

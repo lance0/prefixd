@@ -37,6 +37,14 @@ authorizing a new admission with a new event ID. The upgrade does not fabricate
 an outcome or replay historical events. Completed outcomes retain ordinary
 deduplication.
 
+A current
+ban with no admitted IDs remains retryable while an earlier withdrawal is
+pending. Alertmanager and generic webhook notifications now return `503` for
+ban-side server failures too; they still include every item's result. A resend
+deduplicates successful items and retries unapplied ones when event IDs are
+stable. Configure `fields.source_id` on generic webhooks for that guarantee;
+a ban without an ID is evaluated as a new event on every resend.
+
 Install `jq` on each FastNetMon host before reinstalling the bundled script.
 It refuses to send without `curl` and `jq`. It no longer treats every same-ID
 `409` after a connection error or `503` as delivery success: it requires a

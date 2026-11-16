@@ -223,8 +223,10 @@ and rechecks current policy and guardrails. Another POP returns a scope-conflict
 outcome or intent. Use different event IDs for separate intended admissions on
 different POPs. A failed attempt with no admitted mitigation can retry;
 a final refusal cannot. If the selected mitigation changes or starts withdrawal
-while extension waits on storage, the response is `503` and the unapplied event
-can retry. Once any rule commits, a partial multi-rule admission
+while extension waits on storage, or ownership is still pending withdrawal, the
+response is `503` and the unapplied event can retry after cleanup. If no rule
+was admitted, a server error takes precedence over an earlier rule's permanent
+refusal so that recovery remains possible. Once any rule commits, a partial multi-rule admission
 is terminal for that ID, and retries neither extend those rules nor create
 remaining ones. Unconfirmed announcements belong to reconciliation.
 
@@ -1895,7 +1897,7 @@ it the same way. Resolved alerts ignore the annotation.
 | 400 | Malformed payload (invalid JSON, wrong version, empty alerts) |
 | 401 | Authentication required |
 | 403 | The credential is not bound to `alertmanager` |
-| 503 | A resolved alert's withdrawal failed on the controller's side or its outcome is unknown; the body still lists every alert. The intent is pending and reconciled, and Alertmanager's resend is safe |
+| 503 | A ban or unban encountered a server error, including pending withdrawal; the body still lists every alert. A resend retries unapplied events and deduplicates admitted ones |
 
 > **Note:** Alertmanager will not retry 4xx errors, so malformed payloads return 400 to prevent infinite retry loops.
 
@@ -2110,9 +2112,13 @@ nonce, and only the event ID makes a replay a duplicate. An HMAC adapter
 refuses an unban with no event ID as that item's `error`, counted in `failed`,
 and processes the rest of the payload, so every unban it runs has an ID a
 replay reuses its original targets by. An unban reports
-`withdrawn` or `no_active_mitigation`; one that failed on the controller's side
-is an `error` counted in `failed`, and the response is `503` so the sender
-resends.
+`withdrawn` or `no_active_mitigation`. Any ban or unban that encounters a
+server error is an `error` counted in `failed`, and the response is `503` so
+the sender resends. The body includes every item. Configure `fields.source_id`
+to supply a stable event ID: resending then deduplicates admitted bans and
+retries unapplied ones. A ban without an ID has no replay identity and is
+evaluated as a new event on every resend. Client and policy refusals keep the
+existing `200` aggregate response with per-item errors.
 
 **Response:**
 

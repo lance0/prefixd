@@ -565,6 +565,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep an unapplied detector ban retryable while withdrawal is pending, including
+  when an earlier rule has a permanent refusal. Alertmanager and generic
+  webhooks return `503` for ban-side server failures and deduplicate successful
+  items with stable event IDs when a notification is resent.
+
 - Alertmanager can mitigate a new firing after the same alert resolves.
   Resends still deduplicate within one firing, and delayed or replayed resolves
   cannot withdraw a rule created or extended by a newer episode. An older

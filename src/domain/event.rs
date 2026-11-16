@@ -244,9 +244,9 @@ impl EventOutcome {
             PrefixdError::GuardrailViolation(_) | PrefixdError::UnsupportedFlowSpecScope { .. } => {
                 Some(Self::GuardrailRejected)
             }
-            PrefixdError::Conflict(_) | PrefixdError::InjectionOwnerMismatch { .. } => {
-                Some(Self::Conflict)
-            }
+            PrefixdError::Conflict(_)
+            | PrefixdError::PendingWithdrawal { .. }
+            | PrefixdError::InjectionOwnerMismatch { .. } => Some(Self::Conflict),
             _ => None,
         }
     }

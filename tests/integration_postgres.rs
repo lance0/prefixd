@@ -9589,6 +9589,13 @@ async fn cancelled_http_unban_commit_blocks_a_newer_ban_without_replacing_intent
         prefixd::domain::EventOutcome::Failed
     );
     assert!(newer_event.outcome.outcome_mitigation_ids.is_empty());
+    let original_event_payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT to_jsonb(e) - 'outcome' - 'outcome_reason' - 'outcome_mitigation_ids' FROM events e WHERE event_id = $1",
+    )
+    .bind(newer_event.event_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap();
     assert_eq!(
         ctx.repo.get_mitigation(id).await.unwrap().unwrap(),
         original
@@ -9622,7 +9629,46 @@ async fn cancelled_http_unban_commit_blocks_a_newer_ban_without_replacing_intent
     .await
     .unwrap();
 
-    let response = app.oneshot(event("original-unban", "unban")).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(event("newer-ban", "ban"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = creation_json(response).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let still_waiting = ctx
+        .repo
+        .find_ban_event_by_external_id("commit-race", "newer-ban")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(still_waiting.event_id, newer_event.event_id);
+    assert_eq!(
+        still_waiting.outcome.outcome,
+        prefixd::domain::EventOutcome::Failed
+    );
+    assert!(still_waiting.outcome.outcome_mitigation_ids.is_empty());
+    assert_eq!(
+        ctx.repo.get_mitigation(id).await.unwrap().unwrap(),
+        original
+    );
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+    let still_pending: serde_json::Value = sqlx::query_scalar(
+        "SELECT to_jsonb(w) - 'completed_at' FROM withdrawal_requests w WHERE operation_id = $1 AND completed_at IS NULL",
+    )
+    .bind(request.operation_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(still_pending, immutable_before);
+
+    let response = app
+        .clone()
+        .oneshot(event("original-unban", "unban"))
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     let body = creation_json(response).await;
     assert_eq!(body["mitigation_ids"], serde_json::json!([id]));
@@ -9642,6 +9688,73 @@ async fn cancelled_http_unban_commit_blocks_a_newer_ban_without_replacing_intent
         ctx.repo.get_mitigation(id).await.unwrap().unwrap().status,
         MitigationStatus::Withdrawn
     );
+
+    // Recovery keeps the saved event's destination and ports, not the resend's.
+    let changed_payload = Request::post("/v1/events")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "event_id": "newer-ban", "timestamp": chrono::Utc::now(),
+                "source": "commit-race", "victim_ip": "203.0.113.11",
+                "vector": "udp_flood", "confidence": 0.9, "pps": 90000,
+                "top_dst_ports": [123], "action": "ban",
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let response = app.clone().oneshot(changed_payload).await.unwrap();
+    let status = response.status();
+    let body = creation_json(response).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["event_id"], newer_event.event_id.to_string());
+    let recovered_id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+    assert_ne!(recovered_id, id);
+    let recovered = ctx
+        .repo
+        .get_mitigation(recovered_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.last_event_id, newer_event.event_id);
+    assert_eq!(recovered.victim_ip, newer_event.victim_ip);
+    assert_eq!(recovered.match_criteria, original.match_criteria);
+    assert_eq!(speaker.adds.load(SeqCst), 2);
+    assert_eq!(speaker.deletes.load(SeqCst), 1);
+    assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+    assert_eq!(ctx.repo.count_active_global().await.unwrap(), 1);
+
+    let response = app.oneshot(event("newer-ban", "ban")).await.unwrap();
+    let status = response.status();
+    let body = creation_json(response).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["event_outcome"]["outcome"], "mitigated");
+    assert_eq!(
+        body["event_outcome"]["outcome_mitigation_ids"],
+        serde_json::json!([recovered_id])
+    );
+    let completed = ctx
+        .repo
+        .find_ban_event_by_external_id("commit-race", "newer-ban")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.event_id, newer_event.event_id);
+    assert_eq!(
+        completed.outcome.outcome,
+        prefixd::domain::EventOutcome::Mitigated
+    );
+    assert_eq!(completed.outcome.outcome_mitigation_ids, [recovered_id]);
+    assert_eq!(speaker.adds.load(SeqCst), 2);
+    assert_eq!(speaker.deletes.load(SeqCst), 1);
+    assert_eq!(ctx.repo.count_active_global().await.unwrap(), 1);
+    let completed_event_payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT to_jsonb(e) - 'outcome' - 'outcome_reason' - 'outcome_mitigation_ids' FROM events e WHERE event_id = $1",
+    )
+    .bind(newer_event.event_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(completed_event_payload, original_event_payload);
 }
 
 #[tokio::test]

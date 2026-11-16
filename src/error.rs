@@ -36,6 +36,11 @@ pub enum PrefixdError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// Ownership is unavailable until immutable withdrawal intent completes.
+    /// Manual operations retain 409; detector admission maps this to retryable 503.
+    #[error("conflict: {route} has a pending withdrawal")]
+    PendingWithdrawal { route: &'static str },
+
     /// The speaker refused a route mutation because another injection owner, or
     /// none, holds the key (rustbgpd ADR-0141). Nothing changed.
     #[error("untracked local route ({reason}): {message}")]
@@ -288,6 +293,7 @@ impl PrefixdError {
             | Self::BanAdmissionChanged => StatusCode::SERVICE_UNAVAILABLE,
             Self::DuplicateEvent { .. }
             | Self::Conflict(_)
+            | Self::PendingWithdrawal { .. }
             | Self::InjectionOwnerMismatch { .. } => StatusCode::CONFLICT,
             Self::GuardrailViolation(_) | Self::UnsupportedFlowSpecScope { .. } => {
                 StatusCode::UNPROCESSABLE_ENTITY

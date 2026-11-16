@@ -1618,6 +1618,7 @@ async fn the_prefix_allowlist_admits_only_its_bound_source_and_an_admin() {
 /// A speaker whose TCP deletes fail with `failure` while it is set.
 struct FailingTcpWithdrawals {
     inner: MockAnnouncer,
+    adds: std::sync::atomic::AtomicUsize,
     failure: std::sync::Mutex<Option<fn() -> prefixd::error::PrefixdError>>,
     deletes: std::sync::atomic::AtomicUsize,
 }
@@ -1660,6 +1661,7 @@ impl prefixd::bgp::FlowSpecAnnouncer for FailingTcpWithdrawals {
 #[async_trait::async_trait]
 impl prefixd::bgp::FlowSpecWriter for FailingTcpWithdrawals {
     async fn announce(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+        self.adds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.announce(rule).await
     }
     async fn withdraw(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
@@ -1694,6 +1696,7 @@ async fn failing_fixture(pop: &str) -> (Fixture, Arc<FailingTcpWithdrawals>) {
     let repo = Arc::new(MockRepository::new());
     let speaker = Arc::new(FailingTcpWithdrawals {
         inner: MockAnnouncer::new(),
+        adds: Default::default(),
         failure: std::sync::Mutex::new(Some(refused_delete)),
         deletes: Default::default(),
     });
@@ -3207,4 +3210,172 @@ async fn unban_storage_read_failures_are_retryable() {
         .fail_unban_reads
         .store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(live_for(&f.repo, victim).await.len(), 1);
+}
+
+// A failed withdrawal keeps the next episode retryable across every ban adapter.
+async fn pending_ban_route_recovers(route: &str) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (f, speaker) = failing_fixture(&format!("pending-{route}")).await;
+    if route == "webhook" {
+        f.state.correlation_config.write().await.webhook_adapters[0].root_path =
+            Some("$[*]".into());
+    }
+    let source = match route {
+        "alertmanager" => "alertmanager",
+        "webhook" => "radware",
+        _ => "fastnetmon",
+    };
+    let token = bearer(
+        &f.repo
+            .mint_token_for_test("pending", TokenScope::Ingest, Some(source)),
+    );
+    let auth = Some(("authorization", token.as_str()));
+    let victim = "203.0.113.81";
+    let (_, original) = send(
+        &f.app,
+        "/v1/events",
+        auth,
+        &with_vector(event(source, victim, "original"), "syn_flood"),
+    )
+    .await;
+    let original_id: uuid::Uuid = original["mitigation_id"].as_str().unwrap().parse().unwrap();
+    let remove = with_vector(unban(source, victim, "remove-original"), "syn_flood");
+    let (status, body) = send(&f.app, "/v1/events", auth, &remove).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let immutable = f
+        .repo
+        .pending_withdrawals(Some(&f.state.settings.pop))
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|request| request.mitigation_id == original_id)
+        .unwrap();
+    let (path, payload) = match route {
+        "alertmanager" => {
+            let mut failed = alertmanager(victim, "pending-next");
+            failed["alerts"][0]["labels"]["vector"] = "syn_flood".into();
+            let mut success = alertmanager("203.0.113.82", "independent");
+            success["alerts"][0]["labels"]["vector"] = "syn_flood".into();
+            success["alerts"]
+                .as_array_mut()
+                .unwrap()
+                .push(failed["alerts"][0].clone());
+            ("/v1/signals/alertmanager", success)
+        }
+        "webhook" => (
+            "/v1/signals/webhook/radware",
+            json!([
+                {"id":"independent", "ip":"203.0.113.82", "vector":"syn_flood", "score":0.9},
+                {"id":"pending-next", "ip":victim, "vector":"syn_flood", "score":0.9}
+            ]),
+        ),
+        "fastnetmon" => (
+            "/v1/signals/fastnetmon",
+            json!({
+                "action":"ban", "ip":victim, "alert_scope":"host",
+                "attack_details":{"attack_uuid":"pending-next", "incoming_tcp_pps":5000, "incoming_syn_tcp_pps":5000, "total_incoming_pps":5000}
+            }),
+        ),
+        "batch" => (
+            "/v1/events/batch",
+            json!({"events":[with_vector(event(source, victim, "pending-next"), "syn_flood")]}),
+        ),
+        "direct" => (
+            "/v1/events",
+            with_vector(event(source, victim, "pending-next"), "syn_flood"),
+        ),
+        _ => unreachable!(),
+    };
+    let aggregate = matches!(route, "alertmanager" | "webhook");
+    for _ in 0..2 {
+        let (status, body) = send(&f.app, path, auth, &payload).await;
+        if route == "batch" {
+            assert_eq!(status, StatusCode::MULTI_STATUS, "{body}");
+            assert_eq!(body["results"][0]["status"], "rejected", "{body}");
+            assert!(
+                body["results"][0]["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("retry the event"),
+                "{body}"
+            );
+        } else {
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        }
+        if aggregate {
+            assert_eq!(body["processed"], 1, "{body}");
+            assert_eq!(body["failed"], 1, "{body}");
+            assert_eq!(body["results"][1]["status"], "error", "{body}");
+        }
+        assert_eq!(speaker.adds.load(SeqCst), if aggregate { 2 } else { 1 });
+        assert_eq!(speaker.deletes.load(SeqCst), 1);
+        let pending = f
+            .repo
+            .pending_withdrawals(Some(&f.state.settings.pop))
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|request| request.mitigation_id == original_id)
+            .unwrap();
+        assert_eq!(pending.operation_id, immutable.operation_id);
+        assert_eq!(pending.rule_json, immutable.rule_json);
+        assert_eq!(pending.actor, immutable.actor);
+        assert_eq!(pending.reason, immutable.reason);
+    }
+    *speaker.failure.lock().unwrap() = None;
+    let (status, body) = send(&f.app, "/v1/events", auth, &remove).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(speaker.deletes.load(SeqCst), 2);
+    let (status, body) = send(&f.app, path, auth, &payload).await;
+    assert_eq!(
+        status,
+        if aggregate {
+            StatusCode::OK
+        } else {
+            StatusCode::ACCEPTED
+        },
+        "{body}"
+    );
+    if aggregate {
+        assert_eq!(body["processed"], 2, "{body}");
+        assert_eq!(body["failed"], 0, "{body}");
+        assert_eq!(body["results"][0]["status"], "duplicate", "{body}");
+    }
+    let adds = speaker.adds.load(SeqCst);
+    assert_eq!(adds, if aggregate { 3 } else { 2 });
+    let (status, body) = send(&f.app, path, auth, &payload).await;
+    assert_eq!(
+        status,
+        if aggregate {
+            StatusCode::OK
+        } else if route == "batch" {
+            StatusCode::MULTI_STATUS
+        } else {
+            StatusCode::CONFLICT
+        },
+        "{body}"
+    );
+    assert_eq!(speaker.adds.load(SeqCst), adds);
+    assert_eq!(speaker.deletes.load(SeqCst), 2);
+}
+
+#[tokio::test]
+async fn pending_ban_alertmanager_mixed_notification_recovers() {
+    pending_ban_route_recovers("alertmanager").await;
+}
+#[tokio::test]
+async fn pending_ban_webhook_mixed_notification_recovers() {
+    pending_ban_route_recovers("webhook").await;
+}
+#[tokio::test]
+async fn pending_ban_fastnetmon_recovers() {
+    pending_ban_route_recovers("fastnetmon").await;
+}
+#[tokio::test]
+async fn pending_ban_direct_recovers() {
+    pending_ban_route_recovers("direct").await;
+}
+#[tokio::test]
+async fn pending_ban_batch_recovers() {
+    pending_ban_route_recovers("batch").await;
 }
