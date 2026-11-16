@@ -2,7 +2,7 @@ import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { AlertingConfigPanel } from "@/components/dashboard/alerting-config-panel"
 import type { AlertingDestination } from "@/lib/api"
-import { json, operatorResponse, renderApp, signIn, useFakeController } from "./support/fake-controller"
+import { deferred, settle, json, operatorResponse, renderApp, signIn, useFakeController } from "./support/fake-controller"
 
 const controller = useFakeController()
 
@@ -41,6 +41,23 @@ describe("alerting panel test results", () => {
     // Negative control: the old position-based match showed it on the first card.
     expect(within(destinationRow("PagerDuty")).queryByText("slack returned 404")).toBeNull()
   })
+})
+
+it("discards an in-flight test result when configuration is saved", async () => {
+  const pending = deferred<Response>()
+  controller.route("GET", "/v1/config/alerting", () => json({ destinations, events: [] }))
+  controller.route("PUT", "/v1/config/alerting", () => json({ destinations, events: [] }))
+  controller.route("POST", "/v1/config/alerting/test", () => pending.promise)
+  renderApp(<AlertingConfigPanel />)
+  fireEvent.click(await screen.findByRole("button", { name: "Test" }))
+  await waitFor(() => expect(controller.calls("POST", "/v1/config/alerting/test")).toHaveLength(1))
+  fireEvent.click(screen.getByRole("button", { name: "Edit" }))
+  fireEvent.click(screen.getByRole("checkbox", { name: "mitigation.created" }))
+  fireEvent.click(screen.getByRole("button", { name: "Save" }))
+  await screen.findByRole("button", { name: "Edit" })
+  pending.resolve(json({ results: [{ index: 1, destination: "slack", status: "error", error: "obsolete test failure" }] }))
+  await settle()
+  expect(screen.queryByText("obsolete test failure")).toBeNull()
 })
 
 describe("alerting panel options", () => {

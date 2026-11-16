@@ -21,6 +21,8 @@ GoBGP Adj-In `pattrs_binary`, including serialized BGP attribute headers and
 MP_REACH NLRI. This is receiver API evidence, not a packet capture. The independent
 oracle also checks typed NLRI, RD, source, destination, protocol and ports; it
 does not derive expected action bytes from prefixd's encoder.
+RD and RT values in this receipt and its attribute file were later redacted to
+RFC 5398 documentation values; the redaction keeps each encoded length.
 
 ## Results
 
@@ -30,7 +32,7 @@ does not derive expected action bytes from prefixd's encoder.
 | Police | PASS | PASS | 8 Mbps request, exact 1,000,000 bytes/s rate, scope RTs and withdrawal |
 | Mark | PASS | PASS | DSCP 46 through HTTP/peer path; released plain/leased matrices additionally cover DSCP 0 and 63, invalid parameters and exact read-back |
 | Redirect-to-IP | PASS | PASS | Guarded HTTP preview/confirmation/arm path; IPv4 eight-byte action and IPv6 RFC 5701 twenty-byte action are checked independently |
-| Redirect-to-VRF | PASS | PASS | Guarded configured RT `44407:888`, distinct from scope RTs; separate released tests exercise AS2, IPv4-administrator and AS4 forms |
+| Redirect-to-VRF | PASS | PASS | Guarded configured RT `64500:888`, distinct from scope RTs; separate released tests exercise AS2, IPv4-administrator and AS4 forms |
 | Source plus destination | PASS | PASS | All five actions use explicit source and destination components, TCP and destination port 443 |
 | Source-only | PASS in core receipt | PASS in core receipt | Discard/police only, destination omitted; explicit whole-VRF/source opt-in, source protection, short TTL and quota remain required |
 | Global isolation | PASS | PASS | Same-match global/RD-A/RD-B coexistence, targeted deletion and selective owner lease expiry; the action test keeps a global control and a global-only peer |

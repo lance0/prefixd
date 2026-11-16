@@ -317,6 +317,7 @@ pub async fn update_playbooks(
     *playbooks_guard = new_playbooks.clone();
     drop(playbooks_guard);
     *state.playbooks_loaded_at.write().await = chrono::Utc::now();
+    new_playbooks.log_warnings(&state.settings.guardrails);
 
     // Audit log
     let audit = AuditEntry::new(

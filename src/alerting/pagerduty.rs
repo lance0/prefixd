@@ -16,8 +16,7 @@ pub async fn send(
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(format!("pagerduty returned {} — {}", status, body));
+            return Err(super::platform_error("pagerduty", status));
         }
     }
 
@@ -115,7 +114,10 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0]["event_action"], "trigger");
         assert_eq!(requests[1]["event_action"], "resolve");
-        assert_eq!(requests[0]["dedup_key"], "Test Alert");
+        assert_eq!(
+            requests[0]["dedup_key"],
+            alert.mitigation_id.as_deref().unwrap()
+        );
         assert_eq!(requests[1]["dedup_key"], requests[0]["dedup_key"]);
     }
 

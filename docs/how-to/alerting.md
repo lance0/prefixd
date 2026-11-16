@@ -317,8 +317,11 @@ destinations:
 creates an alert whose alias is the mitigation ID. A later
 `mitigation.withdrawn` or `mitigation.expired` closes that alert through
 Opsgenie's close API, using the same alias, instead of creating another alert.
-A close for an alias with nothing open counts as success, so a withheld or
-already-closed alert does not fail delivery. To alert only on new mitigations,
+Opsgenie processes create and close requests asynchronously. prefixd polls the
+[request status API](https://docs.opsgenie.com/docs/alert-api) before reporting
+success or moving from test creation to cleanup. Each action has a 10-second
+deadline; status responses are limited to 16 KiB. A failed action, missing
+alert, malformed response or timeout is a delivery error. To alert only on new mitigations,
 send only `mitigation.created` there.
 
 ### Generic webhook
@@ -453,13 +456,14 @@ in the running configuration, counted from 0, which identifies its card in the
 editor. The dashboard keys each result by `index`, not by the entry's position
 in the `results` array. The request waits for every delivery,
 including [retries](#current-limits), so a failing destination can hold it for
-up to about 36 seconds.
+up to about 36 seconds (66 seconds for two-action PagerDuty/Opsgenie tests).
 
 A test opens a real PagerDuty incident and a real Opsgenie alert, keyed by the
-title `Test Alert`. prefixd resolves the PagerDuty incident and closes the
-Opsgenie alert immediately after creating it, so a successful test leaves
-nothing open. The result is an error if either the create or the follow-up
-resolve fails.
+unique `prefixd-test-<UUID>` ID per invocation, stable across retries. prefixd
+resolves the PagerDuty incident and confirms creation and closure of the
+Opsgenie alert. Concurrent test invocations cannot resolve one another. The result is an error if either the create or the follow-up
+resolve fails. A failed or timed-out test can leave an incident open; check
+the provider before retrying if cleanup could not be confirmed.
 
 ## What alerts look like
 
@@ -516,6 +520,20 @@ destination fails:
 Refusals name the file, the destination's position and type, and the key or
 variable. They never include a secret or a URL.
 
+Run `prefixd --check` before a restart to see every refusal without stopping
+the controller; see
+[configuration validation](../reference/configuration.md#validation).
+
+### Unknown keys
+
+A key prefixd does not recognize, such as `chanel:` for `channel:` or `event:`
+for `events:`, is ignored in this release, so the destination behaves as if the
+key were absent. Startup and reload log a warning naming the file and the key
+path, such as `destinations[0].chanel` in `alerting.yaml` or
+`alerting.destinations[0].chanel` inline in `prefixd.yaml`, and `prefixd --check`
+prints the same key. The next release refuses unknown keys, so fix each one the
+warning names before upgrading. The warning never includes the value.
+
 ## Troubleshooting
 
 ### The controller exits at startup
@@ -524,10 +542,7 @@ The log names the file and the problem. For example, a variable missing from
 the controller's environment:
 
 ```text
-Error: failed to load /etc/prefixd/alerting.yaml
-
-Caused by:
-    destination[0] (slack): webhook_url_env names environment variable 'SLACK_WEBHOOK_URL', which is not set or empty
+Error: failed to load /etc/prefixd/alerting.yaml: alerting: destination[0] (slack): webhook_url_env names environment variable 'SLACK_WEBHOOK_URL', which is not set or empty
 ```
 
 A URL that fails the rules:
@@ -536,7 +551,8 @@ A URL that fails the rules:
 Error: failed to load /etc/prefixd/alerting.yaml: alerting: destination[1] (discord): webhook_url must use https
 ```
 
-`destination[N]` counts from 0 in file order. For a missing variable, check
+`destination[N]` counts from 0 in file order. Startup prints every error, one
+per line. For a missing variable, check
 `.env`, the override file and `docker compose config`, or
 `/etc/default/prefixd`, then restart. For a URL, fix the value at its source.
 
@@ -565,12 +581,17 @@ The running alert configuration stays as it was.
 
 ### The test alert returns an error
 
-The `error` field has the form `<type> returned <status> — <response body>`,
-so the platform's own error text is in it.
+The HTTP `error` field has the form
+`<type> returned HTTP <status> (response body omitted)`.
+
+Platform HTTP errors expose only the destination type and numeric status. Raw
+response bodies are neither read nor included in test results or delivery logs,
+so echoed credentials, control characters and large bodies cannot leak there.
+Opsgenie success/status JSON is bounded to 16 KiB and never echoed on failure.
 
 | Error | Likely cause |
 |-------|--------------|
-| `400` from Slack, Discord or Teams | The platform rejected the payload; check the body text |
+| `400` from Slack, Discord or Teams | The platform rejected the payload; check the provider configuration and logs |
 | `401` or `403` | Wrong or revoked key or webhook, a Teams workflow that requires sign-in, or a turned-off Opsgenie integration |
 | `404` | Deleted webhook, workflow or channel, or a mistyped URL |
 | `429` | The platform is rate limiting; see below |
@@ -605,11 +626,13 @@ busy chat channels, or point busy events at a generic webhook that aggregates.
 
 ## Current limits
 
-- **One way only.** prefixd posts; it reads nothing back. Chat replies,
+- **One way only.** delivery confirmations do not control mitigations. Chat replies,
   reactions, and PagerDuty or Opsgenie acknowledgements do not change a
   mitigation.
 - **No durable delivery.** A failed post is retried twice, after 2 and then 4
-  more seconds, each attempt with a 10-second timeout. After that the alert is
+  more seconds, each HTTP call with a 10-second timeout. Opsgenie bounds each
+  complete asynchronous action to 10 seconds, including polling; a test has
+  two actions. After that the alert is
   dropped and logged. Alerts waiting in memory are lost when the controller
   restarts, and above 64 alerts in flight new ones are dropped. A durable
   outbox with retry and dead-letter visibility is planned.

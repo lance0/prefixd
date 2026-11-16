@@ -69,7 +69,7 @@ describe("active mitigation worklist", () => {
       victim_ip: "any",
       dst_prefix: "",
       src_prefix: "198.51.100.0/24",
-      vpn_scope: { name: "TRANSIT", identity: { family: "ipv4", rd: "44407:40" }, route_targets: ["44407:777"] },
+      vpn_scope: { name: "TRANSIT", identity: { family: "ipv4", rd: "64500:40" }, route_targets: ["64500:777"] },
     }]} />)
     expect(screen.getByRole("link", { name: "198.51.100.0/24 → any" })).toHaveAttribute("href", "/mitigations/rule-1")
   })

@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useMemo, useState, useId } from "react"
+import { useCallback, useMemo, useState, useId, useRef, useEffect } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { StatusPill } from "@/components/dashboard/status-pill"
@@ -314,6 +314,13 @@ export function AlertingConfigPanel() {
   const [testResults, setTestResults] = useState<AlertingTestResult[] | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const testGeneration = useRef(0)
+  const configIdentity = JSON.stringify(data)
+  useEffect(() => {
+    testGeneration.current += 1
+    setTestResults(null)
+    setTestError(null)
+  }, [configIdentity])
 
   // Draft state for editing
   const [draft, setDraft] = useState<DraftDestination[] | null>(null)
@@ -347,6 +354,9 @@ export function AlertingConfigPanel() {
   const handleSave = useCallback(async () => {
     if (!draft || !draftEvents) return
     setSaving(true)
+    testGeneration.current += 1
+    setTestResults(null)
+    setTestError(null)
 
     try {
       await updateAlertingConfig({
@@ -366,15 +376,17 @@ export function AlertingConfigPanel() {
   }, [draft, draftEvents, mutateAlerting, discardDraft])
 
   const handleTest = async () => {
+    const generation = ++testGeneration.current
     setTesting(true)
     setTestResults(null)
     setTestError(null)
 
     try {
       const response = await testAlerting()
-      setTestResults(response.results)
+
+      if (generation === testGeneration.current) setTestResults(response.results)
     } catch (e) {
-      setTestError(e instanceof Error ? e.message : "Test failed")
+      if (generation === testGeneration.current) setTestError(e instanceof Error ? e.message : "Test failed")
     } finally {
       setTesting(false)
     }
@@ -456,7 +468,7 @@ export function AlertingConfigPanel() {
             <div className="flex items-center justify-between">
               <CardTitle>Alert destinations</CardTitle>
               {canReloadConfig ? (
-                <Button variant="outline" size="sm" onClick={handleTest} disabled={testing}>
+                <Button variant="outline" size="sm" onClick={handleTest} disabled={testing || saving}>
                   {testing ? <Loader2 className="h-3 w-3 mr-1.5 animate-spin" /> : <Send className="h-3 w-3 mr-1.5" />}
                   Send test alert
                 </Button>
@@ -538,7 +550,7 @@ export function AlertingConfigPanel() {
               ) : null}
             </>
           )}
-          <Button variant="outline" size="sm" onClick={handleTest} disabled={testing}>
+          <Button variant="outline" size="sm" onClick={handleTest} disabled={testing || saving}>
             {testing ? <Loader2 className="h-3 w-3 mr-1.5 animate-spin" /> : <Send className="h-3 w-3 mr-1.5" />}
             Test
           </Button>

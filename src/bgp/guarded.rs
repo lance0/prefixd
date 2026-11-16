@@ -363,10 +363,10 @@ mod tests {
                 r.target = Some("127.0.0.1".parse().unwrap())
             }),
             ("scope route targets", |r| {
-                r.route_targets = vec!["44407:777".into()]
+                r.route_targets = vec!["64500:777".into()]
             }),
             ("VRF redirect", |r| {
-                r.redirect_route_target = Some("44407:888".into())
+                r.redirect_route_target = Some("64500:888".into())
             }),
             ("reserved community", |r| {
                 r.export_community = Some("0:100".into())
@@ -415,15 +415,15 @@ mod tests {
                 scope: Some(
                     crate::domain::VpnFlowSpecIdentity::new(
                         crate::domain::VpnFlowSpecFamily::Ipv4,
-                        "44407:40",
+                        "64500:40",
                     )
                     .unwrap(),
                 ),
                 ..global.nlri.clone()
             },
-            route_targets: vec!["44407:777".into()],
+            route_targets: vec!["64500:777".into()],
             target: None,
-            redirect_route_target: Some("44407:888".into()),
+            redirect_route_target: Some("64500:888".into()),
             ..global.clone()
         };
         vrf.validate().unwrap();
@@ -451,11 +451,11 @@ mod tests {
             }),
             ("no action", &global, |r| r.target = None),
             ("global scope targets", &global, |r| {
-                r.route_targets = vec!["44407:777".into()]
+                r.route_targets = vec!["64500:777".into()]
             }),
             ("invalid nlri", &global, |r| r.nlri.src_ports = vec![53]),
             ("non-canonical VRF target", &vrf, |r| {
-                r.redirect_route_target = Some("44407:0888".into())
+                r.redirect_route_target = Some("64500:0888".into())
             }),
             ("VPN without scope targets", &vrf, |r| {
                 r.route_targets.clear()
@@ -482,22 +482,22 @@ mod tests {
         assert_eq!(serde_json::to_value(&rule).unwrap(), legacy);
         let mut vrf = rule.clone();
         vrf.target = None;
-        vrf.redirect_route_target = Some("44407:888".into());
+        vrf.redirect_route_target = Some("64500:888".into());
         assert!(vrf.validate().is_err(), "global VRF redirects stay refused");
         vrf.nlri.scope = Some(
             crate::domain::VpnFlowSpecIdentity::new(
                 crate::domain::VpnFlowSpecFamily::Ipv4,
-                "44407:40",
+                "64500:40",
             )
             .unwrap(),
         );
-        vrf.route_targets = vec!["44407:777".into()];
+        vrf.route_targets = vec!["64500:777".into()];
         vrf.validate().unwrap();
-        assert_eq!(vrf.target_description().unwrap(), "VRF RT 44407:888");
+        assert_eq!(vrf.target_description().unwrap(), "VRF RT 64500:888");
         assert!(!vrf.same_admission(&rule));
         let encoded = serde_json::to_value(&vrf).unwrap();
         assert!(encoded.get("target").is_none());
-        assert_eq!(encoded["redirect_route_target"], "44407:888");
+        assert_eq!(encoded["redirect_route_target"], "64500:888");
         let restored: GuardedRule = serde_json::from_value(encoded).unwrap();
         assert!(vrf.same_admission(&restored));
         vrf.target = rule.target;

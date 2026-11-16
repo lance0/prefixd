@@ -20,36 +20,102 @@ pub async fn send(
     region: &str,
     alert: &Alert,
 ) -> Result<(), String> {
-    for request in build_requests(alert, region) {
-        let response = client
-            .post(&request.url)
-            .header("Authorization", format!("GenieKey {}", api_key))
-            .json(&request.payload)
-            .send()
-            .await
-            .map_err(|e| format!("opsgenie request failed: {}", e.without_url()))?;
+    send_to(client, api_key, base_url(region), alert).await
+}
 
-        let status = response.status();
-        // A close for an alert that is already closed reaches the intended
-        // state; Opsgenie answers 404 once nothing is open for the alias.
-        if request.action == Action::Close && status.as_u16() == 404 {
-            continue;
-        }
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(format!("opsgenie returned {} — {}", status, body));
-        }
+async fn send_to(
+    client: &reqwest::Client,
+    api_key: &str,
+    base: &str,
+    alert: &Alert,
+) -> Result<(), String> {
+    for request in requests_at(alert, base) {
+        let action = match request.action {
+            Action::Create => "create",
+            Action::Close => "close",
+        };
+        // Bound the entire asynchronous action, including response reads and polling.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let response = client
+                .post(&request.url)
+                .header("Authorization", format!("GenieKey {}", api_key))
+                .json(&request.payload)
+                .send()
+                .await
+                .map_err(|_| "opsgenie request failed".to_string())?;
+            if !response.status().is_success() {
+                return Err(super::platform_error("opsgenie", response.status()));
+            }
+            if response.status() != reqwest::StatusCode::ACCEPTED {
+                return Err("opsgenie response did not confirm acceptance".into());
+            }
+            let body = bounded_json(response).await?;
+            let request_id = body["requestId"]
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= 128)
+                .ok_or("opsgenie response missing request ID")?;
+            let url = format!(
+                "{base}/v2/alerts/requests/{}",
+                urlencoding::encode(request_id)
+            );
+            loop {
+                let response = client
+                    .get(&url)
+                    .header("Authorization", format!("GenieKey {}", api_key))
+                    .send()
+                    .await
+                    .map_err(|_| "opsgenie status request failed".to_string())?;
+                // Request status may not be visible yet; this is NOT a close success.
+                if response.status() != reqwest::StatusCode::NOT_FOUND {
+                    if !response.status().is_success() {
+                        return Err(super::platform_error("opsgenie", response.status()));
+                    }
+                    let body = bounded_json(response).await?;
+                    match body["data"]["isSuccess"].as_bool() {
+                        Some(true) => return Ok(()),
+                        Some(false) => {
+                            return Err(
+                                "opsgenie asynchronous action failed (response body omitted)"
+                                    .into(),
+                            );
+                        }
+                        None => return Err("opsgenie status response missing result".into()),
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        })
+        .await
+        .map_err(|_| format!("opsgenie {action} confirmation timed out"))??;
     }
-
     Ok(())
 }
 
+async fn bounded_json(mut response: reqwest::Response) -> Result<serde_json::Value, String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "opsgenie response read failed")?
+    {
+        if body.len() + chunk.len() > 16 * 1024 {
+            return Err("opsgenie response exceeds 16384 bytes".into());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|_| "opsgenie returned invalid JSON".into())
+}
+
 /// The calls this alert needs. A withdrawal or expiry closes the mitigation's
-/// alert by alias. A test alert creates an alert and closes it immediately,
+/// alert by alias. A test alert creates an alert and closes it after confirmation,
 /// because Opsgenie has no test event and an operator asked only for a
 /// delivery check. Every other event creates an alert.
+#[cfg(test)]
 pub fn build_requests(alert: &Alert, region: &str) -> Vec<Request> {
-    let base = base_url(region);
+    requests_at(alert, base_url(region))
+}
+
+fn requests_at(alert: &Alert, base: &str) -> Vec<Request> {
     let alias = alias(alert);
     let resolved = matches!(
         alert.event_type,
@@ -149,6 +215,176 @@ pub fn build_close_payload(alert: &Alert) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    type Replies = std::sync::Arc<tokio::sync::Mutex<std::collections::VecDeque<(u16, String)>>>;
+    type Calls = std::sync::Arc<tokio::sync::Mutex<Vec<(String, serde_json::Value)>>>;
+
+    async fn mock(replies: Vec<(u16, String)>) -> (String, Calls, tokio::task::JoinHandle<()>) {
+        let replies: Replies = std::sync::Arc::new(tokio::sync::Mutex::new(replies.into()));
+        let calls: Calls = Default::default();
+        let app = axum::Router::new().fallback({
+            let calls = calls.clone();
+            move |uri: axum::http::Uri, body: String| {
+                let replies = replies.clone();
+                let calls = calls.clone();
+                async move {
+                    calls.lock().await.push((
+                        uri.to_string(),
+                        serde_json::from_str(&body).unwrap_or_default(),
+                    ));
+                    let (status, body) = replies
+                        .lock()
+                        .await
+                        .pop_front()
+                        .unwrap_or((404, String::new()));
+                    (axum::http::StatusCode::from_u16(status).unwrap(), body)
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (base, calls, server)
+    }
+
+    fn accepted(id: &str) -> (u16, String) {
+        (202, serde_json::json!({"requestId": id}).to_string())
+    }
+
+    fn completed(success: bool) -> (u16, String) {
+        (
+            200,
+            serde_json::json!({"data": {"isSuccess": success, "status": "secret-canary"}})
+                .to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_waits_for_create_then_confirms_close() {
+        let (base, calls, server) = mock(vec![
+            accepted("create"),
+            (404, String::new()),
+            completed(true),
+            accepted("close"),
+            completed(true),
+        ])
+        .await;
+        let alert = Alert::test_alert();
+        send_to(&reqwest::Client::new(), "secret", &base, &alert)
+            .await
+            .unwrap();
+        let calls = calls.lock().await;
+        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[0].0, "/v2/alerts");
+        assert_eq!(calls[1].0, "/v2/alerts/requests/create");
+        assert_eq!(calls[2].0, "/v2/alerts/requests/create");
+        assert_eq!(
+            calls[3].0,
+            format!(
+                "/v2/alerts/{}/close?identifierType=alias",
+                alert.mitigation_id.as_deref().unwrap()
+            )
+        );
+        assert_eq!(calls[4].0, "/v2/alerts/requests/close");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn asynchronous_failures_are_errors_without_echoing_response() {
+        for replies in [
+            vec![accepted("create"), completed(false)],
+            vec![
+                accepted("create"),
+                completed(true),
+                accepted("close"),
+                completed(false),
+            ],
+        ] {
+            let (base, _, server) = mock(replies).await;
+            let error = send_to(
+                &reqwest::Client::new(),
+                "secret",
+                &base,
+                &Alert::test_alert(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error,
+                "opsgenie asynchronous action failed (response body omitted)"
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_close_is_confirmed_and_404_is_not_success() {
+        for event in [
+            AlertEventType::MitigationWithdrawn,
+            AlertEventType::MitigationExpired,
+        ] {
+            for (replies, success) in [
+                (vec![accepted("close"), completed(true)], true),
+                (vec![(404, "secret-canary".into())], false),
+            ] {
+                let (base, calls, server) = mock(replies).await;
+                let mut alert = Alert::test_alert();
+                alert.event_type = event.clone();
+                alert.mitigation_id = Some("stable-mitigation".into());
+                let result = send_to(&reqwest::Client::new(), "secret", &base, &alert).await;
+                assert_eq!(result.is_ok(), success);
+                assert!(calls.lock().await[0].0.contains("/stable-mitigation/close"));
+                server.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_and_oversized_responses_fail_safely() {
+        for reply in [
+            (202, "secret-canary".into()),
+            (202, "x".repeat(16385)),
+            (202, "{}".into()),
+            (500, "secret-canary".repeat(10000)),
+        ] {
+            let (base, _, server) = mock(vec![reply]).await;
+            let error = send_to(
+                &reqwest::Client::new(),
+                "secret",
+                &base,
+                &Alert::test_alert(),
+            )
+            .await
+            .unwrap_err();
+            assert!(!error.contains("secret-canary"));
+            assert!(error.len() < 100);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_request_times_out_without_attempting_close() {
+        let (base, calls, server) = mock(vec![accepted("pending")]).await;
+        let error = send_to(
+            &reqwest::Client::new(),
+            "secret",
+            &base,
+            &Alert::test_alert(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "opsgenie create confirmation timed out");
+        assert!(
+            calls
+                .lock()
+                .await
+                .iter()
+                .all(|(path, _)| !path.contains("/close"))
+        );
+        server.abort();
+    }
+
     #[test]
     fn test_opsgenie_payload_structure() {
         let alert = Alert::test_alert();
@@ -198,11 +434,17 @@ mod tests {
         let requests = build_requests(&alert, "us");
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].action, Action::Create);
-        assert_eq!(requests[0].payload["alias"], "Test Alert");
+        assert_eq!(
+            requests[0].payload["alias"],
+            alert.mitigation_id.as_deref().unwrap()
+        );
         assert_eq!(requests[1].action, Action::Close);
         assert_eq!(
             requests[1].url,
-            "https://api.opsgenie.com/v2/alerts/Test%20Alert/close?identifierType=alias"
+            close_url(
+                "https://api.opsgenie.com",
+                alert.mitigation_id.as_deref().unwrap()
+            )
         );
     }
 

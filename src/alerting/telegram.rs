@@ -7,6 +7,15 @@ pub async fn send(
     alert: &Alert,
 ) -> Result<(), String> {
     let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+    send_to(client, &url, chat_id, alert).await
+}
+
+pub(super) async fn send_to(
+    client: &reqwest::Client,
+    url: &str,
+    chat_id: &str,
+    alert: &Alert,
+) -> Result<(), String> {
     let text = build_message(alert);
 
     let payload = serde_json::json!({
@@ -17,7 +26,7 @@ pub async fn send(
     });
 
     let response = client
-        .post(&url)
+        .post(url)
         .json(&payload)
         .send()
         .await
@@ -25,8 +34,7 @@ pub async fn send(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("telegram returned {} — {}", status, body));
+        return Err(super::platform_error("telegram", status));
     }
 
     Ok(())

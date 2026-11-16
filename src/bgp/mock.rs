@@ -510,6 +510,8 @@ pub struct FaultyBlackholes {
     pub inner: MockAnnouncer,
     /// Every blackhole read fails, as an aborted or partial walk does.
     pub fail_reads: std::sync::atomic::AtomicBool,
+    /// Every blackhole read accepts the request and never answers.
+    pub mute_reads: std::sync::atomic::AtomicBool,
     /// Every FlowSpec read fails.
     pub fail_flowspec_reads: std::sync::atomic::AtomicBool,
     /// Every add fails without changing the speaker.
@@ -718,6 +720,9 @@ impl BlackholeSpeaker for FaultyBlackholes {
         self.inner.withdraw_blackhole(prefix, owner).await
     }
     async fn list_blackholes(&self) -> Result<BlackholeInventory> {
+        if self.mute_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(crate::error::PrefixdError::BgpAnnouncementFailed(
                 "ABORTED: local intent changed during the read".into(),
@@ -727,6 +732,70 @@ impl BlackholeSpeaker for FaultyBlackholes {
         inventory.unrecognized = self.unrecognized.lock().unwrap().clone();
         inventory.expired = self.expired.lock().unwrap().clone();
         Ok(inventory)
+    }
+}
+
+/// Test speaker that accepts the request and never answers a FlowSpec mutation.
+/// Each attempt models a backend spending its own deadline, so a bounded call
+/// shows one attempt where the retrying path spends the whole budget.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct MuteFlowSpec {
+    /// Attempts started by `announce`.
+    pub adds: std::sync::atomic::AtomicUsize,
+    /// Attempts started by `withdraw`.
+    pub deletes: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl MuteFlowSpec {
+    /// What one unanswered attempt costs on the retrying path.
+    pub const ATTEMPT: std::time::Duration = std::time::Duration::from_secs(30);
+    /// Attempts one call makes before it reports no answer.
+    pub const ATTEMPTS: usize = 3;
+
+    async fn mute(&self, attempts: &std::sync::atomic::AtomicUsize) -> Result<()> {
+        for _ in 0..Self::ATTEMPTS {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(Self::ATTEMPT).await;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl crate::bgp::FlowSpecWriter for MuteFlowSpec {
+    async fn announce(&self, _rule: &FlowSpecRule) -> Result<()> {
+        self.mute(&self.adds).await?;
+        Err(crate::error::PrefixdError::BgpAnnouncementFailed(
+            "no answer".into(),
+        ))
+    }
+    async fn withdraw(&self, _rule: &FlowSpecRule) -> Result<()> {
+        self.mute(&self.deletes).await?;
+        Err(crate::error::PrefixdError::BgpWithdrawalFailed(
+            "no answer".into(),
+        ))
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl crate::bgp::FlowSpecReader for MuteFlowSpec {
+    async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
+        Ok(vec![])
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl FlowSpecAnnouncer for MuteFlowSpec {
+    fn backend(&self) -> &'static str {
+        "mock"
+    }
+    fn reader(&self) -> Option<&dyn crate::bgp::FlowSpecReader> {
+        Some(self)
     }
 }
 
@@ -766,10 +835,10 @@ mod tests {
                 );
                 speaker.announce(&global).await.unwrap();
                 let mut siblings = Vec::new();
-                for rd in ["44407:40", "44407:41"] {
+                for rd in ["64500:40", "64500:41"] {
                     let mut sibling = global.clone();
                     sibling.nlri.scope = Some(VpnFlowSpecIdentity::new(family, rd).unwrap());
-                    sibling.route_targets = vec!["44407:777".into()];
+                    sibling.route_targets = vec!["64500:777".into()];
                     if source_only {
                         sibling.nlri.dst_prefix.clear();
                     }
@@ -872,9 +941,16 @@ mod tests {
                 assert_eq!(retried.actor, "original-actor");
                 assert_eq!(retried.reason, "original-reason");
                 assert_eq!(retried.rule_json, request.rule_json);
-                let finished = execute_withdrawal(&repo, &speaker, false, &retried, None)
-                    .await
-                    .unwrap();
+                let finished = execute_withdrawal(
+                    &repo,
+                    &speaker,
+                    false,
+                    &retried,
+                    None,
+                    crate::bgp::RetryPolicy::Durable,
+                )
+                .await
+                .unwrap();
                 assert_eq!(finished.status, MitigationStatus::Withdrawn);
                 let held = speaker.list_active().await.unwrap();
                 assert_eq!(held.len(), 2);
@@ -913,11 +989,11 @@ mod tests {
         scoped.nlri.scope = Some(
             crate::domain::VpnFlowSpecIdentity::new(
                 crate::domain::VpnFlowSpecFamily::Ipv4,
-                "44407:40",
+                "64500:40",
             )
             .unwrap(),
         );
-        scoped.route_targets = vec!["44407:777".into()];
+        scoped.route_targets = vec!["64500:777".into()];
         scoped.actions = vec![FlowSpecAction::mark(46)];
         speaker.announce(&scoped).await.unwrap();
         scoped.actions[0].dscp = None;
@@ -942,17 +1018,17 @@ mod tests {
         );
         speaker.announce(&global).await.unwrap();
         let mut scoped = Vec::new();
-        for rd in ["44407:40", "44407:41"] {
+        for rd in ["64500:40", "64500:41"] {
             let mut rule = global.clone();
             rule.nlri.scope = Some(VpnFlowSpecIdentity::new(VpnFlowSpecFamily::Ipv4, rd).unwrap());
-            rule.route_targets = vec!["44407:777".into()];
+            rule.route_targets = vec!["64500:777".into()];
             assert!(!speaker.matches_nlri(&global.nlri, &rule.nlri).unwrap());
             speaker.announce(&rule).await.unwrap();
             scoped.push(rule);
         }
         assert_eq!(speaker.list_active().await.unwrap().len(), 3);
         let mut replacement = scoped[0].clone();
-        replacement.route_targets = vec!["44407:778".into()];
+        replacement.route_targets = vec!["64500:778".into()];
         speaker.announce(&replacement).await.unwrap();
         assert_eq!(speaker.list_active().await.unwrap().len(), 3);
         speaker.withdraw(&replacement).await.unwrap();

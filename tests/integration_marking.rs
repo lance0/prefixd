@@ -21,8 +21,8 @@ fn settings() -> Settings {
     let mut value = common::test_settings();
     value.mode = OperationMode::Enforced;
     value.bgp.vpn_scopes=serde_json::from_value(json!({
-        "V4":{"family":"ipv4","rd":"44407:40","route_targets":["44407:777"],"allow_source_only":true},
-        "V6":{"family":"ipv6","rd":"44407:40","route_targets":["44407:777"],"allow_source_only":true}
+        "V4":{"family":"ipv4","rd":"64500:40","route_targets":["64500:777"],"allow_source_only":true},
+        "V6":{"family":"ipv6","rd":"64500:40","route_targets":["64500:777"],"allow_source_only":true}
     })).unwrap();
     value
 }
