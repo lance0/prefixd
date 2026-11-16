@@ -330,7 +330,7 @@ mod tests {
             ] {
                 let (base, calls, server) = mock(replies).await;
                 let mut alert = Alert::test_alert();
-                alert.event_type = event.clone();
+                alert.event_type = event;
                 alert.mitigation_id = Some("stable-mitigation".into());
                 let result = send_to(&reqwest::Client::new(), "secret", &base, &alert).await;
                 assert_eq!(result.is_ok(), success);
