@@ -5,11 +5,14 @@ Runs without a lab: python3 -m unittest discover -s lab/interop -p 'test_*.py'
 The log lines are prefixd-fastnetmon.sh output from a 2026-11-16 lane run.
 """
 
+import io
+import json
 import os
 import socket
 import subprocess
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -106,6 +109,116 @@ sleep() { SECONDS=$deadline; }
         self.assertEqual(calls, 2)
         self.assertNotIn("READY", result.stdout)
         self.assertIn("Query failed: fixture API unavailable", result.stderr)
+
+
+class TokenControlTests(unittest.TestCase):
+    def run_controls(self, *, legacy_status=401, events=(), mitigations=()):
+        requests, logs = [], []
+        tokens = {
+            "fixture-wrong-source": 403,
+            "fixture-operator": 403,
+            "fixture-legacy-shared-bearer": legacy_status,
+        }
+
+        def urlopen(request, **_):
+            requests.append(request)
+            if request.get_method() == "POST":
+                token = request.get_header("Authorization").removeprefix("Bearer ")
+                status = tokens[token]
+                body = io.BytesIO(b'{"error":"fixture refusal"}')
+                if status >= 400:
+                    raise urllib.error.HTTPError(request.full_url, status, "refused", None, body)
+                body.status = status
+                return body
+            body = (
+                {"events": list(events)}
+                if "/events?" in request.full_url
+                else {"mitigations": list(mitigations)}
+            )
+            response = io.BytesIO(json.dumps(body).encode())
+            response.status = 200
+            return response
+
+        with tempfile.TemporaryDirectory() as directory:
+            wrong = Path(directory) / "wrong.token"
+            wrong.write_text("fixture-wrong-source\n")
+            lab = FastNetMonLab.__new__(FastNetMonLab)
+            lab.args = SimpleNamespace(api="http://fixture", wrong_token_file=wrong)
+            lab.token = "fixture-operator"
+            lab.use_session = False
+            lab.opener = SimpleNamespace(open=urlopen)
+            lab.log = logs.append
+            with patch("fastnetmon_frr.urllib.request.urlopen", side_effect=urlopen):
+                lab.token_controls("203.0.113.10")
+        return requests, logs
+
+    def test_all_three_credentials_are_refused_without_writes(self):
+        requests, logs = self.run_controls()
+        posts = [r for r in requests if r.get_method() == "POST"]
+        self.assertEqual(
+            [r.get_header("Authorization") for r in posts],
+            [
+                "Bearer fixture-wrong-source",
+                "Bearer fixture-operator",
+                "Bearer fixture-legacy-shared-bearer",
+            ],
+        )
+        for request in posts:
+            self.assertEqual(request.full_url, "http://fixture/v1/events")
+            self.assertEqual(request.get_header("Content-type"), "application/json")
+            event = json.loads(request.data)
+            self.assertEqual(
+                (event["event_id"], event["source"], event["victim_ip"]),
+                ("lane-token-control", "fastnetmon", "203.0.113.10"),
+            )
+        self.assertEqual(
+            [r.full_url for r in requests if r.get_method() == "GET"],
+            [
+                "http://fixture/v1/events?source=fastnetmon&limit=100",
+                "http://fixture/v1/mitigations?victim_ip=203.0.113.10",
+            ],
+        )
+        self.assertIn("POST /v1/events as legacy shared bearer -> 401", logs)
+        for token in ("fixture-wrong-source", "fixture-operator", "fixture-legacy-shared-bearer"):
+            self.assertNotIn(token, "\n".join(logs))
+
+    def test_accepted_legacy_credential_fails_the_lane(self):
+        with self.assertRaisesRegex(AssertionError, "legacy shared bearer"):
+            self.run_controls(legacy_status=202)
+
+    def test_event_stored_after_refusal_fails_the_lane(self):
+        with self.assertRaisesRegex(AssertionError, "external_event_id"):
+            self.run_controls(events=[{"external_event_id": "lane-token-control"}])
+
+    def test_mitigation_stored_after_refusal_fails_the_lane(self):
+        with self.assertRaisesRegex(AssertionError, "mitigation_id"):
+            self.run_controls(mitigations=[{"mitigation_id": MID}])
+
+
+class PackageReceiptTests(unittest.TestCase):
+    def test_records_every_required_fastnetmon_package(self):
+        lab = FastNetMonLab.__new__(FastNetMonLab)
+        lab.args = SimpleNamespace(fastnetmon="fixture")
+        packages = "fastnetmon\t1.2.9\ncurl\tfixture\njq\tfixture\n"
+        calls = []
+
+        def execute(command, **kwargs):
+            calls.append(command)
+            if "dpkg-query" in command:
+                self.assertTrue(kwargs.get("check"))
+                return subprocess.CompletedProcess(command, 0, stdout=packages)
+            return subprocess.CompletedProcess(command, 0, stdout="sha256:fixture\n")
+
+        with (
+            patch("flowspec_frr.Lab.versions", return_value={}),
+            patch("fastnetmon_frr.subprocess.run", side_effect=execute),
+        ):
+            receipt = lab.versions()
+        self.assertEqual(
+            calls[0],
+            ["docker", "exec", "fixture", "dpkg-query", "-W", "fastnetmon", "curl", "jq"],
+        )
+        self.assertEqual(receipt["fastnetmon_packages"], packages.splitlines())
 
 
 class ScriptLogTests(unittest.TestCase):
