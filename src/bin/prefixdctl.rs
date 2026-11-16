@@ -1784,7 +1784,6 @@ async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<()
             let password = match password {
                 Some(p) => p,
                 None => inquire::Password::new("Password:")
-                    .without_confirmation()
                     .prompt()
                     .map_err(|e| format!("failed to read password: {}", e))?
                     .trim()

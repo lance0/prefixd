@@ -544,6 +544,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Interactive `prefixdctl operators create`, including the first Compose Admin,
+  now asks for hidden password confirmation. A mismatch asks again, and
+  cancellation creates no operator. Explicit `--password` automation is unchanged.
 - Detailed health degrades on injection lease renewal failure, expiry or overdue
   renewal, with standby retaining precedence. It adds controller `mode`, an
   approximate monotonic `speaker.lease.remaining_seconds` and `renewal_overdue`,
