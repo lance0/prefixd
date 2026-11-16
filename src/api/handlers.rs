@@ -1030,6 +1030,7 @@ async fn handle_unban(
     state: Arc<AppState>,
     input: AttackEventInput,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
+    validate_event_destination(&input.victim_ip).map_err(AppError)?;
     validate_confidence(input.confidence).map_err(AppError)?;
     validate_top_src_ports(input.top_src_ports.as_deref()).map_err(AppError)?;
     let ext_id = match &input.event_id {
@@ -2303,7 +2304,7 @@ pub async fn list_events(
         ("status" = Option<String>, Query, description = "Comma-separated exact statuses: active, expired or withdrawn, the statuses this version stores. Legacy pending, escalated and rejected are accepted and match stored rows, but this version produces none of them; rejected is no longer produced since 0.20.0, and rows stored by 0.19 and earlier remain. Every token must be valid and nonempty"),
         ("customer_id" = Option<String>, Query, description = "Filter by customer ID"),
         ("q" = Option<String>, Query, description = "Literal case-insensitive substring of target, vector, customer ID or mitigation UUID; maximum 256 UTF-8 bytes, no NUL. Empty matches every row."),
-        ("victim_ip" = Option<String>, Query, description = "Filter by exact stored host IP or canonical manual CIDR; no containment matching"),
+        ("victim_ip" = Option<String>, Query, description = "Filter by host IP or exact CIDR, compared in canonical form (any IPv6 spelling, IPv4-mapped hosts as IPv4); no containment matching"),
         ("pop" = Option<String>, Query, description = "Exact case-sensitive POP; omitted or literal 'all' lists every POP. Empty/NUL identifiers are invalid."),
         ("acknowledged" = Option<bool>, Query, description = "Filter by acknowledged status"),
         ("limit" = Option<u32>, Query, description = "Max results (default 100)"),
@@ -2373,6 +2374,10 @@ pub async fn list_mitigations(
         ))
         .into_response());
     }
+    // Stored victims are canonical; an unparseable filter matches nothing.
+    let victim_filter = query
+        .victim_ip
+        .map(|victim| crate::domain::canonical_destination(&victim).unwrap_or(victim));
     let params = MitigationListParams {
         pop,
         query: query.q,
@@ -2387,7 +2392,7 @@ pub async fn list_mitigations(
         .list_mitigations(
             status_filter.as_deref(),
             query.customer_id.as_deref(),
-            query.victim_ip.as_deref(),
+            victim_filter.as_deref(),
             query.acknowledged,
             &params,
         )
@@ -2729,7 +2734,7 @@ async fn create_blackhole(
     req: CreateMitigationRequest,
 ) -> axum::response::Response {
     let victim_ip = match validate_ip(&req.victim_ip) {
-        Ok(ip) => ip,
+        Ok(ip) => ip.to_canonical(),
         Err(error) => return AppError(error).into_response(),
     };
     let invalid = if req.confirm_victim_ip.as_deref() != Some(req.victim_ip.as_str()) {

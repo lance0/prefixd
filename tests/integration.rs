@@ -10872,7 +10872,8 @@ mod manual_protocol {
         let cases: &[(&str, &str, Option<u8>, &[u16])] = &[
             ("203.0.113.10", "icmp", Some(1), &[]),
             ("2001:db8::10", "icmpv6", Some(58), &[]),
-            ("::ffff:203.0.113.10", "icmpv6", Some(58), &[]),
+            // An IPv4-mapped host is its IPv4 address.
+            ("::ffff:203.0.113.10", "icmp", Some(1), &[]),
             (
                 "203.0.113.10",
                 "udp",
@@ -10931,10 +10932,11 @@ mod manual_protocol {
                     .unwrap();
                 assert_eq!(rows.len(), 1);
                 let saved = &rows[0];
-                assert_eq!(saved.victim_ip, ip);
+                let host = prefixd::domain::canonical_destination(ip).unwrap();
+                assert_eq!(saved.victim_ip, host);
                 assert_eq!(
                     saved.match_criteria.dst_prefix,
-                    format!("{ip}/{}", if ip.contains(':') { 128 } else { 32 })
+                    format!("{host}/{}", if host.contains(':') { 128 } else { 32 })
                 );
                 assert_eq!(saved.match_criteria.protocol, expected_protocol);
                 assert_eq!(saved.match_criteria.dst_ports, ports);
@@ -10959,7 +10961,7 @@ mod manual_protocol {
         for (ip, protocol, error) in [
             ("2001:db8::10", "icmp", "address family"),
             ("203.0.113.10", "icmpv6", "address family"),
-            ("::ffff:203.0.113.10", "icmp", "address family"),
+            ("::ffff:203.0.113.10", "icmpv6", "address family"),
             ("2001:db8::10", "icmp6", "invalid protocol"),
             ("2001:db8::10", "ICMPv6", "invalid protocol"),
             ("203.0.113.10", "gre", "invalid protocol"),
@@ -16462,12 +16464,12 @@ mod manual_destination_cidr {
     }
 
     #[tokio::test]
-    async fn bare_host_text_retains_legacy_history_and_scope_representation() {
+    async fn bare_host_text_is_stored_in_canonical_form() {
         let (state, repo, _) = state(OperationMode::Enforced, false, Inventory::new(vec![]));
         let (status, body) = post(state.clone(), payload("2001:0DB8:0:0:0:0:0:1")).await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
-        assert_eq!(body["victim_ip"], "2001:0DB8:0:0:0:0:0:1");
-        assert_eq!(body["dst_prefix"], "2001:0DB8:0:0:0:0:0:1/128");
+        assert_eq!(body["victim_ip"], "2001:db8::1");
+        assert_eq!(body["dst_prefix"], "2001:db8::1/128");
         assert_eq!(
             post(state, payload("2001:db8::1/128")).await.0,
             StatusCode::CONFLICT

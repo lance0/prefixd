@@ -255,6 +255,33 @@ client, confirm its last use advances, then revoke the old token. If a token lea
 demoting an operator does not revoke the tokens they created; list them with
 `prefixdctl tokens list --created-by <username>` and revoke or rotate each one.
 
+## Canonical victims
+
+This release stores every victim address in one spelling: IPv6 lowercase and
+zero-compressed (RFC 5952), and an IPv4-mapped IPv6 host as its IPv4 address.
+Every ingest route, every signal adapter and manual mitigations apply it, and
+the `victim_ip` filter and IP history canonicalize their input. Earlier
+releases stored a host as the detector sent it, so FastNetMon's zero-padded
+IPv6 (`2001:0db8:0113::0010`) never correlated with, or was found by a search
+for, the canonical `2001:db8:113::10`.
+
+Migration 023 rewrites the IPv6 victim of live state to that spelling: pending,
+active and escalated mitigations and open signal groups. It changes no rule,
+scope, withdrawal intent or schema, and implies no speaker or router change; an
+older controller reads the rewritten rows unchanged. Three cases keep their
+stored text:
+
+- History: events, audit rows and ended mitigations keep the spelling the
+  detector sent. A canonical `victim_ip` filter no longer finds such a row by
+  its old spelling; search with `q`, which matches a substring of the stored
+  text.
+- An open signal group whose canonical key already has an open group keeps
+  its old spelling until its window closes, because only one open group may
+  exist per victim and vector.
+- A live mitigation for an IPv4-mapped victim keeps its victim text and the
+  IPv6 rule it was created with, which matches no IPv4 traffic, until it
+  expires or is withdrawn. New events for that address create an IPv4 rule.
+
 ## rustbgpd v0.83
 
 prefixd requires rustbgpd v0.83.0 or later, for global and VPN FlowSpec
@@ -1278,7 +1305,9 @@ after 0.27.0 adds migration 021, which only narrows the unique scope index
 `idx_mitigations_active_scope` to `active` and `escalated` rows. It cannot fail
 on existing data, and 0.27.0 runs unchanged against it. The same release adds
 migration 022, the API token table, which rules out a rolling replacement and
-starting 0.27.0 again: see [one-way release](#one-way-release).
+starting 0.27.0 again: see [one-way release](#one-way-release). Migration 023
+rewrites only the victim text of live rows
+([canonical victims](#canonical-victims)).
 For any other release that adds a migration:
 
 - The first upgraded controller to start migrates the database, even in

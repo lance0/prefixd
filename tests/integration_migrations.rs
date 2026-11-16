@@ -647,13 +647,13 @@ fn guide_queries(heading: &str) -> Vec<String> {
 }
 
 /// Put a migrated database back at 021: no token table, no username check and
-/// no row for 022.
+/// no row for 022 or later.
 async fn put_at_021(pool: &PgPool) {
     sqlx::raw_sql(
         "DROP TABLE api_tokens;
          ALTER TABLE operators DROP CONSTRAINT operators_username_format;
          ALTER TABLE operators DROP CONSTRAINT operators_role_known;
-         DELETE FROM schema_migrations WHERE version = 22;",
+         DELETE FROM schema_migrations WHERE version >= 22;",
     )
     .execute(pool)
     .await
@@ -685,12 +685,11 @@ async fn api_token_migration_applies_fresh_and_at_021_and_replays_cleanly() {
         .await
         .expect("migrate a database at 021");
     assert_eq!(token_schema(&setup).await, (true, true));
-    assert_eq!(
+    assert!(
         recorded(&setup)
             .await
-            .last()
-            .map(|(version, name, _)| (*version, name.clone())),
-        Some((22, "api_tokens".to_string()))
+            .iter()
+            .any(|(version, name, _)| (*version, name.as_str()) == (22, "api_tokens"))
     );
     let kept: (i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM operators WHERE username = 'ops_admin-1'),
@@ -918,4 +917,139 @@ async fn api_token_migration_refuses_reserved_usernames_and_unknown_roles() {
         .await;
         assert!(inserted.is_err(), "{username} {role}");
     }
+}
+
+const VICTIM_MIGRATION: &str = include_str!("../migrations/023_canonical_live_victims.sql");
+
+async fn victims_with_status(pool: &PgPool, status: &str) -> Vec<String> {
+    sqlx::query_scalar("SELECT victim_ip FROM mitigations WHERE status = $1 ORDER BY victim_ip")
+        .bind(status)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+async fn group_victims(pool: &PgPool) -> Vec<(String, String)> {
+    let mut groups: Vec<(String, String)> =
+        sqlx::query_as("SELECT victim_ip, status FROM signal_groups")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    groups.sort();
+    groups
+}
+
+/// Migration 023 gives live mitigations and open signal groups the IPv6 victim
+/// spelling ingestion now stores, the same text Rust's canonical form produces,
+/// and leaves history, prefixes, embedded-IPv4 hosts and non-addresses alone. It never trips the
+/// open-group unique index, and replaying it changes nothing.
+#[tokio::test]
+async fn canonical_victim_migration_rewrites_only_live_rows_to_the_rust_spelling() {
+    let fixture = start_postgres().await;
+    let setup = connect(&fixture).await;
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("migrate a fresh database");
+    sqlx::raw_sql("DELETE FROM schema_migrations WHERE version = 23;")
+        .execute(&setup)
+        .await
+        .unwrap();
+
+    let addresses = [
+        "2001:0db8:0113::0010",
+        "2001:0DB8:0113:0000:0000:0000:0000:0011",
+        "2001:db8:0:1:1:1:1:1",
+        "2001:0:0:1:0:0:0:1",
+        "FE80::",
+        "::1",
+        "::ffff:203.0.113.10",
+        "::FFFF:CB00:710B",
+    ];
+    let untouched = ["2001:0db8::/32", "any", ""];
+    for (victim, status) in addresses
+        .iter()
+        .flat_map(|victim| [(*victim, "active"), (*victim, "withdrawn")])
+        .chain(untouched.iter().map(|victim| (*victim, "active")))
+    {
+        sqlx::query(
+            "INSERT INTO mitigations (mitigation_id, scope_hash, pop, victim_ip, vector,
+                 match_json, action_type, status, created_at, updated_at, expires_at,
+                 triggering_event_id, last_event_id)
+             VALUES (gen_random_uuid(), gen_random_uuid()::text, 'pop1', $1, 'udp_flood', '{}',
+                 'discard', $2, now(), now(), now() + interval '1 hour',
+                 gen_random_uuid(), gen_random_uuid())",
+        )
+        .bind(victim)
+        .bind(status)
+        .execute(&setup)
+        .await
+        .unwrap();
+    }
+    // The second pair is one victim in two spellings, one canonical already.
+    for (victim, status) in [
+        ("2001:0db8:0113::0020", "open"),
+        ("2001:0db8:0113::0020", "resolved"),
+        ("2001:db8:113::30", "open"),
+        ("2001:0db8:0113::0030", "open"),
+    ] {
+        sqlx::query(
+            "INSERT INTO signal_groups (group_id, victim_ip, vector, window_expires_at, status)
+             VALUES (gen_random_uuid(), $1, 'udp_flood', now() + interval '5 minutes', $2)",
+        )
+        .bind(victim)
+        .bind(status)
+        .execute(&setup)
+        .await
+        .unwrap();
+    }
+
+    prefixd::db::init_postgres_pool(&fixture.url)
+        .await
+        .expect("apply migration 023");
+
+    // An embedded-IPv4 victim keeps the IPv6 rule it was created with, so its
+    // text is left alone rather than split from that rule.
+    let mut expected: Vec<String> = addresses
+        .iter()
+        .map(
+            |victim| match victim.to_ascii_lowercase().starts_with("::ffff:") {
+                true => victim.to_string(),
+                false => prefixd::domain::canonical_destination(victim).unwrap(),
+            },
+        )
+        .chain(untouched.map(String::from))
+        .collect();
+    expected.sort();
+    let mut active = victims_with_status(&setup, "active").await;
+    active.sort();
+    assert_eq!(active, expected);
+    let mut history = victims_with_status(&setup, "withdrawn").await;
+    history.sort();
+    let mut sent = addresses.map(String::from).to_vec();
+    sent.sort();
+    assert_eq!(
+        history, sent,
+        "history keeps the spelling the detector sent"
+    );
+
+    let migrated = group_victims(&setup).await;
+    assert_eq!(
+        migrated,
+        [
+            ("2001:0db8:0113::0020", "resolved"),
+            ("2001:0db8:0113::0030", "open"),
+            ("2001:db8:113::20", "open"),
+            ("2001:db8:113::30", "open"),
+        ]
+        .map(|(victim, status)| (victim.to_string(), status.to_string()))
+    );
+
+    sqlx::raw_sql(VICTIM_MIGRATION)
+        .execute(&setup)
+        .await
+        .expect("replay migration 023");
+    assert_eq!(group_victims(&setup).await, migrated);
+    let mut replayed = victims_with_status(&setup, "active").await;
+    replayed.sort();
+    assert_eq!(replayed, expected);
 }

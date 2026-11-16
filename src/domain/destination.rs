@@ -16,6 +16,21 @@ pub fn is_prefix_destination(value: &str) -> bool {
         .is_ok_and(|destination| destination.prefix_len() != destination.max_prefix_len())
 }
 
+/// The one stored and compared spelling of an event destination (RFC 5952
+/// text): IPv6 lowercase and zero-compressed, an IPv4-mapped IPv6 host as its
+/// IPv4 address, a full-length prefix as its bare address and any other prefix
+/// as its canonical CIDR. Every key on the victim string depends on it.
+pub fn canonical_destination(value: &str) -> Result<String, DestinationError> {
+    let destination = parse_flowspec_destination(value)?;
+    Ok(
+        if destination.prefix_len() == destination.max_prefix_len() {
+            destination.addr().to_canonical().to_string()
+        } else {
+            destination.to_string()
+        },
+    )
+}
+
 /// Parse a literal address or an exact network, rejecting implicit widening.
 /// Admission still needs prefix-length, whole-prefix ownership and safelist checks.
 pub fn parse_flowspec_destination(value: &str) -> Result<IpNet, DestinationError> {
@@ -41,6 +56,29 @@ pub fn parse_flowspec_destination(value: &str) -> Result<IpNet, DestinationError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_destination_has_one_spelling_per_destination() {
+        for (input, expected) in [
+            ("2001:0db8:0113::0010", "2001:db8:113::10"),
+            (
+                "2001:0DB8:0113:0000:0000:0000:0000:0010",
+                "2001:db8:113::10",
+            ),
+            ("2001:DB8:113::10/128", "2001:db8:113::10"),
+            ("::ffff:203.0.113.10", "203.0.113.10"),
+            ("::FFFF:CB00:710A", "203.0.113.10"),
+            ("203.0.113.10/32", "203.0.113.10"),
+            ("203.0.113.10", "203.0.113.10"),
+            ("2001:0DB8:0001::/48", "2001:db8:1::/48"),
+            ("203.0.112.0/22", "203.0.112.0/22"),
+        ] {
+            assert_eq!(canonical_destination(input).unwrap(), expected, "{input}");
+        }
+        for invalid in ["", "203.0.113.010", "203.0.113.1/24", "example.com"] {
+            assert!(canonical_destination(invalid).is_err(), "{invalid}");
+        }
+    }
 
     #[test]
     fn destination_is_exact_and_canonical_in_both_families() {

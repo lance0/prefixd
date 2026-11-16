@@ -69,6 +69,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A request with `Authorization: Bearer` is authenticated by its token alone:
   its session cookie is ignored, and an invalid token gets 401 even beside a
   valid session. Clients that sent both now act as the token.
+- Victim addresses are stored in canonical form on every ingest route and in
+  manual mitigations: IPv6 lowercase and zero-compressed, and an IPv4-mapped
+  IPv6 host as its IPv4 address, whose rules are IPv4 rules. Migration 023
+  rewrites the IPv6 victim of live mitigations and open signal groups the same
+  way, leaving an IPv4-mapped victim with the IPv6 rule it was created with;
+  events, audit rows and ended mitigations keep the spelling the detector sent.
+  The `victim_ip` filter and IP history compare in canonical form, so they no
+  longer find a pre-upgrade history row by its non-canonical spelling; use `q`
+  for those. The migration changes no schema and takes row locks on live rows
+  only; an older controller reads the rewritten rows unchanged. See
+  [canonical victims](docs/how-to/upgrading.md#canonical-victims).
 - Unknown configuration keys in `prefixd.yaml`, `correlation.yaml` and
   `alerting.yaml` are ignored in this release with a warning, and the next
   release refuses them at startup and on reload. Run `prefixd --check` against
@@ -311,6 +322,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- One victim sent in different spellings is now one victim. FastNetMon sends
+  IPv6 zero-padded (`2001:0db8:0113::0010`) while other detectors send the
+  canonical form, so the two never correlated toward `min_sources`, the
+  `victim_ip` filter missed the mitigation, and the bundled FastNetMon unban
+  could not find a mitigation created in canonical form. Every ingest route,
+  the batch route and every signal adapter now parse the victim and store its
+  canonical form, and the filters canonicalize their input.
 - Opsgenie withdrawn and expired alerts close the mitigation's alert by alias
   through Opsgenie's close API instead of creating a second alert. Lifecycle
   creates and closes trust Opsgenie's HTTP 202, so closing an alert already
