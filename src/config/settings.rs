@@ -524,12 +524,18 @@ fn default_quiet_period() -> u32 {
     120
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct StorageConfig {
     /// PostgreSQL connection string (e.g., "postgres://user:pass@localhost/prefixd").
     /// Optional when `DATABASE_URL` is set, which takes precedence.
     #[serde(default)]
     pub connection_string: String,
+}
+
+impl std::fmt::Debug for StorageConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StorageConfig").finish_non_exhaustive()
+    }
 }
 
 impl StorageConfig {

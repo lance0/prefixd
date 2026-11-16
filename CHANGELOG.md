@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- If earlier versions ran with debug logging, treat retained login logs as
+  credentials and reset affected operator passwords; those logs can contain
+  password hashes. See [earlier debug logs](docs/how-to/upgrading.md#password-hashes-in-earlier-debug-logs).
+
 - Reload the bundled Prometheus rules to enable
   `PrefixdLeasedMitigationsAtRisk`, which uses new leased-intent and renewal
   metrics from the upgraded controller. Keep 15-second scrape and evaluation
@@ -288,6 +292,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Operator password hashes and incoming passwords are redacted from debug
+  output, including login and session diagnostics. Token creation responses,
+  database configuration and alert destination configuration also hide secrets
+  when formatted for debugging; their intended API and storage formats stay
+  unchanged.
+
 - The Compose stack has no default database password, and the repository's
   `.gitignore` covers `.env` and the bootstrap's `.prefixd/` token directory,
   so neither secret is committed by accident.
@@ -525,6 +535,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Releases require the latest CI and Interop push runs to pass on the exact
+  release commit before tagging or publishing. A missing, pending or failed
+  Interop run, including the FastNetMon lane, blocks publication even when CI
+  passes. The FastNetMon lab now catches API refusals written only to stderr,
+  including during readiness, instead of accepting their zero exit status.
 - `prefixdctl` works in the Compose controller. Both controller services set
   `PREFIXD_API=http://127.0.0.1:8080`, so `docker compose exec` runs no longer
   fail against the CLI's default port 80.

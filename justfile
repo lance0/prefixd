@@ -13,6 +13,7 @@ default:
 gate:
     just fmt
     just python
+    just shell
     just alerts
     just proto
     just fuzz-lock
@@ -29,12 +30,17 @@ gate:
 fmt:
     cargo fmt --all -- --check
 
-# Test the Compose bootstrap, then lint and format-check every Python file against
+# Test the Compose bootstrap and release checks, then lint and format-check Python against
 # ruff.toml; uvx fetches the pinned ruff.
 python:
     python3 scripts/test-compose-bootstrap.py
+    python3 scripts/test-release-check.py
     uvx ruff@{{ruff_version}} check .
     uvx ruff@{{ruff_version}} format --check .
+
+# Check all shipped shell helpers, including release and Compose scripts.
+shell:
+    shellcheck scripts/*.sh
 
 # Validate the Prometheus alert rules and run their unit tests with pinned promtool.
 alerts:

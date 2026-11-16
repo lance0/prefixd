@@ -46,6 +46,14 @@ the protection; drain affected rules or accept that policy change explicitly.
   [mitigation origin mode](#mitigation-origin-mode).
 - **Always back up the database** before upgrading.
 
+## Password hashes in earlier debug logs
+
+Earlier releases wrote operator password hashes in login diagnostics when
+`debug` logging was enabled. This release redacts those values. Treat retained
+copies of those logs as credentials: restrict access and reset affected
+operators' passwords using an Admin session. Changing a password also invalidates
+that operator's existing sessions. Upgrading does not remove old log copies.
+
 ## Leased mitigation outage alert
 
 Update and reload the bundled `grafana/prometheus-alerts.yml` in Prometheus,
