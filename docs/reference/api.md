@@ -1699,7 +1699,9 @@ receivers:
         http_config:
           authorization:
             type: Bearer
-            credentials: '<your-api-token>'
+            # The controller's PREFIXD_API_TOKEN, in a file readable by the
+            # Alertmanager user only (owned by it, mode 0400)
+            credentials_file: /etc/alertmanager/prefixd-token
         send_resolved: true
 ```
 

@@ -115,3 +115,28 @@ async fn cli_extends_with_authenticated_request_and_reports_saved_noop_and_refus
         assert!(server.await.unwrap_err().is_cancelled());
     }
 }
+
+/// Help names the API, token and cookie variables but never prints their
+/// values; reqwest sends URL userinfo in `PREFIXD_API` as Basic auth.
+#[test]
+fn cli_help_hides_credential_environment_values() {
+    const SENTINEL: &str = "hunter2-help-canary";
+    for flag in ["--help", "-h", "help"] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_prefixdctl"))
+            .arg(flag)
+            .env(
+                "PREFIXD_API",
+                format!("http://operator:{SENTINEL}@127.0.0.1:8080"),
+            )
+            .env("PREFIXD_API_TOKEN", SENTINEL)
+            .env("PREFIXD_SESSION_COOKIE", SENTINEL)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(output.status.success(), "{flag}");
+        for name in ["PREFIXD_API", "PREFIXD_API_TOKEN", "PREFIXD_SESSION_COOKIE"] {
+            assert!(stdout.contains(name), "{flag}: {stdout}");
+        }
+        assert!(!stdout.contains(SENTINEL), "{flag}: {stdout}");
+    }
+}

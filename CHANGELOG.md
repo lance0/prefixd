@@ -80,6 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and still makes one bounded attempt per rule, so a wedged speaker can hold
   the lifecycle mutex for up to N × 3 seconds for an event with N rules.
 
+### Security
+
+- `prefixdctl --help`, `-h` and `help` no longer print the values of
+  `PREFIXD_API_TOKEN` or `PREFIXD_API`, whose URL userinfo is sent as Basic
+  auth. They name the variables only, as they already did for
+  `PREFIXD_SESSION_COOKIE`.
+
 ### Added
 
 - `prefixd --check` validates the configuration directory and exits before
@@ -174,6 +181,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps relative links such as `docs/how-to/upgrading.md`, which broke on the
   GitHub Release page; the release body now points them at
   `https://github.com/<repo>/blob/vX.Y.Z/<path>`.
+- The Administration page no longer shows Reload configuration to viewers and
+  operators; the server already refused them with 403.
 
 ## [0.27.0] - 2026-11-15
 

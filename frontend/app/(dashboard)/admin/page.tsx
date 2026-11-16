@@ -248,10 +248,12 @@ export default function AdminPage() {
                 {reloadResult.text}
               </span>
             )}
-            <Button variant="outline" size="sm" onClick={handleReloadConfig} disabled={isReloading}>
-              <RefreshCw className={isReloading ? "size-4 animate-spin" : "size-4"} aria-hidden="true" />
-              Reload configuration
-            </Button>
+            {permissions.canReloadConfig && (
+              <Button variant="outline" size="sm" onClick={handleReloadConfig} disabled={isReloading}>
+                <RefreshCw className={isReloading ? "size-4 animate-spin" : "size-4"} aria-hidden="true" />
+                Reload configuration
+              </Button>
+            )}
           </>
         }
       />
