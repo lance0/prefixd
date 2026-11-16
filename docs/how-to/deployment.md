@@ -178,7 +178,10 @@ mode 0400, and reads it from there: the FastNetMon script's
 `/etc/default/prefixd` lines, a FastNetMon hostgroup shim, an Alertmanager
 receiver with `credentials_file`, a webhook or Grafana header, or `prefixdctl`
 with `PREFIXD_TOKEN`, plus a `curl -K -` test that keeps the token off the
-command line. The dashboard keeps the secret only while that dialog is
+command line. The snippets use the dialog's **Controller API URL**, prefilled with
+the page origin: set it to an address that reaches the controller API, such as
+the nginx ingress or the controller on port 8080, when the dashboard is served
+without nginx. The dashboard keeps the secret only while that dialog is
 open and asks before closing it uncopied. Revoking asks for confirmation naming
 the token, its source and its last use. The tab needs a signed-in Admin
 session; it is not shown to other roles, mTLS clients or `none` mode, and the

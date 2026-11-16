@@ -464,7 +464,8 @@ export function FlowSpecRuleDialog({ open, onOpenChange, canSourceOnly = true, f
     invalidateAdmission()
     const matchInput = field === "victimIp" || field === "dstPorts"
 
-    if (vector && !matchInput) ownEdits.current.add(field)
+    // A typed reason stays the operator's even before a vector is chosen.
+    if ((vector || field === "reason") && !matchInput) ownEdits.current.add(field)
     setForm((prev) => {
       const next = { ...prev, [field]: value }
 
@@ -483,11 +484,12 @@ export function FlowSpecRuleDialog({ open, onOpenChange, canSourceOnly = true, f
     setError(null)
   }
 
-  // Choosing a vector is explicit, so it rewrites every field the playbook sets.
+  // Choosing a vector is explicit, so it rewrites every field the playbook sets, except a
+  // reason the operator wrote, which stays theirs across vectors.
   const chooseVector = (value: string) => {
     invalidateAdmission()
     setVector(value)
-    ownEdits.current = new Set()
+    ownEdits.current = new Set(ownEdits.current.has("reason") ? ["reason"] : [])
     setForm((prev) => applyPrefill(prev, value, playbooks?.playbooks ?? [], ownEdits.current))
   }
 

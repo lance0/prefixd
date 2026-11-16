@@ -149,6 +149,22 @@ describe("mitigate now", { timeout: 10_000 }, () => {
     expect(dialog.getByLabelText(/^Reason/)).toHaveValue("NOC ticket 4411")
   })
 
+  it("keeps an edited reason that still starts like the picker's across vector changes", async () => {
+    await openAs("operator", "/mitigations?mitigate=true")
+    const dialog = within(await screen.findByRole("dialog", { name: "Mitigate now" }))
+    const vector = dialog.getByRole("combobox", { name: "Attack vector" })
+    await waitFor(() => expect(vector).toBeEnabled())
+    fireEvent.keyDown(vector, { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "UDP flood" }))
+    const reason = "Mitigate now: udp_flood (playbook udp_flood_police_first) INC-4411"
+    fireEvent.change(dialog.getByLabelText(/^Reason/), { target: { value: reason } })
+
+    fireEvent.keyDown(vector, { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "ICMP flood" }))
+    expect(dialog.getByRole("combobox", { name: "Action" })).toHaveTextContent("discard")
+    expect(dialog.getByLabelText(/^Reason/)).toHaveValue(reason)
+  })
+
   it("is not offered to a viewer, even from the mitigate link", async () => {
     await openAs("viewer", "/mitigations?mitigate=true")
     expect(screen.queryByRole("button", { name: "Mitigate now" })).not.toBeInTheDocument()

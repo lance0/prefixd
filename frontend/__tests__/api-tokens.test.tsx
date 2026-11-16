@@ -42,6 +42,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  localStorage.clear()
+
   for (const [name, descriptor] of originals) {
     if (descriptor) Object.defineProperty(Element.prototype, name, descriptor)
     else Reflect.deleteProperty(Element.prototype, name)
@@ -136,6 +138,30 @@ describe("API tokens tab", { timeout: 10_000 }, () => {
     expect(window.location.href).not.toContain(SECRET)
 
     for (const call of [...log.mock.calls, ...error.mock.calls]) expect(JSON.stringify(call)).not.toContain(SECRET)
+  })
+
+  it("builds every snippet from the controller API URL, which is remembered without the secret", async () => {
+    controller.route("POST", "/v1/tokens", () => json({ ...token("am-2", { source: "alertmanager" }), token: SECRET }, 201))
+    await renderAdmin("credentials", "admin")
+    fireEvent.click(await screen.findByRole("button", { name: "Create token" }))
+    let dialog = within(await screen.findByRole("dialog", { name: "Create API token" }))
+    fireEvent.change(dialog.getByLabelText("Name"), { target: { value: "am-2" } })
+    fireEvent.change(dialog.getByLabelText("Source"), { target: { value: "alertmanager" } })
+    fireEvent.click(dialog.getByRole("button", { name: "Create token" }))
+    dialog = within(await screen.findByRole("dialog", { name: "Token am-2 created" }))
+    const api = dialog.getByLabelText("Controller API URL")
+    expect(api).toHaveValue(window.location.origin)
+    expect(api).toHaveAccessibleDescription(/controller API .*not the dashboard alone/)
+
+    fireEvent.change(api, { target: { value: "https://prefixd-api.example.net:8443/" } })
+    const snippets = dialog.getAllByText((_, element) => element?.tagName === "PRE").map((pre) => pre.textContent ?? "")
+    const urls = snippets.flatMap((text) => text.match(/https?:\/\/[^\s"']+/g) ?? [])
+    expect(urls.length).toBeGreaterThanOrEqual(2)
+
+    for (const url of urls) expect(url.startsWith("https://prefixd-api.example.net:8443/v1/")).toBe(true)
+    expect(snippets.join("\n")).not.toContain(window.location.origin)
+    expect(localStorage.getItem("prefixd-token-snippet-api")).toBe("https://prefixd-api.example.net:8443/")
+    expect(Object.values(localStorage).join("\n")).not.toContain(SECRET)
   })
 
   it("asks before closing with an uncopied secret", async () => {

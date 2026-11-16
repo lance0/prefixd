@@ -35,6 +35,19 @@ const EXPIRY_DAYS = ["never", "30", "90", "365"] as const
 // Not a valid username (`^[A-Za-z0-9_-]{1,64}$`), so it never collides with a creator.
 const ANY_CREATOR = "*"
 
+// Per-viewer convenience: only the controller URL is stored, never anything about a token.
+const API_BASE_KEY = "prefixd-token-snippet-api"
+
+function initialApiBase(): string {
+  if (typeof window === "undefined") return ""
+
+  try {
+    return window.localStorage.getItem(API_BASE_KEY) || window.location.origin
+  } catch {
+    return window.location.origin
+  }
+}
+
 type TokenState = "active" | "expired" | "revoked"
 
 function tokenState(token: ApiToken, now: number): TokenState {
@@ -396,6 +409,7 @@ function CreateTokenDialog({ open, onOpenChange, sources, bearerAdapters, onCrea
   const [created, setCreated] = useState<CreatedSecret | null>(null)
   const [copied, setCopied] = useState(false)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const [apiBase, setApiBase] = useState(initialApiBase)
 
   const nameError = !NAME_PATTERN.test(name) ? "Lowercase letters, digits and hyphens, starting with a letter or digit; at most 58 characters." : null
   const sourceError = scope === "ingest" && !SOURCE_PATTERN.test(source) ? "An ingest token needs a source: lowercase letters, digits, hyphens and underscores." : null
@@ -461,8 +475,17 @@ function CreateTokenDialog({ open, onOpenChange, sources, bearerAdapters, onCrea
     }
   }
 
-  const origin = typeof window === "undefined" ? "" : window.location.origin
-  const snippets = created ? tokenSnippets(created, origin, bearerAdapters) : []
+  const changeApiBase = (value: string) => {
+    setApiBase(value)
+
+    try {
+      window.localStorage.setItem(API_BASE_KEY, value)
+    } catch {
+      // Storage unavailable: the field still drives this dialog's snippets.
+    }
+  }
+
+  const snippets = created ? tokenSnippets(created, apiBase.trim().replace(/\/+$/, ""), bearerAdapters) : []
 
   return (
     <Dialog open={open} onOpenChange={(next) => { if (next) onOpenChange(true); else requestClose() }}>
@@ -493,6 +516,14 @@ function CreateTokenDialog({ open, onOpenChange, sources, bearerAdapters, onCrea
             </div>
             <section aria-labelledby={`${id}-snippets`} className="space-y-3">
               <h3 id={`${id}-snippets`} className="text-xs font-semibold">Set up the client</h3>
+              <div className="space-y-1.5">
+                <Label htmlFor={`${id}-api`}>Controller API URL</Label>
+                <Input id={`${id}-api`} type="url" value={apiBase} onChange={(event) => changeApiBase(event.target.value)} className="h-9 font-mono text-xs"
+                  spellCheck={false} autoComplete="off" aria-describedby={`${id}-api-help`} />
+                <p id={`${id}-api-help`} className="text-xs text-muted-foreground">
+                  Must reach the controller API (the nginx ingress, or the controller on port 8080), not the dashboard alone.
+                </p>
+              </div>
               {snippets.map((snippet) => (
                 <div key={snippet.title} className="space-y-1">
                   <div className="flex items-center justify-between gap-2">
