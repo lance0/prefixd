@@ -2,11 +2,12 @@
 
 ## Status
 
-Accepted. Amended by [ADR 034](034-source-bound-api-tokens.md) (proposed
+Accepted. Amended by [ADR 034](034-source-bound-api-tokens.md) (accepted
 2026-11-15): named, hashed, revocable API tokens with `ingest`, `operator` and
 `admin` scopes replace the shared bearer token, ingest tokens are bound to a
-detector source, and the `bearer` auth mode is removed. The bearer-token
-decision below describes the behavior before that amendment.
+detector source, and the `bearer` auth mode is removed. A bearer token replaces
+the session for its request, and only the `Bearer` scheme counts as a token.
+The bearer-token decision below describes the behavior before that amendment.
 
 ## Date
 

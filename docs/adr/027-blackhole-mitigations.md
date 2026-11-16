@@ -9,7 +9,7 @@ ADR is implemented yet. Extends
 [ADR 025](025-pluggable-speaker-backends.md); qualifies the unicast caveat in
 [ADR 002](002-flowspec-only-afi-safi.md).
 
-Amended by [ADR 034](034-source-bound-api-tokens.md) (proposed 2026-11-15):
+Amended by [ADR 034](034-source-bound-api-tokens.md) (accepted 2026-11-15):
 `blackhole.detector_sources` becomes authorization keyed on a source bound to
 the caller's credential, not a filter on a caller-asserted label.
 
