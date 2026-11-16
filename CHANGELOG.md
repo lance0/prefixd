@@ -328,7 +328,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a token or passes one on a command line, keeps existing token files, and
   stops on any failure without leaving a partial file. The quickstart uses it,
   then rehearses one detector event and its unban in dry-run with the ingest
-  token through `curl -K -`.
+  token through `curl -K -`. The
+  [dated receipt](docs/reference/qualification/compose-onboarding-2026-11-16.md)
+  walks it on a fresh stack for both profiles.
 
 ### Changed
 
